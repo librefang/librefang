@@ -816,6 +816,31 @@ fn write_provider_via_daemon(base: &str, body: &serde_json::Value) -> bool {
     status.is_success() && response.get("error").is_none()
 }
 
+/// Make the relay key live in the running daemon's own environment.
+///
+/// The daemon reads `~/.librefang/.env` once at boot — `load_dotenv` is a
+/// `call_once` and no path re-reads it afterwards — so a key written during
+/// this command is invisible to a daemon that is already running. This posts
+/// it to `POST /api/providers/{id}/key`, which writes `secrets.env` and calls
+/// `set_env_var_guarded`, so the key resolves for the very next turn.
+///
+/// Returns `false` when no daemon is reachable or the call failed, so the
+/// caller can fall back to telling the operator to restart. The key value is
+/// never logged or echoed — only the outcome is reported.
+fn push_key_to_daemon(base: Option<&str>, relay_key: &str) -> bool {
+    let Some(base) = base else {
+        return false;
+    };
+    let client = daemon_client();
+    let (status, response) = daemon_json_checked(
+        client
+            .post(format!("{base}/api/providers/{PROVIDER_ID}/key"))
+            .json(&serde_json::json!({ "key": relay_key }))
+            .send(),
+    );
+    status.is_success() && response.get("error").is_none()
+}
+
 /// Write `{librefang_home}/providers/everyapi.toml` directly.
 ///
 /// The path is fixed by agreement with `doctor::EveryApiWiringCheck`, which
@@ -908,6 +933,19 @@ pub(crate) fn cmd_models_connect(target: &str, set_default: bool) {
             "everyapi-connect-provider-written-daemon",
             &[("path", "providers/everyapi.toml")],
         ));
+        // `save_env_key` above wrote the key to `~/.librefang/.env`, but the
+        // daemon parsed that file exactly once at boot (`load_dotenv` is a
+        // `call_once` and nothing re-reads it afterwards), so the running
+        // process cannot see a key added now. Without this the provider is
+        // registered and immediately unusable, and the "no restart needed"
+        // message above would be a lie. `POST /api/providers/{name}/key`
+        // writes `secrets.env` and calls `set_env_var_guarded`, which makes
+        // the key live in the daemon's own environment. `.env` still holds
+        // the authoritative copy for the next boot — it wins on reload
+        // because the loader only fills vars that are not already set.
+        if !push_key_to_daemon(daemon.as_deref(), &credentials.relay_key) {
+            ui::hint(&i18n::t("everyapi-connect-restart-required"));
+        }
     } else {
         match write_provider_file(&toml_body) {
             Ok(path) => {
@@ -1078,8 +1116,8 @@ mod tests {
     use super::{
         choose_default_model, derive_base_url, infer_modality, is_openai_response_only,
         model_request_value, normalize_version_separators, parse_credentials, parse_gateway_models,
-        parse_pricing_rows, provider_request_body, resolve_metadata, snapshot_lookup_ids,
-        synthesize_catalog, GatewayModel, PricingRow,
+        parse_pricing_rows, provider_request_body, push_key_to_daemon, resolve_metadata,
+        snapshot_lookup_ids, synthesize_catalog, GatewayModel, PricingRow,
     };
     use crate::cli::{Cli, Commands, ModelsCommands};
     use clap::Parser;
@@ -2132,6 +2170,17 @@ mod tests {
 
     // ── daemon request body ───────────────────────────────────────────────
 
+    /// Without a daemon there is nothing to push the key into, so the caller
+    /// must be told to restart. The bug this guards: the daemon parses
+    /// `~/.librefang/.env` exactly once at boot, so a key written by this
+    /// command is invisible to an already-running daemon — the provider gets
+    /// registered and is immediately unusable while the output claims no
+    /// restart is needed.
+    #[test]
+    fn no_daemon_means_the_key_was_not_pushed() {
+        assert!(!push_key_to_daemon(None, "rk-never-sent"));
+    }
+
     #[test]
     fn daemon_body_is_flat_carries_no_secret_and_keeps_pricing_known() {
         let catalog = snapshot_catalog();
@@ -2151,7 +2200,9 @@ mod tests {
         assert_eq!(body["api_key_env"], "EVERYAPI_API_KEY");
         assert!(body.get("provider").is_none());
         // The relay key lives in .env; sending it here would additionally
-        // copy the secret into the daemon's secrets.env.
+        // copy the secret into the daemon's secrets.env. The running daemon
+        // is told about the key separately, via `push_key_to_daemon` — see
+        // `no_daemon_means_the_key_was_not_pushed`.
         assert!(body.get("api_key").is_none());
         assert_eq!(
             body["models"].as_array().map(Vec::len),
