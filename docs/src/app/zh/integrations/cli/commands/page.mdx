@@ -1050,6 +1050,31 @@ librefang service install
 loginctl enable-linger
 ```
 
+#### `--system`（macOS）：开机启动，而非登录后启动
+
+上述三个平台的默认行为注册的都是*用户级*服务，只有该用户登录后才会启动。
+因此一台重启后停在登录界面（或 FileVault 解锁界面）的 Mac 并不会启动守护进程——这对需要常驻运行的部署是个实际问题。
+
+`--system` 改为将 LaunchDaemon 写入 `/Library/LaunchDaemons/ai.librefang.daemon.plist`。
+launchd 会在开机时、任何用户登录之前加载该目录。
+
+```bash
+sudo librefang service install --system
+```
+
+它需要 root 权限，并且必须通过 `sudo` 调用，而不能直接以 root 身份登录后执行：守护进程需要以一个真实账户运行，而 `SUDO_USER` 是唯一能标识该账户的信息。
+生成的 job 会把 `UserName` 设为你的账户，`HOME` 指向你的主目录，`LIBREFANG_HOME` 指向 `~/.librefang`，并在安装时把该状态目录及其中的 `daemon.log` 的所有权移交给你——launchd 会在降权之前打开日志文件，若不做这一步，守护进程将无法写入自己的日志。
+
+移除时使用同一个 flag：
+
+```bash
+sudo librefang service uninstall --system
+```
+
+`librefang service status` 会同时报告用户级 LaunchAgent 和开机启动的 LaunchDaemon，无需任何 flag。
+
+`--system` 仅适用于 macOS。在 NixOS 上请使用 `services.librefang` 模块；其他 Linux 发行版可将系统级 unit 写入 `/etc/systemd/system/`，或继续使用用户级服务加 `loginctl enable-linger`。
+
 ---
 
 ### librefang service uninstall

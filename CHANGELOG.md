@@ -9,6 +9,14 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Added
 
+- Add `librefang service install --system` on macOS, which registers a boot-time LaunchDaemon instead of the login-time LaunchAgent the command has always written.
+  The existing behaviour was that every platform got a *per-user* service, so a Mac that rebooted and stopped at the login window — or at the FileVault unlock screen — never started the daemon at all, which makes an always-on install impossible without hand-writing a plist.
+  `--system` writes `/Library/LaunchDaemons/ai.librefang.daemon.plist`, the directory launchd loads at boot before any login.
+  It requires root and specifically requires `sudo` rather than a root login, because the job has to run as a real account and `SUDO_USER` is the only signal identifying which one; a missing `SUDO_USER` is an error rather than a silent default to root.
+  The generated job sets `UserName` to that account, `HOME` to its home directory and `LIBREFANG_HOME` to `~/.librefang`, resolved from the passwd database rather than through `dirs::home_dir()` — under `sudo` the latter returns root's home and the daemon would serve a state directory the invoking user cannot read.
+  The install also creates the state directory and `daemon.log` and chowns both to the target account, because launchd opens `StandardOutPath` before dropping privileges and the daemon would otherwise be unable to write its own log, and it chmods the plist to 0644 since launchd refuses to load a LaunchDaemon writable by anyone but its owner.
+  The pre-existing root guard on the per-user path is unchanged: plain `service install` still refuses to run under `sudo`, and now points at `--system` when it does.
+  `service uninstall --system` removes it, `service status` reports both the LaunchAgent and the LaunchDaemon with no flag needed, and `--system` on Linux or Windows is a clear error pointing at the `services.librefang` NixOS module or a hand-written system unit rather than a silent no-op (@houko)
 - Promote NixOS from a package-only target to a first-class deployment surface, and give deepin / Debian-family hosts the distro awareness they previously lacked entirely.
   The flake gains system-agnostic `nixosModules.default` / `nixosModules.librefang` (backed by the new `nix/nixos-module.nix`) exposing `services.librefang` with `port`, `openFirewall`, `user`, `group`, `stateDir`, `environmentFile`, and `extraEnvironment`, plus `overlays.default` so nixpkgs consumers can pull `librefang-cli` / `librefang-desktop` into their own package set.
   `ExecStart` uses `start --foreground` deliberately: the default `librefang start` takes the `!spawned && !foreground` branch into `spawn_detached_daemon`, which `setsid`s a child and returns from the parent, so a unit without the flag would have its service torn down moments after `nixos-rebuild` reported success.
