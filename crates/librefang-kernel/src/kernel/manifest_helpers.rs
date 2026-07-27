@@ -99,6 +99,39 @@ pub(super) fn global_thinking_backfill_allowed(
         .unwrap_or(true)
 }
 
+/// Resolve the context window (in tokens) for one turn, honouring the
+/// documented precedence chain (#6568).
+///
+/// 1. `agent.toml: [model] context_window` — an explicit operator override. The
+///    warning the agent loop emits for an unknown model literally tells the
+///    operator to set this field, so it has to win; before this helper the three
+///    execution paths never read it and the field was inert.
+/// 2. `ModelCatalog` lookup — provider-aware and prefix-reconciling (#6423), with
+///    `0` filtered out so image / audio entries (which carry no context window)
+///    fall through instead of poisoning the budget math.
+/// 3. `session_hint` — the value persisted on the session, authoritative only
+///    when the catalog has no entry. Callers with no session in hand pass `None`.
+///
+/// Returns `None` when nothing resolves, leaving the fallback (currently
+/// `UNKNOWN_MODEL_CONTEXT_WINDOW`, 8192) to the agent loop, which also logs it.
+pub(super) fn resolve_context_window(
+    catalog: &librefang_runtime::model_catalog::ModelCatalog,
+    model: &librefang_types::agent::ModelConfig,
+    session_hint: Option<u64>,
+) -> Option<usize> {
+    model
+        .context_window
+        .filter(|v| *v > 0)
+        .map(|v| v as usize)
+        .or_else(|| {
+            catalog
+                .find_model_for_manifest(&model.provider, &model.model)
+                .map(|m| m.context_window as usize)
+                .filter(|w| *w > 0)
+        })
+        .or_else(|| session_hint.filter(|v| *v > 0).map(|v| v as usize))
+}
+
 /// Apply a per-call deep-thinking override to a manifest clone.
 ///
 /// - `Some(true)` — ensure the manifest has a `ThinkingConfig` (inserting the
@@ -583,6 +616,160 @@ pub(super) fn peer_scoped_key(
             Ok(format!("peer:{escaped_pid}:{key}"))
         }
         None => Ok(key.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod context_window_tests {
+    use super::resolve_context_window;
+    use librefang_runtime::model_catalog::ModelCatalog;
+    use librefang_types::agent::ModelConfig;
+    use librefang_types::model_catalog::{ModelCatalogEntry, ModelTier};
+
+    fn catalog() -> ModelCatalog {
+        ModelCatalog::from_entries(
+            vec![
+                ModelCatalogEntry {
+                    id: "claude-sonnet-4-6".to_string(),
+                    display_name: "Claude Sonnet 4.6".to_string(),
+                    provider: "anthropic".to_string(),
+                    tier: ModelTier::Smart,
+                    context_window: 200_000,
+                    ..Default::default()
+                },
+                // An image model — the catalog stores 0 for "not applicable".
+                ModelCatalogEntry {
+                    id: "dall-e-3".to_string(),
+                    display_name: "DALL-E 3".to_string(),
+                    provider: "openai".to_string(),
+                    tier: ModelTier::Smart,
+                    context_window: 0,
+                    ..Default::default()
+                },
+            ],
+            vec![],
+        )
+    }
+
+    fn model(provider: &str, name: &str, context_window: Option<u64>) -> ModelConfig {
+        ModelConfig {
+            provider: provider.to_string(),
+            model: name.to_string(),
+            context_window,
+            ..Default::default()
+        }
+    }
+
+    /// The bug in #6568: an operator sets `context_window` in agent.toml for a
+    /// model the catalog does not know — exactly what the runtime's warning tells
+    /// them to do — and it was ignored, leaving the 8192 fallback in place.
+    #[test]
+    fn manifest_override_wins_for_an_unknown_model() {
+        let resolved = resolve_context_window(
+            &catalog(),
+            &model("deepseek", "deepseek-v4-flash", Some(131_072)),
+            None,
+        );
+        assert_eq!(resolved, Some(131_072));
+    }
+
+    #[test]
+    fn manifest_override_wins_over_the_catalog() {
+        let resolved = resolve_context_window(
+            &catalog(),
+            &model("anthropic", "claude-sonnet-4-6", Some(64_000)),
+            None,
+        );
+        assert_eq!(
+            resolved,
+            Some(64_000),
+            "an explicit operator value must beat the catalog entry"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_catalog_without_an_override() {
+        let resolved = resolve_context_window(
+            &catalog(),
+            &model("anthropic", "claude-sonnet-4-6", None),
+            None,
+        );
+        assert_eq!(resolved, Some(200_000));
+    }
+
+    #[test]
+    fn a_zero_override_is_ignored() {
+        let resolved = resolve_context_window(
+            &catalog(),
+            &model("anthropic", "claude-sonnet-4-6", Some(0)),
+            None,
+        );
+        assert_eq!(resolved, Some(200_000), "0 means unset, not a real window");
+    }
+
+    #[test]
+    fn a_zero_catalog_window_falls_through_to_the_session_hint() {
+        // Image / audio entries carry 0; feeding that into budget math would
+        // divide by an empty window.
+        let resolved =
+            resolve_context_window(&catalog(), &model("openai", "dall-e-3", None), Some(48_000));
+        assert_eq!(resolved, Some(48_000));
+    }
+
+    #[test]
+    fn session_hint_is_last() {
+        let resolved = resolve_context_window(
+            &catalog(),
+            &model("anthropic", "claude-sonnet-4-6", None),
+            Some(48_000),
+        );
+        assert_eq!(
+            resolved,
+            Some(200_000),
+            "the catalog is authoritative over a stale persisted session value"
+        );
+    }
+
+    #[test]
+    fn a_zero_session_hint_is_ignored() {
+        let resolved = resolve_context_window(
+            &catalog(),
+            &model("deepseek", "deepseek-v4-flash", None),
+            Some(0),
+        );
+        assert_eq!(
+            resolved, None,
+            "nothing resolved — caller applies its fallback"
+        );
+    }
+
+    #[test]
+    fn returns_none_when_nothing_resolves() {
+        let resolved = resolve_context_window(
+            &catalog(),
+            &model("deepseek", "deepseek-v4-flash", None),
+            None,
+        );
+        assert_eq!(resolved, None);
+    }
+
+    /// Guards the `session_hint: None` choice at the compaction gate.
+    ///
+    /// `session.context_window_tokens` holds whatever the previous turn
+    /// resolved, which for an agent hit by #6568 is the stale 8192 fallback.
+    /// The gate's miss-default is a 200K *global default window*, not the agent
+    /// loop's conservative unknown-model fallback, so passing the session value
+    /// in would rank a stale 8192 above 200K and make compaction fire much
+    /// earlier than before this change. Passing `None` keeps the old default.
+    #[test]
+    fn a_stale_session_hint_would_beat_the_compaction_gate_default() {
+        let unknown = model("deepseek", "deepseek-v4-flash", None);
+        // What the gate must NOT do: rank the stale value above its default.
+        let with_stale_hint = resolve_context_window(&catalog(), &unknown, Some(8192));
+        assert_eq!(with_stale_hint, Some(8192));
+        // What the gate does: no hint, so its own `unwrap_or(200_000)` applies.
+        let without_hint = resolve_context_window(&catalog(), &unknown, None);
+        assert_eq!(without_hint, None);
     }
 }
 

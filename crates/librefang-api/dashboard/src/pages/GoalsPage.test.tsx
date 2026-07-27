@@ -233,6 +233,32 @@ describe("GoalsPage", () => {
     });
   });
 
+  it("omits blank parent_id / agent_id from the create payload (#6562)", async () => {
+    useGoalsMock.mockReturnValue(makeQuery([PARENT_GOAL]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    const { create } = setMutations();
+    renderPage();
+
+    const titleInput = screen.getByPlaceholderText(
+      "goals.goal_title_placeholder",
+    ) as HTMLInputElement;
+    fireEvent.change(titleInput, { target: { value: "No parent" } });
+
+    const submitBtn = screen
+      .getAllByText("goals.create_goal")
+      .map((el) => el.closest("button"))
+      .find((b): b is HTMLButtonElement => !!b && b.type === "submit");
+    fireEvent.click(submitBtn!);
+
+    await Promise.resolve();
+
+    expect(create).toHaveBeenCalledTimes(1);
+    const payload = create.mock.calls[0][0] as Record<string, unknown>;
+    // `parent_id: ""` used to reach the backend and fail its parent-existence check with "Parent goal '' not found"; `agent_id: ""` persisted an unparsable assignment that broke the goal runner's start route.
+    expect(payload).not.toHaveProperty("parent_id");
+    expect(payload).not.toHaveProperty("agent_id");
+  });
+
   it("does not submit the create form when the title is whitespace-only", () => {
     useGoalsMock.mockReturnValue(makeQuery([PARENT_GOAL]));
     useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));

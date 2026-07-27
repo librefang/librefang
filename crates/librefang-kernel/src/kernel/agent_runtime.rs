@@ -352,24 +352,29 @@ impl LibreFangKernel {
             &entry.manifest.model.provider,
         );
 
-        // Resolve the agent's actual context window from the model catalog
-        // BEFORE the gate so the gate's token-trigger comparison uses the
-        // real per-agent window (e.g. 128K GPT-4o, 1M Gemini) instead of
-        // the global 200K default that `CompactionConfig::from_toml_…`
-        // would otherwise hand us. Filter out 0 so image/audio entries
-        // (no context window) fall back to the 200K default instead of
-        // feeding 0 into compaction math.
-        let agent_ctx_window = self
-            .llm
-            .model_catalog
-            .load()
-            // #6423: provider-aware, prefix-reconciling lookup — a bare
-            // OpenRouter manifest model (`tencent/hy3:free`) must still match
-            // the prefixed catalog id (`openrouter/tencent/hy3:free`).
-            .find_model_for_manifest(&entry.manifest.model.provider, &entry.manifest.model.model)
-            .map(|m| m.context_window as usize)
-            .filter(|w| *w > 0)
-            .unwrap_or(200_000);
+        // Resolve the agent's actual context window BEFORE the gate so the
+        // gate's token-trigger comparison uses the real per-agent window (e.g.
+        // 128K GPT-4o, 1M Gemini) instead of the global 200K default that
+        // `CompactionConfig::from_toml_…` would otherwise hand us.
+        //
+        // Honours the agent.toml override, then the catalog (#6568).
+        // `resolve_context_window` filters 0 out so image/audio entries (no
+        // context window) fall back to the 200K default instead of feeding 0
+        // into compaction math.
+        //
+        // `session_hint` is deliberately `None` here, unlike the execution paths
+        // and the context report. This gate's miss-default is a *global default
+        // window* (200K), not the agent loop's conservative unknown-model
+        // fallback — and `session.context_window_tokens` is whatever the last
+        // turn resolved, which for an agent affected by #6568 is 8192. Feeding
+        // that in would rank a stale 8192 above the 200K default and make the
+        // compaction trigger fire far earlier than before this change.
+        let agent_ctx_window = super::manifest_helpers::resolve_context_window(
+            &self.llm.model_catalog.load(),
+            &entry.manifest.model,
+            None,
+        )
+        .unwrap_or(200_000);
         config.context_window_tokens = agent_ctx_window;
 
         // Match the pre-loop caller's estimator inputs in `messaging.rs`
@@ -531,41 +536,23 @@ impl LibreFangKernel {
         // Use the agent's actual filtered tools instead of all builtins
         let tools = self.available_tools(agent_id);
 
-        // Resolve context window with the same precedence chain the agent loop uses:
+        // Resolve context window through the shared helper so this read-only
+        // report and the execution paths cannot disagree (#6568). Precedence:
         // 1. agent.toml `model.context_window` explicit override
         // 2. ModelCatalog lookup (provider-aware, prefix-reconciling, filters out 0)
         // 3. Persisted session value (authoritative only when catalog has no entry)
         // 4. Conservative fallback (8192) — matches UNKNOWN_MODEL_CONTEXT_WINDOW (#3349)
-        let context_window: usize = entry
-            .manifest
-            .model
-            .context_window
-            .filter(|v| *v > 0)
-            .map(|v| v as usize)
-            .or_else(|| {
-                self.llm
-                    .model_catalog
-                    .load()
-                    // #6423: was a provider-blind `find_model`, which missed the
-                    // `openrouter/`-prefixed catalog id for a bare manifest model
-                    // and fell through to UNKNOWN_MODEL_CONTEXT_WINDOW (8192) —
-                    // the wrong context denominator this report describes.
-                    .find_model_for_manifest(
-                        &entry.manifest.model.provider,
-                        &entry.manifest.model.model,
-                    )
-                    .map(|m| m.context_window as usize)
-                    .filter(|w| *w > 0)
-            })
-            .or_else(|| {
-                let v = session.context_window_tokens as usize;
-                if v > 0 {
-                    Some(v)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(librefang_runtime::agent_loop::model::UNKNOWN_MODEL_CONTEXT_WINDOW);
+        //
+        // Until #6568 the comment above claimed this mirrored "the same
+        // precedence chain the agent loop uses", but the three execution paths
+        // read only the catalog, so an operator who set `context_window` saw it
+        // honoured in this report and ignored on every real turn.
+        let context_window: usize = super::manifest_helpers::resolve_context_window(
+            &self.llm.model_catalog.load(),
+            &entry.manifest.model,
+            Some(session.context_window_tokens),
+        )
+        .unwrap_or(librefang_runtime::agent_loop::model::UNKNOWN_MODEL_CONTEXT_WINDOW);
 
         Ok(generate_context_report(
             &session.messages,
