@@ -22,36 +22,6 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
   Models billed per call carry no per-token price and are emitted with `pricing_known = false` instead of a bare `0.0`, which would have asserted they are free.
   Output-token limits are the one figure neither gateway endpoint publishes, so the snapshot is kept solely as their fallback and the command reports which models borrowed one.
   A new `everyapi_catalog` module in `librefang-api` mirrors the existing `openrouter_catalog` shape — TTL staleness check, background backfill, and a shared retry window — so a gateway that adds or removes models is picked up without re-running the connect command (#6583) (@houko)
-
-### Fixed
-
-- Refuse to replace a populated EveryAPI provider entry when the gateway's model list cannot be fetched.
-  Both persistence paths rewrite `providers/everyapi.toml` wholesale, so a transient outage on a re-run downgraded a working catalog to zero models and still reported success.
-  A first run, which has nothing to lose, still proceeds and fills the models in later (#6583) (@houko)
-- Distinguish a rejected relay key from an unreachable gateway when fetching the model list.
-  Both collapsed into the same outcome, so a revoked key printed "check that the gateway is reachable" and was then saved as if valid; a 401 or 403 now stops before anything is written and points at `everyapi login` (#6583) (@houko)
-- Stop the daemon-write path from aborting the process on the failure its own fallback exists for.
-  `write_provider_via_daemon` went through a helper whose transport-error arm calls `std::process::exit(1)`, so an unreachable daemon killed the command before the direct file write could run.
-  A daemon that parses the payload and *rejects* it is now terminal rather than falling back, because the registry route deletes the file it refused and rewriting it would leave a definition that fails to parse on every boot (#6583) (@houko)
-- Pin the gateway base URL into `[provider_urls]` when `--set-default` switches the default provider.
-  The default route persists only provider, model and `api_key_env`, while the daemon resolves the boot-time driver from `default_model.base_url` or `provider_urls` several hundred lines before the model catalog that holds the address is built — so the next boot produced a default driver with no endpoint (#6583) (@houko)
-- Declare the media capabilities the synthesised EveryAPI provider actually implies.
-  `media_capabilities` was hardcoded empty while the same run registered image, audio and video entries, leaving all of them unreachable through the media paths despite appearing in the catalog (#6583) (@houko)
-- Rank the `--set-default` choice by capability instead of taking the first model by id.
-  Entries are id-sorted for output determinism and ASCII orders uppercase first, so the CLI picked `MiniMax-M3` over `claude-opus-5` while its own help text promised "this gateway's best model" (#6583) (@houko)
-- Treat a published context window as evidence of a text model when a gateway row omits `supported_endpoint_types`.
-  The empty case defaults to video because every observed empty row is a video model, but the field is optional — a gateway that stopped sending it would have had its chat models registered as video, exempt from the token-limit validation and unusable for chat (#6583) (@houko)
-- Point the no-daemon `--set-default` message at re-running connect rather than `librefang models set`.
-  That command writes only `default_model.model`, leaving the previous provider and `api_key_env` in place — a combination that resolves the wrong driver for the chosen model (#6583) (@houko)
-
-- Classify an OpenAI-compatible `insufficient_quota` response as a billing error rather than a malformed request.
-  OpenAI signals an exhausted account with that code on a 403, so every OpenAI-compatible endpoint does too, but it was not in `BILLING_PATTERNS` and fell through to the generic 4xx arm.
-  The operator was told to check their request format while the real cause was an empty account, and because `is_billing` stayed false the long billing cooldown never applied, so a provider with no funds left kept being retried.
-  Affects every OpenAI-compatible provider, not just gateways (#6583) (@houko)
-- Stop `librefang doctor` reporting a healthy EveryAPI wiring when the relay key is gone.
-  The check returned `Pass` as soon as the provider file existed, so `credentials_usable` was never consulted — after `everyapi logout`, a key rotation, or a revocation it stayed green while every request through the gateway failed authentication.
-  It now warns and names the remediation, since a provider entry is a file that persists while the credential behind it is not (#6583) (@houko)
-
 - Add `librefang service install --system` on macOS, which registers a boot-time LaunchDaemon instead of the login-time LaunchAgent the command has always written.
   The existing behaviour was that every platform got a *per-user* service, so a Mac that rebooted and stopped at the login window — or at the FileVault unlock screen — never started the daemon at all, which makes an always-on install impossible without hand-writing a plist.
   `--system` writes `/Library/LaunchDaemons/ai.librefang.daemon.plist`, the directory launchd loads at boot before any login.
@@ -81,6 +51,34 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 - Emit a `librefang_media_understanding_failures_total{kind,provider,model}` counter (with a matching structured `warn!`) whenever vision description or audio transcription fails, so a hosted model that a provider silently retires — e.g. Groq removing the hardcoded default `meta-llama/llama-4-scout-17b-16e-instruct` — surfaces as an actionable metric instead of a days-later user report.
   The counter is incremented at the point of failure inside `librefang-runtime-media` (both the image and audio provider-dispatch paths, plus the empty-result case), so it is captured regardless of caller, and its description is registered in `librefang-telemetry` for the Prometheus exporter.
   The hardcoded default models are intentionally left unchanged (choosing replacements is an operator call); a comment on `default_vision_model` now documents that these ids rot and points at the new metric (#6538) (@houko)
+
+### Fixed
+
+- Refuse to replace a populated EveryAPI provider entry when the gateway's model list cannot be fetched.
+  Both persistence paths rewrite `providers/everyapi.toml` wholesale, so a transient outage on a re-run downgraded a working catalog to zero models and still reported success.
+  A first run, which has nothing to lose, still proceeds and fills the models in later (#6583) (@houko)
+- Distinguish a rejected relay key from an unreachable gateway when fetching the model list.
+  Both collapsed into the same outcome, so a revoked key printed "check that the gateway is reachable" and was then saved as if valid; a 401 or 403 now stops before anything is written and points at `everyapi login` (#6583) (@houko)
+- Stop the daemon-write path from aborting the process on the failure its own fallback exists for.
+  `write_provider_via_daemon` went through a helper whose transport-error arm calls `std::process::exit(1)`, so an unreachable daemon killed the command before the direct file write could run.
+  A daemon that parses the payload and *rejects* it is now terminal rather than falling back, because the registry route deletes the file it refused and rewriting it would leave a definition that fails to parse on every boot (#6583) (@houko)
+- Pin the gateway base URL into `[provider_urls]` when `--set-default` switches the default provider.
+  The default route persists only provider, model and `api_key_env`, while the daemon resolves the boot-time driver from `default_model.base_url` or `provider_urls` several hundred lines before the model catalog that holds the address is built — so the next boot produced a default driver with no endpoint (#6583) (@houko)
+- Declare the media capabilities the synthesised EveryAPI provider actually implies.
+  `media_capabilities` was hardcoded empty while the same run registered image, audio and video entries, leaving all of them unreachable through the media paths despite appearing in the catalog (#6583) (@houko)
+- Rank the `--set-default` choice by capability instead of taking the first model by id.
+  Entries are id-sorted for output determinism and ASCII orders uppercase first, so the CLI picked `MiniMax-M3` over `claude-opus-5` while its own help text promised "this gateway's best model" (#6583) (@houko)
+- Treat a published context window as evidence of a text model when a gateway row omits `supported_endpoint_types`.
+  The empty case defaults to video because every observed empty row is a video model, but the field is optional — a gateway that stopped sending it would have had its chat models registered as video, exempt from the token-limit validation and unusable for chat (#6583) (@houko)
+- Point the no-daemon `--set-default` message at re-running connect rather than `librefang models set`.
+  That command writes only `default_model.model`, leaving the previous provider and `api_key_env` in place — a combination that resolves the wrong driver for the chosen model (#6583) (@houko)
+- Classify an OpenAI-compatible `insufficient_quota` response as a billing error rather than a malformed request.
+  OpenAI signals an exhausted account with that code on a 403, so every OpenAI-compatible endpoint does too, but it was not in `BILLING_PATTERNS` and fell through to the generic 4xx arm.
+  The operator was told to check their request format while the real cause was an empty account, and because `is_billing` stayed false the long billing cooldown never applied, so a provider with no funds left kept being retried.
+  Affects every OpenAI-compatible provider, not just gateways (#6583) (@houko)
+- Stop `librefang doctor` reporting a healthy EveryAPI wiring when the relay key is gone.
+  The check returned `Pass` as soon as the provider file existed, so `credentials_usable` was never consulted — after `everyapi logout`, a key rotation, or a revocation it stayed green while every request through the gateway failed authentication.
+  It now warns and names the remediation, since a provider entry is a file that persists while the credential behind it is not (#6583) (@houko)
 
 ### Changed
 
