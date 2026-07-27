@@ -231,7 +231,7 @@ totp-rs = { version = "5", features = ["gen_secret", "otpauth", "qr"] }
 # any real OIDC token validation (`/api/auth/introspect`, the OAuth
 # callback's ID-token path, and the `oidc_auth_middleware`) panics in
 # production. Discovered while landing the #5128 `sub`-required tests.
-jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 
 # Rate limiting
 governor = "0.10.4"
