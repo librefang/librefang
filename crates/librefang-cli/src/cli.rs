@@ -1677,14 +1677,22 @@ pub(crate) enum SystemCommands {
 pub(crate) enum ServiceCommands {
     /// Register auto-start service so LibreFang starts on boot/login.
     #[command(
-        long_about = "Register a system service so LibreFang starts automatically.\n\nOn Linux:   creates a systemd user service (~/.config/systemd/user/librefang.service)\nOn macOS:   creates a LaunchAgent (~/Library/LaunchAgents/ai.librefang.daemon.plist)\nOn Windows: adds a registry entry (HKCU\\...\\Run)\n\nExamples:\n  librefang service install"
+        long_about = "Register a system service so LibreFang starts automatically.\n\nOn Linux:   creates a systemd user service (~/.config/systemd/user/librefang.service)\nOn macOS:   creates a LaunchAgent (~/Library/LaunchAgents/ai.librefang.daemon.plist)\nOn Windows: adds a registry entry (HKCU\\...\\Run)\n\nAll three start the daemon once the user logs in. Pass --system on macOS for a\nLaunchDaemon that starts at boot instead, before any login.\n\nExamples:\n  librefang service install\n  sudo librefang service install --system"
     )]
-    Install,
+    Install {
+        /// macOS only: install a boot-time LaunchDaemon instead of a login-time LaunchAgent. Requires sudo.
+        #[arg(long)]
+        system: bool,
+    },
     /// Remove the auto-start service.
     #[command(
-        long_about = "Remove the previously installed auto-start service.\n\nExamples:\n  librefang service uninstall"
+        long_about = "Remove the previously installed auto-start service.\n\nExamples:\n  librefang service uninstall\n  sudo librefang service uninstall --system"
     )]
-    Uninstall,
+    Uninstall {
+        /// macOS only: remove the boot-time LaunchDaemon instead of the login-time LaunchAgent. Requires sudo.
+        #[arg(long)]
+        system: bool,
+    },
     /// Show whether the auto-start service is registered.
     #[command(
         long_about = "Check whether the auto-start service is currently registered.\n\nExamples:\n  librefang service status"

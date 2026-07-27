@@ -9,6 +9,14 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Added
 
+- Add `librefang service install --system` on macOS, which registers a boot-time LaunchDaemon instead of the login-time LaunchAgent the command has always written.
+  The existing behaviour was that every platform got a *per-user* service, so a Mac that rebooted and stopped at the login window — or at the FileVault unlock screen — never started the daemon at all, which makes an always-on install impossible without hand-writing a plist.
+  `--system` writes `/Library/LaunchDaemons/ai.librefang.daemon.plist`, the directory launchd loads at boot before any login.
+  It requires root and specifically requires `sudo` rather than a root login, because the job has to run as a real account and `SUDO_USER` is the only signal identifying which one; a missing `SUDO_USER` is an error rather than a silent default to root.
+  The generated job sets `UserName` to that account, `HOME` to its home directory and `LIBREFANG_HOME` to `~/.librefang`, resolved from the passwd database rather than through `dirs::home_dir()` — under `sudo` the latter returns root's home and the daemon would serve a state directory the invoking user cannot read.
+  The install also creates the state directory and `daemon.log` and chowns both to the target account, because launchd opens `StandardOutPath` before dropping privileges and the daemon would otherwise be unable to write its own log, and it chmods the plist to 0644 since launchd refuses to load a LaunchDaemon writable by anyone but its owner.
+  The pre-existing root guard on the per-user path is unchanged: plain `service install` still refuses to run under `sudo`, and now points at `--system` when it does.
+  `service uninstall --system` removes it, `service status` reports both the LaunchAgent and the LaunchDaemon with no flag needed, and `--system` on Linux or Windows is a clear error pointing at the `services.librefang` NixOS module or a hand-written system unit rather than a silent no-op (@houko)
 - Implement the MCP `resources` primitive in the `librefang-runtime-mcp` client, which was previously tools-only, so an agent can now consume MCP servers that expose their data as resources rather than tools.
   `McpConnection` gains `list_resources` (`resources/list`), `read_resource` (`resources/read`), and `list_resource_templates` (`resources/templates/list`) on both the rmcp (stdio + streamable-HTTP) and hand-rolled SSE transports; HttpCompat has no resources concept and returns a clear error.
   When a server advertises the `resources` capability (read live from the rmcp handshake `peer_info`, or captured from the SSE `initialize` response) the client registers two synthetic tools — `list_resources` and `read_resource` — that flow through the normal tool-call loop and are intercepted before the transport `tools/call`, so a real server tool literally named `read_resource` is unaffected.
