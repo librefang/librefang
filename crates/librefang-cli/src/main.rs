@@ -663,8 +663,8 @@ fn main() {
             SystemCommands::Version { json } => cmd_system_version(json),
         },
         Some(Commands::Service(sub)) => match sub {
-            ServiceCommands::Install => cmd_service_install(),
-            ServiceCommands::Uninstall => cmd_service_uninstall(),
+            ServiceCommands::Install { system } => cmd_service_install(system),
+            ServiceCommands::Uninstall { system } => cmd_service_uninstall(system),
             ServiceCommands::Status => cmd_service_status(),
         },
         Some(Commands::Reset { confirm }) => cmd_reset(confirm),
