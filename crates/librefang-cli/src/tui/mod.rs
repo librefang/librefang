@@ -1290,8 +1290,10 @@ impl App {
 
     fn handle_kernel_ready(&mut self, kernel: Arc<LibreFangKernel>) {
         self.kernel_booting = false;
-        // Spawn approval expiry sweep task
-        kernel.clone().spawn_approval_sweep_task();
+        // Spawn approval expiry sweep task. Goes through `event::` because the
+        // TUI event loop is sync — the sweep needs a runtime context to be
+        // spawned from, and one that outlives this call.
+        event::spawn_kernel_background_tasks(kernel.clone());
         self.backend = Backend::InProcess { kernel };
         self.agents.reset();
         self.enter_main_phase();

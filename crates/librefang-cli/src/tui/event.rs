@@ -9,7 +9,7 @@ use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
 use ratatui::crossterm::event::{self, Event as CtEvent, KeyEvent, KeyEventKind};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, OnceLock};
 use std::time::Duration;
 
 use super::screens::{
@@ -311,13 +311,48 @@ pub fn spawn_daemon_detect(tx: mpsc::Sender<AppEvent>) {
     });
 }
 
+/// Process-lifetime tokio runtime for the TUI's long-lived background tasks.
+///
+/// The TUI's `main()` is plain `fn main()` and its event loop is synchronous,
+/// so async work is normally done on throwaway per-operation runtimes. That
+/// does not work for the kernel's `spawn_*` sweep loops: they must be spawned
+/// from a runtime context (`Handle::current()`) **and** the runtime has to
+/// outlive the spawn call, otherwise the loop is aborted the moment the
+/// throwaway runtime drops.
+///
+/// The `OnceLock` is never dropped (statics aren't), so tasks spawned onto this
+/// handle live until the process exits.
+fn tui_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("librefang-tui-bg")
+            .build()
+            .expect("failed to build TUI background runtime")
+    })
+}
+
+/// Spawn the kernel's long-lived background sweep loops onto the TUI runtime.
+///
+/// Call this from the sync TUI event loop once the kernel is ready. The
+/// `EnterGuard` is deliberately scoped to this function only — the TUI main
+/// thread must stay runtime-free so the slash-command handlers that build
+/// throwaway `Runtime::new()` instances (`/new`) don't hit
+/// "Cannot start a runtime from within a runtime".
+pub fn spawn_kernel_background_tasks(kernel: Arc<LibreFangKernel>) {
+    let _guard = tui_runtime().enter();
+    kernel.spawn_approval_sweep_task();
+}
+
 /// Spawn a background thread that boots the kernel.
 pub fn spawn_kernel_boot(config: Option<std::path::PathBuf>, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || {
-        // Create a tokio runtime context so any tokio::spawn calls during
-        // boot (e.g. publish_event via set_self_handle) find the reactor.
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
+        // Boot inside the process-lifetime runtime's context so any
+        // tokio::spawn calls during boot (e.g. publish_event via
+        // set_self_handle) find the reactor *and* survive past this thread —
+        // a throwaway runtime here would abort them on drop.
+        let _guard = tui_runtime().enter();
 
         match LibreFangKernel::boot(config.as_deref()) {
             Ok(k) => {
@@ -3040,4 +3075,63 @@ pub fn spawn_fetch_agents_for_chat(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    /// The TUI's sweep loops must survive the call that spawned them.
+    ///
+    /// The original bug had two halves: `spawn_approval_sweep_task` was called
+    /// from the runtime-free TUI main thread (panic), and the only runtime in
+    /// sight — the throwaway one in `spawn_kernel_boot` — was dropped when the
+    /// boot thread returned, which would have aborted the loop anyway. This
+    /// pins the second half: a task spawned under the guard keeps running after
+    /// the guard is dropped.
+    #[test]
+    fn tui_runtime_tasks_outlive_the_spawning_scope() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_task = Arc::clone(&flag);
+
+        {
+            let _guard = tui_runtime().enter();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                flag_task.store(true, Ordering::SeqCst);
+            });
+        } // guard dropped here — a throwaway runtime would abort the task
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !flag.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "task spawned on the TUI runtime was aborted after its spawning scope ended"
+        );
+    }
+
+    /// The runtime guard must not leak into the TUI main loop.
+    ///
+    /// `handle_slash_command` (`/new`) builds a throwaway `Runtime::new()` on
+    /// the main thread. If a guard were held across the event loop that call
+    /// would fail with "Cannot start a runtime from within a runtime", so the
+    /// guard has to stay scoped to the spawn helper.
+    #[test]
+    fn tui_runtime_guard_does_not_leak_to_the_caller() {
+        {
+            let _guard = tui_runtime().enter();
+            assert!(tokio::runtime::Handle::try_current().is_ok());
+        }
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "runtime context leaked past the guard scope"
+        );
+        assert!(
+            tokio::runtime::Runtime::new().is_ok(),
+            "a throwaway runtime (as built by /new) can no longer be created on this thread"
+        );
+    }
 }

@@ -626,6 +626,15 @@ impl LibreFangKernel {
     ///
     /// This periodically checks for expired pending approval requests and
     /// handles their resolution (e.g., timing out deferred tool executions).
+    ///
+    /// # Panics
+    ///
+    /// Must be called from a tokio runtime context (`Handle::current()`).
+    /// The runtime also has to **outlive the loop** — spawning from a
+    /// short-lived `Runtime::new()` that drops right after leaves the sweep
+    /// silently aborted. Sync callers (the TUI event loop) need a
+    /// process-lifetime runtime and a narrowly-scoped `EnterGuard`; see
+    /// `librefang-cli`'s `tui::event::spawn_kernel_background_tasks`.
     pub fn spawn_approval_sweep_task(self: Arc<Self>) {
         let handle = tokio::runtime::Handle::current();
         if self
@@ -685,6 +694,13 @@ impl LibreFangKernel {
     /// restart. `claim_ttl_secs = 0` disables the sweeper (tick is a no-op)
     /// for deployments that legitimately hold tasks `in_progress` for hours
     /// (human-in-the-loop workflows).
+    ///
+    /// # Panics
+    ///
+    /// Same runtime contract as [`Self::spawn_approval_sweep_task`]: must be
+    /// called from a runtime context, and that runtime must outlive the loop.
+    /// Currently daemon-only (`librefang-api::server`), so every caller is
+    /// already inside the server's runtime.
     pub fn spawn_task_board_sweep_task(self: Arc<Self>) {
         let handle = tokio::runtime::Handle::current();
         if self
@@ -765,6 +781,13 @@ impl LibreFangKernel {
     /// with zero live receivers.
     ///
     /// Idempotent: re-calling while already running is a no-op.
+    ///
+    /// # Panics
+    ///
+    /// Same runtime contract as [`Self::spawn_approval_sweep_task`]: must be
+    /// called from a runtime context, and that runtime must outlive the loop.
+    /// Currently daemon-only (`librefang-api::server`), so every caller is
+    /// already inside the server's runtime.
     pub fn spawn_session_stream_hub_gc_task(self: Arc<Self>) {
         let handle = tokio::runtime::Handle::current();
         if self
