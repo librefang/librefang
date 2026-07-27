@@ -1,7 +1,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { formatTime, formatDateTime } from "../lib/datetime";
 import { formatCompact } from "../lib/format";
-import { memo, useId, useMemo, useState, useCallback, useEffect, useReducer } from "react";
+import { memo, useId, useMemo, useRef, useState, useCallback, useEffect, useReducer } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import type { ApiActionResponse, ProviderItem } from "../api";
@@ -914,14 +914,22 @@ function EveryApiConnectDrawer({ isOpen, onClose, addToast }: {
   const [touched, setTouched] = useState(false);
   const connectMutation = useConnectEveryApi();
 
+  // Held in a ref rather than named as a dependency. The object `useMutation` returns is a fresh
+  // reference on every render, so depending on it re-runs this effect on every render, and the
+  // `setState` calls below then trigger the next render — an unbounded loop React aborts with
+  // "Maximum update depth exceeded". Depending on `connectMutation.reset` alone is no safer, since
+  // its stability is an implementation detail of the query library rather than a guarantee.
+  const resetRef = useRef(connectMutation.reset);
+  resetRef.current = connectMutation.reset;
+
   // Reset on close so reopening never shows a previous attempt's key or error.
   useEffect(() => {
     if (isOpen) return;
     setRelayKey("");
     setBaseUrl("");
     setTouched(false);
-    connectMutation.reset();
-  }, [isOpen, connectMutation]);
+    resetRef.current();
+  }, [isOpen]);
 
   const trimmedKey = relayKey.trim();
   const keyMissing = touched && !trimmedKey;
