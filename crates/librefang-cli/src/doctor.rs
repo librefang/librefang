@@ -113,11 +113,18 @@ pub trait AuditCheck {
 /// All currently registered checks. The order here is the order shown to
 /// the user — group related checks together.
 pub fn registered_checks() -> Vec<Box<dyn AuditCheck>> {
-    vec![
+    // `mut` is only exercised by the platform-gated pushes below.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut checks: Vec<Box<dyn AuditCheck>> = vec![
         Box::new(VaultKeyCheck),
         Box::new(ApiListenAddrCheck),
         Box::new(ConfigTomlSchemaCheck),
-    ]
+    ];
+    // Platform-specific checks are pushed as statements rather than listed above because `#[cfg]` on an element of a `vec![]` literal is not stable.
+    // macOS and Windows doctor output is unchanged.
+    #[cfg(target_os = "linux")]
+    checks.push(Box::new(LinuxDesktopDepsCheck));
+    checks
 }
 
 pub fn run_all(ctx: &AuditContext) -> Vec<AuditResult> {
@@ -318,6 +325,294 @@ impl AuditCheck for ConfigTomlSchemaCheck {
     }
 }
 
+// ---------------------------------------------------------------------------
+// LinuxDesktopDepsCheck — the GTK/WebKit stack `librefang-desktop` links against, probed through pkg-config.
+//
+// Linux-only: the desktop app uses the platform webview on macOS and Windows, so the check is not registered there.
+//
+// This is a soft check by design.
+// A CLI-only install is a fully supported configuration, so a missing desktop stack must never reach `Severity::Error` — `Error` is the only severity that clears `all_ok` in `cmd_doctor` (`crates/librefang-cli/src/commands/doctor_cmd.rs:1221`), which in turn drives the `"all_ok"` JSON field (`:1229`) and the closing success-or-failure banner (`:1236`).
+// Note that `cmd_doctor` returns `()` and never calls `process::exit`, so no severity changes the process exit code; what a severity decides is what the operator is told, not what the invoking shell sees.
+// Missing libraries are `Warn`, which prints the remediation hint while leaving `all_ok` set, and a pkg-config we cannot execute is `Info`, because then we have learned nothing either way.
+//
+// The remediation hint suggests a *search* command per package manager rather than concrete package names.
+// The pkg-config module names below are what the build actually requires and every one of them is verified by the probe; the package that ships a given module differs between distributions and between releases of the same distribution, so naming one would be a guess.
+//
+// Every item below carries `#[cfg_attr(not(test), cfg(target_os = "linux"))]`, the same idiom as `desktop_install::install_linux_appimage_to`: gone from non-Linux production builds, but still compiled under `cfg(test)` on every host so the os-release and probe mapping stay testable off Linux.
+// ---------------------------------------------------------------------------
+
+// Read only from `LinuxDesktopDepsCheck::run`, which a non-Linux test build compiles but never reaches — same reason `pkg_config_probe` carries the allow.
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+#[allow(dead_code)]
+const OS_RELEASE_PATH: &str = "/etc/os-release";
+
+/// WebKitGTK pkg-config modules, tried in this order.
+/// 4.1 is the current ABI, 4.0 the older one; either satisfies the desktop app.
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+const WEBKIT_PKG_MODULES: [&str; 2] = ["webkit2gtk-4.1", "webkit2gtk-4.0"];
+
+/// Probed only when neither WebKitGTK module answers, to tell "GTK is here, WebKitGTK is not" apart from "no GUI stack at all".
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+const GTK_PKG_MODULE: &str = "gtk+-3.0";
+
+/// Tray icon support.
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+const TRAY_PKG_MODULE: &str = "libayatana-appindicator3-0.1";
+
+/// Result of one `pkg-config --exists <module>` invocation.
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeOutcome {
+    /// pkg-config knows the module.
+    Present,
+    /// pkg-config ran and does not know the module.
+    Absent,
+    /// pkg-config itself could not be executed.
+    ToolMissing,
+}
+
+/// Package manager whose command shape the remediation hint should use.
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DistroFamily {
+    Debian,
+    Arch,
+    NixOs,
+    Fedora,
+    Unknown,
+}
+
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+impl DistroFamily {
+    /// Map one os-release identifier onto a family.
+    /// `id` must already be lowercased.
+    fn from_id(id: &str) -> Self {
+        match id {
+            "debian" | "ubuntu" | "deepin" => DistroFamily::Debian,
+            "arch" => DistroFamily::Arch,
+            "nixos" => DistroFamily::NixOs,
+            "fedora" => DistroFamily::Fedora,
+            _ => DistroFamily::Unknown,
+        }
+    }
+
+    fn hint_key(&self) -> &'static str {
+        match self {
+            DistroFamily::Debian => "doctor-audit-desktop-deps-hint-apt",
+            DistroFamily::Arch => "doctor-audit-desktop-deps-hint-pacman",
+            DistroFamily::NixOs => "doctor-audit-desktop-deps-hint-nix",
+            DistroFamily::Fedora => "doctor-audit-desktop-deps-hint-dnf",
+            DistroFamily::Unknown => "doctor-audit-desktop-deps-hint-generic",
+        }
+    }
+}
+
+/// The `/etc/os-release` fields this check needs.
+/// A missing or unreadable file yields `Default` (all fields `None`), which maps to [`DistroFamily::Unknown`] and the distro-agnostic hint.
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+#[derive(Debug, Default)]
+struct OsRelease {
+    id: Option<String>,
+    id_like: Option<String>,
+    pretty_name: Option<String>,
+}
+
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+impl OsRelease {
+    /// Try `ID` first, then each `ID_LIKE` token.
+    /// Derivatives commonly name only their base distribution in `ID_LIKE`.
+    fn family(&self) -> DistroFamily {
+        // The os-release spec says `ID` is lowercase, but shipped files disagree (Deepin 20 writes `ID=Deepin`), so fold case first.
+        if let Some(id) = &self.id {
+            let family = DistroFamily::from_id(&id.to_ascii_lowercase());
+            if family != DistroFamily::Unknown {
+                return family;
+            }
+        }
+        if let Some(id_like) = &self.id_like {
+            for token in id_like.split_whitespace() {
+                let family = DistroFamily::from_id(&token.to_ascii_lowercase());
+                if family != DistroFamily::Unknown {
+                    return family;
+                }
+            }
+        }
+        DistroFamily::Unknown
+    }
+
+    /// Distribution name to address the user by in the hint.
+    fn display_name(&self) -> String {
+        for candidate in [&self.pretty_name, &self.id] {
+            if let Some(name) = candidate.as_deref().filter(|n| !n.is_empty()) {
+                return name.to_string();
+            }
+        }
+        i18n::t("doctor-audit-desktop-deps-distro-unknown")
+    }
+}
+
+/// Parse the `KEY=value` lines of an os-release file.
+/// Values may be quoted (`PRETTY_NAME="Deepin 20.9"`), and the format allows blank lines and `#` comments.
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+fn parse_os_release(content: &str) -> OsRelease {
+    let mut parsed = OsRelease::default();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = unquote_os_release_value(value.trim());
+        match key.trim() {
+            "ID" => parsed.id = Some(value),
+            "ID_LIKE" => parsed.id_like = Some(value),
+            "PRETTY_NAME" => parsed.pretty_name = Some(value),
+            _ => {}
+        }
+    }
+    parsed
+}
+
+/// Strip one layer of matching `"` or `'` quotes, the way a shell does when sourcing os-release.
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+fn unquote_os_release_value(value: &str) -> String {
+    for quote in ['"', '\''] {
+        if let Some(inner) = value
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            return inner.to_string();
+        }
+    }
+    value.to_string()
+}
+
+/// Every pkg-config module the desktop app needs, in probe order, for the remediation hint.
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+fn required_modules_list() -> String {
+    let mut modules = WEBKIT_PKG_MODULES.to_vec();
+    modules.push(GTK_PKG_MODULE);
+    modules.push(TRAY_PKG_MODULE);
+    modules.join(", ")
+}
+
+/// Remediation hint for the detected distribution family.
+/// `os_release` is the raw file contents, or `None` when the file is absent or unreadable.
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+fn desktop_deps_hint(os_release: Option<&str>) -> String {
+    let info = os_release.map(parse_os_release).unwrap_or_default();
+    i18n::t_args(
+        info.family().hint_key(),
+        &[
+            ("distro", &info.display_name()),
+            ("modules", &required_modules_list()),
+        ],
+    )
+}
+
+/// Real probe: ask pkg-config whether it can resolve `module`.
+/// A non-zero exit means "unknown module"; a spawn failure means pkg-config itself is unusable, which is a different answer.
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+#[allow(dead_code)]
+fn pkg_config_probe(module: &str) -> ProbeOutcome {
+    let status = std::process::Command::new("pkg-config")
+        .arg("--exists")
+        .arg(module)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match status {
+        Ok(status) if status.success() => ProbeOutcome::Present,
+        Ok(_) => ProbeOutcome::Absent,
+        Err(_) => ProbeOutcome::ToolMissing,
+    }
+}
+
+/// Inner, dependency-injected variant of [`LinuxDesktopDepsCheck::run`]: both the probe and the os-release contents are passed in so tests exercise the mapping without spawning a subprocess or depending on a real `/etc/os-release`.
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+fn evaluate_desktop_deps<P>(probe: P, os_release: Option<&str>) -> AuditResult
+where
+    P: Fn(&str) -> ProbeOutcome,
+{
+    const NAME: &str = "linux_desktop_deps";
+
+    let mut webkit_module: Option<&str> = None;
+    for module in WEBKIT_PKG_MODULES {
+        match probe(module) {
+            ProbeOutcome::Present => {
+                webkit_module = Some(module);
+                break;
+            }
+            ProbeOutcome::Absent => {}
+            // The first probe doubles as the pkg-config availability test — once it has spawned, the later ones cannot fail to spawn — so reaching this arm means nothing was learned about the stack.
+            ProbeOutcome::ToolMissing => {
+                return AuditResult::info(NAME, i18n::t("doctor-audit-desktop-deps-no-pkg-config"));
+            }
+        }
+    }
+
+    if let Some(module) = webkit_module {
+        if matches!(probe(TRAY_PKG_MODULE), ProbeOutcome::Present) {
+            return AuditResult::pass(
+                NAME,
+                i18n::t_args(
+                    "doctor-audit-desktop-deps-ok",
+                    &[("module", module), ("tray", TRAY_PKG_MODULE)],
+                ),
+            );
+        }
+        // The hint names the whole stack rather than the tray alone; every package manager below no-ops on what is already installed.
+        return AuditResult::warn(
+            NAME,
+            i18n::t_args(
+                "doctor-audit-desktop-deps-tray-missing",
+                &[("module", module), ("tray", TRAY_PKG_MODULE)],
+            ),
+            Some(desktop_deps_hint(os_release)),
+        );
+    }
+
+    if matches!(probe(GTK_PKG_MODULE), ProbeOutcome::Present) {
+        return AuditResult::warn(
+            NAME,
+            i18n::t_args(
+                "doctor-audit-desktop-deps-webkit-missing",
+                &[
+                    ("gtk", GTK_PKG_MODULE),
+                    ("webkit", &WEBKIT_PKG_MODULES.join(", ")),
+                ],
+            ),
+            Some(desktop_deps_hint(os_release)),
+        );
+    }
+
+    // The tray module is never probed on this path — with no GTK there is nothing to attach a tray icon to.
+    // So the summary states what the desktop app *requires* rather than claiming every module was measured and found absent.
+    AuditResult::warn(
+        NAME,
+        i18n::t_args(
+            "doctor-audit-desktop-deps-stack-missing",
+            &[("modules", &required_modules_list())],
+        ),
+        Some(desktop_deps_hint(os_release)),
+    )
+}
+
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+#[allow(dead_code)]
+pub struct LinuxDesktopDepsCheck;
+
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+impl AuditCheck for LinuxDesktopDepsCheck {
+    fn run(&self, _ctx: &AuditContext) -> AuditResult {
+        let os_release = std::fs::read_to_string(OS_RELEASE_PATH).ok();
+        evaluate_desktop_deps(pkg_config_probe, os_release.as_deref())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,6 +785,170 @@ mod tests {
         let ctx = ctx_with_home(tmp.path().to_path_buf());
         let r = ConfigTomlSchemaCheck.run(&ctx);
         assert_eq!(r.severity, Severity::Pass);
+    }
+
+    // ── LinuxDesktopDepsCheck ─────────────────────────────────────────────
+
+    /// Deepin ships an uppercase `ID`, which the os-release spec says should be lowercase — the parser has to cope with both.
+    const DEEPIN_OS_RELEASE: &str =
+        "# comment line\nPRETTY_NAME=\"Deepin 20.9\"\nNAME=\"Deepin\"\nID=Deepin\nID_LIKE=debian\n";
+    const NIXOS_OS_RELEASE: &str = "ID=nixos\nPRETTY_NAME=\"NixOS 24.05 (Uakari)\"\n";
+
+    /// Probe stub: modules listed in `present` answer `Present`, every other module `Absent`.
+    /// Tests never spawn the real pkg-config.
+    fn stub_probe<'a>(present: &'a [&'a str]) -> impl Fn(&str) -> ProbeOutcome + 'a {
+        move |module| {
+            if present.contains(&module) {
+                ProbeOutcome::Present
+            } else {
+                ProbeOutcome::Absent
+            }
+        }
+    }
+
+    fn missing_tool_probe(_module: &str) -> ProbeOutcome {
+        ProbeOutcome::ToolMissing
+    }
+
+    #[test]
+    fn os_release_maps_deepin_to_debian_family() {
+        let info = parse_os_release(DEEPIN_OS_RELEASE);
+        assert_eq!(info.family(), DistroFamily::Debian);
+        assert_eq!(info.display_name(), "Deepin 20.9");
+    }
+
+    #[test]
+    fn os_release_maps_known_ids_to_their_package_manager() {
+        assert_eq!(
+            parse_os_release(NIXOS_OS_RELEASE).family(),
+            DistroFamily::NixOs
+        );
+        assert_eq!(parse_os_release("ID=arch\n").family(), DistroFamily::Arch);
+        assert_eq!(
+            parse_os_release("ID=fedora\nVERSION_ID=40\n").family(),
+            DistroFamily::Fedora
+        );
+        assert_eq!(
+            parse_os_release("ID=ubuntu\n").family(),
+            DistroFamily::Debian
+        );
+    }
+
+    #[test]
+    fn os_release_unknown_id_is_unknown_family() {
+        // An ID we have never seen must not be forced into a package manager — the hint falls back to the distro-agnostic wording.
+        let info = parse_os_release("ID=frobnix\nPRETTY_NAME=\"Frobnix 9\"\n");
+        assert_eq!(info.family(), DistroFamily::Unknown);
+        assert_eq!(info.display_name(), "Frobnix 9");
+    }
+
+    #[test]
+    fn os_release_falls_back_to_id_like_for_derivatives() {
+        let info = parse_os_release("ID=linuxmint\nID_LIKE=\"ubuntu debian\"\n");
+        assert_eq!(info.family(), DistroFamily::Debian);
+    }
+
+    #[test]
+    fn os_release_absent_yields_unknown_family_and_localized_name() {
+        let info = OsRelease::default();
+        assert_eq!(info.family(), DistroFamily::Unknown);
+        // Rendered from the locale bundle, so it must not be a missing-key marker.
+        assert!(!info.display_name().starts_with('['));
+    }
+
+    #[test]
+    fn desktop_deps_missing_pkg_config_is_informational() {
+        let r = evaluate_desktop_deps(missing_tool_probe, Some(DEEPIN_OS_RELEASE));
+        assert_eq!(r.severity, Severity::Info);
+        assert!(r.hint.is_none());
+    }
+
+    #[test]
+    fn desktop_deps_nothing_found_does_not_fail_doctor() {
+        // A CLI-only install is fully supported: the missing desktop stack is reported with a hint but must never reach Error, which is the only severity that clears `all_ok` in `cmd_doctor`.
+        let r = evaluate_desktop_deps(stub_probe(&[]), Some(DEEPIN_OS_RELEASE));
+        assert_ne!(r.severity, Severity::Error);
+        assert!(matches!(r.severity, Severity::Info | Severity::Warn));
+        assert!(r.hint.is_some());
+    }
+
+    #[test]
+    fn desktop_deps_full_stack_is_pass() {
+        let r = evaluate_desktop_deps(
+            stub_probe(&[WEBKIT_PKG_MODULES[0], GTK_PKG_MODULE, TRAY_PKG_MODULE]),
+            Some(DEEPIN_OS_RELEASE),
+        );
+        assert_eq!(r.severity, Severity::Pass);
+        assert!(r.summary.contains(WEBKIT_PKG_MODULES[0]));
+    }
+
+    #[test]
+    fn desktop_deps_older_webkit_abi_still_passes() {
+        let r = evaluate_desktop_deps(
+            stub_probe(&[WEBKIT_PKG_MODULES[1], TRAY_PKG_MODULE]),
+            Some(DEEPIN_OS_RELEASE),
+        );
+        assert_eq!(r.severity, Severity::Pass);
+        assert!(r.summary.contains(WEBKIT_PKG_MODULES[1]));
+    }
+
+    #[test]
+    fn desktop_deps_tray_missing_is_warn() {
+        let r = evaluate_desktop_deps(
+            stub_probe(&[WEBKIT_PKG_MODULES[0]]),
+            Some(DEEPIN_OS_RELEASE),
+        );
+        assert_eq!(r.severity, Severity::Warn);
+        assert!(r.summary.contains(TRAY_PKG_MODULE));
+    }
+
+    #[test]
+    fn desktop_deps_gtk_without_webkit_is_warn() {
+        let r = evaluate_desktop_deps(stub_probe(&[GTK_PKG_MODULE]), Some(DEEPIN_OS_RELEASE));
+        assert_eq!(r.severity, Severity::Warn);
+        assert!(r.summary.contains(GTK_PKG_MODULE));
+    }
+
+    #[test]
+    fn desktop_deps_hint_is_package_manager_specific() {
+        let apt = desktop_deps_hint(Some(DEEPIN_OS_RELEASE));
+        let nix = desktop_deps_hint(Some(NIXOS_OS_RELEASE));
+        let pacman = desktop_deps_hint(Some("ID=arch\n"));
+        let dnf = desktop_deps_hint(Some("ID=fedora\n"));
+        let generic = desktop_deps_hint(None);
+
+        // The detected distribution is named back to the user.
+        assert!(apt.contains("Deepin 20.9"));
+        assert!(apt.contains("apt-cache search"));
+        assert!(pacman.contains("pacman -Ss"));
+        assert!(dnf.contains("dnf search"));
+        // NixOS gets pointed at the flake instead of an imperative install, because installing dev libraries by hand does not work there.
+        assert!(nix.contains("devShell"));
+        assert!(nix.contains("librefang-desktop"));
+
+        for hint in [&apt, &nix, &pacman, &dnf, &generic] {
+            // Every hint renders (no `[key]` miss marker) and lists the pkg-config modules the build actually needs.
+            assert!(!hint.starts_with('['), "unrendered hint: {hint}");
+            assert!(hint.contains(TRAY_PKG_MODULE), "hint omits modules: {hint}");
+        }
+    }
+
+    #[test]
+    fn required_modules_list_covers_every_probed_module() {
+        let list = required_modules_list();
+        for module in WEBKIT_PKG_MODULES {
+            assert!(list.contains(module));
+        }
+        assert!(list.contains(GTK_PKG_MODULE));
+        assert!(list.contains(TRAY_PKG_MODULE));
+    }
+
+    #[test]
+    fn unquote_os_release_value_strips_matching_quotes_only() {
+        assert_eq!(unquote_os_release_value("\"Deepin 20.9\""), "Deepin 20.9");
+        assert_eq!(unquote_os_release_value("'Deepin'"), "Deepin");
+        assert_eq!(unquote_os_release_value("nixos"), "nixos");
+        assert_eq!(unquote_os_release_value("\"unbalanced"), "\"unbalanced");
     }
 
     // ── Registry sanity ──────────────────────────────────────────────────

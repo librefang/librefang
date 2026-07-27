@@ -943,6 +943,18 @@ doctor-audit-config-ok = { $path } успішно розбирається як 
 doctor-audit-config-syntax-error = { $path } містить синтаксичні помилки TOML: { $error }
 doctor-audit-config-syntax-error-hint = Відредагуйте { $path } або відновіть її з бекапу.
 
+doctor-audit-desktop-deps-no-pkg-config = pkg-config не знайдено — неможливо перевірити стек GTK/WebKit, потрібний застосунку для стільниці. Для встановлення лише CLI він не потрібен.
+doctor-audit-desktop-deps-ok = Стек GTK/WebKit для стільниці наявний — pkg-config знаходить { $module } і { $tray }.
+doctor-audit-desktop-deps-tray-missing = pkg-config знаходить { $module }, але не { $tray }; застосунок для стільниці працюватиме без піктограми в системному лотку.
+doctor-audit-desktop-deps-webkit-missing = pkg-config знаходить { $gtk }, але не WebKitGTK ({ $webkit }); застосунок для стільниці не зможе відмалювати вікно.
+doctor-audit-desktop-deps-stack-missing = Стек GTK/WebKit для стільниці не знайдено — застосунку для стільниці потрібні { $modules }, самому CLI — ні.
+doctor-audit-desktop-deps-distro-unknown = цей дистрибутив Linux
+doctor-audit-desktop-deps-hint-apt = У { $distro } знайдіть пакунки, що надають { $modules }, за допомогою `apt-cache search webkit2gtk` та `apt-cache search appindicator`, а потім встановіть їх через `sudo apt install <package>`. Назви пакунків різняться між випусками, тому шукайте, а не вгадуйте.
+doctor-audit-desktop-deps-hint-pacman = У { $distro } знайдіть пакунки, що надають { $modules }, за допомогою `pacman -Ss webkit2gtk` та `pacman -Ss appindicator`, а потім встановіть їх через `sudo pacman -S <package>`. Назви пакунків різняться між випусками, тому шукайте, а не вгадуйте.
+doctor-audit-desktop-deps-hint-dnf = У { $distro } знайдіть пакунки, що надають { $modules }, за допомогою `dnf search webkit2gtk` та `dnf search appindicator`, а потім встановіть їх через `sudo dnf install <package>`. Назви пакунків різняться між випусками, тому шукайте, а не вгадуйте.
+doctor-audit-desktop-deps-hint-nix = У { $distro } імперативне встановлення бібліотек розробки не працює — скористайтеся devShell з flake або пакунком librefang-desktop замість того, щоб встановлювати { $modules } вручну.
+doctor-audit-desktop-deps-hint-generic = У { $distro } встановіть пакунки розробки GTK 3, WebKitGTK та Ayatana AppIndicator, які надає ваш менеджер пакунків, доки pkg-config не почне знаходити { $modules }.
+
 # launcher menu items
 launcher-menu-get-started = Налаштувати та запустити
 launcher-menu-get-started-hint = Провайдери, API-ключі, моделі, міграція
