@@ -211,6 +211,191 @@ async fn goals_create_with_unknown_parent_returns_404() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// #6562: the dashboard's create form seeds `parent_id` / `agent_id` as empty strings, so a plain "title + description" create posted `parent_id: ""` and got `404 Parent goal '' not found`.
+/// A blank id means "not set".
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_create_treats_blank_parent_and_agent_ids_as_absent_6562() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/goals",
+        Some(serde_json::json!({
+            "title": "Buy milk",
+            "description": "from the shop",
+            "status": "pending",
+            "progress": 0,
+            "parent_id": "",
+            "agent_id": "",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "got: {body:?}");
+    // Absent, not stored as an empty string: an empty `agent_id` would later fail UUID parsing in `POST /api/goals/{id}/start`.
+    assert!(
+        body.get("parent_id").is_none(),
+        "blank parent_id must not be persisted: {body:?}"
+    );
+    assert!(
+        body.get("agent_id").is_none(),
+        "blank agent_id must not be persisted: {body:?}"
+    );
+}
+
+/// Whitespace-only ids are blank too — a form control can submit `" "`.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_create_treats_whitespace_parent_id_as_absent_6562() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/goals",
+        Some(serde_json::json!({"title": "Whitespace", "parent_id": "   "})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "got: {body:?}");
+    assert!(body.get("parent_id").is_none(), "got: {body:?}");
+}
+
+/// A real parent id still resolves normally — the blank-handling must not weaken the existence check.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_create_with_real_parent_still_links_6562() {
+    let h = boot().await;
+    let parent = create_goal(&h, serde_json::json!({"title": "parent"})).await;
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+
+    let child = create_goal(
+        &h,
+        serde_json::json!({"title": "child", "parent_id": parent_id.clone()}),
+    )
+    .await;
+    assert_eq!(child["parent_id"], parent_id);
+}
+
+/// #6562: `PUT` with a blank `parent_id` clears the link, exactly as `null` does, instead of 404-ing on a lookup for the goal literally named `""`.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_update_blank_parent_id_clears_link_6562() {
+    let h = boot().await;
+    let parent = create_goal(&h, serde_json::json!({"title": "parent"})).await;
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let child = create_goal(
+        &h,
+        serde_json::json!({"title": "child", "parent_id": parent_id}),
+    )
+    .await;
+    let child_id = child["id"].as_str().unwrap().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{child_id}"),
+        Some(serde_json::json!({"parent_id": ""})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+    assert!(
+        body.get("parent_id").is_none(),
+        "blank parent_id must clear the link: {body:?}"
+    );
+}
+
+/// Same contract for `agent_id` on update.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_update_blank_agent_id_clears_assignment_6562() {
+    let h = boot().await;
+    let agent = uuid::Uuid::new_v4().to_string();
+    let created = create_goal(
+        &h,
+        serde_json::json!({"title": "assigned", "agent_id": agent.clone()}),
+    )
+    .await;
+    assert_eq!(created["agent_id"], agent);
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"agent_id": "   "})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+    assert!(body.get("agent_id").is_none(), "got: {body:?}");
+}
+
+/// #6562 follow-up: a real parent id with incidental whitespace (e.g. pasted from a form) must resolve, not 404, since the stored value is trimmed before persisting.
+/// Validating against the untrimmed string while persisting the trimmed one would let this legitimately-linked id fail existence-checking.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_update_with_whitespace_padded_parent_id_still_links_6562() {
+    let h = boot().await;
+    let parent = create_goal(&h, serde_json::json!({"title": "parent"})).await;
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let child = create_goal(&h, serde_json::json!({"title": "child"})).await;
+    let child_id = child["id"].as_str().unwrap().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{child_id}"),
+        Some(serde_json::json!({"parent_id": format!("  {parent_id}  ")})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+    assert_eq!(body["parent_id"], parent_id);
+}
+
+/// #6562 follow-up: a whitespace-padded self-reference must still be rejected as "cannot be its own parent" — comparing the untrimmed candidate against `id` would miss it, and it would land trimmed (i.e. exactly equal to `id`) once persisted.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_update_rejects_whitespace_padded_self_parent_6562() {
+    let h = boot().await;
+    let goal = create_goal(&h, serde_json::json!({"title": "self"})).await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"parent_id": format!("  {id}  ")})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+}
+
+/// A non-blank but unparsable `agent_id` must be rejected up front with
+/// `400 Invalid agent_id`, not silently stored: storing it would let
+/// `POST /api/goals/{id}/start` later report the misleading "Assign an
+/// agent to this goal before starting a run" on a goal that *was* assigned.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_create_rejects_non_uuid_agent_id() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/goals",
+        Some(serde_json::json!({"title": "bad agent", "agent_id": "not-a-uuid"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+}
+
+/// Same contract for `agent_id` on update: a non-blank, unparsable id is
+/// rejected rather than persisted.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_update_rejects_non_uuid_agent_id() {
+    let h = boot().await;
+    let goal = create_goal(&h, serde_json::json!({"title": "bad agent update"})).await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"agent_id": "not-a-uuid"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/goals/{id} + GET /api/goals/{id}/children
 // ---------------------------------------------------------------------------
@@ -541,6 +726,50 @@ async fn goal_run_start_requires_assigned_agent() {
         status,
         StatusCode::BAD_REQUEST,
         "starting a run for a goal with no assigned agent must 400: {body:?}"
+    );
+    let msg = body["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("Assign an agent"),
+        "an unassigned goal keeps the assign-an-agent wording: {body:?}"
+    );
+}
+
+/// #6562: create / update now reject a non-UUID `agent_id`, but goals written
+/// before that fix still carry junk.
+/// Reporting those as unassigned points the operator at a field that already looks filled in, so the two cases get distinct messages.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_start_distinguishes_a_corrupt_agent_id_from_an_unassigned_one_6562() {
+    let h = boot().await;
+    let goal = create_goal(&h, serde_json::json!({"title": "Legacy junk"})).await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    // Write the pre-fix shape directly, bypassing the route's validation the
+    // way an older daemon version would have.
+    let stored = h._state.kernel.memory_substrate().structured_modify(
+        librefang_types::goal::goals_storage_agent_id(),
+        librefang_types::goal::GOALS_STORAGE_KEY,
+        |cur| {
+            let mut goals = match cur {
+                Some(serde_json::Value::Array(a)) => a,
+                _ => Vec::new(),
+            };
+            for g in goals.iter_mut() {
+                if g["id"].as_str() == Some(id.as_str()) {
+                    g["agent_id"] = serde_json::Value::String("not-a-uuid".to_string());
+                }
+            }
+            Ok((serde_json::Value::Array(goals), ()))
+        },
+    );
+    assert!(stored.is_ok(), "seeding the legacy shape must succeed");
+
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/start"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    let msg = body["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("not-a-uuid") && msg.contains("reassign"),
+        "a corrupt stored id must be named and the fix suggested, not reported as unassigned: {body:?}"
     );
 }
 

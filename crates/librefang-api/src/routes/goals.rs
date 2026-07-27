@@ -180,15 +180,22 @@ pub async fn start_goal_run(
             return ApiErrorResponse::not_found(format!("Goal '{id}' not found")).into_json_tuple();
         }
     };
-    let agent_id = match goal["agent_id"]
-        .as_str()
-        .and_then(|s| s.parse::<uuid::Uuid>().ok())
-    {
-        Some(u) => AgentId(u),
-        None => {
+    // Distinguish "never assigned" from "assigned, but the stored id is not a
+    // UUID" (#6562).
+    // Create and update now reject a non-UUID `agent_id` at the boundary, but goals written before that fix still carry `""` or other junk, and reporting them as unassigned sends the operator to a field that already looks filled in.
+    let stored_agent_id = goal["agent_id"].as_str().map(str::trim).unwrap_or("");
+    let agent_id = match stored_agent_id.parse::<uuid::Uuid>() {
+        Ok(u) => AgentId(u),
+        Err(_) if stored_agent_id.is_empty() => {
             return ApiErrorResponse::bad_request(
                 "Assign an agent to this goal before starting a run",
             )
+            .into_json_tuple();
+        }
+        Err(_) => {
+            return ApiErrorResponse::bad_request(format!(
+                "This goal's agent_id ('{stored_agent_id}') is not a valid agent UUID — reassign the agent to repair it"
+            ))
             .into_json_tuple();
         }
     };
@@ -249,6 +256,26 @@ pub async fn stop_goal_run(
     )
 }
 
+/// Read an optional id-like string field, treating blank as absent (#6562).
+///
+/// HTML form controls submit `""` for an unselected `<select>` / untouched `<input>`, so a create payload routinely carries `parent_id: ""` / `agent_id: ""` meaning "no parent" / "no agent".
+/// Reading those with a bare `as_str()` yielded `Some("")`, which then failed the parent-existence check with `404 Parent goal '' not found` and persisted an unparsable empty `agent_id` that later made `POST /api/goals/{id}/start` claim the goal had no agent assigned.
+/// Normalising at the boundary is the right layer: the stored document only ever carries a real id or omits the key entirely.
+fn optional_id_field(req: &serde_json::Value, key: &str) -> Option<String> {
+    req[key]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Whether an update payload's `parent_id` / `agent_id` means "clear it".
+///
+/// `null` is the explicit clear signal; a blank string is the same intent arriving from a form control that was reset rather than omitted (#6562).
+fn is_clear_signal(value: &serde_json::Value) -> bool {
+    value.is_null() || value.as_str().is_some_and(|s| s.trim().is_empty())
+}
+
 /// POST /api/goals — Create a new goal.
 pub async fn create_goal(
     State(state): State<Arc<AppState>>,
@@ -272,7 +299,7 @@ pub async fn create_goal(
             .into_json_tuple();
     }
 
-    let parent_id = req["parent_id"].as_str().map(|s| s.to_string());
+    let parent_id = optional_id_field(&req, "parent_id");
 
     let status = req["status"].as_str().unwrap_or("pending").to_string();
     if !["pending", "in_progress", "completed", "cancelled"].contains(&status.as_str()) {
@@ -287,7 +314,12 @@ pub async fn create_goal(
         return ApiErrorResponse::bad_request("Progress must be 0-100").into_json_tuple();
     }
 
-    let agent_id_str = req["agent_id"].as_str().map(|s| s.to_string());
+    let agent_id_str = optional_id_field(&req, "agent_id");
+    if let Some(ref aid) = agent_id_str {
+        if aid.parse::<uuid::Uuid>().is_err() {
+            return ApiErrorResponse::bad_request("Invalid agent_id").into_json_tuple();
+        }
+    }
 
     let now = chrono::Utc::now().to_rfc3339();
     let goal_id = uuid::Uuid::new_v4().to_string();
@@ -392,9 +424,27 @@ pub async fn update_goal_by_id(
 
     if let Some(parent_id) = req.get("parent_id") {
         if let Some(pid) = parent_id.as_str() {
-            if pid == id {
+            if pid.trim() == id {
                 return ApiErrorResponse::bad_request("A goal cannot be its own parent")
                     .into_json_tuple();
+            }
+        }
+    }
+
+    // `""` is treated exactly like `null` — "clear this link" (#6562).
+    // Resolved once here so the validation below and the mutation inside the transaction cannot drift apart on what a blank string means.
+    let parent_clear = req.get("parent_id").is_some_and(is_clear_signal);
+    let agent_clear = req.get("agent_id").is_some_and(is_clear_signal);
+
+    // A non-blank agent_id must be a real UUID: `start_goal_run` parses it
+    // with `uuid::Uuid` and otherwise reports the misleading "Assign an
+    // agent to this goal before starting a run" on a goal that *was*
+    // assigned, just with an unparsable id (mirrors the same check in
+    // `create_goal` and the existing convention in `triggers.rs` / `cron.rs`).
+    if !agent_clear {
+        if let Some(aid) = req.get("agent_id").and_then(|v| v.as_str()) {
+            if aid.trim().parse::<uuid::Uuid>().is_err() {
+                return ApiErrorResponse::bad_request("Invalid agent_id").into_json_tuple();
             }
         }
     }
@@ -423,8 +473,10 @@ pub async fn update_goal_by_id(
 
             // Parent existence + indirect-cycle detection on the live snapshot.
             if let Some(parent_id) = req.get("parent_id") {
-                if !parent_id.is_null() {
+                if !parent_clear {
                     if let Some(pid) = parent_id.as_str() {
+                        // Trim before comparing (#6562): the mutation below persists `pid.trim()`, so validating against the untrimmed string would either false-404 a whitespace-padded but otherwise valid parent id, or let a whitespace-padded self-reference slip past the cycle check and land trimmed (i.e. equal to `id`) once persisted.
+                        let pid = pid.trim();
                         if !goals.iter().any(|g| g["id"].as_str() == Some(pid)) {
                             return Err(LibreFangError::InvalidInput(format!(
                                 "{PARENT_MISSING}{pid}"
@@ -472,17 +524,17 @@ pub async fn update_goal_by_id(
                         g["progress"] = serde_json::json!(progress);
                     }
                     if let Some(parent_id) = req.get("parent_id") {
-                        if parent_id.is_null() {
+                        if parent_clear {
                             g.as_object_mut().map(|obj| obj.remove("parent_id"));
                         } else if let Some(pid) = parent_id.as_str() {
-                            g["parent_id"] = serde_json::Value::String(pid.to_string());
+                            g["parent_id"] = serde_json::Value::String(pid.trim().to_string());
                         }
                     }
                     if let Some(agent_id) = req.get("agent_id") {
-                        if agent_id.is_null() {
+                        if agent_clear {
                             g.as_object_mut().map(|obj| obj.remove("agent_id"));
                         } else if let Some(aid) = agent_id.as_str() {
-                            g["agent_id"] = serde_json::Value::String(aid.to_string());
+                            g["agent_id"] = serde_json::Value::String(aid.trim().to_string());
                         }
                     }
                     g["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
