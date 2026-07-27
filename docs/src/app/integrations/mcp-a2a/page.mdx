@@ -28,15 +28,211 @@ MCP is a standardized protocol for connecting LLMs to external tools and service
 ```toml
 [[mcp_servers]]
 name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+transport = { type = "stdio", command = "npx", args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"] }
 
 [[mcp_servers]]
 name = "github"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-github"]
-env = { GITHUB_TOKEN = "your-token" }
+transport = { type = "stdio", command = "npx", args = ["-y", "@modelcontextprotocol/server-github"] }
+env = ["GITHUB_TOKEN"]
 ```
+
+The launch details live under a `transport` table, not at the top level of the entry.
+`env` is a **list of strings**, not a table: a bare `"GITHUB_TOKEN"` forwards that variable from the daemon's own environment, and `"GITHUB_TOKEN=ghp_..."` sets it inline.
+`McpServerConfigEntry` is `deny_unknown_fields`, so a top-level `command` key or a `env = { … }` table is a hard parse error rather than an ignored key.
+
+### Connect the EveryAPI MCP server
+
+The [EveryAPI](/configuration/providers/platforms#everyapi) CLI ships an MCP server inside its own binary, reachable as `everyapi mcp`.
+LibreFang speaks stdio MCP, so wiring the two together needs no new code on either side — two config stanzas are the whole integration.
+
+**1. Register the server in `~/.librefang/config.toml`:**
+
+```toml
+[[mcp_servers]]
+name = "everyapi"
+transport = { type = "stdio", command = "everyapi", args = ["mcp"] }
+timeout_secs = 30
+env = []
+```
+
+`env = []` is correct and not an oversight.
+The stdio transport clears the child's environment and then forwards a fixed safe set that includes `HOME`, `XDG_CONFIG_HOME`, `USER`, and `PATH` (plus `USERPROFILE` / `APPDATA` on Windows).
+That is exactly what `everyapi mcp` needs to find `~/.config/everyapi/credentials.json` on its own, so no credential has to be copied into LibreFang's config or vault.
+
+**2. Grant the server to an agent in its `agent.toml`:**
+
+```toml
+mcp_servers = ["everyapi"]
+```
+
+<Note>
+`mcp_servers` is a real allowlist, not a wildcard.
+An empty or omitted `mcp_servers = []` means **no** MCP servers at all — the agent sees zero MCP tools and the MCP server summary is dropped from its prompt (#5855).
+An agent that omits the key does not silently inherit every globally-connected server; it just gets silence.
+Use `["*"]` to opt into all connected servers explicitly.
+</Note>
+
+#### Independent of the provider wiring
+
+This bridge is orthogonal to `librefang models connect everyapi`.
+That command wires EveryAPI as an **LLM provider** so agents can route completions through the gateway.
+The MCP server instead gives an agent **tools** for inspecting and operating the gateway account itself.
+`everyapi mcp` reads the gateway's own credentials file directly, so the bridge works whether or not `models connect everyapi` has ever run — and conversely, connecting the provider does not make these tools available.
+Run `everyapi login` first either way: the server process starts fine unauthenticated, but every individual tool returns a not-logged-in error until credentials exist.
+
+#### Optional: add a catalog entry
+
+The stanza above is all that is required.
+If you also want `librefang mcp add everyapi` and dashboard catalog visibility, drop this file at `~/.librefang/mcp/catalog/everyapi.toml`:
+
+```toml
+id = "everyapi"
+name = "EveryAPI"
+description = "Inspect and operate an EveryAPI gateway account — quota, seller channels, edge nodes — through the everyapi CLI's built-in MCP server"
+category = "cloud"
+icon = "lucide:gauge"
+tags = ["everyapi", "gateway", "quota", "billing", "marketplace"]
+
+[transport]
+type = "stdio"
+command = "everyapi"
+args = ["mcp"]
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Install the EveryAPI CLI and run `everyapi login`, which writes ~/.config/everyapi/credentials.json.
+2. Run `librefang mcp add everyapi`.
+3. Add "everyapi" to the agent's mcp_servers list in its agent.toml.
+
+No credential needs to be entered into LibreFang. The MCP server reads the gateway credentials file itself.
+"""
+
+[i18n.zh]
+name = "EveryAPI"
+description = "通过 everyapi CLI 内置的 MCP 服务器检视与操作 EveryAPI 网关账户 —— 配额、卖家渠道、边缘节点。"
+```
+
+The catalog directory is synced from the upstream registry, but the sync only prunes files it installed itself, so a hand-placed entry survives.
+It declares no `required_env`, so `librefang mcp add everyapi` reports `Ready` immediately rather than prompting for a key.
+
+#### Tool inventory
+
+The server exposes 15 tools.
+Seven read, eight write.
+
+| Read-only | What it returns |
+|---|---|
+| `everyapi_status` | Account name, remaining and used quota in USD, request count, top-up URL |
+| `everyapi_topup` | The wallet URL where credits are purchased — a string only, it moves no money |
+| `everyapi_seller_list` | The caller's mounted seller channels |
+| `everyapi_seller_eligibility` | Which marketplace-seller gates the account has passed |
+| `everyapi_edge_list` | Registered BYO-GPU edge nodes |
+| `everyapi_edge_status` | Health and serving state of one edge node |
+| `everyapi_admin_marketplace_status` | Deployment-wide marketplace settings (admin) |
+
+| Write | Effect and friction |
+|---|---|
+| `everyapi_seller_add_key` | Mounts a seller channel from **plaintext upstream API keys passed as arguments**. **No confirm gate.** |
+| `everyapi_seller_withdraw` | Moves money out of the seller balance. Requires `confirm: "yes"`. |
+| `everyapi_admin_marketplace_set` | Changes deployment-wide marketplace settings. Requires `confirm: "yes"`. |
+| `everyapi_edge_remove` | Destroys an edge-node registration. Requires `confirm: "yes"`. |
+| `everyapi_seller_add_oauth_codex_start` | Begins an OAuth channel mount; needs a human to paste a code back. |
+| `everyapi_seller_add_oauth_codex_poll` | Polls that flow to completion. |
+| `everyapi_seller_add_oauth_claude_start` | Begins the Claude OAuth channel mount. |
+| `everyapi_seller_add_oauth_claude_complete` | Finishes it with the pasted code. |
+
+<Note>
+`everyapi_seller_add_key` deserves specific attention.
+It is the only write tool with no confirm-token friction, and its `keys` argument is a live upstream credential in plaintext.
+Every other write tool forces a second round-trip through the model before it fires; this one executes on the first call.
+Gate it explicitly — see below.
+</Note>
+
+#### Tool names are double-prefixed
+
+LibreFang namespaces every MCP tool as `mcp_{server}_{tool}`, and EveryAPI's tools are *already* named `everyapi_*`.
+The two compose literally, with no de-duplication:
+
+```
+everyapi_status  →  mcp_everyapi_everyapi_status
+```
+
+The first `everyapi` is the server name from your `[[mcp_servers]]` stanza; the second belongs to the upstream tool.
+This matters because approval patterns match the full namespaced name.
+
+#### Restricting an agent to the read-only tools
+
+`require_approval` accepts glob patterns and is matched against the namespaced name, so four patterns cover all eight writes and none of the seven reads:
+
+```toml
+# ~/.librefang/config.toml
+[approval]
+require_approval = [
+  "mcp_everyapi_everyapi_seller_add_*",        # add_key + the 4 OAuth tools
+  "mcp_everyapi_everyapi_seller_withdraw",
+  "mcp_everyapi_everyapi_admin_marketplace_set",
+  "mcp_everyapi_everyapi_edge_remove",
+]
+```
+
+`seller_list` and `seller_eligibility` are deliberately not caught: the wildcard is anchored on `seller_add_`, which is a distinct prefix.
+
+<Note>
+**These patterns hardcode `name = "everyapi"`.**
+The server-name half of the tool name is lowercased and has `-` mapped to `_`, so naming the server `every-api` yields `mcp_every_api_everyapi_*` and every pattern above silently matches nothing.
+There is no warning for a glob that matches zero tools — the gate simply stops applying.
+If you rename the server, rewrite the patterns.
+</Note>
+
+Four honest limits on what this buys you.
+The last three are bypasses: settings elsewhere in `config.toml` that silently switch the globs off.
+
+**`require_approval` pauses, it does not deny.**
+A matched call suspends the turn and raises an approval request; a human then approves or rejects it.
+For an unattended cron agent that means a write tool stalls rather than being refused, and the outcome on timeout is whatever `approval.timeout_fallback` says (`deny` by default, but `skip` and `escalate` are also available).
+If you want a hard block rather than a pause, use a channel deny rule or leave the write tools' server off that agent's `mcp_servers` list entirely.
+
+**`trusted_senders` bypasses it for every MCP tool.**
+The approval manager waives the gate for a trusted sender whenever the tool is not high-risk, and the risk classifier only knows built-in tool names — `shell_exec`, `file_write`, `agent_spawn`, and friends.
+Every MCP tool falls through to `Low`, so a `trusted_senders` entry silently waives approval on `mcp_everyapi_everyapi_seller_withdraw` and `mcp_everyapi_everyapi_seller_add_key` alike.
+The same hole applies to channel deny rules, and a channel *allow* rule is a bypass in its own right: an `allowed_tools` entry that matches the tool returns "no approval needed" before the `require_approval` list is ever consulted.
+Do not combine either with an EveryAPI-enabled agent and assume the globs still hold.
+
+**A hand-tagged agent auto-approves everything.**
+Agents spawned through `activate_hand()` carry a `hand:` tag and are treated as curated trusted packages: their approval submissions return `AutoApproved` without ever reaching a human, and execution proceeds straight through.
+That covers `mcp_everyapi_everyapi_seller_add_key` and `mcp_everyapi_everyapi_seller_withdraw` along with everything else.
+If a hand agent should be able to *reach* the EveryAPI tools at all, treat the globs as documentation rather than enforcement, and keep the write-capable server off that agent.
+
+**Approvals are cached per session by default.**
+`approval.cache_approvals_per_session` defaults to `true`, so the first human approval of a tool name inside a session auto-approves every later call of that same tool in that session.
+For `seller_add_key` — the one write tool EveryAPI itself does not gate behind a confirm token — that means one "yes" covers an unbounded number of subsequent key uploads until the session ends or the daemon restarts.
+Set `cache_approvals_per_session = false` if you want a decision per call.
+
+**Per-user RBAC is the one gate none of these can waive.**
+A user-policy decision of `NeedsApproval` sets `force_human`, which is evaluated ahead of the trusted-sender check, suppresses the hand-agent auto-approval carve-out, and skips the per-session cache.
+It is the only mechanism above that all three bypasses respect, so it is what to reach for when the sender is trusted, the agent is hand-tagged, or the session is long-lived.
+
+#### Flagship use case: check the balance before an expensive job
+
+The intended pattern is a cron agent that calls `mcp_everyapi_everyapi_status` and aborts if the gateway is nearly out of credit, rather than discovering it mid-run through a wall of 402s.
+The read tools are all safe to leave ungated, so this needs no approval interaction at all.
+
+The honest caveat: `everyapi_status` returns **rendered text, not JSON**.
+The agent receives something shaped like this:
+
+```
+Account: alice (alice@example.com)
+Quota:    $12.34 remaining   $87.66 used
+Requests: 1420
+Top-up:   https://api.everyapi.ai/wallet
+```
+
+There is no structured field to read.
+An agent that wants to branch on the remaining balance must parse a float out of that prose, which is exactly the kind of step models get wrong at the margins — a `$1,234.00` thousands separator or a future wording change breaks it silently.
+Prefer a coarse threshold ("if it looks below ten dollars, stop and notify") over arithmetic that assumes an exact parse, and have the agent surface the raw line to a human when it cannot read a number out of it confidently.
 
 ### MCP Tool Naming
 
@@ -66,8 +262,7 @@ Connect to external servers as an MCP client:
 ```toml
 [[mcp_servers]]
 name = "custom"
-command = "python"
-args = ["./mcp_server.py"]
+transport = { type = "stdio", command = "python", args = ["./mcp_server.py"] }
 ```
 
 ### Developing MCP Servers
@@ -253,13 +448,11 @@ curl -N http://localhost:4545/api/a2a/tasks/task-456/events
 # MCP Servers
 [[mcp_servers]]
 name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+transport = { type = "stdio", command = "npx", args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"] }
 
 [[mcp_servers]]
 name = "github"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-github"]
+transport = { type = "stdio", command = "npx", args = ["-y", "@modelcontextprotocol/server-github"] }
 
 # A2A Configuration
 [a2a]

@@ -493,6 +493,9 @@ Unlike every other entry on this page, EveryAPI is not registered in the builtin
 
 The command reads `api_base` and `relay_key` from the credentials file (honouring `$XDG_CONFIG_HOME`), fetches the gateway's live `/v1/models` listing, writes the API key to `~/.librefang/.env` as `EVERYAPI_API_KEY`, and persists the provider — through the running daemon when one is up, so the catalog reloads in place, or by writing `~/.librefang/providers/everyapi.toml` directly when it is not. The key is never written into the provider TOML, and it is never printed to the terminal or the logs.
 
+Separately from this provider wiring, the EveryAPI CLI also ships an MCP server (`everyapi mcp`) that gives an agent tools for inspecting the gateway account itself — quota, seller channels, edge nodes.
+It reads the same credentials file directly, so it works whether or not `models connect everyapi` has run, and connecting the provider does not enable it: see [Connect the EveryAPI MCP server](/integrations/mcp-a2a#connect-the-every-api-mcp-server).
+
 **Notes:**
 
 Pricing and context windows come from the gateway's own public `/api/pricing` feed, so cost figures reflect what the gateway actually charges — its markup included — rather than the upstream vendor's list price. Per-token models are converted from the feed's ratios; models billed per call carry no per-token price and are marked as having unknown pricing, so budget figures do not silently treat them as free.

@@ -28,15 +28,211 @@ MCP 是一个标准化协议，用于连接 LLM 与外部工具和服务。
 ```toml
 [[mcp_servers]]
 name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+transport = { type = "stdio", command = "npx", args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"] }
 
 [[mcp_servers]]
 name = "github"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-github"]
-env = { GITHUB_TOKEN = "your-token" }
+transport = { type = "stdio", command = "npx", args = ["-y", "@modelcontextprotocol/server-github"] }
+env = ["GITHUB_TOKEN"]
 ```
+
+启动参数位于 `transport` 表内，而不是条目的顶层。
+`env` 是**字符串列表**而非表：裸写 `"GITHUB_TOKEN"` 表示从守护进程自身环境转发该变量，`"GITHUB_TOKEN=ghp_..."` 则直接内联赋值。
+`McpServerConfigEntry` 带 `deny_unknown_fields`，所以顶层的 `command` 键或 `env = { … }` 表会直接解析失败，而不是被忽略。
+
+### 接入 EveryAPI MCP 服务器
+
+[EveryAPI](/zh/configuration/providers/platforms#everyapi) CLI 在自身二进制里内置了一个 MCP 服务器，通过 `everyapi mcp` 启动。
+LibreFang 本身就是 stdio MCP 客户端，因此两边都不需要新增任何代码 —— 两段配置就是全部集成工作。
+
+**1. 在 `~/.librefang/config.toml` 中注册服务器：**
+
+```toml
+[[mcp_servers]]
+name = "everyapi"
+transport = { type = "stdio", command = "everyapi", args = ["mcp"] }
+timeout_secs = 30
+env = []
+```
+
+`env = []` 是正确写法，不是遗漏。
+stdio 传输会先清空子进程环境，再转发一组固定的安全变量，其中包含 `HOME`、`XDG_CONFIG_HOME`、`USER` 与 `PATH`（Windows 上还有 `USERPROFILE` / `APPDATA`）。
+这恰好够 `everyapi mcp` 自行找到 `~/.config/everyapi/credentials.json`，所以不需要把任何凭据复制进 LibreFang 的配置或密钥库。
+
+**2. 在 agent 的 `agent.toml` 中授予该服务器：**
+
+```toml
+mcp_servers = ["everyapi"]
+```
+
+<Note>
+`mcp_servers` 是真正的白名单，不是通配符。
+留空或省略的 `mcp_servers = []` 表示**一个 MCP 服务器都不给** —— agent 看不到任何 MCP 工具，提示词里也不会出现 MCP 服务器摘要（#5855）。
+省略该键的 agent 不会隐式继承全局连接的所有服务器，得到的只是沉默。
+要接入全部已连接服务器，请显式写 `["*"]`。
+</Note>
+
+#### 与 provider 接线相互独立
+
+这条桥接与 `librefang models connect everyapi` 是两回事。
+那条命令把 EveryAPI 接成 **LLM provider**，让 agent 的补全请求经网关路由。
+而 MCP 服务器给的是**工具**，用来检视和操作网关账户本身。
+`everyapi mcp` 直接读取网关自己的凭据文件，所以无论是否跑过 `models connect everyapi`，这条桥接都能工作；反过来，接好 provider 也不会让这些工具出现。
+两种情况下都请先执行 `everyapi login`：服务器进程在未登录时也能正常启动，但在凭据出现之前，每个工具都会返回未登录错误。
+
+#### 可选：添加目录条目
+
+上面那段配置已经足够。
+如果你还想用 `librefang mcp add everyapi` 并让它出现在 dashboard 目录里，把下面这个文件放到 `~/.librefang/mcp/catalog/everyapi.toml`：
+
+```toml
+id = "everyapi"
+name = "EveryAPI"
+description = "Inspect and operate an EveryAPI gateway account — quota, seller channels, edge nodes — through the everyapi CLI's built-in MCP server"
+category = "cloud"
+icon = "lucide:gauge"
+tags = ["everyapi", "gateway", "quota", "billing", "marketplace"]
+
+[transport]
+type = "stdio"
+command = "everyapi"
+args = ["mcp"]
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Install the EveryAPI CLI and run `everyapi login`, which writes ~/.config/everyapi/credentials.json.
+2. Run `librefang mcp add everyapi`.
+3. Add "everyapi" to the agent's mcp_servers list in its agent.toml.
+
+No credential needs to be entered into LibreFang. The MCP server reads the gateway credentials file itself.
+"""
+
+[i18n.zh]
+name = "EveryAPI"
+description = "通过 everyapi CLI 内置的 MCP 服务器检视与操作 EveryAPI 网关账户 —— 配额、卖家渠道、边缘节点。"
+```
+
+目录会从上游 registry 同步，但同步只会清理它自己安装过的文件，因此手动放置的条目不会被删除。
+该条目没有声明 `required_env`，所以 `librefang mcp add everyapi` 会直接报告 `Ready`，不会索要密钥。
+
+#### 工具清单
+
+服务器共暴露 15 个工具。
+7 个只读，8 个写入。
+
+| 只读工具 | 返回内容 |
+|---|---|
+| `everyapi_status` | 账户名、剩余与已用配额（美元）、请求数、充值 URL |
+| `everyapi_topup` | 购买额度的钱包 URL —— 仅返回字符串，不涉及任何资金操作 |
+| `everyapi_seller_list` | 调用者已挂载的卖家渠道 |
+| `everyapi_seller_eligibility` | 账户已通过哪些市场卖家准入条件 |
+| `everyapi_edge_list` | 已注册的自带 GPU 边缘节点 |
+| `everyapi_edge_status` | 单个边缘节点的健康与服务状态 |
+| `everyapi_admin_marketplace_status` | 部署级市场设置（管理员） |
+
+| 写入工具 | 影响与摩擦机制 |
+|---|---|
+| `everyapi_seller_add_key` | 用**以参数明文传入的上游 API 密钥**挂载卖家渠道。**没有确认关卡。** |
+| `everyapi_seller_withdraw` | 从卖家余额转出资金。需要 `confirm: "yes"`。 |
+| `everyapi_admin_marketplace_set` | 修改部署级市场设置。需要 `confirm: "yes"`。 |
+| `everyapi_edge_remove` | 销毁边缘节点注册。需要 `confirm: "yes"`。 |
+| `everyapi_seller_add_oauth_codex_start` | 发起 OAuth 渠道挂载，需要人工回贴授权码。 |
+| `everyapi_seller_add_oauth_codex_poll` | 轮询该流程直至完成。 |
+| `everyapi_seller_add_oauth_claude_start` | 发起 Claude OAuth 渠道挂载。 |
+| `everyapi_seller_add_oauth_claude_complete` | 用回贴的授权码完成挂载。 |
+
+<Note>
+`everyapi_seller_add_key` 需要特别注意。
+它是唯一没有确认令牌摩擦的写工具，而它的 `keys` 参数是明文的上游实时凭据。
+其他所有写工具都要求模型再走一轮往返才会真正执行，只有这一个在首次调用时就直接落地。
+请显式为它加上关卡 —— 见下文。
+</Note>
+
+#### 工具名带双重前缀
+
+LibreFang 会把每个 MCP 工具命名为 `mcp_{server}_{tool}`，而 EveryAPI 的工具**本身**就叫 `everyapi_*`。
+两者按字面拼接，不做任何去重：
+
+```
+everyapi_status  →  mcp_everyapi_everyapi_status
+```
+
+第一个 `everyapi` 来自你 `[[mcp_servers]]` 里的服务器名，第二个属于上游工具本身。
+这一点很关键，因为审批模式匹配的是完整的命名空间名。
+
+#### 把 agent 限制在只读工具上
+
+`require_approval` 接受 glob 模式，且匹配的是命名空间名，因此四条模式即可覆盖全部 8 个写工具、且不误伤 7 个读工具：
+
+```toml
+# ~/.librefang/config.toml
+[approval]
+require_approval = [
+  "mcp_everyapi_everyapi_seller_add_*",        # add_key + 4 个 OAuth 工具
+  "mcp_everyapi_everyapi_seller_withdraw",
+  "mcp_everyapi_everyapi_admin_marketplace_set",
+  "mcp_everyapi_everyapi_edge_remove",
+]
+```
+
+`seller_list` 与 `seller_eligibility` 刻意不在其中：通配符锚定在 `seller_add_` 上，那是一个互不重叠的前缀。
+
+<Note>
+**这些模式把 `name = "everyapi"` 写死了。**
+工具名中服务器名那一半会被转小写、并把 `-` 映射成 `_`，因此把服务器命名为 `every-api` 会得到 `mcp_every_api_everyapi_*`，上面每条模式都将静默匹配为空。
+匹配到零个工具时不会有任何告警 —— 关卡只是不再生效。
+如果你重命名了服务器，请同步改写这些模式。
+</Note>
+
+关于这套配置能买到什么，有四点必须说清楚。
+后三点都是绕过路径：`config.toml` 中别处的配置会让这些 glob 静默失效。
+
+**`require_approval` 是暂停，不是拒绝。**
+命中的调用会挂起当前轮次并发起审批请求，再由人来批准或驳回。
+对无人值守的 cron agent 而言，这意味着写工具是卡住而不是被拒绝，超时后的结果取决于 `approval.timeout_fallback`（默认 `deny`，也可选 `skip` 与 `escalate`）。
+如果你要的是硬阻断而非暂停，请改用 channel deny 规则，或干脆不把带写工具的服务器放进该 agent 的 `mcp_servers` 列表。
+
+**`trusted_senders` 会对所有 MCP 工具绕过它。**
+只要工具不属于高风险类别，审批管理器就会为可信发送者放行，而风险分类器只认识内置工具名 —— `shell_exec`、`file_write`、`agent_spawn` 之类。
+所有 MCP 工具都落进 `Low`，因此一个 `trusted_senders` 条目会同时静默豁免 `mcp_everyapi_everyapi_seller_withdraw` 和 `mcp_everyapi_everyapi_seller_add_key`。
+channel deny 规则存在同样的漏洞；而 channel *allow* 规则本身就是另一条绕过路径 —— 命中的 `allowed_tools` 条目会在 `require_approval` 列表被查阅之前直接返回"无需审批"。
+不要在启用了 EveryAPI 的 agent 上配置这两者中的任何一个，还指望上面的 glob 仍然生效。
+
+**带 hand 标签的 agent 会自动批准一切。**
+经由 `activate_hand()` 拉起的 agent 带有 `hand:` 标签，被视为经过策展的可信包：它们提交的审批直接返回 `AutoApproved`，从不抵达人类，执行照常继续。
+这同样覆盖 `mcp_everyapi_everyapi_seller_add_key` 与 `mcp_everyapi_everyapi_seller_withdraw`。
+如果一个 hand agent 确实需要接触 EveryAPI 工具，请把上面的 glob 当作文档而非强制手段，并让带写工具的服务器远离该 agent。
+
+**审批默认按会话缓存。**
+`approval.cache_approvals_per_session` 默认为 `true`，因此某个工具名在一个会话中第一次被人工批准后，该会话内后续对同一工具的每次调用都会自动放行。
+对 `seller_add_key` —— EveryAPI 自身唯一没有加 confirm 令牌的写工具 —— 这意味着一次"同意"会覆盖此后无限次的密钥上传，直到会话结束或守护进程重启。
+如果你要的是逐次决策，请设置 `cache_approvals_per_session = false`。
+
+**按用户的 RBAC 是上述任何一条都无法豁免的关卡。**
+用户策略给出的 `NeedsApproval` 会置上 `force_human`：它在可信发送者检查之前被求值，会抑制 hand agent 的自动批准豁免，也会跳过按会话的缓存。
+它是上面三条绕过路径都必须遵守的唯一机制，所以当发送者可信、agent 带 hand 标签、或会话长期存活时，应该用它。
+
+#### 旗舰场景：在昂贵任务前查余额
+
+预期用法是让 cron agent 调用 `mcp_everyapi_everyapi_status`，在网关额度快耗尽时提前中止，而不是跑到一半才撞上一整墙 402。
+读工具全都可以放心不加关卡，所以这个场景完全不需要任何审批交互。
+
+需要坦白的一点是：`everyapi_status` 返回的是**渲染后的文本，而非 JSON**。
+agent 实际收到的大致是这样：
+
+```
+Account: alice (alice@example.com)
+Quota:    $12.34 remaining   $87.66 used
+Requests: 1420
+Top-up:   https://api.everyapi.ai/wallet
+```
+
+其中没有任何结构化字段可读。
+想据此判断剩余余额的 agent，必须从这段散文里解析出一个浮点数，而这正是模型在边界情况上容易出错的动作 —— 一个 `$1,234.00` 的千位分隔符，或未来一次措辞调整，都会让它悄无声息地失效。
+相比依赖精确解析的算术，更建议用粗粒度阈值（"看起来低于十美元就停下并通知"），并在无法自信读出数字时，让 agent 把原始那一行交给人来看。
 
 ### MCP 工具命名
 
@@ -66,8 +262,7 @@ LibreFang 包含内置 MCP 服务器：
 ```toml
 [[mcp_servers]]
 name = "custom"
-command = "python"
-args = ["./mcp_server.py"]
+transport = { type = "stdio", command = "python", args = ["./mcp_server.py"] }
 ```
 
 ### 开发 MCP 服务器
@@ -253,13 +448,11 @@ curl -N http://localhost:4545/api/a2a/tasks/task-456/events
 # MCP 服务器
 [[mcp_servers]]
 name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+transport = { type = "stdio", command = "npx", args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"] }
 
 [[mcp_servers]]
 name = "github"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-github"]
+transport = { type = "stdio", command = "npx", args = ["-y", "@modelcontextprotocol/server-github"] }
 
 # A2A 配置
 [a2a]

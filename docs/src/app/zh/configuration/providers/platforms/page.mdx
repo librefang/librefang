@@ -493,6 +493,9 @@ model = "glm-4-plus"
 
 该命令从凭据文件读取 `api_base` 与 `relay_key`（遵循 `$XDG_CONFIG_HOME`），拉取网关实时的 `/v1/models` 列表，将 API 密钥以 `EVERYAPI_API_KEY` 写入 `~/.librefang/.env`，随后持久化 provider —— 守护进程在运行时经由它写入以便目录就地重载，未运行时则直接写 `~/.librefang/providers/everyapi.toml`。密钥不会写进 provider TOML，也不会打印到终端或日志。
 
+除了这套 provider 接线之外，EveryAPI CLI 还内置了一个 MCP 服务器（`everyapi mcp`），为 agent 提供检视网关账户本身的工具 —— 配额、卖家渠道、边缘节点。
+它直接读取同一份凭据文件，因此无论是否跑过 `models connect everyapi` 都能工作；反过来，接好 provider 也不会启用它。详见[接入 EveryAPI MCP 服务器](/zh/integrations/mcp-a2a#every-api-mcp)。
+
 **说明：**
 
 价格与上下文窗口取自网关自己公开的 `/api/pricing` 接口，因此成本数字反映的是网关实际收费（含其加价），而不是上游厂商的标价。按 token 计费的模型由该接口的 ratio 换算得到；按次计费的模型没有 per-token 价格，会标记为价格未知，避免预算统计把它当成免费。
