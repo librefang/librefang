@@ -390,7 +390,18 @@ pub(crate) fn synthesize_catalog(
             id: model.id.clone(),
             display_name: model.id.clone(),
             provider: PROVIDER_ID.to_string(),
-            tier: ModelTier::Custom,
+            // Deliberately NOT `ModelTier::Custom`. `find_model` returns the
+            // first `Custom` match immediately so user-defined models beat
+            // builtins (#983), and `merge_catalog_file` dedupes on
+            // `(id, provider)` — so a `Custom` gateway copy of an id that
+            // also exists upstream (`claude-sonnet-5`, `claude-opus-5`,
+            // `gemini-3.5-flash`) would hijack every provider-blind lookup
+            // (`pricing`, `effective_capabilities_for`, the last-resort arm
+            // of `find_model_for_manifest`) and silently re-price agents
+            // that never opted into this gateway. `Balanced` matches what
+            // the registry's own provider catalog files carry, and the
+            // gateway copy stays reachable via `find_model_for_provider`.
+            tier: ModelTier::Balanced,
             modality,
             context_window: metadata.context_window,
             max_output_tokens: metadata.max_output_tokens,
@@ -781,7 +792,9 @@ mod tests {
     use crate::cli::{Cli, Commands, ModelsCommands};
     use clap::Parser;
     use librefang_runtime::model_catalog::ModelCatalog;
-    use librefang_types::model_catalog::{Modality, ModelCatalogFile};
+    use librefang_types::model_catalog::{
+        Modality, ModelCatalogEntry, ModelCatalogFile, ModelTier,
+    };
     use serde_json::json;
 
     /// A catalog built over an empty directory. The OpenRouter snapshot is
@@ -1279,6 +1292,70 @@ mod tests {
                 .validate()
                 .unwrap_or_else(|e| panic!("entry rejected downstream: {e}"));
         }
+    }
+
+    #[test]
+    fn registering_the_gateway_does_not_hijack_provider_blind_model_lookup() {
+        // Several gateway ids collide with builtin ids (`claude-sonnet-5`,
+        // `claude-opus-5`, `gemini-3.5-flash`). `find_model` returns the
+        // FIRST `ModelTier::Custom` match immediately (#983), and
+        // `merge_catalog_file` dedupes on `(id, provider)` — so tagging
+        // these entries `Custom` would make every provider-blind lookup
+        // (`pricing`, `effective_capabilities_for`, the last-resort arm of
+        // `find_model_for_manifest`) resolve to the gateway's copy instead
+        // of the vendor's, silently re-pricing agents that never opted in.
+        let catalog = snapshot_catalog();
+        let result = synthesize_catalog(
+            &catalog,
+            "https://api.everyapi.ai/v1",
+            &live_gateway_listing(),
+        );
+        for model in &result.file.models {
+            assert_ne!(
+                model.tier,
+                ModelTier::Custom,
+                "{} must not claim Custom tier",
+                model.id
+            );
+        }
+
+        // Merging must leave a same-id builtin reachable by a provider-blind
+        // lookup rather than shadowing it.
+        let mut merged = snapshot_catalog();
+        let builtin = ModelCatalogEntry {
+            id: "claude-sonnet-5".to_string(),
+            display_name: "Claude Sonnet 5".to_string(),
+            provider: "anthropic".to_string(),
+            tier: ModelTier::Frontier,
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
+            input_cost_per_m: 2.0,
+            output_cost_per_m: 10.0,
+            ..Default::default()
+        };
+        merged.merge_catalog_file(ModelCatalogFile {
+            provider: None,
+            models: vec![builtin],
+        });
+        merged.merge_catalog_file(ModelCatalogFile {
+            provider: result.file.provider.clone(),
+            models: result.file.models.clone(),
+        });
+
+        assert_eq!(
+            merged
+                .find_model("claude-sonnet-5")
+                .map(|m| m.provider.as_str()),
+            Some("anthropic"),
+            "the gateway copy must not shadow the vendor's entry"
+        );
+        // The gateway copy is still reachable when a provider is named.
+        assert_eq!(
+            merged
+                .find_model_for_provider("everyapi", "claude-sonnet-5")
+                .map(|m| m.provider.as_str()),
+            Some("everyapi")
+        );
     }
 
     // ── daemon request body ───────────────────────────────────────────────
