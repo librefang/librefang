@@ -55,10 +55,8 @@ vi.mock("../lib/mutations/providers", () => ({
   useSetDefaultProvider: vi.fn(),
   useCreateRegistryContent: vi.fn(),
   useConnectEveryApi: vi.fn(),
-  // A value export rather than a hook, and the page reads it for the relay-key and gateway
-  // placeholders. The literal has to match `EVERYAPI_PROVIDER` in the real module, which in turn
-  // mirrors the Rust-side constants — a mock drifting from it would make these tests assert
-  // placeholders the shipped UI never renders.
+  // A value export rather than a hook, and the page reads it for the relay-key and gateway placeholders.
+  // The literal has to match `EVERYAPI_PROVIDER` in the real module, which in turn mirrors the Rust-side constants — a mock drifting from it would make these tests assert placeholders the shipped UI never renders.
   EVERYAPI_PROVIDER: {
     id: "everyapi",
     displayName: "EveryAPI",
@@ -210,8 +208,7 @@ describe("ProvidersPage", () => {
     useCreateRegistryContentMock.mockReturnValue(
       stubMutation(vi.fn().mockResolvedValue(undefined)),
     );
-    // The EveryAPI drawer reads more of the mutation surface than `stubMutation` provides: it
-    // calls `reset()` when the drawer closes and renders an inline alert off `isError` / `error`.
+    // The EveryAPI drawer reads more of the mutation surface than `stubMutation` provides: it calls `reset()` when the drawer closes and renders an inline alert off `isError` / `error`.
     useConnectEveryApiMock.mockReturnValue({
       mutateAsync: connectEveryApiMutateAsync,
       isPending: false,
@@ -307,9 +304,8 @@ describe("ProvidersPage", () => {
 
   // ── EveryAPI connect action ───────────────────────────────────────────
   //
-  // EveryAPI is not a built-in provider: until a registry entry exists it is absent from
-  // `GET /api/providers` altogether, not merely unconfigured, so the picker's catalog can never
-  // list it. The footer action is the dashboard's only way in, which is what these cover.
+  // EveryAPI is not a built-in provider: until a registry entry exists it is absent from `GET /api/providers` altogether, not merely unconfigured, so the picker's catalog can never list it.
+  // The footer action is the dashboard's only way in, which is what these cover.
 
   it("offers the EveryAPI connect action while no everyapi entry exists", async () => {
     useProvidersMock.mockReturnValue({
@@ -335,9 +331,8 @@ describe("ProvidersPage", () => {
         {
           id: "everyapi",
           display_name: "EveryAPI",
-          // Deliberately unconfigured: the action must key off the entry *existing*, not off it
-          // being usable. An entry with a missing key is reachable through the normal configure
-          // flow, so re-offering "connect" would write over it.
+          // Deliberately unconfigured: the action must key off the entry *existing*, not off it being usable.
+          // An entry with a missing key is reachable through the normal configure flow, so re-offering "connect" would write over it.
           auth_status: "missing",
           reachable: false,
           key_required: true,
@@ -382,8 +377,7 @@ describe("ProvidersPage", () => {
       within(form).getByRole("button", { name: /providers\.everyapi_connect_action/ }),
     );
 
-    // The key is trimmed, and an omitted gateway URL is passed through as-is so the hook applies
-    // the documented default rather than the page inventing one.
+    // The key is trimmed, and an omitted gateway URL is passed through as-is so the hook applies the documented default rather than the page inventing one.
     expect(connectEveryApiMutateAsync).toHaveBeenCalledTimes(1);
     expect(connectEveryApiMutateAsync).toHaveBeenCalledWith({
       relayKey: "relay-abc",

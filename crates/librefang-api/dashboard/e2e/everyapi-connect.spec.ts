@@ -1,27 +1,18 @@
 // End-to-end coverage for the EveryAPI connect action on the Providers page.
 //
-// The unit tests in `src/pages/ProvidersPage.test.tsx` mock at the mutation-hook layer, so they
-// prove the page calls `useConnectEveryApi` with the right arguments and nothing more. What they
-// cannot see is the part that actually crosses a wire: the request paths, the JSON body shapes,
-// and the order the two writes happen in. They also cannot see render-loop bugs, because a mocked
-// hook returns a reference-stable object while the real `useMutation` returns a fresh one every
-// render.
+// The unit tests in `src/pages/ProvidersPage.test.tsx` mock at the mutation-hook layer, so they prove the page calls `useConnectEveryApi` with the right arguments and nothing more.
+// What they cannot see is the part that actually crosses a wire: the request paths, the JSON body shapes, and the order the two writes happen in.
+// They also cannot see render-loop bugs, because a mocked hook returns a reference-stable object while the real `useMutation` returns a fresh one every render.
 //
-// The write ordering is load-bearing rather than incidental — `POST /api/providers/{id}/key`
-// addresses a provider by id, so a key sent before the registry entry exists has nothing to attach
-// to. And the registry body is a cross-language contract with the CLI: the daemon keys its catalog
-// refresh off the provider id, and `models` is deliberately empty so
-// `catalog_needs_initial_refresh` in `crates/librefang-api/src/everyapi_catalog.rs` becomes true
-// and the daemon backfills the catalog itself.
+// The write ordering is load-bearing rather than incidental — `POST /api/providers/{id}/key` addresses a provider by id, so a key sent before the registry entry exists has nothing to attach to.
+// And the registry body is a cross-language contract with the CLI: the daemon keys its catalog refresh off the provider id, and `models` is deliberately empty so `catalog_needs_initial_refresh` in `crates/librefang-api/src/everyapi_catalog.rs` becomes true and the daemon backfills the catalog itself.
 //
-// No daemon is involved. Playwright serves the dashboard from vite (see playwright.config.ts,
-// port 4173) and every backend call is fulfilled by `page.route`, so this suite never contends
-// with a real LibreFang on 4545. The flip side is that it verifies what the dashboard *sends*,
-// not that the daemon accepts it.
+// No daemon is involved.
+// Playwright serves the dashboard from vite (see playwright.config.ts, port 4173) and every backend call is fulfilled by `page.route`, so this suite never contends with a real LibreFang on 4545.
+// The flip side is that it verifies what the dashboard *sends*, not that the daemon accepts it.
 //
-// `.first()` throughout: the drawer host mounts at both the desktop and mobile breakpoints, so
-// every control inside it resolves to two nodes with only one visible. Without it Playwright's
-// strict mode rejects the locator outright.
+// `.first()` throughout: the drawer host mounts at both the desktop and mobile breakpoints, so every control inside it resolves to two nodes with only one visible.
+// Without it Playwright's strict mode rejects the locator outright.
 
 import { expect, test, type Page } from "@playwright/test";
 
@@ -88,8 +79,7 @@ test("connecting EveryAPI writes the registry entry before the key", async ({ pa
   await stubProviderRoutes(page, writes);
   await openConnectDrawer(page);
 
-  // Leaving the gateway field empty on purpose: the default belongs to the mutation hook, and the
-  // assertion below pins that the page does not substitute one of its own.
+  // Leaving the gateway field empty on purpose: the default belongs to the mutation hook, and the assertion below pins that the page does not substitute one of its own.
   await page.getByPlaceholder("EVERYAPI_API_KEY").first().fill("relay-e2e-key");
   await page.getByRole("button", { name: "Connect", exact: true }).first().click();
 
@@ -104,9 +94,8 @@ test("connecting EveryAPI writes the registry entry before the key", async ({ pa
   expect(registryWrite.method).toBe("POST");
   expect(keyWrite.method).toBe("POST");
 
-  // The registry body is the contract with the daemon. `models: []` is what arms the daemon's
-  // initial catalog refresh, so an accidental change here silently leaves the provider with no
-  // models forever rather than failing loudly.
+  // The registry body is the contract with the daemon.
+  // `models: []` is what arms the daemon's initial catalog refresh, so an accidental change here silently leaves the provider with no models forever rather than failing loudly.
   expect(registryWrite.body).toEqual({
     id: "everyapi",
     display_name: "EveryAPI",
@@ -125,8 +114,7 @@ test("a custom gateway URL replaces the default in the registry write", async ({
   await openConnectDrawer(page);
 
   await page.getByPlaceholder("EVERYAPI_API_KEY").first().fill("relay-e2e-key");
-  // Surrounding whitespace is what a paste out of a browser address bar looks like; the hook
-  // trims it, and the daemon-side base URL must carry no `/v1` suffix.
+  // Surrounding whitespace is what a paste out of a browser address bar looks like; the hook trims it, and the daemon-side base URL must carry no `/v1` suffix.
   await page
     .getByPlaceholder("https://api.everyapi.ai")
     .first()

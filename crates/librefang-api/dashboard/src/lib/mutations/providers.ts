@@ -130,12 +130,8 @@ export function useSetDefaultProvider() {
 /**
  * EveryAPI's provider identity, mirroring the constants the CLI writes.
  *
- * These are a cross-language contract, not dashboard-local choices: `librefang models connect
- * everyapi` writes the same values into `providers/everyapi.toml`, and the daemon keys its
- * catalog refresh off the provider id. Changing any of them here without changing
- * `PROVIDER_ID` / `PROVIDER_DISPLAY_NAME` / `API_KEY_ENV` in
- * `crates/librefang-cli/src/commands/everyapi.rs` would make the dashboard register a provider
- * the daemon never refreshes.
+ * These are a cross-language contract, not dashboard-local choices: `librefang models connect everyapi` writes the same values into `providers/everyapi.toml`, and the daemon keys its catalog refresh off the provider id.
+ * Changing any of them here without changing `PROVIDER_ID` / `PROVIDER_DISPLAY_NAME` / `API_KEY_ENV` in `crates/librefang-cli/src/commands/everyapi.rs` would make the dashboard register a provider the daemon never refreshes.
  */
 export const EVERYAPI_PROVIDER = {
   id: "everyapi",
