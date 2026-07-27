@@ -412,6 +412,36 @@ pub(crate) fn macos_system_plist(
     )
 }
 
+/// Every path an ownership handover has to cover: `root` itself plus everything beneath it.
+///
+/// Symlinks are returned but never descended. `DirEntry::file_type` describes the entry itself rather
+/// than its target, so a link inside the state directory pointing somewhere else cannot redirect the
+/// caller's `lchown` onto an unrelated tree — the same reason the skills bundle scanner uses
+/// `entry.file_type().is_dir()` instead of `path.is_dir()`.
+///
+/// Unreadable directories are skipped rather than aborting the walk: a subtree this process cannot
+/// enumerate is one it also cannot chown, and failing the whole install over it would be worse than
+/// handing over everything reachable.
+#[cfg_attr(not(test), cfg(target_os = "macos"))]
+fn collect_ownership_handover_paths(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = vec![root.to_path_buf()];
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let descend = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            out.push(path.clone());
+            if descend {
+                stack.push(path);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn service_install_macos_system(binary: &std::path::Path) {
     let target = match resolve_system_service_target() {
@@ -456,8 +486,15 @@ pub(crate) fn service_install_macos_system(binary: &std::path::Path) {
             return;
         }
     }
-    for path in [librefang_home.as_path(), log_path.as_path()] {
-        if let Err(e) = std::os::unix::fs::chown(path, Some(target.uid), Some(target.gid)) {
+    // Hand over the whole tree, not just the directory and its log.
+    // `~/.librefang` almost always exists by the time anyone reaches for `--system` — the user has run
+    // `librefang init` or the LaunchAgent first — so `create_dir_all` above was a no-op and chowning
+    // only the directory node would leave its contents on whatever uid created them. That is harmless
+    // when the invoking user created them, and a latent failure when a `sudo librefang start` did: the
+    // LaunchDaemon runs as `UserName` and hits EACCES at some arbitrary depth long after
+    // `service status` has reported everything registered.
+    for path in collect_ownership_handover_paths(&librefang_home) {
+        if let Err(e) = std::os::unix::fs::lchown(&path, Some(target.uid), Some(target.gid)) {
             ui::error(&i18n::t_args(
                 "maintenance-service-system-chown-failed",
                 &[
@@ -1914,6 +1951,53 @@ mod tests {
             plist.contains("<string>/opt/librefang/daemon.log</string>"),
             "{plist}"
         );
+    }
+
+    #[test]
+    fn ownership_handover_covers_nested_contents_without_following_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        // A state dir shaped like a real one: nested directories plus files at depth.
+        std::fs::create_dir_all(root.path().join("workspaces/agents/assistant")).unwrap();
+        std::fs::write(root.path().join("config.toml"), b"").unwrap();
+        std::fs::write(
+            root.path().join("workspaces/agents/assistant/agent.toml"),
+            b"",
+        )
+        .unwrap();
+
+        // A file the walk must not reach by following a link out of the tree.
+        std::fs::write(outside.path().join("unrelated.txt"), b"").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
+
+        let paths = collect_ownership_handover_paths(root.path());
+
+        // The root itself has to be in the set — chowning only the contents would leave the directory
+        // node on the installing uid.
+        assert!(paths.contains(&root.path().to_path_buf()), "{paths:?}");
+        assert!(
+            paths.contains(&root.path().join("config.toml")),
+            "top-level files must be covered: {paths:?}"
+        );
+        assert!(
+            paths.contains(&root.path().join("workspaces/agents/assistant/agent.toml")),
+            "nested files must be covered — this is the case chowning only the root misses: {paths:?}"
+        );
+
+        // The link itself is handed over; what it points at is not.
+        #[cfg(unix)]
+        {
+            assert!(
+                paths.contains(&root.path().join("escape")),
+                "the symlink entry itself should be chowned: {paths:?}"
+            );
+            assert!(
+                !paths.contains(&outside.path().join("unrelated.txt")),
+                "the walk must not descend through a symlink out of the tree: {paths:?}"
+            );
+        }
     }
 
     #[test]
