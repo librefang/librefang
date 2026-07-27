@@ -2127,3 +2127,208 @@ async fn delete_provider_key_rejects_dotted_name() {
         "dotted provider name must be rejected on DELETE; body: {body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// EveryAPI live-catalog refresh (`everyapi_catalog.rs`)
+//
+// `librefang models connect everyapi` registers a one-shot snapshot of the
+// gateway's models. These tests drive the TTL refresh end-to-end against a
+// local mock gateway: `GET {base_url}/models` for the authoritative id list
+// and the public `GET {origin}/api/pricing` for context window + billing
+// ratios, proving that the `/v1`-stripped pricing origin is derived correctly
+// and that metadata the gateway publishes nowhere survives the merge.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn everyapi_refresh_merges_both_gateway_endpoints() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let base_url = format!("{}/v1", server.uri());
+    // The retry window is keyed by the provider `base_url` (the `/v1` form),
+    // not the bare server origin — sequential tests reuse ephemeral ports.
+    librefang_api::everyapi_catalog::clear_refresh_attempts(&base_url);
+
+    // Distinct env var per test: `std::env::set_var` is process-global and
+    // nextest runs test threads concurrently.
+    let key_env = "LIBREFANG_TEST_EVERYAPI_RELAY_KEY_MERGE";
+    std::env::set_var(key_env, "relay-secret-must-not-leak");
+
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"id": "claude-sonnet-5", "owned_by": "anthropic", "supported_endpoint_types": ["openai", "anthropic"]},
+                {"id": "tts-1", "owned_by": "openai", "supported_endpoint_types": ["audio-speech"]},
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/pricing"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "success": true,
+            "data": [
+                {"model_name": "claude-sonnet-5", "quota_type": 0, "model_ratio": 1.0, "completion_ratio": 5.0, "context_window": 200000, "billing_mode": "per_token"},
+                {"model_name": "tts-1", "quota_type": 0, "model_ratio": 7.5, "completion_ratio": 0.0, "context_window": 0, "billing_mode": "per_token"},
+                // Published by the pricing feed but absent from `/v1/models`;
+                // must never be registered.
+                {"model_name": "claude-fable-5", "quota_type": 0, "model_ratio": 5.0, "completion_ratio": 5.0, "context_window": 200000, "billing_mode": "per_token"},
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let h = boot_with_provider(ProviderInfo {
+        id: "everyapi".to_string(),
+        display_name: "EveryAPI".to_string(),
+        api_key_env: key_env.to_string(),
+        base_url: base_url.clone(),
+        key_required: true,
+        auth_status: AuthStatus::Configured,
+        ..ProviderInfo::default()
+    });
+
+    // Stand in for what `models connect everyapi` wrote: `max_output_tokens`
+    // and the capability flags appear on neither gateway endpoint, so they
+    // exist only here. `clear_provider_available_models` then rewinds the
+    // freshness stamp so the handler sees a stale catalog.
+    let registered = ModelCatalogEntry {
+        id: "claude-sonnet-5".to_string(),
+        display_name: "claude-sonnet-5".to_string(),
+        provider: "everyapi".to_string(),
+        tier: ModelTier::Balanced,
+        modality: Modality::Text,
+        context_window: 200_000,
+        max_output_tokens: 64_000,
+        input_cost_per_m: 2.0,
+        output_cost_per_m: 10.0,
+        pricing_known: true,
+        supports_tools: true,
+        supports_vision: true,
+        supports_streaming: true,
+        supports_thinking: true,
+        ..ModelCatalogEntry::default()
+    };
+    let delisted = ModelCatalogEntry {
+        id: "gemini-3-flash".to_string(),
+        display_name: "gemini-3-flash".to_string(),
+        provider: "everyapi".to_string(),
+        tier: ModelTier::Balanced,
+        modality: Modality::Text,
+        context_window: 1_000_000,
+        max_output_tokens: 8_192,
+        supports_streaming: true,
+        ..ModelCatalogEntry::default()
+    };
+    h._state.kernel.model_catalog_update(&mut |catalog| {
+        catalog.reconcile_live_provider_models(
+            "everyapi",
+            vec!["claude-sonnet-5".to_string(), "gemini-3-flash".to_string()],
+            vec![registered.clone(), delisted.clone()],
+        );
+        catalog.clear_provider_available_models("everyapi");
+    });
+
+    let (status, body) = json_request(&h, Method::GET, "/api/providers/everyapi", None).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let models = body["models"].as_array().expect("models array");
+    let by_id = |id: &str| models.iter().find(|m| m["id"].as_str() == Some(id));
+
+    let sonnet = by_id("claude-sonnet-5").unwrap_or_else(|| panic!("sonnet missing: {body}"));
+    // Pricing feed ratios: model_ratio 1 x $2 in, x completion_ratio 5 out.
+    assert_eq!(sonnet["input_cost_per_m"], 2.0);
+    assert_eq!(sonnet["output_cost_per_m"], 10.0);
+    assert_eq!(sonnet["pricing_known"], true);
+    assert_eq!(sonnet["context_window"], 200_000);
+    // Published by neither endpoint — proof the merge carries it forward
+    // instead of letting `reconcile_live_provider_models` delete it.
+    assert_eq!(sonnet["max_output_tokens"], 64_000);
+    assert_eq!(sonnet["supports_tools"], true);
+
+    // Newly listed by the gateway, non-Text so it needs no token metadata.
+    let tts = by_id("tts-1").unwrap_or_else(|| panic!("tts-1 missing: {body}"));
+    assert_eq!(tts["modality"], "audio");
+    assert_eq!(tts["input_cost_per_m"], 15.0);
+
+    assert!(
+        by_id("gemini-3-flash").is_none(),
+        "a model the gateway delisted must disappear: {body}"
+    );
+    assert!(
+        by_id("claude-fable-5").is_none(),
+        "the pricing feed must never introduce a model id: {body}"
+    );
+
+    // Relay key reached the Authorization header only.
+    assert!(
+        !body.to_string().contains("relay-secret-must-not-leak"),
+        "the relay key must never appear in a response payload"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn everyapi_refresh_keeps_the_registered_catalog_when_the_gateway_is_down() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let base_url = format!("{}/v1", server.uri());
+    librefang_api::everyapi_catalog::clear_refresh_attempts(&base_url);
+
+    let key_env = "LIBREFANG_TEST_EVERYAPI_RELAY_KEY_DOWN";
+    std::env::set_var(key_env, "relay-secret-must-not-leak");
+
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let h = boot_with_provider(ProviderInfo {
+        id: "everyapi".to_string(),
+        display_name: "EveryAPI".to_string(),
+        api_key_env: key_env.to_string(),
+        base_url: base_url.clone(),
+        key_required: true,
+        auth_status: AuthStatus::Configured,
+        ..ProviderInfo::default()
+    });
+    let registered = ModelCatalogEntry {
+        id: "claude-sonnet-5".to_string(),
+        display_name: "claude-sonnet-5".to_string(),
+        provider: "everyapi".to_string(),
+        tier: ModelTier::Balanced,
+        modality: Modality::Text,
+        context_window: 200_000,
+        max_output_tokens: 64_000,
+        input_cost_per_m: 2.0,
+        output_cost_per_m: 10.0,
+        pricing_known: true,
+        supports_streaming: true,
+        ..ModelCatalogEntry::default()
+    };
+    h._state.kernel.model_catalog_update(&mut |catalog| {
+        catalog.reconcile_live_provider_models(
+            "everyapi",
+            vec!["claude-sonnet-5".to_string()],
+            vec![registered.clone()],
+        );
+        catalog.clear_provider_available_models("everyapi");
+    });
+
+    // A failed refresh is warn-logged, never fatal to the request.
+    let (status, body) = json_request(&h, Method::GET, "/api/providers/everyapi", None).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let models = body["models"].as_array().expect("models array");
+    let sonnet = models
+        .iter()
+        .find(|m| m["id"].as_str() == Some("claude-sonnet-5"))
+        .unwrap_or_else(|| panic!("registered catalog must survive: {body}"));
+    assert_eq!(sonnet["max_output_tokens"], 64_000);
+}

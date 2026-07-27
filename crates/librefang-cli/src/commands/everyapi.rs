@@ -8,10 +8,14 @@
 //!
 //! 1. read `api_base` + `relay_key` from the credentials file;
 //! 2. ask the gateway for its live `/v1/models` list;
-//! 3. synthesise a `providers/everyapi.toml` catalog file, enriching text
-//!    models with context/pricing metadata from the compiled-in OpenRouter
-//!    snapshot;
-//! 4. persist the relay key to `~/.librefang/.env` as `EVERYAPI_API_KEY`.
+//! 3. ask the gateway for its own `/api/pricing` feed — the gateway's book,
+//!    not an upstream vendor's — and convert its billing ratios into
+//!    per-million-token USD figures;
+//! 4. synthesise a `providers/everyapi.toml` catalog file; where the gateway
+//!    publishes no context/output token limit at all, borrow *only those two
+//!    numbers* from the compiled-in OpenRouter snapshot and say so in the
+//!    report;
+//! 5. persist the relay key to `~/.librefang/.env` as `EVERYAPI_API_KEY`.
 //!
 //! No `librefang-llm-drivers` change is needed: `create_driver()` already
 //! falls back to the OpenAI-compatible driver for any provider that carries a
@@ -41,8 +45,23 @@ const PROVIDER_DISPLAY_NAME: &str = "EveryAPI";
 /// already produces exactly this value for the id `everyapi`.
 const API_KEY_ENV: &str = "EVERYAPI_API_KEY";
 /// How long to wait for the gateway's model list before giving up and
-/// writing the provider entry with no `[[models]]`.
+/// writing the provider entry with no `[[models]]`. The same budget applies
+/// to the pricing feed, which is fetched from the same host.
 const MODELS_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+/// Ratio → USD conversion factor for the gateway's billing ratios.
+///
+/// EveryAPI's backend meters in "quota" units with `QuotaPerUnit = 500_000`
+/// quota per USD, and charges `tokens * model_ratio` quota — so a ratio of 1
+/// is `1_000_000 / 500_000` = $2.00 per million input tokens. The gateway's
+/// own docs state the same rule ("upstream price per 1M = model_ratio x $2"),
+/// so the two independent sources agree.
+///
+/// The daemon-side TTL refresh in `librefang-api/src/everyapi_catalog.rs`
+/// carries an identical constant and conversion, because the two crates do not
+/// depend on each other in a direction that would let one reuse the other.
+/// Both sides assert the same `claude-sonnet-5` => 2.00 / 10.00 value, so
+/// editing this rule on one side alone fails the other side's tests.
+const RATIO_USD_PER_MILLION: f64 = 2.0;
 
 // ---------------------------------------------------------------------------
 // Credentials
@@ -123,15 +142,27 @@ pub(crate) fn derive_base_url(api_base: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GatewayModel {
     pub(crate) id: String,
-    /// Vendor label — the snapshot lookup's namespace (`anthropic`,
-    /// `openai`, `google`, `minimax`, …). Empty when the gateway omits it.
+    /// Vendor label — the token-limit snapshot lookup's namespace
+    /// (`anthropic`, `openai`, `google`, `minimax`, …). Empty when the
+    /// gateway omits it.
     pub(crate) owned_by: String,
     /// `supported_endpoint_types`, verbatim. Drives modality inference and
     /// the streaming-only warning.
     pub(crate) supported_endpoint_types: Vec<String>,
-    /// `context_window` when the gateway published one. Authoritative over
-    /// the snapshot: the gateway knows what *it* will accept.
+    /// `context_window` when the gateway published one on this endpoint.
+    /// The most specific statement available: this is the model's own row in
+    /// the gateway's model listing, so it outranks both the pricing feed's
+    /// figure and the snapshot's.
     pub(crate) context_window: Option<u64>,
+    /// `max_output` when the gateway published one.
+    ///
+    /// The gateway's `dto.OpenAIModels` struct carries a `max_output` field
+    /// (json tag `max_output,omitempty`), but no observed account populates
+    /// it — every live row omits it. Read anyway: the field is part of the
+    /// gateway's published contract, and honouring it the day it starts
+    /// arriving costs one line, whereas the alternative is silently
+    /// preferring the snapshot's number over the gateway's own.
+    pub(crate) max_output_tokens: Option<u64>,
 }
 
 /// Extract the model array from a `/v1/models` body.
@@ -172,7 +203,119 @@ pub(crate) fn parse_gateway_models(body: &serde_json::Value) -> Vec<GatewayModel
                     .get("context_window")
                     .and_then(serde_json::Value::as_u64)
                     .filter(|v| *v > 0),
+                max_output_tokens: item
+                    .get("max_output")
+                    .and_then(serde_json::Value::as_u64)
+                    .filter(|v| *v > 0),
             })
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Gateway pricing feed
+// ---------------------------------------------------------------------------
+
+/// One row of the gateway's `GET /api/pricing` feed.
+///
+/// This is the gateway's *own* billing book — what EveryAPI will actually
+/// charge — as opposed to the upstream vendor's list price. It is served
+/// under optional auth, so it reads with or without the relay key.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PricingRow {
+    /// `model_name`, matching `/v1/models`' `id` verbatim.
+    pub(crate) model_name: String,
+    /// `false` for `quota_type == 1` / `billing_mode == "per_call"`, where
+    /// the charge is a flat `model_price` per request and no per-token
+    /// figure exists at all.
+    pub(crate) per_token: bool,
+    /// Input-side billing multiplier. Meaningless when `per_token` is false.
+    pub(crate) model_ratio: f64,
+    /// Output-side multiplier applied on top of `model_ratio`.
+    pub(crate) completion_ratio: f64,
+    /// `context_window` when the feed published a non-zero one. Zero in the
+    /// feed means "unknown", not "no context".
+    pub(crate) context_window: Option<u64>,
+}
+
+impl PricingRow {
+    /// Input price per million tokens, in USD.
+    ///
+    /// The gateway additionally scales every charge by the account's
+    /// `group_ratio` (observed values 0.25 / 0.35 / 0.55, i.e. all below 1),
+    /// which is a per-account discount rather than a property of the model.
+    /// It is deliberately NOT applied: the discount can change under the
+    /// operator without the catalog being regenerated, and the undiscounted
+    /// figure is an upper bound — over-reporting cost is the safe direction
+    /// for budget and metering math.
+    pub(crate) fn input_cost_per_m(&self) -> f64 {
+        if !self.per_token {
+            return 0.0;
+        }
+        self.model_ratio * RATIO_USD_PER_MILLION
+    }
+
+    /// Output price per million tokens, in USD.
+    pub(crate) fn output_cost_per_m(&self) -> f64 {
+        if !self.per_token {
+            return 0.0;
+        }
+        self.model_ratio * self.completion_ratio * RATIO_USD_PER_MILLION
+    }
+}
+
+/// Index the `GET /api/pricing` body by `model_name`.
+///
+/// A `BTreeMap` rather than a `HashMap` so any future iteration over the
+/// index is ordered (repo invariant #3298); lookups here are by exact key,
+/// but the type keeps the determinism guarantee from depending on nobody
+/// adding an iteration later.
+///
+/// Rows without a usable `model_name` are dropped rather than failing the
+/// whole feed — the same posture `parse_gateway_models` takes.
+pub(crate) fn parse_pricing_rows(
+    body: &serde_json::Value,
+) -> std::collections::BTreeMap<String, PricingRow> {
+    let Some(items) = body.get("data").and_then(|d| d.as_array()) else {
+        return std::collections::BTreeMap::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let model_name = item
+                .get("model_name")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())?;
+            // `quota_type` is the authoritative discriminator (the billing
+            // implementation branches on it); `billing_mode` is the
+            // human-readable mirror of the same fact. Treat either signal as
+            // per-call so a feed that ships only one of them still bills
+            // correctly.
+            let per_call = item
+                .get("quota_type")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|q| q != 0)
+                || item.get("billing_mode").and_then(|v| v.as_str()) == Some("per_call");
+            Some((
+                model_name.to_string(),
+                PricingRow {
+                    model_name: model_name.to_string(),
+                    per_token: !per_call,
+                    model_ratio: item
+                        .get("model_ratio")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0),
+                    completion_ratio: item
+                        .get("completion_ratio")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0),
+                    context_window: item
+                        .get("context_window")
+                        .and_then(serde_json::Value::as_u64)
+                        .filter(|v| *v > 0),
+                },
+            ))
         })
         .collect()
 }
@@ -219,7 +362,7 @@ pub(crate) fn is_openai_response_only(supported_endpoint_types: &[String]) -> bo
 // Metadata resolution
 // ---------------------------------------------------------------------------
 
-/// Context / pricing metadata resolved for one text model.
+/// Context / pricing metadata resolved for one model.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ModelMetadata {
     pub(crate) context_window: u64,
@@ -230,6 +373,11 @@ pub(crate) struct ModelMetadata {
     pub(crate) supports_tools: bool,
     pub(crate) supports_vision: bool,
     pub(crate) supports_thinking: bool,
+    /// True when either token limit had to come from the OpenRouter
+    /// snapshot because neither gateway endpoint published one. Surfaced in
+    /// the command's report so the operator knows which numbers are the
+    /// gateway's own and which are borrowed.
+    pub(crate) token_limits_borrowed: bool,
 }
 
 /// Rewrite a `-`-separated version tail into the `.`-separated spelling.
@@ -263,6 +411,10 @@ pub(crate) fn normalize_version_separators(id: &str) -> String {
 /// the gateway's `MiniMax-M3` vs the snapshot's `minimax/minimax-m3`; the
 /// only remaining mismatch is the version-tail separator, handled by
 /// [`normalize_version_separators`].
+///
+/// Used **only** for the token-limit fallback described on
+/// [`resolve_metadata`] — never for pricing, which now comes from the
+/// gateway's own feed.
 pub(crate) fn snapshot_lookup_ids(owned_by: &str, model_id: &str) -> Vec<String> {
     if owned_by.is_empty() {
         return Vec::new();
@@ -275,32 +427,79 @@ pub(crate) fn snapshot_lookup_ids(owned_by: &str, model_id: &str) -> Vec<String>
     ids
 }
 
-/// Look one gateway model up in the compiled-in OpenRouter snapshot.
+/// Resolve one model's context / pricing metadata.
+///
+/// Source precedence, per field:
+///
+/// - **Pricing** — the gateway's `/api/pricing` row, converted by
+///   [`PricingRow::input_cost_per_m`] / [`PricingRow::output_cost_per_m`].
+///   The OpenRouter snapshot is *never* consulted for pricing: it carries
+///   the upstream vendor's list price, which is a different number from
+///   what this gateway bills and drifts independently of it. No pricing
+///   row, or a per-call row with no per-token price at all, means
+///   `pricing_known = false` with 0.0/0.0 — never a fabricated figure,
+///   because `pricing_known` deserializes to `true` by default and a bare
+///   0.0 would assert the model is genuinely free.
+/// - **`context_window`** — `/v1/models` (the model's own row) beats
+///   `/api/pricing` beats the snapshot. The gateway is authoritative about
+///   its own deployment; the snapshot describes OpenRouter's copy.
+/// - **`max_output_tokens`** — `/v1/models`' `max_output` when populated,
+///   else the snapshot.
+///
+/// The snapshot fallback for the two token limits is deliberate and is the
+/// only thing keeping most text models registrable. Neither gateway
+/// endpoint publishes an output limit for any observed model, and
+/// `/api/pricing` publishes a context window only for the claude family —
+/// so with no fallback, `ModelCatalogEntry::validate()` would reject every
+/// non-claude text model (`max_output_tokens == 0`) and the command would
+/// register 0 text models instead of 8. The alternative candidates were
+/// both worse: skipping is a silent feature regression, and deriving a
+/// fraction of `context_window` would invent a number that feeds straight
+/// into compaction thresholds. Borrowing a real published figure and
+/// naming the affected models in the report keeps the provenance visible.
+///
+/// Capability flags (`supports_tools` / `supports_vision` /
+/// `supports_thinking`) also come from the snapshot: the gateway publishes
+/// none of them. `input_modalities` appears on some `/v1/models` rows but
+/// never disagreed with the snapshot's vision flag on any observed model,
+/// so it is not read.
 ///
 /// The snapshot is `include_str!`-ed into `librefang-runtime` and merged by
 /// every `ModelCatalog` construction, so an empty-directory catalog is a
 /// sufficient (and hermetic) handle on it.
-///
-/// `gateway_context_window` wins over the snapshot's when present: the
-/// snapshot describes what OpenRouter's copy of the model accepts, whereas
-/// the gateway is authoritative about its own deployment.
 pub(crate) fn resolve_metadata(
     catalog: &librefang_runtime::model_catalog::ModelCatalog,
     model: &GatewayModel,
-) -> Option<ModelMetadata> {
-    let entry = snapshot_lookup_ids(&model.owned_by, &model.id)
+    pricing: Option<&PricingRow>,
+) -> ModelMetadata {
+    let snapshot = snapshot_lookup_ids(&model.owned_by, &model.id)
         .into_iter()
-        .find_map(|id| catalog.find_model(&id))?;
-    Some(ModelMetadata {
-        context_window: model.context_window.unwrap_or(entry.context_window),
-        max_output_tokens: entry.max_output_tokens,
-        input_cost_per_m: entry.input_cost_per_m,
-        output_cost_per_m: entry.output_cost_per_m,
-        pricing_known: entry.pricing_known,
-        supports_tools: entry.supports_tools,
-        supports_vision: entry.supports_vision,
-        supports_thinking: entry.supports_thinking,
-    })
+        .find_map(|id| catalog.find_model(&id));
+
+    let context_window = model
+        .context_window
+        .or_else(|| pricing.and_then(|p| p.context_window))
+        .or_else(|| snapshot.map(|s| s.context_window).filter(|v| *v > 0));
+    let max_output_tokens = model
+        .max_output_tokens
+        .or_else(|| snapshot.map(|s| s.max_output_tokens).filter(|v| *v > 0));
+
+    let borrowed_context = context_window.is_some()
+        && model.context_window.is_none()
+        && pricing.and_then(|p| p.context_window).is_none();
+    let borrowed_max_output = max_output_tokens.is_some() && model.max_output_tokens.is_none();
+
+    ModelMetadata {
+        context_window: context_window.unwrap_or(0),
+        max_output_tokens: max_output_tokens.unwrap_or(0),
+        input_cost_per_m: pricing.map(PricingRow::input_cost_per_m).unwrap_or(0.0),
+        output_cost_per_m: pricing.map(PricingRow::output_cost_per_m).unwrap_or(0.0),
+        pricing_known: pricing.is_some_and(|p| p.per_token),
+        supports_tools: snapshot.is_some_and(|s| s.supports_tools),
+        supports_vision: snapshot.is_some_and(|s| s.supports_vision),
+        supports_thinking: snapshot.is_some_and(|s| s.supports_thinking),
+        token_limits_borrowed: borrowed_context || borrowed_max_output,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -324,6 +523,15 @@ pub(crate) struct SynthesisResult {
     pub(crate) skipped: Vec<SkippedModel>,
     /// Registered ids that reject non-streaming requests.
     pub(crate) streaming_only: Vec<String>,
+    /// Registered ids whose context window and/or output limit had to be
+    /// borrowed from the OpenRouter snapshot because the gateway published
+    /// neither. Reported so a borrowed number is never mistaken for the
+    /// gateway's own.
+    pub(crate) borrowed_token_limits: Vec<String>,
+    /// Registered ids carrying no per-token price: absent from the pricing
+    /// feed, or billed per call. Their `pricing_known` is false, so budget
+    /// math treats them as unknown rather than free.
+    pub(crate) unpriced: Vec<String>,
 }
 
 /// Build the `providers/everyapi.toml` contents.
@@ -331,15 +539,13 @@ pub(crate) struct SynthesisResult {
 /// The skip rule is the load-bearing part. `ModelCatalogEntry::validate()`
 /// rejects a `Modality::Text` entry whose `context_window` OR
 /// `max_output_tokens` is 0, and `merge_catalog_file` then drops it with only
-/// a `warn!`. The gateway publishes no max-output field at all, so a text
-/// model's `max_output_tokens` is resolvable ONLY from a snapshot hit —
-/// meaning a text model with no snapshot hit cannot produce a loadable entry
-/// even when the gateway supplied its own `context_window`. Emitting it
-/// anyway would make the feature look successful while the model silently
-/// vanished at the next daemon boot, so such models are skipped and reported
-/// by name instead. Inventing a plausible-looking fallback would be worse:
-/// a wrong context window feeds straight into compaction thresholds and
-/// budget math.
+/// a `warn!`. Emitting such an entry anyway would make the command look
+/// successful while the model silently vanished at the next daemon boot, so
+/// a text model whose limits cannot be resolved from any source — gateway
+/// listing, pricing feed, or the snapshot fallback described on
+/// [`resolve_metadata`] — is skipped and reported by name instead.
+/// Inventing a plausible-looking number would be worse: a wrong context
+/// window feeds straight into compaction thresholds and budget math.
 ///
 /// Non-text models are exempt from `validate()`'s token checks and are
 /// registered with whatever the gateway published.
@@ -350,41 +556,50 @@ pub(crate) fn synthesize_catalog(
     catalog: &librefang_runtime::model_catalog::ModelCatalog,
     base_url: &str,
     models: &[GatewayModel],
+    pricing: &std::collections::BTreeMap<String, PricingRow>,
 ) -> SynthesisResult {
     let mut entries: Vec<ModelCatalogEntry> = Vec::new();
     let mut skipped: Vec<SkippedModel> = Vec::new();
     let mut streaming_only: Vec<String> = Vec::new();
+    let mut borrowed_token_limits: Vec<String> = Vec::new();
+    let mut unpriced: Vec<String> = Vec::new();
 
     for model in models {
         let modality = infer_modality(&model.supported_endpoint_types);
-        let metadata = resolve_metadata(catalog, model);
+        let metadata = resolve_metadata(catalog, model, pricing.get(&model.id));
 
-        if modality == Modality::Text && metadata.is_none() {
-            skipped.push(SkippedModel {
-                id: model.id.clone(),
-                reason_key: "everyapi-connect-skip-no-metadata",
-            });
-            continue;
+        // `validate()` rejects a text entry missing EITHER limit, so the
+        // reason must name which one is actually missing. A model whose
+        // context window resolved from the pricing feed but whose output
+        // limit did not is a real case (any claude-family model the
+        // snapshot has not caught up with), and telling that operator "no
+        // context window is known" would send them looking for the wrong
+        // thing.
+        if modality == Modality::Text {
+            let reason_key = match (metadata.context_window, metadata.max_output_tokens) {
+                (0, 0) => Some("everyapi-connect-skip-no-metadata"),
+                (0, _) => Some("everyapi-connect-skip-no-context-window"),
+                (_, 0) => Some("everyapi-connect-skip-no-output-limit"),
+                _ => None,
+            };
+            if let Some(reason_key) = reason_key {
+                skipped.push(SkippedModel {
+                    id: model.id.clone(),
+                    reason_key,
+                });
+                continue;
+            }
         }
 
         if is_openai_response_only(&model.supported_endpoint_types) {
             streaming_only.push(model.id.clone());
         }
-
-        let metadata = metadata.unwrap_or(ModelMetadata {
-            context_window: 0,
-            max_output_tokens: 0,
-            input_cost_per_m: 0.0,
-            output_cost_per_m: 0.0,
-            // No snapshot hit means no pricing was resolved. `pricing_known`
-            // defaults to `true` on deserialize, so leaving it unset here
-            // would assert that 0.0/0.0 is the model's *real* price and
-            // poison every budget and metering figure derived from it.
-            pricing_known: false,
-            supports_tools: false,
-            supports_vision: false,
-            supports_thinking: false,
-        });
+        if metadata.token_limits_borrowed {
+            borrowed_token_limits.push(model.id.clone());
+        }
+        if !metadata.pricing_known {
+            unpriced.push(model.id.clone());
+        }
 
         entries.push(ModelCatalogEntry {
             id: model.id.clone(),
@@ -405,6 +620,11 @@ pub(crate) fn synthesize_catalog(
             modality,
             context_window: metadata.context_window,
             max_output_tokens: metadata.max_output_tokens,
+            // Always emitted, never omitted: neither cost field carries
+            // `#[serde(default)]`, so a missing one fails the whole file's
+            // parse. `pricing_known` is the flag that distinguishes "free"
+            // from "unknown" — it defaults to `true` on deserialize, so an
+            // unpriced model must carry an explicit `false`.
             input_cost_per_m: metadata.input_cost_per_m,
             output_cost_per_m: metadata.output_cost_per_m,
             pricing_known: metadata.pricing_known,
@@ -421,6 +641,8 @@ pub(crate) fn synthesize_catalog(
     entries.sort_by(|a, b| a.id.cmp(&b.id));
     skipped.sort_by(|a, b| a.id.cmp(&b.id));
     streaming_only.sort();
+    borrowed_token_limits.sort();
+    unpriced.sort();
 
     SynthesisResult {
         file: ModelCatalogFile {
@@ -438,6 +660,8 @@ pub(crate) fn synthesize_catalog(
         },
         skipped,
         streaming_only,
+        borrowed_token_limits,
+        unpriced,
     }
 }
 
@@ -496,6 +720,44 @@ fn fetch_gateway_models(base_url: &str, key: &str) -> Option<Vec<GatewayModel>> 
     }
     let body = response.json::<serde_json::Value>().ok()?;
     Some(parse_gateway_models(&body))
+}
+
+/// Fetch `GET {api_base}/api/pricing` — the gateway's own billing book.
+///
+/// Note the base: this endpoint sits at the gateway *root*, not under the
+/// OpenAI-compatible `/v1` prefix, so it is built from `api_base` rather
+/// than the derived `base_url`.
+///
+/// The bearer is sent even though the route is registered with optional auth
+/// and answers anonymously. One code path for both gateway fetches is worth
+/// more than saving a header, and an authenticated read is the shape that
+/// keeps working if EveryAPI ever tightens the route or starts varying rows
+/// per account.
+///
+/// Returns `None` on any transport error or non-2xx status. A missing
+/// pricing feed is not fatal: models still register, they just carry
+/// `pricing_known = false` instead of a fabricated price.
+fn fetch_pricing_rows(
+    api_base: &str,
+    key: &str,
+) -> Option<std::collections::BTreeMap<String, PricingRow>> {
+    let client = crate::http_client::client_builder()
+        .timeout(MODELS_FETCH_TIMEOUT)
+        .build()
+        .ok()?;
+    let response = client
+        .get(format!(
+            "{}/api/pricing",
+            api_base.trim().trim_end_matches('/')
+        ))
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {key}"))
+        .send()
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body = response.json::<serde_json::Value>().ok()?;
+    Some(parse_pricing_rows(&body))
 }
 
 /// Read + parse the credentials file, or exit(1) with a rendered message.
@@ -595,8 +857,19 @@ pub(crate) fn cmd_models_connect(target: &str, set_default: bool) {
         }
     };
 
+    let pricing = match fetch_pricing_rows(&credentials.api_base, &credentials.relay_key) {
+        Some(rows) => rows,
+        None => {
+            ui::warn_with_fix(
+                &i18n::t("everyapi-connect-pricing-fetch-failed"),
+                &i18n::t("everyapi-connect-pricing-fetch-failed-fix"),
+            );
+            std::collections::BTreeMap::new()
+        }
+    };
+
     let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
-    let synthesis = synthesize_catalog(&catalog, &base_url, models);
+    let synthesis = synthesize_catalog(&catalog, &base_url, models, &pricing);
     let toml_body = match toml::to_string_pretty(&synthesis.file) {
         Ok(body) => body,
         Err(e) => {
@@ -719,6 +992,25 @@ fn report_models(synthesis: &SynthesisResult) {
         }
     }
 
+    // Provenance, not decoration: a borrowed context window drives
+    // compaction thresholds and an unknown price silences budget accounting,
+    // so both sets are named rather than merely counted.
+    if !synthesis.borrowed_token_limits.is_empty() {
+        ui::blank();
+        ui::check_warn(&i18n::t_args(
+            "everyapi-connect-token-limits-borrowed",
+            &[("models", &synthesis.borrowed_token_limits.join(", "))],
+        ));
+    }
+
+    if !synthesis.unpriced.is_empty() {
+        ui::blank();
+        ui::check_warn(&i18n::t_args(
+            "everyapi-connect-models-unpriced",
+            &[("models", &synthesis.unpriced.join(", "))],
+        ));
+    }
+
     if !synthesis.streaming_only.is_empty() {
         ui::blank();
         ui::check_warn(&i18n::t_args(
@@ -786,8 +1078,8 @@ mod tests {
     use super::{
         choose_default_model, derive_base_url, infer_modality, is_openai_response_only,
         model_request_value, normalize_version_separators, parse_credentials, parse_gateway_models,
-        provider_request_body, resolve_metadata, snapshot_lookup_ids, synthesize_catalog,
-        GatewayModel,
+        parse_pricing_rows, provider_request_body, resolve_metadata, snapshot_lookup_ids,
+        synthesize_catalog, GatewayModel, PricingRow,
     };
     use crate::cli::{Cli, Commands, ModelsCommands};
     use clap::Parser;
@@ -796,6 +1088,7 @@ mod tests {
         Modality, ModelCatalogEntry, ModelCatalogFile, ModelTier,
     };
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     /// A catalog built over an empty directory. The OpenRouter snapshot is
     /// `include_str!`-ed into `librefang-runtime` and merged unconditionally
@@ -812,7 +1105,66 @@ mod tests {
             owned_by: owned_by.to_string(),
             supported_endpoint_types: endpoints.iter().map(|s| s.to_string()).collect(),
             context_window: None,
+            max_output_tokens: None,
         }
+    }
+
+    /// A per-token pricing row, the common case.
+    fn priced(model_name: &str, model_ratio: f64, completion_ratio: f64) -> PricingRow {
+        PricingRow {
+            model_name: model_name.to_string(),
+            per_token: true,
+            model_ratio,
+            completion_ratio,
+            context_window: None,
+        }
+    }
+
+    fn pricing_index(rows: Vec<PricingRow>) -> BTreeMap<String, PricingRow> {
+        rows.into_iter()
+            .map(|row| (row.model_name.clone(), row))
+            .collect()
+    }
+
+    /// The real 19-row `/api/pricing` listing, live-captured. Note it carries
+    /// `claude-fable-5`, which the model listing does not — the two feeds
+    /// genuinely differ in both directions.
+    fn live_pricing_rows() -> BTreeMap<String, PricingRow> {
+        let per_call = |model_name: &str| PricingRow {
+            model_name: model_name.to_string(),
+            per_token: false,
+            model_ratio: 0.0,
+            completion_ratio: 0.0,
+            context_window: None,
+        };
+        let claude = |model_name: &str, ratio: f64| PricingRow {
+            model_name: model_name.to_string(),
+            per_token: true,
+            model_ratio: ratio,
+            completion_ratio: 5.0,
+            context_window: Some(200_000),
+        };
+        pricing_index(vec![
+            priced("MiniMax-M3", 0.15, 4.0),
+            claude("claude-fable-5", 5.0),
+            claude("claude-haiku-4-5", 0.5),
+            claude("claude-opus-5", 2.5),
+            claude("claude-sonnet-5", 1.0),
+            per_call("doubao-seedance-1-0-pro-250528"),
+            per_call("doubao-seedance-1-0-pro-fast-251015"),
+            per_call("doubao-seedance-2-0-260128"),
+            per_call("doubao-seedance-2-0-fast-260128"),
+            per_call("doubao-seedance-2-0-mini-260615"),
+            per_call("doubao-seedream-4-0-250828"),
+            priced("gemini-3-flash", 0.75, 6.0),
+            priced("gemini-3.1-pro-low", 1.0, 5.0),
+            priced("gemini-3.5-flash", 0.75, 6.0),
+            priced("gpt-5.6-luna", 0.5, 6.0),
+            priced("gpt-5.6-sol", 2.5, 6.0),
+            priced("gpt-5.6-terra", 1.25, 6.0),
+            priced("tts-1", 7.5, 0.0),
+            priced("tts-1-hd", 15.0, 0.0),
+        ])
     }
 
     // ── credentials ───────────────────────────────────────────────────────
@@ -960,7 +1312,138 @@ mod tests {
         assert!(parse_gateway_models(&json!({ "error": "nope" })).is_empty());
     }
 
-    // ── snapshot lookup ───────────────────────────────────────────────────
+    #[test]
+    fn gateway_max_output_is_read_when_the_listing_publishes_one() {
+        // No observed account populates `max_output`, but the field is part
+        // of the gateway's published DTO. When it arrives it must be read,
+        // otherwise the snapshot's number would silently outrank the
+        // gateway's own statement about its deployment.
+        let body = json!({
+            "data": [
+                { "id": "with-limit", "owned_by": "vendor",
+                  "supported_endpoint_types": ["openai"],
+                  "context_window": 128000, "max_output": 8192 },
+                { "id": "zero-limit", "owned_by": "vendor",
+                  "supported_endpoint_types": ["openai"], "max_output": 0 },
+                { "id": "no-limit", "owned_by": "vendor",
+                  "supported_endpoint_types": ["openai"] }
+            ]
+        });
+        let models = parse_gateway_models(&body);
+        assert_eq!(models[0].max_output_tokens, Some(8_192));
+        // Zero means "unknown", not "no output allowed".
+        assert_eq!(models[1].max_output_tokens, None);
+        assert_eq!(models[2].max_output_tokens, None);
+    }
+
+    // ── pricing feed parsing ──────────────────────────────────────────────
+
+    #[test]
+    fn pricing_rows_parse_the_real_feed_shape() {
+        let body = json!({
+            "success": true,
+            "pricing_version": "dbb3811c",
+            "group_ratio": { "grp_M3K-NEhOUc": 0.25 },
+            "data": [
+                { "model_name": "claude-sonnet-5", "quota_type": 0, "model_ratio": 1,
+                  "completion_ratio": 5, "model_price": 0, "cache_ratio": 0.1,
+                  "context_window": 200000, "billing_mode": "per_token" },
+                { "model_name": "doubao-seedream-4-0-250828", "quota_type": 1,
+                  "model_ratio": 0, "completion_ratio": 0, "model_price": 0.028,
+                  "billing_mode": "per_call" },
+                { "model_name": "   ", "quota_type": 0 },
+                { "quota_type": 0, "model_ratio": 3 }
+            ]
+        });
+        let rows = parse_pricing_rows(&body);
+        // The two unusable rows are dropped, the good ones survive.
+        assert_eq!(rows.len(), 2);
+
+        let sonnet = &rows["claude-sonnet-5"];
+        assert!(sonnet.per_token);
+        assert_eq!(sonnet.context_window, Some(200_000));
+        // The mandated sanity check, asserted through the real JSON parse
+        // rather than a hand-built struct: the feed ships these ratios as
+        // JSON *integers*, so this is what proves the `as_f64` accessor
+        // does not silently yield 0.0 and price the model as free.
+        assert_eq!(sonnet.input_cost_per_m(), 2.00);
+        assert_eq!(sonnet.output_cost_per_m(), 10.00);
+
+        let seedream = &rows["doubao-seedream-4-0-250828"];
+        assert!(!seedream.per_token);
+        // Zero in the feed means "unknown", not "no context".
+        assert_eq!(seedream.context_window, None);
+    }
+
+    #[test]
+    fn pricing_rows_without_a_data_array_yield_nothing() {
+        assert!(parse_pricing_rows(&json!({ "success": false })).is_empty());
+    }
+
+    #[test]
+    fn either_per_call_signal_alone_marks_a_row_as_not_per_token() {
+        // `quota_type` is what the gateway's billing code branches on and
+        // `billing_mode` is its human-readable mirror; a feed shipping only
+        // one of them must still bill correctly.
+        let body = json!({ "data": [
+            { "model_name": "quota-only", "quota_type": 1, "model_ratio": 0 },
+            { "model_name": "mode-only", "billing_mode": "per_call", "model_ratio": 0 },
+            { "model_name": "neither", "quota_type": 0, "billing_mode": "per_token",
+              "model_ratio": 1, "completion_ratio": 5 }
+        ]});
+        let rows = parse_pricing_rows(&body);
+        assert!(!rows["quota-only"].per_token);
+        assert!(!rows["mode-only"].per_token);
+        assert!(rows["neither"].per_token);
+    }
+
+    // ── ratio → USD conversion ────────────────────────────────────────────
+
+    #[test]
+    fn billing_ratios_convert_to_usd_per_million_tokens() {
+        // The gateway's anchor case: ratio 1 = $2/1M in, and the completion
+        // ratio multiplies on top of it, not instead of it.
+        let sonnet = priced("claude-sonnet-5", 1.0, 5.0);
+        assert_eq!(sonnet.input_cost_per_m(), 2.00);
+        assert_eq!(sonnet.output_cost_per_m(), 10.00);
+
+        // A second, independent anchor with a non-integer ratio and a
+        // different completion ratio.
+        let terra = priced("gpt-5.6-terra", 1.25, 6.0);
+        assert_eq!(terra.input_cost_per_m(), 2.5);
+        assert_eq!(terra.output_cost_per_m(), 15.0);
+
+        let minimax = priced("MiniMax-M3", 0.15, 4.0);
+        assert_eq!(minimax.input_cost_per_m(), 0.3);
+        assert!((minimax.output_cost_per_m() - 1.2).abs() < 1e-12);
+
+        // completion_ratio 0 (the tts family) prices input only — it is not
+        // a signal that the model is unpriced.
+        let tts = priced("tts-1", 7.5, 0.0);
+        assert_eq!(tts.input_cost_per_m(), 15.0);
+        assert_eq!(tts.output_cost_per_m(), 0.0);
+    }
+
+    #[test]
+    fn per_call_rows_carry_no_per_token_price() {
+        // `model_price` is a flat per-request charge in USD. Forcing it into
+        // a per-million-token field would misreport cost by orders of
+        // magnitude, so both figures stay at zero and the caller marks the
+        // model `pricing_known = false`.
+        let row = PricingRow {
+            model_name: "doubao-seedance-2-0-260128".to_string(),
+            per_token: false,
+            // Even if the feed shipped non-zero ratios on a per-call row,
+            // they must not leak into a per-token figure.
+            model_ratio: 3.0,
+            completion_ratio: 4.0,
+            context_window: None,
+        };
+        assert_eq!(row.input_cost_per_m(), 0.0);
+        assert_eq!(row.output_cost_per_m(), 0.0);
+    }
+
+    // ── metadata resolution ───────────────────────────────────────────────
 
     #[test]
     fn version_separator_normalization_only_touches_digit_hyphen_digit() {
@@ -996,72 +1479,140 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_exact_hit_carries_context_and_pricing() {
+    fn pricing_comes_from_the_gateway_and_token_limits_from_the_snapshot() {
         let catalog = snapshot_catalog();
+        let row = priced("claude-sonnet-5", 1.0, 5.0);
         let meta = resolve_metadata(
             &catalog,
             &gateway_model("claude-sonnet-5", "anthropic", &["openai", "anthropic"]),
-        )
-        .expect("anthropic/claude-sonnet-5 is in the snapshot");
-        assert_eq!(meta.context_window, 1_000_000);
-        assert_eq!(meta.max_output_tokens, 128_000);
+            Some(&row),
+        );
+        // The gateway's own book, not the snapshot's copy of the vendor's.
         assert_eq!(meta.input_cost_per_m, 2.0);
         assert_eq!(meta.output_cost_per_m, 10.0);
         assert!(meta.pricing_known);
+        // Neither gateway endpoint published a limit here, so both are
+        // borrowed and the caller must be told.
+        assert_eq!(meta.max_output_tokens, 128_000);
+        assert_eq!(meta.context_window, 1_000_000);
+        assert!(meta.token_limits_borrowed);
+        // Capability flags have no gateway source either.
+        assert!(meta.supports_tools);
     }
 
     #[test]
-    fn snapshot_hit_is_case_insensitive() {
-        // Gateway says "MiniMax-M3"; the snapshot stores "minimax/minimax-m3".
+    fn the_snapshot_is_never_consulted_for_pricing() {
+        // `anthropic/claude-sonnet-5` sits in the snapshot at 2.0/10.0. A
+        // model absent from the gateway's pricing feed must still come out
+        // unpriced rather than inheriting the upstream vendor's list price.
         let catalog = snapshot_catalog();
         let meta = resolve_metadata(
             &catalog,
-            &gateway_model("MiniMax-M3", "minimax", &["openai"]),
-        )
-        .expect("minimax/minimax-m3 resolves case-insensitively");
-        assert_eq!(meta.context_window, 1_048_576);
-        assert_eq!(meta.input_cost_per_m, 0.3);
-        assert_eq!(meta.output_cost_per_m, 1.2);
+            &gateway_model("claude-sonnet-5", "anthropic", &["openai"]),
+            None,
+        );
+        assert_eq!(meta.input_cost_per_m, 0.0);
+        assert_eq!(meta.output_cost_per_m, 0.0);
+        assert!(
+            !meta.pricing_known,
+            "a zero cost must be reported as unknown, not as free"
+        );
+        // Token limits still resolve, so the model stays registrable.
+        assert_eq!(meta.context_window, 1_000_000);
+        assert_eq!(meta.max_output_tokens, 128_000);
     }
 
     #[test]
-    fn snapshot_hit_via_normalized_version_tail() {
-        // Gateway "claude-haiku-4-5" vs snapshot "anthropic/claude-haiku-4.5".
+    fn pricing_feed_context_window_beats_the_snapshot() {
+        // The gateway bills claude-sonnet-5 at a 200K window; the snapshot
+        // describes OpenRouter's 1M copy. Taking the snapshot's number would
+        // over-report the usable window 5x straight into compaction
+        // thresholds.
         let catalog = snapshot_catalog();
+        let mut row = priced("claude-sonnet-5", 1.0, 5.0);
+        row.context_window = Some(200_000);
         let meta = resolve_metadata(
             &catalog,
-            &gateway_model("claude-haiku-4-5", "anthropic", &["openai"]),
-        )
-        .expect("normalized retry resolves");
+            &gateway_model("claude-sonnet-5", "anthropic", &["openai"]),
+            Some(&row),
+        );
         assert_eq!(meta.context_window, 200_000);
-        assert_eq!(meta.max_output_tokens, 64_000);
+        // Only max_output was borrowed, but that is still a borrow.
+        assert_eq!(meta.max_output_tokens, 128_000);
+        assert!(meta.token_limits_borrowed);
     }
 
     #[test]
-    fn snapshot_genuine_miss_returns_none() {
-        let catalog = snapshot_catalog();
-        assert!(resolve_metadata(
-            &catalog,
-            &gateway_model("doubao-seedance-2-0-260128", "doubao", &[])
-        )
-        .is_none());
-        assert!(resolve_metadata(
-            &catalog,
-            &gateway_model("gemini-3-flash", "google", &["openai"])
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn gateway_context_window_overrides_the_snapshot() {
+    fn model_listing_context_window_beats_the_pricing_feed() {
+        // The model's own row on /v1/models is the most specific statement
+        // about this gateway, so it outranks both other sources.
         let catalog = snapshot_catalog();
         let mut model = gateway_model("claude-sonnet-5", "anthropic", &["openai"]);
         model.context_window = Some(64_000);
-        let meta = resolve_metadata(&catalog, &model).expect("hit");
-        assert_eq!(meta.context_window, 64_000, "gateway wins over snapshot");
-        // max_output_tokens still comes from the snapshot — the gateway
-        // publishes no such field.
-        assert_eq!(meta.max_output_tokens, 128_000);
+        let mut row = priced("claude-sonnet-5", 1.0, 5.0);
+        row.context_window = Some(200_000);
+        let meta = resolve_metadata(&catalog, &model, Some(&row));
+        assert_eq!(meta.context_window, 64_000);
+    }
+
+    #[test]
+    fn a_published_gateway_max_output_is_not_borrowed() {
+        let catalog = snapshot_catalog();
+        let mut model = gateway_model("claude-sonnet-5", "anthropic", &["openai"]);
+        model.context_window = Some(200_000);
+        model.max_output_tokens = Some(32_000);
+        let row = priced("claude-sonnet-5", 1.0, 5.0);
+        let meta = resolve_metadata(&catalog, &model, Some(&row));
+        assert_eq!(meta.max_output_tokens, 32_000, "gateway beats the snapshot");
+        assert!(
+            !meta.token_limits_borrowed,
+            "both limits came from the gateway"
+        );
+    }
+
+    #[test]
+    fn snapshot_lookup_still_normalizes_the_version_tail_and_case() {
+        // The snapshot fallback is what keeps these models registrable, so
+        // both id-shape fixes must keep resolving.
+        let catalog = snapshot_catalog();
+        // Gateway "claude-haiku-4-5" vs snapshot "anthropic/claude-haiku-4.5".
+        let haiku = resolve_metadata(
+            &catalog,
+            &gateway_model("claude-haiku-4-5", "anthropic", &["openai"]),
+            None,
+        );
+        assert_eq!(haiku.max_output_tokens, 64_000);
+        // Gateway "MiniMax-M3" vs snapshot "minimax/minimax-m3".
+        let minimax = resolve_metadata(
+            &catalog,
+            &gateway_model("MiniMax-M3", "minimax", &["openai"]),
+            None,
+        );
+        assert_eq!(minimax.context_window, 1_048_576);
+        assert_eq!(minimax.max_output_tokens, 512_000);
+    }
+
+    #[test]
+    fn a_model_absent_from_both_sources_resolves_to_nothing_registrable() {
+        // gemini-3-flash is in the gateway's listing and pricing feed but is
+        // in no snapshot, and neither gateway source publishes a token
+        // limit. Pricing still resolves; the limits do not.
+        let catalog = snapshot_catalog();
+        let row = priced("gemini-3-flash", 0.75, 6.0);
+        let meta = resolve_metadata(
+            &catalog,
+            &gateway_model("gemini-3-flash", "google", &["openai"]),
+            Some(&row),
+        );
+        assert_eq!(meta.input_cost_per_m, 1.5);
+        assert_eq!(meta.output_cost_per_m, 9.0);
+        assert!(meta.pricing_known);
+        assert_eq!(meta.context_window, 0);
+        assert_eq!(meta.max_output_tokens, 0);
+        assert!(
+            !meta.token_limits_borrowed,
+            "nothing was borrowed — there was nothing to borrow"
+        );
     }
 
     // ── catalog synthesis ─────────────────────────────────────────────────
@@ -1095,14 +1646,18 @@ mod tests {
     }
 
     #[test]
-    fn text_model_without_resolvable_metadata_is_skipped_not_emitted_with_zero() {
+    fn text_model_without_resolvable_token_limits_is_skipped_not_emitted_with_zero() {
         let catalog = snapshot_catalog();
         let result = synthesize_catalog(
             &catalog,
             "https://api.everyapi.ai/v1",
             &live_gateway_listing(),
+            &live_pricing_rows(),
         );
 
+        // The gateway prices both gemini models but publishes a token limit
+        // for neither, and neither is in the snapshot — so pricing alone
+        // does not rescue them.
         let skipped: Vec<&str> = result.skipped.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(skipped, vec!["gemini-3-flash", "gemini-3.1-pro-low"]);
         for skip in &result.skipped {
@@ -1130,27 +1685,177 @@ mod tests {
     }
 
     #[test]
-    fn a_gateway_context_window_alone_does_not_rescue_a_snapshot_miss() {
-        // A text model the snapshot does not know, but for which the gateway
-        // published a context_window. `max_output_tokens` is unobtainable —
-        // the gateway has no such field — so the entry would be dropped by
-        // `validate()` downstream. It must be skipped loudly instead.
+    fn a_priced_text_model_with_no_token_limits_anywhere_is_still_skipped() {
+        // Pricing resolves but neither token limit does, and `validate()`
+        // rejects a text entry missing either. Emitting it would look like
+        // success while the model vanished at the next daemon boot.
         let catalog = snapshot_catalog();
-        let mut model = gateway_model("totally-unknown-model", "someone", &["openai"]);
-        model.context_window = Some(128_000);
-        let result = synthesize_catalog(&catalog, "https://api.everyapi.ai/v1", &[model]);
+        let model = gateway_model("totally-unknown-model", "someone", &["openai"]);
+        let pricing = pricing_index(vec![priced("totally-unknown-model", 1.0, 5.0)]);
+        let result = synthesize_catalog(
+            &catalog,
+            "https://api.everyapi.ai/v1",
+            std::slice::from_ref(&model),
+            &pricing,
+        );
         assert!(result.file.models.is_empty());
         assert_eq!(result.skipped.len(), 1);
         assert_eq!(result.skipped[0].id, "totally-unknown-model");
+        assert_eq!(
+            result.skipped[0].reason_key,
+            "everyapi-connect-skip-no-metadata"
+        );
+
+        // A context window alone does not rescue it either: `max_output` is
+        // unobtainable from any source for this model. The reason must now
+        // name the output limit specifically — claiming the context window
+        // is unknown would be false here.
+        let mut with_ctx = model.clone();
+        with_ctx.context_window = Some(128_000);
+        let result = synthesize_catalog(
+            &catalog,
+            "https://api.everyapi.ai/v1",
+            &[with_ctx],
+            &pricing,
+        );
+        assert!(result.file.models.is_empty());
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(
+            result.skipped[0].reason_key,
+            "everyapi-connect-skip-no-output-limit"
+        );
     }
 
     #[test]
-    fn non_text_models_survive_without_any_snapshot_metadata() {
+    fn a_pricing_feed_context_window_without_an_output_limit_names_the_missing_one() {
+        // The realistic shape: a claude-family model priced by the gateway
+        // (so its 200K window resolves from the feed) that the compiled-in
+        // snapshot has not caught up with, leaving `max_output_tokens`
+        // unresolvable. It is still skipped, but for the right stated
+        // reason.
+        let catalog = snapshot_catalog();
+        let mut row = priced("claude-nonesuch-9", 1.0, 5.0);
+        row.context_window = Some(200_000);
+        let result = synthesize_catalog(
+            &catalog,
+            "https://api.everyapi.ai/v1",
+            &[gateway_model("claude-nonesuch-9", "anthropic", &["openai"])],
+            &pricing_index(vec![row]),
+        );
+        assert!(result.file.models.is_empty());
+        assert_eq!(
+            result.skipped[0].reason_key,
+            "everyapi-connect-skip-no-output-limit"
+        );
+    }
+
+    #[test]
+    fn a_known_output_limit_without_a_context_window_names_the_missing_one() {
+        // The mirror case: the gateway published `max_output` but no
+        // context window, and no snapshot covers the model.
+        let catalog = snapshot_catalog();
+        let mut model = gateway_model("totally-unknown-model", "someone", &["openai"]);
+        model.max_output_tokens = Some(8_192);
+        let result = synthesize_catalog(
+            &catalog,
+            "https://api.everyapi.ai/v1",
+            &[model],
+            &BTreeMap::new(),
+        );
+        assert!(result.file.models.is_empty());
+        assert_eq!(
+            result.skipped[0].reason_key,
+            "everyapi-connect-skip-no-context-window"
+        );
+    }
+
+    #[test]
+    fn a_gateway_model_absent_from_the_pricing_feed_registers_unpriced() {
+        // The two listings genuinely differ in both directions — the live
+        // pricing feed carries `claude-fable-5`, which `/v1/models` omits —
+        // so the reverse must also degrade gracefully. Token limits come
+        // from the snapshot, so the model stays usable; only its price is
+        // recorded as unknown.
+        let catalog = snapshot_catalog();
+        let models = vec![gateway_model(
+            "claude-opus-5",
+            "anthropic",
+            &["openai", "anthropic"],
+        )];
+        let result = synthesize_catalog(
+            &catalog,
+            "https://api.everyapi.ai/v1",
+            &models,
+            &BTreeMap::new(),
+        );
+        assert!(result.skipped.is_empty());
+        let entry = &result.file.models[0];
+        assert_eq!(entry.input_cost_per_m, 0.0);
+        assert_eq!(entry.output_cost_per_m, 0.0);
+        assert!(!entry.pricing_known);
+        assert!(entry.context_window > 0 && entry.max_output_tokens > 0);
+        assert_eq!(result.unpriced, vec!["claude-opus-5"]);
+    }
+
+    #[test]
+    fn a_pricing_row_with_no_matching_gateway_model_is_ignored() {
+        // `claude-fable-5` is priced but not listed. Pricing must not
+        // conjure a model the gateway never offered.
         let catalog = snapshot_catalog();
         let result = synthesize_catalog(
             &catalog,
             "https://api.everyapi.ai/v1",
             &live_gateway_listing(),
+            &live_pricing_rows(),
+        );
+        assert!(
+            !result.file.models.iter().any(|m| m.id == "claude-fable-5"),
+            "a pricing-only row must not become a registered model"
+        );
+    }
+
+    #[test]
+    fn gateway_pricing_lands_on_the_emitted_entries() {
+        let catalog = snapshot_catalog();
+        let result = synthesize_catalog(
+            &catalog,
+            "https://api.everyapi.ai/v1",
+            &live_gateway_listing(),
+            &live_pricing_rows(),
+        );
+        let entry = |id: &str| {
+            result
+                .file
+                .models
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap_or_else(|| panic!("{id} registered"))
+                .clone()
+        };
+
+        let sonnet = entry("claude-sonnet-5");
+        assert_eq!(sonnet.input_cost_per_m, 2.0);
+        assert_eq!(sonnet.output_cost_per_m, 10.0);
+        assert!(sonnet.pricing_known);
+        // The pricing feed's 200K window beats the snapshot's 1M copy.
+        assert_eq!(sonnet.context_window, 200_000);
+
+        // tts-1 has no snapshot presence at all, but the gateway prices it,
+        // so it is no longer registered as unpriced.
+        let tts = entry("tts-1");
+        assert_eq!(tts.input_cost_per_m, 15.0);
+        assert_eq!(tts.output_cost_per_m, 0.0);
+        assert!(tts.pricing_known);
+    }
+
+    #[test]
+    fn non_text_models_survive_without_any_token_limits() {
+        let catalog = snapshot_catalog();
+        let result = synthesize_catalog(
+            &catalog,
+            "https://api.everyapi.ai/v1",
+            &live_gateway_listing(),
+            &live_pricing_rows(),
         );
         let by_modality = |modality: Modality| {
             result
@@ -1167,17 +1872,16 @@ mod tests {
     }
 
     #[test]
-    fn pricing_known_is_false_whenever_pricing_did_not_resolve() {
+    fn per_call_models_are_unpriced_rather_than_free() {
         let catalog = snapshot_catalog();
         let result = synthesize_catalog(
             &catalog,
             "https://api.everyapi.ai/v1",
             &live_gateway_listing(),
+            &live_pricing_rows(),
         );
         for model in &result.file.models {
-            let has_snapshot_pricing =
-                model.input_cost_per_m > 0.0 || model.output_cost_per_m > 0.0;
-            if !has_snapshot_pricing {
+            if model.input_cost_per_m == 0.0 && model.output_cost_per_m == 0.0 {
                 assert!(
                     !model.pricing_known,
                     "{} claims known pricing with zero cost",
@@ -1185,17 +1889,73 @@ mod tests {
                 );
             }
         }
-        // The doubao/system families have no snapshot presence at all.
-        let unpriced: Vec<&str> = result
+        // The doubao family is billed per call, so it has no per-token
+        // price to report at all.
+        assert_eq!(
+            result.unpriced,
+            vec![
+                "doubao-seedance-1-0-pro-250528",
+                "doubao-seedance-1-0-pro-fast-251015",
+                "doubao-seedance-2-0-260128",
+                "doubao-seedance-2-0-fast-260128",
+                "doubao-seedance-2-0-mini-260615",
+                "doubao-seedream-4-0-250828",
+            ]
+        );
+        for id in &result.unpriced {
+            let entry = result
+                .file
+                .models
+                .iter()
+                .find(|m| &m.id == id)
+                .expect("registered");
+            assert_eq!(entry.input_cost_per_m, 0.0);
+            assert_eq!(entry.output_cost_per_m, 0.0);
+        }
+    }
+
+    #[test]
+    fn borrowed_token_limits_are_reported_and_gateway_supplied_ones_are_not() {
+        let catalog = snapshot_catalog();
+        let result = synthesize_catalog(
+            &catalog,
+            "https://api.everyapi.ai/v1",
+            &live_gateway_listing(),
+            &live_pricing_rows(),
+        );
+        // Every registered text model borrows at least `max_output_tokens`:
+        // no gateway source publishes one.
+        let text_ids: Vec<&str> = result
             .file
             .models
             .iter()
-            .filter(|m| !m.pricing_known)
+            .filter(|m| m.modality == Modality::Text)
             .map(|m| m.id.as_str())
             .collect();
-        assert!(unpriced.contains(&"tts-1"));
-        assert!(unpriced.contains(&"doubao-seedream-4-0-250828"));
-        assert!(!unpriced.contains(&"claude-sonnet-5"));
+        assert_eq!(result.borrowed_token_limits, text_ids);
+        // Non-text entries borrow nothing — they need no token limits.
+        assert!(!result
+            .borrowed_token_limits
+            .iter()
+            .any(|id| id.starts_with("tts-") || id.starts_with("doubao-")));
+    }
+
+    #[test]
+    fn a_fully_self_described_model_borrows_nothing() {
+        let catalog = snapshot_catalog();
+        let mut model = gateway_model("claude-sonnet-5", "anthropic", &["openai"]);
+        model.context_window = Some(200_000);
+        model.max_output_tokens = Some(64_000);
+        let result = synthesize_catalog(
+            &catalog,
+            "https://api.everyapi.ai/v1",
+            &[model],
+            &pricing_index(vec![priced("claude-sonnet-5", 1.0, 5.0)]),
+        );
+        assert!(result.borrowed_token_limits.is_empty());
+        assert!(result.unpriced.is_empty());
+        assert_eq!(result.file.models[0].context_window, 200_000);
+        assert_eq!(result.file.models[0].max_output_tokens, 64_000);
     }
 
     #[test]
@@ -1204,14 +1964,17 @@ mod tests {
         let forward = live_gateway_listing();
         let mut reversed = forward.clone();
         reversed.reverse();
+        let pricing = live_pricing_rows();
 
-        let a = synthesize_catalog(&catalog, "https://api.everyapi.ai/v1", &forward);
-        let b = synthesize_catalog(&catalog, "https://api.everyapi.ai/v1", &reversed);
+        let a = synthesize_catalog(&catalog, "https://api.everyapi.ai/v1", &forward, &pricing);
+        let b = synthesize_catalog(&catalog, "https://api.everyapi.ai/v1", &reversed, &pricing);
 
         let render = |file: &ModelCatalogFile| toml::to_string_pretty(file).expect("serializes");
         assert_eq!(render(&a.file), render(&b.file));
         assert_eq!(a.skipped, b.skipped);
         assert_eq!(a.streaming_only, b.streaming_only);
+        assert_eq!(a.borrowed_token_limits, b.borrowed_token_limits);
+        assert_eq!(a.unpriced, b.unpriced);
     }
 
     #[test]
@@ -1221,6 +1984,7 @@ mod tests {
             &catalog,
             "https://api.everyapi.ai/v1",
             &live_gateway_listing(),
+            &live_pricing_rows(),
         );
         assert_eq!(
             result.streaming_only,
@@ -1245,6 +2009,7 @@ mod tests {
             &catalog,
             "https://api.everyapi.ai/v1",
             &only_response_models,
+            &live_pricing_rows(),
         );
         // Still returns something rather than silently doing nothing, but the
         // caller has already warned about the streaming requirement.
@@ -1261,7 +2026,12 @@ mod tests {
             gateway_model("tts-1", "system", &["audio-speech"]),
             gateway_model("doubao-seedance-2-0-260128", "doubao", &[]),
         ];
-        let result = synthesize_catalog(&catalog, "https://api.everyapi.ai/v1", &media_only);
+        let result = synthesize_catalog(
+            &catalog,
+            "https://api.everyapi.ai/v1",
+            &media_only,
+            &live_pricing_rows(),
+        );
         assert_eq!(result.file.models.len(), 2);
         assert!(choose_default_model(&result.file.models, &result.streaming_only).is_none());
     }
@@ -1275,6 +2045,7 @@ mod tests {
             &catalog,
             "https://api.everyapi.ai/v1",
             &live_gateway_listing(),
+            &live_pricing_rows(),
         );
         let rendered = toml::to_string_pretty(&result.file).expect("serializes");
 
@@ -1309,6 +2080,7 @@ mod tests {
             &catalog,
             "https://api.everyapi.ai/v1",
             &live_gateway_listing(),
+            &live_pricing_rows(),
         );
         for model in &result.file.models {
             assert_ne!(
@@ -1367,6 +2139,7 @@ mod tests {
             &catalog,
             "https://api.everyapi.ai/v1",
             &live_gateway_listing(),
+            &live_pricing_rows(),
         );
         let body = provider_request_body(&result.file);
 
@@ -1391,14 +2164,34 @@ mod tests {
         for model in body["models"].as_array().expect("models array") {
             assert!(model.get("pricing_known").is_some_and(|v| v.is_boolean()));
         }
+        // tts-1 is priced by the gateway even though no snapshot knows it.
         let tts = result
             .file
             .models
             .iter()
             .find(|m| m.id == "tts-1")
             .expect("tts-1 registered");
-        assert_eq!(model_request_value(tts)["pricing_known"], json!(false));
+        assert_eq!(model_request_value(tts)["pricing_known"], json!(true));
+        assert_eq!(model_request_value(tts)["input_cost_per_m"], json!(15.0));
         assert_eq!(model_request_value(tts)["modality"], json!("audio"));
+
+        // A per-call model must ship an explicit `pricing_known = false`
+        // alongside its zero costs.
+        let seedream = result
+            .file
+            .models
+            .iter()
+            .find(|m| m.id == "doubao-seedream-4-0-250828")
+            .expect("doubao-seedream registered");
+        assert_eq!(model_request_value(seedream)["pricing_known"], json!(false));
+        assert_eq!(
+            model_request_value(seedream)["input_cost_per_m"],
+            json!(0.0)
+        );
+        assert_eq!(
+            model_request_value(seedream)["output_cost_per_m"],
+            json!(0.0)
+        );
     }
 
     // ── clap wiring ───────────────────────────────────────────────────────
@@ -1439,10 +2232,49 @@ mod tests {
         // the command carried on. The `[provider]` section alone must still
         // round-trip, otherwise the fallback is worthless.
         let catalog = snapshot_catalog();
-        let result = synthesize_catalog(&catalog, "https://api.everyapi.ai/v1", &[]);
+        let result = synthesize_catalog(
+            &catalog,
+            "https://api.everyapi.ai/v1",
+            &[],
+            &BTreeMap::new(),
+        );
         let rendered = toml::to_string_pretty(&result.file).expect("serializes");
         let parsed: ModelCatalogFile = toml::from_str(&rendered).expect("round trips");
         assert!(parsed.models.is_empty());
         assert_eq!(parsed.provider.expect("provider").id, "everyapi");
+    }
+
+    #[test]
+    fn an_unreachable_pricing_feed_still_produces_a_loadable_catalog() {
+        // `fetch_pricing_rows` returned None and the command carried on with
+        // an empty index. Every model the snapshot can give token limits to
+        // must still register and round-trip — just with no price. The
+        // command reports the whole set by name so the operator knows their
+        // spend is not being counted.
+        let catalog = snapshot_catalog();
+        let result = synthesize_catalog(
+            &catalog,
+            "https://api.everyapi.ai/v1",
+            &live_gateway_listing(),
+            &BTreeMap::new(),
+        );
+        assert_eq!(result.file.models.len(), 16);
+
+        let rendered = toml::to_string_pretty(&result.file).expect("serializes");
+        let parsed: ModelCatalogFile = toml::from_str(&rendered).expect("round trips");
+        for model in &parsed.models {
+            model
+                .validate()
+                .unwrap_or_else(|e| panic!("entry rejected downstream: {e}"));
+            assert!(
+                !model.pricing_known,
+                "{} must not claim a price with no feed",
+                model.id
+            );
+            assert_eq!(model.input_cost_per_m, 0.0);
+            assert_eq!(model.output_cost_per_m, 0.0);
+        }
+        // Reported, not silent: all 16 are named as unpriced.
+        assert_eq!(result.unpriced.len(), 16);
     }
 }

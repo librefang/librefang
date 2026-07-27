@@ -120,6 +120,7 @@ pub mod approval;
 pub mod channel_bridge;
 pub mod client_ip;
 pub mod error;
+pub mod everyapi_catalog;
 pub mod extensions;
 pub mod extractors;
 pub mod idempotency;

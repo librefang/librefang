@@ -495,7 +495,11 @@ The command reads `api_base` and `relay_key` from the credentials file (honourin
 
 **Notes:**
 
-Model metadata is resolved from LibreFang's builtin catalog, because the gateway's `/v1/models` response carries ids but no pricing and mostly no context window. A text model whose context window and output limit cannot be resolved is skipped and named in the command output rather than registered — a text entry missing either field is discarded when the catalog loads, so registering it would silently lose the model with nothing but a log line. Where pricing cannot be resolved the entry is marked as having unknown pricing, so budget figures do not silently treat it as free.
+Pricing and context windows come from the gateway's own public `/api/pricing` feed, so cost figures reflect what the gateway actually charges — its markup included — rather than the upstream vendor's list price. Per-token models are converted from the feed's ratios; models billed per call carry no per-token price and are marked as having unknown pricing, so budget figures do not silently treat them as free.
+
+Output-token limits are the one figure neither gateway endpoint publishes, so they fall back to LibreFang's builtin catalog. A text entry missing either token limit is discarded when the catalog loads, so a model whose limits cannot be resolved at all is skipped and named in the command output rather than registered silently. The command also reports which models had to borrow a limit, so it is clear which numbers are the gateway's own.
+
+The daemon re-fetches both feeds on a TTL once the provider is registered, so models the gateway later adds or removes show up without re-running the connect command.
 
 Some gateway models accept only streaming requests. Those are registered but reported separately in the command output, and `--set-default` will not choose one: a non-streaming default breaks history compaction, proactive memory, the skill workshop, and web augmentation, which all issue non-streaming calls while the main chat loop keeps working.
 

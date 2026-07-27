@@ -273,6 +273,15 @@ pub async fn list_models(
             tracing::warn!(%error, "OpenRouter live catalog unavailable; using checked-in snapshot");
         }
     }
+    let everyapi_in_scope = provider_filter
+        .as_deref()
+        .map(|provider| provider == "everyapi")
+        .unwrap_or(true);
+    if everyapi_in_scope {
+        if let Err(error) = crate::everyapi_catalog::refresh_if_stale(&state.kernel).await {
+            tracing::warn!(%error, "EveryAPI live catalog unavailable; using registered snapshot");
+        }
+    }
     let catalog = state.kernel.model_catalog_ref().load();
 
     // Pre-compute the live-discovered model ID set per local provider so we
@@ -577,6 +586,14 @@ pub async fn get_model(
     if id.starts_with("openrouter/") || id.starts_with("openrouter:") {
         let _ = crate::openrouter_catalog::refresh_if_missing(&state.kernel).await;
     }
+    // No everyapi arm here: OpenRouter's catalog ids are stored prefixed
+    // (`openrouter/<vendor>/<model>`), but `models connect everyapi` registers
+    // bare ids (`claude-sonnet-5`). `find_model` matches on the id verbatim,
+    // so an `everyapi/`- or `everyapi:`-qualified path can only ever 404 —
+    // gating a refresh on it would fetch the gateway exclusively for requests
+    // that cannot resolve. Gating on the bare id instead is also wrong: those
+    // ids collide with `anthropic` / `gemini` entries, so an unrelated model
+    // lookup would hit the gateway.
     let catalog = state.kernel.model_catalog_ref().load();
     match catalog.find_model(&id) {
         Some(m) => {
@@ -839,6 +856,7 @@ fn provider_max_output_tokens(
 )]
 pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     crate::openrouter_catalog::refresh_if_missing_in_background(&state.kernel);
+    crate::everyapi_catalog::refresh_if_missing_in_background(&state.kernel);
     // Snapshot both the provider list and the matching suppression flags
     // from the same catalog load — racing a `delete_provider_key` /
     // `enable_provider` mid-iteration would otherwise let the JSON show a
@@ -1107,6 +1125,9 @@ pub async fn get_provider(
 ) -> impl IntoResponse {
     if name == "openrouter" {
         let _ = crate::openrouter_catalog::refresh_if_stale(&state.kernel).await;
+    }
+    if name == "everyapi" {
+        let _ = crate::everyapi_catalog::refresh_if_stale(&state.kernel).await;
     }
     let (provider, models, max_output_tokens) = {
         let catalog = state.kernel.model_catalog_ref().load();
@@ -2412,6 +2433,14 @@ pub async fn set_default_provider(
 ) -> impl IntoResponse {
     if name == "openrouter" {
         let _ = crate::openrouter_catalog::refresh_if_stale(&state.kernel).await;
+    }
+    // `librefang models connect everyapi --set-default` lands here, so the
+    // gateway's current model list decides which id becomes the daemon
+    // default. Refresh before selecting; the availability guard below stays
+    // OpenRouter-only (rejecting an everyapi model here would be a new 400
+    // path, not part of making the catalog fresh).
+    if name == "everyapi" {
+        let _ = crate::everyapi_catalog::refresh_if_stale(&state.kernel).await;
     }
     // Accept optional {"model": "model-id"} body to override the auto-selected model.
     // This is needed for providers like ollama where models are dynamic and may
