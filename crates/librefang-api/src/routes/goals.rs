@@ -246,12 +246,6 @@ pub async fn start_goal_run(
                 }
             }
         }
-        Err(_) => {
-            return ApiErrorResponse::bad_request(format!(
-                "This goal's agent_id ('{stored_agent_id}') is not a valid agent UUID — reassign the agent to repair it"
-            ))
-            .into_json_tuple();
-        }
     };
 
     let max_iterations = body
