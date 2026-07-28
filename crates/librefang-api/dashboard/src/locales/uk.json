@@ -814,7 +814,7 @@
       "tools_click_assign": "натисніть, щоб призначити",
       "tools_mcp_granted": "надано через mcp_servers",
       "tools_mcp_not_granted": "надайте на вкладці MCP-серверів",
-      "tools_mcp_readonly": "Цей сервер надано через mcp_servers в agent.toml. Змініть надання на вкладці MCP-серверів; окремі інструменти фільтруються через tool_blocklist.",
+      "tools_mcp_readonly": "Цей сервер надано через mcp_servers в agent.toml. Змініть надання на вкладці MCP-серверів; окремі інструменти фільтруються через tool_allowlist і tool_blocklist.",
       "tools_blocked": "у списку блокування",
       "tools_customize": "Налаштувати — перейти до allowlist",
       "tools_fine_grain": "Налаштувати окремі інструменти",

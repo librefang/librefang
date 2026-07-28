@@ -817,7 +817,7 @@
       "tools_click_assign": "할당하려면 클릭하세요.",
       "tools_mcp_granted": "mcp_servers로 허용됨",
       "tools_mcp_not_granted": "MCP 서버 탭에서 허용하세요",
-      "tools_mcp_readonly": "이 서버는 agent.toml의 mcp_servers를 통해 허용됩니다. 허용 범위는 MCP 서버 탭에서 변경하고, 개별 도구는 tool_blocklist로 필터링합니다.",
+      "tools_mcp_readonly": "이 서버는 agent.toml의 mcp_servers를 통해 허용됩니다. 허용 범위는 MCP 서버 탭에서 변경하고, 개별 도구는 tool_allowlist와 tool_blocklist로 필터링합니다.",
       "tools_blocked": "차단 목록",
       "tools_reset_to_all": "모든 도구를 사용하려면 재설정하세요.",
       "events_tail": "이벤트 · 꼬리",

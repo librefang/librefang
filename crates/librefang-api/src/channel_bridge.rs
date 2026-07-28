@@ -1082,6 +1082,9 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         if provider_id == "openrouter" {
             let _ = crate::openrouter_catalog::refresh_if_stale(&self.kernel).await;
         }
+        if provider_id == "everyapi" {
+            let _ = crate::everyapi_catalog::refresh_if_stale(&self.kernel).await;
+        }
         let catalog = self.kernel.model_catalog_ref().load();
         catalog
             .models_by_provider(provider_id)

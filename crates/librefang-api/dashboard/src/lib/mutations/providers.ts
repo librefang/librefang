@@ -137,8 +137,11 @@ export const EVERYAPI_PROVIDER = {
   id: "everyapi",
   displayName: "EveryAPI",
   apiKeyEnv: "EVERYAPI_API_KEY",
-  /** Gateway root, with no `/v1` suffix — the drivers append the path themselves. */
-  defaultBaseUrl: "https://api.everyapi.ai",
+  /**
+   * The OpenAI-compatible root, `/v1` segment included, because every consumer appends onto it verbatim: the driver adds `/chat/completions` (`crates/librefang-llm-drivers/src/drivers/openai.rs`) and the daemon's catalog refresh adds `/models` (`crates/librefang-api/src/everyapi_catalog.rs`).
+   * Nothing appends `/v1` on the way through — `derive_base_url` in `crates/librefang-cli/src/commands/everyapi.rs` bakes it into the value the CLI stores, so the dashboard has to store the same shape or the entry registers with a catalog that can never load.
+   */
+  defaultBaseUrl: "https://api.everyapi.ai/v1",
 } as const;
 
 /**

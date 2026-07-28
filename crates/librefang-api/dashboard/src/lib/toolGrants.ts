@@ -50,6 +50,15 @@ export function isToolBlocked(toolName: string, blocklist: readonly string[]): b
   return blocklist.some((pattern) => toolPatternMatches(pattern, toolName));
 }
 
+/** Whether `toolName` survives a `tool_allowlist`.
+ *
+ * An empty list is unrestricted, mirroring the kernel's `if !tool_allowlist.is_empty()` guard (`tools_and_skills.rs`, Step 4).
+ * That step runs after MCP tools have been pushed into the candidate set, so the allowlist filters MCP tools too — a non-empty list naming no `mcp__*` glob strips the whole server (#6495).
+ */
+export function isToolAllowed(toolName: string, allowlist: readonly string[]): boolean {
+  return allowlist.length === 0 || allowlist.some((pattern) => toolPatternMatches(pattern, toolName));
+}
+
 /** Resolve the MCP grant mode from the raw allowlist when the backend field is absent (older daemon), mirroring `routes::agents::mcp_servers_mode`. */
 export function resolveMcpGrantMode(
   mcpServers: readonly string[] | undefined,

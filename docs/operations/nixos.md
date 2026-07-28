@@ -206,14 +206,18 @@ To bind a routable address, override the environment variable directly:
     enable = true;
     openFirewall = true;
     extraEnvironment.LIBREFANG_LISTEN = "0.0.0.0:4545";
-    environmentFile = "/run/secrets/librefang.env"; # must export an API key
+    environmentFile = "/run/secrets/librefang.env"; # must export LIBREFANG_DASHBOARD_USER and LIBREFANG_DASHBOARD_PASS
   };
 }
 ```
 
-The `environmentFile` is not optional in this configuration.
-`run_daemon` refuses to start on a non-loopback bind with no authentication configured and no `LIBREFANG_ALLOW_NO_AUTH` opt-in (`crates/librefang-api/src/server.rs:1915` calling `check_bind_auth_safety`, implemented at `crates/librefang-api/src/server.rs:312-330`).
-The module asserts the same condition at evaluation time, so the misconfiguration fails `nixos-rebuild` rather than producing a restart loop.
+Authentication is not optional in this configuration, and the environment is a narrower lever than it looks.
+`api_key` is read from `<stateDir>/config.toml` only — no environment variable feeds it — so the sole authentication source the daemon picks up from the unit environment is a dashboard credential pair, `LIBREFANG_DASHBOARD_USER` plus `LIBREFANG_DASHBOARD_PASS`.
+An `environmentFile` holding nothing but provider keys satisfies neither `any_auth_configured` nor the daemon's boot-time refusal.
+
+`run_daemon` refuses to start on a non-loopback bind with no authentication configured and no `LIBREFANG_ALLOW_NO_AUTH` opt-in (`check_bind_auth_safety` and `any_auth_configured` in `crates/librefang-api/src/server.rs`).
+The module asserts at evaluation time as well, but it cannot read the contents of a secret produced out-of-band, so `environmentFile != null` is only a proxy for the real condition.
+When authentication lives in a `config.toml` this module does not manage, declare that with `authConfiguredExternally = true` instead of pointing `environmentFile` at a file that carries no credentials.
 Prefer an SSH tunnel or a reverse proxy with TLS over a raw public bind — an unauthenticated LibreFang API grants shell execution, vault access, and your LLM API keys to anyone who can reach the port.
 
 ## Custom user or state directory

@@ -61,7 +61,7 @@ vi.mock("../lib/mutations/providers", () => ({
     id: "everyapi",
     displayName: "EveryAPI",
     apiKeyEnv: "EVERYAPI_API_KEY",
-    defaultBaseUrl: "https://api.everyapi.ai",
+    defaultBaseUrl: "https://api.everyapi.ai/v1",
   },
 }));
 

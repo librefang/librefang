@@ -817,7 +817,7 @@
       "tools_click_assign": "点击分配",
       "tools_mcp_granted": "通过 mcp_servers 授权",
       "tools_mcp_not_granted": "在 MCP 服务器标签页授权",
-      "tools_mcp_readonly": "该服务器通过 agent.toml 中的 mcp_servers 授权。请在 MCP 服务器标签页更改授权；单个工具由 tool_blocklist 过滤。",
+      "tools_mcp_readonly": "该服务器通过 agent.toml 中的 mcp_servers 授权。请在 MCP 服务器标签页更改授权；单个工具由 tool_allowlist 和 tool_blocklist 过滤。",
       "tools_blocked": "已加入屏蔽列表",
       "tools_reset_to_all": "重置为使用所有工具",
       "events_tail": "事件 · 尾部",

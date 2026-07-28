@@ -61,6 +61,25 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Fixed
 
+- Store the EveryAPI gateway base URL with its `/v1` segment when connecting from the dashboard, matching what the CLI writes.
+  `EVERYAPI_PROVIDER.defaultBaseUrl` was `https://api.everyapi.ai` on a doc comment claiming the drivers append the path themselves, which no driver does: the OpenAI-compatible driver builds `{base_url}/chat/completions` and the daemon's catalog refresh builds `{base_url}/models`.
+  A dashboard connect with the gateway field left blank therefore registered a provider whose model fetch 404s, and because that failure is only `warn!`-logged and then throttled per base URL, the entry sat configured-with-zero-models indefinitely while the identical `librefang models connect everyapi` flow worked (#6586) (@houko)
+- Refresh the EveryAPI catalog from the channel model picker, which was the one read path #6583 left unwired.
+  `list_models_by_provider` in `channel_bridge.rs` refreshes for `openrouter` and fell through for `everyapi`, so a Telegram or Slack user picking a model saw whatever snapshot the catalog last happened to hold while every `providers.rs` read path refreshed correctly (#6583) (@houko)
+- Apply `tool_allowlist` when rendering MCP tool grants in the dashboard's Tools tab.
+  The tab mirrored `tool_blocklist` only, but the kernel's Step 4 filter runs after MCP tools have joined the candidate set, so a non-empty allowlist naming no `mcp__*` glob strips the entire server (#6495).
+  An allowlist-filtered server rendered as fully granted — the display asserted an agent could call tools the kernel had already removed (#6578) (@houko)
+- Stop following symlinks in the two skill installers #6581 left untouched.
+  That PR hardened `librefang_skills::marketplace::copy_dir_recursive` but the API route's copy helper and the CLI's `copy_dir_recursive` read the same registry checkout, the former dereferencing links through `std::fs::copy` and the latter branching on `Path::is_dir()`, which follows them.
+  A symlink planted in a registry skill therefore still copied the target's real contents — or an entire external tree — into the installed skill (#6581) (@houko)
+- Refuse `service install --system` on macOS while a per-user LaunchAgent is still installed.
+  Both carry the `ai.librefang.daemon` label and the same state directory, so installing the LaunchDaemon over the agent produced a login-time respawn loop: the agent's `start --foreground` finds the daemon already holding the port, exits non-zero, and `KeepAlive` relaunches it.
+  The check runs before the ownership handover and the plist write, so a refused install leaves nothing behind (#6584) (@houko)
+- XML-escape the paths interpolated into both macOS plists.
+  APFS permits every byte but `/` and NUL, so a volume named `Backup & Media` or a `LIBREFANG_HOME` containing `<` produced an ill-formed plist that launchd rejects wholesale, while the install path still reported it as written (#6584) (@houko)
+- Correct the NixOS module's non-loopback bind assertion, which accepted `environmentFile != null` as proof of authentication.
+  No environment variable feeds `api_key` — it is read from `<stateDir>/config.toml` only — so the documented off-host recipe, whose environment file holds provider keys, passed `nixos-rebuild` and then deployed a unit the daemon refuses to start.
+  The message now names the only credentials the unit environment can actually supply (`LIBREFANG_DASHBOARD_USER` / `LIBREFANG_DASHBOARD_PASS`), a new `authConfiguredExternally` option covers a `config.toml` maintained out-of-band, and the `LIBREFANG_ALLOW_NO_AUTH` disjunct now checks the value against the same five spellings `allow_no_auth_env()` accepts instead of merely testing for the key's presence (#6582) (@houko)
 - Stop `[approval] trusted_senders` from waiving human approval on every tool a connected MCP server exposes.
   `classify_risk` matched a closed list of built-in names, so any `mcp_*` tool fell into the `Low` default and the trusted-sender branch of `requires_approval_with_context` returned before the operator's `require_approval` globs were consulted — the globs were dead config for exactly the tools least able to be audited, since server-side tool code is third-party and its effects are not enumerable from a name.
   Real MCP servers ship tools that move money or take a plaintext credential as an argument, so `mcp_*` now grades as high risk and the bypass stays scoped to the built-ins it was written for; an operator who wants an MCP tool unattended can still allow it per-channel or per-user (#6592) (@houko)
@@ -104,6 +123,13 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Documentation
 
+- Add the missing YAML front matter to the v2026.7.27 release article.
+  The publish workflows both key off it: dev.to skips an article with no `title`, and the release Discussion body is extracted with `awk` that prints only after the second `---`, so it came out empty.
+  The generator `scripts/changelog-to-article.sh` emits the block correctly — this article was written without it (#6588) (@houko)
+- Fix the v2026.7.27 highlight that described `service install --system` as starting LibreFang "at login".
+  The feature is a boot-time LaunchDaemon, which is the whole reason it exists, and the authoritative entry a few hundred lines above already said so (#6588) (@houko)
+- Correct the NixOS off-host recipe, which annotated its `environmentFile` as "must export an API key".
+  An environment file cannot set `api_key`; the only authentication the daemon reads from the unit environment is a dashboard credential pair (#6582) (@houko)
 - Document the EveryAPI MCP bridge on the MCP/A2A integrations page (EN + zh mirror), and fix the `[[mcp_servers]]` examples that page already carried.
   The [EveryAPI](https://github.com/everyapi-ai/everyapi) CLI ships an MCP stdio server as `everyapi mcp` and LibreFang is an MCP stdio client, so the integration is two config stanzas and no code: a `[[mcp_servers]]` entry plus the server's name in the target agent's `mcp_servers` allowlist, with `env = []` because the stdio transport already forwards `HOME` and the server reads `~/.config/everyapi/credentials.json` itself.
   The page also carries an optional `~/.librefang/mcp/catalog/everyapi.toml` entry for `librefang mcp add everyapi`, the 15-tool read/write inventory, and the fact that LibreFang's `mcp_{server}_{tool}` namespacing does not de-duplicate — EveryAPI's already-`everyapi_`-prefixed tools become `mcp_everyapi_everyapi_*`, so an approval glob written against the single-prefix form silently matches nothing.
@@ -316,7 +342,7 @@ _33 PRs from 2 contributors since v2026.7.21._
 ### Highlights
 
 - **EveryAPI integration** — connect EveryAPI as a model provider via `librefang models connect everyapi` from the CLI or the new Providers page connect action, with a built-in wiring doctor check
-- **macOS boot-time service** — `service install --system` installs a LaunchDaemon so LibreFang starts automatically at login without a running user session
+- **macOS boot-time service** — `service install --system` installs a LaunchDaemon so LibreFang starts automatically at boot, before any login and without a running user session
 - **NixOS & additional Linux distros** — first-class NixOS deployment support with deepin/Debian distro awareness out of the box
 - **Audit log integrity** — audit entries are now preserved (WORM-protected) when an agent is purged, preventing accidental evidence loss
 - **Tool result and context fidelity fixes** — stops lossily truncating tool results in the spill dead band, and correctly honors `context_window` from `agent.toml` on all turn-execution paths

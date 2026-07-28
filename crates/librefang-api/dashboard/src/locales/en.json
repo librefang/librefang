@@ -817,7 +817,7 @@
       "tools_click_assign": "click to assign",
       "tools_mcp_granted": "granted via mcp_servers",
       "tools_mcp_not_granted": "grant on the MCP servers tab",
-      "tools_mcp_readonly": "This server is granted through mcp_servers in agent.toml. Change the grant on the MCP servers tab; individual tools are filtered by tool_blocklist.",
+      "tools_mcp_readonly": "This server is granted through mcp_servers in agent.toml. Change the grant on the MCP servers tab; individual tools are filtered by tool_allowlist and tool_blocklist.",
       "tools_blocked": "blocklisted",
       "tools_reset_to_all": "Reset to use all tools",
       "events_tail": "events · tail",

@@ -1,3 +1,12 @@
+---
+title: "LibreFang 2026.7.27 Released"
+published: true
+description: "LibreFang v2026.7.27 release notes — open-source Agent OS built in Rust"
+tags: rust, ai, opensource, release
+canonical_url: https://github.com/librefang/librefang/releases/tag/v2026.7.27
+cover_image: https://raw.githubusercontent.com/librefang/librefang/main/public/assets/logo.png
+---
+
 # LibreFang 2026.7.27 Released
 
 We're shipping **v2026.7.27** with 33 improvements spanning provider integrations, operational polish, and critical fidelity fixes.
@@ -10,7 +19,7 @@ Connect it via `librefang models connect everyapi` in the CLI or the new Provide
 The CLI includes a built-in wiring doctor to catch misconfiguration—no more debugging silent auth failures.
 
 **macOS users: LibreFang now runs at boot.**
-The new `service install --system` command installs a LaunchDaemon so your daemon starts automatically at login, even without a user session.
+The new `service install --system` command installs a LaunchDaemon so your daemon starts automatically at boot, before anyone logs in and without a user session.
 Forget about manual restarts after reboot.
 
 **NixOS and additional Linux distros are now officially supported.**

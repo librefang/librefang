@@ -100,7 +100,7 @@ test("connecting EveryAPI writes the registry entry before the key", async ({ pa
     id: "everyapi",
     display_name: "EveryAPI",
     api_key_env: "EVERYAPI_API_KEY",
-    base_url: "https://api.everyapi.ai",
+    base_url: "https://api.everyapi.ai/v1",
     key_required: true,
     models: [],
   });
@@ -114,7 +114,7 @@ test("a custom gateway URL replaces the default in the registry write", async ({
   await openConnectDrawer(page);
 
   await page.getByPlaceholder("EVERYAPI_API_KEY").first().fill("relay-e2e-key");
-  // Surrounding whitespace is what a paste out of a browser address bar looks like; the hook trims it, and the daemon-side base URL must carry no `/v1` suffix.
+  // Surrounding whitespace is what a paste out of a browser address bar looks like; the hook trims it and otherwise stores the typed value verbatim, because a self-hosted gateway mounted at a different path is a legitimate configuration.
   await page
     .getByPlaceholder("https://api.everyapi.ai")
     .first()
