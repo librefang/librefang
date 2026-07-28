@@ -20,31 +20,18 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
 
 /// Build the redacted body returned by `GET /api/config`.
 ///
-/// Split out of the handler so the read/write parity guard can render a
-/// payload without booting a kernel.
+/// Split out of the handler so the read/write parity guard can render a payload without booting a kernel.
 ///
-/// Every leaf that `is_writable_config_path` accepts MUST be represented
-/// here (redacted where the value is a secret, but present as a key).
-/// The dashboard populates its form fields from this payload, so a writable
-/// field missing from the read side renders blank and reads back as "not
-/// configured" even immediately after a successful save (#6596).
-/// `config_read_write_parity_tests::every_writable_config_leaf_is_readable`
-/// fails the build when the two sides drift apart again.
+/// Every leaf that `is_writable_config_path` accepts MUST be represented here (redacted where the value is a secret, but present as a key).
+/// The dashboard populates its form fields from this payload, so a writable field missing from the read side renders blank and reads back as "not configured" even immediately after a successful save (#6596).
+/// `config_read_write_parity_tests::every_writable_config_leaf_is_readable` fails the build when the two sides drift apart again.
 fn redacted_config_json(
     config: &librefang_types::config::KernelConfig,
     budget: &librefang_types::config::BudgetConfig,
 ) -> serde_json::Value {
-    // -- channels: file-transfer limits + which platforms are configured
-    // (instance counts), no tokens --
-    // All previously in-process channels (whatsapp, teams,
-    // google_chat, webhook, …) migrated to sidecars; their per-vendor
-    // fields no longer exist on `ChannelsConfig`, so only its
-    // file-transfer scalars are enumerated here. The macro shape +
-    // lookup are preserved as a comment block so a future in-process
-    // channel can rebuild the per-vendor part: uncomment the block,
-    // append one `ch!()` line per field, then bind `channels` below as
-    // `let mut` and fold `map` into it with
-    // `channels.as_object_mut().expect("object").extend(map)`.
+    // -- channels: file-transfer limits + which platforms are configured (instance counts), no tokens --
+    // All previously in-process channels (whatsapp, teams, google_chat, webhook, …) migrated to sidecars; their per-vendor fields no longer exist on `ChannelsConfig`, so only its file-transfer scalars are enumerated here.
+    // The macro shape + lookup are preserved as a comment block so a future in-process channel can rebuild the per-vendor part: uncomment the block, append one `ch!()` line per field, then bind `channels` below as `let mut` and fold `map` into it with `channels.as_object_mut().expect("object").extend(map)`.
     //
     //   let c = &config.channels;
     //   let mut map = serde_json::Map::new();
@@ -60,9 +47,7 @@ fn redacted_config_json(
     //   }
     //   ch!(<future_in_process_channel>);
     //
-    // The file-transfer scalars are non-secret and the dashboard declares a
-    // `channels` section for them, so omitting them rendered the section
-    // blank (#6596).
+    // The file-transfer scalars are non-secret and the dashboard declares a `channels` section for them, so omitting them rendered the section blank (#6596).
     let channels = serde_json::json!({
         "file_download_max_bytes": config.channels.file_download_max_bytes,
         "file_download_dir": config.channels.file_download_dir,
@@ -204,10 +189,8 @@ fn redacted_config_json(
         }
     );
     set!("network_enabled", config.network_enabled);
-    // Serde encoding, not `Debug`: `KernelMode` is `rename_all = "snake_case"`,
-    // so the write path and the schema's select options both speak
-    // `"stable" | "default" | "dev"`. Emitting `Debug`'s `"Default"` here left
-    // the dashboard dropdown with a value none of its options matched (#6596).
+    // Serde encoding, not `Debug`: `KernelMode` is `rename_all = "snake_case"`, so the write path and the schema's select options both speak `"stable" | "default" | "dev"`.
+    // Emitting `Debug`'s `"Default"` here left the dashboard dropdown with a value none of its options matched (#6596).
     set!(
         "mode",
         serde_json::to_value(config.mode).unwrap_or(serde_json::json!("default"))
@@ -230,11 +213,8 @@ fn redacted_config_json(
             .to_string()
     );
     // ── Default Model ──
-    // `extra_params` is deliberately absent: it is `#[serde(flatten)]`, so it
-    // has no key of its own on the wire — its entries live directly on the
-    // `[default_model]` table. Inventing a nested `extra_params` object here
-    // would put a shape in the read payload that neither config.toml nor the
-    // generated schema has.
+    // `extra_params` is deliberately absent: it is `#[serde(flatten)]`, so it has no key of its own on the wire — its entries live directly on the `[default_model]` table.
+    // Inventing a nested `extra_params` object here would put a shape in the read payload that neither config.toml nor the generated schema has.
     set!("default_model", {
         "provider": config.default_model.provider,
         "model": config.default_model.model,
@@ -335,8 +315,7 @@ fn redacted_config_json(
 
     set!("fallback_providers", fallback_providers);
 
-    // `cdp_auth_token_env` is an env-var *name*, not a token — same treatment
-    // as `default_model.api_key_env`, which the dashboard has always shown.
+    // `cdp_auth_token_env` is an env-var *name*, not a token — same treatment as `default_model.api_key_env`, which the dashboard has always shown.
     set!("browser", {
         "enabled": config.browser.enabled,
         "headless": config.browser.headless,
@@ -364,8 +343,7 @@ fn redacted_config_json(
     });
 
     let stt_available = config.media.audio_provider.is_some();
-    // `custom_stt` is serialized wholesale: `CustomSttConfig` carries only a
-    // base URL, an env-var name, a bool and a model id — no secret values.
+    // `custom_stt` is serialized wholesale: `CustomSttConfig` carries only a base URL, an env-var name, a bool and a model id — no secret values.
     set!("media", {
         "image_description": config.media.image_description,
         "audio_transcription": config.media.audio_transcription,
@@ -386,8 +364,7 @@ fn redacted_config_json(
         "timeout_secs": config.links.timeout_secs,
     });
 
-    // `ReloadMode` is `rename_all = "snake_case"` — emit the serde form the
-    // write path accepts, not `Debug`'s capitalised variant name.
+    // `ReloadMode` is `rename_all = "snake_case"` — emit the serde form the write path accepts, not `Debug`'s capitalised variant name.
     set!("reload", {
         "mode": serde_json::to_value(config.reload.mode).unwrap_or(serde_json::json!("hybrid")),
         "debounce_ms": config.reload.debounce_ms,
@@ -416,9 +393,7 @@ fn redacted_config_json(
         "totp_grace_period_secs": config.approval.totp_grace_period_secs,
     });
 
-    // `ExecSecurityMode` is `rename_all = "lowercase"` — the schema's select
-    // offers `deny | allowlist | full`, so `Debug`'s `"Allowlist"` never
-    // matched an option.
+    // `ExecSecurityMode` is `rename_all = "lowercase"` — the schema's select offers `deny | allowlist | full`, so `Debug`'s `"Allowlist"` never matched an option.
     set!("exec_policy", {
         "mode": serde_json::to_value(config.exec_policy.mode).unwrap_or(serde_json::json!("allowlist")),
         "safe_bins": config.exec_policy.safe_bins,
@@ -431,13 +406,8 @@ fn redacted_config_json(
     });
 
     // ── Terminal access controls ──
-    // The whole section was missing from the read side even though
-    // `ui_sections_overlay` declares it and `terminal.` is a writable section
-    // prefix, so the dashboard rendered every field blank and a save silently
-    // read back as unset (#6596). None of these are secrets: the two
-    // remote-access booleans were already mutable through
-    // `POST /api/config/set`, and showing an operator the value they can
-    // already change is strictly weaker than the existing write surface.
+    // The whole section was missing from the read side even though `ui_sections_overlay` declares it and `terminal.` is a writable section prefix, so the dashboard rendered every field blank and a save silently read back as unset (#6596).
+    // None of these are secrets: the two remote-access booleans were already mutable through `POST /api/config/set`, and showing an operator the value they can already change is strictly weaker than the existing write surface.
     set!("terminal", {
         "enabled": config.terminal.enabled,
         "allowed_origins": config.terminal.allowed_origins,
@@ -507,8 +477,7 @@ fn redacted_config_json(
                 "format": config.tts.google.format,
             }),
         );
-        // `CustomTtsConfig` mirrors `CustomSttConfig`: base URL, env-var name,
-        // bool, model / voice / format ids — no secret values.
+        // `CustomTtsConfig` mirrors `CustomSttConfig`: base URL, env-var name, bool, model / voice / format ids — no secret values.
         tts.insert(
             "custom".into(),
             serde_json::to_value(&config.tts.custom).unwrap_or_default(),
@@ -534,8 +503,7 @@ fn redacted_config_json(
             "pids_limit".into(),
             serde_json::json!(config.docker.pids_limit),
         );
-        // Both enums are `rename_all = "snake_case"`; `Debug` would emit
-        // `"NonMain"` where the write path and the schema expect `"non_main"`.
+        // Both enums are `rename_all = "snake_case"`; `Debug` would emit `"NonMain"` where the write path and the schema expect `"non_main"`.
         docker.insert(
             "mode".into(),
             serde_json::to_value(config.docker.mode).unwrap_or(serde_json::json!("off")),
@@ -585,8 +553,7 @@ fn redacted_config_json(
         },
     );
 
-    // Budget is read from the kernel's live `BudgetConfig` rather than
-    // `config.budget`: `/api/budget` mutations update the former in place.
+    // Budget is read from the kernel's live `BudgetConfig` rather than `config.budget`: `/api/budget` mutations update the former in place.
     set!("budget", {
         "max_hourly_usd": budget.max_hourly_usd,
         "max_daily_usd": budget.max_daily_usd,
@@ -1468,31 +1435,21 @@ pub async fn config_set(
 // Read/write parity guard (#6596)
 // ---------------------------------------------------------------------------
 
-/// Guards the invariant that `GET /api/config` exposes every config leaf
-/// `POST /api/config/set` accepts.
+/// Guards the invariant that `GET /api/config` exposes every config leaf `POST /api/config/set` accepts.
 ///
-/// The response body is hand-enumerated per section rather than derived from
-/// `Serialize`, because the dashboard depends on keys serde would never emit
-/// (`web.search_available`, `media.stt_available`) and on redaction markers
-/// that replace secret values in place. That shape is worth keeping, but it
-/// drifts silently: a field added to a config struct and wired into the write
-/// allowlist stays invisible on the read side, so the dashboard renders the
-/// setting blank and a successful save reads back as "not configured". This
-/// module turns that drift into a build failure.
+/// The response body is hand-enumerated per section rather than derived from `Serialize`, because the dashboard depends on keys serde would never emit (`web.search_available`, `media.stt_available`) and on redaction markers that replace secret values in place.
+/// That shape is worth keeping, but it drifts silently: a field added to a config struct and wired into the write allowlist stays invisible on the read side, so the dashboard renders the setting blank and a successful save reads back as "not configured".
+/// This module turns that drift into a build failure.
 ///
-/// The exclusion rules (secret suffixes, per-section depth limits, sections
-/// that are deliberately edit-on-disk) are NOT restated here — the guard calls
-/// the real `is_writable_config_path` so there is exactly one copy of them.
+/// The exclusion rules (secret suffixes, per-section depth limits, sections that are deliberately edit-on-disk) are NOT restated here — the guard calls the real `is_writable_config_path` so there is exactly one copy of them.
 #[cfg(test)]
 mod config_read_write_parity_tests {
     use librefang_types::config::{
         A2aConfig, BudgetConfig, KernelConfig, ThinkingConfig, WebhookTriggerConfig,
     };
 
-    /// `KernelConfig::default()` with every `Option`-wrapped section
-    /// populated. Those sections serialize to `null` when unset, which would
-    /// hide their leaves from the walk below and let a gap under `a2a`,
-    /// `webhook_triggers`, or `thinking` pass unnoticed.
+    /// `KernelConfig::default()` with every `Option`-wrapped section populated.
+    /// Those sections serialize to `null` when unset, which would hide their leaves from the walk below and let a gap under `a2a`, `webhook_triggers`, or `thinking` pass unnoticed.
     fn config_with_optional_sections_populated() -> KernelConfig {
         KernelConfig {
             a2a: Some(A2aConfig::default()),
@@ -1502,18 +1459,11 @@ mod config_read_write_parity_tests {
         }
     }
 
-    /// Every dotted path in `value` that `is_writable_config_path` could
-    /// match: the top-level key plus one and two nested levels, which is the
-    /// deepest form the allowlist accepts. Arrays are leaves — a numeric index
-    /// is not a config key path.
+    /// Every dotted path in `value` that `is_writable_config_path` could match: the top-level key plus one and two nested levels, which is the deepest form the allowlist accepts.
+    /// Arrays are leaves — a numeric index is not a config key path.
     ///
-    /// Known blind spot: a field carrying `#[serde(skip_serializing_if = …)]`
-    /// whose default value satisfies that predicate is absent from `value`, so
-    /// the walk cannot see it. Every writable path in that category today
-    /// (`exec_policy.allowed_env_vars`, `default_model.cli_profile_dirs`,
-    /// `budget.providers`, `tool_invoke.allowlist`, `agent_max_iterations`,
-    /// `max_history_messages`) is in the read payload, checked by hand; a
-    /// future one has to be added by hand too.
+    /// Known blind spot: a field carrying `#[serde(skip_serializing_if = …)]` whose default value satisfies that predicate is absent from `value`, so the walk cannot see it.
+    /// Every writable path in that category today (`exec_policy.allowed_env_vars`, `default_model.cli_profile_dirs`, `budget.providers`, `tool_invoke.allowlist`, `agent_max_iterations`, `max_history_messages`) is in the read payload, checked by hand; a future one has to be added by hand too.
     fn candidate_paths(value: &serde_json::Value) -> Vec<String> {
         let mut paths = Vec::new();
         let Some(root) = value.as_object() else {
@@ -1537,10 +1487,8 @@ mod config_read_write_parity_tests {
         paths
     }
 
-    /// Walk a dotted path through the response body, returning the value at
-    /// the end. A JSON `null` counts as found: an unset `Option` is
-    /// legitimately rendered as `null`, and the dashboard needs the key to
-    /// exist so it can bind an empty input to it.
+    /// Walk a dotted path through the response body, returning the value at the end.
+    /// A JSON `null` counts as found: an unset `Option` is legitimately rendered as `null`, and the dashboard needs the key to exist so it can bind an empty input to it.
     fn lookup<'a>(payload: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
         let mut cursor = payload;
         for segment in path.split('.') {
@@ -1561,9 +1509,8 @@ mod config_read_write_parity_tests {
             .filter(|path| super::super::is_writable_config_path(path))
             .collect();
 
-        // Sanity floor: if the walk stops producing paths (a refactor changes
-        // the serialized shape, say) the assertion below would pass vacuously
-        // and the guard would be worthless. The real count is in the hundreds.
+        // Sanity floor: if the walk stops producing paths (a refactor changes the serialized shape, say) the assertion below would pass vacuously and the guard would be worthless.
+        // The real count is in the hundreds.
         assert!(
             writable.len() > 100,
             "parity guard enumerated only {} writable paths — the walk is broken, \
@@ -1586,11 +1533,8 @@ mod config_read_write_parity_tests {
         );
     }
 
-    /// The write path, the JSON schema's `select` options, and `config.toml`
-    /// all speak serde's rename form for these enums. `format!("{:?}", …)`
-    /// emitted the Rust variant name instead, so the dashboard received a
-    /// value matching none of the options it offered and showed the dropdown
-    /// empty even though the field was set.
+    /// The write path, the JSON schema's `select` options, and `config.toml` all speak serde's rename form for these enums.
+    /// `format!("{:?}", …)` emitted the Rust variant name instead, so the dashboard received a value matching none of the options it offered and showed the dropdown empty even though the field was set.
     #[test]
     fn enum_valued_fields_use_the_serde_encoding_not_debug() {
         let config = KernelConfig::default();
@@ -1614,9 +1558,7 @@ mod config_read_write_parity_tests {
         }
     }
 
-    /// The specific paths the #6596 report listed as writable-but-unreadable,
-    /// pinned by name so a regression names the issue rather than surfacing as
-    /// one entry in the bulk diff above.
+    /// The specific paths the #6596 report listed as writable-but-unreadable, pinned by name so a regression names the issue rather than surfacing as one entry in the bulk diff above.
     #[test]
     fn reported_missing_paths_are_present() {
         let config = config_with_optional_sections_populated();

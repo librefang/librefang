@@ -162,9 +162,8 @@ fn is_web_search_configured(web: &librefang_types::config::WebConfig) -> bool {
 
 fn redacted_web(web: &librefang_types::config::WebConfig) -> serde_json::Value {
     serde_json::json!({
-        // `SearchProvider` is `rename_all = "snake_case"`, and the schema's
-        // select offers those spellings (`duck_duck_go`, …). `Debug` emitted
-        // `"DuckDuckGo"`, which matched no option in the dashboard (#6596).
+        // `SearchProvider` is `rename_all = "snake_case"`, and the schema's select offers those spellings (`duck_duck_go`, …).
+        // `Debug` emitted `"DuckDuckGo"`, which matched no option in the dashboard (#6596).
         "search_provider": serde_json::to_value(web.search_provider).unwrap_or(serde_json::json!("auto")),
         "cache_ttl_minutes": web.cache_ttl_minutes,
         "timeout_secs": web.timeout_secs,

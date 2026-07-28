@@ -142,9 +142,8 @@ async fn get_config_returns_redacted_view() {
     }
 }
 
-/// Walk a dotted path through a JSON body. A `null` at the end still counts as
-/// found — an unset `Option` renders as `null` and the dashboard needs the key
-/// to exist in order to bind an empty input to it.
+/// Walk a dotted path through a JSON body.
+/// A `null` at the end still counts as found — an unset `Option` renders as `null` and the dashboard needs the key to exist in order to bind an empty input to it.
 fn dig<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
     let mut cursor = value;
     for segment in path.split('.') {
@@ -153,12 +152,8 @@ fn dig<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::V
     Some(cursor)
 }
 
-/// #6596: `GET /api/config` used to omit fields that `POST /api/config/set`
-/// accepts, so the dashboard rendered them blank and reported them as "not
-/// configured" even when `config.toml` set them. The unit-level guard in
-/// `routes::config::manage` enumerates the full set; this test pins the paths
-/// from the report plus one whole section (`terminal`) that was absent
-/// entirely, over the real router.
+/// #6596: `GET /api/config` used to omit fields that `POST /api/config/set` accepts, so the dashboard rendered them blank and reported them as "not configured" even when `config.toml` set them.
+/// The unit-level guard in `routes::config::manage` enumerates the full set; this test pins the paths from the report plus one whole section (`terminal`) that was absent entirely, over the real router.
 #[tokio::test(flavor = "multi_thread")]
 async fn get_config_exposes_writable_fields_that_used_to_be_write_only() {
     let h = boot_router_with_api_key(API_KEY).await;
@@ -204,8 +199,7 @@ async fn get_config_exposes_writable_fields_that_used_to_be_write_only() {
         );
     }
 
-    // `terminal` was missing as a whole section even though `ui_sections_overlay`
-    // declares it and `terminal.` is a writable section prefix.
+    // `terminal` was missing as a whole section even though `ui_sections_overlay` declares it and `terminal.` is a writable section prefix.
     let terminal = json
         .get("terminal")
         .expect("GET /api/config must include the `terminal` section (#6596)");
@@ -226,12 +220,9 @@ async fn get_config_exposes_writable_fields_that_used_to_be_write_only() {
     }
 }
 
-/// #6596: enum-valued config fields were rendered with `format!("{:?}", …)`,
-/// which emits the Rust variant name (`"Allowlist"`, `"DuckDuckGo"`). The write
-/// path, `config.toml`, and the schema's `select` options all use serde's
-/// rename form, so the dashboard dropdown matched none of its own options.
-/// Asserting the absence of upper-case characters catches any new field that
-/// reintroduces `Debug` formatting, not just the seven that were fixed.
+/// #6596: enum-valued config fields were rendered with `format!("{:?}", …)`, which emits the Rust variant name (`"Allowlist"`, `"DuckDuckGo"`).
+/// The write path, `config.toml`, and the schema's `select` options all use serde's rename form, so the dashboard dropdown matched none of its own options.
+/// Asserting the absence of upper-case characters catches any new field that reintroduces `Debug` formatting, not just the seven that were fixed.
 #[tokio::test(flavor = "multi_thread")]
 async fn get_config_enum_values_use_serde_encoding() {
     let h = boot_router_with_api_key(API_KEY).await;
@@ -261,26 +252,16 @@ async fn get_config_enum_values_use_serde_encoding() {
     }
 }
 
-/// #6596 end to end: write a field that used to be invisible on the read side,
-/// then read it back. Before the fix the write succeeded and the subsequent GET
-/// still showed nothing, which is what made the dashboard report a saved
-/// setting as unconfigured.
+/// #6596 end to end: write a field that used to be invisible on the read side, then read it back.
+/// Before the fix the write succeeded and the subsequent GET still showed nothing, which is what made the dashboard report a saved setting as unconfigured.
 ///
-/// `compaction.*` is the field family used here because
-/// `build_reload_plan` classifies it as a read-live no-op change, so its own
-/// diff satisfies `should_store_config` and the live config swap is guaranteed
-/// by this edit alone. A `browser.*` write is classified restart-required and
-/// would only reach the live snapshot on the back of some unrelated diff, which
-/// would make the assertion prove the wrong thing.
+/// `compaction.*` is the field family used here because `build_reload_plan` classifies it as a read-live no-op change, so its own diff satisfies `should_store_config` and the live config swap is guaranteed by this edit alone.
+/// A `browser.*` write is classified restart-required and would only reach the live snapshot on the back of some unrelated diff, which would make the assertion prove the wrong thing.
 #[tokio::test(flavor = "multi_thread")]
 async fn config_set_then_get_round_trips_a_previously_write_only_field() {
     let h = boot_router_with_api_key(API_KEY).await;
 
-    // Seed the on-disk config with the harness's api_key. `config_set` reloads
-    // from this file afterwards, so without the seed the reload would replace
-    // the live config with one whose `api_key` is empty and the follow-up
-    // authenticated GET would be answered under different auth rules than the
-    // one under test.
+    // Seed the on-disk config with the harness's api_key. `config_set` reloads from this file afterwards, so without the seed the reload would replace the live config with one whose `api_key` is empty and the follow-up authenticated GET would be answered under different auth rules than the one under test.
     let seed = format!("api_key = \"{API_KEY}\"\n");
     std::fs::write(h.home.join("config.toml"), seed).expect("seed config.toml");
 
