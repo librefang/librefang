@@ -250,7 +250,8 @@ To keep those guardrails while switching the wake-up cycle off, write `schedule 
 ```toml
 [agents.main]
 name = "main-agent"
-# Cap the turn's tool loop. This role still only runs when it is messaged.
+# Cap the turn's tool loop.
+# This role still only runs when it is messaged.
 max_iterations = 80
 ```
 
