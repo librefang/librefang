@@ -135,9 +135,16 @@ pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
     // `/usr/local/bin/librefang`) and the Windows `.exe` suffix; `gateway` is
     // the alias subcommand for the same three verbs. `status` and every other
     // read-only subcommand are deliberately not matched.
+    //
+    // The pre-verb group absorbs a flag *and its separate value token*, because
+    // `--config <path>` is the CLI's only `global = true` option and its value
+    // is a distinct whitespace-delimited token — a group that only consumed
+    // `-flag ` would miss `librefang --config x.toml stop`. Each iteration
+    // still requires a leading `-`, which is what keeps the group from eating a
+    // subcommand name and matching `librefang <subcommand> … start`.
     dp!(
         "stop/restart the LibreFang daemon",
-        r"\blibrefang(\.exe)?\s+(-[^\s]+\s+)*(gateway\s+)?(start|stop|restart)\b"
+        r"\blibrefang(\.exe)?\s+(-[^\s]+(\s+[^\s-][^\s]*)?\s+)*(gateway\s+)?(start|stop|restart)\b"
     ),
     // ── Process termination ──────────────────────────────────────────────
     dp!("kill all processes", r"\bkill\s+-9\s+-1\b"),
@@ -481,8 +488,13 @@ mod tests {
         assert!(dangerous("librefang stop"));
         assert!(dangerous("librefang start"));
         assert!(dangerous("librefang restart"));
-        // Global flags before the subcommand, and subcommand flags after it.
-        assert!(dangerous("librefang --json restart"));
+        // `--config <path>` is the CLI's only global option, and its value is a
+        // separate token the pre-verb group has to absorb.
+        assert!(dangerous(
+            "librefang --config ~/.librefang/config.toml stop"
+        ));
+        assert!(dangerous("librefang --config /tmp/c.toml gateway restart"));
+        // Subcommand flags after the verb.
         assert!(dangerous("librefang start --foreground"));
         // Invoked by path, which is how an agent that just built it would.
         assert!(dangerous("target/release/librefang restart"));
@@ -505,6 +517,17 @@ mod tests {
         assert!(safe("librefang service status"));
         assert!(safe("librefang doctor"));
         assert!(safe("librefang agents list"));
+    }
+
+    /// Structural guard on the pre-verb group: every iteration must require a
+    /// leading `-`. A widening that also absorbed a bare token would let any
+    /// subcommand whose own arguments happen to end in `start` / `stop` /
+    /// `restart` match, which is a false positive on an unrelated command.
+    #[test]
+    fn librefang_subcommand_names_are_not_absorbed_as_flags() {
+        assert!(safe("librefang spawn coder start"));
+        assert!(safe("librefang agent logs restart"));
+        assert!(safe("librefang skill show --json restart"));
     }
 
     /// #6594: writes against the daemon's own SQLite file damage every agent,
