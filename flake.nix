@@ -153,8 +153,7 @@
           nativeBuildInputs = nativeBuildInputs
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
               pkgs.copyDesktopItems
-              # wrapGAppsHook3 injects LD_LIBRARY_PATH (via gappsWrapperArgs
-              # below) and the GTK runtime env (XDG_DATA_DIRS,
+              # wrapGAppsHook3 injects the GTK runtime env (XDG_DATA_DIRS,
               # GIO_MODULE_DIR, GSETTINGS_SCHEMA_DIR, …) the webview needs.
               pkgs.wrapGAppsHook3
             ];
