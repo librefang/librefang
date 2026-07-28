@@ -243,6 +243,51 @@ impl Drop for CdpConnection {
     }
 }
 
+// ── HTTP target discovery ──────────────────────────────────────────────────
+
+/// Ask a Chrome-style HTTP discovery endpoint for a fresh tab.
+///
+/// Returns the tab's WebSocket URL and its target ID, when the endpoint reports one.
+///
+/// `/json/new` is requested with PUT.
+/// Chrome has required that verb since 111 and answers a GET with `405 Method Not Allowed` and the body "Using unsafe HTTP verb GET to invoke /json/new. This action supports only PUT verb.", which this code used to walk straight into.
+/// Older Chromium builds and third-party CDP proxies may route only GET, so a 405 falls back to it rather than failing the session.
+async fn http_discover_target(cdp_endpoint: &str) -> Result<(String, Option<String>), String> {
+    let base = cdp_endpoint.trim_end_matches('/');
+    let new_url = format!("{base}/json/new");
+    let client = crate::http_client::new_client();
+
+    let send = |req: reqwest::RequestBuilder| async {
+        tokio::time::timeout(Duration::from_secs(CDP_CONNECT_TIMEOUT_SECS), req.send())
+            .await
+            .map_err(|_| format!("Timed out connecting to CDP endpoint: {cdp_endpoint}"))?
+            .map_err(|e| format!("Failed to reach CDP endpoint {cdp_endpoint}: {e}"))
+    };
+
+    let mut resp = send(client.put(&new_url)).await?;
+    if resp.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+        debug!("PUT /json/new rejected with 405; retrying with GET");
+        resp = send(client.get(&new_url)).await?;
+    }
+
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("/json/new returned {status}"));
+    }
+
+    let target: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Invalid JSON from /json/new: {e}"))?;
+
+    let page_ws = target["webSocketDebuggerUrl"]
+        .as_str()
+        .ok_or("Missing webSocketDebuggerUrl in /json/new response")?
+        .to_string();
+    let target_id = target["id"].as_str().map(|s| s.to_string());
+    Ok((page_ws, target_id))
+}
+
 // ── Browser session ────────────────────────────────────────────────────────
 
 /// A live browser session: one CDP connection per agent.
@@ -363,9 +408,8 @@ impl BrowserSession {
     /// Attach to a remote CDP endpoint instead of spawning a local Chromium.
     ///
     /// Accepted formats for `cdp_endpoint`:
-    /// - `http[s]://host:port` — HTTP discovery; `GET /json/new` creates a fresh
-    ///   tab and returns its WebSocket URL. The created target ID is stored for
-    ///   cleanup when the session ends.
+    /// - `http[s]://host:port` — HTTP discovery; `/json/new` creates a fresh tab (PUT, falling back to GET on a 405) and returns its WebSocket URL.
+    ///   The created target ID is stored for cleanup when the session ends.
     /// - `ws[s]://…` — Direct WebSocket attach (assumes page-level endpoint).
     ///
     /// `auth_token` is sent as `Authorization: Bearer <token>` on the WS upgrade,
@@ -376,27 +420,9 @@ impl BrowserSession {
 
         let lower = cdp_endpoint.to_lowercase();
         if lower.starts_with("http://") || lower.starts_with("https://") {
-            // Normalise: strip trailing slash
-            let base = cdp_endpoint.trim_end_matches('/');
-            let new_url = format!("{base}/json/new");
-            let resp = tokio::time::timeout(
-                Duration::from_secs(CDP_CONNECT_TIMEOUT_SECS),
-                crate::http_client::new_client().get(&new_url).send(),
-            )
-            .await
-            .map_err(|_| format!("Timed out connecting to CDP endpoint: {cdp_endpoint}"))?
-            .map_err(|e| format!("Failed to reach CDP endpoint {cdp_endpoint}: {e}"))?;
-
-            let target: serde_json::Value = resp
-                .json()
-                .await
-                .map_err(|e| format!("Invalid JSON from /json/new: {e}"))?;
-
-            page_ws = target["webSocketDebuggerUrl"]
-                .as_str()
-                .ok_or("Missing webSocketDebuggerUrl in /json/new response")?
-                .to_string();
-            target_id = target["id"].as_str().map(|s| s.to_string());
+            let (ws, id) = http_discover_target(cdp_endpoint).await?;
+            page_ws = ws;
+            target_id = id;
             debug!(ws = %page_ws, "Attached via HTTP discovery (/json/new)");
         } else if lower.starts_with("ws://") || lower.starts_with("wss://") {
             page_ws = cdp_endpoint.to_string();
@@ -1295,6 +1321,80 @@ mod tests {
         let err = BrowserResponse::err("bad");
         assert!(!err.success);
         assert_eq!(err.error.unwrap(), "bad");
+    }
+
+    /// Chrome 111+ serves `/json/new` on PUT only, answering GET with 405.
+    #[tokio::test]
+    async fn test_http_discovery_uses_put() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // The counts are the assertion: a PUT-second implementation reaches the same result by trying GET first, so only the call counts tell the two orders apart.
+        Mock::given(method("GET"))
+            .and(path("/json/new"))
+            .respond_with(ResponseTemplate::new(405))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/json/new"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "TAB-1",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/TAB-1",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (ws, id) = http_discover_target(&server.uri()).await.unwrap();
+        assert_eq!(ws, "ws://127.0.0.1:9222/devtools/page/TAB-1");
+        assert_eq!(id.as_deref(), Some("TAB-1"));
+    }
+
+    /// Endpoints that route only GET still work: a 405 on PUT falls back.
+    #[tokio::test]
+    async fn test_http_discovery_falls_back_to_get_on_405() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Both verbs must be exercised: a GET-first implementation would answer from the GET mock alone and never prove that PUT was attempted at all.
+        Mock::given(method("PUT"))
+            .and(path("/json/new"))
+            .respond_with(ResponseTemplate::new(405))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/json/new"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "TAB-2",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/TAB-2",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (ws, id) = http_discover_target(&server.uri()).await.unwrap();
+        assert_eq!(ws, "ws://127.0.0.1:9222/devtools/page/TAB-2");
+        assert_eq!(id.as_deref(), Some("TAB-2"));
+    }
+
+    /// A non-2xx that is not 405 surfaces as an error instead of a JSON parse failure further down.
+    #[tokio::test]
+    async fn test_http_discovery_reports_non_success_status() {
+        use wiremock::matchers::path;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(path("/json/new"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let err = http_discover_target(&server.uri()).await.unwrap_err();
+        assert!(err.contains("404"), "unexpected error: {err}");
     }
 }
 

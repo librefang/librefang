@@ -1,0 +1,4 @@
+Request `/json/new` with `PUT` when discovering a target over HTTP, so `cdp_endpoint` works against Chrome 111 and newer.
+Chrome moved the endpoint to `PUT` as CSRF hardening; librefang still sent `GET` and got back a `405` page whose HTML then failed to parse, so the operator saw `Invalid JSON from /json/new: expected value at line 1 column 1` — a parser error that says nothing about the verb that caused it.
+The request now tries `PUT` first and falls back to `GET` on `405`, which keeps older builds and proxies that only route `GET` working, and the response status is checked before the body is parsed so a non-2xx reply is reported as itself rather than as malformed JSON.
+The two verb-negotiation tests pin the call counts rather than only the returned target, since a GET-first implementation reaches the same result and would otherwise pass both (#6619) (@nevgenov)
