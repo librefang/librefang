@@ -15,7 +15,7 @@ use super::*;
 pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = state.kernel.config_ref();
     let budget = state.kernel.budget_config();
-    Json(redacted_config_json(&**config, &budget))
+    Json(redacted_config_json(&config, &budget))
 }
 
 /// Build the redacted body returned by `GET /api/config`.
@@ -1503,6 +1503,14 @@ mod config_read_write_parity_tests {
     /// match: the top-level key plus one and two nested levels, which is the
     /// deepest form the allowlist accepts. Arrays are leaves — a numeric index
     /// is not a config key path.
+    ///
+    /// Known blind spot: a field carrying `#[serde(skip_serializing_if = …)]`
+    /// whose default value satisfies that predicate is absent from `value`, so
+    /// the walk cannot see it. Every writable path in that category today
+    /// (`exec_policy.allowed_env_vars`, `default_model.cli_profile_dirs`,
+    /// `budget.providers`, `tool_invoke.allowlist`, `agent_max_iterations`,
+    /// `max_history_messages`) is in the read payload, checked by hand; a
+    /// future one has to be added by hand too.
     fn candidate_paths(value: &serde_json::Value) -> Vec<String> {
         let mut paths = Vec::new();
         let Some(root) = value.as_object() else {
