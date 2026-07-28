@@ -92,6 +92,7 @@ function makeAuditEntry(overrides: Partial<ApprovalAuditEntry> = {}): ApprovalAu
     decided_by: "admin",
     decided_at: "2026-07-28T10:00:00Z",
     requested_at: "2026-07-28T09:59:00Z",
+    second_factor_used: false,
     ...overrides,
   };
 }

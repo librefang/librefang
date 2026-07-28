@@ -3330,8 +3330,14 @@ export interface ApprovalAuditEntry {
   decided_at: string;
   requested_at: string;
   feedback?: string;
-  /** Whether a TOTP second factor was used for this decision. */
-  second_factor_used?: boolean;
+  /**
+   * Whether a TOTP second factor was used for this decision.
+   *
+   * Always present: the Rust field is a plain `bool` (not an `Option`), and
+   * `GET /api/approvals/audit` serializes `Vec<ApprovalAuditEntry>` straight
+   * through, so serde always emits it.
+   */
+  second_factor_used: boolean;
 }
 
 export async function queryApprovalAudit(params: {

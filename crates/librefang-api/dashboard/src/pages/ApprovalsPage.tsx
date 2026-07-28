@@ -38,7 +38,7 @@ import {
   EyeOff,
   HelpCircle,
   History as HistoryIcon,
-  Loader2,
+  Hourglass,
   SkipForward,
   Zap,
 } from "lucide-react";
@@ -382,9 +382,12 @@ const DECISION_PRESENTATION: Record<KnownApprovalDecision, DecisionPresentation>
     color: "var(--color-text-dim)",
   },
   // Submission row: still awaiting a decision, not a completed one.
+  // `Hourglass` rather than `Loader2` — every other `Loader2` in the dashboard
+  // is paired with `animate-spin` to mean "request in flight", and a static
+  // spinner glyph repeated down a history table reads as a stalled one.
   pending: {
     labelKey: "approvals.history.decisions.pending",
-    Icon: Loader2,
+    Icon: Hourglass,
     color: "var(--color-brand)",
   },
   // Timeout fallback ran the agent on without the tool.
