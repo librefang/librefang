@@ -4,6 +4,9 @@ use super::*;
 // Agent Identity endpoint
 // ---------------------------------------------------------------------------
 /// Request body for updating agent visual identity.
+///
+/// Every field is optional and carries PATCH semantics: an omitted or `null` field preserves the stored value, and an empty string stores an empty string (`GET /api/agents/{id}` then reports `""`, not `null`).
+/// See `merge_agent_identity` in the parent module for why `null` cannot mean "clear".
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdateIdentityRequest {
@@ -24,7 +27,10 @@ pub(crate) struct UpdateIdentityRequest {
     path = "/api/agents/{id}/identity",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = UpdateIdentityRequest, description = "Identity fields to update"),
+    request_body(
+        content = UpdateIdentityRequest,
+        description = "Identity fields to update. PATCH semantics: an omitted or `null` field preserves the stored value, and a partial body never nulls the fields it does not mention. A field cannot be set back to `null`, because `null` already means \"not provided\"; sending an empty string stores an empty string, which is the closest thing to clearing one. Identical in behaviour to the six identity fields of `PATCH /api/agents/{id}/config`."
+    ),
     responses(
         (status = 200, description = "Update an agent's visual identity", body = crate::types::JsonObject)
     )
@@ -71,14 +77,28 @@ pub async fn update_agent_identity(
         }
     }
 
-    let identity = AgentIdentity {
-        emoji: req.emoji,
-        avatar_url: req.avatar_url,
-        color: req.color,
-        archetype: req.archetype,
-        vibe: req.vibe,
-        greeting_style: req.greeting_style,
-    };
+    // Read the stored identity and merge the provided fields onto it (#6608).
+    // This endpoint is a PATCH: before the fix it built a fresh `AgentIdentity` from the request alone, so a single-field body silently nulled the other five and returned 200.
+    // `merge_agent_identity` is shared with `PATCH /api/agents/{id}/config`, which writes the same six fields.
+    //
+    // A missing agent yields `AgentIdentity::default()` here and is then reported as 404 by `update_identity` below, matching `/config`.
+    let current = state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .map(|e| e.identity)
+        .unwrap_or_default();
+    let identity = merge_agent_identity(
+        current,
+        AgentIdentity {
+            emoji: req.emoji,
+            avatar_url: req.avatar_url,
+            color: req.color,
+            archetype: req.archetype,
+            vibe: req.vibe,
+            greeting_style: req.greeting_style,
+        },
+    );
 
     match state
         .kernel

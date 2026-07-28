@@ -24,7 +24,9 @@
 //!   PUT  /api/agents/{id}/files/{filename}     — write (round-trip + traversal)
 //!   GET  /api/agents/{id}/files/{filename}     — read back
 //!   DELETE /api/agents/{id}/files/{filename}   — delete + read-back-gone
-//!   GET/PUT /api/agents/{id}/tools             — tool allow/blocklist
+//!   GET/PUT /api/agents/{id}/tools             — tool allow/blocklist, plus the
+//!                                                inert-`tool_allowlist`-entry
+//!                                                warnings from #6609
 //!   GET/PUT /api/agents/{id}/skills            — skill allowlist
 //!   GET/PUT /api/agents/{id}/mcp_servers       — MCP server allowlist
 //!
@@ -718,5 +720,281 @@ async fn test_capabilities_put_requires_auth() {
         status,
         StatusCode::UNAUTHORIZED,
         "unauthenticated capabilities mutation must be 401"
+    );
+}
+
+// ===========================================================================
+// PUT /api/agents/{id}/tools — inert `tool_allowlist` entry warnings (#6609)
+// ===========================================================================
+//
+// The kernel applies `tool_allowlist` in `available_tools` Step 4 as
+// `all_tools.retain(...)`, after `capabilities.tools` has already filtered the
+// candidate set in Step 1. `retain` can only remove, so an allowlist entry
+// naming a builtin the declared set excludes grants nothing. Those semantics
+// are deliberate and unchanged; what these tests pin is that the write API no
+// longer accepts such an entry silently.
+
+/// Collect the response's `warnings` array as plain strings. Absent key → empty.
+fn warnings_of(body: &serde_json::Value) -> Vec<String> {
+    body.get("warnings")
+        .and_then(|w| w.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|v| v.as_str().unwrap_or_default().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// An allowlist entry that `capabilities_tools` cannot admit is accepted and persisted (semantics unchanged) but named in the response's `warnings`.
+/// Both fields go in one request so the check is proven to run against the declared set the request just wrote, not the one it replaced.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tools_put_warns_about_inert_allowlist_entry() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "tools-inert");
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/tools"),
+            serde_json::json!({
+                "capabilities_tools": ["file_read"],
+                "tool_allowlist": ["web_search"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PUT must still succeed: {body:?}");
+
+    let warnings = warnings_of(&body);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "exactly one inert entry expected: {body:?}"
+    );
+    assert!(
+        warnings[0].contains("web_search"),
+        "the warning must name the inert entry: {body:?}"
+    );
+
+    // Semantics are unchanged — the value is still stored and echoed.
+    assert_eq!(
+        body["tool_allowlist"],
+        serde_json::json!(["web_search"]),
+        "the allowlist must still be persisted: {body:?}"
+    );
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/tools"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["tool_allowlist"], serde_json::json!(["web_search"]));
+}
+
+/// False-positive guard: an entry that `capabilities_tools` does admit produces no warning at all.
+/// Without this a diagnostic that warned on every request would still satisfy the test above.
+///
+/// The declared entry is a glob (`file_*`) and the allowlist entry a literal (`file_read`), so a string-equality implementation of the check would flag a working configuration here — the match has to be glob-evaluated.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tools_put_does_not_warn_about_a_live_allowlist_entry() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "tools-live");
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/tools"),
+            serde_json::json!({
+                "capabilities_tools": ["file_*"],
+                "tool_allowlist": ["file_read"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert!(
+        body.get("warnings").is_none(),
+        "a live allowlist entry must produce no warnings key: {body:?}"
+    );
+}
+
+/// An unbounded `capabilities_tools` makes the Step 1 filter a no-op, so no entry is provably inert and nothing may be reported — warning here would be a false positive on a configuration that grants every builtin.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tools_put_does_not_warn_when_capabilities_tools_is_unbounded() {
+    let h = boot().await;
+
+    // Explicit `*` wildcard grant.
+    let wildcard = spawn_named(&h.state, "tools-wildcard");
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{wildcard}/tools"),
+            serde_json::json!({
+                "capabilities_tools": ["*"],
+                "tool_allowlist": ["web_search", "definitely_not_a_tool"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert!(
+        body.get("warnings").is_none(),
+        "a `*` grant admits everything, so nothing is provably inert: {body:?}"
+    );
+
+    // Empty list — the kernel's other "unrestricted" spelling.
+    let unrestricted = spawn_named(&h.state, "tools-unrestricted");
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{unrestricted}/tools"),
+            serde_json::json!({
+                "capabilities_tools": [],
+                "tool_allowlist": ["web_search"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert!(
+        body.get("warnings").is_none(),
+        "an empty capabilities_tools is unrestricted, so nothing is provably inert: {body:?}"
+    );
+}
+
+/// MCP tools reach the candidate set without being filtered by `capabilities_tools`, and an `mcp_*` allowlist entry is how a caller selects among them (#6495).
+/// Warning about one would break a working configuration.
+/// A wildcard entry is likewise never reported: a later skill install or MCP connect can make it match.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tools_put_does_not_warn_about_mcp_or_glob_entries() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "tools-mcp-glob");
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/tools"),
+            serde_json::json!({
+                "capabilities_tools": ["file_read"],
+                "tool_allowlist": ["mcp_github_create_issue", "mcp_*", "web_*"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert!(
+        body.get("warnings").is_none(),
+        "MCP-namespaced and glob entries are never provably inert: {body:?}"
+    );
+}
+
+/// A request that touches neither the allowlist nor the grant surface says nothing about either, so it must stay quiet even when the stored allowlist is inert.
+/// A blocklist-only request is the shape that qualifies; narrowing `capabilities_tools` does not, and is covered by the test below.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tools_put_only_warns_about_submitted_allowlist_entries() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "tools-not-submitted");
+
+    // Seed an inert entry (and take the warning).
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/tools"),
+            serde_json::json!({
+                "capabilities_tools": ["file_read"],
+                "tool_allowlist": ["web_search"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(warnings_of(&body).len(), 1, "{body:?}");
+
+    // A follow-up request that touches only the blocklist leaves the stored allowlist alone and must stay quiet about it.
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/tools"),
+            serde_json::json!({ "tool_blocklist": ["shell_exec"] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        body["tool_allowlist"],
+        serde_json::json!(["web_search"]),
+        "the stored allowlist must be untouched: {body:?}"
+    );
+    assert!(
+        body.get("warnings").is_none(),
+        "a request that did not submit tool_allowlist must not warn about it: {body:?}"
+    );
+}
+
+/// Narrowing `capabilities_tools` alone can silence a stored allowlist entry without the request ever mentioning the allowlist, and from the operator's side that is the same defect: their own request is what stopped the tool from being granted, and the response is a clean `200`.
+/// Gating the diagnostic on a submitted `tool_allowlist` alone would stay quiet here.
+///
+/// The reverse shape — widening the grant surface back to unbounded, which is the most common real request that submits only `capabilities_tools` — must go quiet again rather than warn about the same stored entry.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tools_put_warns_when_narrowing_capabilities_makes_a_stored_entry_inert() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "tools-narrowed");
+
+    // A working configuration: an unbounded grant with a live allowlist.
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/tools"),
+            serde_json::json!({
+                "capabilities_tools": ["*"],
+                "tool_allowlist": ["web_search"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert!(
+        body.get("warnings").is_none(),
+        "a `*` grant admits web_search, so nothing is inert yet: {body:?}"
+    );
+
+    // Narrow the grant surface and nothing else. The stored allowlist stays at
+    // ["web_search"], which the new declared set no longer admits.
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/tools"),
+            serde_json::json!({ "capabilities_tools": ["file_read"] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let warnings = warnings_of(&body);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "narrowing capabilities_tools must report the stored entry it silenced: {body:?}"
+    );
+    assert!(
+        warnings[0].contains("web_search"),
+        "the warning must name the silenced entry: {body:?}"
+    );
+    assert_eq!(
+        body["tool_allowlist"],
+        serde_json::json!(["web_search"]),
+        "a capabilities-only request must leave the stored allowlist untouched: {body:?}"
+    );
+
+    // Widen the grant surface back — nothing is provably inert against an
+    // unbounded declared set, so the warning must disappear.
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/tools"),
+            serde_json::json!({ "capabilities_tools": ["*"] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert!(
+        body.get("warnings").is_none(),
+        "an unbounded grant admits everything, so nothing is provably inert: {body:?}"
     );
 }

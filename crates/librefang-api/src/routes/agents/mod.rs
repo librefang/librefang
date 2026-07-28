@@ -361,6 +361,29 @@ pub(crate) fn effective_default_model(
     override_dm.cloned().unwrap_or_else(|| base.clone())
 }
 
+/// Merge a partial identity update onto an agent's stored identity (#6608).
+///
+/// PATCH semantics for the six `AgentIdentity` fields: an `incoming` field of `None` means "not provided by the caller" and preserves the stored value; `Some(v)` overwrites it.
+///
+/// Both `PATCH /api/agents/{id}/identity` and `PATCH /api/agents/{id}/config` write these same six fields, and #6608 was the two drifting into opposite semantics: `/config` merged, `/identity` built a fresh `AgentIdentity` from the request alone, so `PATCH {"emoji": "X"}` through `/identity` nulled the other five fields and returned `200`.
+/// Routing both handlers through this one function is what keeps them from diverging again — a per-handler copy of the six-line merge is exactly what produced the bug.
+///
+/// Neither endpoint can set a field back to `None`, because `None` is already spoken for by "not provided".
+/// The closest available operation is to store an empty string: `Some("")` passes both handlers' `color` / `avatar_url` validators (each is guarded by `!x.is_empty()`) and is stored as `Some("")`, which `GET /api/agents/{id}` then reports as `""` rather than `null`.
+pub(crate) fn merge_agent_identity(
+    current: AgentIdentity,
+    incoming: AgentIdentity,
+) -> AgentIdentity {
+    AgentIdentity {
+        emoji: incoming.emoji.or(current.emoji),
+        avatar_url: incoming.avatar_url.or(current.avatar_url),
+        color: incoming.color.or(current.color),
+        archetype: incoming.archetype.or(current.archetype),
+        vibe: incoming.vibe.or(current.vibe),
+        greeting_style: incoming.greeting_style.or(current.greeting_style),
+    }
+}
+
 /// Resolve the session id the attachment blocks should be written to,
 /// mirroring the resolver used by `send_message_*` in
 /// `kernel::messaging`. Pure function (no I/O, no kernel reads) so it can
@@ -820,6 +843,91 @@ mod tests {
         // Const sanity in a runtime form so clippy doesn't fold it
         // out: zero cap would silently empty the list.
         assert!(effective_agent_list_limit(Some(10)) >= 10.min(MAX_AGENT_LIST_LIMIT));
+    }
+
+    // -----------------------------------------------------------------------
+    // merge_agent_identity (#6608)
+    // -----------------------------------------------------------------------
+
+    fn full_identity() -> AgentIdentity {
+        AgentIdentity {
+            emoji: Some("stored-emoji".to_string()),
+            avatar_url: Some("https://example.invalid/stored.png".to_string()),
+            color: Some("#000001".to_string()),
+            archetype: Some("stored-archetype".to_string()),
+            vibe: Some("stored-vibe".to_string()),
+            greeting_style: Some("stored-greeting".to_string()),
+        }
+    }
+
+    /// A one-field update must preserve the other five.
+    /// This is #6608 in unit form: the pre-fix `/identity` handler dropped them.
+    #[test]
+    fn merge_agent_identity_preserves_fields_the_caller_omitted() {
+        let merged = merge_agent_identity(
+            full_identity(),
+            AgentIdentity {
+                emoji: Some("new-emoji".to_string()),
+                ..AgentIdentity::default()
+            },
+        );
+        assert_eq!(merged.emoji.as_deref(), Some("new-emoji"));
+        assert_eq!(
+            merged.avatar_url.as_deref(),
+            Some("https://example.invalid/stored.png")
+        );
+        assert_eq!(merged.color.as_deref(), Some("#000001"));
+        assert_eq!(merged.archetype.as_deref(), Some("stored-archetype"));
+        assert_eq!(merged.vibe.as_deref(), Some("stored-vibe"));
+        assert_eq!(merged.greeting_style.as_deref(), Some("stored-greeting"));
+    }
+
+    /// Every field is wired to its own counterpart.
+    /// A transposed pair (`vibe: incoming.archetype.or(...)`) is precisely the drift class this helper exists to prevent, and only a per-field assertion catches it, so each field is driven with a distinguishable value.
+    #[test]
+    fn merge_agent_identity_maps_each_field_to_itself() {
+        let incoming = AgentIdentity {
+            emoji: Some("in-emoji".to_string()),
+            avatar_url: Some("in-avatar".to_string()),
+            color: Some("in-color".to_string()),
+            archetype: Some("in-archetype".to_string()),
+            vibe: Some("in-vibe".to_string()),
+            greeting_style: Some("in-greeting".to_string()),
+        };
+        let merged = merge_agent_identity(full_identity(), incoming);
+        assert_eq!(merged.emoji.as_deref(), Some("in-emoji"));
+        assert_eq!(merged.avatar_url.as_deref(), Some("in-avatar"));
+        assert_eq!(merged.color.as_deref(), Some("in-color"));
+        assert_eq!(merged.archetype.as_deref(), Some("in-archetype"));
+        assert_eq!(merged.vibe.as_deref(), Some("in-vibe"));
+        assert_eq!(merged.greeting_style.as_deref(), Some("in-greeting"));
+    }
+
+    /// An empty string is the documented way to clear a field, since `None` already means "not provided".
+    /// It must reach the stored identity as `Some("")` rather than being folded back to the previous value.
+    #[test]
+    fn merge_agent_identity_treats_empty_string_as_an_explicit_clear() {
+        let merged = merge_agent_identity(
+            full_identity(),
+            AgentIdentity {
+                color: Some(String::new()),
+                ..AgentIdentity::default()
+            },
+        );
+        assert_eq!(merged.color.as_deref(), Some(""));
+        assert_eq!(merged.emoji.as_deref(), Some("stored-emoji"));
+    }
+
+    /// Nothing provided is a no-op, not a wipe.
+    #[test]
+    fn merge_agent_identity_with_no_incoming_fields_is_a_noop() {
+        let merged = merge_agent_identity(full_identity(), AgentIdentity::default());
+        assert_eq!(merged.emoji, full_identity().emoji);
+        assert_eq!(merged.avatar_url, full_identity().avatar_url);
+        assert_eq!(merged.color, full_identity().color);
+        assert_eq!(merged.archetype, full_identity().archetype);
+        assert_eq!(merged.vibe, full_identity().vibe);
+        assert_eq!(merged.greeting_style, full_identity().greeting_style);
     }
 
     /// The pre-fix prefix-match (`"image/"`) let SVG, BMP, TIFF, HEIC and

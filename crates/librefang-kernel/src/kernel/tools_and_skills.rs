@@ -1441,7 +1441,9 @@ impl LibreFangKernel {
     /// evolution path is active). Extracted as a named predicate so the gate
     /// condition is shared between `available_tools` and unit tests — no
     /// inline duplication of the tool-name list.
-    pub(crate) fn is_evolve_tool(name: &str) -> bool {
+    ///
+    /// Public because these tools bypass the `capabilities.tools` filter, which makes the predicate load-bearing outside the kernel too: the API layer's inert-`tool_allowlist`-entry diagnostic (#6609, `routes::agents::config`) must not flag an entry naming one of them as unable to match, since Step 1's post-filter injects them regardless of what `capabilities.tools` declares.
+    pub fn is_evolve_tool(name: &str) -> bool {
         matches!(
             name,
             "skill_read_file"

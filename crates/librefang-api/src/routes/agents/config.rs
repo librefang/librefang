@@ -88,7 +88,7 @@ pub async fn set_model(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "Get an agent's tool allowlist and blocklist", body = crate::types::JsonObject)
+        (status = 200, description = "Get an agent's tool allowlist and blocklist. `capabilities_tools` is the grant surface; `tool_allowlist` and `tool_blocklist` are applied afterwards and only narrow what it already admits, so a tool listed in `tool_allowlist` but absent from `capabilities_tools` is not granted (MCP tools excepted — they are not filtered by `capabilities_tools`). Refs #6609.", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_agent_tools(
@@ -126,16 +126,72 @@ pub async fn get_agent_tools(
     )
 }
 
+/// The `tool_allowlist` entries that provably cannot admit any tool (#6609).
+///
+/// `tool_allowlist` is applied by `LibreFangKernel::available_tools`
+/// (`librefang-kernel/src/kernel/tools_and_skills.rs`, Step 4) as `all_tools.retain(...)`, so it can only remove.
+/// A builtin or skill tool that `capabilities.tools` did not admit in Step 1 is already gone by then, and no allowlist entry can bring it back.
+/// That narrowing-only behaviour is deliberate; what this function fixes is that the write API used to accept, persist and echo an entry that could never do anything, with no signal at all to the caller.
+///
+/// Only entries that are *provably* inert are reported.
+/// Anything that might match a tool now or later is left unreported, because a false warning on a working configuration is worse than the silence it replaces.
+/// An entry is reported only when all of the following hold:
+///
+/// - `declared_tools` is restricted: non-empty and free of a `*` entry.
+///   This mirrors the kernel's `tools_unrestricted` check; when it is false Step 1's filter is a no-op and every builtin reaches the candidate set, so any entry may legitimately narrow something.
+/// - The entry contains no `*`.
+///   A glob may match a tool introduced by a later skill install or MCP connect, so it is never *provably* inert; restricting the check to literals also removes any need to decide whether two glob patterns can overlap.
+/// - The entry is not MCP-namespaced.
+///   MCP tools join the candidate set in Step 3 *without* being filtered by `capabilities.tools`, and their names are generated at runtime from whichever servers happen to be connected.
+/// - The entry is not a self-evolution tool.
+///   Step 1's post-filter injects those regardless of what `capabilities.tools` declares.
+/// - No declared pattern glob-matches the entry.
+///   This is a glob evaluation, not a string comparison: `capabilities.tools = ["file_*"]` does admit an allowlist entry of `file_read`, and a string compare would wrongly flag it.
+///
+/// Together those conditions make false positives impossible: for a literal entry to survive Step 4 it must equal some candidate tool name, and every source of candidate names — builtins and skill tools admitted by `capabilities.tools`, the always-injected evolution tools, and MCP tools — is excluded above.
+/// The cost is false negatives (a genuinely inert glob entry goes unreported), which is the safe direction to err in.
+fn inert_tool_allowlist_entries(
+    declared_tools: &[String],
+    tool_allowlist: &[String],
+) -> Vec<String> {
+    let declared_restricted =
+        !declared_tools.is_empty() && !declared_tools.iter().any(|d| d == "*");
+    if !declared_restricted {
+        return Vec::new();
+    }
+    tool_allowlist
+        .iter()
+        .filter(|raw| {
+            let entry = raw.as_str();
+            !entry.contains('*')
+                && !librefang_kernel::mcp::is_mcp_tool(entry)
+                && !librefang_kernel::LibreFangKernel::is_evolve_tool(entry)
+                && !declared_tools
+                    .iter()
+                    .any(|d| librefang_types::capability::glob_matches(d, entry))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Request body for updating an agent's tool configuration.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetAgentToolsRequest {
-    /// Declared tools (capabilities.tools). `None` = no change, `Some([])` = unrestricted.
+    /// Declared tools (capabilities.tools) — the grant surface.
+    /// A builtin or skill tool has to be admitted here to reach the agent at all.
+    /// `None` = no change, `Some([])` = unrestricted.
+    /// Glob patterns allowed.
     pub capabilities_tools: Option<Vec<String>>,
-    /// Tool allowlist — additional filter. `None` = no change, `Some([])` = clear.
+    /// Tool allowlist — a **narrowing** filter over what `capabilities_tools` already admits, never a grant.
+    /// It is applied after `capabilities_tools` as a retain, so an entry naming a tool the declared set excludes has no effect; grant such a tool by adding it to `capabilities_tools` instead.
+    /// `None` = no change, `Some([])` = clear.
+    /// Glob patterns allowed (`file_*`, `mcp_*`).
     #[serde(default)]
     pub tool_allowlist: Option<Vec<String>>,
-    /// Tool blocklist — exclusion filter. `None` = no change, `Some([])` = clear.
+    /// Tool blocklist — exclusion filter, applied after the allowlist.
+    /// `None` = no change, `Some([])` = clear.
+    /// Glob patterns allowed.
     #[serde(default)]
     pub tool_blocklist: Option<Vec<String>>,
 }
@@ -146,9 +202,12 @@ pub struct SetAgentToolsRequest {
     path = "/api/agents/{id}/tools",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = SetAgentToolsRequest, description = "Tool configuration fields"),
+    request_body(
+        content = SetAgentToolsRequest,
+        description = "Tool configuration fields. `capabilities_tools` is the grant surface; `tool_allowlist` and `tool_blocklist` only ever narrow what it already admits, because the kernel applies them afterwards as a retain. An allowlist entry naming a builtin or skill tool that `capabilities_tools` excludes therefore grants nothing — add it to `capabilities_tools` instead. MCP tools are the exception: they are not filtered by `capabilities_tools`, so an `mcp_*` allowlist entry does select among them (#6609)."
+    ),
     responses(
-        (status = 200, description = "Update an agent's tool allowlist and blocklist", body = crate::types::JsonObject)
+        (status = 200, description = "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist`.", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_tools(
@@ -188,6 +247,14 @@ pub async fn set_agent_tools(
         );
     }
 
+    // Whether the inert-entry diagnostic below should run at all.
+    // Captured before the fields are moved into the kernel call.
+    //
+    // Submitting `tool_allowlist` obviously makes the caller responsible for what it says.
+    // Submitting `capabilities_tools` does too, because that is the grant surface: narrowing it can render a stored allowlist entry inert without the request mentioning the allowlist at all, and staying silent there would reproduce the exact #6609 experience — the operator's own request silences a tool and the response is a clean 200.
+    // A request that touches neither (blocklist only) says nothing about either side, so it stays quiet about whatever was already stored.
+    let evaluate_inert_entries = body.tool_allowlist.is_some() || body.capabilities_tools.is_some();
+
     match state.kernel.set_agent_tool_filters(
         agent_id,
         body.capabilities_tools,
@@ -200,15 +267,36 @@ pub async fn set_agent_tools(
         // unlikely — would mean the agent was deleted mid-PUT) fall back to a
         // 200 ack so existing clients don't crash on the missing body.
         Ok(()) => match state.kernel.agent_registry().get(agent_id) {
-            Some(entry) => (
-                StatusCode::OK,
-                Json(serde_json::json!({
+            Some(entry) => {
+                let mut payload = serde_json::json!({
                     "capabilities_tools": entry.manifest.capabilities.tools,
                     "tool_allowlist": entry.manifest.tool_allowlist,
                     "tool_blocklist": entry.manifest.tool_blocklist,
                     "disabled": entry.manifest.tools_disabled,
-                })),
-            ),
+                });
+                // Name any allowlist entry that provably cannot admit a tool (#6609).
+                // Evaluated against the entry read back *after* the write, so both the new declared set and the stored allowlist are the post-write values: a request that sets `capabilities_tools` and `tool_allowlist` together is judged against what it just wrote rather than what it replaced, and a request that only narrows `capabilities_tools` is judged against the allowlist it left in place.
+                //
+                // No `tools_disabled` guard is needed: `update_tool_config` unconditionally clears that flag on every successful write, so on this arm the agent's tools are always enabled.
+                if evaluate_inert_entries {
+                    let inert = inert_tool_allowlist_entries(
+                        &entry.manifest.capabilities.tools,
+                        &entry.manifest.tool_allowlist,
+                    );
+                    if !inert.is_empty() {
+                        let warnings: Vec<String> = inert
+                            .iter()
+                            .map(|name| {
+                                format!(
+                                    "tool_allowlist entry '{name}' cannot take effect: capabilities_tools does not admit it, and tool_allowlist only narrows that set — it never grants. Add '{name}' to capabilities_tools to grant it."
+                                )
+                            })
+                            .collect();
+                        payload["warnings"] = serde_json::json!(warnings);
+                    }
+                }
+                (StatusCode::OK, Json(payload))
+            }
             None => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
         },
         Err(e) => (
@@ -720,21 +808,25 @@ pub async fn patch_agent_config(
         || req.greeting_style.is_some();
 
     if has_identity_field {
-        // Read current identity, merge with provided fields
+        // Read current identity, merge with provided fields.
+        // The merge itself lives in `merge_agent_identity` so this handler and `PATCH /api/agents/{id}/identity` cannot drift apart again (#6608).
         let current = state
             .kernel
             .agent_registry()
             .get(agent_id)
             .map(|e| e.identity)
             .unwrap_or_default();
-        let merged = AgentIdentity {
-            emoji: req.emoji.or(current.emoji),
-            avatar_url: req.avatar_url.or(current.avatar_url),
-            color: req.color.or(current.color),
-            archetype: req.archetype.or(current.archetype),
-            vibe: req.vibe.or(current.vibe),
-            greeting_style: req.greeting_style.or(current.greeting_style),
-        };
+        let merged = merge_agent_identity(
+            current,
+            AgentIdentity {
+                emoji: req.emoji,
+                avatar_url: req.avatar_url,
+                color: req.color,
+                archetype: req.archetype,
+                vibe: req.vibe,
+                greeting_style: req.greeting_style,
+            },
+        );
         if state
             .kernel
             .agent_registry()
@@ -1083,5 +1175,90 @@ pub async fn delete_hand_agent_runtime_config(
             let (status, msg) = map_hand_runtime_override_err(&e);
             (status, Json(serde_json::json!({"error": msg}))).into_response()
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod inert_allowlist_tests {
+    use super::inert_tool_allowlist_entries;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The reporter's case: a literal tool name allowlisted while `capabilities.tools` excludes it.
+    /// Step 1 already dropped the tool, so the entry can never grant it back.
+    #[test]
+    fn literal_entry_outside_the_declared_set_is_inert() {
+        assert_eq!(
+            inert_tool_allowlist_entries(&v(&["file_read"]), &v(&["web_search"])),
+            v(&["web_search"])
+        );
+    }
+
+    /// The false-positive guard that a string-equality implementation fails: `file_*` does admit `file_read`, so the entry is live and must not be reported.
+    /// This is why the declared side is evaluated with `glob_matches`.
+    #[test]
+    fn entry_admitted_by_a_declared_glob_is_not_inert() {
+        assert!(inert_tool_allowlist_entries(&v(&["file_*"]), &v(&["file_read"])).is_empty());
+    }
+
+    #[test]
+    fn entry_matching_a_declared_literal_is_not_inert() {
+        assert!(inert_tool_allowlist_entries(&v(&["file_read"]), &v(&["file_read"])).is_empty());
+    }
+
+    /// An empty `capabilities.tools` is the kernel's "unrestricted" case: Step 1's filter is a no-op, every builtin reaches the candidate set, so no entry is provably inert.
+    #[test]
+    fn empty_declared_set_is_unbounded_and_yields_no_warnings() {
+        assert!(inert_tool_allowlist_entries(&[], &v(&["web_search", "nope"])).is_empty());
+    }
+
+    /// Same for an explicit `*` wildcard grant.
+    #[test]
+    fn wildcard_declared_set_is_unbounded_and_yields_no_warnings() {
+        assert!(
+            inert_tool_allowlist_entries(&v(&["*", "file_read"]), &v(&["web_search"])).is_empty()
+        );
+    }
+
+    /// A glob entry may match a tool a later skill install introduces, so it is never *provably* inert even against a restricted declared set.
+    #[test]
+    fn glob_entry_is_never_reported() {
+        assert!(inert_tool_allowlist_entries(&v(&["file_read"]), &v(&["web_*"])).is_empty());
+    }
+
+    /// MCP tools join the candidate set without being filtered by `capabilities.tools`, and their names depend on which servers are connected, so an MCP-namespaced entry is never reported.
+    #[test]
+    fn mcp_namespaced_entry_is_never_reported() {
+        assert!(
+            inert_tool_allowlist_entries(&v(&["file_read"]), &v(&["mcp_github_create_issue"]))
+                .is_empty()
+        );
+    }
+
+    /// Self-evolution tools are injected regardless of `capabilities.tools`.
+    #[test]
+    fn evolve_tool_entry_is_never_reported() {
+        assert!(inert_tool_allowlist_entries(
+            &v(&["file_read"]),
+            &v(&["skill_evolve_create", "skill_read_file"])
+        )
+        .is_empty());
+    }
+
+    /// Mixed input reports only the inert entries, in submission order.
+    #[test]
+    fn only_inert_entries_are_reported_and_order_is_preserved() {
+        assert_eq!(
+            inert_tool_allowlist_entries(
+                &v(&["file_*", "shell_exec"]),
+                &v(&["web_search", "file_write", "agent_spawn", "shell_exec"]),
+            ),
+            v(&["web_search", "agent_spawn"])
+        );
     }
 }

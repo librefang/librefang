@@ -1366,7 +1366,7 @@
           }
         ],
         "requestBody": {
-          "description": "Identity fields to update",
+          "description": "Identity fields to update. PATCH semantics: an omitted or `null` field preserves the stored value, and a partial body never nulls the fields it does not mention. A field cannot be set back to `null`, because `null` already means \"not provided\"; sending an empty string stores an empty string, which is the closest thing to clearing one. Identical in behaviour to the six identity fields of `PATCH /api/agents/{id}/config`.",
           "content": {
             "application/json": {
               "schema": {
@@ -2765,7 +2765,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Get an agent's tool allowlist and blocklist",
+            "description": "Get an agent's tool allowlist and blocklist. `capabilities_tools` is the grant surface; `tool_allowlist` and `tool_blocklist` are applied afterwards and only narrow what it already admits, so a tool listed in `tool_allowlist` but absent from `capabilities_tools` is not granted (MCP tools excepted — they are not filtered by `capabilities_tools`). Refs #6609.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2794,7 +2794,7 @@
           }
         ],
         "requestBody": {
-          "description": "Tool configuration fields",
+          "description": "Tool configuration fields. `capabilities_tools` is the grant surface; `tool_allowlist` and `tool_blocklist` only ever narrow what it already admits, because the kernel applies them afterwards as a retain. An allowlist entry naming a builtin or skill tool that `capabilities_tools` excludes therefore grants nothing — add it to `capabilities_tools` instead. MCP tools are the exception: they are not filtered by `capabilities_tools`, so an `mcp_*` allowlist entry does select among them (#6609).",
           "content": {
             "application/json": {
               "schema": {
@@ -2806,7 +2806,7 @@
         },
         "responses": {
           "200": {
-            "description": "Update an agent's tool allowlist and blocklist",
+            "description": "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -14475,7 +14475,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Declared tools (capabilities.tools). `None` = no change, `Some([])` = unrestricted."
+            "description": "Declared tools (capabilities.tools) — the grant surface.\nA builtin or skill tool has to be admitted here to reach the agent at all.\n`None` = no change, `Some([])` = unrestricted.\nGlob patterns allowed."
           },
           "tool_allowlist": {
             "type": [
@@ -14485,7 +14485,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Tool allowlist — additional filter. `None` = no change, `Some([])` = clear."
+            "description": "Tool allowlist — a **narrowing** filter over what `capabilities_tools` already admits, never a grant.\nIt is applied after `capabilities_tools` as a retain, so an entry naming a tool the declared set excludes has no effect; grant such a tool by adding it to `capabilities_tools` instead.\n`None` = no change, `Some([])` = clear.\nGlob patterns allowed (`file_*`, `mcp_*`)."
           },
           "tool_blocklist": {
             "type": [
@@ -14495,7 +14495,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Tool blocklist — exclusion filter. `None` = no change, `Some([])` = clear."
+            "description": "Tool blocklist — exclusion filter, applied after the allowlist.\n`None` = no change, `Some([])` = clear.\nGlob patterns allowed."
           }
         },
         "additionalProperties": false
@@ -14683,7 +14683,7 @@
       },
       "UpdateIdentityRequest": {
         "type": "object",
-        "description": "Request body for updating agent visual identity.",
+        "description": "Request body for updating agent visual identity.\n\nEvery field is optional and carries PATCH semantics: an omitted or `null` field preserves the stored value, and an empty string stores an empty string (`GET /api/agents/{id}` then reports `\"\"`, not `null`).\nSee `merge_agent_identity` in the parent module for why `null` cannot mean \"clear\".",
         "properties": {
           "archetype": {
             "type": [
