@@ -218,6 +218,7 @@ fn test_taint_outbound_text_allows_short_identifiers() {
 #[tokio::test]
 async fn test_tool_a2a_send_blocks_secret_in_message() {
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::new(AtomicUsize::new(0)),
         user_gate_override: None,
     });
@@ -238,6 +239,7 @@ async fn test_tool_a2a_send_blocks_secret_in_message() {
 #[tokio::test]
 async fn test_tool_channel_send_blocks_secret_in_text_message() {
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::new(AtomicUsize::new(0)),
         user_gate_override: None,
     });
@@ -268,6 +270,7 @@ async fn test_tool_channel_send_blocks_secret_in_text_message() {
 #[tokio::test]
 async fn test_tool_channel_send_blocks_secret_in_image_caption() {
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::new(AtomicUsize::new(0)),
         user_gate_override: None,
     });
@@ -299,6 +302,7 @@ async fn test_tool_channel_send_blocks_secret_in_image_caption() {
 #[tokio::test]
 async fn test_tool_channel_send_blocks_secret_in_poll_question() {
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::new(AtomicUsize::new(0)),
         user_gate_override: None,
     });
@@ -331,6 +335,7 @@ async fn test_tool_channel_send_blocks_secret_in_poll_question() {
 async fn test_tool_channel_send_auto_fills_recipient_from_sender_id() {
     // Test that channel_send uses sender_id when recipient is omitted
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::new(AtomicUsize::new(0)),
         user_gate_override: None,
     });
@@ -366,6 +371,7 @@ async fn test_tool_channel_send_auto_fills_recipient_from_sender_id() {
 async fn test_tool_channel_send_requires_recipient_without_sender_id() {
     // Test that channel_send still requires recipient when sender_id is None
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::new(AtomicUsize::new(0)),
         user_gate_override: None,
     });
@@ -405,6 +411,7 @@ const GUARD_MSG: &str = "Cross-chat dispatch is forbidden";
 
 fn guard_kernel() -> Arc<dyn KernelHandle> {
     Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::new(AtomicUsize::new(0)),
         user_gate_override: None,
     })
@@ -1653,6 +1660,11 @@ struct ApprovalKernel {
     /// for every call. `None` keeps the default-impl behaviour
     /// (`UserToolGate::Allow`) so pre-RBAC tests are unaffected.
     user_gate_override: Option<librefang_types::user_policy::UserToolGate>,
+    /// #6594 — overrides what `requires_approval` returns for every tool,
+    /// modelling an operator whose global `approval.require_approval` list does
+    /// not name the tool being called. `None` keeps the default mock behaviour
+    /// (`tool_name == "shell_exec"`), so pre-existing tests are unaffected.
+    requires_approval_override: Option<bool>,
 }
 
 /// Captures the `DeferredToolExecution.force_human` flag so tests
@@ -1836,7 +1848,8 @@ impl KnowledgeGraph for ApprovalKernel {
 #[async_trait::async_trait]
 impl ApprovalGate for ApprovalKernel {
     fn requires_approval(&self, tool_name: &str) -> bool {
-        tool_name == "shell_exec"
+        self.requires_approval_override
+            .unwrap_or(tool_name == "shell_exec")
     }
 
     async fn request_approval(

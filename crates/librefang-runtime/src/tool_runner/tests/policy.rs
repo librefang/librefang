@@ -6,6 +6,7 @@ use super::*;
 async fn tool_runner_rbac_user_deny_returns_hard_error() {
     let approval_requests = Arc::new(AtomicUsize::new(0));
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::clone(&approval_requests),
         user_gate_override: Some(librefang_types::user_policy::UserToolGate::Deny {
             reason: "user 'Bob' (role: user) is not permitted to invoke 'shell_exec'".to_string(),
@@ -65,6 +66,7 @@ async fn tool_runner_rbac_user_deny_returns_hard_error() {
 async fn tool_runner_rbac_user_needs_approval_routes_through_approval_queue() {
     let approval_requests = Arc::new(AtomicUsize::new(0));
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::clone(&approval_requests),
         // file_write is NOT in the default require_approval list (which
         // would already gate it). The point of this test is to prove the
@@ -130,6 +132,7 @@ async fn tool_runner_rbac_user_needs_approval_routes_through_approval_queue() {
 async fn tool_runner_rbac_full_mode_does_not_bypass_user_needs_approval() {
     let approval_requests = Arc::new(AtomicUsize::new(0));
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::clone(&approval_requests),
         user_gate_override: Some(librefang_types::user_policy::UserToolGate::NeedsApproval {
             reason: "tool 'shell_exec' requires admin approval for user 'Bob'".to_string(),
@@ -198,6 +201,7 @@ async fn tool_runner_rbac_user_allow_falls_through_to_existing_approval_logic() 
     // pass-through, not a bypass.
     let approval_requests = Arc::new(AtomicUsize::new(0));
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::clone(&approval_requests),
         user_gate_override: Some(librefang_types::user_policy::UserToolGate::Allow),
     });

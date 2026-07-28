@@ -398,6 +398,7 @@ fn redacted_config_json(
         "mode": serde_json::to_value(config.exec_policy.mode).unwrap_or(serde_json::json!("allowlist")),
         "safe_bins": config.exec_policy.safe_bins,
         "safe_bins_skip_approval": config.exec_policy.safe_bins_skip_approval,
+        "full_mode_skips_approval": config.exec_policy.full_mode_skips_approval,
         "allowed_commands": config.exec_policy.allowed_commands,
         "allowed_env_vars": config.exec_policy.allowed_env_vars,
         "timeout_secs": config.exec_policy.timeout_secs,

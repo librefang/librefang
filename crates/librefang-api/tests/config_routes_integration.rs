@@ -176,6 +176,7 @@ async fn get_config_exposes_writable_fields_that_used_to_be_write_only() {
         "web.fetch.ssrf_allowed_hosts",
         "exec_policy.allowed_env_vars",
         "exec_policy.safe_bins_skip_approval",
+        "exec_policy.full_mode_skips_approval",
         "session.reset",
         "session.context_injection",
         "memory.decay",

@@ -2119,6 +2119,19 @@ pub struct ExecPolicy {
     /// (The skip is gated to a strict subset of the execution allowlist — metacharacters and wrappers are still rejected — but the approval prompt is gone.)
     #[serde(default)]
     pub safe_bins_skip_approval: bool,
+    /// Whether `mode = "full"` also waives the global `approval.require_approval` list for `shell_exec`.
+    ///
+    /// Default `true` preserves the historical coupling, and the default is deliberately NOT flipped (#6594).
+    /// Two facts make a flipped default a breaking change for ordinary installs: `ApprovalPolicy::default()` puts `shell_exec` in `require_approval`, and `Kernel::spawn` promotes any standalone agent whose `capabilities.tools` contains `shell_exec` or `*` and which declares no `exec_policy` to `mode = "full"`.
+    /// So on a default install this waiver is the only reason ordinary agents run shell commands unattended, and flipping it would make every install prompt on every command.
+    ///
+    /// Set `false` to hold both positions at once — unrestricted commands that still prompt.
+    /// `Full` then waives only allowlist *validation*, and `require_approval` is honoured exactly as it is for any other mode.
+    /// This overrides a coupling that was deliberate rather than accidental: `Full` skipping the approval queue was documented behaviour, and `false` narrows `Full` to what its name describes — a command-validation mode — leaving who-must-confirm to `[approval]`.
+    ///
+    /// Independent of this flag in both positions: a per-user RBAC `NeedsApproval` still forces the approval queue, and the dangerous-command denylist still screens every command under `full`.
+    #[serde(default = "default_full_mode_skips_approval")]
+    pub full_mode_skips_approval: bool,
     /// Global command allowlist (when mode = allowlist).
     pub allowed_commands: Vec<String>,
     /// Environment variables explicitly allowed to pass through to `shell_exec`.
@@ -2138,6 +2151,10 @@ fn default_no_output_timeout() -> u64 {
     30
 }
 
+fn default_full_mode_skips_approval() -> bool {
+    true
+}
+
 impl Default for ExecPolicy {
     fn default() -> Self {
         Self {
@@ -2150,6 +2167,7 @@ impl Default for ExecPolicy {
             .map(String::from)
             .collect(),
             safe_bins_skip_approval: false,
+            full_mode_skips_approval: default_full_mode_skips_approval(),
             allowed_commands: Vec::new(),
             allowed_env_vars: Vec::new(),
             timeout_secs: 30,

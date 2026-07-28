@@ -1617,8 +1617,16 @@ pub async fn execute_tool_with_sender_account(
         };
     }
 
-    let shell_exec_full_mode = tool_name == "shell_exec"
-        && exec_policy.is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
+    // #6594: `Full` waives the global `require_approval` list only while the
+    // operator leaves `exec_policy.full_mode_skips_approval` set, which is the
+    // default and therefore preserves the historical behaviour. Setting it to
+    // `false` narrows `Full` to command validation and lets `[approval]` decide
+    // who must confirm, so an operator can have unrestricted commands that
+    // still prompt.
+    let shell_exec_full_mode_waives_approval = tool_name == "shell_exec"
+        && exec_policy.is_some_and(|p| {
+            p.mode == librefang_types::config::ExecSecurityMode::Full && p.full_mode_skips_approval
+        });
 
     // #5962: opt-in — in allowlist mode, a shell_exec whose EVERY base command is a
     // declared safe_bin may skip the approval prompt. Off by default.
@@ -1699,14 +1707,14 @@ pub async fn execute_tool_with_sender_account(
             }
         };
 
-        // SECURITY: the shell-Full bypass (and the #5962 opt-in all-safe-bins
-        // bypass) only applies to the global `require_approval` list — a
-        // user-policy `NeedsApproval` MUST still route through the approval
-        // queue. Without `!force_approval` here, a user whose RBAC policy
-        // demanded approval would have the call execute directly, defeating
-        // Phase-2.
+        // SECURITY: both bypasses below waive only the global `require_approval` list — a user-policy `NeedsApproval` MUST still route through the approval queue.
+        // Without `!force_approval` here, a user whose RBAC policy demanded approval would have the call execute directly, defeating Phase-2.
+        //
+        // The two halves are deliberately asymmetric (#6594).
+        // The shell-Full waiver is operator-overridable through `exec_policy.full_mode_skips_approval` because `Full` is a command-validation mode that never claimed to be a statement about approval.
+        // The #5962 all-safe-bins waiver is not overridable: `safe_bins_skip_approval` is by its own name an explicit approval opt-out, so honouring `require_approval` on top of it would leave the flag meaning nothing.
         let skip_approval_for_full_exec =
-            (shell_exec_full_mode || shell_exec_all_safe_bins) && !force_approval;
+            (shell_exec_full_mode_waives_approval || shell_exec_all_safe_bins) && !force_approval;
 
         if !skip_approval_for_full_exec
             && (force_approval || kh.requires_approval_with_context(tool_name, sender_id, channel))
