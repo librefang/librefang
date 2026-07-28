@@ -351,64 +351,11 @@ impl LibreFangKernel {
                 }
             }
 
-            // Scheduling (#6595): activation used to synthesize `ScheduleMode::Continuous` whenever `manifest.autonomous` was present.
-            // `AutonomousConfig` is also the carrier for the flat HAND.toml `max_iterations` field — the agent-loop iteration cap resolved in `librefang_runtime::agent_loop` — so a hand author asking for a loop-depth cap got a permanent 30s wake-up cycle (the `heartbeat_interval_secs` default) as an undeclared side effect, including on hands that say `frequency = "on-demand"`.
+            // Scheduling (#6595): activation deliberately does not touch `manifest.schedule`.
+            // It used to synthesize `ScheduleMode::Continuous` whenever `manifest.autonomous` was present, but `AutonomousConfig` is also the carrier for the flat HAND.toml `max_iterations` field — the agent-loop iteration cap resolved in `librefang_runtime::agent_loop` — so a hand author asking for a loop-depth cap got a permanent 30s wake-up cycle (the `heartbeat_interval_secs` default) they never declared.
             //
-            // The wake-up declaration hand authors actually write is `[metadata] frequency`, which was never read anywhere.
-            // Read it here instead, so the declaration and the behaviour agree:
-            //
-            //   1. A role whose own manifest declares a non-reactive `schedule` keeps it verbatim — the most specific declaration wins, and it is the only way to get a `Periodic` cron or `Proactive` schedule.
-            //   2. Otherwise the hand's `frequency` decides *whether* the role ticks and how often, and the role's `[autonomous]` guardrails decide *which* roles do.
-            //      A multi-role hand gives guardrails only to the roles that run loops (`devops` has five roles and caps two), so requiring both keeps the sub-agents that exist to be delegated to from waking up on their own.
-            //   3. Anything else stays `Reactive`.
-            //
-            // `ScheduleMode` is what `background_lifecycle`'s start loop keys off — it skips every `Reactive` agent — so this resolution is exactly what decides whether a background loop is started for the role.
-            if matches!(manifest.schedule, ScheduleMode::Reactive) {
-                // No `[metadata]` block at all reads as no wake-up declaration: `HandFrequency::default()` is `OnDemand`.
-                let frequency = def
-                    .metadata
-                    .as_ref()
-                    .map(|m| m.frequency.clone())
-                    .unwrap_or_default();
-                let hand_declares_cadence = frequency.declares_wake_up_cycle();
-                let role_has_guardrails = manifest.autonomous.is_some();
-                let derived = manifest
-                    .autonomous
-                    .as_ref()
-                    .and_then(|a| frequency.tick_interval_secs(a.heartbeat_interval_secs));
-                match derived {
-                    Some(check_interval_secs) => {
-                        manifest.schedule = ScheduleMode::Continuous {
-                            check_interval_secs,
-                        };
-                        info!(
-                            hand = %hand_id,
-                            role = %role,
-                            agent = %manifest.name,
-                            frequency = ?frequency,
-                            check_interval_secs,
-                            "Hand agent schedule derived from the hand's declared frequency"
-                        );
-                    }
-                    // Only worth a line when one of the two halves is present and the other is not, which is where an operator's expectation and the outcome can diverge.
-                    // An on-demand hand whose role declares no guardrails either is the ordinary case and needs no narration.
-                    None if hand_declares_cadence || role_has_guardrails => {
-                        info!(
-                            hand = %hand_id,
-                            role = %role,
-                            agent = %manifest.name,
-                            frequency = ?frequency,
-                            role_has_guardrails,
-                            "Hand agent stays reactive; any `max_iterations` it declares is \
-                             the agent-loop iteration cap only. Ticking needs both a cadence \
-                             in the hand's `[metadata] frequency` and `[autonomous]` \
-                             guardrails on this role, or an explicit \
-                             `[agents.<role>.schedule.continuous]`"
-                        );
-                    }
-                    None => {}
-                }
-            }
+            // A role now leaves `ScheduleMode::Reactive` only if its own manifest says so: an explicit `schedule` (the only route to the `Periodic` cron and `Proactive` variants) or an explicit `[autonomous]` block, which `librefang_hands::apply_explicit_autonomous_schedule` resolves into `Continuous` at parse time, where the raw TOML still distinguishes an author-written block from the synthesized one.
+            // Honouring `schedule` verbatim is also what `spawn_agent_inner` does for a standalone agent, so hand roles and standalone agents no longer disagree about what the field means.
 
             // Shell exec policy (#6594): a hand definition is third-party content, so activation must never hand out a stronger `mode` than the operator configured globally.
             // Inherit the global `[exec_policy]` instead of fabricating `Full`; a hand that genuinely needs elevated exec opts in by declaring its own `[exec_policy]`, which the `declared_mode.is_none()` guard below respects.
