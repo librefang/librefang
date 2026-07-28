@@ -333,12 +333,8 @@ type DecisionPresentation = {
 /**
  * How each known `approval_audit.decision` value renders in the History table.
  *
- * Typed as a total `Record` over `KnownApprovalDecision` on purpose (#6607):
- * adding a member to that union without giving it a row here is a compile
- * error, so a newly-emitted backend variant cannot silently inherit another
- * decision's label. Every entry carries its own label text and its own icon —
- * colour is never the sole carrier of the distinction, because an approval
- * audit trail has to be readable without colour perception.
+ * Typed as a total `Record` over `KnownApprovalDecision` on purpose (#6607): adding a member to that union without giving it a row here is a compile error, so a newly-emitted backend variant cannot silently inherit another decision's label.
+ * Every entry carries its own label text and its own icon — colour is never the sole carrier of the distinction, because an approval audit trail has to be readable without colour perception.
  */
 const DECISION_PRESENTATION: Record<KnownApprovalDecision, DecisionPresentation> = {
   approved: {
@@ -381,10 +377,8 @@ const DECISION_PRESENTATION: Record<KnownApprovalDecision, DecisionPresentation>
     Icon: Clock,
     color: "var(--color-text-dim)",
   },
-  // Submission row: still awaiting a decision, not a completed one.
-  // `Hourglass` rather than `Loader2` — every other `Loader2` in the dashboard
-  // is paired with `animate-spin` to mean "request in flight", and a static
-  // spinner glyph repeated down a history table reads as a stalled one.
+  // Submission row: written before any decision exists, so it is not a completed outcome.
+  // `Hourglass` rather than `Loader2` — every other `Loader2` in the dashboard is paired with `animate-spin` to mean "request in flight", and a static spinner glyph repeated down a history table reads as a stalled one.
   pending: {
     labelKey: "approvals.history.decisions.pending",
     Icon: Hourglass,
@@ -401,8 +395,7 @@ const DECISION_PRESENTATION: Record<KnownApprovalDecision, DecisionPresentation>
 /**
  * Fallback for a value this build does not know.
  *
- * Referenced by identity in `HistoryRow` to decide between the translated
- * label and the raw server value, so it must stay a single shared object.
+ * Referenced by identity in `HistoryRow` to decide between the translated label and the raw server value, so it must stay a single shared object.
  */
 const UNKNOWN_DECISION: DecisionPresentation = {
   labelKey: "approvals.history.decisions.unknown",
@@ -413,8 +406,7 @@ const UNKNOWN_DECISION: DecisionPresentation = {
 /**
  * Resolve a raw `decision` string to its presentation.
  *
- * `hasOwnProperty` rather than `in` so a prototype key ("toString",
- * "constructor") arriving from the server cannot resolve to a presentation.
+ * `hasOwnProperty` rather than `in` so a prototype key ("toString", "constructor") arriving from the server cannot resolve to a presentation.
  */
 function decisionPresentation(decision: string): DecisionPresentation {
   return Object.prototype.hasOwnProperty.call(DECISION_PRESENTATION, decision)
@@ -440,9 +432,7 @@ const HistoryRow = React.memo(function HistoryRow({
   const presentation = decisionPresentation(decision);
   const isKnown = presentation !== UNKNOWN_DECISION;
   const DecisionIcon = presentation.Icon;
-  // An unrecognised decision shows the raw server value rather than borrowing
-  // another decision's label, so a future backend variant degrades visibly
-  // instead of becoming a false record (#6607).
+  // An unrecognised decision shows the raw server value rather than borrowing another decision's label, so a future backend variant degrades visibly instead of becoming a false record (#6607).
   const decisionLabel = isKnown
     ? t(presentation.labelKey)
     : decision || t(UNKNOWN_DECISION.labelKey);

@@ -3278,20 +3278,12 @@ export async function modifyAndRetryApproval(
  * Decision values the daemon is known to put on an `approval_audit` row.
  *
  * Cross-language contract (#6607) — the authoritative writers are:
- * - `"pending"` — written at submission time by `ApprovalManager::request_approval`
- *   (`crates/librefang-kernel/src/approval.rs`) so a crash mid-flight still leaves
- *   a record of the request. It is NOT a resolved decision.
- * - `"approved" | "denied" | "timed_out" | "modify_and_retry" | "skipped"` —
- *   `ApprovalDecision::as_str()` (`crates/librefang-types/src/approval.rs`),
- *   written on resolution by `ApprovalManager::push_recent`.
+ * - `"pending"` — written at submission time by `ApprovalManager::request_approval` (`crates/librefang-kernel/src/approval.rs`) so a crash mid-flight still leaves a record of the request.
+ *   It is NOT a resolved decision.
+ * - `"approved" | "denied" | "timed_out" | "modify_and_retry" | "skipped"` — `ApprovalDecision::as_str()` (`crates/librefang-types/src/approval.rs`), written on resolution by `ApprovalManager::push_recent`.
  *
- * `"rejected"` is the spelling `crates/librefang-api/src/routes/approvals.rs`
- * uses for `Denied` on sibling shapes (the `status` field of `GET /api/approvals`,
- * and the `decision` field of the reject-all response), and `"approve"` /
- * `"reject"` are the request verbs its batch endpoint accepts. No site persists
- * those three onto an audit row today; they are carried here because the
- * History table has always accepted them and dropping the aliases would be a
- * silent behaviour regression if any surface ever does.
+ * `"rejected"` is the spelling `crates/librefang-api/src/routes/approvals.rs` uses for `Denied` on sibling shapes (the `status` field of `GET /api/approvals`, and the `decision` field of the reject-all response), and `"approve"` / `"reject"` are the request verbs its batch endpoint accepts.
+ * No site persists those three onto an audit row today; they are carried here because the History table has always accepted them and dropping the aliases would be a silent behaviour regression if any surface ever does.
  */
 export type KnownApprovalDecision =
   | "pending"
@@ -3305,13 +3297,10 @@ export type KnownApprovalDecision =
   | "skipped";
 
 /**
- * `KnownApprovalDecision` plus an escape hatch for anything else the daemon
- * sends.
+ * `KnownApprovalDecision` plus an escape hatch for anything else the daemon sends.
  *
- * The union is what the UI is checked against; the `string` arm is the honest
- * admission that a newer daemon can send a variant this build has never heard
- * of. Consumers must keep a runtime fallback for that case — see
- * `decisionPresentation` in `pages/ApprovalsPage.tsx`.
+ * The union is what the UI is checked against; the `string` arm is the honest admission that a newer daemon can send a variant this build has never heard of.
+ * Consumers must keep a runtime fallback for that case — see `decisionPresentation` in `pages/ApprovalsPage.tsx`.
  */
 export type ApprovalDecisionValue =
   | KnownApprovalDecision
@@ -3333,9 +3322,7 @@ export interface ApprovalAuditEntry {
   /**
    * Whether a TOTP second factor was used for this decision.
    *
-   * Always present: the Rust field is a plain `bool` (not an `Option`), and
-   * `GET /api/approvals/audit` serializes `Vec<ApprovalAuditEntry>` straight
-   * through, so serde always emits it.
+   * Always present: the Rust field is a plain `bool` (not an `Option`), and `GET /api/approvals/audit` serializes `Vec<ApprovalAuditEntry>` straight through, so serde always emits it.
    */
   second_factor_used: boolean;
 }
