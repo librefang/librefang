@@ -81,18 +81,11 @@ pub fn check_agents(registry: &AgentRegistry, config: &HeartbeatConfig) -> Vec<H
             continue;
         }
 
-        // Skip passive agents — they wait for messages and should not be
-        // flagged as unresponsive by the heartbeat monitor.
+        // Skip passive agents — they wait for messages and should not be flagged as unresponsive by the heartbeat monitor.
         //
-        // `schedule` is the direct expression of that, and `autonomous.is_some()`
-        // was only ever a proxy for it. The proxy held while activation derived
-        // `Continuous` from the mere presence of `autonomous`, but this change
-        // makes `autonomous` mean "carries a loop cap, and possibly guardrails",
-        // which says nothing about whether the agent wakes itself. A role
-        // declaring `max_iterations` with no `[autonomous]` block and no
-        // `schedule` is now the common shape — 20 of the 59 roles in the
-        // registry — and under the old predicate every one of them would be
-        // flagged `BecameUnresponsive` for behaving exactly as configured.
+        // `schedule` is the direct expression of that, and `autonomous.is_some()` was only ever a proxy for it.
+        // The proxy held while activation derived `Continuous` from the mere presence of `autonomous`, but this change makes `autonomous` mean "carries a loop cap, and possibly guardrails", which says nothing about whether the agent wakes itself.
+        // A role declaring `max_iterations` with no `[autonomous]` block and no `schedule` is now the common shape — 20 of the 59 roles in the registry — and under the old predicate every one of them would be flagged `BecameUnresponsive` for behaving exactly as configured.
         if matches!(entry_ref.manifest.schedule, ScheduleMode::Reactive) {
             continue;
         }
@@ -345,12 +338,9 @@ mod tests {
         };
         registry.register(non_autonomous_entry).unwrap();
 
-        // Register a running agent that carries `[autonomous]` guardrails but a
-        // reactive schedule. This is the shape a hand role gets from declaring
-        // `max_iterations` alone, and it must be skipped: nothing wakes it, so
-        // inactivity is correct behaviour rather than a fault. Before the
-        // predicate moved from `autonomous.is_some()` to `schedule`, this agent
-        // was flagged `BecameUnresponsive` for behaving as configured.
+        // Register a running agent that carries `[autonomous]` guardrails but a reactive schedule.
+        // This is the shape a hand role gets from declaring `max_iterations` alone, and it must be skipped: nothing wakes it, so inactivity is correct behaviour rather than a fault.
+        // Before the predicate moved from `autonomous.is_some()` to `schedule`, this agent was flagged `BecameUnresponsive` for behaving as configured.
         let capped_reactive_entry = AgentEntry {
             id: AgentId::new(),
             name: "capped-reactive-agent".to_string(),
@@ -412,8 +402,8 @@ mod tests {
 
         let statuses = check_agents(&registry, &config);
 
-        // Only the self-waking agent should appear in the results. The passive
-        // agent and the capped-but-reactive one are both skipped.
+        // Only the self-waking agent should appear in the results.
+        // The passive agent and the capped-but-reactive one are both skipped.
         assert_eq!(
             statuses.len(),
             1,
@@ -439,8 +429,7 @@ mod tests {
         let config = HeartbeatConfig::default();
 
         let five_min_ago = Utc::now() - Duration::seconds(300);
-        // A non-reactive schedule is what makes the heartbeat consider this
-        // agent at all, so it must be set for this test to exercise anything.
+        // A non-reactive schedule is what makes the heartbeat consider this agent at all, so it must be set for this test to exercise anything.
         let autonomous_manifest = AgentManifest {
             autonomous: Some(AutonomousConfig::default()),
             schedule: ScheduleMode::Continuous {
@@ -497,8 +486,7 @@ mod tests {
         // last_active drifted half an hour from creation purely from admin
         // bookkeeping — well outside any reasonable time-based grace window.
         let last_active = one_hour_ago + Duration::seconds(1800);
-        // A non-reactive schedule is what makes the heartbeat consider this
-        // agent at all, so it must be set for this test to exercise anything.
+        // A non-reactive schedule is what makes the heartbeat consider this agent at all, so it must be set for this test to exercise anything.
         let autonomous_manifest = AgentManifest {
             autonomous: Some(AutonomousConfig::default()),
             schedule: ScheduleMode::Continuous {
@@ -602,8 +590,7 @@ mod tests {
 
         let one_hour_ago = Utc::now() - Duration::seconds(3600);
         let last_active = Utc::now() - Duration::seconds(300);
-        // A non-reactive schedule is what makes the heartbeat consider this
-        // agent at all, so it must be set for this test to exercise anything.
+        // A non-reactive schedule is what makes the heartbeat consider this agent at all, so it must be set for this test to exercise anything.
         let autonomous_manifest = AgentManifest {
             autonomous: Some(AutonomousConfig::default()),
             schedule: ScheduleMode::Continuous {
