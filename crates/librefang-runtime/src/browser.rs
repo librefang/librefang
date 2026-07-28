@@ -289,36 +289,6 @@ async fn http_discover_target(cdp_endpoint: &str) -> Result<(String, Option<Stri
     Ok((page_ws, target_id))
 }
 
-/// Ask a Chrome-style HTTP discovery endpoint to close a tab created via `/json/new`.
-///
-/// `/json/close/{target_id}` is a state-mutating endpoint, same class as `/json/new`.
-/// Chrome has required PUT there since the same 111 change, and answers a GET with `405 Method Not Allowed`.
-/// A 405 falls back to GET for the same reason `http_discover_target` does: older Chromium builds and third-party CDP proxies may route only the older verb.
-async fn http_close_target(cdp_endpoint: &str, target_id: &str) -> Result<(), String> {
-    let base = cdp_endpoint.trim_end_matches('/');
-    let close_url = format!("{base}/json/close/{target_id}");
-    let client = crate::http_client::new_client();
-
-    let send = |req: reqwest::RequestBuilder| async {
-        tokio::time::timeout(Duration::from_secs(CDP_CONNECT_TIMEOUT_SECS), req.send())
-            .await
-            .map_err(|_| format!("Timed out connecting to CDP endpoint: {cdp_endpoint}"))?
-            .map_err(|e| format!("Failed to reach CDP endpoint {cdp_endpoint}: {e}"))
-    };
-
-    let mut resp = send(client.put(&close_url)).await?;
-    if resp.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
-        debug!("PUT /json/close rejected with 405; retrying with GET");
-        resp = send(client.get(&close_url)).await?;
-    }
-
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(format!("/json/close returned {status}"));
-    }
-    Ok(())
-}
-
 // ── Browser session ────────────────────────────────────────────────────────
 
 /// A live browser session: one CDP connection per agent.
@@ -1057,13 +1027,27 @@ impl BrowserManager {
                 let guard = session.lock().await;
                 if let Some(ref target_id) = guard.attached_target_id {
                     let cdp_endpoint = self.config.cdp_endpoint.as_deref().unwrap_or("");
-                    match http_close_target(cdp_endpoint, target_id).await {
-                        Ok(()) => {
+                    let base = cdp_endpoint.trim_end_matches('/');
+                    let close_url = format!("{base}/json/close/{target_id}");
+                    match crate::http_client::new_client()
+                        .get(&close_url)
+                        .send()
+                        .await
+                    {
+                        Ok(resp) if resp.status().is_success() => {
                             debug!(agent_id, target_id, "Closed remote CDP tab");
                         }
-                        Err(e) => {
+                        Ok(resp) => {
                             // Tab-leak accumulates on remote Chrome — don't
                             // log a success that didn't happen (#5137).
+                            warn!(
+                                agent_id,
+                                target_id,
+                                status = %resp.status(),
+                                "Remote CDP tab close returned non-2xx; tab may leak"
+                            );
+                        }
+                        Err(e) => {
                             warn!(
                                 agent_id,
                                 target_id,
@@ -1405,64 +1389,6 @@ mod tests {
             .await;
 
         let err = http_discover_target(&server.uri()).await.unwrap_err();
-        assert!(err.contains("404"), "unexpected error: {err}");
-    }
-
-    /// `/json/close` is the same class of mutating endpoint as `/json/new`; Chrome 111+ requires PUT there too.
-    #[tokio::test]
-    async fn test_http_close_uses_put() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/json/close/TAB-1"))
-            .respond_with(ResponseTemplate::new(405))
-            .mount(&server)
-            .await;
-        Mock::given(method("PUT"))
-            .and(path("/json/close/TAB-1"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&server)
-            .await;
-
-        http_close_target(&server.uri(), "TAB-1").await.unwrap();
-    }
-
-    /// Endpoints that route only GET still work: a 405 on PUT falls back.
-    #[tokio::test]
-    async fn test_http_close_falls_back_to_get_on_405() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("PUT"))
-            .and(path("/json/close/TAB-2"))
-            .respond_with(ResponseTemplate::new(405))
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/json/close/TAB-2"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&server)
-            .await;
-
-        http_close_target(&server.uri(), "TAB-2").await.unwrap();
-    }
-
-    /// A non-2xx that is not 405 surfaces as an error rather than being silently swallowed.
-    #[tokio::test]
-    async fn test_http_close_reports_non_success_status() {
-        use wiremock::matchers::path;
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(path("/json/close/TAB-3"))
-            .respond_with(ResponseTemplate::new(404))
-            .mount(&server)
-            .await;
-
-        let err = http_close_target(&server.uri(), "TAB-3").await.unwrap_err();
         assert!(err.contains("404"), "unexpected error: {err}");
     }
 }
