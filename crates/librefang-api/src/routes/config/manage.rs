@@ -15,7 +15,7 @@ use super::*;
 pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = state.kernel.config_ref();
     let budget = state.kernel.budget_config();
-    Json(redacted_config_json(&config, &budget))
+    Json(redacted_config_json(&**config, &budget))
 }
 
 /// Build the redacted body returned by `GET /api/config`.
@@ -227,6 +227,11 @@ fn redacted_config_json(
             .to_string()
     );
     // ── Default Model ──
+    // `extra_params` is deliberately absent: it is `#[serde(flatten)]`, so it
+    // has no key of its own on the wire — its entries live directly on the
+    // `[default_model]` table. Inventing a nested `extra_params` object here
+    // would put a shape in the read payload that neither config.toml nor the
+    // generated schema has.
     set!("default_model", {
         "provider": config.default_model.provider,
         "model": config.default_model.model,
@@ -234,11 +239,6 @@ fn redacted_config_json(
         "base_url": config.default_model.base_url,
         "message_timeout_secs": config.default_model.message_timeout_secs,
         "cli_profile_dirs": config.default_model.cli_profile_dirs,
-        // `extra_params` is deliberately absent: it is `#[serde(flatten)]`, so
-        // it has no key of its own on the wire — its entries live directly on
-        // the `[default_model]` table. Inventing a nested `extra_params`
-        // object here would put a shape in the read payload that neither
-        // config.toml nor the generated schema has.
     });
 
     // ── Memory ──
