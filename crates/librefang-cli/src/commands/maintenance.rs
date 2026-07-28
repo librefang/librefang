@@ -381,8 +381,7 @@ pub(crate) fn macos_system_plist(
 ) -> String {
     let binary = xml_escape(&binary.display().to_string());
     let user = xml_escape(user);
-    // `HOME` is the account's real home, not the state dir: `dirs::home_dir()` reads it, and the
-    // first-start `librefang init` path exits when it resolves to nothing.
+    // `HOME` is the account's real home, not the state dir: `dirs::home_dir()` reads it, and the first-start `librefang init` path exits when it resolves to nothing.
     let home = xml_escape(&account_home.display().to_string());
     let librefang_home = xml_escape(&librefang_home.display().to_string());
     format!(

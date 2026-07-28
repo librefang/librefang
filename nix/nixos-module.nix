@@ -159,9 +159,8 @@ in
         '';
       }
       {
-        # The value check mirrors `allow_no_auth_env()` (crates/librefang-api/src/server.rs), which
-        # accepts only these five spellings. A presence check would let
-        # `LIBREFANG_ALLOW_NO_AUTH = "0"` pass evaluation and then be rejected at boot.
+        # The value check mirrors `allow_no_auth_env()` (crates/librefang-api/src/server.rs), which accepts only these five spellings.
+        # A presence check would let `LIBREFANG_ALLOW_NO_AUTH = "0"` pass evaluation and then be rejected at boot.
         assertion = listenIsLoopback
           || cfg.environmentFile != null
           || cfg.authConfiguredExternally
