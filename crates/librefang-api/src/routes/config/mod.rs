@@ -1427,6 +1427,8 @@ url = "https://search.example.com"
         // Sectioned tunables — single leaf and one nested level both allowed.
         assert!(super::is_writable_config_path("web.search_provider"));
         assert!(super::is_writable_config_path("rate_limit.max_ws_per_ip"));
+        // This one pins the depth rule, NOT a backing field: post-sidecar-migration `ChannelsConfig` declares no per-vendor sub-table, so `channels.telegram.enabled` resolves to nothing and is the same silent-no-op shape as the `ui.*` paths above.
+        // It is left asserted-writable because dropping `channels.` or moving it to depth 1 changes the write surface, which is a maintainer call — see the note at `WRITABLE_DEPTH_2_ONLY_PREFIXES` for the evidence and both candidate repairs.
         assert!(super::is_writable_config_path("channels.telegram.enabled"));
 
         // Account / credential paths MUST be rejected.

@@ -528,12 +528,8 @@ async fn config_export_requires_auth_when_key_set() {
 #[tokio::test(flavor = "multi_thread")]
 async fn config_set_writes_allowlisted_path_to_tempdir_toml() {
     let h = boot_router_with_api_key(API_KEY).await;
-    // `log_level` is a real top-level KernelConfig field on the allowlist;
-    // it round-trips through the schema validator AND survives the post-write
-    // kernel reload (which re-serializes the in-memory config).
-    // `ui.theme` used to be named here as the counter-example of an allowlisted
-    // path the kernel does not model; #6605 removed those four `ui.*` entries
-    // from the allowlist, so the write path no longer accepts any such path.
+    // `log_level` is a real top-level KernelConfig field on the allowlist; it round-trips through the schema validator AND survives the post-write kernel reload (which re-serializes the in-memory config).
+    // `ui.theme` used to be named here as the counter-example of an allowlisted path the kernel does not model; #6605 removed those four `ui.*` entries from the allowlist, so the write path no longer accepts any such path.
     let (status, body) = send(
         h.app.clone(),
         auth_post_json(
@@ -624,9 +620,8 @@ async fn config_set_rejects_missing_value_field() {
     let h = boot_router_with_api_key(API_KEY).await;
     let (status, _) = send(
         h.app.clone(),
-        // A real allowlisted path, so the 400 can only come from the missing
-        // `value` field. Was `ui.theme` until #6605 dropped it from the
-        // allowlist.
+        // A real allowlisted path, so the 400 can only come from the missing `value` field.
+        // Was `ui.theme` until #6605 dropped it from the allowlist.
         auth_post_json("/api/config/set", serde_json::json!({"path": "log_level"})),
     )
     .await;
@@ -847,9 +842,8 @@ async fn config_set_requires_auth_when_key_set() {
         .method(Method::POST)
         .uri("/api/config/set")
         .header(header::CONTENT_TYPE, "application/json")
-        // Any well-formed body will do — the 401 comes from the auth layer
-        // before the handler runs. Was `ui.theme` until #6605 dropped it from
-        // the allowlist.
+        // Any well-formed body will do — the 401 comes from the auth layer before the handler runs.
+        // Was `ui.theme` until #6605 dropped it from the allowlist.
         .body(Body::from(
             serde_json::json!({"path": "log_level", "value": "debug"}).to_string(),
         ))

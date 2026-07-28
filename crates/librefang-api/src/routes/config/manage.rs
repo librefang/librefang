@@ -1609,8 +1609,7 @@ mod config_read_write_parity_tests {
     #[test]
     fn non_writable_but_operator_visible_fields_are_readable() {
         let mut config = config_with_optional_sections_populated();
-        // Deliberately the non-default value: `require_email_verified` defaults to `true`, so
-        // asserting `true` would also pass against a hardcoded literal in the response builder.
+        // Deliberately the non-default value: `require_email_verified` defaults to `true`, so asserting `true` would also pass against a hardcoded literal in the response builder.
         config.external_auth.require_email_verified = false;
         config.external_auth.providers.push(oidc_provider_fixture());
         let payload = super::redacted_config_json(&config, &BudgetConfig::default());
@@ -1643,10 +1642,14 @@ mod config_read_write_parity_tests {
             "audience",
             "require_email_verified",
         ] {
+            // Presence is not enough: a response builder that emits the key but drops the value renders `"jwks_uri": null`, which a `contains_key` check accepts.
+            // The fixture populates all 14 fields, so a null here is always a dropped field.
+            // Exact values are pinned by the `get_config_exposes_non_writable_external_auth_fields` integration test rather than duplicated here.
             assert!(
-                provider.contains_key(key),
-                "`external_auth.providers[].{key}` is missing from GET /api/config — every \
-                 `OidcProvider` field is non-secret and must be visible (#6605); got {provider:#?}"
+                provider.get(key).is_some_and(|v| !v.is_null()),
+                "`external_auth.providers[].{key}` is missing or null in GET /api/config — every \
+                 `OidcProvider` field is non-secret, is set by the fixture, and must be visible \
+                 (#6605); got {provider:#?}"
             );
         }
     }
