@@ -1552,11 +1552,8 @@ system_prompt = "You are a test worker."
     kernel.shutdown();
 }
 
-/// Minimal hand in the **flat** agent format (`provider` / `model` as top-level
-/// strings, no `[model]` sub-table) whose tool list contains `shell_exec` and
-/// whose agent section declares no `[exec_policy]` of its own. This is the
-/// shape every registry hand uses, and the shape that used to be handed a
-/// fabricated `ExecSecurityMode::Full` policy at activation (#6594).
+/// Minimal hand in the **flat** agent format (`provider` / `model` as top-level strings, no `[model]` sub-table) whose tool list contains `shell_exec` and whose agent section declares no `[exec_policy]` of its own.
+/// This is the shape every registry hand uses, and the shape that used to be handed a fabricated `ExecSecurityMode::Full` policy at activation (#6594).
 const SHELL_EXEC_HAND_TOML: &str = r#"
 id = "exec-policy-test"
 version = "0.1.0"
@@ -1574,11 +1571,8 @@ model = "default"
 system_prompt = "You are a test worker."
 "#;
 
-/// Same shape as [`SHELL_EXEC_HAND_TOML`] but declaring the `*` tool wildcard
-/// instead of naming `shell_exec`. `spawn_agent_inner`'s own exec-policy
-/// fallback matches `*` too, so a guard that only looked for the literal
-/// `shell_exec` here would leave `exec_policy` unset and let that fallback
-/// fabricate `Full` a few frames later (#6594).
+/// Same shape as [`SHELL_EXEC_HAND_TOML`] but declaring the `*` tool wildcard instead of naming `shell_exec`.
+/// `spawn_agent_inner`'s own exec-policy fallback matches `*` too, so a guard that only looked for the literal `shell_exec` here would leave `exec_policy` unset and let that fallback fabricate `Full` a few frames later (#6594).
 const WILDCARD_TOOLS_HAND_TOML: &str = r#"
 id = "exec-policy-wildcard"
 version = "0.1.0"
@@ -1596,9 +1590,7 @@ model = "default"
 system_prompt = "You are a test worker."
 "#;
 
-/// Boot a throwaway kernel whose global `[exec_policy]` is `global`, activate
-/// `hand_toml`, and return the exec policy that activation materialized onto
-/// the derived agent's manifest.
+/// Boot a throwaway kernel whose global `[exec_policy]` is `global`, activate `hand_toml`, and return the exec policy that activation materialized onto the derived agent's manifest.
 fn materialize_hand_exec_policy(
     label: &str,
     hand_id: &str,
@@ -1642,11 +1634,8 @@ fn materialize_hand_exec_policy(
     policy
 }
 
-/// Regression test for issue #6594 — activation must inherit the operator's
-/// global exec mode instead of fabricating `Full`. `Deny` is the sharpest
-/// case: the operator has switched shell execution off entirely, and a
-/// third-party hand definition must not be able to turn it back on merely by
-/// listing `shell_exec` among its tools.
+/// Regression test for issue #6594 — activation must inherit the operator's global exec mode instead of fabricating `Full`.
+/// `Deny` is the sharpest case: the operator has switched shell execution off entirely, and a third-party hand definition must not be able to turn it back on merely by listing `shell_exec` among its tools.
 #[test]
 fn hand_activation_inherits_global_exec_policy_deny() {
     let policy = materialize_hand_exec_policy(
@@ -1667,11 +1656,8 @@ fn hand_activation_inherits_global_exec_policy_deny() {
     );
 }
 
-/// A hand that declares the `*` tool wildcard instead of naming `shell_exec`
-/// must be covered too. `spawn_agent_inner`'s exec-policy fallback matches `*`,
-/// so an `exec_policy` still unset at that point is promoted to `Full` there —
-/// the guard at activation has to cover the same trigger set or the escalation
-/// simply moves one frame down the call stack (#6594).
+/// A hand that declares the `*` tool wildcard instead of naming `shell_exec` must be covered too.
+/// `spawn_agent_inner`'s exec-policy fallback matches `*`, so an `exec_policy` still unset at that point is promoted to `Full` there — the guard at activation has to cover the same trigger set or the escalation simply moves one frame down the call stack (#6594).
 #[test]
 fn hand_activation_inherits_global_exec_policy_for_tool_wildcard() {
     let policy = materialize_hand_exec_policy(
@@ -1692,8 +1678,7 @@ fn hand_activation_inherits_global_exec_policy_for_tool_wildcard() {
     );
 }
 
-/// Companion to the `Deny` case: an `allowlist` operator config must reach the
-/// hand agent whole, allowed-command list included.
+/// Companion to the `Deny` case: an `allowlist` operator config must reach the hand agent whole, allowed-command list included.
 #[test]
 fn hand_activation_inherits_global_exec_policy_allowlist() {
     let policy = materialize_hand_exec_policy(
@@ -1712,9 +1697,8 @@ fn hand_activation_inherits_global_exec_policy_allowlist() {
         librefang_types::config::ExecSecurityMode::Allowlist,
         "hand activation must inherit the operator's global exec mode (#6594)"
     );
-    // `Allowlist` is also `ExecSecurityMode::default()`, so the mode alone
-    // cannot tell "inherited from global config" apart from "fell back to
-    // ExecPolicy::default()". The operator's command list can.
+    // `Allowlist` is also `ExecSecurityMode::default()`, so the mode alone cannot tell "inherited from global config" apart from "fell back to ExecPolicy::default()".
+    // The operator's command list can.
     assert_eq!(
         policy.allowed_commands,
         vec!["git".to_string(), "cargo".to_string()],
@@ -1723,11 +1707,8 @@ fn hand_activation_inherits_global_exec_policy_allowlist() {
     );
 }
 
-/// The generous hand timeouts survive as a **floor**, not as a replacement:
-/// a global below the floor is raised to it (so long-running hand commands do
-/// not silently drop to the 30s `ExecPolicy::default()`), and a global above
-/// the floor is inherited verbatim. Timeouts are not a security property —
-/// only `mode` is, which is why only `mode` is inherited unconditionally.
+/// The generous hand timeouts survive as a **floor**, not as a replacement: a global below the floor is raised to it (so long-running hand commands do not silently drop to the 30s `ExecPolicy::default()`), and a global above the floor is inherited verbatim.
+/// Timeouts are not a security property — only `mode` is, which is why only `mode` is inherited unconditionally.
 #[test]
 fn hand_activation_floors_inherited_exec_timeouts() {
     let floored = materialize_hand_exec_policy(
@@ -1750,9 +1731,7 @@ fn hand_activation_floors_inherited_exec_timeouts() {
         "a 30s global no-output timeout must be raised to the 120s hand floor"
     );
 
-    // A global *above* the floor is the case a hardcoded constant could not
-    // produce, so this is what proves the floor is a `.max()` rather than an
-    // unconditional overwrite.
+    // A global *above* the floor is the case a hardcoded constant could not produce, so this is what proves the floor is a `.max()` rather than an unconditional overwrite.
     let raised = materialize_hand_exec_policy(
         "librefang-kernel-hand-exec-timeout-raised",
         "exec-policy-test",
@@ -1773,20 +1752,15 @@ fn hand_activation_floors_inherited_exec_timeouts() {
     );
 }
 
-/// A hand agent that declares its own `[exec_policy]` keeps it verbatim: no
-/// mode substitution, no timeout floor. This is the per-hand opt-in referenced
-/// by #6594, and — since the section is in the flat format — it is also the
-/// regression test for the `LegacyHandAgentConfig` passthrough that makes the
-/// opt-in reachable at all for hands written that way.
+/// A hand agent that declares its own `[exec_policy]` keeps it verbatim: no mode substitution, no timeout floor.
+/// This is the per-hand opt-in referenced by #6594, and — since the section is in the flat format — it is also the regression test for the `LegacyHandAgentConfig` passthrough that makes the opt-in reachable at all for hands written that way.
 #[test]
 fn hand_activation_respects_hand_declared_exec_policy() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-hand-exec-optin");
     std::fs::create_dir_all(&home_dir).unwrap();
 
-    // Global is deliberately the *loosest* mode with default timeouts, so
-    // inheriting instead of respecting the declaration would be unmistakable:
-    // the manifest would read Full / 300 / 120 rather than Deny / 45 / 15.
+    // Global is deliberately the *loosest* mode with default timeouts, so inheriting instead of respecting the declaration would be unmistakable: the manifest would read Full / 300 / 120 rather than Deny / 45 / 15.
     let config = KernelConfig {
         home_dir: home_dir.clone(),
         data_dir: home_dir.join("data"),
@@ -1860,15 +1834,10 @@ no_output_timeout_secs = 15
     kernel.shutdown();
 }
 
-/// Boot a throwaway kernel, activate `hand_toml`, and return the manifest that
-/// activation materialized onto the hand's `worker` agent.
+/// Boot a throwaway kernel, activate `hand_toml`, and return the manifest that activation materialized onto the hand's `worker` agent.
 ///
-/// The scheduling tests below all assert on `manifest.schedule`, which is the
-/// single field that decides whether the role ever wakes up on its own: the
-/// startup scan in `background_lifecycle` skips every agent whose schedule is
-/// `ScheduleMode::Reactive` and hands every other one to
-/// `start_background_for_agent`. Asserting the resolved schedule is therefore
-/// the direct proxy for "does a background loop get started for this role".
+/// The scheduling tests below all assert on `manifest.schedule`, which is the single field that decides whether the role ever wakes up on its own: the startup scan in `background_lifecycle` skips every agent whose schedule is `ScheduleMode::Reactive` and hands every other one to `start_background_for_agent`.
+/// Asserting the resolved schedule is therefore the direct proxy for "does a background loop get started for this role".
 fn materialize_hand_agent_manifest(label: &str, hand_id: &str, hand_toml: &str) -> AgentManifest {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join(label);
@@ -1921,17 +1890,10 @@ fn assert_reactive_schedule(manifest: &AgentManifest, why: &str) {
     }
 }
 
-/// Regression test for issue #6595 — `max_iterations` is the agent-loop
-/// iteration cap, not a request for autonomous ticking, and a hand that
-/// declares no `[metadata]` block declares no wake-up cycle at all
-/// (`HandFrequency::default()` is `OnDemand`).
+/// Regression test for issue #6595 — `max_iterations` is the agent-loop iteration cap, not a request for autonomous ticking, and a hand that declares no `[metadata]` block declares no wake-up cycle at all (`HandFrequency::default()` is `OnDemand`).
 ///
-/// Both assertions matter. The schedule staying `Reactive` is the fix; the
-/// `AutonomousConfig` surviving with the declared cap is what distinguishes
-/// this from the tempting "just leave `manifest.autonomous` as `None`"
-/// shortcut, which would silently drop the loop cap the hand author asked for
-/// (`librefang_runtime::agent_loop` resolves `manifest.autonomous.max_iterations`
-/// first — there is no other manifest field carrying it).
+/// Both assertions matter.
+/// The schedule staying `Reactive` is the fix; the `AutonomousConfig` surviving with the declared cap is what distinguishes this from the tempting "just leave `manifest.autonomous` as `None`" shortcut, which would silently drop the loop cap the hand author asked for (`librefang_runtime::agent_loop` resolves `manifest.autonomous.max_iterations` first — there is no other manifest field carrying it).
 #[test]
 fn hand_activation_keeps_reactive_schedule_for_max_iterations_only() {
     let manifest = materialize_hand_agent_manifest(
@@ -1971,9 +1933,8 @@ max_iterations = 80
     );
 }
 
-/// The reporter's exact shape in #6595: a hand that says in its own metadata
-/// that it runs on demand, and whose agent declares a loop-depth cap. It used
-/// to tick every 30 seconds regardless of that declaration.
+/// The reporter's exact shape in #6595: a hand that says in its own metadata that it runs on demand, and whose agent declares a loop-depth cap.
+/// It used to tick every 30 seconds regardless of that declaration.
 #[test]
 fn hand_activation_keeps_reactive_schedule_for_on_demand_frequency() {
     let manifest = materialize_hand_agent_manifest(
@@ -2011,18 +1972,12 @@ max_iterations = 80
     );
 }
 
-/// The other half of #6595: `[metadata] frequency` is the wake-up declaration
-/// hand authors actually write, and the shipped hands rely on it — the bundled
-/// `devops` hand's own prompt says "The Hand is `frequency = \"continuous\"`,
-/// so the next tick will re-read `devops_queue.json`". So a `continuous` hand
-/// must still get a background loop, at the cadence its `[autonomous]`
-/// guardrails name.
+/// The other half of #6595: `[metadata] frequency` is the wake-up declaration hand authors actually write, and the shipped hands rely on it — the bundled `devops` hand's own prompt says "The Hand is `frequency = \"continuous\"`, so the next tick will re-read `devops_queue.json`".
+/// So a `continuous` hand must still get a background loop, at the cadence its `[autonomous]` guardrails name.
 #[test]
 fn hand_activation_derives_continuous_schedule_from_hand_frequency() {
-    // Default `AutonomousConfig::heartbeat_interval_secs` is 30, which is the
-    // interval every ticking registry hand ran at before the fix. Deriving the
-    // schedule from `frequency` rather than from `autonomous.is_some()` must
-    // not change it.
+    // Default `AutonomousConfig::heartbeat_interval_secs` is 30, which is the interval every ticking registry hand ran at before the fix.
+    // Deriving the schedule from `frequency` rather than from `autonomous.is_some()` must not change it.
     let default_heartbeat = materialize_hand_agent_manifest(
         "librefang-kernel-hand-continuous-default",
         "continuous-test",
@@ -2061,9 +2016,8 @@ max_iterations = 60
         "the loop cap is independent of the derived schedule"
     );
 
-    // `continuous` means "as often as this agent's heartbeat", so a role that
-    // raises `heartbeat_interval_secs` ticks that much less often. A hardcoded
-    // interval could not produce this.
+    // `continuous` means "as often as this agent's heartbeat", so a role that raises `heartbeat_interval_secs` ticks that much less often.
+    // A hardcoded interval could not produce this.
     let explicit_heartbeat = materialize_hand_agent_manifest(
         "librefang-kernel-hand-continuous-explicit",
         "continuous-slow-test",
@@ -2104,9 +2058,8 @@ heartbeat_interval_secs = 900
     );
 }
 
-/// The fixed cadences are honoured as declared rather than collapsing to the
-/// `continuous` heartbeat. Before the fix an `hourly` hand with a loop cap
-/// ticked every 30 seconds — 120x its own declaration.
+/// The fixed cadences are honoured as declared rather than collapsing to the `continuous` heartbeat.
+/// Before the fix an `hourly` hand with a loop cap ticked every 30 seconds — 120x its own declaration.
 #[test]
 fn hand_activation_derives_fixed_cadence_from_hourly_and_daily_frequency() {
     let hourly = materialize_hand_agent_manifest(
@@ -2163,12 +2116,8 @@ max_iterations = 50
     assert_continuous_schedule(&daily, 86_400, "`frequency = \"daily\"` must tick daily");
 }
 
-/// The hand's `frequency` decides *whether* its roles tick; the role's own
-/// `[autonomous]` guardrails decide *which* ones do. A multi-role hand gives
-/// guardrails only to the roles that run loops — the bundled `devops` hand has
-/// five roles and caps two — so a role with no guardrails must stay reactive
-/// even on a `continuous` hand, or activating such a hand would start
-/// background loops for sub-agents that exist purely to be delegated to.
+/// The hand's `frequency` decides *whether* its roles tick; the role's own `[autonomous]` guardrails decide *which* ones do.
+/// A multi-role hand gives guardrails only to the roles that run loops — the bundled `devops` hand has five roles and caps two — so a role with no guardrails must stay reactive even on a `continuous` hand, or activating such a hand would start background loops for sub-agents that exist purely to be delegated to.
 #[test]
 fn hand_activation_keeps_reactive_schedule_without_autonomous_guardrails() {
     let manifest = materialize_hand_agent_manifest(
@@ -2205,17 +2154,11 @@ system_prompt = "You are a test worker."
     );
 }
 
-/// The most specific declaration wins: a role that writes its own
-/// `[schedule.continuous]` keeps it verbatim, even when the hand's `frequency`
-/// would have derived a different cadence. This is also the only way to reach
-/// the `Periodic` (cron) and `Proactive` schedule variants, which `frequency`
-/// cannot express.
+/// The most specific declaration wins: a role that writes its own `[schedule.continuous]` keeps it verbatim, even when the hand's `frequency` would have derived a different cadence.
+/// This is also the only way to reach the `Periodic` (cron) and `Proactive` schedule variants, which `frequency` cannot express.
 ///
-/// `ScheduleMode` is externally tagged, so the sub-table (or an inline
-/// `schedule = { continuous = { check_interval_secs = 900 } }`) is the form
-/// that parses — a bare `schedule = "continuous"` string cannot resolve a
-/// struct variant. The section is in the flat format on purpose: that is the
-/// path the `LegacyHandAgentConfig` passthrough enables.
+/// `ScheduleMode` is externally tagged, so the sub-table (or an inline `schedule = { continuous = { check_interval_secs = 900 } }`) is the form that parses — a bare `schedule = "continuous"` string cannot resolve a struct variant.
+/// The section is in the flat format on purpose: that is the path the `LegacyHandAgentConfig` passthrough enables.
 #[test]
 fn hand_activation_honours_explicit_continuous_schedule() {
     let manifest = materialize_hand_agent_manifest(

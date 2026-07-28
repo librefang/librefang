@@ -19,19 +19,14 @@ use crate::error::KernelResult;
 
 use super::*;
 
-/// Floor for `exec_policy.timeout_secs` materialized onto a hand agent that
-/// inherits the operator's global `[exec_policy]` (#6594).
+/// Floor for `exec_policy.timeout_secs` materialized onto a hand agent that inherits the operator's global `[exec_policy]` (#6594).
 ///
-/// Hand activation used to hardcode a 300s / 120s timeout pair alongside a
-/// fabricated `Full` mode. The mode is now inherited from global config, but
-/// inheriting the timeouts wholesale would cut long-running hand commands
-/// short at the 30s `ExecPolicy::default()` value, so the historically
-/// generous numbers survive as a floor. Timeouts are not a security property;
-/// `mode` is, which is why only the latter is inherited verbatim.
+/// Hand activation used to hardcode a 300s / 120s timeout pair alongside a fabricated `Full` mode.
+/// The mode is now inherited from global config, but inheriting the timeouts wholesale would cut long-running hand commands short at the 30s `ExecPolicy::default()` value, so the historically generous numbers survive as a floor.
+/// Timeouts are not a security property; `mode` is, which is why only the latter is inherited verbatim.
 const HAND_EXEC_TIMEOUT_FLOOR_SECS: u64 = 300;
 
-/// Floor for `exec_policy.no_output_timeout_secs` on the same path — see
-/// [`HAND_EXEC_TIMEOUT_FLOOR_SECS`].
+/// Floor for `exec_policy.no_output_timeout_secs` on the same path — see [`HAND_EXEC_TIMEOUT_FLOOR_SECS`].
 const HAND_EXEC_NO_OUTPUT_TIMEOUT_FLOOR_SECS: u64 = 120;
 
 impl LibreFangKernel {
@@ -356,39 +351,20 @@ impl LibreFangKernel {
                 }
             }
 
-            // Scheduling (#6595): activation used to synthesize
-            // `ScheduleMode::Continuous` whenever `manifest.autonomous` was
-            // present. `AutonomousConfig` is also the carrier for the flat
-            // HAND.toml `max_iterations` field — the agent-loop iteration cap
-            // resolved in `librefang_runtime::agent_loop` — so a hand author
-            // asking for a loop-depth cap got a permanent 30s wake-up cycle
-            // (the `heartbeat_interval_secs` default) as an undeclared side
-            // effect, including on hands that say `frequency = "on-demand"`.
+            // Scheduling (#6595): activation used to synthesize `ScheduleMode::Continuous` whenever `manifest.autonomous` was present.
+            // `AutonomousConfig` is also the carrier for the flat HAND.toml `max_iterations` field — the agent-loop iteration cap resolved in `librefang_runtime::agent_loop` — so a hand author asking for a loop-depth cap got a permanent 30s wake-up cycle (the `heartbeat_interval_secs` default) as an undeclared side effect, including on hands that say `frequency = "on-demand"`.
             //
-            // The wake-up declaration hand authors actually write is
-            // `[metadata] frequency`, which was never read anywhere. Read it
-            // here instead, so the declaration and the behaviour agree:
+            // The wake-up declaration hand authors actually write is `[metadata] frequency`, which was never read anywhere.
+            // Read it here instead, so the declaration and the behaviour agree:
             //
-            //   1. A role whose own manifest declares a non-reactive
-            //      `schedule` keeps it verbatim — the most specific
-            //      declaration wins, and it is the only way to get a
-            //      `Periodic` cron or `Proactive` schedule.
-            //   2. Otherwise the hand's `frequency` decides *whether* the role
-            //      ticks and how often, and the role's `[autonomous]`
-            //      guardrails decide *which* roles do. A multi-role hand gives
-            //      guardrails only to the roles that run loops (`devops` has
-            //      five roles and caps two), so requiring both keeps the
-            //      sub-agents that exist to be delegated to from waking up on
-            //      their own.
+            //   1. A role whose own manifest declares a non-reactive `schedule` keeps it verbatim — the most specific declaration wins, and it is the only way to get a `Periodic` cron or `Proactive` schedule.
+            //   2. Otherwise the hand's `frequency` decides *whether* the role ticks and how often, and the role's `[autonomous]` guardrails decide *which* roles do.
+            //      A multi-role hand gives guardrails only to the roles that run loops (`devops` has five roles and caps two), so requiring both keeps the sub-agents that exist to be delegated to from waking up on their own.
             //   3. Anything else stays `Reactive`.
             //
-            // `ScheduleMode` is what `background_lifecycle`'s start loop keys
-            // off — it skips every `Reactive` agent — so this resolution is
-            // exactly what decides whether a background loop is started for
-            // the role.
+            // `ScheduleMode` is what `background_lifecycle`'s start loop keys off — it skips every `Reactive` agent — so this resolution is exactly what decides whether a background loop is started for the role.
             if matches!(manifest.schedule, ScheduleMode::Reactive) {
-                // No `[metadata]` block at all reads as no wake-up
-                // declaration: `HandFrequency::default()` is `OnDemand`.
+                // No `[metadata]` block at all reads as no wake-up declaration: `HandFrequency::default()` is `OnDemand`.
                 let frequency = def
                     .metadata
                     .as_ref()
@@ -414,11 +390,8 @@ impl LibreFangKernel {
                             "Hand agent schedule derived from the hand's declared frequency"
                         );
                     }
-                    // Only worth a line when one of the two halves is present
-                    // and the other is not, which is where an operator's
-                    // expectation and the outcome can diverge. An on-demand
-                    // hand whose role declares no guardrails either is the
-                    // ordinary case and needs no narration.
+                    // Only worth a line when one of the two halves is present and the other is not, which is where an operator's expectation and the outcome can diverge.
+                    // An on-demand hand whose role declares no guardrails either is the ordinary case and needs no narration.
                     None if hand_declares_cadence || role_has_guardrails => {
                         info!(
                             hand = %hand_id,
@@ -437,25 +410,14 @@ impl LibreFangKernel {
                 }
             }
 
-            // Shell exec policy (#6594): a hand definition is third-party
-            // content, so activation must never hand out a stronger `mode`
-            // than the operator configured globally. Inherit the global
-            // `[exec_policy]` instead of fabricating `Full`; a hand that
-            // genuinely needs elevated exec opts in by declaring its own
-            // `[exec_policy]`, which the `declared_mode.is_none()` guard
-            // below respects.
+            // Shell exec policy (#6594): a hand definition is third-party content, so activation must never hand out a stronger `mode` than the operator configured globally.
+            // Inherit the global `[exec_policy]` instead of fabricating `Full`; a hand that genuinely needs elevated exec opts in by declaring its own `[exec_policy]`, which the `declared_mode.is_none()` guard below respects.
             //
-            // Only the timeouts deviate from global, and only upwards — see
-            // `HAND_EXEC_TIMEOUT_FLOOR_SECS` for why.
+            // Only the timeouts deviate from global, and only upwards — see `HAND_EXEC_TIMEOUT_FLOOR_SECS` for why.
             //
-            // The trigger set must match `spawn_agent_inner`'s exec-policy
-            // fallback (`shell_exec` OR the `*` wildcard, read from
-            // `capabilities.tools`) exactly. That fallback still promotes an
-            // agent with no `exec_policy` to `Full`, so leaving `None` on any
-            // manifest it would match — a hand declaring `tools = ["*"]`, say
-            // — just relocates the escalation instead of removing it.
-            // `manifest.capabilities.tools` was assigned from `def.tools`
-            // above, and is what the spawn path actually reads.
+            // The trigger set must match `spawn_agent_inner`'s exec-policy fallback (`shell_exec` OR the `*` wildcard, read from `capabilities.tools`) exactly.
+            // That fallback still promotes an agent with no `exec_policy` to `Full`, so leaving `None` on any manifest it would match — a hand declaring `tools = ["*"]`, say — just relocates the escalation instead of removing it.
+            // `manifest.capabilities.tools` was assigned from `def.tools` above, and is what the spawn path actually reads.
             if manifest
                 .capabilities
                 .tools
@@ -482,12 +444,9 @@ impl LibreFangKernel {
                         ..cfg.exec_policy.clone()
                     });
                 }
-                // Surface the resolved mode at activation time. Without this
-                // the only signal was the per-call "Shell exec in full mode"
-                // warning, long after the operator could react. The wording is
-                // mode-neutral on purpose: this same line fires when the
-                // inherited mode is `Deny`, so it must not claim exec was
-                // granted.
+                // Surface the resolved mode at activation time.
+                // Without this the only signal was the per-call "Shell exec in full mode" warning, long after the operator could react.
+                // The wording is mode-neutral on purpose: this same line fires when the inherited mode is `Deny`, so it must not claim exec was granted.
                 info!(
                     hand = %hand_id,
                     role = %role,

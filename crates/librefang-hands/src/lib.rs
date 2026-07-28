@@ -285,13 +285,9 @@ pub struct HandDashboard {
 /// from `AgentManifest`.  Legacy files with flat fields (provider, model, max_tokens,
 /// temperature, system_prompt at the top level of `[agent]`) are auto-converted.
 ///
-/// This struct has no `deny_unknown_fields`, and `parse_single_agent_section`
-/// tries it *first* for any agent section without a `[model]` sub-table — the
-/// shape every in-repo hand uses. So any `AgentManifest` field absent here is
-/// silently dropped for flat-format hands rather than reaching the manifest.
-/// `schedule`, `autonomous`, and `exec_policy` are passed through explicitly
-/// because each one is a documented per-hand opt-in that was unreachable
-/// otherwise (#6594, #6595).
+/// This struct has no `deny_unknown_fields`, and `parse_single_agent_section` tries it *first* for any agent section without a `[model]` sub-table — the shape every in-repo hand uses.
+/// So any `AgentManifest` field absent here is silently dropped for flat-format hands rather than reaching the manifest.
+/// `schedule`, `autonomous`, and `exec_policy` are passed through explicitly because each one is a documented per-hand opt-in that was unreachable otherwise (#6594, #6595).
 #[derive(Debug, Clone, Deserialize)]
 struct LegacyHandAgentConfig {
     name: String,
@@ -311,23 +307,18 @@ struct LegacyHandAgentConfig {
     temperature: f32,
     #[serde(default)]
     system_prompt: String,
-    /// Agent-loop iteration cap. Synthesizes an `[autonomous]` block when the
-    /// author did not write one — it is NOT a request for autonomous ticking
-    /// (#6595).
+    /// Agent-loop iteration cap.
+    /// Synthesizes an `[autonomous]` block when the author did not write one — it is NOT a request for autonomous ticking (#6595).
     max_iterations: Option<u32>,
-    /// Explicit scheduling mode. `ScheduleMode` is externally tagged, so the
-    /// TOML forms are `schedule = "reactive"` for the unit variant and a
-    /// sub-table for the struct variants, e.g.
-    /// `[agents.<role>.schedule.continuous]` with `check_interval_secs = 900`.
+    /// Explicit scheduling mode. `ScheduleMode` is externally tagged, so the TOML forms are `schedule = "reactive"` for the unit variant and a sub-table for the struct variants, e.g. `[agents.<role>.schedule.continuous]` with `check_interval_secs = 900`.
     #[serde(default)]
     schedule: Option<ScheduleMode>,
-    /// Explicit autonomous guardrails. Wins over the block synthesized from
-    /// `max_iterations`.
+    /// Explicit autonomous guardrails.
+    /// Wins over the block synthesized from `max_iterations`.
     #[serde(default)]
     autonomous: Option<AutonomousConfig>,
-    /// Explicit per-hand exec policy. This is the opt-in that lets a hand ask
-    /// for a stronger `mode` than the operator's global `[exec_policy]`;
-    /// activation only inherits the global policy when this is absent (#6594).
+    /// Explicit per-hand exec policy.
+    /// This is the opt-in that lets a hand ask for a stronger `mode` than the operator's global `[exec_policy]`; activation only inherits the global policy when this is absent (#6594).
     #[serde(
         default,
         deserialize_with = "librefang_types::serde_compat::exec_policy_lenient"
@@ -882,21 +873,16 @@ impl<'de> Deserialize<'de> for HandDefinition {
 
 /// How often a Hand runs.
 ///
-/// This is the hand-level declaration of *whether and how often* the hand's
-/// autonomous roles wake up, consumed by hand activation in
-/// `librefang-kernel` (#6595). It used to be catalog-display metadata only,
-/// while the wake-up schedule was inferred from the presence of an agent's
-/// `max_iterations` — a loop-depth cap that says nothing about scheduling.
+/// This is the hand-level declaration of *whether and how often* the hand's autonomous roles wake up, consumed by hand activation in `librefang-kernel` (#6595).
+/// It used to be catalog-display metadata only, while the wake-up schedule was inferred from the presence of an agent's `max_iterations` — a loop-depth cap that says nothing about scheduling.
 /// The declaration and the implementation now agree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HandFrequency {
     Continuous,
     Periodic,
-    /// No wake-up cycle: the hand's agents run only when a message or event
-    /// arrives. `reactive` is accepted as an alias because it is the
-    /// `ScheduleMode` spelling of the same thing and the natural value to
-    /// reach for when switching a hand's ticking off.
+    /// No wake-up cycle: the hand's agents run only when a message or event arrives.
+    /// `reactive` is accepted as an alias because it is the `ScheduleMode` spelling of the same thing and the natural value to reach for when switching a hand's ticking off.
     #[default]
     #[serde(rename = "on-demand", alias = "reactive")]
     OnDemand,
@@ -904,22 +890,15 @@ pub enum HandFrequency {
     Hourly,
 }
 
-/// Wake-up cadence used for [`HandFrequency::Periodic`], which names a
-/// recurring cycle without saying how long it is. Matches the
-/// `check_interval_secs` default of `librefang_types::agent::ScheduleMode`,
-/// so a `periodic` hand ticks at the same rate as an agent that writes
-/// `[schedule.continuous]` and leaves the interval out.
+/// Wake-up cadence used for [`HandFrequency::Periodic`], which names a recurring cycle without saying how long it is.
+/// Matches the `check_interval_secs` default of `librefang_types::agent::ScheduleMode`, so a `periodic` hand ticks at the same rate as an agent that writes `[schedule.continuous]` and leaves the interval out.
 const PERIODIC_TICK_INTERVAL_SECS: u64 = 300;
 
 impl HandFrequency {
-    /// Wake-up cadence in seconds that this frequency declares, or `None` when
-    /// it declares no wake-up cycle at all ([`HandFrequency::OnDemand`]).
+    /// Wake-up cadence in seconds that this frequency declares, or `None` when it declares no wake-up cycle at all ([`HandFrequency::OnDemand`]).
     ///
-    /// `heartbeat_interval_secs` comes from the role's own `[autonomous]`
-    /// guardrails and is used for [`HandFrequency::Continuous`], which means
-    /// "as often as this agent's heartbeat" rather than a fixed period. The
-    /// fixed cadences ignore it: an author who wrote `hourly` asked for an
-    /// hour, not for the 30s `AutonomousConfig` heartbeat default.
+    /// `heartbeat_interval_secs` comes from the role's own `[autonomous]` guardrails and is used for [`HandFrequency::Continuous`], which means "as often as this agent's heartbeat" rather than a fixed period.
+    /// The fixed cadences ignore it: an author who wrote `hourly` asked for an hour, not for the 30s `AutonomousConfig` heartbeat default.
     pub fn tick_interval_secs(&self, heartbeat_interval_secs: u64) -> Option<u64> {
         match self {
             Self::Continuous => Some(heartbeat_interval_secs),
@@ -930,9 +909,8 @@ impl HandFrequency {
         }
     }
 
-    /// Whether this frequency declares a wake-up cycle at all, independent of
-    /// how long it is. Derived from [`Self::tick_interval_secs`] so the two can
-    /// never disagree about which variants are scheduled.
+    /// Whether this frequency declares a wake-up cycle at all, independent of how long it is.
+    /// Derived from [`Self::tick_interval_secs`] so the two can never disagree about which variants are scheduled.
     pub fn declares_wake_up_cycle(&self) -> bool {
         self.tick_interval_secs(0).is_some()
     }
@@ -1187,13 +1165,8 @@ mod tests {
         assert!(err.to_string().contains("already"));
     }
 
-    /// Regression test for #6594 / #6595 — `parse_single_agent_section` tries
-    /// `LegacyHandAgentConfig` first for any agent section without a `[model]`
-    /// sub-table (the shape every registry hand uses), and that struct has no
-    /// `deny_unknown_fields`. Before the passthrough, an explicit `schedule`,
-    /// `[autonomous]`, or `[exec_policy]` written in that flat format was
-    /// deserialized into a struct with no such fields and vanished silently,
-    /// leaving all three documented per-hand opt-ins unreachable.
+    /// Regression test for #6594 / #6595 — `parse_single_agent_section` tries `LegacyHandAgentConfig` first for any agent section without a `[model]` sub-table (the shape every registry hand uses), and that struct has no `deny_unknown_fields`.
+    /// Before the passthrough, an explicit `schedule`, `[autonomous]`, or `[exec_policy]` written in that flat format was deserialized into a struct with no such fields and vanished silently, leaving all three documented per-hand opt-ins unreachable.
     #[test]
     fn flat_agent_section_passes_through_schedule_autonomous_and_exec_policy() {
         let toml_content = r#"
@@ -1269,10 +1242,7 @@ timeout_secs = 45
         assert_eq!(policy.timeout_secs, 45);
     }
 
-    /// Companion: with no explicit blocks, the flat `max_iterations` still
-    /// synthesizes the `AutonomousConfig` that carries the agent-loop cap, the
-    /// schedule stays `Reactive`, and `exec_policy` stays unset so activation
-    /// can inherit the operator's global policy (#6594 / #6595).
+    /// Companion: with no explicit blocks, the flat `max_iterations` still synthesizes the `AutonomousConfig` that carries the agent-loop cap, the schedule stays `Reactive`, and `exec_policy` stays unset so activation can inherit the operator's global policy (#6594 / #6595).
     #[test]
     fn flat_agent_max_iterations_only_synthesizes_cap_and_stays_reactive() {
         let toml_content = r#"
@@ -1967,11 +1937,8 @@ metrics = []
         assert_eq!(meta.activation_warning, "This hand uses paid API calls");
     }
 
-    /// `frequency` is the hand-level wake-up declaration hand activation reads
-    /// (#6595), and `reactive` is the `ScheduleMode` spelling of `on-demand` —
-    /// the natural value to reach for when switching a hand's ticking off. It
-    /// used to be a TOML parse error, which is a dead end for exactly the
-    /// operator trying to stop unwanted ticks.
+    /// `frequency` is the hand-level wake-up declaration hand activation reads (#6595), and `reactive` is the `ScheduleMode` spelling of `on-demand` — the natural value to reach for when switching a hand's ticking off.
+    /// It used to be a TOML parse error, which is a dead end for exactly the operator trying to stop unwanted ticks.
     #[test]
     fn hand_frequency_accepts_reactive_as_an_alias_for_on_demand() {
         let toml_str = r#"
@@ -2001,10 +1968,8 @@ system_prompt = "Test."
         );
     }
 
-    /// The cadence each frequency declares, which hand activation turns into a
-    /// `ScheduleMode` (#6595). `continuous` defers to the role's own heartbeat;
-    /// the named cadences ignore it, because an author who wrote `hourly` asked
-    /// for an hour and not for the 30s `AutonomousConfig` heartbeat default.
+    /// The cadence each frequency declares, which hand activation turns into a `ScheduleMode` (#6595).
+    /// `continuous` defers to the role's own heartbeat; the named cadences ignore it, because an author who wrote `hourly` asked for an hour and not for the 30s `AutonomousConfig` heartbeat default.
     #[test]
     fn hand_frequency_tick_interval_matches_the_declared_cadence() {
         assert_eq!(HandFrequency::Continuous.tick_interval_secs(30), Some(30));
