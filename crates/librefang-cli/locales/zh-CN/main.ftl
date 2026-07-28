@@ -2013,7 +2013,13 @@ label-header-value = 值
 label-header-enabled = 已启用
 label-header-url = URL
 # Channel command specific keys
-channel-header-msgs-24h = 24 小时消息数
+# Scoped by channel TYPE, not by sidecar instance — usage_events.channel stores the type, so every bot of the same type shares the count (#6606).
+channel-header-msgs-24h-by-type = 24 小时消息数（按类型）
+channel-header-connected = 已连接
+channel-header-in-out = 收/发
+channel-liveness-not-started = 未启动
+channel-last-errors-heading = 各通道最近一次报告的错误（粘性记录——失败时写入，恢复后不会清除）：
+channel-last-error-entry = { $name }: { $error }
 channel-error-save-failed-no-body = 保存失败（没有错误正文）
 # Models command specific keys
 model-none-in-catalog = 目录中没有模型。

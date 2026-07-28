@@ -105,10 +105,26 @@ use crate::types::ApiErrorResponse;
 /// they carry no editable `fields`; the page renders them as
 /// configured/online cards (it conditionally hides empty
 /// `fields`/`setup_steps`).
+///
+/// # Liveness (#6606)
+///
+/// Each row carries the supervisor's real per-instance health, read from `ChannelStatus` via the adapter registered under the instance `name` in `kernel.channel_adapters_ref()`: `connected`, `started_at`, `last_message_at`, `messages_received`, `messages_sent`, `last_error`, plus a `supervised` flag that says whether an adapter is registered for that name at all.
+///
+/// The dashboard derives its status indicator from these facts; the mapping lives in `dashboard/src/lib/channelLiveness.ts` and is shared by the Channels page and the Comms page's Channels tab.
+/// Three properties of the underlying data constrain that mapping and are documented here because they are not obvious from the field names:
+///
+/// - `started_at` is the timestamp of the **last successful child spawn** (`sidecar.rs` sets it next to `connected = true`), while `messages_received` / `messages_sent` accumulate on the adapter's `Arc<Mutex<ChannelStatus>>`, which outlives every supervised restart.
+///   So the counters are since-adapter-creation, not since `started_at`, and must never be captioned as a 24h figure.
+/// - `last_error` is **sticky**: the supervisor sets it on a sidecar `error` event, a failed spawn, and a circuit-break, and never clears it — not even on the `connected = true` that follows a successful respawn.
+///   A connected channel that carries one is therefore "was unhealthy at least once", not "is broken now", and must read as degraded rather than dead.
+///   (The circuit-break regression test in `sidecar.rs` asserts the persistence, so do not "fix" this by clearing on reconnect.)
+/// - A configured sidecar whose `start_adapter` failed has its plain key removed from the adapter map again (`channel_bridge.rs`), and one added to `config.toml` without a following channel reload was never registered in the first place.
+///   Both land on `supervised: false`, which is the honest reading available here: the API layer cannot tell "start failed" from "never attempted".
 fn sidecar_channel_rows(
     sidecar: &[librefang_types::config::SidecarChannelConfig],
-    msgs_24h: &std::collections::HashMap<String, u64>,
+    msgs_24h_by_type: &std::collections::HashMap<String, u64>,
     with_msgs: bool,
+    adapters: &dashmap::DashMap<String, Arc<dyn librefang_channels::types::ChannelAdapter>>,
 ) -> Vec<serde_json::Value> {
     // Previously skipped sidecar entries whose `name` collided with an
     // in-process `CHANNEL_REGISTRY` row; that registry is empty now so
@@ -153,14 +169,36 @@ fn sidecar_channel_rows(
             "config_template": format!(
                 "[[sidecar_channels]]\nname = \"{name}\"\nchannel_type = \"{channel_type}\""
             ),
+            // Surfaced on its own (it previously only appeared inside
+            // `config_template`) so the UI can label the per-type traffic
+            // figure with the type it actually covers.
+            "channel_type": channel_type,
         });
+        // Per-instance liveness from the sidecar supervisor.
+        // Adapters are registered under the instance `name` (the qualified `name:account_id` alias points at the same adapter), which is the same key this loop iterates, so the lookup is per-bot.
+        // `json!` of an `Option` yields `null` for `None`, so the three nullable fields keep a stable shape whether or not an adapter is registered — a consumer never has to distinguish "absent" from "unknown".
+        let status = adapters.get(name).map(|a| a.value().status());
+        row["supervised"] = serde_json::json!(status.is_some());
+        row["connected"] = serde_json::json!(status.as_ref().is_some_and(|s| s.connected));
+        row["started_at"] = serde_json::json!(status
+            .as_ref()
+            .and_then(|s| s.started_at)
+            .map(|ts| ts.to_rfc3339()));
+        row["last_message_at"] = serde_json::json!(status
+            .as_ref()
+            .and_then(|s| s.last_message_at)
+            .map(|ts| ts.to_rfc3339()));
+        row["messages_received"] =
+            serde_json::json!(status.as_ref().map_or(0, |s| s.messages_received));
+        row["messages_sent"] = serde_json::json!(status.as_ref().map_or(0, |s| s.messages_sent));
+        row["last_error"] = serde_json::json!(status.as_ref().and_then(|s| s.last_error.clone()));
         if with_msgs {
-            let m = msgs_24h
-                .get(channel_type)
-                .or_else(|| msgs_24h.get(name))
-                .copied()
-                .unwrap_or(0);
-            row["msgs_24h"] = serde_json::json!(m);
+            // Deliberately per-TYPE, and named so no consumer can mistake it for per-bot traffic.
+            // `usage_events.channel` stores the channel type (see `UsageStore::channel_type_msgs_24h_bulk`), so every sidecar of the same type reads the same number.
+            // The previous `msgs_24h` key carried a `.or_else(|| msgs_24h.get(name))` per-instance fallback that could never be reached, which made a shared aggregate look per-bot: on a host with six Telegram sidecars all six cards reported the Telegram total (#6606).
+            // Per-bot traffic is `messages_received` / `messages_sent` above.
+            let m = msgs_24h_by_type.get(channel_type).copied().unwrap_or(0);
+            row["msgs_24h_channel_type"] = serde_json::json!(m);
         }
         rows.push(row);
     }
@@ -1171,6 +1209,14 @@ pub async fn delete_sidecar_channel(
 /// The full channel registry is materialized in-memory, so this is a single
 /// page — `offset=0`, `limit=None`. The bespoke `configured_count` sibling
 /// is preserved for the dashboard's "X of Y configured" sub-line.
+//
+// Row shape is documented on `sidecar_channel_rows`: configured rows carry
+// per-instance liveness (`connected`, `started_at`, `last_message_at`,
+// `messages_received`, `messages_sent`, `last_error`, `supervised`) plus a
+// per-channel-TYPE `msgs_24h_channel_type` figure. Deliberately a plain
+// comment rather than a doc line — the doc comment above is the source of this
+// operation's `summary` / `description` in the generated `openapi.json`, and
+// duplicating the row shape there would only add spec churn.
 #[utoipa::path(
     get,
     path = "/api/channels",
@@ -1180,20 +1226,28 @@ pub async fn delete_sidecar_channel(
     )
 )]
 pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // 24h activity per channel — backs the design's "slack · 142 msgs/24h"
-    // sub-line. One grouped SQL pass for the whole page; falls back to an
-    // empty map if the query fails so the listing itself still loads.
+    // 24h activity per channel TYPE — one grouped SQL pass for the whole
+    // page; falls back to an empty map if the query fails so the listing
+    // itself still loads. Keyed by `usage_events.channel`, which holds the
+    // type, so every sidecar instance of a type shares the number; rows
+    // publish it under `msgs_24h_channel_type` and per-bot traffic comes
+    // from the supervisor counters instead (#6606).
     // Configured channels come from `sidecar_channel_rows`; unconfigured
     // catalog adapters come from `sidecar_discovery_rows`. The
     // in-process CHANNEL_REGISTRY loop that used to feed both is gone.
-    let msgs_24h = state
+    let msgs_24h_by_type = state
         .kernel
         .memory_substrate()
         .usage()
-        .channels_msgs_24h_bulk()
+        .channel_type_msgs_24h_bulk()
         .unwrap_or_default();
     let kcfg = state.kernel.config_ref();
-    let configured_rows = sidecar_channel_rows(&kcfg.sidecar_channels, &msgs_24h, true);
+    let configured_rows = sidecar_channel_rows(
+        &kcfg.sidecar_channels,
+        &msgs_24h_by_type,
+        true,
+        state.kernel.channel_adapters_ref(),
+    );
     let configured_count = configured_rows.len() as u32;
     let mut channels = configured_rows;
     channels.extend(sidecar_discovery_rows(&kcfg.sidecar_channels));
@@ -1215,13 +1269,17 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
 pub(crate) async fn channels_snapshot(state: &Arc<AppState>) -> Vec<serde_json::Value> {
     // Same sidecar-only shape as `list_channels` above; just no
     // pagination envelope and the snapshot's caller doesn't care
-    // about per-channel msg counts. See `list_channels` for the
-    // history of the in-process loop that this used to mirror.
+    // about the per-channel-type 24h msg count. Per-instance liveness
+    // rides along unconditionally — it is read from the in-memory
+    // adapter map, so it costs the snapshot nothing. See
+    // `list_channels` for the history of the in-process loop that this
+    // used to mirror.
     let kcfg = state.kernel.config_ref();
     let mut channels = sidecar_channel_rows(
         &kcfg.sidecar_channels,
         &std::collections::HashMap::new(),
         false,
+        state.kernel.channel_adapters_ref(),
     );
     channels.extend(sidecar_discovery_rows(&kcfg.sidecar_channels));
     channels
