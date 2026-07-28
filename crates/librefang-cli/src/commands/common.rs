@@ -838,9 +838,8 @@ pub(crate) fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) {
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
-            // Both `Path::is_dir()` and `std::fs::copy` follow links, so a symlinked
-            // entry would pull an external file (or a whole external tree) into the
-            // installed skill. Mirrors `librefang_skills::marketplace::copy_dir_recursive`.
+            // Both `Path::is_dir()` and `std::fs::copy` follow links, so a symlinked entry would pull an external file (or a whole external tree) into the installed skill.
+            // Mirrors `librefang_skills::marketplace::copy_dir_recursive`.
             if file_type.is_symlink() {
                 continue;
             }
@@ -911,9 +910,7 @@ mod tests {
     use reqwest::StatusCode;
     use serde_json::json;
 
-    /// #6581 hardened the `librefang-skills` copy helper against symlinks, but this CLI-side copy
-    /// reads the same registry checkout and branched on `Path::is_dir()`, which follows links —
-    /// so a symlinked entry was still dereferenced into the installed skill.
+    /// #6581 hardened the `librefang-skills` copy helper against symlinks, but this CLI-side copy reads the same registry checkout and branched on `Path::is_dir()`, which follows links — so a symlinked entry was still dereferenced into the installed skill.
     #[test]
     #[cfg(unix)]
     fn copy_dir_recursive_skips_symlinks() {

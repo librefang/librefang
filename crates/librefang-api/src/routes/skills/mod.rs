@@ -1237,8 +1237,7 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let ty = entry.file_type()?;
-        // `std::fs::copy` dereferences links, so a symlink planted in the registry
-        // checkout would write the target's real contents into the installed skill.
+        // `std::fs::copy` dereferences links, so a symlink planted in the registry checkout would write the target's real contents into the installed skill.
         // Mirrors `librefang_skills::marketplace::copy_dir_recursive`.
         if ty.is_symlink() {
             tracing::warn!(
@@ -1262,9 +1261,7 @@ mod tests {
     use super::*;
     use librefang_types::config::{McpServerConfigEntry, McpTransportEntry};
 
-    /// #6581 hardened `librefang_skills::marketplace::copy_dir_recursive` against symlinks but left
-    /// this installer — which copies out of the same registry checkout — dereferencing them, so a
-    /// link planted in a skill directory still exfiltrated the target's contents into the install.
+    /// #6581 hardened `librefang_skills::marketplace::copy_dir_recursive` against symlinks but left this installer — which copies out of the same registry checkout — dereferencing them, so a link planted in a skill directory still exfiltrated the target's contents into the install.
     #[test]
     #[cfg(unix)]
     fn copy_dir_recursive_skips_symlinks() {

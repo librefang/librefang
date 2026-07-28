@@ -354,9 +354,7 @@ fn resolve_system_service_target() -> Option<SystemServiceTarget> {
 /// Escape the XML text-node metacharacters so an operator-supplied path renders as literal text.
 ///
 /// A plist is XML, and launchd rejects an ill-formed one outright rather than ignoring the bad node.
-/// Every interpolated value here is arbitrary filesystem bytes — APFS permits every byte but `/` and
-/// NUL, so a volume named `Backup & Media` or a `LIBREFANG_HOME` containing `<` is enough to produce
-/// a file that `launchctl load` refuses while the install path still reports the plist as written.
+/// Every interpolated value here is arbitrary filesystem bytes — APFS permits every byte but `/` and NUL, so a volume named `Backup & Media` or a `LIBREFANG_HOME` containing `<` is enough to produce a file that `launchctl load` refuses while the install path still reports the plist as written.
 #[cfg_attr(not(test), cfg(target_os = "macos"))]
 fn xml_escape(s: &str) -> String {
     // `&` first: escaping it last would re-escape the `&` introduced by `&lt;` / `&gt;`.
@@ -467,11 +465,8 @@ pub(crate) fn service_install_macos_system(binary: &std::path::Path) {
         }
     };
 
-    // The per-user LaunchAgent written by `service install` carries the same `ai.librefang.daemon`
-    // label and points at the same state directory, so leaving both installed is not layering, it is
-    // a respawn loop: at login the agent's `start --foreground` finds the LaunchDaemon already holding
-    // the port, exits non-zero, and `KeepAlive` relaunches it forever. Refuse before touching anything
-    // rather than create it — this runs ahead of the chown and the plist write on purpose.
+    // The per-user LaunchAgent written by `service install` carries the same `ai.librefang.daemon` label and points at the same state directory, so leaving both installed is not layering, it is a respawn loop: at login the agent's `start --foreground` finds the LaunchDaemon already holding the port, exits non-zero, and `KeepAlive` relaunches it forever.
+    // Refuse before touching anything rather than create it — this runs ahead of the chown and the plist write on purpose.
     let user_agent_plist = target
         .home
         .join("Library/LaunchAgents/ai.librefang.daemon.plist");
@@ -1998,9 +1993,8 @@ mod tests {
 
     #[test]
     fn macos_system_plist_escapes_xml_metacharacters_in_paths() {
-        // APFS permits every byte but `/` and NUL, so a volume named `Backup & Media` reaches the
-        // renderer verbatim. Left unescaped it is an XML well-formedness error and launchd rejects
-        // the whole file, while the install path still reports the plist as written.
+        // APFS permits every byte but `/` and NUL, so a volume named `Backup & Media` reaches the renderer verbatim.
+        // Left unescaped it is an XML well-formedness error and launchd rejects the whole file, while the install path still reports the plist as written.
         let plist = macos_system_plist(
             std::path::Path::new("/Volumes/Backup & Media/bin/librefang"),
             std::path::Path::new("/Users/a<b>"),
