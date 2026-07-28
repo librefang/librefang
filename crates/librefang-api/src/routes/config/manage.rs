@@ -41,10 +41,13 @@ fn redacted_config_json(
     // fields no longer exist on `ChannelsConfig`, so only its
     // file-transfer scalars are enumerated here. The macro shape +
     // lookup are preserved as a comment block so a future in-process
-    // channel can rebuild the per-vendor part by uncommenting +
-    // appending one `ch!()` line per field.
+    // channel can rebuild the per-vendor part: uncomment the block,
+    // append one `ch!()` line per field, then bind `channels` below as
+    // `let mut` and fold `map` into it with
+    // `channels.as_object_mut().expect("object").extend(map)`.
     //
     //   let c = &config.channels;
+    //   let mut map = serde_json::Map::new();
     //   macro_rules! ch {
     //       ($name:ident) => {{
     //           if !c.$name.is_empty() {
