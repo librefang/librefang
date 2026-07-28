@@ -138,22 +138,15 @@ pub fn upsert_sidecar_block(
 
 /// Monotonic counter disambiguating concurrent tempfile names within this process.
 ///
-/// Module-level on purpose. Both writers format into the same
-/// `.config.toml.tmp.{pid}.{seq}` namespace, so a counter declared inside each
-/// function would give each its own sequence starting at zero and the first
-/// call to either would mint the identical path — a concurrent configure and
-/// remove could then write and rename each other's tempfile, landing one
-/// request's document at the other's target or losing it entirely.
+/// Module-level on purpose.
+/// Both writers format into the same `.config.toml.tmp.{pid}.{seq}` namespace, so a counter declared inside each function would give each its own sequence starting at zero and the first call to either would mint the identical path — a concurrent configure and remove could then write and rename each other's tempfile, landing one request's document at the other's target or losing it entirely.
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Write `contents` to `path` by way of a sibling tempfile and a rename.
 ///
-/// Shared by both writers so the sequence that disambiguates their tempfile
-/// names is genuinely shared — see [`TMP_SEQ`]. PID guards against other
-/// daemon processes touching the same directory; the counter guards against
-/// concurrent threads within this process (parallel tests, or two HTTP
-/// handlers racing on the same config file). Same defect class as
-/// `secrets_env::upsert_secret` (T3.1).
+/// Shared by both writers so the sequence that disambiguates their tempfile names is genuinely shared — see [`TMP_SEQ`].
+/// PID guards against other daemon processes touching the same directory; the counter guards against concurrent threads within this process (parallel tests, or two HTTP handlers racing on the same config file).
+/// Same defect class as `secrets_env::upsert_secret` (T3.1).
 fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
     let parent = path.parent().ok_or("config path has no parent")?;
     let tmp = parent.join(next_tmp_name());
@@ -162,8 +155,8 @@ fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Next tempfile name from the shared sequence. Split out so a test can assert
-/// successive names differ without writing to the filesystem.
+/// Next tempfile name from the shared sequence.
+/// Split out so a test can assert successive names differ without writing to the filesystem.
 fn next_tmp_name() -> String {
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     format!(".config.toml.tmp.{}.{seq}", std::process::id())
@@ -210,16 +203,11 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// Both writers mint tempfile names from one namespace, so the sequence
-    /// backing that namespace has to be shared and atomic. Before the writers
-    /// were funnelled through `atomic_write`, each declared its own
-    /// `static SEQ` starting at zero, so the first `upsert` and the first
-    /// `remove` in a process both produced `.config.toml.tmp.{pid}.0`.
+    /// Both writers mint tempfile names from one namespace, so the sequence backing that namespace has to be shared and atomic.
+    /// Before the writers were funnelled through `atomic_write`, each declared its own `static SEQ` starting at zero, so the first `upsert` and the first `remove` in a process both produced `.config.toml.tmp.{pid}.0`.
     ///
-    /// Names are drawn concurrently and asserted all-distinct. This pins
-    /// atomicity and the single shared counter; it cannot detect a future
-    /// writer that bypasses `next_tmp_name` and formats the same pattern
-    /// itself, which is what the doc comment on `TMP_SEQ` is for.
+    /// Names are drawn concurrently and asserted all-distinct.
+    /// This pins atomicity and the single shared counter; it cannot detect a future writer that bypasses `next_tmp_name` and formats the same pattern itself, which is what the doc comment on `TMP_SEQ` is for.
     #[test]
     fn tmp_names_are_unique_across_concurrent_callers() {
         const THREADS: usize = 8;
