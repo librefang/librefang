@@ -162,8 +162,11 @@ fn is_web_search_configured(web: &librefang_types::config::WebConfig) -> bool {
 
 fn redacted_web(web: &librefang_types::config::WebConfig) -> serde_json::Value {
     serde_json::json!({
-        "search_provider": format!("{:?}", web.search_provider),
+        // `SearchProvider` is `rename_all = "snake_case"`, and the schema's select offers those spellings (`duck_duck_go`, …).
+        // `Debug` emitted `"DuckDuckGo"`, which matched no option in the dashboard (#6596).
+        "search_provider": serde_json::to_value(web.search_provider).unwrap_or(serde_json::json!("auto")),
         "cache_ttl_minutes": web.cache_ttl_minutes,
+        "timeout_secs": web.timeout_secs,
         "search_available": is_web_search_configured(web),
         "brave": {
             "api_key_env": web.brave.api_key_env,
@@ -198,6 +201,8 @@ fn redacted_web(web: &librefang_types::config::WebConfig) -> serde_json::Value {
             "max_response_bytes": web.fetch.max_response_bytes,
             "timeout_secs": web.fetch.timeout_secs,
             "readability": web.fetch.readability,
+            "ssrf_allowed_hosts": web.fetch.ssrf_allowed_hosts,
+            "max_file_bytes": web.fetch.max_file_bytes,
         },
     })
 }

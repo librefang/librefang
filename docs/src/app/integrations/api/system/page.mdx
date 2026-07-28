@@ -258,17 +258,35 @@ Auto-generated OpenAPI 3.0 specification for all API endpoints.
 
 Retrieve current kernel configuration (secrets are redacted).
 
-**Response** `200 OK`:
+The body mirrors `config.toml` section for section: top-level scalars stay at the top level, and each `[section]` becomes a nested object under the same key.
+Secret values are replaced in place with `"***"` (set) or `"not set"` (empty) rather than dropped, so the key is always present.
+Enum-valued fields use the same spelling `config.toml` accepts (`"allowlist"`, not `"Allowlist"`).
+Every field `POST /api/config/set` accepts is readable here — a test enforces that (#6596).
+
+**Response** `200 OK` (abbreviated — the real body carries every config section):
 
 ```json
 {
+  "api_listen": "127.0.0.1:4545",
+  "api_key": "***",
+  "log_level": "info",
+  "mode": "default",
   "data_dir": "/home/user/.librefang/data",
-  "default_provider": "groq",
-  "default_model": "llama-3.3-70b-versatile",
-  "listen_addr": "127.0.0.1:4545",
-  "api_key_set": true,
-  "channels_configured": 2,
-  "mcp_servers": 1
+  "default_model": {
+    "provider": "groq",
+    "model": "llama-3.3-70b-versatile",
+    "api_key_env": "GROQ_API_KEY",
+    "base_url": null
+  },
+  "exec_policy": {
+    "mode": "allowlist",
+    "timeout_secs": 30
+  },
+  "terminal": {
+    "enabled": true,
+    "allow_remote": false
+  },
+  "mcp_servers": [{ "name": "filesystem", "timeout_secs": 30, "env_count": 1 }]
 }
 ```
 
@@ -278,13 +296,16 @@ Get the JSON Schema for the full config file (`~/.librefang/config.toml`). Usefu
 
 ### POST /api/config/set
 
-Set one or more config values at runtime without restarting.
+Set one allowlisted config value at runtime without restarting.
+
+The field is `path`, a dot-separated key path of at most three segments, and it must be on the write allowlist — a whole table (`default_model`) is rejected with `403`, its leaves (`default_model.model`) are accepted.
+Infrastructure and credential paths (`api_key`, `network.shared_secret`, anything ending in `_env`) stay edit-on-disk.
 
 **Request Body**:
 
 ```json
 {
-  "key": "default_model",
+  "path": "default_model.model",
   "value": "gemini-2.5-flash"
 }
 ```
