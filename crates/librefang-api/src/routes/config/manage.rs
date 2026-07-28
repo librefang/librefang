@@ -13,16 +13,25 @@ use super::*;
     )
 )]
 pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Return a redacted view of the kernel config
     let config = state.kernel.config_ref();
+    let budget = state.kernel.budget_config();
+    Json(redacted_config_json(&config, &budget))
+}
 
-    // -- channels: show which platforms are configured (instance counts), no tokens --
-    // All previously in-process channels (whatsapp, teams,
-    // google_chat, webhook, …) migrated to sidecars; their fields no
-    // longer exist on `ChannelsConfig` so there's nothing to
-    // enumerate here. The macro shape + lookup are preserved as a
-    // comment block so a future in-process channel can rebuild this
-    // block by uncommenting + appending one `ch!()` line per field.
+/// Build the redacted body returned by `GET /api/config`.
+///
+/// Split out of the handler so the read/write parity guard can render a payload without booting a kernel.
+///
+/// Every leaf that `is_writable_config_path` accepts MUST be represented here (redacted where the value is a secret, but present as a key).
+/// The dashboard populates its form fields from this payload, so a writable field missing from the read side renders blank and reads back as "not configured" even immediately after a successful save (#6596).
+/// `config_read_write_parity_tests::every_writable_config_leaf_is_readable` fails the build when the two sides drift apart again.
+fn redacted_config_json(
+    config: &librefang_types::config::KernelConfig,
+    budget: &librefang_types::config::BudgetConfig,
+) -> serde_json::Value {
+    // -- channels: file-transfer limits + which platforms are configured (instance counts), no tokens --
+    // All previously in-process channels (whatsapp, teams, google_chat, webhook, …) migrated to sidecars; their per-vendor fields no longer exist on `ChannelsConfig`, so only its file-transfer scalars are enumerated here.
+    // The macro shape + lookup are preserved as a comment block so a future in-process channel can rebuild the per-vendor part: uncomment the block, append one `ch!()` line per field, then bind `channels` below as `let mut` and fold `map` into it with `channels.as_object_mut().expect("object").extend(map)`.
     //
     //   let c = &config.channels;
     //   let mut map = serde_json::Map::new();
@@ -37,8 +46,13 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     //       }};
     //   }
     //   ch!(<future_in_process_channel>);
-    //   serde_json::Value::Object(map)
-    let channels = serde_json::Value::Object(serde_json::Map::new());
+    //
+    // The file-transfer scalars are non-secret and the dashboard declares a `channels` section for them, so omitting them rendered the section blank (#6596).
+    let channels = serde_json::json!({
+        "file_download_max_bytes": config.channels.file_download_max_bytes,
+        "file_download_dir": config.channels.file_download_dir,
+        "file_upload_max_bytes": config.channels.file_upload_max_bytes,
+    });
 
     // -- mcp_servers: list names/commands, redact env secrets --
     let mcp_servers: Vec<serde_json::Value> = config
@@ -175,7 +189,12 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         }
     );
     set!("network_enabled", config.network_enabled);
-    set!("mode", format!("{:?}", config.mode));
+    // Serde encoding, not `Debug`: `KernelMode` is `rename_all = "snake_case"`, so the write path and the schema's select options both speak `"stable" | "default" | "dev"`.
+    // Emitting `Debug`'s `"Default"` here left the dashboard dropdown with a value none of its options matched (#6596).
+    set!(
+        "mode",
+        serde_json::to_value(config.mode).unwrap_or(serde_json::json!("default"))
+    );
     set!("language", config.language);
     set!(
         "usage_footer",
@@ -194,11 +213,15 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
             .to_string()
     );
     // ── Default Model ──
+    // `extra_params` is deliberately absent: it is `#[serde(flatten)]`, so it has no key of its own on the wire — its entries live directly on the `[default_model]` table.
+    // Inventing a nested `extra_params` object here would put a shape in the read payload that neither config.toml nor the generated schema has.
     set!("default_model", {
         "provider": config.default_model.provider,
         "model": config.default_model.model,
         "api_key_env": config.default_model.api_key_env,
         "base_url": config.default_model.base_url,
+        "message_timeout_secs": config.default_model.message_timeout_secs,
+        "cli_profile_dirs": config.default_model.cli_profile_dirs,
     });
 
     // ── Memory ──
@@ -209,7 +232,15 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "decay_rate": config.memory.decay_rate,
         "embedding_provider": config.memory.embedding_provider,
         "embedding_api_key_env": config.memory.embedding_api_key_env,
+        "embedding_dimensions": config.memory.embedding_dimensions,
         "consolidation_interval_hours": config.memory.consolidation_interval_hours,
+        "fts_only": config.memory.fts_only,
+        "decay": serde_json::to_value(&config.memory.decay).unwrap_or_default(),
+        "chunking": serde_json::to_value(&config.memory.chunking).unwrap_or_default(),
+        "vector_backend": config.memory.vector_backend,
+        "vector_store_url": config.memory.vector_store_url,
+        "soft_delete_retention_days": config.memory.soft_delete_retention_days,
+        "pool_size": config.memory.pool_size,
     });
 
     // ── Proactive Memory ──
@@ -225,6 +256,10 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "confidence_decay_rate": config.proactive_memory.confidence_decay_rate,
         "duplicate_threshold": config.proactive_memory.duplicate_threshold,
         "max_memories_per_agent": config.proactive_memory.max_memories_per_agent,
+        "format_context_max_chars": config.proactive_memory.format_context_max_chars,
+        "update_threshold_same_category": config.proactive_memory.update_threshold_same_category,
+        "update_threshold_cross_category": config.proactive_memory.update_threshold_cross_category,
+        "extractor_sidecar": serde_json::to_value(&config.proactive_memory.extractor_sidecar).unwrap_or_default(),
     });
 
     // ── Auto-Dream (background memory consolidation) ──
@@ -243,6 +278,8 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "bootstrap_peers": config.network.bootstrap_peers,
         "mdns_enabled": config.network.mdns_enabled,
         "max_peers": config.network.max_peers,
+        "max_messages_per_peer_per_minute": config.network.max_messages_per_peer_per_minute,
+        "max_llm_tokens_per_peer_per_hour": config.network.max_llm_tokens_per_peer_per_hour,
         "shared_secret": if config.network.shared_secret.is_empty() { "not set" } else { "***" },
     });
 
@@ -262,6 +299,8 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         match &config.a2a {
             Some(a2a) => serde_json::json!({
                 "enabled": a2a.enabled,
+                "name": a2a.name,
+                "description": a2a.description,
                 "listen_path": a2a.listen_path,
                 "external_agents": a2a.external_agents.iter().map(|ea| {
                     serde_json::json!({ "name": ea.name, "url": ea.url })
@@ -276,7 +315,9 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
 
     set!("fallback_providers", fallback_providers);
 
+    // `cdp_auth_token_env` is an env-var *name*, not a token — same treatment as `default_model.api_key_env`, which the dashboard has always shown.
     set!("browser", {
+        "enabled": config.browser.enabled,
         "headless": config.browser.headless,
         "viewport_width": config.browser.viewport_width,
         "viewport_height": config.browser.viewport_height,
@@ -284,6 +325,8 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "idle_timeout_secs": config.browser.idle_timeout_secs,
         "max_sessions": config.browser.max_sessions,
         "chromium_path": config.browser.chromium_path,
+        "cdp_endpoint": config.browser.cdp_endpoint,
+        "cdp_auth_token_env": config.browser.cdp_auth_token_env,
     });
 
     set!("extensions", {
@@ -296,17 +339,21 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     set!("vault", {
         "enabled": config.vault.enabled,
         "path": config.vault.path.as_ref().map(|p| p.to_string_lossy().to_string()),
+        "use_os_keyring": config.vault.use_os_keyring,
     });
 
     let stt_available = config.media.audio_provider.is_some();
+    // `custom_stt` is serialized wholesale: `CustomSttConfig` carries only a base URL, an env-var name, a bool and a model id — no secret values.
     set!("media", {
         "image_description": config.media.image_description,
         "audio_transcription": config.media.audio_transcription,
         "video_description": config.media.video_description,
         "max_concurrency": config.media.max_concurrency,
         "image_provider": config.media.image_provider,
+        "image_model": config.media.image_model,
         "audio_provider": config.media.audio_provider,
         "audio_model": config.media.audio_model,
+        "custom_stt": serde_json::to_value(&config.media.custom_stt).unwrap_or_default(),
         "stt_available": stt_available,
     });
 
@@ -317,8 +364,9 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "timeout_secs": config.links.timeout_secs,
     });
 
+    // `ReloadMode` is `rename_all = "snake_case"` — emit the serde form the write path accepts, not `Debug`'s capitalised variant name.
     set!("reload", {
-        "mode": format!("{:?}", config.reload.mode),
+        "mode": serde_json::to_value(config.reload.mode).unwrap_or(serde_json::json!("hybrid")),
         "debounce_ms": config.reload.debounce_ms,
     });
 
@@ -342,21 +390,40 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "auto_approve": config.approval.auto_approve,
         "second_factor": serde_json::to_value(config.approval.second_factor).unwrap_or(serde_json::json!("none")),
         "totp_issuer": config.approval.totp_issuer,
+        "totp_grace_period_secs": config.approval.totp_grace_period_secs,
     });
 
+    // `ExecSecurityMode` is `rename_all = "lowercase"` — the schema's select offers `deny | allowlist | full`, so `Debug`'s `"Allowlist"` never matched an option.
     set!("exec_policy", {
-        "mode": format!("{:?}", config.exec_policy.mode),
+        "mode": serde_json::to_value(config.exec_policy.mode).unwrap_or(serde_json::json!("allowlist")),
         "safe_bins": config.exec_policy.safe_bins,
+        "safe_bins_skip_approval": config.exec_policy.safe_bins_skip_approval,
         "allowed_commands": config.exec_policy.allowed_commands,
+        "allowed_env_vars": config.exec_policy.allowed_env_vars,
         "timeout_secs": config.exec_policy.timeout_secs,
         "max_output_bytes": config.exec_policy.max_output_bytes,
         "no_output_timeout_secs": config.exec_policy.no_output_timeout_secs,
     });
 
+    // ── Terminal access controls ──
+    // The whole section was missing from the read side even though `ui_sections_overlay` declares it and `terminal.` is a writable section prefix, so the dashboard rendered every field blank and a save silently read back as unset (#6596).
+    // None of these are secrets: the two remote-access booleans were already mutable through `POST /api/config/set`, and showing an operator the value they can already change is strictly weaker than the existing write surface.
+    set!("terminal", {
+        "enabled": config.terminal.enabled,
+        "allowed_origins": config.terminal.allowed_origins,
+        "allow_remote": config.terminal.allow_remote,
+        "require_proxy_headers": config.terminal.require_proxy_headers,
+        "allow_unauthenticated_remote": config.terminal.allow_unauthenticated_remote,
+        "tmux_enabled": config.terminal.tmux_enabled,
+        "max_windows": config.terminal.max_windows,
+        "tmux_binary_path": config.terminal.tmux_binary_path,
+    });
+
     set!("bindings", bindings);
 
+    // `BroadcastStrategy` is `rename_all = "lowercase"`.
     set!("broadcast", {
-        "strategy": format!("{:?}", config.broadcast.strategy),
+        "strategy": serde_json::to_value(config.broadcast.strategy).unwrap_or(serde_json::json!("parallel")),
         "routes": config.broadcast.routes,
     });
 
@@ -397,6 +464,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "model_id": config.tts.elevenlabs.model_id,
                 "stability": config.tts.elevenlabs.stability,
                 "similarity_boost": config.tts.elevenlabs.similarity_boost,
+                "output_format": config.tts.elevenlabs.output_format,
             }),
         );
         tts.insert(
@@ -408,6 +476,11 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "pitch": config.tts.google.pitch,
                 "format": config.tts.google.format,
             }),
+        );
+        // `CustomTtsConfig` mirrors `CustomSttConfig`: base URL, env-var name, bool, model / voice / format ids — no secret values.
+        tts.insert(
+            "custom".into(),
+            serde_json::to_value(&config.tts.custom).unwrap_or_default(),
         );
     }
 
@@ -430,13 +503,14 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
             "pids_limit".into(),
             serde_json::json!(config.docker.pids_limit),
         );
+        // Both enums are `rename_all = "snake_case"`; `Debug` would emit `"NonMain"` where the write path and the schema expect `"non_main"`.
         docker.insert(
             "mode".into(),
-            serde_json::json!(format!("{:?}", config.docker.mode)),
+            serde_json::to_value(config.docker.mode).unwrap_or(serde_json::json!("off")),
         );
         docker.insert(
             "scope".into(),
-            serde_json::json!(format!("{:?}", config.docker.scope)),
+            serde_json::to_value(config.docker.scope).unwrap_or(serde_json::json!("session")),
         );
         docker.insert(
             "reuse_cool_secs".into(),
@@ -460,6 +534,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "enabled": config.pairing.enabled,
         "max_devices": config.pairing.max_devices,
         "token_expiry_secs": config.pairing.token_expiry_secs,
+        "public_base_url": config.pairing.public_base_url,
         "push_provider": config.pairing.push_provider,
         "ntfy_url": config.pairing.ntfy_url,
         "ntfy_topic": config.pairing.ntfy_topic,
@@ -478,16 +553,16 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         },
     );
 
-    {
-        let budget = state.kernel.budget_config();
-        set!("budget", {
-            "max_hourly_usd": budget.max_hourly_usd,
-            "max_daily_usd": budget.max_daily_usd,
-            "max_monthly_usd": budget.max_monthly_usd,
-            "alert_threshold": budget.alert_threshold,
-            "default_max_llm_tokens_per_hour": budget.default_max_llm_tokens_per_hour,
-        });
-    }
+    // Budget is read from the kernel's live `BudgetConfig` rather than `config.budget`: `/api/budget` mutations update the former in place.
+    set!("budget", {
+        "max_hourly_usd": budget.max_hourly_usd,
+        "max_daily_usd": budget.max_daily_usd,
+        "max_monthly_usd": budget.max_monthly_usd,
+        "alert_threshold": budget.alert_threshold,
+        "default_max_llm_tokens_per_hour": budget.default_max_llm_tokens_per_hour,
+        "default_burst_ratio": budget.default_burst_ratio,
+        "providers": serde_json::to_value(&budget.providers).unwrap_or_default(),
+    });
 
     set!("provider_urls", config.provider_urls);
     set!("provider_proxy_urls", config.provider_proxy_urls);
@@ -513,12 +588,17 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "retention_days": config.session.retention_days,
         "max_sessions_per_agent": config.session.max_sessions_per_agent,
         "cleanup_interval_hours": config.session.cleanup_interval_hours,
+        "reset_prompt": config.session.reset_prompt,
+        "context_injection": serde_json::to_value(&config.session.context_injection).unwrap_or_default(),
+        "on_session_start_script": config.session.on_session_start_script,
+        "reset": serde_json::to_value(&config.session.reset).unwrap_or_default(),
     });
 
     set!("queue", {
         "max_depth_per_agent": config.queue.max_depth_per_agent,
         "max_depth_global": config.queue.max_depth_global,
         "task_ttl_secs": config.queue.task_ttl_secs,
+        "task_queue_retention_days": config.queue.task_queue_retention_days,
     });
     if let Some(queue) = out.get_mut("queue").and_then(|v| v.as_object_mut()) {
         queue.insert(
@@ -529,6 +609,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "subagent_lane": config.queue.concurrency.subagent_lane,
                 "trigger_lane": config.queue.concurrency.trigger_lane,
                 "default_per_agent": config.queue.concurrency.default_per_agent,
+                "trigger_fire_timeout_secs": config.queue.concurrency.trigger_fire_timeout_secs,
             }),
         );
     }
@@ -688,6 +769,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     set!("registry", {
         "cache_ttl_secs": config.registry.cache_ttl_secs,
         "registry_mirror": config.registry.registry_mirror,
+        "registry_host": config.registry.registry_host,
     });
 
     // ── privacy ──
@@ -773,6 +855,9 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "token_threshold_ratio": config.compaction.token_threshold_ratio,
         "max_chunk_chars": config.compaction.max_chunk_chars,
         "max_retries": config.compaction.max_retries,
+        "aggregate_developer_loops": config.compaction.aggregate_developer_loops,
+        "max_loop_steps_before_aggregate": config.compaction.max_loop_steps_before_aggregate,
+        "strip_reasoning_after_turns": config.compaction.strip_reasoning_after_turns,
     });
 
     // ── azure_openai (endpoint URL may identify a tenant; keep as-is, deployment is non-secret) ──
@@ -808,7 +893,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     // `provider_api_keys` are already inserted above. `tool_timeouts`:
     set!("tool_timeouts", config.tool_timeouts);
 
-    Json(serde_json::Value::Object(out))
+    serde_json::Value::Object(out)
 }
 
 // ── Model Catalog Endpoints ─────────────────────────────────────────
@@ -1344,4 +1429,157 @@ pub async fn config_set(
         body["reload_error"] = serde_json::Value::String(err);
     }
     (StatusCode::OK, Json(body))
+}
+
+// ---------------------------------------------------------------------------
+// Read/write parity guard (#6596)
+// ---------------------------------------------------------------------------
+
+/// Guards the invariant that `GET /api/config` exposes every config leaf `POST /api/config/set` accepts.
+///
+/// The response body is hand-enumerated per section rather than derived from `Serialize`, because the dashboard depends on keys serde would never emit (`web.search_available`, `media.stt_available`) and on redaction markers that replace secret values in place.
+/// That shape is worth keeping, but it drifts silently: a field added to a config struct and wired into the write allowlist stays invisible on the read side, so the dashboard renders the setting blank and a successful save reads back as "not configured".
+/// This module turns that drift into a build failure.
+///
+/// The exclusion rules (secret suffixes, per-section depth limits, sections that are deliberately edit-on-disk) are NOT restated here — the guard calls the real `is_writable_config_path` so there is exactly one copy of them.
+#[cfg(test)]
+mod config_read_write_parity_tests {
+    use librefang_types::config::{
+        A2aConfig, BudgetConfig, KernelConfig, ThinkingConfig, WebhookTriggerConfig,
+    };
+
+    /// `KernelConfig::default()` with every `Option`-wrapped section populated.
+    /// Those sections serialize to `null` when unset, which would hide their leaves from the walk below and let a gap under `a2a`, `webhook_triggers`, or `thinking` pass unnoticed.
+    fn config_with_optional_sections_populated() -> KernelConfig {
+        KernelConfig {
+            a2a: Some(A2aConfig::default()),
+            webhook_triggers: Some(WebhookTriggerConfig::default()),
+            thinking: Some(ThinkingConfig::default()),
+            ..KernelConfig::default()
+        }
+    }
+
+    /// Every dotted path in `value` that `is_writable_config_path` could match: the top-level key plus one and two nested levels, which is the deepest form the allowlist accepts.
+    /// Arrays are leaves — a numeric index is not a config key path.
+    ///
+    /// Known blind spot: a field carrying `#[serde(skip_serializing_if = …)]` whose default value satisfies that predicate is absent from `value`, so the walk cannot see it.
+    /// Every writable path in that category today (`exec_policy.allowed_env_vars`, `default_model.cli_profile_dirs`, `budget.providers`, `tool_invoke.allowlist`, `agent_max_iterations`, `max_history_messages`) is in the read payload, checked by hand; a future one has to be added by hand too.
+    fn candidate_paths(value: &serde_json::Value) -> Vec<String> {
+        let mut paths = Vec::new();
+        let Some(root) = value.as_object() else {
+            return paths;
+        };
+        for (k1, v1) in root {
+            paths.push(k1.clone());
+            let Some(level1) = v1.as_object() else {
+                continue;
+            };
+            for (k2, v2) in level1 {
+                paths.push(format!("{k1}.{k2}"));
+                let Some(level2) = v2.as_object() else {
+                    continue;
+                };
+                for k3 in level2.keys() {
+                    paths.push(format!("{k1}.{k2}.{k3}"));
+                }
+            }
+        }
+        paths
+    }
+
+    /// Walk a dotted path through the response body, returning the value at the end.
+    /// A JSON `null` counts as found: an unset `Option` is legitimately rendered as `null`, and the dashboard needs the key to exist so it can bind an empty input to it.
+    fn lookup<'a>(payload: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+        let mut cursor = payload;
+        for segment in path.split('.') {
+            cursor = cursor.as_object()?.get(segment)?;
+        }
+        Some(cursor)
+    }
+
+    #[test]
+    fn every_writable_config_leaf_is_readable() {
+        let config = config_with_optional_sections_populated();
+        let budget = BudgetConfig::default();
+        let serialized = serde_json::to_value(&config).expect("KernelConfig derives Serialize");
+        let payload = super::redacted_config_json(&config, &budget);
+
+        let writable: Vec<String> = candidate_paths(&serialized)
+            .into_iter()
+            .filter(|path| super::super::is_writable_config_path(path))
+            .collect();
+
+        // Sanity floor: if the walk stops producing paths (a refactor changes the serialized shape, say) the assertion below would pass vacuously and the guard would be worthless.
+        // The real count is in the hundreds.
+        assert!(
+            writable.len() > 100,
+            "parity guard enumerated only {} writable paths — the walk is broken, \
+             not the config (expected hundreds)",
+            writable.len()
+        );
+
+        let mut missing: Vec<String> = writable
+            .into_iter()
+            .filter(|path| lookup(&payload, path).is_none())
+            .collect();
+        missing.sort();
+
+        assert!(
+            missing.is_empty(),
+            "POST /api/config/set accepts these paths but GET /api/config omits them, so the \
+             dashboard renders each one blank and reads it back as \"not configured\" right \
+             after a successful save (#6596). Add every path to `redacted_config_json`: \
+             {missing:#?}"
+        );
+    }
+
+    /// The write path, the JSON schema's `select` options, and `config.toml` all speak serde's rename form for these enums.
+    /// `format!("{:?}", …)` emitted the Rust variant name instead, so the dashboard received a value matching none of the options it offered and showed the dropdown empty even though the field was set.
+    #[test]
+    fn enum_valued_fields_use_the_serde_encoding_not_debug() {
+        let config = KernelConfig::default();
+        let payload = super::redacted_config_json(&config, &BudgetConfig::default());
+
+        for (path, expected) in [
+            ("mode", "default"),
+            ("reload.mode", "hybrid"),
+            ("exec_policy.mode", "allowlist"),
+            ("broadcast.strategy", "parallel"),
+            ("docker.mode", "off"),
+            ("docker.scope", "session"),
+            ("web.search_provider", "auto"),
+        ] {
+            assert_eq!(
+                lookup(&payload, path).and_then(|v| v.as_str()),
+                Some(expected),
+                "`{path}` must be the serde encoding the write path accepts, not Debug's \
+                 variant name"
+            );
+        }
+    }
+
+    /// The specific paths the #6596 report listed as writable-but-unreadable, pinned by name so a regression names the issue rather than surfacing as one entry in the bulk diff above.
+    #[test]
+    fn reported_missing_paths_are_present() {
+        let config = config_with_optional_sections_populated();
+        let payload = super::redacted_config_json(&config, &BudgetConfig::default());
+
+        for path in [
+            "browser.enabled",
+            "browser.cdp_endpoint",
+            "media.image_model",
+            "media.custom_stt",
+            "tts.custom",
+            "channels.file_download_dir",
+            "terminal.enabled",
+            "approval.totp_grace_period_secs",
+            "web.timeout_secs",
+            "exec_policy.allowed_env_vars",
+        ] {
+            assert!(
+                lookup(&payload, path).is_some(),
+                "`{path}` was reported missing from GET /api/config in #6596"
+            );
+        }
+    }
 }
