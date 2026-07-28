@@ -152,7 +152,8 @@ fn redacted_config_json(
         .collect();
 
     // -- external_auth: redact secrets --
-    // Every field of `OidcProvider` is enumerated here. None of them holds a secret value: `client_secret_env` is the *name* of the environment variable the secret is read from (the secret itself is never stored in config), and `client_id` is the public half of the OAuth client registration — both were already emitted before #6605.
+    // Every field of `OidcProvider` is enumerated here.
+    // None of them holds a secret value: `client_secret_env` is the *name* of the environment variable the secret is read from (the secret itself is never stored in config), and `client_id` is the public half of the OAuth client registration — both were already emitted before #6605.
     // `auth_url` / `token_url` / `userinfo_url` / `jwks_uri` / `audience` / `require_email_verified` were missing, which left an operator unable to tell from the API whether a non-OIDC provider's explicit endpoints were picked up or whether this provider overrides the global email-verification gate (#6605).
     // These stay read-only: `external_auth.` is deliberately absent from `WRITABLE_SECTION_PREFIXES`, because flipping an endpoint or the verification gate post-auth is the #3703 impersonation vector.
     let external_auth_providers: Vec<serde_json::Value> = config
@@ -1654,7 +1655,8 @@ mod config_read_write_parity_tests {
         }
     }
 
-    /// One fully-populated provider. `OidcProvider` derives no `Default`, so every field is spelled out; distinct values make it obvious in a failure which field a payload dropped.
+    /// One fully-populated provider.
+    /// `OidcProvider` derives no `Default`, so every field is spelled out; distinct values make it obvious in a failure which field a payload dropped.
     fn oidc_provider_fixture() -> librefang_types::config::OidcProvider {
         librefang_types::config::OidcProvider {
             id: "corp".into(),
@@ -1699,7 +1701,8 @@ mod writable_allowlist_backing_field_tests {
 
     /// Does `segments` resolve to a field declared by the draft-07 schema rooted at `node`?
     ///
-    /// Follows `$ref` into `definitions`. Treats `allOf` / `anyOf` / `oneOf` as "any branch that resolves counts": schemars renders a struct-typed field as `allOf: [{$ref}]`, an `Option<T>` as `anyOf: [{$ref}, {"type": "null"}]`, and a `OneOrMany<T>` as a `T` / `[T]` branch pair, so the branch that matches is the one that answers the question.
+    /// Follows `$ref` into `definitions`.
+    /// Treats `allOf` / `anyOf` / `oneOf` as "any branch that resolves counts": schemars renders a struct-typed field as `allOf: [{$ref}]`, an `Option<T>` as `anyOf: [{$ref}, {"type": "null"}]`, and a `OneOrMany<T>` as a `T` / `[T]` branch pair, so the branch that matches is the one that answers the question.
     /// `additionalProperties` consumes one segment: a map-typed section (`provider_urls`, `tool_timeouts`, …) has dynamic keys by design, and an allowlist entry addressing one is correct rather than dangling.
     /// Everything else — including a dotted segment against an array or a scalar — is not a declared field.
     fn schema_declares_path(
@@ -1787,7 +1790,8 @@ mod writable_allowlist_backing_field_tests {
              moved, so this guard is no longer checking the real write surface (expected 80+)"
         );
 
-        // Negative controls. The failure mode of a resolver is over-permissiveness: one stray fallback, or a schema shape it walks past instead of rejecting, turns the guard into a no-op that still passes.
+        // Negative controls.
+        // The failure mode of a resolver is over-permissiveness: one stray fallback, or a schema shape it walks past instead of rejecting, turns the guard into a no-op that still passes.
         // `ui.theme` is the exact path #6605 removed, which also ties this guard to the defect it exists for.
         for absent in [
             "ui.theme",
@@ -1808,7 +1812,8 @@ mod writable_allowlist_backing_field_tests {
                 dangling.push(path.to_string());
             }
         }
-        // A section prefix is checked at its base. The prefix admits arbitrary leaves beneath it, so "this section exists" is the strongest claim available without enumerating what a caller might post — the leaf itself is only reachable at request time.
+        // A section prefix is checked at its base.
+        // The prefix admits arbitrary leaves beneath it, so "this section exists" is the strongest claim available without enumerating what a caller might post — the leaf itself is only reachable at request time.
         for &prefix in super::super::WRITABLE_SECTION_PREFIXES {
             if !declares(&definitions, &schema, prefix.trim_end_matches('.')) {
                 dangling.push(prefix.to_string());
