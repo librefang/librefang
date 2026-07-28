@@ -258,17 +258,35 @@ API 版本发现。返回所有可用的 API 版本及其稳定性状态。
 
 获取当前内核配置（敏感信息已脱敏）。
 
-**响应** `200 OK`：
+响应体与 `config.toml` 逐节对应：顶层标量仍在顶层，每个 `[section]` 对应同名的嵌套对象。
+敏感值不会被删除，而是原地替换为 `"***"`（已设置）或 `"not set"`（为空），因此对应的键始终存在。
+枚举字段使用与 `config.toml` 相同的写法（`"allowlist"`，而非 `"Allowlist"`）。
+`POST /api/config/set` 能写入的每个字段在这里都可读——已有测试保证这一点（#6596）。
+
+**响应** `200 OK`（节选——实际响应包含全部配置节）：
 
 ```json
 {
+  "api_listen": "127.0.0.1:4545",
+  "api_key": "***",
+  "log_level": "info",
+  "mode": "default",
   "data_dir": "/home/user/.librefang/data",
-  "default_provider": "groq",
-  "default_model": "llama-3.3-70b-versatile",
-  "listen_addr": "127.0.0.1:4545",
-  "api_key_set": true,
-  "channels_configured": 2,
-  "mcp_servers": 1
+  "default_model": {
+    "provider": "groq",
+    "model": "llama-3.3-70b-versatile",
+    "api_key_env": "GROQ_API_KEY",
+    "base_url": null
+  },
+  "exec_policy": {
+    "mode": "allowlist",
+    "timeout_secs": 30
+  },
+  "terminal": {
+    "enabled": true,
+    "allow_remote": false
+  },
+  "mcp_servers": [{ "name": "filesystem", "timeout_secs": 30, "env_count": 1 }]
 }
 ```
 
@@ -278,13 +296,16 @@ API 版本发现。返回所有可用的 API 版本及其稳定性状态。
 
 ### POST /api/config/set
 
-在运行时设置一个或多个配置值，无需重启。
+在运行时设置一个位于白名单内的配置值，无需重启。
+
+字段名为 `path`，是最多三段的点分键路径，且必须在写入白名单内——整张表（`default_model`）会返回 `403`，其叶子字段（`default_model.model`）才被接受。
+基础设施与凭据类路径（`api_key`、`network.shared_secret`、以 `_env` 结尾的任意键）仍需直接编辑磁盘上的配置文件。
 
 **请求体**：
 
 ```json
 {
-  "key": "default_model",
+  "path": "default_model.model",
   "value": "gemini-2.5-flash"
 }
 ```

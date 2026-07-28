@@ -1,7 +1,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { formatTime, formatDateTime } from "../lib/datetime";
 import { formatCompact } from "../lib/format";
-import { memo, useId, useMemo, useState, useCallback, useEffect, useReducer } from "react";
+import { memo, useId, useMemo, useRef, useState, useCallback, useEffect, useReducer } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import type { ApiActionResponse, ProviderItem } from "../api";
@@ -10,7 +10,7 @@ import { useCredentialPools, useProviders, useProviderStatus } from "../lib/quer
 import type { CredentialPoolStatus, CredentialPoolKeySnapshot } from "../api";
 import { useModels, useModelOverrides } from "../lib/queries/models";
 import { useUpdateModelOverrides } from "../lib/mutations/models";
-import { useTestProvider, useSetProviderKey, useDeleteProviderKey, useEnableProvider, useSetProviderUrl, useSetDefaultProvider, useCreateRegistryContent } from "../lib/mutations/providers";
+import { useTestProvider, useSetProviderKey, useDeleteProviderKey, useEnableProvider, useSetProviderUrl, useSetDefaultProvider, useCreateRegistryContent, useConnectEveryApi, EVERYAPI_PROVIDER } from "../lib/mutations/providers";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -27,7 +27,7 @@ import {
   Server, Zap, Clock, Key, Globe, CheckCircle2, XCircle, Loader2, AlertCircle, Search,
   SortAsc, SortDesc, CheckSquare, Square, ChevronRight, X, Grid3X3, List, Filter,
   Activity, Cpu, Cloud, Bot, Globe2, Sparkles, Plus, Star, Pencil, Trash2,
-  Check, ChevronLeft, RotateCcw, Gauge
+  Check, ChevronLeft, RotateCcw, Gauge, Link2
 } from "lucide-react";
 
 function getErrorMessage(e: unknown): string | null {
@@ -892,6 +892,137 @@ interface ModelEntry {
   output_cost_per_m: number | "";
 }
 
+/**
+ * Connect drawer for the EveryAPI gateway.
+ *
+ * EveryAPI needs its own entry point rather than a row in the Add picker: it is not a built-in provider, so nothing represents it in `GET /api/providers` until an entry has been written, and the picker only lists what that endpoint already returns.
+ *
+ * The drawer collects the relay key and an optional gateway root.
+ * It does not fetch the model catalog — the daemon does that on its own once the provider is configured, so this stays a two-field form rather than a wizard.
+ */
+function EveryApiConnectDrawer({ isOpen, onClose, addToast }: {
+  isOpen: boolean;
+  onClose: () => void;
+  addToast: (msg: string, type?: "success" | "error" | "info") => void;
+}) {
+  const { t } = useTranslation();
+  const [relayKey, setRelayKey] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [touched, setTouched] = useState(false);
+  const connectMutation = useConnectEveryApi();
+
+  // Held in a ref rather than named as a dependency.
+  // The object `useMutation` returns is a fresh reference on every render, so depending on it re-runs this effect on every render, and the `setState` calls below then trigger the next render — an unbounded loop React aborts with "Maximum update depth exceeded".
+  // Depending on `connectMutation.reset` alone is no safer, since its stability is an implementation detail of the query library rather than a guarantee.
+  const resetRef = useRef(connectMutation.reset);
+  resetRef.current = connectMutation.reset;
+
+  // Reset on close so reopening never shows a previous attempt's key or error.
+  useEffect(() => {
+    if (isOpen) return;
+    setRelayKey("");
+    setBaseUrl("");
+    setTouched(false);
+    resetRef.current();
+  }, [isOpen]);
+
+  const trimmedKey = relayKey.trim();
+  const keyMissing = touched && !trimmedKey;
+
+  const submit = async () => {
+    setTouched(true);
+    if (!trimmedKey) return;
+    try {
+      await connectMutation.mutateAsync({ relayKey: trimmedKey, baseUrl });
+      addToast(t("providers.everyapi_connected", { defaultValue: "EveryAPI connected" }), "success");
+      onClose();
+    } catch (e) {
+      addToast(getErrorMessage(e) || t("common.error"), "error");
+    }
+  };
+
+  return (
+    <DrawerPanel
+      isOpen={isOpen}
+      onClose={onClose}
+      title={t("providers.everyapi_connect_title", { defaultValue: "Connect EveryAPI" })}
+      size="md"
+    >
+      <form
+        className="flex flex-col gap-4 p-5"
+        onSubmit={(e) => { e.preventDefault(); void submit(); }}
+      >
+        <p className="text-[12px] leading-relaxed text-text-dim">
+          {t("providers.everyapi_connect_help", {
+            defaultValue: "Registers the EveryAPI gateway as a provider and stores its relay key. The model catalog and pricing are filled in by the daemon after the entry is created.",
+          })}
+        </p>
+
+        <Input
+          label={t("providers.everyapi_relay_key", { defaultValue: "Relay key" })}
+          type="password"
+          autoComplete="off"
+          value={relayKey}
+          onChange={(e) => setRelayKey(e.target.value)}
+          onBlur={() => setTouched(true)}
+          placeholder={EVERYAPI_PROVIDER.apiKeyEnv}
+          leftIcon={<Key className="w-4 h-4" />}
+          error={keyMissing
+            ? t("providers.everyapi_relay_key_required", { defaultValue: "A relay key is required." })
+            : undefined}
+          disabled={connectMutation.isPending}
+        />
+
+        <Input
+          label={t("providers.everyapi_base_url", { defaultValue: "Gateway URL (optional)" })}
+          type="url"
+          autoComplete="off"
+          value={baseUrl}
+          onChange={(e) => setBaseUrl(e.target.value)}
+          placeholder={EVERYAPI_PROVIDER.defaultBaseUrl}
+          leftIcon={<Globe className="w-4 h-4" />}
+          disabled={connectMutation.isPending}
+        />
+
+        {connectMutation.isError && (
+          <div
+            role="alert"
+            className="flex items-start gap-2 rounded-md border border-error/30 bg-error/10 p-3 text-[12px] text-error"
+          >
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span className="min-w-0 break-words">
+              {getErrorMessage(connectMutation.error) || t("common.error")}
+            </span>
+          </div>
+        )}
+
+        <div className="flex items-center gap-2 border-t border-border-subtle pt-3">
+          <Button
+            type="submit"
+            className="flex-1"
+            disabled={connectMutation.isPending || !trimmedKey}
+            leftIcon={connectMutation.isPending
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : <Link2 className="w-3.5 h-3.5" />}
+          >
+            {connectMutation.isPending
+              ? t("providers.everyapi_connecting", { defaultValue: "Connecting…" })
+              : t("providers.everyapi_connect_action", { defaultValue: "Connect" })}
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={onClose}
+            disabled={connectMutation.isPending}
+          >
+            {t("common.cancel")}
+          </Button>
+        </div>
+      </form>
+    </DrawerPanel>
+  );
+}
+
 function toTitleCase(id: string): string {
   return id.split("-").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
@@ -1376,6 +1507,7 @@ export function ProvidersPage() {
   // for new providers lives behind the Add picker.
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerSearch, setPickerSearch] = useState("");
+  const [everyApiOpen, setEveryApiOpen] = useState(false);
   useCreateShortcut(() => { setPickerSearch(""); setPickerOpen(true); });
   const [deleteConfirmProvider, setDeleteConfirmProvider] = useState<ProviderItem | null>(null);
   const addToast = useUIStore((s) => s.addToast);
@@ -1462,6 +1594,13 @@ export function ProvidersPage() {
         || p.id.toLowerCase().includes(pickerSearch.toLowerCase()))
       .sort((a, b) => (a.display_name || a.id).localeCompare(b.display_name || b.id)),
     [providers, pickerSearch],
+  );
+
+  // EveryAPI is not a built-in provider, so it is absent from `providers` entirely until a registry entry exists — not merely unconfigured.
+  // That is why the picker cannot surface it and the footer offers an explicit connect action instead, hidden once an entry is present.
+  const everyApiPresent = useMemo(
+    () => providers.some(p => p.id === EVERYAPI_PROVIDER.id),
+    [providers],
   );
 
   const openPicker = () => { setPickerSearch(""); setPickerOpen(true); };
@@ -2013,7 +2152,17 @@ export function ProvidersPage() {
               })}
             </div>
           )}
-          <div className="border-t border-border-subtle pt-3 mt-1">
+          <div className="border-t border-border-subtle pt-3 mt-1 flex flex-col gap-2">
+            {!everyApiPresent && (
+              <Button
+                variant="secondary"
+                className="w-full"
+                onClick={() => { setPickerOpen(false); setEveryApiOpen(true); }}
+                leftIcon={<Link2 className="w-3.5 h-3.5" />}
+              >
+                {t("providers.everyapi_connect_cta", { defaultValue: "Connect EveryAPI gateway" })}
+              </Button>
+            )}
             <Button
               variant="secondary"
               className="w-full"
@@ -2025,6 +2174,12 @@ export function ProvidersPage() {
           </div>
         </div>
       </DrawerPanel>
+
+      <EveryApiConnectDrawer
+        isOpen={everyApiOpen}
+        onClose={() => setEveryApiOpen(false)}
+        addToast={addToast}
+      />
     </div>
   );
 }

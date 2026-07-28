@@ -209,6 +209,8 @@ pub(crate) fn service_install_macos(binary: &std::path::Path, librefang_home: &s
         return;
     }
 
+    let binary = xml_escape(&binary.display().to_string());
+    let home = xml_escape(&librefang_home.display().to_string());
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -235,9 +237,7 @@ pub(crate) fn service_install_macos(binary: &std::path::Path, librefang_home: &s
     <string>{home}/daemon.log</string>
 </dict>
 </plist>
-"#,
-        binary = binary.display(),
-        home = librefang_home.display(),
+"#
     );
 
     let plist_path = agents_dir.join("ai.librefang.daemon.plist");
@@ -351,6 +351,18 @@ fn resolve_system_service_target() -> Option<SystemServiceTarget> {
     })
 }
 
+/// Escape the XML text-node metacharacters so an operator-supplied path renders as literal text.
+///
+/// A plist is XML, and launchd rejects an ill-formed one outright rather than ignoring the bad node.
+/// Every interpolated value here is arbitrary filesystem bytes — APFS permits every byte but `/` and NUL, so a volume named `Backup & Media` or a `LIBREFANG_HOME` containing `<` is enough to produce a file that `launchctl load` refuses while the install path still reports the plist as written.
+#[cfg_attr(not(test), cfg(target_os = "macos"))]
+fn xml_escape(s: &str) -> String {
+    // `&` first: escaping it last would re-escape the `&` introduced by `&lt;` / `&gt;`.
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// Render the LaunchDaemon plist.
 ///
 /// Kept as a pure function so the parts that are easy to get wrong — `--foreground`, `UserName`, and
@@ -367,6 +379,11 @@ pub(crate) fn macos_system_plist(
     librefang_home: &std::path::Path,
     user: &str,
 ) -> String {
+    let binary = xml_escape(&binary.display().to_string());
+    let user = xml_escape(user);
+    // `HOME` is the account's real home, not the state dir: `dirs::home_dir()` reads it, and the first-start `librefang init` path exits when it resolves to nothing.
+    let home = xml_escape(&account_home.display().to_string());
+    let librefang_home = xml_escape(&librefang_home.display().to_string());
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -402,13 +419,7 @@ pub(crate) fn macos_system_plist(
     <string>{librefang_home}/daemon.log</string>
 </dict>
 </plist>
-"#,
-        binary = binary.display(),
-        user = user,
-        // `HOME` is the account's real home, not the state dir: `dirs::home_dir()` reads it, and the
-        // first-start `librefang init` path exits when it resolves to nothing.
-        home = account_home.display(),
-        librefang_home = librefang_home.display(),
+"#
     )
 }
 
@@ -452,6 +463,20 @@ pub(crate) fn service_install_macos_system(binary: &std::path::Path) {
             std::process::exit(1);
         }
     };
+
+    // The per-user LaunchAgent written by `service install` carries the same `ai.librefang.daemon` label and points at the same state directory, so leaving both installed is not layering, it is a respawn loop: at login the agent's `start --foreground` finds the LaunchDaemon already holding the port, exits non-zero, and `KeepAlive` relaunches it forever.
+    // Refuse before touching anything rather than create it — this runs ahead of the chown and the plist write on purpose.
+    let user_agent_plist = target
+        .home
+        .join("Library/LaunchAgents/ai.librefang.daemon.plist");
+    if user_agent_plist.exists() {
+        ui::error(&i18n::t_args(
+            "maintenance-service-system-agent-conflict",
+            &[("path", &user_agent_plist.display().to_string())],
+        ));
+        ui::hint(&i18n::t("maintenance-service-system-agent-conflict-fix"));
+        std::process::exit(1);
+    }
 
     // Honour an explicitly forwarded LIBREFANG_HOME (`sudo -E`), otherwise derive it from the target
     // account rather than from root's home, which is what `cli_librefang_home()` would return here.
@@ -1951,6 +1976,65 @@ mod tests {
             plist.contains("<string>/opt/librefang/daemon.log</string>"),
             "{plist}"
         );
+    }
+
+    #[test]
+    fn xml_escape_escapes_ampersand_before_angle_brackets() {
+        assert_eq!(xml_escape("Backup & Media"), "Backup &amp; Media");
+        assert_eq!(xml_escape("a<b>c"), "a&lt;b&gt;c");
+        // `&` has to be rewritten first, or the `&` inside `&lt;` gets escaped a second time.
+        assert_eq!(xml_escape("<&>"), "&lt;&amp;&gt;");
+        assert_eq!(
+            xml_escape("/Users/dave/.librefang"),
+            "/Users/dave/.librefang"
+        );
+    }
+
+    #[test]
+    fn macos_system_plist_escapes_xml_metacharacters_in_paths() {
+        // APFS permits every byte but `/` and NUL, so a volume named `Backup & Media` reaches the renderer verbatim.
+        // Left unescaped it is an XML well-formedness error and launchd rejects the whole file, while the install path still reports the plist as written.
+        let plist = macos_system_plist(
+            std::path::Path::new("/Volumes/Backup & Media/bin/librefang"),
+            std::path::Path::new("/Users/a<b>"),
+            std::path::Path::new("/Volumes/Backup & Media/state"),
+            "a&b",
+        );
+        assert!(
+            plist.contains("<string>/Volumes/Backup &amp; Media/bin/librefang</string>"),
+            "{plist}"
+        );
+        assert!(plist.contains("<string>a&amp;b</string>"), "{plist}");
+        assert!(
+            plist.contains("<string>/Users/a&lt;b&gt;</string>"),
+            "{plist}"
+        );
+        assert!(
+            plist.contains("<string>/Volumes/Backup &amp; Media/state/daemon.log</string>"),
+            "{plist}"
+        );
+        // No raw metacharacter may survive anywhere in the rendered document body.
+        for line in plist
+            .lines()
+            .filter(|l| l.trim_start().starts_with("<string>"))
+        {
+            let inner = line
+                .trim()
+                .trim_start_matches("<string>")
+                .trim_end_matches("</string>");
+            assert!(
+                !inner.contains('<') && !inner.contains('>'),
+                "unescaped angle bracket in {line:?}"
+            );
+            assert!(
+                inner
+                    .split("&amp;")
+                    .flat_map(|s| s.split("&lt;"))
+                    .flat_map(|s| s.split("&gt;"))
+                    .all(|s| !s.contains('&')),
+                "unescaped ampersand in {line:?}"
+            );
+        }
     }
 
     #[test]

@@ -835,9 +835,17 @@ pub(crate) fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) {
     std::fs::create_dir_all(dst).unwrap();
     if let Ok(entries) = std::fs::read_dir(src) {
         for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            // Both `Path::is_dir()` and `std::fs::copy` follow links, so a symlinked entry would pull an external file (or a whole external tree) into the installed skill.
+            // Mirrors `librefang_skills::marketplace::copy_dir_recursive`.
+            if file_type.is_symlink() {
+                continue;
+            }
             let path = entry.path();
             let dest_path = dst.join(entry.file_name());
-            if path.is_dir() {
+            if file_type.is_dir() {
                 copy_dir_recursive(&path, &dest_path);
             } else {
                 let _ = std::fs::copy(&path, &dest_path);
@@ -901,6 +909,40 @@ mod tests {
     use super::*;
     use reqwest::StatusCode;
     use serde_json::json;
+
+    /// #6581 hardened the `librefang-skills` copy helper against symlinks, but this CLI-side copy reads the same registry checkout and branched on `Path::is_dir()`, which follows links — so a symlinked entry was still dereferenced into the installed skill.
+    #[test]
+    #[cfg(unix)]
+    fn copy_dir_recursive_skips_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(src.join("nested")).unwrap();
+        std::fs::write(src.join("SKILL.md"), "---\nname: x\n---\n").unwrap();
+        std::fs::write(src.join("nested/file.txt"), "data").unwrap();
+
+        let outside = tmp.path().join("outside.txt");
+        std::fs::write(&outside, "secret").unwrap();
+        std::os::unix::fs::symlink(&outside, src.join("link.txt")).unwrap();
+
+        let outside_dir = tmp.path().join("outside_dir");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        std::fs::write(outside_dir.join("more.txt"), "also secret").unwrap();
+        std::os::unix::fs::symlink(&outside_dir, src.join("link_dir")).unwrap();
+
+        let dest = tmp.path().join("dest");
+        copy_dir_recursive(&src, &dest);
+
+        assert!(dest.join("SKILL.md").exists());
+        assert!(dest.join("nested/file.txt").exists());
+        assert!(
+            !dest.join("link.txt").exists(),
+            "a symlinked file must not be dereferenced into the install"
+        );
+        assert!(
+            !dest.join("link_dir").exists(),
+            "a symlinked directory must not be walked into the install"
+        );
+    }
 
     #[test]
     fn date_from_unix_secs_matches_known_dates() {

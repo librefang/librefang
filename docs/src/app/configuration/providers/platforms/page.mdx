@@ -18,6 +18,7 @@ This page covers providers that route through a platform-specific gateway, enter
 - Zhipu Coding (CodeGeex)
 - Z.ai
 - Vertex AI
+- EveryAPI
 
 > **Note on Bedrock:** AWS Bedrock is documented in [Hosted APIs](/configuration/providers/hosted#aws-bedrock) since the current driver authenticates via a long-lived bearer token (`AWS_BEARER_TOKEN_BEDROCK`) rather than per-request SigV4 signing. The older SigV4 entry that used to live on this page has been removed.
 
@@ -458,3 +459,53 @@ model = "glm-4-plus"
    ```
 
 **Notes:** Vertex AI uses the same Gemini `generateContent` API format as the native Gemini driver but authenticates via Google Cloud OAuth2 instead of an API key. Access tokens are cached with a ~50-minute TTL and auto-refreshed before expiry. The endpoint format is `https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent`.
+
+---
+
+## EveryAPI
+
+| | |
+|---|---|
+| **Display Name** | EveryAPI |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `EVERYAPI_API_KEY` |
+| **Base URL** | `<your gateway host>/v1` (e.g. `https://api.everyapi.ai/v1`) |
+| **Key Required** | Yes |
+| **Free Tier** | Depends on the gateway account |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | Whatever the gateway account exposes — Claude, GPT, Gemini, MiniMax, and media models are all routed through one endpoint |
+
+Unlike every other entry on this page, EveryAPI is not registered in the builtin catalog and has no fixed model list. It is a self-hostable aggregating gateway, so the available models are a property of your account rather than of LibreFang. A dedicated CLI command reads your gateway credentials and synthesises the provider entry.
+
+**Setup:**
+1. Install the [EveryAPI CLI](https://github.com/everyapi-ai/everyapi) and sign in, which writes `~/.config/everyapi/credentials.json`:
+   ```bash
+   everyapi login
+   ```
+2. Register the gateway with LibreFang:
+   ```bash
+   librefang models connect everyapi
+   ```
+3. Optionally make it the daemon default in the same step:
+   ```bash
+   librefang models connect everyapi --set-default
+   ```
+
+The command reads `api_base` and `relay_key` from the credentials file (honouring `$XDG_CONFIG_HOME`), fetches the gateway's live `/v1/models` listing, writes the API key to `~/.librefang/.env` as `EVERYAPI_API_KEY`, and persists the provider — through the running daemon when one is up, so the catalog reloads in place, or by writing `~/.librefang/providers/everyapi.toml` directly when it is not. The key is never written into the provider TOML, and it is never printed to the terminal or the logs.
+
+Separately from this provider wiring, the EveryAPI CLI also ships an MCP server (`everyapi mcp`) that gives an agent tools for inspecting the gateway account itself — quota, seller channels, edge nodes.
+It reads the same credentials file directly, so it works whether or not `models connect everyapi` has run, and connecting the provider does not enable it: see [Connect the EveryAPI MCP server](/integrations/mcp-a2a#connect-the-every-api-mcp-server).
+
+**Notes:**
+
+Pricing and context windows come from the gateway's own public `/api/pricing` feed, so cost figures reflect what the gateway actually charges — its markup included — rather than the upstream vendor's list price. Per-token models are converted from the feed's ratios; models billed per call carry no per-token price and are marked as having unknown pricing, so budget figures do not silently treat them as free.
+
+Output-token limits are the one figure neither gateway endpoint publishes, so they fall back to LibreFang's builtin catalog. A text entry missing either token limit is discarded when the catalog loads, so a model whose limits cannot be resolved at all is skipped and named in the command output rather than registered silently. The command also reports which models had to borrow a limit, so it is clear which numbers are the gateway's own.
+
+The daemon re-fetches both feeds on a TTL once the provider is registered, so models the gateway later adds or removes show up without re-running the connect command.
+
+Some gateway models accept only streaming requests. Those are registered but reported separately in the command output, and `--set-default` will not choose one: a non-streaming default breaks history compaction, proactive memory, the skill workshop, and web augmentation, which all issue non-streaming calls while the main chat loop keeps working.
+
+Gateway model ids frequently collide with upstream ones (`claude-sonnet-5`, `gemini-3.5-flash`). Registered entries are deliberately kept off the custom tier so a provider-blind model lookup still resolves to the upstream vendor's entry; the gateway copy is reached through the provider-scoped lookup that an agent configured for `everyapi` actually uses.
+
+Run `librefang doctor` to see which route is in effect. If an `everyapi use` shell has also exported `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL`, two independent routes are live at once — that env route redirects the CLI-subprocess drivers (`claude-code`, `codex-cli`) while the provider entry redirects the API drivers — and the doctor check warns and names both, since which one applies depends on the agent's driver.

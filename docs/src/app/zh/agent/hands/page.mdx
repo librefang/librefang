@@ -220,6 +220,53 @@ temperature = 0.7
 system_prompt = "You are a helpful agent."
 ```
 
+### 调度
+
+`[metadata] frequency` 声明 Hand 的 Agent 是否自行唤醒，以及唤醒频率。
+
+```toml
+[metadata]
+# continuous | hourly | daily | periodic | on-demand
+# 默认值是 "on-demand"；"reactive" 是它的别名。
+frequency = "continuous"
+```
+
+只有当 Hand 声明了唤醒节奏，**并且**该角色自身声明了 `[autonomous]` 护栏（扁平格式下由 `max_iterations` 合成）时，这个角色才会自行唤醒。
+后半个条件的作用是让多 Agent Hand 中被派发的子 Agent 保持休眠：把护栏加在真正跑循环的角色上，协调者派发的角色不要加。
+`max_iterations` 本身只是 Agent 循环的迭代上限，不代表任何调度意图。
+
+各节奏对应的间隔：`continuous` 按角色自己的 `heartbeat_interval_secs`（默认 30 秒），`hourly` 为 3600 秒，`daily` 为 86400 秒，`periodic` 为 300 秒。
+`on-demand` 永不自行唤醒。
+
+角色可以自己指定 `schedule`，它覆盖由 `frequency` 推导出的节奏，也是取得 cron（`periodic`）或条件驱动（`proactive`）调度的唯一途径。
+`ScheduleMode` 使用外部标签（externally tagged）序列化，因此结构体变体必须写成子表——裸的 `schedule = "continuous"` 字符串无法解析。
+
+```toml
+[agents.monitor.autonomous]
+max_iterations = 40
+heartbeat_interval_secs = 900
+
+[agents.monitor.schedule.continuous]
+check_interval_secs = 1800
+```
+
+### Shell 执行策略
+
+`tools` 列表中包含 `shell_exec`（或 `*` 通配符）的 Hand，会继承守护进程的全局 `[exec_policy]`，`mode` 也一并继承。
+激活流程绝不会授予比运维人员配置更宽松的 mode。
+全局默认 mode 是 `allowlist`，且 `allowed_commands` 为空、`safe_bins` 只含只读工具，因此需要执行真实命令的 Hand 要么依赖运维侧的 `allowed_commands` 条目，要么自己声明：
+
+```toml
+[agents.main.exec_policy]
+mode = "allowlist"
+allowed_commands = ["git", "cargo"]
+timeout_secs = 600
+```
+
+Hand 自己声明的策略会被原样采纳，这样提权后的执行姿态就写在 Hand 自己的 manifest 里，而不是激活时一次不可见的授权。
+
+这两项声明都在激活时解析，因此修改会在下一次激活该 Hand 时生效——或者在下一次守护进程启动时生效，届时所有持久化的 Hand 都会重新激活。
+
 ---
 
 ## REST API 端点

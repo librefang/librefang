@@ -5,7 +5,7 @@
  * - **Builtin tools** are filtered by `capabilities.tools` (the dashboard's `capabilities_tools`). An empty list — or one containing `"*"` — means unrestricted.
  * - **MCP tools** are granted by the agent's `mcp_servers` allowlist and are explicitly NOT filtered by `capabilities.tools`: "MCP tool names are dynamic and unknown at agent-definition time. Use tool_blocklist to restrict specific MCP tools if needed." An empty `mcp_servers` grants no server; `["*"]` grants every connected server (#5855).
  *
- * `tool_blocklist` then filters whatever survived, on both paths, with glob patterns (#6495).
+ * `tool_allowlist` and then `tool_blocklist` filter whatever survived, on both paths, with glob patterns (#6495). Both run in the kernel's Step 4, after MCP tools have joined the candidate set, so a non-empty allowlist naming no `mcp__*` glob strips a granted server outright — the quoted advice above predates #6495 and is no longer the whole story.
  *
  * Deriving MCP group state from `capabilities_tools` (as the Tools tab did before #6565) therefore always reported a whole-server grant as unassigned, even while the agent was actively calling those tools.
  */
@@ -48,6 +48,15 @@ export function toolPatternMatches(pattern: string, value: string): boolean {
 /** Whether `toolName` is filtered out by a `tool_blocklist`. */
 export function isToolBlocked(toolName: string, blocklist: readonly string[]): boolean {
   return blocklist.some((pattern) => toolPatternMatches(pattern, toolName));
+}
+
+/** Whether `toolName` survives a `tool_allowlist`.
+ *
+ * An empty list is unrestricted, mirroring the kernel's `if !tool_allowlist.is_empty()` guard (`tools_and_skills.rs`, Step 4).
+ * That step runs after MCP tools have been pushed into the candidate set, so the allowlist filters MCP tools too — a non-empty list naming no `mcp__*` glob strips the whole server (#6495).
+ */
+export function isToolAllowed(toolName: string, allowlist: readonly string[]): boolean {
+  return allowlist.length === 0 || allowlist.some((pattern) => toolPatternMatches(pattern, toolName));
 }
 
 /** Resolve the MCP grant mode from the raw allowlist when the backend field is absent (older daemon), mirroring `routes::agents::mcp_servers_mode`. */

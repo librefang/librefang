@@ -120,6 +120,7 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "models set",
         "models aliases",
         "models providers",
+        "models connect",
         "approvals list",
         "approvals respond",
         "approvals approve",

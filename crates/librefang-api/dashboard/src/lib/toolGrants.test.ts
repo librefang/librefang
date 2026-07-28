@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   isMcpServerGranted,
+  isToolAllowed,
   isToolBlocked,
   normalizeMcpName,
   resolveMcpGrantMode,
@@ -104,5 +105,27 @@ describe("isMcpServerGranted", () => {
 
   it("compares server names after normalization", () => {
     expect(isMcpServerGranted("Brave-Search", ["brave_search"], "allowlist")).toBe(true);
+  });
+});
+
+describe("isToolAllowed", () => {
+  it("treats an empty allowlist as unrestricted", () => {
+    expect(isToolAllowed("mcp__github__create_issue", [])).toBe(true);
+    expect(isToolAllowed("file_read", [])).toBe(true);
+  });
+
+  // The kernel's Step 4 filter runs after MCP tools join the candidate set, so an allowlist naming only native tools strips a granted server entirely (#6495).
+  it("drops mcp tools when the allowlist names only native tools", () => {
+    expect(isToolAllowed("mcp__github__create_issue", ["file_read"])).toBe(false);
+    expect(isToolAllowed("file_read", ["file_read"])).toBe(true);
+  });
+
+  it("keeps mcp tools matched by a glob entry", () => {
+    expect(isToolAllowed("mcp__github__create_issue", ["mcp__github__*"])).toBe(true);
+    expect(isToolAllowed("mcp__linear__list", ["mcp__github__*"])).toBe(false);
+  });
+
+  it("keeps everything under a bare star", () => {
+    expect(isToolAllowed("mcp__github__create_issue", ["*"])).toBe(true);
   });
 });

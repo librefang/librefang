@@ -22,6 +22,7 @@ import {
   useSetProviderUrl,
   useSetDefaultProvider,
   useCreateRegistryContent,
+  useConnectEveryApi,
 } from "../lib/mutations/providers";
 
 vi.mock("../lib/queries/providers", () => ({
@@ -53,6 +54,15 @@ vi.mock("../lib/mutations/providers", () => ({
   useSetProviderUrl: vi.fn(),
   useSetDefaultProvider: vi.fn(),
   useCreateRegistryContent: vi.fn(),
+  useConnectEveryApi: vi.fn(),
+  // A value export rather than a hook, and the page reads it for the relay-key and gateway placeholders.
+  // The literal has to match `EVERYAPI_PROVIDER` in the real module, which in turn mirrors the Rust-side constants — a mock drifting from it would make these tests assert placeholders the shipped UI never renders.
+  EVERYAPI_PROVIDER: {
+    id: "everyapi",
+    displayName: "EveryAPI",
+    apiKeyEnv: "EVERYAPI_API_KEY",
+    defaultBaseUrl: "https://api.everyapi.ai/v1",
+  },
 }));
 
 // Toast store — only `addToast` is consumed by ProvidersPage.
@@ -99,6 +109,8 @@ const useSetDefaultProviderMock = useSetDefaultProvider as unknown as ReturnType
 >;
 const useCreateRegistryContentMock =
   useCreateRegistryContent as unknown as ReturnType<typeof vi.fn>;
+const useConnectEveryApiMock =
+  useConnectEveryApi as unknown as ReturnType<typeof vi.fn>;
 
 const PROVIDERS: ProviderItem[] = [
   {
@@ -156,6 +168,7 @@ function DrawerSlot(): React.ReactNode {
 
 describe("ProvidersPage", () => {
   let testMutateAsync: ReturnType<typeof vi.fn>;
+  let connectEveryApiMutateAsync: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -163,6 +176,7 @@ describe("ProvidersPage", () => {
     // drawer left open by one test doesn't bleed into the next.
     useDrawerStore.setState({ isOpen: false, content: null });
     testMutateAsync = vi.fn().mockResolvedValue({ status: "ok" });
+    connectEveryApiMutateAsync = vi.fn().mockResolvedValue(undefined);
 
     useProviderStatusMock.mockReturnValue({
       data: { default_provider: "openai" },
@@ -194,6 +208,14 @@ describe("ProvidersPage", () => {
     useCreateRegistryContentMock.mockReturnValue(
       stubMutation(vi.fn().mockResolvedValue(undefined)),
     );
+    // The EveryAPI drawer reads more of the mutation surface than `stubMutation` provides: it calls `reset()` when the drawer closes and renders an inline alert off `isError` / `error`.
+    useConnectEveryApiMock.mockReturnValue({
+      mutateAsync: connectEveryApiMutateAsync,
+      isPending: false,
+      isError: false,
+      error: null,
+      reset: vi.fn(),
+    });
   });
 
   it("shows skeleton placeholders while providers load", () => {
@@ -278,6 +300,89 @@ describe("ProvidersPage", () => {
     expect(within(drawer).getByText("Groq")).toBeInTheDocument();
     expect(within(drawer).queryByText("OpenAI")).not.toBeInTheDocument();
     expect(within(drawer).queryByText("Anthropic")).not.toBeInTheDocument();
+  });
+
+  // ── EveryAPI connect action ───────────────────────────────────────────
+  //
+  // EveryAPI is not a built-in provider: until a registry entry exists it is absent from `GET /api/providers` altogether, not merely unconfigured, so the picker's catalog can never list it.
+  // The footer action is the dashboard's only way in, which is what these cover.
+
+  it("offers the EveryAPI connect action while no everyapi entry exists", async () => {
+    useProvidersMock.mockReturnValue({
+      data: PROVIDERS,
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /providers\.add/ }));
+
+    const drawer = await screen.findByTestId("drawer-slot");
+    expect(
+      within(drawer).getByText("providers.everyapi_connect_cta"),
+    ).toBeInTheDocument();
+  });
+
+  it("hides the EveryAPI connect action once an everyapi entry is present", async () => {
+    useProvidersMock.mockReturnValue({
+      data: [
+        ...PROVIDERS,
+        {
+          id: "everyapi",
+          display_name: "EveryAPI",
+          // Deliberately unconfigured: the action must key off the entry *existing*, not off it being usable.
+          // An entry with a missing key is reachable through the normal configure flow, so re-offering "connect" would write over it.
+          auth_status: "missing",
+          reachable: false,
+          key_required: true,
+          base_url: "https://api.everyapi.ai",
+        },
+      ],
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /providers\.add/ }));
+
+    const drawer = await screen.findByTestId("drawer-slot");
+    expect(
+      within(drawer).queryByText("providers.everyapi_connect_cta"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("registers the gateway and stores the relay key on submit", async () => {
+    useProvidersMock.mockReturnValue({
+      data: PROVIDERS,
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /providers\.add/ }));
+
+    const picker = await screen.findByTestId("drawer-slot");
+    fireEvent.click(
+      within(picker).getByText("providers.everyapi_connect_cta"),
+    );
+
+    // The connect form replaces the picker in the shared drawer slot.
+    const form = await screen.findByTestId("drawer-slot");
+    const keyField = within(form).getByPlaceholderText("EVERYAPI_API_KEY");
+    fireEvent.change(keyField, { target: { value: "  relay-abc  " } });
+    fireEvent.click(
+      within(form).getByRole("button", { name: /providers\.everyapi_connect_action/ }),
+    );
+
+    // The key is trimmed, and an omitted gateway URL is passed through as-is so the hook applies the documented default rather than the page inventing one.
+    expect(connectEveryApiMutateAsync).toHaveBeenCalledTimes(1);
+    expect(connectEveryApiMutateAsync).toHaveBeenCalledWith({
+      relayKey: "relay-abc",
+      baseUrl: "",
+    });
   });
 
   it("filters configured providers by search term", () => {

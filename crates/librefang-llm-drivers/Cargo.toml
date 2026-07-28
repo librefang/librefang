@@ -32,7 +32,7 @@ dirs = { workspace = true }
 rand = { workspace = true }
 
 [dev-dependencies]
-serial_test = "3"
+serial_test = "4"
 tempfile = { workspace = true }
 wiremock = "0.6"
 opentelemetry_sdk = { workspace = true }

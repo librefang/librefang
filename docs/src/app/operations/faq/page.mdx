@@ -160,8 +160,7 @@ allowed_users = ["123456789", "alice", "@bob"]  # numeric IDs or usernames
 ```toml
 [[mcp_servers]]
 name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+transport = { type = "stdio", command = "npx", args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"] }
 ```
 
 ---

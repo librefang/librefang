@@ -263,7 +263,7 @@ where
                     Dispatch::Request(_, responder) => responder
                         .respond_with_error(agent_client_protocol::Error::method_not_found()),
                     Dispatch::Notification(_) => Ok(()),
-                    Dispatch::Response(result, router) => router.respond_with_result(result),
+                    Dispatch::Response(result, router) => router.route_with_result(result),
                 }
             },
             agent_client_protocol::on_receive_dispatch!(),

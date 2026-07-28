@@ -18,6 +18,7 @@
 - Zhipu Coding(CodeGeex)
 - Z.ai
 - Vertex AI
+- EveryAPI
 
 > **关于 Bedrock:** AWS Bedrock 已挪到 [托管 API](/zh/configuration/providers/hosted#aws-bedrock) 页面 —— 当前驱动用长效 bearer token(`AWS_BEARER_TOKEN_BEDROCK`)鉴权而不是逐请求 SigV4 签名。原本在本页的 SigV4 条目已删除。
 
@@ -458,3 +459,53 @@ model = "glm-4-plus"
    ```
 
 **说明：** Vertex AI 使用与原生 Gemini 驱动相同的 `generateContent` API 格式，但通过 Google Cloud OAuth2 而非 API 密钥进行认证。访问令牌缓存约 50 分钟的 TTL，并在到期前自动刷新。端点格式为 `https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent`。
+
+---
+
+## EveryAPI
+
+| | |
+|---|---|
+| **显示名称** | EveryAPI |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `EVERYAPI_API_KEY` |
+| **基础 URL** | `<你的网关地址>/v1`（例如 `https://api.everyapi.ai/v1`） |
+| **需要密钥** | 是 |
+| **免费额度** | 取决于网关账户 |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 取决于网关账户开放的范围 —— Claude、GPT、Gemini、MiniMax 以及多媒体模型都经由同一个端点路由 |
+
+与本页其他条目不同，EveryAPI 不在内置目录中，也没有固定的模型清单。它是一个可自托管的聚合网关，可用模型取决于你的账户而非 LibreFang。有一条专门的 CLI 命令负责读取网关凭据并合成 provider 条目。
+
+**设置：**
+1. 安装 [EveryAPI CLI](https://github.com/everyapi-ai/everyapi) 并登录，该步骤会写入 `~/.config/everyapi/credentials.json`：
+   ```bash
+   everyapi login
+   ```
+2. 向 LibreFang 注册该网关：
+   ```bash
+   librefang models connect everyapi
+   ```
+3. 也可以在同一步顺带设为守护进程默认：
+   ```bash
+   librefang models connect everyapi --set-default
+   ```
+
+该命令从凭据文件读取 `api_base` 与 `relay_key`（遵循 `$XDG_CONFIG_HOME`），拉取网关实时的 `/v1/models` 列表，将 API 密钥以 `EVERYAPI_API_KEY` 写入 `~/.librefang/.env`，随后持久化 provider —— 守护进程在运行时经由它写入以便目录就地重载，未运行时则直接写 `~/.librefang/providers/everyapi.toml`。密钥不会写进 provider TOML，也不会打印到终端或日志。
+
+除了这套 provider 接线之外，EveryAPI CLI 还内置了一个 MCP 服务器（`everyapi mcp`），为 agent 提供检视网关账户本身的工具 —— 配额、卖家渠道、边缘节点。
+它直接读取同一份凭据文件，因此无论是否跑过 `models connect everyapi` 都能工作；反过来，接好 provider 也不会启用它。详见[接入 EveryAPI MCP 服务器](/zh/integrations/mcp-a2a#every-api-mcp)。
+
+**说明：**
+
+价格与上下文窗口取自网关自己公开的 `/api/pricing` 接口，因此成本数字反映的是网关实际收费（含其加价），而不是上游厂商的标价。按 token 计费的模型由该接口的 ratio 换算得到；按次计费的模型没有 per-token 价格，会标记为价格未知，避免预算统计把它当成免费。
+
+输出 token 上限是两个网关接口都不提供的唯一一项，因此回退到 LibreFang 的内置目录。文本条目缺少任一 token 上限会在目录加载时被丢弃，所以两个上限都无法解析的模型会被跳过并在命令输出中点名，而不是悄悄注册进去。命令还会报告哪些模型借用了上限，以便区分哪些数字来自网关本身。
+
+provider 注册完成后，守护进程会按 TTL 重新拉取这两个接口，因此网关后续增删的模型无需重跑 connect 命令即可反映出来。
+
+部分网关模型只接受流式请求。这类模型会注册，但在命令输出中单独列出，且 `--set-default` 不会选中它们：默认模型若不支持非流式，会打断历史压缩、主动记忆、技能工坊与网页增强，而主对话循环仍在正常工作，问题因此难以察觉。
+
+网关的模型 id 经常与上游重名（`claude-sonnet-5`、`gemini-3.5-flash`）。注册的条目刻意不使用自定义层级，以便不带 provider 的模型查找仍解析到上游厂商的条目；网关那份副本通过按 provider 限定的查找抵达，也正是配置为 `everyapi` 的 agent 实际走的路径。
+
+运行 `librefang doctor` 可以查看当前生效的是哪条路径。如果某个 `everyapi use` 会话同时导出了 `ANTHROPIC_BASE_URL` 或 `OPENAI_BASE_URL`，就会有两条独立路径同时生效 —— 环境变量那条改写 CLI 子进程驱动（`claude-code`、`codex-cli`），而 provider 条目改写 API 驱动 —— doctor 检查会告警并同时点出两者，因为具体哪条生效取决于 agent 用的驱动。

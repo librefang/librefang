@@ -45,7 +45,7 @@ keyring = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-serial_test = "3"
+serial_test = "4"
 librefang-runtime = { path = "../librefang-runtime" }
 
 [lints]

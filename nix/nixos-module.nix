@@ -137,6 +137,16 @@ in
         Do not put secrets here — unit environment blocks land in the world-readable Nix store; use {option}`services.librefang.environmentFile` instead.
       '';
     };
+
+    authConfiguredExternally = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Assert that authentication is configured outside this module — an `api_key`, a `[[users]]` entry with `api_key_hash`, or dashboard credentials in `<stateDir>/config.toml`, which this module deliberately does not manage.
+        No environment variable can set `api_key`, so an {option}`services.librefang.environmentFile` holding only provider keys does not satisfy the daemon's boot-time check; this option is the escape hatch for a `config.toml` maintained out-of-band.
+        It relaxes the non-loopback bind assertion below and nothing else: the daemon still runs its own check at startup and refuses to start if the claim is false.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -149,12 +159,16 @@ in
         '';
       }
       {
+        # The value check mirrors `allow_no_auth_env()` (crates/librefang-api/src/server.rs), which accepts only these five spellings.
+        # A presence check would let `LIBREFANG_ALLOW_NO_AUTH = "0"` pass evaluation and then be rejected at boot.
         assertion = listenIsLoopback
           || cfg.environmentFile != null
-          || (cfg.extraEnvironment ? LIBREFANG_ALLOW_NO_AUTH);
+          || cfg.authConfiguredExternally
+          || (lib.elem (cfg.extraEnvironment.LIBREFANG_ALLOW_NO_AUTH or "") [ "1" "true" "TRUE" "yes" "on" ]);
         message = ''
-          services.librefang binds the non-loopback address ${effectiveListen} with no authentication source configured, and the daemon refuses to start in that configuration (crates/librefang-api/src/server.rs:1915 calling `check_bind_auth_safety`, crates/librefang-api/src/server.rs:312-330).
-          Set services.librefang.environmentFile to a file exporting an API key, or accept the risk explicitly with extraEnvironment.LIBREFANG_ALLOW_NO_AUTH = "1".
+          services.librefang binds the non-loopback address ${effectiveListen} with no authentication source configured, and the daemon refuses to start in that configuration (`check_bind_auth_safety` / `any_auth_configured` in crates/librefang-api/src/server.rs).
+          No environment variable feeds `api_key` — it is read from <stateDir>/config.toml only — so the only authentication the daemon picks up from the unit environment is a dashboard credential pair: have services.librefang.environmentFile export LIBREFANG_DASHBOARD_USER and LIBREFANG_DASHBOARD_PASS.
+          If authentication is already configured in <stateDir>/config.toml, which this module does not manage, set services.librefang.authConfiguredExternally = true; to run intentionally open, set extraEnvironment.LIBREFANG_ALLOW_NO_AUTH = "1".
         '';
       }
       {

@@ -18,6 +18,7 @@ import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { Modal } from "../components/ui/Modal";
 import {
   isMcpServerGranted,
+  isToolAllowed,
   isToolBlocked,
   resolveMcpGrantMode,
 } from "../lib/toolGrants";
@@ -1778,6 +1779,8 @@ export function AgentsPage() {
     // #6565: MCP tools are granted by the agent's `mcp_servers` allowlist, not by `capabilities_tools` — the kernel explicitly skips the declared-tools filter for them (`tools_and_skills.rs`, Step 3).
     // Reading MCP group state off `capabilities_tools` reported a whole-server grant as "AVAILABLE / click to assign" while the agent was actively calling those tools.
     const blocklist = agentToolCfg?.tool_blocklist ?? [];
+    // `tool_allowlist` is the other half of the kernel's Step 4 filter and applies to MCP tools too since #6495, so a non-empty allowlist that names no `mcp__*` glob strips the entire server even while `mcp_servers` still grants it.
+    const allowlist = agentToolCfg?.tool_allowlist ?? [];
     // The kernel gates MCP on `!mcp_disabled && !mcp_servers.is_empty()`, and `tools_disabled` short-circuits every tool before that.
     // Both hard switches have to fold into "none", or an `mcp_disabled` agent with `mcp_servers = ["*"]` renders as a live grant.
     const mcpMode =
@@ -1793,7 +1796,11 @@ export function AgentsPage() {
     // Whether one tool inside a group counts as active for display purposes.
     const isToolActive = (groupName: string, tool: ToolDefinition): boolean => {
       if (isMcpGroup(groupName)) {
-        return isMcpGroupGranted(groupName) && !isToolBlocked(tool.name, blocklist);
+        return (
+          isMcpGroupGranted(groupName) &&
+          isToolAllowed(tool.name, allowlist) &&
+          !isToolBlocked(tool.name, blocklist)
+        );
       }
       return draftSet.has(tool.name);
     };
@@ -2033,7 +2040,7 @@ export function AgentsPage() {
                             <p className="px-2.5 py-1.5 text-[10.5px] text-text-dim/70">
                               {t("agents.detail.tools_mcp_readonly", {
                                 defaultValue:
-                                  "This server is granted through mcp_servers in agent.toml. Change the grant on the MCP servers tab; individual tools are filtered by tool_blocklist.",
+                                  "This server is granted through mcp_servers in agent.toml. Change the grant on the MCP servers tab; individual tools are filtered by tool_allowlist and tool_blocklist.",
                               })}
                             </p>
                           )}

@@ -22,13 +22,11 @@
 
 use crate::i18n;
 use base64::Engine;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Severity of a single audit finding.
 ///
-/// `Pass` reports the green case (showing it built confidence in noisy
-/// infra setups), `Info` is informational (no problem, no action), `Warn`
-/// surfaces a fixable misconfiguration, `Error` blocks correct operation.
+/// `Pass` reports the green case (showing it built confidence in noisy infra setups), `Info` is informational (no problem, no action), `Warn` surfaces a fixable misconfiguration, `Error` blocks correct operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Pass,
@@ -98,9 +96,8 @@ impl AuditResult {
     }
 }
 
-/// State a check may consult — paths derived once by the caller so each
-/// check doesn't redo the same lookup. Add fields here as new checks need
-/// them; keep it cheap to construct.
+/// State a check may consult — paths derived once by the caller so each check doesn't redo the same lookup.
+/// Add fields here as new checks need them; keep it cheap to construct.
 pub struct AuditContext {
     /// `~/.librefang/` (or `$LIBREFANG_HOME`).
     pub librefang_home: PathBuf,
@@ -110,8 +107,8 @@ pub trait AuditCheck {
     fn run(&self, ctx: &AuditContext) -> AuditResult;
 }
 
-/// All currently registered checks. The order here is the order shown to
-/// the user — group related checks together.
+/// All currently registered checks.
+/// The order here is the order shown to the user — group related checks together.
 pub fn registered_checks() -> Vec<Box<dyn AuditCheck>> {
     // `mut` is only exercised by the platform-gated pushes below.
     #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
@@ -119,6 +116,7 @@ pub fn registered_checks() -> Vec<Box<dyn AuditCheck>> {
         Box::new(VaultKeyCheck),
         Box::new(ApiListenAddrCheck),
         Box::new(ConfigTomlSchemaCheck),
+        Box::new(EveryApiWiringCheck),
     ];
     // Platform-specific checks are pushed as statements rather than listed above because `#[cfg]` on an element of a `vec![]` literal is not stable.
     // macOS and Windows doctor output is unchanged.
@@ -323,6 +321,274 @@ impl AuditCheck for ConfigTomlSchemaCheck {
             ),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// EveryApiWiringCheck — report whether an EveryAPI gateway environment exists
+// and whether LibreFang is actually wired to it.
+//
+// EveryAPI can reach LibreFang through two INDEPENDENT routes, and they do not
+// see each other:
+//
+//   1. Config route — `{librefang_home}/providers/everyapi.toml` registers a
+//      custom OpenAI-shaped provider. This is what API drivers use.
+//   2. Env route — `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` (and the `_API_URL`
+//      / `_API_BASE` aliases) exported into the process. CLI-subprocess drivers
+//      (claude-code, codex-cli) inherit these and get redirected regardless of
+//      any provider entry. `everyapi use` injects exactly this shape.
+//
+// When both are live, which one applies depends on the agent's driver, not on
+// anything the user can see in one place. Saying so explicitly is the whole
+// point of this check.
+//
+// Read-only: `AuditCheck::run` has no repair path, and the relay key is never
+// printed.
+// ---------------------------------------------------------------------------
+
+/// Env vars that redirect a CLI-subprocess driver, paired with the official host that means "not proxied".
+/// Order is fixed so the reported var is deterministic.
+///
+/// Kept in sync by hand with the production probes: `claude_code.rs:claude_code_available` (`ANTHROPIC_BASE_URL`, `ANTHROPIC_API_URL`) and `codex_cli.rs` (`OPENAI_BASE_URL`, `OPENAI_API_BASE`).
+const CLI_DRIVER_BASE_URL_VARS: &[(&str, &str)] = &[
+    ("ANTHROPIC_BASE_URL", "api.anthropic.com"),
+    ("ANTHROPIC_API_URL", "api.anthropic.com"),
+    ("OPENAI_BASE_URL", "api.openai.com"),
+    ("OPENAI_API_BASE", "api.openai.com"),
+];
+
+/// Everything the grader needs, gathered from the environment once.
+#[derive(Debug, Default)]
+struct EveryApiState {
+    /// `everyapi` binary found on `PATH`.
+    cli_on_path: bool,
+    /// Credentials file exists AND carries a non-empty `relay_key`.
+    /// The key value itself is never retained.
+    credentials_usable: bool,
+    /// Credentials file exists but has no usable `relay_key` (missing, blank, or the file is unreadable / not JSON).
+    credentials_incomplete: bool,
+    /// `{librefang_home}/providers/everyapi.toml` exists.
+    provider_entry: Option<PathBuf>,
+    /// A CLI-driver base-URL env var pointing somewhere non-official: `(var_name, host)`.
+    env_route: Option<(String, String)>,
+}
+
+pub struct EveryApiWiringCheck;
+
+impl AuditCheck for EveryApiWiringCheck {
+    fn run(&self, ctx: &AuditContext) -> AuditResult {
+        grade_everyapi_wiring(&gather_everyapi_state(ctx))
+    }
+}
+
+fn gather_everyapi_state(ctx: &AuditContext) -> EveryApiState {
+    let credentials_file = everyapi_credentials_path().filter(|p| p.exists());
+    let credentials_usable = credentials_file.as_deref().is_some_and(relay_key_present);
+    let credentials_incomplete = credentials_file.is_some() && !credentials_usable;
+    let provider_path = ctx.librefang_home.join("providers").join("everyapi.toml");
+    EveryApiState {
+        cli_on_path: everyapi_cli_on_path(),
+        credentials_usable,
+        credentials_incomplete,
+        provider_entry: provider_path.exists().then_some(provider_path),
+        env_route: detect_cli_driver_env_route(),
+    }
+}
+
+/// Grade a gathered [`EveryApiState`].
+/// Pure — the whole decision table lives here so it is unit-testable without touching the process env or the disk.
+fn grade_everyapi_wiring(state: &EveryApiState) -> AuditResult {
+    const NAME: &str = "everyapi_wiring";
+
+    // Both routes live: the one case that genuinely needs a warning, because
+    // the effective gateway differs per driver and neither surface mentions
+    // the other.
+    if let (Some((var, env_host)), Some(path)) = (&state.env_route, &state.provider_entry) {
+        return AuditResult::warn(
+            NAME,
+            i18n::t_args(
+                "doctor-everyapi-both-routes",
+                &[
+                    ("var", var),
+                    ("host", env_host),
+                    ("path", &path.display().to_string()),
+                ],
+            ),
+            Some(i18n::t_args(
+                "doctor-everyapi-both-routes-hint",
+                &[("var", var), ("path", &path.display().to_string())],
+            )),
+        );
+    }
+
+    if let Some((var, env_host)) = &state.env_route {
+        return AuditResult::info(
+            NAME,
+            i18n::t_args(
+                "doctor-everyapi-env-route-only",
+                &[("var", var), ("host", env_host)],
+            ),
+        );
+    }
+
+    if let Some(path) = &state.provider_entry {
+        // A provider entry alone is not health. The relay key was copied into
+        // the LibreFang dotenv file at connect time and nothing re-validates
+        // it, so `everyapi logout`, a key rotation, or a revocation leaves the
+        // entry in place while every request through it 401s. Grading that
+        // green is the one outcome an operator cannot act on, so the
+        // credentials have to be consulted before this returns.
+        if !state.credentials_usable {
+            return AuditResult::warn(
+                NAME,
+                i18n::t_args(
+                    "doctor-everyapi-provider-without-credentials",
+                    &[("path", &path.display().to_string())],
+                ),
+                Some(i18n::t("doctor-everyapi-provider-without-credentials-hint")),
+            );
+        }
+        return AuditResult::pass(
+            NAME,
+            i18n::t_args(
+                "doctor-everyapi-provider-only",
+                &[("path", &path.display().to_string())],
+            ),
+        );
+    }
+
+    // Credentials exist but nothing routes to them. Deliberately Info, not
+    // Warn: having the EveryAPI CLI installed without wiring LibreFang to it
+    // is a legitimate state, and `doctor` should not paint it yellow every
+    // run. The remediation command therefore lives in the summary — the
+    // human path only renders `hint` for Warn/Error (see
+    // `commands/doctor_cmd.rs`).
+    if state.credentials_usable {
+        return AuditResult::info(NAME, i18n::t("doctor-everyapi-not-connected"));
+    }
+
+    if state.credentials_incomplete {
+        return AuditResult::info(NAME, i18n::t("doctor-everyapi-credentials-incomplete"));
+    }
+
+    if state.cli_on_path {
+        return AuditResult::info(NAME, i18n::t("doctor-everyapi-cli-not-logged-in"));
+    }
+
+    AuditResult::info(NAME, i18n::t("doctor-everyapi-absent"))
+}
+
+/// PATH lookup for the `everyapi` binary.
+///
+/// Mirrors `desktop_install::which_lookup`, which is private to that module (and takes an already-suffixed name — its only caller passes `librefang-desktop.exe` on Windows).
+/// Appending the Windows suffix here keeps that helper untouched.
+fn everyapi_cli_on_path() -> bool {
+    let name = if cfg!(windows) {
+        "everyapi.exe"
+    } else {
+        "everyapi"
+    };
+    let Ok(path_var) = std::env::var("PATH") else {
+        return false;
+    };
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    path_var
+        .split(separator)
+        .any(|dir| PathBuf::from(dir).join(name).exists())
+}
+
+/// `$XDG_CONFIG_HOME/everyapi/credentials.json`, falling back to `~/.config/everyapi/credentials.json`.
+/// `None` when neither root resolves.
+fn everyapi_credentials_path() -> Option<PathBuf> {
+    let root = match std::env::var("XDG_CONFIG_HOME") {
+        Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
+        _ => dirs::home_dir()?.join(".config"),
+    };
+    Some(root.join("everyapi").join("credentials.json"))
+}
+
+/// Whether the credentials file carries a non-empty `relay_key`.
+///
+/// The value is inspected and dropped; it is never returned, logged, or rendered into any message.
+fn relay_key_present(path: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    value
+        .get("relay_key")
+        .and_then(|v| v.as_str())
+        .is_some_and(|k| !k.trim().is_empty())
+}
+
+/// First base-URL env var pointing at a non-official host, as `(var_name, host)`.
+///
+/// Deliberately diverges from `librefang_llm_drivers::drivers::is_proxied_via_env`, which returns on the first var that is merely *set* — so an `ANTHROPIC_BASE_URL` left at the official host masks a proxied `ANTHROPIC_API_URL`.
+/// That is the right trade-off there (it answers "is the primary var redirected"); here a masked redirect is a false negative in exactly the scenario this check exists to catch, so we skip past official and empty values instead of stopping.
+/// Do not "fix" this back.
+fn detect_cli_driver_env_route() -> Option<(String, String)> {
+    for &(var, official_host) in CLI_DRIVER_BASE_URL_VARS {
+        let Ok(raw) = std::env::var(var) else {
+            continue;
+        };
+        if let Some(host) = env_route_redirect_host(&raw, official_host) {
+            return Some((var.to_string(), host));
+        }
+    }
+    None
+}
+
+/// The host `value` actually addresses, or `None` when it is empty or already
+/// points at `official_host`.
+///
+/// Split out from [`detect_cli_driver_env_route`] so the bypasses below are
+/// covered by tests rather than needing a process-wide environment mutation,
+/// and so the comparison lives in exactly one place.
+///
+/// The comparison is against the *parsed host*, never a substring of the whole
+/// value. A `contains` test is defeated by any URL that carries the official
+/// name somewhere other than its authority:
+///
+/// - `https://api.anthropic.com.attacker.example/v1` — official name as a domain prefix
+/// - `https://evil.example/api.anthropic.com` — official name in the path
+/// - `https://api.anthropic.com@evil.example/` — official name as userinfo, while every HTTP
+///   client actually connects to `evil.example`
+///
+/// Each of those would have been waved through as "official", making this
+/// check report no redirection at all in precisely the case it exists to catch.
+///
+/// `librefang_llm_drivers::drivers::is_proxied_via_env` has the same weak
+/// `contains` shape. That is pre-existing and out of scope here, but this
+/// function is new and security-relevant, so it does not reproduce it.
+fn env_route_redirect_host(value: &str, official_host: &str) -> Option<String> {
+    let normalized = value.trim().trim_end_matches('/').to_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    let host = url_host(&normalized).unwrap_or(normalized);
+    (host != official_host).then_some(host)
+}
+
+/// Extract the host (authority minus userinfo and port) from a URL-ish string.
+/// Returns `None` when there is no scheme separator or the authority is empty, letting the caller fall back to the raw value rather than print nothing.
+fn url_host(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest)?;
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    // Strip userinfo, then the port. A bracketed IPv6 literal keeps its
+    // brackets so the result stays an unambiguous host.
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match host.strip_prefix('[') {
+        Some(rest) => match rest.split_once(']') {
+            Some((v6, _)) => return Some(format!("[{v6}]")),
+            None => host,
+        },
+        None => host.split_once(':').map_or(host, |(h, _)| h),
+    };
+    (!host.is_empty()).then(|| host.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -610,20 +876,17 @@ mod tests {
 
     // ── VaultKeyCheck ──────────────────────────────────────────────────────
 
-    /// Process-wide lock for tests that mutate `LIBREFANG_VAULT_KEY`. `cargo
-    /// test` runs tests in parallel by default, and env-var mutation is
-    /// process-global, so without serialization these races clobber each
-    /// other (and `run_all_returns_one_result_per_check`, which also reads
-    /// the env var). No external dep needed — std `Mutex` is enough.
+    /// Process-wide lock for tests that mutate `LIBREFANG_VAULT_KEY`.
+    /// `cargo test` runs tests in parallel by default, and env-var mutation is process-global, so without serialization these races clobber each other (and `run_all_returns_one_result_per_check`, which also reads the env var).
+    /// No external dep needed — std `Mutex` is enough.
     fn env_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
     /// Run a closure with `LIBREFANG_VAULT_KEY` temporarily set to `value`.
-    /// Holds [`env_lock`] for the entire body so concurrent vault-key tests
-    /// (and any other env-var test in this binary) don't race. The original
-    /// value is restored before the lock is released.
+    /// Holds [`env_lock`] for the entire body so concurrent vault-key tests (and any other env-var test in this binary) don't race.
+    /// The original value is restored before the lock is released.
     fn with_vault_key<F: FnOnce() -> AuditResult>(value: Option<&str>, f: F) -> AuditResult {
         // poison is fine — a panicking sibling test shouldn't make the rest
         // hang or incorrectly skip.
@@ -766,6 +1029,235 @@ mod tests {
         let ctx = ctx_with_home(tmp.path().to_path_buf());
         let r = ConfigTomlSchemaCheck.run(&ctx);
         assert_eq!(r.severity, Severity::Pass);
+    }
+
+    // ── EveryApiWiringCheck ───────────────────────────────────────────────
+    //
+    // The grading table is exercised through the pure `grade_everyapi_wiring`
+    // so no test touches the process env or the real `~/.config`. The PATH
+    // probe (`everyapi_cli_on_path`) is intentionally untested — it is a
+    // one-line, host-dependent lookup with no decision logic.
+
+    fn state() -> EveryApiState {
+        EveryApiState::default()
+    }
+
+    fn env_route(host: &str) -> Option<(String, String)> {
+        Some(("ANTHROPIC_BASE_URL".to_string(), host.to_string()))
+    }
+
+    fn provider_entry() -> Option<PathBuf> {
+        Some(PathBuf::from("/home/u/.librefang/providers/everyapi.toml"))
+    }
+
+    #[test]
+    fn everyapi_absent_everywhere_is_info() {
+        let r = grade_everyapi_wiring(&state());
+        assert_eq!(r.severity, Severity::Info);
+        assert!(r.hint.is_none());
+        assert!(r.summary.contains("No EveryAPI"));
+    }
+
+    #[test]
+    fn everyapi_cli_present_without_credentials_is_info() {
+        let r = grade_everyapi_wiring(&EveryApiState {
+            cli_on_path: true,
+            ..state()
+        });
+        assert_eq!(r.severity, Severity::Info);
+        assert!(r.summary.contains("everyapi login"));
+    }
+
+    #[test]
+    fn everyapi_credentials_without_relay_key_is_info() {
+        let r = grade_everyapi_wiring(&EveryApiState {
+            cli_on_path: true,
+            credentials_incomplete: true,
+            ..state()
+        });
+        assert_eq!(r.severity, Severity::Info);
+        assert!(r.summary.contains("relay_key"));
+    }
+
+    /// The actionable case.
+    /// Info (not Warn) on purpose — see the comment in `grade_everyapi_wiring`.
+    /// Because the human path only renders `hint` for Warn/Error, the remediation command MUST be in the summary; this assertion is what stops someone from silently moving it to `hint`.
+    #[test]
+    fn everyapi_credentials_without_provider_entry_names_connect_command_in_summary() {
+        let r = grade_everyapi_wiring(&EveryApiState {
+            cli_on_path: true,
+            credentials_usable: true,
+            ..state()
+        });
+        assert_eq!(r.severity, Severity::Info);
+        assert!(r.summary.contains("librefang models connect everyapi"));
+    }
+
+    #[test]
+    fn everyapi_provider_entry_only_is_pass() {
+        let r = grade_everyapi_wiring(&EveryApiState {
+            cli_on_path: true,
+            credentials_usable: true,
+            provider_entry: provider_entry(),
+            ..state()
+        });
+        assert_eq!(r.severity, Severity::Pass);
+        assert!(r.summary.contains("everyapi.toml"));
+    }
+
+    /// The provider entry is a file on disk and stays there forever; the relay key it depends on can be revoked at any time by `everyapi logout` or a rotation.
+    /// Grading on the file alone reported green for a wiring that 401s on every request — the one outcome an operator cannot act on.
+    #[test]
+    fn everyapi_provider_entry_without_usable_credentials_warns() {
+        let r = grade_everyapi_wiring(&EveryApiState {
+            cli_on_path: true,
+            credentials_usable: false,
+            credentials_incomplete: true,
+            provider_entry: provider_entry(),
+            ..state()
+        });
+        assert_eq!(r.severity, Severity::Warn);
+        assert!(r.summary.contains("everyapi.toml"));
+        assert!(r.hint.is_some(), "a warn must carry a remediation hint");
+    }
+
+    #[test]
+    fn everyapi_env_route_only_is_info() {
+        let r = grade_everyapi_wiring(&EveryApiState {
+            env_route: env_route("api.everyapi.ai"),
+            ..state()
+        });
+        assert_eq!(r.severity, Severity::Info);
+        assert!(r.summary.contains("ANTHROPIC_BASE_URL"));
+        assert!(r.summary.contains("api.everyapi.ai"));
+    }
+
+    #[test]
+    fn everyapi_both_routes_is_warn_naming_both_surfaces() {
+        let r = grade_everyapi_wiring(&EveryApiState {
+            cli_on_path: true,
+            credentials_usable: true,
+            provider_entry: provider_entry(),
+            env_route: env_route("api.everyapi.ai"),
+            ..state()
+        });
+        assert_eq!(r.severity, Severity::Warn);
+        assert!(r.hint.is_some());
+        assert!(r.summary.contains("ANTHROPIC_BASE_URL"));
+        assert!(r.summary.contains("everyapi.toml"));
+    }
+
+    /// Both routes pointing at the *same* gateway is still ambiguous — which one applies depends on the agent's driver, and the two can drift apart later.
+    /// Identical hosts must not downgrade the warning.
+    #[test]
+    fn everyapi_both_routes_same_host_is_still_warn() {
+        let r = grade_everyapi_wiring(&EveryApiState {
+            cli_on_path: true,
+            credentials_usable: true,
+            provider_entry: Some(PathBuf::from("/h/.librefang/providers/everyapi.toml")),
+            env_route: env_route("api.everyapi.ai"),
+            ..state()
+        });
+        assert_eq!(r.severity, Severity::Warn);
+    }
+
+    /// The env route alone is enough to warn: a user can export `ANTHROPIC_BASE_URL` without ever installing the EveryAPI CLI, and the provider entry is still a second, independent route.
+    #[test]
+    fn everyapi_both_routes_without_cli_or_credentials_is_warn() {
+        let r = grade_everyapi_wiring(&EveryApiState {
+            provider_entry: provider_entry(),
+            env_route: env_route("gateway.internal"),
+            ..state()
+        });
+        assert_eq!(r.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn url_host_extracts_authority() {
+        assert_eq!(
+            url_host("https://api.everyapi.ai/v1"),
+            Some("api.everyapi.ai".to_string())
+        );
+        assert_eq!(
+            url_host("http://user:pw@gw.internal:8080/v1"),
+            Some("gw.internal".to_string())
+        );
+        assert_eq!(url_host("http://[::1]:4545/v1"), Some("[::1]".to_string()));
+        // No scheme separator, or an empty authority: caller falls back to
+        // the raw value rather than printing nothing.
+        assert_eq!(url_host("api.everyapi.ai"), None);
+        assert_eq!(url_host("https:///v1"), None);
+    }
+
+    #[test]
+    fn env_route_redirect_host_is_not_fooled_by_lookalike_urls() {
+        // Every value here connects somewhere other than api.anthropic.com while still
+        // containing that string, so the previous `normalized.contains(official_host)` test
+        // classified them as official and made the check report no redirection at all — a
+        // false negative in exactly the case it exists to catch.
+        for value in [
+            // Official name as a domain prefix.
+            "https://api.anthropic.com.attacker.example/v1",
+            // Official name in the path.
+            "https://evil.example/api.anthropic.com",
+            // Official name as userinfo. Every HTTP client connects to evil.example here.
+            "https://api.anthropic.com@evil.example/",
+            "https://api.anthropic.com:tokenlike@evil.example/v1",
+            // Suffix that merely ends with the official name's leading label.
+            "https://not-api.anthropic.com.co/v1",
+        ] {
+            let host = env_route_redirect_host(value, "api.anthropic.com");
+            assert!(
+                host.is_some(),
+                "{value} redirects off the official host and must be reported"
+            );
+            assert_ne!(
+                host.as_deref(),
+                Some("api.anthropic.com"),
+                "{value} must not resolve to the official host"
+            );
+        }
+    }
+
+    #[test]
+    fn env_route_redirect_host_still_skips_genuine_official_values() {
+        // The other direction: the check must not cry redirect at operators who
+        // set the var explicitly to the vendor's own endpoint. Trailing slash,
+        // casing, whitespace, and a set-but-empty value all normalize away.
+        for value in [
+            "https://api.anthropic.com",
+            "https://api.anthropic.com/",
+            "  https://API.Anthropic.Com/  ",
+            "",
+            "   ",
+        ] {
+            assert_eq!(
+                env_route_redirect_host(value, "api.anthropic.com"),
+                None,
+                "{value:?} must not be reported as a redirect"
+            );
+        }
+    }
+
+    #[test]
+    fn relay_key_present_requires_non_empty_string() {
+        let tmp = tmp_home();
+        let path = tmp.path().join("credentials.json");
+
+        std::fs::write(&path, r#"{"relay_key":"sk-abc","api_base":"https://x"}"#).unwrap();
+        assert!(relay_key_present(&path));
+
+        std::fs::write(&path, r#"{"relay_key":"   "}"#).unwrap();
+        assert!(!relay_key_present(&path));
+
+        std::fs::write(&path, r#"{"api_base":"https://x"}"#).unwrap();
+        assert!(!relay_key_present(&path));
+
+        // Non-JSON, and a missing file, are both "no usable key" rather than
+        // a panic.
+        std::fs::write(&path, "not json at all").unwrap();
+        assert!(!relay_key_present(&path));
+        assert!(!relay_key_present(&tmp.path().join("nope.json")));
     }
 
     // ── LinuxDesktopDepsCheck ─────────────────────────────────────────────

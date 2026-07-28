@@ -142,6 +142,155 @@ async fn get_config_returns_redacted_view() {
     }
 }
 
+/// Walk a dotted path through a JSON body.
+/// A `null` at the end still counts as found — an unset `Option` renders as `null` and the dashboard needs the key to exist in order to bind an empty input to it.
+fn dig<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let mut cursor = value;
+    for segment in path.split('.') {
+        cursor = cursor.as_object()?.get(segment)?;
+    }
+    Some(cursor)
+}
+
+/// #6596: `GET /api/config` used to omit fields that `POST /api/config/set` accepts, so the dashboard rendered them blank and reported them as "not configured" even when `config.toml` set them.
+/// The unit-level guard in `routes::config::manage` enumerates the full set; this test pins the paths from the report plus one whole section (`terminal`) that was absent entirely, over the real router.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_config_exposes_writable_fields_that_used_to_be_write_only() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+
+    for path in [
+        // Reported by the issue.
+        "browser.cdp_endpoint",
+        "browser.enabled",
+        "media.image_model",
+        "media.custom_stt",
+        "tts.custom",
+        "channels.file_download_dir",
+        // Found alongside them while auditing every writable section.
+        "browser.cdp_auth_token_env",
+        "approval.totp_grace_period_secs",
+        "web.timeout_secs",
+        "web.fetch.ssrf_allowed_hosts",
+        "exec_policy.allowed_env_vars",
+        "exec_policy.safe_bins_skip_approval",
+        "session.reset",
+        "session.context_injection",
+        "memory.decay",
+        "memory.chunking",
+        "memory.pool_size",
+        "proactive_memory.format_context_max_chars",
+        "queue.task_queue_retention_days",
+        "queue.concurrency.trigger_fire_timeout_secs",
+        "compaction.strip_reasoning_after_turns",
+        "registry.registry_host",
+        "vault.use_os_keyring",
+        "pairing.public_base_url",
+        "default_model.message_timeout_secs",
+        "budget.default_burst_ratio",
+        "network.max_messages_per_peer_per_minute",
+        "tts.elevenlabs.output_format",
+    ] {
+        assert!(
+            dig(&json, path).is_some(),
+            "GET /api/config must expose writable path '{path}' (#6596); body: {json}"
+        );
+    }
+
+    // `terminal` was missing as a whole section even though `ui_sections_overlay` declares it and `terminal.` is a writable section prefix.
+    let terminal = json
+        .get("terminal")
+        .expect("GET /api/config must include the `terminal` section (#6596)");
+    for key in [
+        "enabled",
+        "allowed_origins",
+        "allow_remote",
+        "require_proxy_headers",
+        "allow_unauthenticated_remote",
+        "tmux_enabled",
+        "max_windows",
+        "tmux_binary_path",
+    ] {
+        assert!(
+            terminal.get(key).is_some(),
+            "`terminal.{key}` missing from GET /api/config: {terminal}"
+        );
+    }
+}
+
+/// #6596: enum-valued config fields were rendered with `format!("{:?}", …)`, which emits the Rust variant name (`"Allowlist"`, `"DuckDuckGo"`).
+/// The write path, `config.toml`, and the schema's `select` options all use serde's rename form, so the dashboard dropdown matched none of its own options.
+/// Asserting the absence of upper-case characters catches any new field that reintroduces `Debug` formatting, not just the seven that were fixed.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_config_enum_values_use_serde_encoding() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+
+    for path in [
+        "mode",
+        "reload.mode",
+        "exec_policy.mode",
+        "broadcast.strategy",
+        "docker.mode",
+        "docker.scope",
+        "web.search_provider",
+        "privacy.mode",
+        "sanitize.mode",
+    ] {
+        let value = dig(&json, path)
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("'{path}' missing or not a string in {json}"));
+        assert!(
+            !value.chars().any(|c| c.is_ascii_uppercase()),
+            "'{path}' = \"{value}\" looks like Debug output; emit the serde encoding the \
+             write path and the schema's select options use (#6596)"
+        );
+    }
+}
+
+/// #6596 end to end: write a field that used to be invisible on the read side, then read it back.
+/// Before the fix the write succeeded and the subsequent GET still showed nothing, which is what made the dashboard report a saved setting as unconfigured.
+///
+/// `compaction.*` is the field family used here because `build_reload_plan` classifies it as a read-live no-op change, so its own diff satisfies `should_store_config` and the live config swap is guaranteed by this edit alone.
+/// A `browser.*` write is classified restart-required and would only reach the live snapshot on the back of some unrelated diff, which would make the assertion prove the wrong thing.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_then_get_round_trips_a_previously_write_only_field() {
+    let h = boot_router_with_api_key(API_KEY).await;
+
+    // Seed the on-disk config with the harness's api_key. `config_set` reloads from this file afterwards, so without the seed the reload would replace the live config with one whose `api_key` is empty and the follow-up authenticated GET would be answered under different auth rules than the one under test.
+    let seed = format!("api_key = \"{API_KEY}\"\n");
+    std::fs::write(h.home.join("config.toml"), seed).expect("seed config.toml");
+
+    // Default is 0, so 4 is an observable change.
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "compaction.strip_reasoning_after_turns", "value": 4}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "compaction.strip_reasoning_after_turns is allowlisted; got {status}: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        dig(&json, "compaction.strip_reasoning_after_turns").and_then(|v| v.as_u64()),
+        Some(4),
+        "a saved value must be visible in the next GET /api/config (#6596); body: {json}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn get_config_is_dashboard_read_when_no_api_key() {
     // With api_key empty, dashboard reads must work without a token.
