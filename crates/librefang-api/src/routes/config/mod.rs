@@ -797,20 +797,12 @@ const WRITABLE_SECTION_PREFIXES: &[&str] = &[
 // a bot/API token. Depth-2 (`channels.telegram.enabled` etc.) goes
 // through SCRUB_SUFFIXES which catches the `_env` blanket.
 //
-// State of this rule after the sidecar migration, recorded while auditing
-// dangling allowlist entries for #6605: `ChannelsConfig` no longer declares
-// any per-vendor field — only the three file-transfer scalars
-// (`file_download_dir`, `file_download_max_bytes`, `file_upload_max_bytes`),
-// which sit at depth 1 and are therefore rejected by the rule above, while no
-// depth-2 path under `channels.` resolves to a field at all. A depth-2 write
-// such as `channels.telegram.enabled` is still accepted, still lands a
-// `[channels.telegram]` table in config.toml, and is still discarded by the
-// next load — the same silent-no-op shape #6605 removed the `ui.*` entries
-// for, one level deeper than the backing-field guard can see. Both candidate
-// repairs (drop `channels.` so the surface matches the struct, or move it to
-// depth-1 so the three real scalars become writable) change the write surface
-// rather than the allowlist's internal consistency, so they are a maintainer
-// call, not a mechanical consequence of #6605.
+// State of this rule after the sidecar migration, recorded while auditing dangling allowlist entries for #6605.
+// `ChannelsConfig` no longer declares any per-vendor field — only the three file-transfer scalars (`file_download_dir`, `file_download_max_bytes`, `file_upload_max_bytes`), which sit at depth 1 and are therefore rejected by the rule above, while no depth-2 path under `channels.` resolves to a field at all.
+// A depth-2 write such as `channels.telegram.enabled` is still accepted, still lands a `[channels.telegram]` table in config.toml, and is still discarded by the next load — the same silent-no-op shape #6605 removed the `ui.*` entries for.
+// `every_writable_allowlist_entry_has_a_backing_config_field` cannot see it: the guard checks a section prefix at its base, and `channels` is a real `KernelConfig` field, so the dangling part sits one level below what the guard inspects.
+// The visible half is the mirror image: `ui_sections_overlay` declares a `channels` section and `ConfigPage` posts `<section>.<field>`, so the dashboard renders editors for the three real scalars and every save of one is rejected with 403.
+// Both candidate repairs (drop `channels.` so the surface matches the struct, or move it to depth 1 so the three real scalars become writable) change the write surface rather than the allowlist's internal consistency, so they are a maintainer call, not a mechanical consequence of #6605.
 const WRITABLE_DEPTH_2_ONLY_PREFIXES: &[&str] = &["channels."];
 
 /// Allowlist of user-tunable config paths writable via POST /api/config/set

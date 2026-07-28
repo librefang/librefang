@@ -1800,13 +1800,13 @@ mod writable_allowlist_backing_field_tests {
         }
 
         let mut dangling: Vec<String> = Vec::new();
-        for path in super::super::WRITABLE_EXACT_PATHS.iter().copied() {
+        for &path in super::super::WRITABLE_EXACT_PATHS {
             if !declares(&definitions, &schema, path) {
                 dangling.push(path.to_string());
             }
         }
         // A section prefix is checked at its base. The prefix admits arbitrary leaves beneath it, so "this section exists" is the strongest claim available without enumerating what a caller might post — the leaf itself is only reachable at request time.
-        for prefix in super::super::WRITABLE_SECTION_PREFIXES.iter().copied() {
+        for &prefix in super::super::WRITABLE_SECTION_PREFIXES {
             if !declares(&definitions, &schema, prefix.trim_end_matches('.')) {
                 dangling.push(prefix.to_string());
             }
@@ -1826,7 +1826,7 @@ mod writable_allowlist_backing_field_tests {
     /// Same defect shape as a dangling path: a rule that reads as a restriction but has no effect.
     #[test]
     fn every_depth_2_only_prefix_is_also_a_section_prefix() {
-        for prefix in super::super::WRITABLE_DEPTH_2_ONLY_PREFIXES.iter().copied() {
+        for &prefix in super::super::WRITABLE_DEPTH_2_ONLY_PREFIXES {
             assert!(
                 super::super::WRITABLE_SECTION_PREFIXES.contains(&prefix),
                 "`{prefix}` restricts writes to depth 2 but is not a writable section prefix, so \
