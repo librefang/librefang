@@ -1552,6 +1552,659 @@ system_prompt = "You are a test worker."
     kernel.shutdown();
 }
 
+/// Minimal hand in the **flat** agent format (`provider` / `model` as top-level strings, no `[model]` sub-table) whose tool list contains `shell_exec` and whose agent section declares no `[exec_policy]` of its own.
+/// This is the shape every registry hand uses, and the shape that used to be handed a fabricated `ExecSecurityMode::Full` policy at activation (#6594).
+const SHELL_EXEC_HAND_TOML: &str = r#"
+id = "exec-policy-test"
+version = "0.1.0"
+name = "Exec Policy Test Hand"
+description = "Regression fixture for issue #6594"
+category = "development"
+
+tools = ["shell_exec"]
+
+[agents.worker]
+name = "exec-policy-worker"
+description = "Declares no exec policy of its own"
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+"#;
+
+/// Same shape as [`SHELL_EXEC_HAND_TOML`] but declaring the `*` tool wildcard instead of naming `shell_exec`.
+/// `spawn_agent_inner`'s own exec-policy fallback matches `*` too, so a guard that only looked for the literal `shell_exec` here would leave `exec_policy` unset and let that fallback fabricate `Full` a few frames later (#6594).
+const WILDCARD_TOOLS_HAND_TOML: &str = r#"
+id = "exec-policy-wildcard"
+version = "0.1.0"
+name = "Exec Policy Wildcard Hand"
+description = "Regression fixture for issue #6594 (tool wildcard)"
+category = "development"
+
+tools = ["*"]
+
+[agents.worker]
+name = "exec-policy-wildcard-worker"
+description = "Declares no exec policy of its own"
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+"#;
+
+/// Boot a throwaway kernel whose global `[exec_policy]` is `global`, activate `hand_toml`, and return the exec policy that activation materialized onto the derived agent's manifest.
+fn materialize_hand_exec_policy(
+    label: &str,
+    hand_id: &str,
+    hand_toml: &str,
+    global: librefang_types::config::ExecPolicy,
+) -> librefang_types::config::ExecPolicy {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join(label);
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        exec_policy: global,
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    kernel
+        .skills
+        .hand_registry
+        .install_from_content(hand_toml, "")
+        .expect("install hand from content");
+
+    let instance = kernel
+        .activate_hand(hand_id, HashMap::new())
+        .expect("hand should activate");
+    let agent_id = instance
+        .agent_id()
+        .expect("derived agent id from activated hand");
+    let policy = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("hand-derived agent must be in the registry")
+        .manifest
+        .exec_policy
+        .clone()
+        .expect("a hand whose tools include shell_exec must receive an exec policy");
+
+    kernel.shutdown();
+    policy
+}
+
+/// Regression test for issue #6594 — activation must inherit the operator's global exec mode instead of fabricating `Full`.
+/// `Deny` is the sharpest case: the operator has switched shell execution off entirely, and a third-party hand definition must not be able to turn it back on merely by listing `shell_exec` among its tools.
+#[test]
+fn hand_activation_inherits_global_exec_policy_deny() {
+    let policy = materialize_hand_exec_policy(
+        "librefang-kernel-hand-exec-deny",
+        "exec-policy-test",
+        SHELL_EXEC_HAND_TOML,
+        librefang_types::config::ExecPolicy {
+            mode: librefang_types::config::ExecSecurityMode::Deny,
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        policy.mode,
+        librefang_types::config::ExecSecurityMode::Deny,
+        "hand activation must inherit the operator's global exec mode, not \
+         fabricate ExecSecurityMode::Full (#6594)"
+    );
+}
+
+/// A hand that declares the `*` tool wildcard instead of naming `shell_exec` must be covered too.
+/// `spawn_agent_inner`'s exec-policy fallback matches `*`, so an `exec_policy` still unset at that point is promoted to `Full` there — the guard at activation has to cover the same trigger set or the escalation simply moves one frame down the call stack (#6594).
+#[test]
+fn hand_activation_inherits_global_exec_policy_for_tool_wildcard() {
+    let policy = materialize_hand_exec_policy(
+        "librefang-kernel-hand-exec-wildcard",
+        "exec-policy-wildcard",
+        WILDCARD_TOOLS_HAND_TOML,
+        librefang_types::config::ExecPolicy {
+            mode: librefang_types::config::ExecSecurityMode::Deny,
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        policy.mode,
+        librefang_types::config::ExecSecurityMode::Deny,
+        "a hand declaring `tools = [\"*\"]` must inherit the operator's exec mode \
+         rather than falling through to the spawn-path Full promotion (#6594)"
+    );
+}
+
+/// Companion to the `Deny` case: an `allowlist` operator config must reach the hand agent whole, allowed-command list included.
+#[test]
+fn hand_activation_inherits_global_exec_policy_allowlist() {
+    let policy = materialize_hand_exec_policy(
+        "librefang-kernel-hand-exec-allowlist",
+        "exec-policy-test",
+        SHELL_EXEC_HAND_TOML,
+        librefang_types::config::ExecPolicy {
+            mode: librefang_types::config::ExecSecurityMode::Allowlist,
+            allowed_commands: vec!["git".to_string(), "cargo".to_string()],
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        policy.mode,
+        librefang_types::config::ExecSecurityMode::Allowlist,
+        "hand activation must inherit the operator's global exec mode (#6594)"
+    );
+    // `Allowlist` is also `ExecSecurityMode::default()`, so the mode alone cannot tell "inherited from global config" apart from "fell back to ExecPolicy::default()".
+    // The operator's command list can.
+    assert_eq!(
+        policy.allowed_commands,
+        vec!["git".to_string(), "cargo".to_string()],
+        "the whole global policy is inherited, not just its mode — otherwise an \
+         allowlist hand would run with an empty command list"
+    );
+}
+
+/// The generous hand timeouts survive as a **floor**, not as a replacement: a global below the floor is raised to it (so long-running hand commands do not silently drop to the 30s `ExecPolicy::default()`), and a global above the floor is inherited verbatim.
+/// Timeouts are not a security property — only `mode` is, which is why only `mode` is inherited unconditionally.
+#[test]
+fn hand_activation_floors_inherited_exec_timeouts() {
+    let floored = materialize_hand_exec_policy(
+        "librefang-kernel-hand-exec-timeout-floor",
+        "exec-policy-test",
+        SHELL_EXEC_HAND_TOML,
+        librefang_types::config::ExecPolicy {
+            timeout_secs: 30,
+            no_output_timeout_secs: 30,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        floored.timeout_secs, 300,
+        "a 30s global timeout must be raised to the hand floor, preserving the \
+         historical 300s budget for long-running hand commands"
+    );
+    assert_eq!(
+        floored.no_output_timeout_secs, 120,
+        "a 30s global no-output timeout must be raised to the 120s hand floor"
+    );
+
+    // A global *above* the floor is the case a hardcoded constant could not produce, so this is what proves the floor is a `.max()` rather than an unconditional overwrite.
+    let raised = materialize_hand_exec_policy(
+        "librefang-kernel-hand-exec-timeout-raised",
+        "exec-policy-test",
+        SHELL_EXEC_HAND_TOML,
+        librefang_types::config::ExecPolicy {
+            timeout_secs: 600,
+            no_output_timeout_secs: 400,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        raised.timeout_secs, 600,
+        "a global timeout above the floor must be inherited verbatim"
+    );
+    assert_eq!(
+        raised.no_output_timeout_secs, 400,
+        "a global no-output timeout above the floor must be inherited verbatim"
+    );
+}
+
+/// A hand agent that declares its own `[exec_policy]` keeps it verbatim: no mode substitution, no timeout floor.
+/// This is the per-hand opt-in referenced by #6594, and — since the section is in the flat format — it is also the regression test for the `LegacyHandAgentConfig` passthrough that makes the opt-in reachable at all for hands written that way.
+#[test]
+fn hand_activation_respects_hand_declared_exec_policy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-hand-exec-optin");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    // Global is deliberately the *loosest* mode with default timeouts, so inheriting instead of respecting the declaration would be unmistakable: the manifest would read Full / 300 / 120 rather than Deny / 45 / 15.
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        exec_policy: librefang_types::config::ExecPolicy {
+            mode: librefang_types::config::ExecSecurityMode::Full,
+            ..Default::default()
+        },
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let hand_toml = r#"
+id = "exec-policy-optin"
+version = "0.1.0"
+name = "Exec Policy Opt-in Hand"
+description = "Regression fixture for issue #6594 (per-hand opt-in)"
+category = "development"
+
+tools = ["shell_exec"]
+
+[agents.worker]
+name = "exec-policy-optin-worker"
+description = "Declares its own exec policy in the flat agent format"
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+
+[agents.worker.exec_policy]
+mode = "deny"
+timeout_secs = 45
+no_output_timeout_secs = 15
+"#;
+
+    kernel
+        .skills
+        .hand_registry
+        .install_from_content(hand_toml, "")
+        .expect("install hand from content");
+
+    let instance = kernel
+        .activate_hand("exec-policy-optin", HashMap::new())
+        .expect("hand should activate");
+    let agent_id = instance
+        .agent_id()
+        .expect("derived agent id from activated hand");
+    let policy = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("hand-derived agent must be in the registry")
+        .manifest
+        .exec_policy
+        .clone()
+        .expect("a flat-format hand's own [exec_policy] must survive parsing");
+
+    assert_eq!(
+        policy.mode,
+        librefang_types::config::ExecSecurityMode::Deny,
+        "a hand agent's own exec mode must not be clobbered by the global policy"
+    );
+    assert_eq!(
+        policy.timeout_secs, 45,
+        "the hand-floor timeout applies only to an inherited policy, never to a \
+         policy the hand declared itself"
+    );
+    assert_eq!(
+        policy.no_output_timeout_secs, 15,
+        "the hand-floor no-output timeout applies only to an inherited policy"
+    );
+
+    kernel.shutdown();
+}
+
+/// Boot a throwaway kernel, activate `hand_toml`, and return the manifest that activation materialized onto the hand's `worker` agent.
+///
+/// The scheduling tests below all assert on `manifest.schedule`, which is the single field that decides whether the role ever wakes up on its own: the startup scan in `background_lifecycle` skips every agent whose schedule is `ScheduleMode::Reactive` and hands every other one to `start_background_for_agent`.
+/// Asserting the resolved schedule is therefore the direct proxy for "does a background loop get started for this role".
+fn materialize_hand_agent_manifest(label: &str, hand_id: &str, hand_toml: &str) -> AgentManifest {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join(label);
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    kernel
+        .skills
+        .hand_registry
+        .install_from_content(hand_toml, "")
+        .expect("install hand from content");
+
+    let instance = kernel
+        .activate_hand(hand_id, HashMap::new())
+        .expect("hand should activate");
+    let agent_id = instance
+        .agent_id()
+        .expect("derived agent id from activated hand");
+    let manifest = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("hand-derived agent must be in the registry")
+        .manifest
+        .clone();
+
+    kernel.shutdown();
+    manifest
+}
+
+/// `ScheduleMode` has no `PartialEq`, so the schedule assertions destructure.
+fn assert_continuous_schedule(manifest: &AgentManifest, expected_interval_secs: u64, why: &str) {
+    match manifest.schedule {
+        ScheduleMode::Continuous {
+            check_interval_secs,
+        } => assert_eq!(check_interval_secs, expected_interval_secs, "{why}"),
+        ref other => panic!("expected a continuous schedule ({why}); got {other:?}"),
+    }
+}
+
+fn assert_reactive_schedule(manifest: &AgentManifest, why: &str) {
+    match manifest.schedule {
+        ScheduleMode::Reactive => {}
+        ref other => panic!("expected a reactive schedule ({why}); got {other:?}"),
+    }
+}
+
+/// Regression test for issue #6595 — `max_iterations` is the agent-loop iteration cap, not a request for autonomous ticking, and a hand that declares no `[metadata]` block declares no wake-up cycle at all (`HandFrequency::default()` is `OnDemand`).
+///
+/// Both assertions matter.
+/// The schedule staying `Reactive` is the fix; the `AutonomousConfig` surviving with the declared cap is what distinguishes this from the tempting "just leave `manifest.autonomous` as `None`" shortcut, which would silently drop the loop cap the hand author asked for (`librefang_runtime::agent_loop` resolves `manifest.autonomous.max_iterations` first — there is no other manifest field carrying it).
+#[test]
+fn hand_activation_keeps_reactive_schedule_for_max_iterations_only() {
+    let manifest = materialize_hand_agent_manifest(
+        "librefang-kernel-hand-loop-cap",
+        "loop-cap-test",
+        r#"
+id = "loop-cap-test"
+version = "0.1.0"
+name = "Loop Cap Test Hand"
+description = "Regression fixture for issue #6595"
+category = "development"
+
+[agents.worker]
+name = "loop-cap-worker"
+description = "Declares a loop-depth cap and nothing else"
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+max_iterations = 80
+"#,
+    );
+
+    assert_reactive_schedule(
+        &manifest,
+        "a hand agent declaring only `max_iterations`, with no declared hand \
+         frequency, must not be given a wake-up cycle (#6595)",
+    );
+    assert_eq!(
+        manifest
+            .autonomous
+            .as_ref()
+            .map(|a| a.max_iterations)
+            .expect("the declared loop cap must still reach the manifest"),
+        80,
+        "`max_iterations` must survive as the agent-loop iteration cap even \
+         though it no longer implies a tick schedule"
+    );
+}
+
+/// The reporter's exact shape in #6595: a hand that says in its own metadata that it runs on demand, and whose agent declares a loop-depth cap.
+/// It used to tick every 30 seconds regardless of that declaration.
+#[test]
+fn hand_activation_keeps_reactive_schedule_for_on_demand_frequency() {
+    let manifest = materialize_hand_agent_manifest(
+        "librefang-kernel-hand-on-demand",
+        "on-demand-test",
+        r#"
+id = "on-demand-test"
+version = "0.1.0"
+name = "On Demand Test Hand"
+description = "Regression fixture for issue #6595"
+category = "development"
+
+[metadata]
+frequency = "on-demand"
+
+[agents.worker]
+name = "on-demand-worker"
+description = "Declares a loop-depth cap on an on-demand hand"
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+max_iterations = 80
+"#,
+    );
+
+    assert_reactive_schedule(
+        &manifest,
+        "a hand declaring `frequency = \"on-demand\"` must never be given a \
+         wake-up cycle, whatever loop cap its roles declare (#6595)",
+    );
+    assert_eq!(
+        manifest.autonomous.as_ref().map(|a| a.max_iterations),
+        Some(80),
+        "the loop cap is still the loop cap"
+    );
+}
+
+/// The other half of #6595: `[metadata] frequency` is the wake-up declaration hand authors actually write, and the shipped hands rely on it — the bundled `devops` hand's own prompt says "The Hand is `frequency = \"continuous\"`, so the next tick will re-read `devops_queue.json`".
+/// So a `continuous` hand must still get a background loop, at the cadence its `[autonomous]` guardrails name.
+#[test]
+fn hand_activation_derives_continuous_schedule_from_hand_frequency() {
+    // Default `AutonomousConfig::heartbeat_interval_secs` is 30, which is the interval every ticking registry hand ran at before the fix.
+    // Deriving the schedule from `frequency` rather than from `autonomous.is_some()` must not change it.
+    let default_heartbeat = materialize_hand_agent_manifest(
+        "librefang-kernel-hand-continuous-default",
+        "continuous-test",
+        r#"
+id = "continuous-test"
+version = "0.1.0"
+name = "Continuous Test Hand"
+description = "Regression fixture for issue #6595"
+category = "development"
+
+[metadata]
+frequency = "continuous"
+
+[agents.worker]
+name = "continuous-worker"
+description = "A continuous hand's loop-running role"
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+max_iterations = 60
+"#,
+    );
+    assert_continuous_schedule(
+        &default_heartbeat,
+        30,
+        "a `continuous` hand must keep ticking at its heartbeat interval — \
+         deleting the wake-up derivation outright would silently disable every \
+         monitoring hand and the shipped auto-evolution pipeline",
+    );
+    assert_eq!(
+        default_heartbeat
+            .autonomous
+            .as_ref()
+            .map(|a| a.max_iterations),
+        Some(60),
+        "the loop cap is independent of the derived schedule"
+    );
+
+    // `continuous` means "as often as this agent's heartbeat", so a role that raises `heartbeat_interval_secs` ticks that much less often.
+    // A hardcoded interval could not produce this.
+    let explicit_heartbeat = materialize_hand_agent_manifest(
+        "librefang-kernel-hand-continuous-explicit",
+        "continuous-slow-test",
+        r#"
+id = "continuous-slow-test"
+version = "0.1.0"
+name = "Slow Continuous Test Hand"
+description = "Regression fixture for issue #6595"
+category = "development"
+
+[metadata]
+frequency = "continuous"
+
+[agents.worker]
+name = "continuous-slow-worker"
+description = "A continuous role that asks for a slower heartbeat"
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+
+[agents.worker.autonomous]
+max_iterations = 12
+heartbeat_interval_secs = 900
+"#,
+    );
+    assert_continuous_schedule(
+        &explicit_heartbeat,
+        900,
+        "an explicit `heartbeat_interval_secs` must set the derived cadence",
+    );
+    assert_eq!(
+        explicit_heartbeat
+            .autonomous
+            .as_ref()
+            .map(|a| a.max_iterations),
+        Some(12),
+        "an explicit `[autonomous]` block must reach the manifest whole"
+    );
+}
+
+/// The fixed cadences are honoured as declared rather than collapsing to the `continuous` heartbeat.
+/// Before the fix an `hourly` hand with a loop cap ticked every 30 seconds — 120x its own declaration.
+#[test]
+fn hand_activation_derives_fixed_cadence_from_hourly_and_daily_frequency() {
+    let hourly = materialize_hand_agent_manifest(
+        "librefang-kernel-hand-hourly",
+        "hourly-test",
+        r#"
+id = "hourly-test"
+version = "0.1.0"
+name = "Hourly Test Hand"
+description = "Regression fixture for issue #6595"
+category = "development"
+
+[metadata]
+frequency = "hourly"
+
+[agents.worker]
+name = "hourly-worker"
+description = "An hourly hand's loop-running role"
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+max_iterations = 50
+"#,
+    );
+    assert_continuous_schedule(
+        &hourly,
+        3_600,
+        "`frequency = \"hourly\"` must tick hourly, not at the 30s \
+         `AutonomousConfig` heartbeat default",
+    );
+
+    let daily = materialize_hand_agent_manifest(
+        "librefang-kernel-hand-daily",
+        "daily-test",
+        r#"
+id = "daily-test"
+version = "0.1.0"
+name = "Daily Test Hand"
+description = "Regression fixture for issue #6595"
+category = "development"
+
+[metadata]
+frequency = "daily"
+
+[agents.worker]
+name = "daily-worker"
+description = "A daily hand's loop-running role"
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+max_iterations = 50
+"#,
+    );
+    assert_continuous_schedule(&daily, 86_400, "`frequency = \"daily\"` must tick daily");
+}
+
+/// The hand's `frequency` decides *whether* its roles tick; the role's own `[autonomous]` guardrails decide *which* ones do.
+/// A multi-role hand gives guardrails only to the roles that run loops — the bundled `devops` hand has five roles and caps two — so a role with no guardrails must stay reactive even on a `continuous` hand, or activating such a hand would start background loops for sub-agents that exist purely to be delegated to.
+#[test]
+fn hand_activation_keeps_reactive_schedule_without_autonomous_guardrails() {
+    let manifest = materialize_hand_agent_manifest(
+        "librefang-kernel-hand-no-guardrails",
+        "no-guardrails-test",
+        r#"
+id = "no-guardrails-test"
+version = "0.1.0"
+name = "No Guardrails Test Hand"
+description = "Regression fixture for issue #6595"
+category = "development"
+
+[metadata]
+frequency = "continuous"
+
+[agents.worker]
+name = "no-guardrails-worker"
+description = "A delegated sub-agent role with no autonomous guardrails"
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+"#,
+    );
+
+    assert!(
+        manifest.autonomous.is_none(),
+        "fixture sanity: this role declares neither `max_iterations` nor an \
+         `[autonomous]` block"
+    );
+    assert_reactive_schedule(
+        &manifest,
+        "a role with no autonomous guardrails must not be woken up just because \
+         some other role of the same hand runs a loop",
+    );
+}
+
+/// The most specific declaration wins: a role that writes its own `[schedule.continuous]` keeps it verbatim, even when the hand's `frequency` would have derived a different cadence.
+/// This is also the only way to reach the `Periodic` (cron) and `Proactive` schedule variants, which `frequency` cannot express.
+///
+/// `ScheduleMode` is externally tagged, so the sub-table (or an inline `schedule = { continuous = { check_interval_secs = 900 } }`) is the form that parses — a bare `schedule = "continuous"` string cannot resolve a struct variant.
+/// The section is in the flat format on purpose: that is the path the `LegacyHandAgentConfig` passthrough enables.
+#[test]
+fn hand_activation_honours_explicit_continuous_schedule() {
+    let manifest = materialize_hand_agent_manifest(
+        "librefang-kernel-hand-explicit-schedule",
+        "explicit-schedule-test",
+        r#"
+id = "explicit-schedule-test"
+version = "0.1.0"
+name = "Explicit Schedule Test Hand"
+description = "Regression fixture for issue #6595 (explicit opt-in)"
+category = "development"
+
+[metadata]
+frequency = "hourly"
+
+[agents.worker]
+name = "explicit-schedule-worker"
+description = "Explicitly opts into continuous scheduling"
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+max_iterations = 80
+
+[agents.worker.schedule.continuous]
+check_interval_secs = 900
+"#,
+    );
+
+    assert_continuous_schedule(
+        &manifest,
+        900,
+        "a role's own `schedule` must win over the cadence derived from the \
+         hand's `frequency` (which would have been 3600 here)",
+    );
+    assert_eq!(
+        manifest
+            .autonomous
+            .as_ref()
+            .map(|a| a.max_iterations)
+            .expect("the declared loop cap must still reach the manifest"),
+        80,
+        "an explicit schedule and a loop cap are independent knobs — declaring \
+         one must not drop the other"
+    );
+}
+
 #[test]
 fn test_available_tools_returns_empty_when_tools_disabled() {
     let tmp = tempfile::tempdir().unwrap();

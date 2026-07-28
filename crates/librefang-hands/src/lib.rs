@@ -13,7 +13,7 @@ pub use hands_hub::{
 
 use chrono::{DateTime, Utc};
 use librefang_types::agent::{
-    AgentId, AgentManifest, AutonomousConfig, ModelConfig, WebSearchAugmentationMode,
+    AgentId, AgentManifest, AutonomousConfig, ModelConfig, ScheduleMode, WebSearchAugmentationMode,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -284,6 +284,10 @@ pub struct HandDashboard {
 /// New HAND.toml files can use the full `[agent]` / `[agent.model]` nested format
 /// from `AgentManifest`.  Legacy files with flat fields (provider, model, max_tokens,
 /// temperature, system_prompt at the top level of `[agent]`) are auto-converted.
+///
+/// This struct has no `deny_unknown_fields`, and `parse_single_agent_section` tries it *first* for any agent section without a `[model]` sub-table — the shape every in-repo hand uses.
+/// So any `AgentManifest` field absent here is silently dropped for flat-format hands rather than reaching the manifest.
+/// `schedule`, `autonomous`, and `exec_policy` are passed through explicitly because each one is a documented per-hand opt-in that was unreachable otherwise (#6594, #6595).
 #[derive(Debug, Clone, Deserialize)]
 struct LegacyHandAgentConfig {
     name: String,
@@ -303,11 +307,36 @@ struct LegacyHandAgentConfig {
     temperature: f32,
     #[serde(default)]
     system_prompt: String,
+    /// Agent-loop iteration cap.
+    /// Synthesizes an `[autonomous]` block when the author did not write one — it is NOT a request for autonomous ticking (#6595).
     max_iterations: Option<u32>,
+    /// Explicit scheduling mode. `ScheduleMode` is externally tagged, so the TOML forms are `schedule = "reactive"` for the unit variant and a sub-table for the struct variants, e.g. `[agents.<role>.schedule.continuous]` with `check_interval_secs = 900`.
+    #[serde(default)]
+    schedule: Option<ScheduleMode>,
+    /// Explicit autonomous guardrails.
+    /// Wins over the block synthesized from `max_iterations`.
+    #[serde(default)]
+    autonomous: Option<AutonomousConfig>,
+    /// Explicit per-hand exec policy.
+    /// This is the opt-in that lets a hand ask for a stronger `mode` than the operator's global `[exec_policy]`; activation only inherits the global policy when this is absent (#6594).
+    #[serde(
+        default,
+        deserialize_with = "librefang_types::serde_compat::exec_policy_lenient"
+    )]
+    exec_policy: Option<librefang_types::config::ExecPolicy>,
 }
 
 impl From<LegacyHandAgentConfig> for AgentManifest {
-    fn from(legacy: LegacyHandAgentConfig) -> Self {
+    fn from(mut legacy: LegacyHandAgentConfig) -> Self {
+        // An explicitly declared `[autonomous]` block wins over the one
+        // synthesized from `max_iterations`: the flat field only carries the
+        // agent-loop iteration cap, so it must not clobber real guardrails.
+        let autonomous = legacy.autonomous.take().or_else(|| {
+            legacy.max_iterations.map(|max_iter| AutonomousConfig {
+                max_iterations: max_iter,
+                ..Default::default()
+            })
+        });
         AgentManifest {
             name: legacy.name,
             description: legacy.description,
@@ -324,10 +353,9 @@ impl From<LegacyHandAgentConfig> for AgentManifest {
                 max_output_tokens: None,
                 extra_params: std::collections::BTreeMap::new(),
             },
-            autonomous: legacy.max_iterations.map(|max_iter| AutonomousConfig {
-                max_iterations: max_iter,
-                ..Default::default()
-            }),
+            schedule: legacy.schedule.unwrap_or_default(),
+            autonomous,
+            exec_policy: legacy.exec_policy,
             ..Default::default()
         }
     }
@@ -844,16 +872,48 @@ impl<'de> Deserialize<'de> for HandDefinition {
 }
 
 /// How often a Hand runs.
+///
+/// This is the hand-level declaration of *whether and how often* the hand's autonomous roles wake up, consumed by hand activation in `librefang-kernel` (#6595).
+/// It used to be catalog-display metadata only, while the wake-up schedule was inferred from the presence of an agent's `max_iterations` — a loop-depth cap that says nothing about scheduling.
+/// The declaration and the implementation now agree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HandFrequency {
     Continuous,
     Periodic,
+    /// No wake-up cycle: the hand's agents run only when a message or event arrives.
+    /// `reactive` is accepted as an alias because it is the `ScheduleMode` spelling of the same thing and the natural value to reach for when switching a hand's ticking off.
     #[default]
-    #[serde(rename = "on-demand")]
+    #[serde(rename = "on-demand", alias = "reactive")]
     OnDemand,
     Daily,
     Hourly,
+}
+
+/// Wake-up cadence used for [`HandFrequency::Periodic`], which names a recurring cycle without saying how long it is.
+/// Matches the `check_interval_secs` default of `librefang_types::agent::ScheduleMode`, so a `periodic` hand ticks at the same rate as an agent that writes `[schedule.continuous]` and leaves the interval out.
+const PERIODIC_TICK_INTERVAL_SECS: u64 = 300;
+
+impl HandFrequency {
+    /// Wake-up cadence in seconds that this frequency declares, or `None` when it declares no wake-up cycle at all ([`HandFrequency::OnDemand`]).
+    ///
+    /// `heartbeat_interval_secs` comes from the role's own `[autonomous]` guardrails and is used for [`HandFrequency::Continuous`], which means "as often as this agent's heartbeat" rather than a fixed period.
+    /// The fixed cadences ignore it: an author who wrote `hourly` asked for an hour, not for the 30s `AutonomousConfig` heartbeat default.
+    pub fn tick_interval_secs(&self, heartbeat_interval_secs: u64) -> Option<u64> {
+        match self {
+            Self::Continuous => Some(heartbeat_interval_secs),
+            Self::Hourly => Some(3_600),
+            Self::Daily => Some(86_400),
+            Self::Periodic => Some(PERIODIC_TICK_INTERVAL_SECS),
+            Self::OnDemand => None,
+        }
+    }
+
+    /// Whether this frequency declares a wake-up cycle at all, independent of how long it is.
+    /// Derived from [`Self::tick_interval_secs`] so the two can never disagree about which variants are scheduled.
+    pub fn declares_wake_up_cycle(&self) -> bool {
+        self.tick_interval_secs(0).is_some()
+    }
 }
 
 /// Relative token consumption level of a Hand.
@@ -1103,6 +1163,130 @@ mod tests {
 
         let err = HandError::AlreadyActive("clip".to_string());
         assert!(err.to_string().contains("already"));
+    }
+
+    /// Regression test for #6594 / #6595 — `parse_single_agent_section` tries `LegacyHandAgentConfig` first for any agent section without a `[model]` sub-table (the shape every registry hand uses), and that struct has no `deny_unknown_fields`.
+    /// Before the passthrough, an explicit `schedule`, `[autonomous]`, or `[exec_policy]` written in that flat format was deserialized into a struct with no such fields and vanished silently, leaving all three documented per-hand opt-ins unreachable.
+    #[test]
+    fn flat_agent_section_passes_through_schedule_autonomous_and_exec_policy() {
+        let toml_content = r#"
+id = "flat-passthrough"
+version = "0.1.0"
+name = "Flat Passthrough Hand"
+description = "Regression fixture for issues #6594 / #6595"
+category = "development"
+
+tools = ["shell_exec"]
+
+[agents.worker]
+name = "flat-worker"
+description = "Flat agent format with explicit schedule / autonomy / exec policy"
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+max_iterations = 80
+
+[agents.worker.schedule.continuous]
+check_interval_secs = 900
+
+[agents.worker.autonomous]
+max_iterations = 12
+heartbeat_interval_secs = 600
+
+[agents.worker.exec_policy]
+mode = "deny"
+timeout_secs = 45
+"#;
+
+        let def = registry::parse_hand_toml(toml_content, "", HashMap::new())
+            .expect("flat-format hand should parse");
+        let manifest = &def
+            .agents
+            .get("worker")
+            .expect("worker role must be present")
+            .manifest;
+
+        match manifest.schedule {
+            ScheduleMode::Continuous {
+                check_interval_secs,
+            } => assert_eq!(
+                check_interval_secs, 900,
+                "an explicitly declared check interval must survive the flat-format parse"
+            ),
+            ref other => panic!("expected an explicit continuous schedule, got {other:?}"),
+        }
+
+        let autonomous = manifest
+            .autonomous
+            .as_ref()
+            .expect("an explicit [autonomous] block must survive the flat-format parse");
+        assert_eq!(
+            autonomous.max_iterations, 12,
+            "an explicit [autonomous] block must win over the one synthesized \
+             from the flat `max_iterations` field"
+        );
+        assert_eq!(
+            autonomous.heartbeat_interval_secs, 600,
+            "the whole explicit [autonomous] block is carried through, not just its cap"
+        );
+
+        let policy = manifest
+            .exec_policy
+            .as_ref()
+            .expect("an explicit [exec_policy] must survive the flat-format parse");
+        assert_eq!(
+            policy.mode,
+            librefang_types::config::ExecSecurityMode::Deny,
+            "a hand's own exec mode is its opt-in and must reach the manifest"
+        );
+        assert_eq!(policy.timeout_secs, 45);
+    }
+
+    /// Companion: with no explicit blocks, the flat `max_iterations` still synthesizes the `AutonomousConfig` that carries the agent-loop cap, the schedule stays `Reactive`, and `exec_policy` stays unset so activation can inherit the operator's global policy (#6594 / #6595).
+    #[test]
+    fn flat_agent_max_iterations_only_synthesizes_cap_and_stays_reactive() {
+        let toml_content = r#"
+id = "flat-cap-only"
+version = "0.1.0"
+name = "Flat Cap Only Hand"
+description = "Regression fixture for issue #6595"
+category = "development"
+
+tools = ["shell_exec"]
+
+[agents.worker]
+name = "flat-cap-worker"
+description = "Only declares a loop-depth cap"
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+max_iterations = 80
+"#;
+
+        let def = registry::parse_hand_toml(toml_content, "", HashMap::new())
+            .expect("flat-format hand should parse");
+        let manifest = &def
+            .agents
+            .get("worker")
+            .expect("worker role must be present")
+            .manifest;
+
+        assert_eq!(
+            manifest.autonomous.as_ref().map(|a| a.max_iterations),
+            Some(80),
+            "`max_iterations` must still be carried through as the agent-loop cap"
+        );
+        match manifest.schedule {
+            ScheduleMode::Reactive => {}
+            ref other => panic!(
+                "`max_iterations` alone must not imply a non-reactive schedule, got {other:?}"
+            ),
+        }
+        assert!(
+            manifest.exec_policy.is_none(),
+            "a flat agent section declaring no [exec_policy] must leave it unset \
+             so hand activation inherits the operator's global policy"
+        );
     }
 
     #[test]
@@ -1751,6 +1935,76 @@ metrics = []
         assert_eq!(meta.token_consumption, TokenConsumption::Medium);
         assert!(meta.default_active);
         assert_eq!(meta.activation_warning, "This hand uses paid API calls");
+    }
+
+    /// `frequency` is the hand-level wake-up declaration hand activation reads (#6595), and `reactive` is the `ScheduleMode` spelling of `on-demand` — the natural value to reach for when switching a hand's ticking off.
+    /// It used to be a TOML parse error, which is a dead end for exactly the operator trying to stop unwanted ticks.
+    #[test]
+    fn hand_frequency_accepts_reactive_as_an_alias_for_on_demand() {
+        let toml_str = r#"
+id = "reactive-alias-test"
+name = "Reactive Alias Test"
+description = "Test"
+category = "productivity"
+tools = []
+
+[metadata]
+frequency = "reactive"
+
+[agent]
+name = "test-agent"
+description = "Test"
+system_prompt = "Test."
+"#;
+        let def: HandDefinition = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            def.metadata
+                .as_ref()
+                .expect("metadata should be present")
+                .frequency,
+            HandFrequency::OnDemand,
+            "`reactive` must resolve to the same no-wake-up-cycle variant as \
+             `on-demand` rather than failing the parse"
+        );
+    }
+
+    /// The cadence each frequency declares, which hand activation turns into a `ScheduleMode` (#6595).
+    /// `continuous` defers to the role's own heartbeat; the named cadences ignore it, because an author who wrote `hourly` asked for an hour and not for the 30s `AutonomousConfig` heartbeat default.
+    #[test]
+    fn hand_frequency_tick_interval_matches_the_declared_cadence() {
+        assert_eq!(HandFrequency::Continuous.tick_interval_secs(30), Some(30));
+        assert_eq!(HandFrequency::Continuous.tick_interval_secs(900), Some(900));
+        assert_eq!(HandFrequency::Hourly.tick_interval_secs(30), Some(3_600));
+        assert_eq!(HandFrequency::Daily.tick_interval_secs(30), Some(86_400));
+        assert_eq!(HandFrequency::Periodic.tick_interval_secs(30), Some(300));
+        assert_eq!(
+            HandFrequency::OnDemand.tick_interval_secs(30),
+            None,
+            "an on-demand hand declares no wake-up cycle at all, so there is no \
+             cadence to derive"
+        );
+        assert_eq!(
+            HandFrequency::default().tick_interval_secs(30),
+            None,
+            "a hand with no `[metadata]` block declares no wake-up cycle either"
+        );
+
+        // `declares_wake_up_cycle` must agree with `tick_interval_secs` on
+        // every variant — it exists so activation can ask the yes/no question
+        // without inventing a second list of scheduled variants.
+        for frequency in [
+            HandFrequency::Continuous,
+            HandFrequency::Hourly,
+            HandFrequency::Daily,
+            HandFrequency::Periodic,
+            HandFrequency::OnDemand,
+        ] {
+            assert_eq!(
+                frequency.declares_wake_up_cycle(),
+                frequency.tick_interval_secs(30).is_some(),
+                "{frequency:?} disagrees with its own cadence"
+            );
+        }
     }
 
     #[test]
