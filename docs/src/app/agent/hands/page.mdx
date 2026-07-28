@@ -220,6 +220,53 @@ temperature = 0.7
 system_prompt = "You are a helpful agent."
 ```
 
+### Scheduling
+
+`[metadata] frequency` declares whether the hand's agents wake up on their own, and how often.
+
+```toml
+[metadata]
+# continuous | hourly | daily | periodic | on-demand
+# "on-demand" is the default; "reactive" is accepted as an alias for it.
+frequency = "continuous"
+```
+
+A role wakes up only when the hand declares a cadence **and** that role declares `[autonomous]` guardrails (in the flat format, `max_iterations` synthesizes them).
+The second half is what keeps a multi-agent hand's delegated sub-agents asleep: give guardrails to the roles that run loops, and leave them off the ones the coordinator dispatches to.
+`max_iterations` on its own is the agent-loop iteration cap and never implies a schedule.
+
+Cadences: `continuous` ticks at the role's `heartbeat_interval_secs` (30s by default), `hourly` at 3600s, `daily` at 86400s, and `periodic` at 300s.
+`on-demand` never ticks.
+
+A role can pin its own `schedule`, which overrides the cadence derived from `frequency` and is the only way to get a cron (`periodic`) or condition-driven (`proactive`) schedule.
+`ScheduleMode` is externally tagged, so the struct variants need a sub-table — a bare `schedule = "continuous"` string does not parse.
+
+```toml
+[agents.monitor.autonomous]
+max_iterations = 40
+heartbeat_interval_secs = 900
+
+[agents.monitor.schedule.continuous]
+check_interval_secs = 1800
+```
+
+### Shell Exec Policy
+
+A hand whose `tools` list contains `shell_exec` (or the `*` wildcard) inherits the daemon's global `[exec_policy]`, mode included.
+Activation never grants a stronger mode than the operator configured.
+The default global mode is `allowlist` with an empty `allowed_commands` and a read-only `safe_bins` set, so a hand that needs to run real commands needs either an operator-side `allowed_commands` entry or its own declaration:
+
+```toml
+[agents.main.exec_policy]
+mode = "allowlist"
+allowed_commands = ["git", "cargo"]
+timeout_secs = 600
+```
+
+A policy the hand declares is honoured verbatim, which keeps an elevated exec posture visible in the hand's own manifest instead of being an invisible activation-time grant.
+
+Both declarations are resolved at activation time, so an edit takes effect the next time the hand is activated — or at the next daemon start, which re-activates every persisted hand.
+
 ---
 
 ## REST API Endpoints
