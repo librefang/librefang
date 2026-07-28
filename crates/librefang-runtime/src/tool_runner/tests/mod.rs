@@ -1660,10 +1660,8 @@ struct ApprovalKernel {
     /// for every call. `None` keeps the default-impl behaviour
     /// (`UserToolGate::Allow`) so pre-RBAC tests are unaffected.
     user_gate_override: Option<librefang_types::user_policy::UserToolGate>,
-    /// #6594 — overrides what `requires_approval` returns for every tool,
-    /// modelling an operator whose global `approval.require_approval` list does
-    /// not name the tool being called. `None` keeps the default mock behaviour
-    /// (`tool_name == "shell_exec"`), so pre-existing tests are unaffected.
+    /// #6594 — overrides what `requires_approval` returns for every tool, modelling an operator whose global `approval.require_approval` list does not name the tool being called.
+    /// `None` keeps the default mock behaviour (`tool_name == "shell_exec"`), so pre-existing tests are unaffected.
     requires_approval_override: Option<bool>,
 }
 

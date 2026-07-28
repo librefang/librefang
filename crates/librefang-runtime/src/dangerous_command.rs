@@ -87,27 +87,17 @@ pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
     ),
     dp!("SQL TRUNCATE", r"\btruncate\s+(table\s+)?\w"),
     // ── Daemon database mutation ─────────────────────────────────────────
-    // #6594: the daemon's own SQLite file backs every agent, session, and
-    // approval record on the host, so a write against it is host-wide damage
-    // rather than one agent's business. Only mutation is matched: statement
-    // forms (`insert into`, `update <t> set`, …) rather than bare verbs, so a
-    // read-only diagnostic that merely mentions `'delete'` as a value stays
-    // allowed, and `select` / `.schema` / `.dump` are untouched. Blocking those
-    // would have blocked the investigation that produced #6606.
-    // Scoped to `librefang.db` on purpose — an agent's own project SQLite file
-    // is not this denylist's concern.
-    // The filename must precede the statement, which is the canonical
-    // `sqlite3 <db> <sql>` form; a flag-first invocation that inverts the order
-    // (`sqlite3 -cmd "insert into …" librefang.db`) is not matched. Widening to
-    // an order-free alternation doubles the pattern for a form nothing emits,
-    // so the narrow shape is preferred over the exhaustive one here.
+    // #6594: the daemon's own SQLite file backs every agent, session, and approval record on the host, so a write against it is host-wide damage rather than one agent's business.
+    // Only mutation is matched: statement forms (`insert into`, `update <t> set`, …) rather than bare verbs, so a read-only diagnostic that merely mentions `'delete'` as a value stays allowed, and `select` / `.schema` / `.dump` are untouched.
+    // Blocking those would have blocked the investigation that produced #6606.
+    // Scoped to `librefang.db` on purpose — an agent's own project SQLite file is not this denylist's concern.
+    // The filename must precede the statement, which is the canonical `sqlite3 <db> <sql>` form; a flag-first invocation that inverts the order (`sqlite3 -cmd "insert into …" librefang.db`) is not matched.
+    // Widening to an order-free alternation doubles the pattern for a form nothing emits, so the narrow shape is preferred over the exhaustive one here.
     dp!(
         "mutating SQL against the daemon database",
         r"\bsqlite3\b.*\blibrefang\.db\b.*\b(insert\s+into|replace\s+into|update\s+[^\s]+\s+set|delete\s+from|drop\s+(table|index|view|trigger)|alter\s+table)\b"
     ),
-    // The path token ends at whitespace, a shell operator, or end-of-string —
-    // deliberately not `\b`, which would also match the `.` in a distinct
-    // backup file like `librefang.db.bak` and block an ordinary `.dump`.
+    // The path token ends at whitespace, a shell operator, or end-of-string — deliberately not `\b`, which would also match the `.` in a distinct backup file like `librefang.db.bak` and block an ordinary `.dump`.
     dp!(
         "redirect output over the daemon database",
         r">\s*[^\s>]*librefang\.db([\s;&|)]|$)"
@@ -129,19 +119,12 @@ pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
         "stop/restart system service",
         r"\bsystemctl\s+(-[^\s]+\s+)*(stop|restart|disable|mask)\b"
     ),
-    // #6594: bouncing the daemon takes down every other agent and channel
-    // adapter sharing it, so the blast radius exceeds the calling agent by far.
-    // Matches the binary by bare name or by path (`target/release/librefang`,
-    // `/usr/local/bin/librefang`) and the Windows `.exe` suffix; `gateway` is
-    // the alias subcommand for the same three verbs. `status` and every other
-    // read-only subcommand are deliberately not matched.
+    // #6594: bouncing the daemon takes down every other agent and channel adapter sharing it, so the blast radius exceeds the calling agent by far.
+    // Matches the binary by bare name or by path (`target/release/librefang`, `/usr/local/bin/librefang`) and the Windows `.exe` suffix; `gateway` is the alias subcommand for the same three verbs.
+    // `status` and every other read-only subcommand are deliberately not matched.
     //
-    // The pre-verb group absorbs a flag *and its separate value token*, because
-    // `--config <path>` is the CLI's only `global = true` option and its value
-    // is a distinct whitespace-delimited token — a group that only consumed
-    // `-flag ` would miss `librefang --config x.toml stop`. Each iteration
-    // still requires a leading `-`, which is what keeps the group from eating a
-    // subcommand name and matching `librefang <subcommand> … start`.
+    // The pre-verb group absorbs a flag *and its separate value token*, because `--config <path>` is the CLI's only `global = true` option and its value is a distinct whitespace-delimited token — a group that only consumed `-flag ` would miss `librefang --config x.toml stop`.
+    // Each iteration still requires a leading `-`, which is what keeps the group from eating a subcommand name and matching `librefang <subcommand> … start`.
     dp!(
         "stop/restart the LibreFang daemon",
         r"\blibrefang(\.exe)?\s+(-[^\s]+(\s+[^\s-][^\s]*)?\s+)*(gateway\s+)?(start|stop|restart)\b"
@@ -488,8 +471,7 @@ mod tests {
         assert!(dangerous("librefang stop"));
         assert!(dangerous("librefang start"));
         assert!(dangerous("librefang restart"));
-        // `--config <path>` is the CLI's only global option, and its value is a
-        // separate token the pre-verb group has to absorb.
+        // `--config <path>` is the CLI's only global option, and its value is a separate token the pre-verb group has to absorb.
         assert!(dangerous(
             "librefang --config ~/.librefang/config.toml stop"
         ));
@@ -507,8 +489,7 @@ mod tests {
         assert!(dangerous("librefang gateway restart --tail"));
     }
 
-    /// The lifecycle entry must not swallow read-only subcommands — an agent
-    /// still has to be able to ask whether the daemon is up.
+    /// The lifecycle entry must not swallow read-only subcommands — an agent still has to be able to ask whether the daemon is up.
     #[test]
     fn librefang_read_only_subcommands_stay_safe() {
         assert!(safe("librefang status"));
@@ -519,10 +500,8 @@ mod tests {
         assert!(safe("librefang agents list"));
     }
 
-    /// Structural guard on the pre-verb group: every iteration must require a
-    /// leading `-`. A widening that also absorbed a bare token would let any
-    /// subcommand whose own arguments happen to end in `start` / `stop` /
-    /// `restart` match, which is a false positive on an unrelated command.
+    /// Structural guard on the pre-verb group: every iteration must require a leading `-`.
+    /// A widening that also absorbed a bare token would let any subcommand whose own arguments happen to end in `start` / `stop` / `restart` match, which is a false positive on an unrelated command.
     #[test]
     fn librefang_subcommand_names_are_not_absorbed_as_flags() {
         assert!(safe("librefang spawn coder start"));
@@ -530,8 +509,7 @@ mod tests {
         assert!(safe("librefang skill show --json restart"));
     }
 
-    /// #6594: writes against the daemon's own SQLite file damage every agent,
-    /// session, and approval record on the host.
+    /// #6594: writes against the daemon's own SQLite file damage every agent, session, and approval record on the host.
     #[test]
     fn mutating_sql_against_daemon_database() {
         assert!(dangerous(
@@ -544,17 +522,15 @@ mod tests {
             r#"sqlite3 librefang.db "DELETE FROM approval_audit""#
         ));
         assert!(dangerous(r#"sqlite3 librefang.db "DROP TABLE sessions""#));
-        // `drop index` / `drop view` are not covered by the generic SQL DROP
-        // entry (`table|database` only), so this entry is what catches them.
+        // `drop index` / `drop view` are not covered by the generic SQL DROP entry (`table|database` only), so this entry is what catches them.
         assert!(dangerous(r#"sqlite3 librefang.db "DROP INDEX idx_usage""#));
         assert!(dangerous(
             r#"sqlite3 librefang.db "ALTER TABLE agents ADD COLUMN x TEXT""#
         ));
     }
 
-    /// Read-only inspection of the daemon database must stay allowed. The first
-    /// query is #6606's own diagnostic, verbatim — blocking it would have
-    /// blocked the investigation that produced the report.
+    /// Read-only inspection of the daemon database must stay allowed.
+    /// The first query is #6606's own diagnostic, verbatim — blocking it would have blocked the investigation that produced the report.
     #[test]
     fn read_only_daemon_database_queries_stay_safe() {
         assert!(safe(
@@ -563,8 +539,7 @@ mod tests {
         assert!(safe("sqlite3 librefang.db"));
         assert!(safe("sqlite3 librefang.db .schema"));
         assert!(safe("sqlite3 librefang.db .tables"));
-        // A backup of the daemon DB writes to a different file, so the
-        // redirection entry must not fire on it.
+        // A backup of the daemon DB writes to a different file, so the redirection entry must not fire on it.
         assert!(safe("sqlite3 librefang.db .dump > backup.sql"));
         assert!(safe("sqlite3 librefang.db .dump > librefang.db.bak"));
         // `delete` as a column value, not as a statement.
@@ -577,29 +552,22 @@ mod tests {
         ));
     }
 
-    /// Truncating or overwriting the file itself is as destructive as a
-    /// mutating statement, and does not go through `sqlite3` at all.
+    /// Truncating or overwriting the file itself is as destructive as a mutating statement, and does not go through `sqlite3` at all.
     #[test]
     fn redirect_clobbering_daemon_database() {
         assert!(dangerous("echo corrupt > librefang.db"));
         assert!(dangerous("cat other.db > ~/.librefang/librefang.db"));
         assert!(dangerous("sqlite3 backup.db .dump >> librefang.db"));
         assert!(dangerous("printf '' >/var/lib/librefang/librefang.db"));
-        // The path token must be allowed to end at a shell operator, not only
-        // at whitespace or end-of-string: a trailing `;`, `&&`, `|` or `)`
-        // would otherwise walk straight past the entry.
+        // The path token must be allowed to end at a shell operator, not only at whitespace or end-of-string: a trailing `;`, `&&`, `|` or `)` would otherwise walk straight past the entry.
         assert!(dangerous("echo corrupt > librefang.db; echo done"));
         assert!(dangerous("echo corrupt > librefang.db && sync"));
         assert!(dangerous("(echo corrupt > librefang.db)"));
         assert!(dangerous("echo corrupt > librefang.db|tee log"));
     }
 
-    /// The daemon-database entry is scoped to `librefang.db` on purpose: an
-    /// agent's own project SQLite file is its business, and a blanket
-    /// `sqlite3 … insert` block would break ordinary work for no security gain.
-    /// `delete from` and `drop table` against any database remain caught by the
-    /// pre-existing generic SQL entries, so the narrowing only affects the
-    /// verbs those entries never covered.
+    /// The daemon-database entry is scoped to `librefang.db` on purpose: an agent's own project SQLite file is its business, and a blanket `sqlite3 … insert` block would break ordinary work for no security gain.
+    /// `delete from` and `drop table` against any database remain caught by the pre-existing generic SQL entries, so the narrowing only affects the verbs those entries never covered.
     #[test]
     fn mutating_sql_against_other_databases_is_not_this_entry() {
         assert!(safe(r#"sqlite3 project.db "INSERT INTO notes VALUES (1)""#));

@@ -510,11 +510,8 @@ timeout_secs = 60
         assert_eq!(policy.timeout_secs, 60);
     }
 
-    /// #6594: an `exec_policy` written before `full_mode_skips_approval` existed
-    /// must keep the historical "Full waives the global require_approval list"
-    /// behaviour after an upgrade. This pins the deserialization path that real
-    /// installs take, which is distinct from the `..Default::default()` struct
-    /// literals the dispatch tests use.
+    /// #6594: an `exec_policy` written before `full_mode_skips_approval` existed must keep the historical "Full waives the global require_approval list" behaviour after an upgrade.
+    /// This pins the deserialization path that real installs take, which is distinct from the `..Default::default()` struct literals the dispatch tests use.
     #[test]
     fn exec_policy_full_mode_skips_approval_defaults_true_on_upgrade() {
         let table: TestExecPolicy = toml::from_str(
