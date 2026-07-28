@@ -362,14 +362,14 @@ mod platform_tray {
 
         fn activate(&mut self, _x: i32, _y: i32) {
             if let Some(w) = self.app_handle.get_webview_window("main") {
-                if let Ok(visible) = w.is_visible() {
-                    if visible {
-                        let _ = w.hide();
-                    } else {
-                        let _ = w.show();
-                        let _ = w.unminimize();
-                        let _ = w.set_focus();
-                    }
+                let visible = w.is_visible().unwrap_or(false);
+                let minimized = w.is_minimized().unwrap_or(false);
+                if visible && !minimized {
+                    let _ = w.hide();
+                } else {
+                    let _ = w.show();
+                    let _ = w.unminimize();
+                    let _ = w.set_focus();
                 }
             }
         }
@@ -506,13 +506,19 @@ mod platform_tray {
             app_handle: app.handle().clone(),
         };
         tauri::async_runtime::spawn(async move {
+            let start_time = std::time::Instant::now();
+            let mut connected_once = false;
+            let mut logged_error = false;
+            let mut consecutive_failures = 0;
+
             loop {
                 match tray.clone().assume_sni_available(true).spawn().await {
                     Ok(handle) => {
                         info!("Linux system tray successfully spawned.");
+                        connected_once = true;
+                        consecutive_failures = 0;
                         // Periodically call handle.update() to diff properties and emit D-Bus update signals (e.g. NewTitle / NewTooltip).
-                        // Without this heartbeat loop, properties like Uptime and Agents count (which are rendered inside menu())
-                        // will never update dynamically, remaining stale until a manual user activation query.
+                        // Without this heartbeat loop, properties like Uptime and Agents count (which are rendered inside menu()) will never update dynamically, remaining stale until a manual user activation query.
                         loop {
                             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                             if handle.update(|_| {}).await.is_none() {
@@ -522,7 +528,28 @@ mod platform_tray {
                         }
                     }
                     Err(e) => {
-                        warn!("Failed to spawn Linux system tray: {e}. Retrying in 10 seconds...");
+                        consecutive_failures += 1;
+                        if !connected_once {
+                            let elapsed = start_time.elapsed();
+                            if elapsed > std::time::Duration::from_secs(60) {
+                                if !logged_error {
+                                    warn!("D-Bus session bus is not available after 60 seconds; system tray will be disabled.");
+                                    logged_error = true;
+                                }
+                                // Back off aggressively (retry once every 5 minutes) without spamming logs
+                                let sleep_secs = 300;
+                                tokio::time::sleep(std::time::Duration::from_secs(sleep_secs))
+                                    .await;
+                                continue;
+                            }
+                        }
+
+                        // Default error logging (only for the first few failures at startup, or if it has connected before)
+                        if connected_once || consecutive_failures <= 3 {
+                            warn!(
+                                "Failed to spawn Linux system tray: {e}. Retrying in 10 seconds..."
+                            );
+                        }
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
