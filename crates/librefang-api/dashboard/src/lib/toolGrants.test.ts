@@ -114,8 +114,7 @@ describe("isToolAllowed", () => {
     expect(isToolAllowed("file_read", [])).toBe(true);
   });
 
-  // The kernel's Step 4 filter runs after MCP tools join the candidate set, so an
-  // allowlist naming only native tools strips a granted server entirely (#6495).
+  // The kernel's Step 4 filter runs after MCP tools join the candidate set, so an allowlist naming only native tools strips a granted server entirely (#6495).
   it("drops mcp tools when the allowlist names only native tools", () => {
     expect(isToolAllowed("mcp__github__create_issue", ["file_read"])).toBe(false);
     expect(isToolAllowed("file_read", ["file_read"])).toBe(true);

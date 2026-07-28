@@ -1028,8 +1028,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_models_text(&self) -> String {
-        // This listing spans every provider, so both TTL-backed catalogs have to be refreshed —
-        // unlike `list_models_by_provider` below, which only needs the one being asked about.
+        // This listing spans every provider, so both TTL-backed catalogs have to be refreshed — unlike `list_models_by_provider` below, which only needs the one being asked about.
         let _ = crate::openrouter_catalog::refresh_if_stale(&self.kernel).await;
         let _ = crate::everyapi_catalog::refresh_if_stale(&self.kernel).await;
         let catalog = self.kernel.model_catalog_ref().load();
