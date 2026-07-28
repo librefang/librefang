@@ -2040,7 +2040,7 @@ export function AgentsPage() {
                             <p className="px-2.5 py-1.5 text-[10.5px] text-text-dim/70">
                               {t("agents.detail.tools_mcp_readonly", {
                                 defaultValue:
-                                  "This server is granted through mcp_servers in agent.toml. Change the grant on the MCP servers tab; individual tools are filtered by tool_blocklist.",
+                                  "This server is granted through mcp_servers in agent.toml. Change the grant on the MCP servers tab; individual tools are filtered by tool_allowlist and tool_blocklist.",
                               })}
                             </p>
                           )}
