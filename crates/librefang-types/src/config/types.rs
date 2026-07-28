@@ -835,9 +835,10 @@ pub struct BrowserConfig {
     /// Remote CDP endpoint to attach to instead of spawning a local Chromium.
     ///
     /// Accepted formats:
-    /// - `ws://host:port/devtools/browser/<id>` — page-level WebSocket (direct attach)
-    /// - `http://host:port` — HTTP discovery endpoint; librefang calls `GET /json/new`
-    ///   to create a fresh tab and connects to the returned WebSocket URL.
+    /// - `ws://host:port/…` — direct WebSocket attach.
+    ///   Both page-level and browser-level endpoints work: librefang asks `Target.getTargetInfo` which it is, and on a browser-level endpoint creates a target with `Target.createTarget`, attaches to it with `Target.attachToTarget` (flattened), and routes later commands through the returned `sessionId`.
+    ///   Required by CDP servers that expose no Chrome-style HTTP discovery routes, such as Lightpanda.
+    /// - `http://host:port` — HTTP discovery endpoint; librefang calls `/json/new` to create a fresh tab and connects to the returned WebSocket URL.
     ///
     /// When set, `headless`, `chromium_path`, and local-process discovery are
     /// ignored. Browser lifecycle (start/stop) is the operator's responsibility.
