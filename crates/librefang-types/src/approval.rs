@@ -641,6 +641,30 @@ pub struct ApprovalAuditEntry {
     pub description: String,
     pub action_summary: String,
     pub risk_level: String,
+    /// Outcome recorded for the request, as a bare wire string.
+    ///
+    /// Two writers produce it, and the set of values they can produce is a
+    /// cross-language contract with the dashboard (#6607):
+    /// - `"pending"` — written by `ApprovalManager::request_approval` when the
+    ///   request is *submitted*, so a crash mid-flight still leaves a record.
+    ///   Resolution inserts a second row rather than updating this one, so a
+    ///   `"pending"` row is not evidence that the request is still open.
+    /// - `"approved"`, `"denied"`, `"timed_out"`, `"modify_and_retry"`,
+    ///   `"skipped"` — [`ApprovalDecision::as_str`], written by
+    ///   `ApprovalManager::push_recent` on resolution.
+    ///
+    /// The type stays `String` because the column is read back from SQLite for
+    /// rows written by any past version; a strict enum would make a legacy or
+    /// hand-edited value unparseable, and `query_audit` drops rows it cannot
+    /// deserialize — silently shortening a security audit trail.
+    ///
+    /// Adding a variant to [`ApprovalDecision`] therefore extends this set
+    /// without any compile-time signal reaching the consumer. The consumer is
+    /// `crates/librefang-api/dashboard/src/pages/ApprovalsPage.tsx`
+    /// (`DECISION_PRESENTATION`) and its `KnownApprovalDecision` union in
+    /// `src/api.ts`; both must be updated in the same change, and
+    /// `audit_decision_wire_strings_are_pinned` below fails if a rename
+    /// alters an existing string.
     pub decision: String,
     pub decided_by: Option<String>,
     pub decided_at: String,
@@ -1808,6 +1832,36 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         let back: ApprovalAuditEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(back.decision, "approved");
+    }
+
+    /// Pin every string that can reach `ApprovalAuditEntry::decision` on
+    /// resolution.
+    ///
+    /// These values are a cross-language contract with the dashboard's
+    /// Approvals History table — `DECISION_PRESENTATION` in
+    /// `crates/librefang-api/dashboard/src/pages/ApprovalsPage.tsx` labels each
+    /// one distinctly and degrades an unrecognised value to a visible "unknown"
+    /// row rather than to another decision's label (#6607).
+    /// A rename on this side relabels an audit row in the UI without any
+    /// compile error, so it has to break a test instead.
+    ///
+    /// The sixth value the column can hold, `"pending"`, is written by
+    /// `ApprovalManager::request_approval` at submission time and is asserted
+    /// by `librefang-kernel`'s
+    /// `approval::tests::submission_writes_pending_audit_row_and_persists_pending_table`.
+    #[test]
+    fn audit_decision_wire_strings_are_pinned() {
+        assert_eq!(ApprovalDecision::Approved.as_str(), "approved");
+        assert_eq!(ApprovalDecision::Denied.as_str(), "denied");
+        assert_eq!(ApprovalDecision::TimedOut.as_str(), "timed_out");
+        assert_eq!(ApprovalDecision::Skipped.as_str(), "skipped");
+        assert_eq!(
+            ApprovalDecision::ModifyAndRetry {
+                feedback: String::new(),
+            }
+            .as_str(),
+            "modify_and_retry"
+        );
     }
 
     // -----------------------------------------------------------------------

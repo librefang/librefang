@@ -1,7 +1,11 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "@tanstack/react-router";
-import { type ApprovalAuditEntry, type ApprovalItem } from "../api";
+import {
+  type ApprovalAuditEntry,
+  type ApprovalItem,
+  type KnownApprovalDecision,
+} from "../api";
 import {
   useApprovals,
   useApprovalAudit,
@@ -32,7 +36,10 @@ import {
   Edit3,
   Eye,
   EyeOff,
+  HelpCircle,
   History as HistoryIcon,
+  Loader2,
+  SkipForward,
   Zap,
 } from "lucide-react";
 
@@ -309,6 +316,110 @@ function TotpModal({
 }
 
 /* ------------------------------------------------------------------ */
+/*  Audit decision presentation                                       */
+/* ------------------------------------------------------------------ */
+
+/** Every lucide icon shares one type; anchor to a concrete one. */
+type LucideIconComponent = typeof CheckCircle;
+
+type DecisionPresentation = {
+  /** i18n key for the visible label. */
+  labelKey: string;
+  Icon: LucideIconComponent;
+  /** Theme variable — resolves per light/dark mode, never a literal hex. */
+  color: string;
+};
+
+/**
+ * How each known `approval_audit.decision` value renders in the History table.
+ *
+ * Typed as a total `Record` over `KnownApprovalDecision` on purpose (#6607):
+ * adding a member to that union without giving it a row here is a compile
+ * error, so a newly-emitted backend variant cannot silently inherit another
+ * decision's label. Every entry carries its own label text and its own icon —
+ * colour is never the sole carrier of the distinction, because an approval
+ * audit trail has to be readable without colour perception.
+ */
+const DECISION_PRESENTATION: Record<KnownApprovalDecision, DecisionPresentation> = {
+  approved: {
+    labelKey: "approvals.history.decisions.approved",
+    Icon: CheckCircle,
+    color: "var(--color-success)",
+  },
+  // Request verb, kept as an alias of `approved` — see `KnownApprovalDecision`.
+  approve: {
+    labelKey: "approvals.history.decisions.approved",
+    Icon: CheckCircle,
+    color: "var(--color-success)",
+  },
+  denied: {
+    labelKey: "approvals.history.decisions.denied",
+    Icon: XCircle,
+    color: "var(--color-error)",
+  },
+  // `routes/approvals.rs` spelling of `Denied` on sibling shapes.
+  rejected: {
+    labelKey: "approvals.history.decisions.denied",
+    Icon: XCircle,
+    color: "var(--color-error)",
+  },
+  // Request verb, kept as an alias of `denied`.
+  reject: {
+    labelKey: "approvals.history.decisions.denied",
+    Icon: XCircle,
+    color: "var(--color-error)",
+  },
+  // The one decision that genuinely represents an operator edit.
+  modify_and_retry: {
+    labelKey: "approvals.history.decisions.edited",
+    Icon: Edit3,
+    color: "var(--color-warning)",
+  },
+  // Nobody answered before the timeout expired — neutral, not an operator action.
+  timed_out: {
+    labelKey: "approvals.history.decisions.timedOut",
+    Icon: Clock,
+    color: "var(--color-text-dim)",
+  },
+  // Submission row: still awaiting a decision, not a completed one.
+  pending: {
+    labelKey: "approvals.history.decisions.pending",
+    Icon: Loader2,
+    color: "var(--color-brand)",
+  },
+  // Timeout fallback ran the agent on without the tool.
+  skipped: {
+    labelKey: "approvals.history.decisions.skipped",
+    Icon: SkipForward,
+    color: "var(--color-accent)",
+  },
+};
+
+/**
+ * Fallback for a value this build does not know.
+ *
+ * Referenced by identity in `HistoryRow` to decide between the translated
+ * label and the raw server value, so it must stay a single shared object.
+ */
+const UNKNOWN_DECISION: DecisionPresentation = {
+  labelKey: "approvals.history.decisions.unknown",
+  Icon: HelpCircle,
+  color: "var(--color-text-dim)",
+};
+
+/**
+ * Resolve a raw `decision` string to its presentation.
+ *
+ * `hasOwnProperty` rather than `in` so a prototype key ("toString",
+ * "constructor") arriving from the server cannot resolve to a presentation.
+ */
+function decisionPresentation(decision: string): DecisionPresentation {
+  return Object.prototype.hasOwnProperty.call(DECISION_PRESENTATION, decision)
+    ? DECISION_PRESENTATION[decision as KnownApprovalDecision]
+    : UNKNOWN_DECISION;
+}
+
+/* ------------------------------------------------------------------ */
 /*  History row (memoised)                                            */
 /* ------------------------------------------------------------------ */
 
@@ -319,23 +430,22 @@ const HistoryRow = React.memo(function HistoryRow({
 }: {
   h: ApprovalAuditEntry;
   isLast: boolean;
-  t: (key: string) => string;
+  t: (key: string, opts?: Record<string, unknown>) => string;
 }) {
   const risk = normalizeRisk(h.risk_level);
   const decision = h.decision;
-  const isApprove = decision === "approved" || decision === "approve";
-  const isDeny = decision === "rejected" || decision === "reject";
-  const decisionColor = isApprove
-    ? "var(--color-success)"
-    : isDeny
-      ? "var(--color-error)"
-      : "var(--color-warning)";
-  const DecisionIcon = isApprove ? CheckCircle : isDeny ? XCircle : Edit3;
-  const decisionLabel = isApprove
-    ? t("approvals.history.decisions.approved")
-    : isDeny
-      ? t("approvals.history.decisions.denied")
-      : t("approvals.history.decisions.edited");
+  const presentation = decisionPresentation(decision);
+  const isKnown = presentation !== UNKNOWN_DECISION;
+  const DecisionIcon = presentation.Icon;
+  // An unrecognised decision shows the raw server value rather than borrowing
+  // another decision's label, so a future backend variant degrades visibly
+  // instead of becoming a false record (#6607).
+  const decisionLabel = isKnown
+    ? t(presentation.labelKey)
+    : decision || t(UNKNOWN_DECISION.labelKey);
+  const decisionAria = isKnown
+    ? t("approvals.history.decisions.aria", { label: t(presentation.labelKey) })
+    : t("approvals.history.decisions.unknownAria", { value: decisionLabel });
   const dt = h.decided_at ? new Date(h.decided_at) : null;
   const auto = (h.decided_by ?? "").startsWith("auto");
 
@@ -348,11 +458,13 @@ const HistoryRow = React.memo(function HistoryRow({
     >
       <span
         role="cell"
-        className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider"
-        style={{ color: decisionColor }}
+        aria-label={decisionAria}
+        title={decisionLabel}
+        className="inline-flex min-w-0 items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider"
+        style={{ color: presentation.color }}
       >
-        <DecisionIcon className="w-3 h-3" />
-        {decisionLabel}
+        <DecisionIcon className="w-3 h-3 shrink-0" aria-hidden="true" />
+        <span className="truncate">{decisionLabel}</span>
       </span>
 
       <span role="cell" className="hidden lg:inline font-mono text-[12px] truncate pr-2">

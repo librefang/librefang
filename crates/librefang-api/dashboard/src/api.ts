@@ -3274,6 +3274,49 @@ export async function modifyAndRetryApproval(
   return post(`/api/approvals/${encodeURIComponent(id)}/modify`, { feedback });
 }
 
+/**
+ * Decision values the daemon is known to put on an `approval_audit` row.
+ *
+ * Cross-language contract (#6607) — the authoritative writers are:
+ * - `"pending"` — written at submission time by `ApprovalManager::request_approval`
+ *   (`crates/librefang-kernel/src/approval.rs`) so a crash mid-flight still leaves
+ *   a record of the request. It is NOT a resolved decision.
+ * - `"approved" | "denied" | "timed_out" | "modify_and_retry" | "skipped"` —
+ *   `ApprovalDecision::as_str()` (`crates/librefang-types/src/approval.rs`),
+ *   written on resolution by `ApprovalManager::push_recent`.
+ *
+ * `"rejected"` is the spelling `crates/librefang-api/src/routes/approvals.rs`
+ * uses for `Denied` on sibling shapes (the `status` field of `GET /api/approvals`,
+ * and the `decision` field of the reject-all response), and `"approve"` /
+ * `"reject"` are the request verbs its batch endpoint accepts. No site persists
+ * those three onto an audit row today; they are carried here because the
+ * History table has always accepted them and dropping the aliases would be a
+ * silent behaviour regression if any surface ever does.
+ */
+export type KnownApprovalDecision =
+  | "pending"
+  | "approved"
+  | "approve"
+  | "denied"
+  | "rejected"
+  | "reject"
+  | "timed_out"
+  | "modify_and_retry"
+  | "skipped";
+
+/**
+ * `KnownApprovalDecision` plus an escape hatch for anything else the daemon
+ * sends.
+ *
+ * The union is what the UI is checked against; the `string` arm is the honest
+ * admission that a newer daemon can send a variant this build has never heard
+ * of. Consumers must keep a runtime fallback for that case — see
+ * `decisionPresentation` in `pages/ApprovalsPage.tsx`.
+ */
+export type ApprovalDecisionValue =
+  | KnownApprovalDecision
+  | (string & Record<never, never>);
+
 export interface ApprovalAuditEntry {
   id: string;
   request_id: string;
@@ -3282,11 +3325,13 @@ export interface ApprovalAuditEntry {
   description: string;
   action_summary: string;
   risk_level: string;
-  decision: string;
+  decision: ApprovalDecisionValue;
   decided_by?: string;
   decided_at: string;
   requested_at: string;
   feedback?: string;
+  /** Whether a TOTP second factor was used for this decision. */
+  second_factor_used?: boolean;
 }
 
 export async function queryApprovalAudit(params: {

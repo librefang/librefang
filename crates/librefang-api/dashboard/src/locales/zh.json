@@ -2796,7 +2796,13 @@
       "decisions": {
         "approved": "已批准",
         "denied": "已拒绝",
-        "edited": "已修改"
+        "edited": "已修改",
+        "pending": "待处理",
+        "timedOut": "已超时",
+        "skipped": "已跳过",
+        "unknown": "未知状态",
+        "aria": "决定：{{label}}",
+        "unknownAria": "无法识别的决定：{{value}}"
       },
       "cols": {
         "decision": "决定",

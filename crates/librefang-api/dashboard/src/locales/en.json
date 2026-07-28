@@ -2830,7 +2830,13 @@
       "decisions": {
         "approved": "Approved",
         "denied": "Denied",
-        "edited": "Edited"
+        "edited": "Edited",
+        "pending": "Pending",
+        "timedOut": "Timed out",
+        "skipped": "Skipped",
+        "unknown": "Unknown status",
+        "aria": "Decision: {{label}}",
+        "unknownAria": "Unrecognised decision: {{value}}"
       },
       "cols": {
         "decision": "Decision",
