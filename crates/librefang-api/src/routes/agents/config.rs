@@ -129,42 +129,27 @@ pub async fn get_agent_tools(
 /// The `tool_allowlist` entries that provably cannot admit any tool (#6609).
 ///
 /// `tool_allowlist` is applied by `LibreFangKernel::available_tools`
-/// (`librefang-kernel/src/kernel/tools_and_skills.rs`, Step 4) as
-/// `all_tools.retain(...)`, so it can only remove. A builtin or skill tool that
-/// `capabilities.tools` did not admit in Step 1 is already gone by then, and no
-/// allowlist entry can bring it back. That narrowing-only behaviour is
-/// deliberate; what this function fixes is that the write API used to accept,
-/// persist and echo an entry that could never do anything, with no signal at
-/// all to the caller.
+/// (`librefang-kernel/src/kernel/tools_and_skills.rs`, Step 4) as `all_tools.retain(...)`, so it can only remove.
+/// A builtin or skill tool that `capabilities.tools` did not admit in Step 1 is already gone by then, and no allowlist entry can bring it back.
+/// That narrowing-only behaviour is deliberate; what this function fixes is that the write API used to accept, persist and echo an entry that could never do anything, with no signal at all to the caller.
 ///
-/// Only entries that are *provably* inert are reported. Anything that might
-/// match a tool now or later is left unreported, because a false warning on a
-/// working configuration is worse than the silence it replaces. An entry is
-/// reported only when all of the following hold:
+/// Only entries that are *provably* inert are reported.
+/// Anything that might match a tool now or later is left unreported, because a false warning on a working configuration is worse than the silence it replaces.
+/// An entry is reported only when all of the following hold:
 ///
-/// - `declared_tools` is restricted: non-empty and free of a `*` entry. This
-///   mirrors the kernel's `tools_unrestricted` check; when it is false Step 1's
-///   filter is a no-op and every builtin reaches the candidate set, so any entry
-///   may legitimately narrow something.
-/// - The entry contains no `*`. A glob may match a tool introduced by a later
-///   skill install or MCP connect, so it is never *provably* inert; restricting
-///   the check to literals also removes any need to decide whether two glob
-///   patterns can overlap.
-/// - The entry is not MCP-namespaced. MCP tools join the candidate set in Step 3
-///   *without* being filtered by `capabilities.tools`, and their names are
-///   generated at runtime from whichever servers happen to be connected.
-/// - The entry is not a self-evolution tool. Step 1's post-filter injects those
-///   regardless of what `capabilities.tools` declares.
-/// - No declared pattern glob-matches the entry. This is a glob evaluation, not
-///   a string comparison: `capabilities.tools = ["file_*"]` does admit an
-///   allowlist entry of `file_read`, and a string compare would wrongly flag it.
+/// - `declared_tools` is restricted: non-empty and free of a `*` entry.
+///   This mirrors the kernel's `tools_unrestricted` check; when it is false Step 1's filter is a no-op and every builtin reaches the candidate set, so any entry may legitimately narrow something.
+/// - The entry contains no `*`.
+///   A glob may match a tool introduced by a later skill install or MCP connect, so it is never *provably* inert; restricting the check to literals also removes any need to decide whether two glob patterns can overlap.
+/// - The entry is not MCP-namespaced.
+///   MCP tools join the candidate set in Step 3 *without* being filtered by `capabilities.tools`, and their names are generated at runtime from whichever servers happen to be connected.
+/// - The entry is not a self-evolution tool.
+///   Step 1's post-filter injects those regardless of what `capabilities.tools` declares.
+/// - No declared pattern glob-matches the entry.
+///   This is a glob evaluation, not a string comparison: `capabilities.tools = ["file_*"]` does admit an allowlist entry of `file_read`, and a string compare would wrongly flag it.
 ///
-/// Together those conditions make false positives impossible: for a literal
-/// entry to survive Step 4 it must equal some candidate tool name, and every
-/// source of candidate names — builtins and skill tools admitted by
-/// `capabilities.tools`, the always-injected evolution tools, and MCP tools — is
-/// excluded above. The cost is false negatives (a genuinely inert glob entry
-/// goes unreported), which is the safe direction to err in.
+/// Together those conditions make false positives impossible: for a literal entry to survive Step 4 it must equal some candidate tool name, and every source of candidate names — builtins and skill tools admitted by `capabilities.tools`, the always-injected evolution tools, and MCP tools — is excluded above.
+/// The cost is false negatives (a genuinely inert glob entry goes unreported), which is the safe direction to err in.
 fn inert_tool_allowlist_entries(
     declared_tools: &[String],
     tool_allowlist: &[String],
@@ -265,15 +250,9 @@ pub async fn set_agent_tools(
     // Whether the inert-entry diagnostic below should run at all.
     // Captured before the fields are moved into the kernel call.
     //
-    // Submitting `tool_allowlist` obviously makes the caller responsible for
-    // what it says.
-    // Submitting `capabilities_tools` does too, because that is the grant
-    // surface: narrowing it can render a stored allowlist entry inert without
-    // the request mentioning the allowlist at all, and staying silent there
-    // would reproduce the exact #6609 experience — the operator's own request
-    // silences a tool and the response is a clean 200.
-    // A request that touches neither (blocklist only) says nothing about either
-    // side, so it stays quiet about whatever was already stored.
+    // Submitting `tool_allowlist` obviously makes the caller responsible for what it says.
+    // Submitting `capabilities_tools` does too, because that is the grant surface: narrowing it can render a stored allowlist entry inert without the request mentioning the allowlist at all, and staying silent there would reproduce the exact #6609 experience — the operator's own request silences a tool and the response is a clean 200.
+    // A request that touches neither (blocklist only) says nothing about either side, so it stays quiet about whatever was already stored.
     let evaluate_inert_entries = body.tool_allowlist.is_some() || body.capabilities_tools.is_some();
 
     match state.kernel.set_agent_tool_filters(
@@ -295,18 +274,10 @@ pub async fn set_agent_tools(
                     "tool_blocklist": entry.manifest.tool_blocklist,
                     "disabled": entry.manifest.tools_disabled,
                 });
-                // Name any allowlist entry that provably cannot admit a tool
-                // (#6609). Evaluated against the entry read back *after* the
-                // write, so both the new declared set and the stored allowlist
-                // are the post-write values: a request that sets
-                // `capabilities_tools` and `tool_allowlist` together is judged
-                // against what it just wrote rather than what it replaced, and a
-                // request that only narrows `capabilities_tools` is judged
-                // against the allowlist it left in place.
+                // Name any allowlist entry that provably cannot admit a tool (#6609).
+                // Evaluated against the entry read back *after* the write, so both the new declared set and the stored allowlist are the post-write values: a request that sets `capabilities_tools` and `tool_allowlist` together is judged against what it just wrote rather than what it replaced, and a request that only narrows `capabilities_tools` is judged against the allowlist it left in place.
                 //
-                // No `tools_disabled` guard is needed: `update_tool_config`
-                // unconditionally clears that flag on every successful write, so
-                // on this arm the agent's tools are always enabled.
+                // No `tools_disabled` guard is needed: `update_tool_config` unconditionally clears that flag on every successful write, so on this arm the agent's tools are always enabled.
                 if evaluate_inert_entries {
                     let inert = inert_tool_allowlist_entries(
                         &entry.manifest.capabilities.tools,
@@ -837,9 +808,8 @@ pub async fn patch_agent_config(
         || req.greeting_style.is_some();
 
     if has_identity_field {
-        // Read current identity, merge with provided fields. The merge itself
-        // lives in `merge_agent_identity` so this handler and
-        // `PATCH /api/agents/{id}/identity` cannot drift apart again (#6608).
+        // Read current identity, merge with provided fields.
+        // The merge itself lives in `merge_agent_identity` so this handler and `PATCH /api/agents/{id}/identity` cannot drift apart again (#6608).
         let current = state
             .kernel
             .agent_registry()
@@ -1219,9 +1189,8 @@ mod inert_allowlist_tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
-    /// The reporter's case: a literal tool name allowlisted while
-    /// `capabilities.tools` excludes it. Step 1 already dropped the tool, so the
-    /// entry can never grant it back.
+    /// The reporter's case: a literal tool name allowlisted while `capabilities.tools` excludes it.
+    /// Step 1 already dropped the tool, so the entry can never grant it back.
     #[test]
     fn literal_entry_outside_the_declared_set_is_inert() {
         assert_eq!(
@@ -1230,9 +1199,8 @@ mod inert_allowlist_tests {
         );
     }
 
-    /// The false-positive guard that a string-equality implementation fails:
-    /// `file_*` does admit `file_read`, so the entry is live and must not be
-    /// reported. This is why the declared side is evaluated with `glob_matches`.
+    /// The false-positive guard that a string-equality implementation fails: `file_*` does admit `file_read`, so the entry is live and must not be reported.
+    /// This is why the declared side is evaluated with `glob_matches`.
     #[test]
     fn entry_admitted_by_a_declared_glob_is_not_inert() {
         assert!(inert_tool_allowlist_entries(&v(&["file_*"]), &v(&["file_read"])).is_empty());
@@ -1243,9 +1211,7 @@ mod inert_allowlist_tests {
         assert!(inert_tool_allowlist_entries(&v(&["file_read"]), &v(&["file_read"])).is_empty());
     }
 
-    /// An empty `capabilities.tools` is the kernel's "unrestricted" case: Step
-    /// 1's filter is a no-op, every builtin reaches the candidate set, so no
-    /// entry is provably inert.
+    /// An empty `capabilities.tools` is the kernel's "unrestricted" case: Step 1's filter is a no-op, every builtin reaches the candidate set, so no entry is provably inert.
     #[test]
     fn empty_declared_set_is_unbounded_and_yields_no_warnings() {
         assert!(inert_tool_allowlist_entries(&[], &v(&["web_search", "nope"])).is_empty());
@@ -1259,16 +1225,13 @@ mod inert_allowlist_tests {
         );
     }
 
-    /// A glob entry may match a tool a later skill install introduces, so it is
-    /// never *provably* inert even against a restricted declared set.
+    /// A glob entry may match a tool a later skill install introduces, so it is never *provably* inert even against a restricted declared set.
     #[test]
     fn glob_entry_is_never_reported() {
         assert!(inert_tool_allowlist_entries(&v(&["file_read"]), &v(&["web_*"])).is_empty());
     }
 
-    /// MCP tools join the candidate set without being filtered by
-    /// `capabilities.tools`, and their names depend on which servers are
-    /// connected, so an MCP-namespaced entry is never reported.
+    /// MCP tools join the candidate set without being filtered by `capabilities.tools`, and their names depend on which servers are connected, so an MCP-namespaced entry is never reported.
     #[test]
     fn mcp_namespaced_entry_is_never_reported() {
         assert!(

@@ -363,23 +363,13 @@ pub(crate) fn effective_default_model(
 
 /// Merge a partial identity update onto an agent's stored identity (#6608).
 ///
-/// PATCH semantics for the six `AgentIdentity` fields: an `incoming` field of
-/// `None` means "not provided by the caller" and preserves the stored value;
-/// `Some(v)` overwrites it.
+/// PATCH semantics for the six `AgentIdentity` fields: an `incoming` field of `None` means "not provided by the caller" and preserves the stored value; `Some(v)` overwrites it.
 ///
-/// Both `PATCH /api/agents/{id}/identity` and `PATCH /api/agents/{id}/config`
-/// write these same six fields, and #6608 was the two drifting into opposite
-/// semantics: `/config` merged, `/identity` built a fresh `AgentIdentity` from
-/// the request alone, so `PATCH {"emoji": "X"}` through `/identity` nulled the
-/// other five fields and returned `200`. Routing both handlers through this one
-/// function is what keeps them from diverging again — a per-handler copy of the
-/// six-line merge is exactly what produced the bug.
+/// Both `PATCH /api/agents/{id}/identity` and `PATCH /api/agents/{id}/config` write these same six fields, and #6608 was the two drifting into opposite semantics: `/config` merged, `/identity` built a fresh `AgentIdentity` from the request alone, so `PATCH {"emoji": "X"}` through `/identity` nulled the other five fields and returned `200`.
+/// Routing both handlers through this one function is what keeps them from diverging again — a per-handler copy of the six-line merge is exactly what produced the bug.
 ///
-/// Neither endpoint can set a field back to `None`, because `None` is already
-/// spoken for by "not provided". The closest available operation is to store an
-/// empty string: `Some("")` passes both handlers' `color` / `avatar_url`
-/// validators (each is guarded by `!x.is_empty()`) and is stored as `Some("")`,
-/// which `GET /api/agents/{id}` then reports as `""` rather than `null`.
+/// Neither endpoint can set a field back to `None`, because `None` is already spoken for by "not provided".
+/// The closest available operation is to store an empty string: `Some("")` passes both handlers' `color` / `avatar_url` validators (each is guarded by `!x.is_empty()`) and is stored as `Some("")`, which `GET /api/agents/{id}` then reports as `""` rather than `null`.
 pub(crate) fn merge_agent_identity(
     current: AgentIdentity,
     incoming: AgentIdentity,
@@ -870,8 +860,8 @@ mod tests {
         }
     }
 
-    /// A one-field update must preserve the other five. This is #6608 in unit
-    /// form: the pre-fix `/identity` handler dropped them.
+    /// A one-field update must preserve the other five.
+    /// This is #6608 in unit form: the pre-fix `/identity` handler dropped them.
     #[test]
     fn merge_agent_identity_preserves_fields_the_caller_omitted() {
         let merged = merge_agent_identity(
@@ -892,10 +882,8 @@ mod tests {
         assert_eq!(merged.greeting_style.as_deref(), Some("stored-greeting"));
     }
 
-    /// Every field is wired to its own counterpart. A transposed pair
-    /// (`vibe: incoming.archetype.or(...)`) is precisely the drift class this
-    /// helper exists to prevent, and only a per-field assertion catches it, so
-    /// each field is driven with a distinguishable value.
+    /// Every field is wired to its own counterpart.
+    /// A transposed pair (`vibe: incoming.archetype.or(...)`) is precisely the drift class this helper exists to prevent, and only a per-field assertion catches it, so each field is driven with a distinguishable value.
     #[test]
     fn merge_agent_identity_maps_each_field_to_itself() {
         let incoming = AgentIdentity {
@@ -915,9 +903,8 @@ mod tests {
         assert_eq!(merged.greeting_style.as_deref(), Some("in-greeting"));
     }
 
-    /// An empty string is the documented way to clear a field, since `None`
-    /// already means "not provided". It must reach the stored identity as
-    /// `Some("")` rather than being folded back to the previous value.
+    /// An empty string is the documented way to clear a field, since `None` already means "not provided".
+    /// It must reach the stored identity as `Some("")` rather than being folded back to the previous value.
     #[test]
     fn merge_agent_identity_treats_empty_string_as_an_explicit_clear() {
         let merged = merge_agent_identity(

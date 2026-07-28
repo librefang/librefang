@@ -746,10 +746,8 @@ fn warnings_of(body: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// An allowlist entry that `capabilities_tools` cannot admit is accepted and
-/// persisted (semantics unchanged) but named in the response's `warnings`.
-/// Both fields go in one request so the check is proven to run against the
-/// declared set the request just wrote, not the one it replaced.
+/// An allowlist entry that `capabilities_tools` cannot admit is accepted and persisted (semantics unchanged) but named in the response's `warnings`.
+/// Both fields go in one request so the check is proven to run against the declared set the request just wrote, not the one it replaced.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tools_put_warns_about_inert_allowlist_entry() {
     let h = boot().await;
@@ -790,13 +788,10 @@ async fn test_tools_put_warns_about_inert_allowlist_entry() {
     assert_eq!(body["tool_allowlist"], serde_json::json!(["web_search"]));
 }
 
-/// False-positive guard: an entry that `capabilities_tools` does admit produces
-/// no warning at all. Without this a diagnostic that warned on every request
-/// would still satisfy the test above.
+/// False-positive guard: an entry that `capabilities_tools` does admit produces no warning at all.
+/// Without this a diagnostic that warned on every request would still satisfy the test above.
 ///
-/// The declared entry is a glob (`file_*`) and the allowlist entry a literal
-/// (`file_read`), so a string-equality implementation of the check would flag a
-/// working configuration here — the match has to be glob-evaluated.
+/// The declared entry is a glob (`file_*`) and the allowlist entry a literal (`file_read`), so a string-equality implementation of the check would flag a working configuration here — the match has to be glob-evaluated.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tools_put_does_not_warn_about_a_live_allowlist_entry() {
     let h = boot().await;
@@ -820,9 +815,7 @@ async fn test_tools_put_does_not_warn_about_a_live_allowlist_entry() {
     );
 }
 
-/// An unbounded `capabilities_tools` makes the Step 1 filter a no-op, so no
-/// entry is provably inert and nothing may be reported — warning here would be
-/// a false positive on a configuration that grants every builtin.
+/// An unbounded `capabilities_tools` makes the Step 1 filter a no-op, so no entry is provably inert and nothing may be reported — warning here would be a false positive on a configuration that grants every builtin.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tools_put_does_not_warn_when_capabilities_tools_is_unbounded() {
     let h = boot().await;
@@ -866,11 +859,9 @@ async fn test_tools_put_does_not_warn_when_capabilities_tools_is_unbounded() {
     );
 }
 
-/// MCP tools reach the candidate set without being filtered by
-/// `capabilities_tools`, and an `mcp_*` allowlist entry is how a caller selects
-/// among them (#6495). Warning about one would break a working configuration.
-/// A wildcard entry is likewise never reported: a later skill install or MCP
-/// connect can make it match.
+/// MCP tools reach the candidate set without being filtered by `capabilities_tools`, and an `mcp_*` allowlist entry is how a caller selects among them (#6495).
+/// Warning about one would break a working configuration.
+/// A wildcard entry is likewise never reported: a later skill install or MCP connect can make it match.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tools_put_does_not_warn_about_mcp_or_glob_entries() {
     let h = boot().await;
@@ -894,10 +885,8 @@ async fn test_tools_put_does_not_warn_about_mcp_or_glob_entries() {
     );
 }
 
-/// A request that touches neither the allowlist nor the grant surface says
-/// nothing about either, so it must stay quiet even when the stored allowlist is
-/// inert. A blocklist-only request is the shape that qualifies; narrowing
-/// `capabilities_tools` does not, and is covered by the test below.
+/// A request that touches neither the allowlist nor the grant surface says nothing about either, so it must stay quiet even when the stored allowlist is inert.
+/// A blocklist-only request is the shape that qualifies; narrowing `capabilities_tools` does not, and is covered by the test below.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tools_put_only_warns_about_submitted_allowlist_entries() {
     let h = boot().await;
@@ -918,8 +907,7 @@ async fn test_tools_put_only_warns_about_submitted_allowlist_entries() {
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert_eq!(warnings_of(&body).len(), 1, "{body:?}");
 
-    // A follow-up request that touches only the blocklist leaves the stored
-    // allowlist alone and must stay quiet about it.
+    // A follow-up request that touches only the blocklist leaves the stored allowlist alone and must stay quiet about it.
     let (status, body) = send(
         h.app.clone(),
         put_json(
@@ -940,15 +928,10 @@ async fn test_tools_put_only_warns_about_submitted_allowlist_entries() {
     );
 }
 
-/// Narrowing `capabilities_tools` alone can silence a stored allowlist entry
-/// without the request ever mentioning the allowlist, and from the operator's
-/// side that is the same defect: their own request is what stopped the tool from
-/// being granted, and the response is a clean `200`. Gating the diagnostic on a
-/// submitted `tool_allowlist` alone would stay quiet here.
+/// Narrowing `capabilities_tools` alone can silence a stored allowlist entry without the request ever mentioning the allowlist, and from the operator's side that is the same defect: their own request is what stopped the tool from being granted, and the response is a clean `200`.
+/// Gating the diagnostic on a submitted `tool_allowlist` alone would stay quiet here.
 ///
-/// The reverse shape — widening the grant surface back to unbounded, which is
-/// the most common real request that submits only `capabilities_tools` — must go
-/// quiet again rather than warn about the same stored entry.
+/// The reverse shape — widening the grant surface back to unbounded, which is the most common real request that submits only `capabilities_tools` — must go quiet again rather than warn about the same stored entry.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tools_put_warns_when_narrowing_capabilities_makes_a_stored_entry_inert() {
     let h = boot().await;

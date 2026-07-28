@@ -78,13 +78,10 @@ pub async fn update_agent_identity(
     }
 
     // Read the stored identity and merge the provided fields onto it (#6608).
-    // This endpoint is a PATCH: before the fix it built a fresh `AgentIdentity`
-    // from the request alone, so a single-field body silently nulled the other
-    // five and returned 200. `merge_agent_identity` is shared with
-    // `PATCH /api/agents/{id}/config`, which writes the same six fields.
+    // This endpoint is a PATCH: before the fix it built a fresh `AgentIdentity` from the request alone, so a single-field body silently nulled the other five and returned 200.
+    // `merge_agent_identity` is shared with `PATCH /api/agents/{id}/config`, which writes the same six fields.
     //
-    // A missing agent yields `AgentIdentity::default()` here and is then
-    // reported as 404 by `update_identity` below, matching `/config`.
+    // A missing agent yields `AgentIdentity::default()` here and is then reported as 404 by `update_identity` below, matching `/config`.
     let current = state
         .kernel
         .agent_registry()

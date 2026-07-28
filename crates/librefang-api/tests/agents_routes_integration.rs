@@ -2107,8 +2107,7 @@ async fn test_patch_config_can_restore_global_default_inheritance() {
 // ---------------------------------------------------------------------------
 
 /// The full six-field identity used as the "before" state of the merge tests.
-/// `color` must start with `#` and `avatar_url` with `http`/`https`/`data:` to
-/// pass both handlers' validators.
+/// `color` must start with `#` and `avatar_url` with `http`/`https`/`data:` to pass both handlers' validators.
 fn full_identity_body() -> serde_json::Value {
     serde_json::json!({
         "emoji": "🦊",
@@ -2122,12 +2121,8 @@ fn full_identity_body() -> serde_json::Value {
 
 /// Read all six identity fields straight off the registry entry.
 ///
-/// `GET /api/agents/{id}` exposes only `emoji` / `avatar_url` / `color`
-/// (`routes::agents::agent_json`), so the three personality fields have no HTTP
-/// read surface at all. Extending that response to make the assertions uniform
-/// would be a response-shape change well beyond this fix (it would drag in the
-/// dashboard's `AgentIdentity` type and the generated OpenAPI), so the test
-/// reads the same state the handler wrote instead.
+/// `GET /api/agents/{id}` exposes only `emoji` / `avatar_url` / `color` (`routes::agents::agent_json`), so the three personality fields have no HTTP read surface at all.
+/// Extending that response to make the assertions uniform would be a response-shape change well beyond this fix (it would drag in the dashboard's `AgentIdentity` type and the generated OpenAPI), so the test reads the same state the handler wrote instead.
 fn stored_identity(state: &Arc<AppState>, id: AgentId) -> librefang_types::agent::AgentIdentity {
     state
         .kernel
@@ -2137,10 +2132,8 @@ fn stored_identity(state: &Arc<AppState>, id: AgentId) -> librefang_types::agent
         .identity
 }
 
-/// A single-field PATCH must change that field and leave the other five
-/// untouched. Before #6608 this handler built a fresh `AgentIdentity` from the
-/// request body alone, so the five omitted fields were nulled and the response
-/// was still 200.
+/// A single-field PATCH must change that field and leave the other five untouched.
+/// Before #6608 this handler built a fresh `AgentIdentity` from the request body alone, so the five omitted fields were nulled and the response was still 200.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_patch_identity_merges_instead_of_replacing() {
     let h = boot(TEST_TOKEN).await;
@@ -2215,10 +2208,8 @@ async fn test_patch_identity_merges_instead_of_replacing() {
     assert_eq!(body["identity"]["color"], serde_json::json!("#123456"));
 }
 
-/// `PATCH /identity` and `PATCH /config` write the same six identity fields, so
-/// the same partial body must produce the same stored identity through either
-/// route. Two PATCH endpoints on one resource having opposite semantics is the
-/// core of #6608, and this equivalence is what keeps them from diverging again.
+/// `PATCH /identity` and `PATCH /config` write the same six identity fields, so the same partial body must produce the same stored identity through either route.
+/// Two PATCH endpoints on one resource having opposite semantics is the core of #6608, and this equivalence is what keeps them from diverging again.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_patch_identity_and_patch_config_agree_on_partial_updates() {
     let h = boot(TEST_TOKEN).await;
@@ -2290,10 +2281,8 @@ async fn test_patch_identity_and_patch_config_agree_on_partial_updates() {
     assert_eq!(from_identity.greeting_style.as_deref(), Some("brief"));
 }
 
-/// Sending an empty string is as close as either route gets to clearing an
-/// identity field, since `null` / omitted is already spoken for by "not
-/// provided". It must land as a stored `""` rather than being folded back to the
-/// previous value — the field ends up empty, not absent.
+/// Sending an empty string is as close as either route gets to clearing an identity field, since `null` / omitted is already spoken for by "not provided".
+/// It must land as a stored `""` rather than being folded back to the previous value — the field ends up empty, not absent.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_patch_identity_empty_string_clears_a_single_field() {
     let h = boot(TEST_TOKEN).await;
