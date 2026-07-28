@@ -1664,7 +1664,18 @@ impl WorkflowEngine {
         let mut skipped: usize = 0;
         for row in rows {
             match row_to_workflow_run(&row) {
-                Ok(run) => {
+                Ok(mut run) => {
+                    // `total_steps` isn't a SQLite column (#6504 added the
+                    // field without a migration), so `row_to_workflow_run`
+                    // always hands back 0. Recompute it from the still-
+                    // registered workflow definition — loaded via
+                    // `load_from_dir_sync` earlier in boot — so runs
+                    // reloaded after a restart don't permanently report
+                    // `total_steps: 0` in the debug UI. Falls back to 0
+                    // if the workflow was since deleted.
+                    if let Some(workflow) = self.workflows.blocking_read().get(&run.workflow_id) {
+                        run.total_steps = workflow.steps.len();
+                    }
                     self.runs.insert(run.id, run);
                     loaded += 1;
                 }
