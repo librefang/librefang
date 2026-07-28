@@ -17,7 +17,7 @@ use librefang_types::config::BrowserConfig;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::io::AsyncBufReadExt;
@@ -34,7 +34,7 @@ const CDP_CONNECT_TIMEOUT_SECS: u64 = 15;
 const CDP_COMMAND_TIMEOUT_SECS: u64 = 30;
 const PAGE_LOAD_POLL_INTERVAL_MS: u64 = 200;
 const PAGE_LOAD_MAX_POLLS: u32 = 150; // 30 seconds
-#[allow(dead_code)]
+/// Cap on the extracted page text handed back to the model.
 const MAX_CONTENT_CHARS: usize = 50_000;
 const BROWSER_ENV_ALLOWLIST: &[&str] = &[
     "PATH",
@@ -661,7 +661,7 @@ impl BrowserSession {
     }
 
     async fn cmd_read_page(&self) -> BrowserResponse {
-        match self.cdp.run_js(EXTRACT_CONTENT_JS).await {
+        match self.cdp.run_js(&EXTRACT_CONTENT_JS).await {
             Ok(val) => {
                 let parsed: serde_json::Value = val
                     .as_str()
@@ -767,7 +767,7 @@ impl BrowserSession {
 
         let content_val = self
             .cdp
-            .run_js(EXTRACT_CONTENT_JS)
+            .run_js(&EXTRACT_CONTENT_JS)
             .await
             .unwrap_or_default();
         let content_obj: serde_json::Value = content_val
@@ -1077,7 +1077,10 @@ impl BrowserManager {
 // ── Embedded JavaScript ────────────────────────────────────────────────────
 
 /// JavaScript to extract readable page content as markdown.
-pub(crate) const EXTRACT_CONTENT_JS: &str = r#"(() => {
+/// Page-extraction script, with `__MAX_CONTENT_CHARS__` still to be substituted.
+///
+/// Use [`EXTRACT_CONTENT_JS`] rather than this template.
+const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
     const title = document.title || '';
     const url = location.href || '';
     const body = document.body;
@@ -1120,9 +1123,14 @@ pub(crate) const EXTRACT_CONTENT_JS: &str = r#"(() => {
     walk(root);
 
     let content = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-    if (content.length > 50000) content = content.substring(0, 50000) + '\n... (truncated)';
+    if (content.length > __MAX_CONTENT_CHARS__) content = content.substring(0, __MAX_CONTENT_CHARS__) + '\n... (truncated)';
     return JSON.stringify({title, url, content});
 })()"#;
+
+/// Page-extraction script with the cap substituted in, built once.
+pub(crate) static EXTRACT_CONTENT_JS: LazyLock<String> = LazyLock::new(|| {
+    EXTRACT_CONTENT_JS_TEMPLATE.replace("__MAX_CONTENT_CHARS__", &MAX_CONTENT_CHARS.to_string())
+});
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
@@ -1283,6 +1291,27 @@ mod tests {
         assert!(
             !paths.is_empty(),
             "Should have platform-specific candidates"
+        );
+    }
+
+    /// The cap the model sees must be the one the constant declares.
+    ///
+    /// The script used to hard-code `50000` while `MAX_CONTENT_CHARS` sat unused, so changing the constant changed nothing.
+    #[test]
+    fn test_extract_content_js_uses_max_content_chars() {
+        assert!(
+            !EXTRACT_CONTENT_JS.contains("__MAX_CONTENT_CHARS__"),
+            "placeholder must be substituted before the script is sent"
+        );
+        assert!(
+            EXTRACT_CONTENT_JS.contains(&MAX_CONTENT_CHARS.to_string()),
+            "the script must truncate at MAX_CONTENT_CHARS"
+        );
+        // Guards against the placeholder being dropped from the template entirely,
+        // which would leave the two silently independent again.
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("__MAX_CONTENT_CHARS__"),
+            "the template must keep the placeholder"
         );
     }
 
