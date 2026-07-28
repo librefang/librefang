@@ -69,6 +69,10 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Fixed
 
+- Request `/json/new` with PUT when attaching to an `http://` `cdp_endpoint`, so HTTP target discovery works against current Chrome.
+  Chrome has required that verb since 111 and answers a GET with `405 Method Not Allowed` and the body "Using unsafe HTTP verb GET to invoke /json/new. This action supports only PUT verb." — reproduced against Chrome for Testing 148.0.7778.96, where `attach()` walked straight into it and every browser session died before its first command.
+  The failure surfaced as `Invalid JSON from /json/new`, because the 405 body is plain text and the response status was never checked; a non-2xx that is not a 405 is now reported as the status it was.
+  A 405 on PUT falls back to GET rather than failing, since older Chromium builds and third-party CDP proxies may route only the older verb, and there is no version handshake to branch on (@nevgenov)
 - Merge instead of replace in `PATCH /api/agents/{id}/identity`, so a partial body no longer nulls the identity fields it omits.
   The handler built a fresh `AgentIdentity` from the request alone with no read of the stored one, so `PATCH {"emoji": "X"}` silently discarded `avatar_url`, `color`, `archetype`, `vibe` and `greeting_style` and returned `200` — while the sibling `PATCH /api/agents/{id}/config`, which writes the same six fields, merged them correctly.
   Two PATCH endpoints on one resource with opposite semantics is the actual defect, so the six-field merge is now a single shared `merge_agent_identity` helper that both handlers call rather than a copy in each; an integration test asserts the two routes produce the same stored identity for the same partial body.
