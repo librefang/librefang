@@ -475,7 +475,9 @@ model = "glm-4-plus"
 | **认证方式** | `Authorization: Bearer` 请求头 |
 | **模型数** | 取决于网关账户开放的范围 —— Claude、GPT、Gemini、MiniMax 以及多媒体模型都经由同一个端点路由 |
 
-EveryAPI 是托管 provider，没有固定的模型清单。可用模型取决于你的账户而非 LibreFang。LibreFang 通过 EveryAPI CLI 的凭据进程获取当前网关与 relay 凭据，再加载账户的实时模型目录。
+EveryAPI 是托管 provider，没有固定的模型清单。
+可用模型取决于你的账户而非 LibreFang。
+LibreFang 通过 EveryAPI CLI 的凭据进程获取当前网关与 relay 凭据，再加载账户的实时模型目录。
 
 **设置：**
 1. 安装公开的 [EveryAPI CLI](https://github.com/everyapi-ai/everyapi-ai) 并登录：
@@ -491,7 +493,10 @@ EveryAPI 是托管 provider，没有固定的模型清单。可用模型取决�
    librefang models connect everyapi --set-default
    ```
 
-托管发现模式下，EveryAPI 始终是凭据权威。LibreFang 在需要凭据时调用 `everyapi auth credential --format=json`，且不会持久化返回的密钥。旧版兼容 CLI 的凭据仍可作为回退读取。显式端点或环境变量配置仍然可用，并优先于托管发现。
+托管发现模式下，EveryAPI 始终是凭据权威。
+LibreFang 在需要凭据时调用 `everyapi auth credential --format=json`，且不会持久化返回的密钥。
+旧版兼容 CLI 的凭据仍可作为回退读取。
+显式端点或环境变量配置仍然可用，并优先于托管发现。
 
 除了这套 provider 接线之外，EveryAPI CLI 还内置了一个 MCP 服务器（`everyapi mcp`），为 agent 提供检视网关账户本身的工具 —— 配额、卖家渠道、边缘节点。
 它独立使用 EveryAPI 账户，因此无论是否跑过 `models connect everyapi` 都能工作；反过来，接好 provider 也不会启用它。详见[接入 EveryAPI MCP 服务器](/zh/integrations/mcp-a2a#every-api-mcp)。
