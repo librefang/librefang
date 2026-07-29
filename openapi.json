@@ -4112,7 +4112,7 @@
           "auth"
         ],
         "summary": "POST /api/auth/refresh — Exchange a refresh token for a new access token.",
-        "description": "When the access token expires, clients can call this endpoint with the\nrefresh token received during login instead of forcing a full re-authorization.\nIf the request body omits `refresh_token`, the server looks up the token store\nfor a previously stored refresh token (from the OAuth callback).",
+        "description": "When the access token expires, clients call this instead of forcing a full\nre-authorization, presenting either:\n\n* `refresh_token` — one the client holds itself, or\n* `access_token` — the one its own login callback returned, which identifies\n  the stored session whose server-side refresh token should be used.\n\nThere is no third path. The endpoint used to fall back to scanning the token\nstore for any entry matching a `provider` hint, or for literally any entry\nwith a refresh token, and it is reachable by any Admin — so a caller could\nrefresh a *different* local user's upstream session and be handed their\ncredentials, with every scope that token carried. Both fallbacks are gone\n(#6629); a request that proves nothing gets a 400.",
         "operationId": "auth_refresh",
         "requestBody": {
           "content": {
@@ -14409,6 +14409,13 @@
         "type": "object",
         "description": "Request body for the refresh token endpoint.",
         "properties": {
+          "access_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The access token this caller received from its own login callback,\nproving which stored session it owns (#6629).\n\nThe callback returns the upstream access token to the client but keeps\nthe refresh token server-side, so a client legitimately has no refresh\ntoken of its own to present. Presenting the access token it *was* given\nis what lets the server resolve the matching entry without letting the\ncaller name someone else's session: the value is high-entropy, issued by\nthe identity provider, and never disclosed by any read route.\n\nAn expired access token still matches — entries live in the store for\n24 h regardless of the access token's own lifetime, which is exactly the\nstate a caller is in when it needs to refresh."
+          },
           "provider": {
             "type": [
               "string",
@@ -14421,7 +14428,7 @@
               "string",
               "null"
             ],
-            "description": "The refresh token obtained from the initial login callback.\nIf omitted, the server looks up a stored refresh token from the token store."
+            "description": "The refresh token obtained from the initial login callback.\n\nWhen omitted, `access_token` must be supplied instead — the server no\nlonger searches the token store for \"some\" stored session (#6629)."
           }
         }
       },
