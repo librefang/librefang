@@ -1197,19 +1197,20 @@ pub async fn update_hand_settings(
             // Merge over existing config so untouched keys keep their saved values.
             let mut merged = inst.config;
             merged.extend(config);
-            match state.kernel.hands().update_config(id, merged.clone()) {
-                Ok(()) => {
-                    state.kernel.persist_hand_state();
-                    (
-                        StatusCode::OK,
-                        Json(serde_json::json!({
-                            "status": "ok",
-                            "hand_id": hand_id,
-                            "instance_id": id,
-                            "config": merged,
-                        })),
-                    )
-                }
+            // `update_hand_config` (not the bare registry `update_config`) —
+            // it also re-renders the `## User Configuration` prompt tail on
+            // the hand's live agents, which is the only way a saved setting
+            // reaches an LLM before the next daemon restart (#6636).
+            match state.kernel.update_hand_config(id, merged) {
+                Ok(updated) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "status": "ok",
+                        "hand_id": hand_id,
+                        "instance_id": id,
+                        "config": updated.config,
+                    })),
+                ),
                 Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
             }
         }

@@ -396,6 +396,13 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         config: std::collections::HashMap<String, serde_json::Value>,
     ) -> KernelResult<librefang_hands::HandInstance>;
     fn deactivate_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()>;
+    /// Save a hand instance's `[[settings]]` values and re-render them into the live agents' system prompts.
+    /// Prefer this over `hands().update_config(..)` plus `persist_hand_state()`: the bare registry write persists the values but leaves every running agent on the prompt it was activated with (#6636).
+    fn update_hand_config(
+        &self,
+        instance_id: uuid::Uuid,
+        config: std::collections::HashMap<String, serde_json::Value>,
+    ) -> KernelResult<librefang_hands::HandInstance>;
     fn pause_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()>;
     fn resume_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()>;
     fn reload_hands(&self) -> (usize, usize);
@@ -1184,6 +1191,13 @@ impl KernelApi for LibreFangKernel {
     }
     fn deactivate_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
         Self::deactivate_hand(self, instance_id)
+    }
+    fn update_hand_config(
+        &self,
+        instance_id: uuid::Uuid,
+        config: std::collections::HashMap<String, serde_json::Value>,
+    ) -> KernelResult<librefang_hands::HandInstance> {
+        Self::update_hand_config(self, instance_id, config)
     }
     fn pause_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
         Self::pause_hand(self, instance_id)

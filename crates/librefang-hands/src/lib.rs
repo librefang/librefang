@@ -208,6 +208,21 @@ pub struct ResolvedSettings {
     pub env_vars: Vec<String>,
 }
 
+/// Render one stored setting value as the string the schema compares against.
+///
+/// `HandSetting.default` and `HandSettingOption.value` are declared as TOML strings, so the whole resolver works on `&str`.
+/// Stored values, though, come from a `serde_json::Value` map that any API client can post — the dashboard sends strings, but `true` and `100` are equally valid JSON for a toggle or a numeric text field.
+/// A plain `as_str()` returns `None` for those and the setting silently reverts to its schema default, which is the same user-visible failure as not saving at all.
+/// Coerce the scalar forms; arrays / objects / null have no meaningful scalar rendering and still fall through to the default.
+fn setting_value_as_str(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
 /// Resolve user config values against a hand's settings schema.
 ///
 /// For each setting, looks up the user's choice in `config` (falling back to
@@ -222,10 +237,8 @@ pub fn resolve_settings(
     let mut env_vars: Vec<String> = Vec::new();
 
     for setting in settings {
-        let chosen_value = config
-            .get(&setting.key)
-            .and_then(|v| v.as_str())
-            .unwrap_or(&setting.default);
+        let stored = config.get(&setting.key).and_then(setting_value_as_str);
+        let chosen_value: &str = stored.as_deref().unwrap_or(&setting.default);
 
         match setting.setting_type {
             HandSettingType::Select => {
@@ -1764,6 +1777,73 @@ metrics = []
         let resolved = resolve_settings(&settings, &config);
         assert!(resolved.prompt_block.contains("Enabled"));
         assert!(resolved.prompt_block.contains("large-v3"));
+    }
+
+    /// Stored values arrive as arbitrary JSON.
+    /// A non-string scalar used to fall out of `as_str()` as `None` and silently revert the setting to its schema default — the same user-visible symptom as not saving at all (#6636).
+    /// The dashboard stringifies, but the HTTP API accepts any client.
+    #[test]
+    fn resolve_settings_coerces_non_string_scalars() {
+        let settings = vec![
+            HandSetting {
+                key: "approval_mode".to_string(),
+                label: "Approval".to_string(),
+                description: String::new(),
+                setting_type: HandSettingType::Toggle,
+                default: "true".to_string(),
+                options: vec![],
+                env_var: None,
+            },
+            HandSetting {
+                key: "initial_capital".to_string(),
+                label: "Initial Capital".to_string(),
+                description: String::new(),
+                setting_type: HandSettingType::Text,
+                default: "10000".to_string(),
+                options: vec![],
+                env_var: None,
+            },
+        ];
+
+        let mut config = HashMap::new();
+        config.insert("approval_mode".to_string(), serde_json::json!(false));
+        config.insert("initial_capital".to_string(), serde_json::json!(100));
+        let resolved = resolve_settings(&settings, &config);
+        assert!(
+            resolved.prompt_block.contains("- Approval: Disabled"),
+            "JSON `false` must read as the toggle's off state, not fall back \
+             to the `true` default; got: {}",
+            resolved.prompt_block
+        );
+        assert!(
+            resolved.prompt_block.contains("- Initial Capital: 100"),
+            "JSON number must render verbatim; got: {}",
+            resolved.prompt_block
+        );
+        assert!(
+            !resolved.prompt_block.contains("10000"),
+            "the schema default must not survive an explicit numeric value; got: {}",
+            resolved.prompt_block
+        );
+    }
+
+    /// Non-scalar JSON has no meaningful rendering against a schema whose `default` and option `value`s are strings, so it still falls back.
+    #[test]
+    fn resolve_settings_falls_back_for_non_scalar_json() {
+        let settings = vec![HandSetting {
+            key: "watchlist".to_string(),
+            label: "Watchlist".to_string(),
+            description: String::new(),
+            setting_type: HandSettingType::Text,
+            default: "SPY".to_string(),
+            options: vec![],
+            env_var: None,
+        }];
+
+        let mut config = HashMap::new();
+        config.insert("watchlist".to_string(), serde_json::json!(["BTC", "ETH"]));
+        let resolved = resolve_settings(&settings, &config);
+        assert!(resolved.prompt_block.contains("- Watchlist: SPY"));
     }
 
     #[test]

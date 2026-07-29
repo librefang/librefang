@@ -668,6 +668,7 @@ hand-no-active-instance = Не знайдено активного інстан�
 hand-info-not-found = Hands не знайдено: { $error }
 hand-no-settings = Hands '{ $id }' не має конфігурованих налаштувань.
 hand-settings-title = Налаштування для '{ $id }'
+hand-setting-default-marker = (за замовчуванням)
 hand-set-setting-success = Встановлено { $key }={ $value } для Hands '{ $id }'.
 hand-reloaded-summary = Перезавантажено Hands: { $added } додано, { $updated } оновлено, всього { $total }.
 

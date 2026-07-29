@@ -410,6 +410,168 @@ default = "15"
 }
 
 // ---------------------------------------------------------------------------
+// PUT /api/hands/{hand_id}/settings — saved values reach the live prompts
+// ---------------------------------------------------------------------------
+
+/// Regression test for #6636: saving settings must re-render the `## User Configuration` tail on every live agent of the hand.
+///
+/// Before the fix, the handler wrote the instance config and persisted `hand_state.json` but never touched the agents, so a running agent kept answering from the HAND.toml defaults until the daemon restarted — boot replays hands through `activate_hand_with_id`, which does re-render.
+/// The hand here is multi-agent and ships skill content so the test also pins the tail-ordering hazard: re-rendering the settings block on a prompt that already carries `## Reference Knowledge` and `## Your Team` must not truncate them away.
+#[tokio::test(flavor = "multi_thread")]
+async fn update_hand_settings_rerenders_live_agent_prompts() {
+    let h = boot_router_open().await;
+
+    let toml = r#"
+id = "settings-prompt-test"
+name = "Settings Prompt Test"
+description = "Multi-agent hand with settings for prompt-render coverage."
+category = "data"
+
+[[settings]]
+key = "trading_mode"
+label = "Trading Mode"
+setting_type = "select"
+default = "paper"
+
+[[settings.options]]
+value = "paper"
+label = "Paper Trading"
+
+[[settings.options]]
+value = "live"
+label = "Live Trading"
+
+[[settings]]
+key = "initial_capital"
+label = "Initial Capital"
+setting_type = "text"
+default = "10000"
+
+[agents.lead]
+name = "settings-prompt-lead"
+description = "coordinator"
+module = "builtin:chat"
+coordinator = true
+
+[agents.lead.model]
+provider = "openai"
+model = "gpt-4o-mini"
+system_prompt = "BASE LEAD PROMPT"
+
+[agents.worker]
+name = "settings-prompt-worker"
+description = "executes trades"
+module = "builtin:chat"
+
+[agents.worker.model]
+provider = "openai"
+model = "gpt-4o-mini"
+system_prompt = "BASE WORKER PROMPT"
+"#;
+    let (status, body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/install",
+        Some(serde_json::json!({
+            "toml_content": toml,
+            "skill_content": "TRADING PLAYBOOK",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "install body: {body}");
+
+    // Activate on the schema defaults, exactly as the dashboard's
+    // activation modal does when the user changes nothing.
+    let instance = h
+        ._state
+        .kernel
+        .activate_hand("settings-prompt-test", std::collections::HashMap::new())
+        .expect("activate hand");
+    let lead_id = *instance
+        .agent_ids
+        .get("lead")
+        .expect("lead role must have spawned an agent");
+
+    let prompt_of = |id| {
+        h._state
+            .kernel
+            .agent_registry()
+            .get(id)
+            .expect("agent must be in the registry")
+            .manifest
+            .model
+            .system_prompt
+    };
+
+    let before = prompt_of(lead_id);
+    assert!(
+        before.contains("Paper Trading") && before.contains("10000"),
+        "activation must render the schema defaults; got: {before}"
+    );
+
+    let (status, body) = json_request(
+        &h.app,
+        Method::PUT,
+        "/api/hands/settings-prompt-test/settings",
+        Some(serde_json::json!({
+            "trading_mode": "live",
+            "initial_capital": "100",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update body: {body}");
+
+    for (role, agent_id) in &instance.agent_ids {
+        let after = prompt_of(*agent_id);
+        assert!(
+            after.contains("Live Trading"),
+            "[{role}] saved value must reach the live system prompt; got: {after}"
+        );
+        assert!(
+            after.contains("- Initial Capital: 100"),
+            "[{role}] saved text value must reach the live system prompt; got: {after}"
+        );
+        assert!(
+            !after.contains("Paper Trading"),
+            "[{role}] HAND.toml default must be gone from the prompt; got: {after}"
+        );
+        assert!(
+            !after.contains("Initial Capital: 10000"),
+            "[{role}] HAND.toml default must be gone from the prompt; got: {after}"
+        );
+        assert!(
+            after.contains("## Reference Knowledge\n\nTRADING PLAYBOOK"),
+            "[{role}] skill tail must survive the settings re-render; got: {after}"
+        );
+        assert!(
+            after.contains("## Your Team"),
+            "[{role}] team tail must survive the settings re-render; got: {after}"
+        );
+        assert_eq!(
+            after.matches("## User Configuration").count(),
+            1,
+            "[{role}] exactly one settings block must be present; got: {after}"
+        );
+    }
+
+    // Each role keeps its own author-written base prompt — the re-render
+    // strips tails, not the prompt the hand author wrote.
+    assert!(prompt_of(lead_id).starts_with("BASE LEAD PROMPT\n\n---\n\n"));
+
+    // And the values are readable back through the GET side.
+    let (status, body) = get_json(&h.app, "/api/hands/settings-prompt-test/settings").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["current_values"]["trading_mode"].as_str(),
+        Some("live")
+    );
+    assert_eq!(
+        body["current_values"]["initial_capital"].as_str(),
+        Some("100")
+    );
+}
+
+// ---------------------------------------------------------------------------
 // POST /api/hands/install — input validation
 // ---------------------------------------------------------------------------
 

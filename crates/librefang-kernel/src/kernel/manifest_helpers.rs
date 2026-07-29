@@ -360,12 +360,27 @@ const SKILL_REFERENCE_TAIL_MARKER: &str = "\n\n---\n\n## Reference Knowledge";
 /// match the marker and cause `find()` to truncate user-authored content.
 const TEAM_TAIL_MARKER: &str = "\n\n---\n\n## Your Team";
 
+/// Byte offset of the earliest runtime-rendered prompt tail in `prompt`, or `None` when the prompt carries no tail at all.
+///
+/// The three tails are always appended in a fixed order (settings -> reference -> team), so truncating at the earliest marker drops every tail in one shot and leaves the author-written base prompt.
+/// Each marker is probed individually so a prompt carrying only a subset still truncates at the right place.
+fn earliest_rendered_tail_idx(prompt: &str) -> Option<usize> {
+    [
+        USER_CONFIG_TAIL_MARKER,
+        SKILL_REFERENCE_TAIL_MARKER,
+        TEAM_TAIL_MARKER,
+    ]
+    .into_iter()
+    .filter_map(|marker| prompt.find(marker))
+    .min()
+}
+
 /// Append (or refresh) the rendered `## User Configuration` block on a
 /// manifest's `model.system_prompt` from a hand's `[[settings]]` schema +
 /// instance config.
 ///
 /// This is the single source of truth for the "settings -> system prompt"
-/// materialization. Two call sites use it:
+/// materialization. Three call sites use it:
 ///
 /// 1. Hand activation (`activate_hand`) — turns the disk TOML's bare prompt
 ///    into the runtime prompt with settings spliced in before save_agent.
@@ -374,6 +389,7 @@ const TEAM_TAIL_MARKER: &str = "\n\n---\n\n## Your Team";
 ///    settings tail (it's runtime-materialized, not persisted), so without
 ///    re-rendering here the agent loses its configured values on every
 ///    restart until somebody re-runs `hand activate`.
+/// 3. [`rerender_hand_prompt_tails`], which serves the settings-save path (`PUT /api/hands/{id}/settings`) — see that function for why it must strip to the base prompt before calling this one.
 ///
 /// Idempotency: if the prompt already ends with a `## User Configuration`
 /// tail, that tail is stripped before the freshly resolved one is appended.
@@ -540,20 +556,67 @@ pub(super) fn apply_team_block_to_manifest(
 pub(super) fn manifest_for_diff(manifest: &AgentManifest) -> AgentManifest {
     let mut copy = manifest.clone();
     let prompt = &mut copy.model.system_prompt;
-    let mut earliest_idx: Option<usize> = None;
-    for marker in [
-        USER_CONFIG_TAIL_MARKER,
-        SKILL_REFERENCE_TAIL_MARKER,
-        TEAM_TAIL_MARKER,
-    ] {
-        if let Some(idx) = prompt.find(marker) {
-            earliest_idx = Some(earliest_idx.map_or(idx, |cur| cur.min(idx)));
-        }
-    }
-    if let Some(idx) = earliest_idx {
+    if let Some(idx) = earliest_rendered_tail_idx(prompt) {
         prompt.truncate(idx);
     }
     copy
+}
+
+/// Env-var passthrough allowlist for a hand instance: the `provider_env` / `env_var` names its resolved settings select, plus the `[[requires]]` entries that name an env var or API key.
+///
+/// SECURITY: every candidate is attacker-controllable HAND.toml text and is later materialized into a child process's env from the daemon's LIVE environment, so the shared secret blocklist filters the whole list.
+/// A marketplace hand cannot exfiltrate `LIBREFANG_VAULT_KEY` / `ANTHROPIC_API_KEY` / … by naming them in a setting or requirement.
+/// `sandbox_command` re-checks defensively at spawn time.
+///
+/// Shared by hand activation and the settings-save re-render so the two paths cannot drift on which names survive the filter.
+pub(super) fn resolve_hand_allowed_env(
+    def: &librefang_hands::HandDefinition,
+    instance_config: &std::collections::HashMap<String, serde_json::Value>,
+) -> Vec<String> {
+    let mut allowed: Vec<String> =
+        librefang_hands::resolve_settings(&def.settings, instance_config)
+            .env_vars
+            .into_iter()
+            .filter(|v| !librefang_runtime::subprocess_sandbox::is_blocked_env_var(v))
+            .collect();
+    for req in &def.requires {
+        match req.requirement_type {
+            librefang_hands::RequirementType::ApiKey | librefang_hands::RequirementType::EnvVar
+                if !req.check_value.is_empty()
+                    && !allowed.contains(&req.check_value)
+                    && !librefang_runtime::subprocess_sandbox::is_blocked_env_var(
+                        &req.check_value,
+                    ) =>
+            {
+                allowed.push(req.check_value.clone());
+            }
+            _ => {}
+        }
+    }
+    allowed
+}
+
+/// Re-materialize all three rendered prompt tails on a manifest that is **already carrying them** — the live registry copy of a hand agent.
+///
+/// Activation and the boot drift loop both start from a tail-free manifest (activation clones the disk TOML; drift assigns `entry.manifest = disk_manifest` first), so they can call the three `apply_*` helpers directly.
+/// The settings-save path cannot: it re-renders the *live* manifest, whose prompt already ends in `[base][settings][reference][team]`.
+/// Calling `apply_settings_block_to_manifest` on that shape truncates at the settings marker — dropping the reference and team tails with it — and then appends settings last, after which `apply_skill_reference_block_to_manifest` truncates at the reference marker and drops the settings tail it just wrote.
+/// Stripping back to the base prompt first and re-appending in canonical order is what makes the operation idempotent for any input shape.
+///
+/// Returns the resolved env-var allowlist; the caller is responsible for filtering it and writing `metadata["hand_allowed_env"]`.
+pub(super) fn rerender_hand_prompt_tails(
+    manifest: &mut AgentManifest,
+    role: &str,
+    def: &librefang_hands::HandDefinition,
+    instance_config: &std::collections::HashMap<String, serde_json::Value>,
+) -> Vec<String> {
+    if let Some(idx) = earliest_rendered_tail_idx(&manifest.model.system_prompt) {
+        manifest.model.system_prompt.truncate(idx);
+    }
+    let env_vars = apply_settings_block_to_manifest(manifest, &def.settings, instance_config);
+    apply_skill_reference_block_to_manifest(manifest, role, def);
+    apply_team_block_to_manifest(manifest, role, def);
+    env_vars
 }
 
 pub fn shared_memory_agent_id() -> AgentId {
@@ -1195,6 +1258,178 @@ system_prompt = "BASE-WORKER"
             projected.model.system_prompt,
             "BASE prompt with no rendered tails"
         );
+    }
+
+    const MULTI_AGENT_HAND_WITH_SETTINGS: &str = r#"
+id = "team"
+version = "1.0.0"
+name = "Team"
+description = "t"
+category = "other"
+
+[[settings]]
+key = "trading_mode"
+label = "Trading Mode"
+setting_type = "select"
+default = "paper"
+
+[[settings.options]]
+value = "paper"
+label = "Paper Trading"
+
+[[settings.options]]
+value = "live"
+label = "Live Trading"
+provider_env = "BROKER_ACCOUNT_ID"
+
+[[requires]]
+key = "feed_endpoint"
+label = "Feed endpoint"
+requirement_type = "env_var"
+check_value = "MARKET_FEED_ENDPOINT"
+
+# Deliberately names a daemon secret — must never survive the blocklist.
+[[requires]]
+key = "vault"
+label = "Vault"
+requirement_type = "api_key"
+check_value = "LIBREFANG_VAULT_KEY"
+
+[agents.lead]
+name = "team-lead"
+description = "lead agent"
+module = "builtin:chat"
+invoke_hint = "delegates work"
+
+[agents.lead.model]
+provider = "openrouter"
+model = "x"
+system_prompt = "BASE-LEAD"
+
+[agents.worker]
+name = "team-worker"
+description = "executes tasks"
+module = "builtin:chat"
+
+[agents.worker.model]
+provider = "openrouter"
+model = "x"
+system_prompt = "BASE-WORKER"
+"#;
+
+    fn config_with(key: &str, value: &str) -> std::collections::HashMap<String, serde_json::Value> {
+        std::collections::HashMap::from([(
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        )])
+    }
+
+    /// The #6636 hazard in isolation: re-rendering a *live* prompt — one that already carries all three tails — must not lose the reference or team blocks.
+    /// Calling the three `apply_*` helpers directly on that shape does lose them, which is why the settings-save path goes through `rerender_hand_prompt_tails`.
+    #[test]
+    fn rerender_preserves_reference_and_team_tails() {
+        let def = parse_hand(MULTI_AGENT_HAND_WITH_SETTINGS, "STUFF");
+        let mut m = manifest_with_prompt("BASE-LEAD");
+
+        // Materialize the activation-time shape.
+        apply_settings_block_to_manifest(&mut m, &def.settings, &std::collections::HashMap::new());
+        apply_skill_reference_block_to_manifest(&mut m, "lead", &def);
+        apply_team_block_to_manifest(&mut m, "lead", &def);
+        assert!(m.model.system_prompt.contains("Paper Trading"));
+
+        // Now re-render with a changed setting, as a settings save does.
+        rerender_hand_prompt_tails(&mut m, "lead", &def, &config_with("trading_mode", "live"));
+
+        let prompt = &m.model.system_prompt;
+        assert!(
+            prompt.starts_with("BASE-LEAD\n\n---\n\n"),
+            "author-written base prompt must survive; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("Live Trading"),
+            "new value must be rendered; got: {prompt}"
+        );
+        assert!(
+            !prompt.contains("Paper Trading"),
+            "stale default must be gone; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("## Reference Knowledge\n\nSTUFF"),
+            "skill tail must survive the re-render; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("- **worker**: executes tasks"),
+            "team tail must survive the re-render; got: {prompt}"
+        );
+        for heading in [
+            "## User Configuration",
+            "## Reference Knowledge",
+            "## Your Team",
+        ] {
+            assert_eq!(
+                prompt.matches(heading).count(),
+                1,
+                "exactly one {heading} block must be present; got: {prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn rerender_is_idempotent_and_order_stable() {
+        let def = parse_hand(MULTI_AGENT_HAND_WITH_SETTINGS, "STUFF");
+        let cfg = config_with("trading_mode", "live");
+        let mut m = manifest_with_prompt("BASE-LEAD");
+
+        rerender_hand_prompt_tails(&mut m, "lead", &def, &cfg);
+        let after_first = m.model.system_prompt.clone();
+        rerender_hand_prompt_tails(&mut m, "lead", &def, &cfg);
+        assert_eq!(m.model.system_prompt, after_first);
+
+        // Canonical order: settings -> reference -> team.
+        let settings_at = after_first.find("## User Configuration").unwrap();
+        let reference_at = after_first.find("## Reference Knowledge").unwrap();
+        let team_at = after_first.find("## Your Team").unwrap();
+        assert!(settings_at < reference_at && reference_at < team_at);
+    }
+
+    /// A hand whose prompt has no rendered tail yet — the very first save after an activation that had nothing to render — must still come out with the base prompt intact.
+    #[test]
+    fn rerender_from_bare_prompt_keeps_base() {
+        let def = parse_hand(MULTI_AGENT_HAND_WITH_SETTINGS, "");
+        let mut m = manifest_with_prompt("BASE-WORKER");
+        rerender_hand_prompt_tails(&mut m, "worker", &def, &config_with("trading_mode", "live"));
+        assert!(m.model.system_prompt.starts_with("BASE-WORKER\n\n---\n\n"));
+        assert!(!m.model.system_prompt.contains("## Reference Knowledge"));
+    }
+
+    #[test]
+    fn allowed_env_covers_selected_option_and_requirements() {
+        let def = parse_hand(MULTI_AGENT_HAND_WITH_SETTINGS, "");
+
+        // Default `paper` option declares no provider_env.
+        let on_default = resolve_hand_allowed_env(&def, &std::collections::HashMap::new());
+        assert_eq!(on_default, vec!["MARKET_FEED_ENDPOINT".to_string()]);
+
+        // Switching to `live` pulls in that option's provider_env — the
+        // whole point of re-resolving the allowlist on a settings save.
+        let on_live = resolve_hand_allowed_env(&def, &config_with("trading_mode", "live"));
+        assert_eq!(
+            on_live,
+            vec![
+                "BROKER_ACCOUNT_ID".to_string(),
+                "MARKET_FEED_ENDPOINT".to_string()
+            ]
+        );
+
+        // The `[[requires]]` entry naming a daemon secret is filtered out on
+        // both paths — a marketplace hand cannot widen the passthrough into
+        // the operator's own credentials by declaring a requirement for one.
+        for resolved in [&on_default, &on_live] {
+            assert!(
+                !resolved.contains(&"LIBREFANG_VAULT_KEY".to_string()),
+                "blocklisted env var must never reach the allowlist; got: {resolved:?}"
+            );
+        }
     }
 
     #[test]
