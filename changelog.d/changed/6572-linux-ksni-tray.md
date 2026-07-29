@@ -1,0 +1,4 @@
+Migrate the Linux system tray implementation in `librefang-desktop` from Tauri's default `tray-icon` to a pure D-Bus implementation using `ksni` 0.3.6.
+This removes `libappindicator` / `libappindicator-sys` from the Linux build graph, eliminating the runtime `dlopen` of `libayatana-appindicator3` and the corresponding CI/Docker package install.
+It does not remove the GTK3 dependency tree (`gtk`, `gdk`, `atk`, …) or resolve the advisories tracked in `deny.toml`'s `ignore` list (RUSTSEC-2024-0411..0420) — those stay transitive via `tauri-runtime-wry` on Linux regardless of the tray implementation, and RUSTSEC-2024-0429 was never in that list to begin with.
+The new implementation re-registers with the `StatusNotifierWatcher` via `ksni` on D-Bus reconnect, updates status properties every second, and supports toggling window visibility on left-click activation (#6572) (@pavver)
