@@ -363,6 +363,10 @@ The daemon command is `start` (not `daemon`).
   `cargo xtask collect-fragments` folds fragments into `## [Unreleased]` and deletes the files consumed; `cargo xtask release` runs it before cutting the dated section, so a fragment reaches the CHANGELOG exactly as a hand-written bullet does.
   Editing `## [Unreleased]` directly still works and assembly appends to whatever is already there — but the direct edit is the thing that conflicts, so don't reach for it.
   A fragment in an unrecognised section directory is rejected by `scripts/check-changelog-attribution.py`, because assembly has no heading to render it under and would drop it silently.
+  **The entry ends up in the GitHub release body verbatim.**
+  `cargo xtask release` moves the whole `## [Unreleased]` body into the dated `## [VERSION]` section it cuts, leaving the heading behind and empty for the next cycle, and `.github/workflows/release.yml` slices that section into the release notes, the Dev.to article, and the social post.
+  Generated `- <PR title> (#N) (@author)` lines fill only the gaps: a PR whose number appears in a curated bullet's trailing `(#N)` group gets no generated line, so it is described once, in the words someone chose.
+  Write the entry as prose that explains *why*, not a restatement of the PR title — the title is already covered for free.
 - **No AI / Claude attribution** in commit messages, PR bodies, or
   comments — see "Commit & PR hygiene" under GitHub Collaboration below
   for the canonical rule (the `commit-msg` hook enforces it server-side

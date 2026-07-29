@@ -8,6 +8,17 @@ Two PRs never touch the same fragment file, so the conflict becomes structurally
 Editing `## [Unreleased]` directly still works and is still supported.
 A fragment is the same bullet with a delay on it: `cargo xtask collect-fragments` folds fragments into `## [Unreleased]` and deletes the files it consumed, and the release flow runs that step before cutting the dated release section.
 
+## Where your fragment ends up
+
+In the GitHub release body, verbatim.
+
+`cargo xtask release` folds the fragments in, then moves the whole `## [Unreleased]` body into the dated `## [VERSION]` section it cuts — subsections and order intact — leaving the `## [Unreleased]` heading behind and empty for the next cycle.
+`.github/workflows/release.yml` slices that section out of `CHANGELOG.md` and publishes it as the release notes; `release-notify.yml` reuses the same slice for the announcement article and the social post.
+
+The rest of the section is generated from PR metadata and fills only the gaps.
+Every merged PR in the range gets a `- <PR title> (#N) (@author)` line **unless** its number appears in the trailing `(#N)` group of a curated bullet, in which case that bullet is the entry and no generated line is added.
+So write prose that explains *why*, not a restatement of your PR title — the title is already covered for free.
+
 ## Sections
 
 One directory per `### ` heading of `## [Unreleased]`:
@@ -53,6 +64,11 @@ After `cargo xtask collect-fragments` that lands under `### Fixed` in `## [Unrel
   The attribution may sit on any line of the bullet, but not past a blank line — a blank line ends the bullet, so anything after it is a separate paragraph.
 - The fragment must sit in one of the five section directories listed above.
 - Prose is not hard-wrapped at any column; break only at sentence boundaries.
+
+Not enforced, but it costs you if you skip it: end the bullet with its PR reference, `(#1234)` — or `(#1234, #1235)` when one entry covers two PRs.
+That group is how the release flow knows which generated line your prose replaces.
+Without it the generated list is kept in full, your PR appears twice in the release body, and `cargo xtask release` prints a warning naming the bullet.
+Only the **last** `(#N)` group on the bullet's **last non-empty line** counts, so a mid-bullet cross-reference to some other PR is never mistaken for yours.
 
 Checked by the `pre-commit` hook and by the `CHANGELOG Attribution` CI jobs, in all of their modes:
 
