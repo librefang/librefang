@@ -254,11 +254,11 @@ fn resolve_with(
     }
 
     if !invalidate {
-        return resolve_legacy_cache(config_dir).or_else(|error| {
+        return resolve_legacy_cache(config_dir).map_err(|error| {
             if matches!(error, CredentialError::NotLoggedIn) {
-                Err(CredentialError::NotInstalled)
+                CredentialError::NotInstalled
             } else {
-                Err(error)
+                error
             }
         });
     }
@@ -340,12 +340,12 @@ fn resolve_legacy_cache(config_dir: &Path) -> Result<EveryApiCredential, Credent
         login_base.is_empty() || login_base == GLOBAL_API_BASE || login_base == CHINA_API_BASE;
     let origin = if !official {
         login_base.to_string()
-    } else if matches!(
-        settings.gateway_region.trim().to_ascii_lowercase().as_str(),
-        "cn" | "china"
-    ) {
-        CHINA_API_BASE.to_string()
-    } else if login_base == CHINA_API_BASE {
+    } else if login_base == CHINA_API_BASE
+        || matches!(
+            settings.gateway_region.trim().to_ascii_lowercase().as_str(),
+            "cn" | "china"
+        )
+    {
         CHINA_API_BASE.to_string()
     } else {
         GLOBAL_API_BASE.to_string()
