@@ -1987,11 +1987,16 @@ mod tests {
             user_role_allows_request(UserRole::Admin, &post, "/api/plugins/install-deps/disable"),
             "the gate must read the action segment, not any segment"
         );
-        // A bare `{name}` POST is not a registered route; it must not be
-        // Owner-gated by accident either way, but it must not panic.
+        // Single-segment tail: `strip_prefix` leaves "enable" with no `/`, so
+        // there is no action segment and the predicate must fall through rather
+        // than treating the name as an action. No POST route is registered at
+        // this shape today (`/plugins/{name}` is GET-only), so this is a
+        // predicate boundary rather than a reachable request — the point is
+        // that a future `POST /api/plugins/{name}` cannot be silently
+        // Owner-gated by a name that collides with an action.
         assert!(
             user_role_allows_request(UserRole::Admin, &post, "/api/plugins/enable"),
-            "`/api/plugins/enable` is a plugin NAMED enable, not the enable action"
+            "a single trailing segment carries no action, so the gate must not fire"
         );
     }
 

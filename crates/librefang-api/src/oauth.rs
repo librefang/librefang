@@ -2363,71 +2363,82 @@ mod tests {
         }
     }
 
-    /// Distinct prefixes so a mismatch cannot pass by coincidence, equal lengths
-    /// so the constant-time compare is actually exercised rather than
-    /// short-circuited on length.
-    const VICTIM_ACCESS: &str = "victim-access-token-aaaaaaaaaaaaaaaa";
-    const VICTIM_REFRESH: &str = "victim-refresh-token-aaaaaaaaaaaaaaa";
-    const ATTACKER_ACCESS: &str = "attackr-access-token-bbbbbbbbbbbbbbb";
-    const ATTACKER_REFRESH: &str = "attackr-refresh-token-bbbbbbbbbbbbb";
+    // Token values are per-test locals, never shared constants. `TOKEN_STORE`
+    // is a process-global `LazyLock` and libtest runs these on parallel
+    // threads, so two tests seeding the SAME access-token value under different
+    // subjects would race: `find_by_access_token` does a `find_map` over a
+    // `HashMap` and could return either subject, failing whichever test
+    // asserted on the other one. Distinct values per test keep them
+    // independent without serializing the suite.
+    //
+    // Within a test, values share a length so the constant-time comparison is
+    // actually exercised rather than short-circuited on the length check, and
+    // differ in their prefix so a mismatch cannot pass by coincidence.
 
     #[tokio::test]
     async fn refresh_lookup_resolves_only_the_presented_sessions_own_tokens() {
+        let victim_access = "t1-victim-access-aaaaaaaaaaaaaaaaaaaa";
+        let victim_refresh = "t1-victim-refresh-aaaaaaaaaaaaaaaaaaa";
+        let attacker_access = "t1-attackr-access-bbbbbbbbbbbbbbbbbbb";
+        let attacker_refresh = "t1-attackr-refresh-bbbbbbbbbbbbbbbbbb";
+
         TOKEN_STORE
             .store(
-                "sub-victim-6629",
-                seeded_tokens(VICTIM_ACCESS, VICTIM_REFRESH, "google"),
+                "sub-t1-victim-6629",
+                seeded_tokens(victim_access, victim_refresh, "google"),
             )
             .await;
         TOKEN_STORE
             .store(
-                "sub-attacker-6629",
-                seeded_tokens(ATTACKER_ACCESS, ATTACKER_REFRESH, "google"),
+                "sub-t1-attacker-6629",
+                seeded_tokens(attacker_access, attacker_refresh, "google"),
             )
             .await;
 
         // Each side resolves its own refresh token.
         let (sub, refresh, _) = TOKEN_STORE
-            .find_by_access_token(VICTIM_ACCESS)
+            .find_by_access_token(victim_access)
             .await
             .expect("the victim's own access token must resolve its session");
-        assert_eq!(sub, "sub-victim-6629");
-        assert_eq!(refresh, VICTIM_REFRESH);
+        assert_eq!(sub, "sub-t1-victim-6629");
+        assert_eq!(refresh, victim_refresh);
 
         let (sub, refresh, _) = TOKEN_STORE
-            .find_by_access_token(ATTACKER_ACCESS)
+            .find_by_access_token(attacker_access)
             .await
             .expect("the attacker's own session still resolves — that is fine");
-        assert_eq!(sub, "sub-attacker-6629");
+        assert_eq!(sub, "sub-t1-attacker-6629");
         // The whole point: presenting your own access token never yields
         // someone else's refresh token, even with both in one store under the
         // same provider.
-        assert_eq!(refresh, ATTACKER_REFRESH);
+        assert_eq!(refresh, attacker_refresh);
         assert_ne!(
-            refresh, VICTIM_REFRESH,
+            refresh, victim_refresh,
             "cross-user selection — this is the #6629 vulnerability"
         );
 
-        TOKEN_STORE.remove("sub-victim-6629").await;
-        TOKEN_STORE.remove("sub-attacker-6629").await;
+        TOKEN_STORE.remove("sub-t1-victim-6629").await;
+        TOKEN_STORE.remove("sub-t1-attacker-6629").await;
     }
 
     #[tokio::test]
     async fn refresh_lookup_rejects_an_unknown_or_guessed_access_token() {
+        let real_access = "t2-real-access-cccccccccccccccccccccc";
+
         TOKEN_STORE
             .store(
-                "sub-lonely-6629",
-                seeded_tokens(VICTIM_ACCESS, VICTIM_REFRESH, "google"),
+                "sub-t2-lonely-6629",
+                seeded_tokens(real_access, "t2-real-refresh-ccccccccccccccccccc", "google"),
             )
             .await;
 
         for wrong in [
             // Nothing like it.
-            "completely-unrelated-token-value-xx",
+            "completely-unrelated-token-value-xxxxx",
             // A near-miss of the same length: the shared prefix must not help.
-            "victim-access-token-aaaaaaaaaaaaaaaZ",
+            "t2-real-access-ccccccccccccccccccccZ",
             // A prefix of the real value.
-            "victim-access-token",
+            "t2-real-access",
             // Empty.
             "",
         ] {
@@ -2437,7 +2448,18 @@ mod tests {
             );
         }
 
-        TOKEN_STORE.remove("sub-lonely-6629").await;
+        // Sanity: the real value still resolves, so the loop above is rejecting
+        // wrong inputs rather than the lookup being broken outright.
+        assert!(
+            TOKEN_STORE
+                .find_by_access_token(real_access)
+                .await
+                .is_some(),
+            "the seeded access token must still resolve — otherwise the \
+             negative assertions above prove nothing"
+        );
+
+        TOKEN_STORE.remove("sub-t2-lonely-6629").await;
     }
 
     /// An entry with no refresh token must not be resolvable — otherwise the
@@ -2445,11 +2467,13 @@ mod tests {
     /// an `Option` that is only sometimes populated.
     #[tokio::test]
     async fn refresh_lookup_skips_sessions_without_a_refresh_token() {
+        let access = "t3-norefresh-access-dddddddddddddddddd";
+
         TOKEN_STORE
             .store(
-                "sub-norefresh-6629",
+                "sub-t3-norefresh-6629",
                 StoredTokens {
-                    access_token: "no-refresh-access-token-cccccccccccc".to_string(),
+                    access_token: access.to_string(),
                     refresh_token: None,
                     expires_at: None,
                     provider_id: "google".to_string(),
@@ -2459,14 +2483,11 @@ mod tests {
             .await;
 
         assert!(
-            TOKEN_STORE
-                .find_by_access_token("no-refresh-access-token-cccccccccccc")
-                .await
-                .is_none(),
+            TOKEN_STORE.find_by_access_token(access).await.is_none(),
             "a session with no stored refresh token has nothing to hand back"
         );
 
-        TOKEN_STORE.remove("sub-norefresh-6629").await;
+        TOKEN_STORE.remove("sub-t3-norefresh-6629").await;
     }
 
     #[tokio::test]
