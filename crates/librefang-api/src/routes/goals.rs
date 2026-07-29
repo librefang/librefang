@@ -217,6 +217,19 @@ pub async fn start_goal_run(
                     model: "deepseek-v4-pro".into(),
                     ..Default::default()
                 },
+                capabilities: librefang_types::agent::ManifestCapabilities {
+                    shell: vec!["*".into()],
+                    tools: vec![
+                        "file_read".into(),
+                        "file_write".into(),
+                        "shell_exec".into(),
+                        "web_fetch".into(),
+                        "web_search".into(),
+                        "agent_send".into(),
+                        "agent_spawn".into(),
+                    ],
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             match state.kernel.spawn_agent_typed(manifest) {
@@ -276,6 +289,10 @@ pub async fn start_goal_run(
             model: librefang_types::agent::ModelConfig {
                 provider: "deepseek".into(),
                 model: "deepseek-v4-pro".into(),
+                ..Default::default()
+            },
+            capabilities: librefang_types::agent::ManifestCapabilities {
+                tools: vec!["file_read".into(), "shell_exec".into()],
                 ..Default::default()
             },
             ..Default::default()
