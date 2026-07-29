@@ -1451,6 +1451,13 @@ pub async fn build_router(
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
+        // Snapshot now, while this is still the config the kernel booted with
+        // and `kernel.embedding()` still reflects it. `/api/ready` compares the
+        // two; reading the requirement live would let a later config reload
+        // introduce one the driver can never satisfy. See the field docs.
+        readiness_requires_embedding: crate::routes::config::embedding_is_required(
+            &kernel.config_ref(),
+        ),
         bridge_manager: arc_swap::ArcSwap::new(std::sync::Arc::new(bridge)),
         channels_config: tokio::sync::RwLock::new(channels_config),
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),

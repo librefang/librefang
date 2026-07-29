@@ -142,6 +142,24 @@ pub(crate) fn resolve_lang(lang: Option<&axum::Extension<RequestLanguage>>) -> &
 pub struct AppState {
     pub kernel: Arc<dyn KernelApi>,
     pub started_at: Instant,
+    /// Whether a working embedding driver was a *requirement* of the config
+    /// this process booted with — snapshotted at boot, deliberately not read
+    /// live (#6633).
+    ///
+    /// `GET /api/ready` compares this against `kernel.embedding()`, which
+    /// reflects the driver built once during boot. Reading the requirement
+    /// from the live `config_ref()` instead would compare two different points
+    /// in time: `POST /api/config/reload` swaps the whole `KernelConfig` when
+    /// the plan carries any hot action, so an edit that adds
+    /// `memory.embedding_provider` alongside any hot-reloadable field lands a
+    /// new requirement against a driver that is never rebuilt (a `[memory]`
+    /// change is `restart_required`). Readiness would then report 503 forever
+    /// while the daemon is perfectly able to serve traffic, and Kubernetes
+    /// would hold the pod out of Service endpoints with no automatic recovery
+    /// — turning a config-file edit into an outage.
+    ///
+    /// Snapshotting keeps the probe an answer about *this* process.
+    pub readiness_requires_embedding: bool,
     /// Channel bridge manager — held in an `ArcSwap` for lock-free reads and atomic
     /// swap on hot-reload. Write sites use `store(Arc::new(new_value))`; the stop
     /// path uses `swap` + `Arc::try_unwrap` to obtain ownership for `stop()`.

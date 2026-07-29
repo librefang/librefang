@@ -277,7 +277,11 @@ fn database_probe_ok(state: &Arc<AppState>) -> bool {
 /// * `embedding_provider` unset or `"auto"` — boot probes provider API-key
 ///   env vars and falls back to local Ollama, then to FTS. Nothing was
 ///   promised, so nothing is broken.
-fn embedding_is_required(config: &librefang_types::config::KernelConfig) -> bool {
+///
+/// Callers must evaluate this against the config the process **booted** with
+/// and cache the answer in `AppState::readiness_requires_embedding`, not read
+/// it live per request. See that field's documentation for why.
+pub(crate) fn embedding_is_required(config: &librefang_types::config::KernelConfig) -> bool {
     if config.memory.fts_only.unwrap_or(false) {
         return false;
     }
@@ -315,8 +319,12 @@ fn embedding_is_required(config: &librefang_types::config::KernelConfig) -> bool
 pub async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let db_ok = database_probe_ok(&state);
 
-    let config = state.kernel.config_ref();
-    let embedding_required = embedding_is_required(&config);
+    // Boot-time snapshot, not `config_ref()`: the requirement and the driver
+    // must be read from the same point in time, or a `POST /api/config/reload`
+    // that adds `memory.embedding_provider` pins readiness at 503 against a
+    // driver that a `restart_required` change will never rebuild. See
+    // `AppState::readiness_requires_embedding`.
+    let embedding_required = state.readiness_requires_embedding;
     let embedding_present = state.kernel.embedding().is_some();
     let embedding_status = match (embedding_required, embedding_present) {
         (true, true) => "ok",

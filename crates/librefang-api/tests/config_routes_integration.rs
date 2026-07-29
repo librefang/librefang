@@ -1550,3 +1550,97 @@ async fn ready_treats_auto_embedding_provider_as_optional() {
         Some(false)
     );
 }
+
+/// Readiness must answer for the process that is running, not for whatever
+/// `config.toml` says right now.
+///
+/// `POST /api/config/reload` swaps the entire live `KernelConfig` whenever the
+/// plan carries any hot action, and a `[memory]` change is classified
+/// `restart_required` — the embedding driver is built once at boot and never
+/// rebuilt. So an operator edit that adds `memory.embedding_provider`
+/// alongside any hot-reloadable field would, if the probe read the requirement
+/// from `config_ref()`, introduce a requirement against a driver that can
+/// never appear. Readiness would sit at 503 forever while the daemon served
+/// traffic perfectly well, and Kubernetes would hold the pod out of Service
+/// endpoints with no path back except a manual restart: a config-file edit
+/// turned into an outage.
+///
+/// `AppState::readiness_requires_embedding` snapshots the requirement at boot
+/// to keep both halves of the comparison from the same point in time.
+#[tokio::test(flavor = "multi_thread")]
+async fn ready_ignores_an_embedding_provider_introduced_by_a_later_config_reload() {
+    let h = boot_router_with_api_key(API_KEY).await;
+
+    // Baseline: nothing pinned at boot, so readiness does not depend on an
+    // embedding driver.
+    let (status, body) = send(h.app.clone(), anon_get("/api/ready")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        ready_check(&json, "embedding")
+            .get("required")
+            .and_then(|r| r.as_bool()),
+        Some(false),
+        "precondition: the harness pins no provider at boot"
+    );
+
+    // Land a config.toml that pins an unsatisfiable embedding provider AND
+    // touches a hot-reloadable field. The second part matters: `should_store_config`
+    // only swaps the live config when the plan carries a hot action or a
+    // no-op change, so a memory-only edit would not swap at all and the test
+    // would pass for the wrong reason.
+    let on_disk = format!(
+        "log_level = \"debug\"\n\
+         max_history_messages = 42\n\
+         [memory]\n\
+         fts_only = false\n\
+         embedding_provider = \"cohere\"\n\
+         embedding_api_key_env = \"{ABSENT_EMBEDDING_KEY_ENV}\"\n"
+    );
+    std::fs::write(h.home.join("config.toml"), on_disk).expect("write config.toml");
+
+    let reload = Request::builder()
+        .method(Method::POST)
+        .uri("/api/config/reload")
+        .header(header::AUTHORIZATION, format!("Bearer {API_KEY}"))
+        .body(Body::empty())
+        .unwrap();
+    let (reload_status, reload_body) = send(h.app.clone(), reload).await;
+    assert_eq!(
+        reload_status,
+        StatusCode::OK,
+        "reload should succeed (partially): {}",
+        String::from_utf8_lossy(&reload_body)
+    );
+    let reload_json: serde_json::Value =
+        serde_json::from_slice(&reload_body).expect("reload body is JSON");
+    // Sanity-check that this edit really is the restart-required shape the
+    // regression depends on. If a future reload-plan change made `[memory]`
+    // hot-reloadable, this assertion fails loudly and the snapshot rationale
+    // above needs revisiting — rather than the test silently going vacuous.
+    assert_eq!(
+        reload_json
+            .get("restart_required")
+            .and_then(|r| r.as_bool()),
+        Some(true),
+        "a [memory] edit must still be restart_required for this regression to \
+         be meaningful: {reload_json}"
+    );
+
+    let (status, body) = send(h.app.clone(), anon_get("/api/ready")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a config reload must not be able to fail readiness for a driver the \
+         running process was never asked to build; body: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        ready_check(&json, "embedding")
+            .get("required")
+            .and_then(|r| r.as_bool()),
+        Some(false),
+        "the requirement is a boot-time property: {json}"
+    );
+}

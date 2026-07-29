@@ -226,6 +226,10 @@ impl TestAppState {
         Arc::new(AppState {
             kernel,
             started_at: Instant::now(),
+            // The mock kernel pins no embedding provider, so readiness never
+            // depends on one. Production computes this from the booted config
+            // in `server::build_router`.
+            readiness_requires_embedding: false,
             bridge_manager: arc_swap::ArcSwap::new(std::sync::Arc::new(None)),
             channels_config: tokio::sync::RwLock::new(channels_config),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
