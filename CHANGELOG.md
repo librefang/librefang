@@ -69,10 +69,6 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Fixed
 
-- Substitute `MAX_CONTENT_CHARS` into the page-extraction script instead of leaving the cap hard-coded in the JavaScript, so the constant that documents the limit is the one that enforces it.
-  `MAX_CONTENT_CHARS` was declared, marked `#[allow(dead_code)]`, and read by nothing; the script truncated at a literal `50000` written twice inside the JS string.
-  Editing the constant to change how much page text reaches the model therefore did nothing at all, and the `#[allow]` suppressed the one warning that would have said so.
-  The script is now a template with a `__MAX_CONTENT_CHARS__` placeholder substituted once through a `LazyLock`, and a test asserts both that the placeholder is gone from the built script and that it is still present in the template — the second half is what keeps the two from silently drifting apart again (@nevgenov)
 - Merge instead of replace in `PATCH /api/agents/{id}/identity`, so a partial body no longer nulls the identity fields it omits.
   The handler built a fresh `AgentIdentity` from the request alone with no read of the stored one, so `PATCH {"emoji": "X"}` silently discarded `avatar_url`, `color`, `archetype`, `vibe` and `greeting_style` and returned `200` — while the sibling `PATCH /api/agents/{id}/config`, which writes the same six fields, merged them correctly.
   Two PATCH endpoints on one resource with opposite semantics is the actual defect, so the six-field merge is now a single shared `merge_agent_identity` helper that both handlers call rather than a copy in each; an integration test asserts the two routes produce the same stored identity for the same partial body.
