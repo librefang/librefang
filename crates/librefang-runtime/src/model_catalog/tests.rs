@@ -2380,9 +2380,9 @@ fn explicit_registration_takes_the_entry_back_from_cli_management() {
     );
 }
 
-/// Installing a provider file at runtime (the registry install route) names an
-/// `api_key_env`, which is an explicit credential source — so it also takes the
-/// entry back, without waiting for the next boot to reclassify it.
+/// Installing a provider file at runtime — the registry install route behind the
+/// dashboard's "Connect EveryAPI gateway" action — is an explicit configuration,
+/// so it takes the entry back without waiting for the next boot to reclassify it.
 #[test]
 fn a_provider_file_merge_clears_cli_management() {
     let mut catalog = ModelCatalog::default();
@@ -2405,6 +2405,38 @@ fn a_provider_file_merge_clears_cli_management() {
     let provider = catalog.get_provider("everyapi").unwrap();
     assert!(!provider.cli_managed);
     assert_eq!(provider.api_key_env, "MY_EVERYAPI_KEY");
+    assert_eq!(provider.base_url, "https://relay.self-hosted.example/v1");
+}
+
+/// A payload that leaves `api_key_env` empty keeps the previous env var, but it
+/// still overwrites `base_url` — so it must take the entry back too. Tying the
+/// hand-off to the `api_key_env` branch instead would leave the endpoint the
+/// file just set exposed to the next credential refresh.
+#[test]
+fn a_provider_file_merge_without_a_key_env_still_clears_cli_management() {
+    let mut catalog = ModelCatalog::default();
+    assert!(catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1"));
+
+    catalog.merge_catalog_file(librefang_types::model_catalog::ModelCatalogFile {
+        provider: Some(librefang_types::model_catalog::ProviderCatalogToml {
+            id: "everyapi".to_string(),
+            display_name: "EveryAPI".to_string(),
+            api_key_env: String::new(),
+            base_url: "https://relay.self-hosted.example/v1".to_string(),
+            key_required: true,
+            signup_url: None,
+            regions: std::collections::HashMap::new(),
+            media_capabilities: Vec::new(),
+        }),
+        models: Vec::new(),
+    });
+
+    let provider = catalog.get_provider("everyapi").unwrap();
+    assert!(!provider.cli_managed);
+    assert_eq!(
+        provider.api_key_env, "EVERYAPI_API_KEY",
+        "an empty payload field must not erase the previous env var"
+    );
     assert_eq!(provider.base_url, "https://relay.self-hosted.example/v1");
 }
 

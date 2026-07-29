@@ -1574,14 +1574,19 @@ impl ModelCatalog {
                     // Keep the previous env var when catalog payload omits/empties it.
                     if !prov_toml.api_key_env.trim().is_empty() {
                         existing.api_key_env = prov_toml.api_key_env;
-                        // A provider file naming its own key env var is an
-                        // explicit credential source, so it takes the entry
-                        // back from CLI-managed discovery. Without this, the
-                        // operator's file would keep its endpoint rewritten
-                        // from the CLI account on every credential refresh.
-                        existing.cli_managed = false;
                     }
                     existing.key_required = prov_toml.key_required;
+                    // A provider file is an explicit configuration, so it takes
+                    // the entry back from CLI-managed discovery.
+                    //
+                    // Unconditional, and specifically not tied to the
+                    // `api_key_env` branch above: this function has already
+                    // overwritten `base_url` either way, so leaving the entry
+                    // CLI-managed would let the next credential refresh rewrite
+                    // the endpoint the file just set. Only EveryAPI ever sets
+                    // the flag, so clearing it is a no-op for every other
+                    // provider.
+                    existing.cli_managed = false;
                 }
             } else {
                 self.providers.push(prov_toml.into());
