@@ -105,7 +105,8 @@ A ReadWriteMany volume also does not buy anything here — it would let a second
 
 ## Health contracts
 
-Three probes, two contracts. Confusing them causes restart loops.
+Three probes, two contracts.
+Confusing them causes restart loops.
 
 | Probe | Endpoint | Meaning | On failure |
 | --- | --- | --- | --- |
@@ -120,14 +121,16 @@ That is intentional and is why it is safe as a liveness signal: a recoverable st
 An unset or `"auto"` embedding provider is an optional enhancement and never fails readiness, because falling back to FTS text search is a supported mode rather than a degradation.
 
 Both endpoints are public: the kubelet issues probes with no credential, and a 401 would pin the pod out of Service endpoints permanently.
-Their payloads are minimal by design — check names and a coarse status, no version, hostname, provider id, or error text. Detailed diagnostics stay behind the authenticated `/api/health/detail`.
+Their payloads are minimal by design — check names and a coarse status, no version, hostname, provider id, or error text.
+Detailed diagnostics stay behind the authenticated `/api/health/detail`.
 
 ## Updates and restarts
 
 A StatefulSet terminates its pod before creating the replacement, so two daemons never contend for the volume.
 State survives pod replacement because the PVC created from `volumeClaimTemplates` outlives the pod — and outlives the StatefulSet itself, which is why deleting the StatefulSet does not delete your agents.
 
-`terminationGracePeriodSeconds: 60` covers the SQLite WAL checkpoint plus any in-flight agent turn. The daemon stops accepting new work on SIGTERM; the window is for finishing what it already started, so a turn mid-LLM-call is not killed with its tool results unpersisted.
+`terminationGracePeriodSeconds: 60` covers the SQLite WAL checkpoint plus any in-flight agent turn.
+The daemon stops accepting new work on SIGTERM; the window is for finishing what it already started, so a turn mid-LLM-call is not killed with its tool results unpersisted.
 
 If you prefer a Deployment, it must set `strategy: Recreate`.
 The default `RollingUpdate` briefly runs both pods, and the new one either fails to attach the ReadWriteOnce PVC or — on a driver that permits multi-attach — fails the `daemon.lock` flock.
