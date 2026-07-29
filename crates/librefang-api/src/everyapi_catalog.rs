@@ -87,11 +87,8 @@ const RATIO_USD_PER_MILLION: f64 = 2.0;
 fn catalog_provider_is_configured(catalog: &ModelCatalog) -> bool {
     !catalog.is_suppressed(PROVIDER_ID)
         && catalog.get_provider(PROVIDER_ID).is_some_and(|provider| {
-            // The `Missing` arm keeps a CLI-managed entry eligible while the
-            // credential process is unreachable, so a later login recovers on
-            // its own. It is keyed on `cli_managed` rather than `!is_custom`:
-            // an explicit provider file whose key env var is simply unset must
-            // not be sent down the CLI credential path.
+            // The `Missing` arm keeps a CLI-managed entry eligible while the credential process is unreachable, so a later login recovers on its own.
+            // It is keyed on `cli_managed` rather than `!is_custom`: an explicit provider file whose key env var is simply unset must not be sent down the CLI credential path.
             matches!(
                 provider.auth_status,
                 AuthStatus::Configured | AuthStatus::ValidatedKey | AuthStatus::AutoDetected
@@ -99,14 +96,10 @@ fn catalog_provider_is_configured(catalog: &ModelCatalog) -> bool {
         })
 }
 
-/// Whether this entry's credentials come from the EveryAPI CLI rather than from
-/// a declared env var.
+/// Whether this entry's credentials come from the EveryAPI CLI rather than from a declared env var.
 ///
-/// Keys on `cli_managed` alone. `auth_status` used to carry part of this answer
-/// (`AutoDetected | Missing`), but it describes availability, not provenance —
-/// and pairing it with `!is_custom` classified an explicitly configured
-/// provider file as CLI-managed, which let `ensure_managed_everyapi` repoint
-/// the operator's endpoint at whatever account the CLI was logged into.
+/// Keys on `cli_managed` alone.
+/// `auth_status` used to carry part of this answer (`AutoDetected | Missing`), but it describes availability, not provenance — and pairing it with `!is_custom` classified an explicitly configured provider file as CLI-managed, which let `ensure_managed_everyapi` repoint the operator's endpoint at whatever account the CLI was logged into.
 fn is_managed_provider_active(catalog: &ModelCatalog) -> bool {
     !catalog.is_suppressed(PROVIDER_ID)
         && catalog
@@ -616,10 +609,7 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
         } else {
             provider.api_key_env.clone()
         };
-        // Which credential source to use is the entry's provenance, not its
-        // current availability: an explicitly configured provider file whose
-        // key env var happens to be unset must NOT fall through to the CLI's
-        // credential process, or `ensure_managed_everyapi` would repoint it.
+        // Which credential source to use is the entry's provenance, not its current availability: an explicitly configured provider file whose key env var happens to be unset must NOT fall through to the CLI's credential process, or `ensure_managed_everyapi` would repoint it.
         (provider.base_url.clone(), env_var, provider.cli_managed)
     };
 
@@ -695,12 +685,7 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
                     // entry has not been taken over by CLI-managed discovery and
                     // still declares that same credential env var.
                     //
-                    // `is_custom` is deliberately NOT part of the invariant — it
-                    // answers "may the dashboard delete this?" and the catalog
-                    // loader leaves it `false` for every provider whenever
-                    // `registry/providers/` is unreadable, so an explicitly
-                    // configured gateway is routinely non-custom and requiring
-                    // the flag here discarded its refresh silently.
+                    // `is_custom` is deliberately NOT part of the invariant — it answers "may the dashboard delete this?" and the catalog loader leaves it `false` for every provider whenever `registry/providers/` is unreadable, so an explicitly configured gateway is routinely non-custom and requiring the flag here discarded its refresh silently.
                     !is_managed_provider_active(catalog)
                         && provider.api_key_env == expected_api_key_env
                 }
@@ -991,17 +976,11 @@ mod tests {
 
     /// The mirror of the write-back bug, and the more damaging half.
     ///
-    /// A provider file installed at runtime before its key is set lands as
-    /// non-custom + `Missing`. The gate used to admit that shape through
-    /// `(!is_custom && Missing)`, and `refresh_now` used to read the same pair
-    /// as "CLI-managed" — so the refresh spawned the EveryAPI credential
-    /// process and `ensure_managed_everyapi` rewrote the operator's `base_url`
-    /// to whatever account the CLI was logged into. A self-hosted or regional
-    /// gateway was silently repointed until the next daemon restart, where
-    /// `everyapi_explicit` would have classified it correctly.
+    /// A provider file installed at runtime before its key is set lands as non-custom + `Missing`.
+    /// The gate used to admit that shape through `(!is_custom && Missing)`, and `refresh_now` used to read the same pair as "CLI-managed" — so the refresh spawned the EveryAPI credential process and `ensure_managed_everyapi` rewrote the operator's `base_url` to whatever account the CLI was logged into.
+    /// A self-hosted or regional gateway was silently repointed until the next daemon restart, where `everyapi_explicit` would have classified it correctly.
     ///
-    /// Provenance now lives in `cli_managed`, so the entry is inert until its
-    /// own key appears.
+    /// Provenance now lives in `cli_managed`, so the entry is inert until its own key appears.
     #[test]
     fn a_keyless_provider_file_is_inert_rather_than_read_as_cli_managed() {
         let mut catalog = ModelCatalog::default();

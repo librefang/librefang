@@ -1129,11 +1129,8 @@ impl ModelCatalog {
             }
             provider.base_url = base_url.to_string();
             provider.auth_status = AuthStatus::AutoDetected;
-            // Boot only reaches this call after ruling out every explicit
-            // source, so adopting a registry-shipped entry here is correct.
-            // Runtime callers arrive through `resolve_managed_credential`,
-            // which is gated on this same flag — so an entry that was never
-            // CLI-managed can no longer be repointed at the CLI's endpoint.
+            // Boot only reaches this call after ruling out every explicit source, so adopting a registry-shipped entry here is correct.
+            // Runtime callers arrive through `resolve_managed_credential`, which is gated on this same flag — so an entry that was never CLI-managed can no longer be repointed at the CLI's endpoint.
             provider.cli_managed = true;
             return true;
         }
@@ -1182,8 +1179,7 @@ impl ModelCatalog {
                 AuthStatus::Missing
             };
             provider.is_custom = true;
-            // Explicit configuration takes the entry back from CLI-managed
-            // discovery: its credentials now come from `api_key_env`.
+            // Explicit configuration takes the entry back from CLI-managed discovery: its credentials now come from `api_key_env`.
             provider.cli_managed = false;
             return true;
         }
@@ -1576,16 +1572,10 @@ impl ModelCatalog {
                         existing.api_key_env = prov_toml.api_key_env;
                     }
                     existing.key_required = prov_toml.key_required;
-                    // A provider file is an explicit configuration, so it takes
-                    // the entry back from CLI-managed discovery.
+                    // A provider file is an explicit configuration, so it takes the entry back from CLI-managed discovery.
                     //
-                    // Unconditional, and specifically not tied to the
-                    // `api_key_env` branch above: this function has already
-                    // overwritten `base_url` either way, so leaving the entry
-                    // CLI-managed would let the next credential refresh rewrite
-                    // the endpoint the file just set. Only EveryAPI ever sets
-                    // the flag, so clearing it is a no-op for every other
-                    // provider.
+                    // Unconditional, and specifically not tied to the `api_key_env` branch above: this function has already overwritten `base_url` either way, so leaving the entry CLI-managed would let the next credential refresh rewrite the endpoint the file just set.
+                    // Only EveryAPI ever sets the flag, so clearing it is a no-op for every other provider.
                     existing.cli_managed = false;
                 }
             } else {

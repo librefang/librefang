@@ -2358,9 +2358,8 @@ fn explicit_everyapi_registration_survives_without_a_registry_entry() {
     assert!(!provider.cli_managed);
 }
 
-/// Provenance must survive a CLI login that predates the explicit config, and
-/// the explicit side must win. Reading `!is_custom` as "CLI-managed" instead
-/// let the credential process keep rewriting `base_url` afterwards.
+/// Provenance must survive a CLI login that predates the explicit config, and the explicit side must win.
+/// Reading `!is_custom` as "CLI-managed" instead let the credential process keep rewriting `base_url` afterwards.
 #[test]
 fn explicit_registration_takes_the_entry_back_from_cli_management() {
     let mut catalog = ModelCatalog::default();
@@ -2380,9 +2379,7 @@ fn explicit_registration_takes_the_entry_back_from_cli_management() {
     );
 }
 
-/// Installing a provider file at runtime — the registry install route behind the
-/// dashboard's "Connect EveryAPI gateway" action — is an explicit configuration,
-/// so it takes the entry back without waiting for the next boot to reclassify it.
+/// Installing a provider file at runtime — the registry install route behind the dashboard's "Connect EveryAPI gateway" action — is an explicit configuration, so it takes the entry back without waiting for the next boot to reclassify it.
 #[test]
 fn a_provider_file_merge_clears_cli_management() {
     let mut catalog = ModelCatalog::default();
@@ -2408,10 +2405,8 @@ fn a_provider_file_merge_clears_cli_management() {
     assert_eq!(provider.base_url, "https://relay.self-hosted.example/v1");
 }
 
-/// A payload that leaves `api_key_env` empty keeps the previous env var, but it
-/// still overwrites `base_url` — so it must take the entry back too. Tying the
-/// hand-off to the `api_key_env` branch instead would leave the endpoint the
-/// file just set exposed to the next credential refresh.
+/// A payload that leaves `api_key_env` empty keeps the previous env var, but it still overwrites `base_url` — so it must take the entry back too.
+/// Tying the hand-off to the `api_key_env` branch instead would leave the endpoint the file just set exposed to the next credential refresh.
 #[test]
 fn a_provider_file_merge_without_a_key_env_still_clears_cli_management() {
     let mut catalog = ModelCatalog::default();
@@ -2440,15 +2435,10 @@ fn a_provider_file_merge_without_a_key_env_still_clears_cli_management() {
     assert_eq!(provider.base_url, "https://relay.self-hosted.example/v1");
 }
 
-/// `detect_auth` must leave a CLI-managed entry alone: no env var describes its
-/// credentials, so probing `api_key_env` could only promote it on the strength
-/// of an unrelated key and route its refresh down the explicit-key branch.
+/// `detect_auth` must leave a CLI-managed entry alone: no env var describes its credentials, so probing `api_key_env` could only promote it on the strength of an unrelated key and route its refresh down the explicit-key branch.
 ///
-/// `EVERYAPI_API_KEY` is set here precisely because that is the env var
-/// `ensure_managed_everyapi` records — a stray value in the daemon's
-/// environment must not be mistaken for the CLI login's credentials. Nothing
-/// else in this crate reads the variable, so setting it cannot skew a
-/// concurrent test.
+/// `EVERYAPI_API_KEY` is set here precisely because that is the env var `ensure_managed_everyapi` records — a stray value in the daemon's environment must not be mistaken for the CLI login's credentials.
+/// Nothing else in this crate reads the variable, so setting it cannot skew a concurrent test.
 #[test]
 fn detect_auth_does_not_promote_a_cli_managed_entry_from_a_stray_env_key() {
     let previous = std::env::var("EVERYAPI_API_KEY").ok();
@@ -2456,8 +2446,7 @@ fn detect_auth_does_not_promote_a_cli_managed_entry_from_a_stray_env_key() {
 
     let mut catalog = ModelCatalog::default();
     assert!(catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1"));
-    // The API refresh path demotes the entry when the credential process
-    // becomes unreachable; an unrelated re-detection pass must not undo that.
+    // The API refresh path demotes the entry when the credential process becomes unreachable; an unrelated re-detection pass must not undo that.
     catalog.set_provider_auth_status("everyapi", AuthStatus::Missing);
     catalog.detect_auth();
     let provider = catalog.get_provider("everyapi").unwrap();
