@@ -1105,6 +1105,52 @@ system_prompt = "BASE-WORKER"
         );
     }
 
+    /// A base prompt that *talks about* the User Configuration section must not be mistaken for one.
+    ///
+    /// This is the shape the registry's Trading Hand actually has: its Phase 0 says "Read **User Configuration** section for trading_mode, market_focus, …" and Phase 6 says "Read trading_mode from User Configuration", with no `## User Configuration` heading anywhere in the prompt body.
+    /// The marker is the fenced `\n\n---\n\n## User Configuration` form precisely so prose like that cannot make `find()` truncate author-written instructions, which would silently delete the phases that consume the settings.
+    #[test]
+    fn settings_marker_ignores_prose_references_to_the_section() {
+        let base = "You are a trader.\n\n\
+                    2. Read **User Configuration** section for trading_mode and watchlist\n\n\
+                    ## Phase 6\n\nRead trading_mode from User Configuration:";
+        let mut m = manifest_with_prompt(base);
+        apply_settings_block_to_manifest(
+            &mut m,
+            &make_settings(),
+            &std::collections::HashMap::new(),
+        );
+        assert!(
+            m.model.system_prompt.starts_with(base),
+            "prose mentions must survive verbatim; got: {}",
+            m.model.system_prompt
+        );
+        assert_eq!(
+            manifest_for_diff(&m).model.system_prompt,
+            base,
+            "stripping back to the base prompt must land at the fence, not at a prose mention"
+        );
+
+        // And a re-render over that prompt stays stable rather than eating a phase per save.
+        let def = parse_hand(MULTI_AGENT_HAND_WITH_SETTINGS, "");
+        let mut live = manifest_with_prompt(base);
+        rerender_hand_prompt_tails(
+            &mut live,
+            "lead",
+            &def,
+            &config_with("trading_mode", "live"),
+        );
+        let after_first = live.model.system_prompt.clone();
+        rerender_hand_prompt_tails(
+            &mut live,
+            "lead",
+            &def,
+            &config_with("trading_mode", "live"),
+        );
+        assert_eq!(live.model.system_prompt, after_first);
+        assert!(live.model.system_prompt.starts_with(base));
+    }
+
     #[test]
     fn apply_skill_reference_replaces_stale_tail_when_content_changes() {
         let def_old = parse_hand(SINGLE_AGENT_HAND, "OLD");
