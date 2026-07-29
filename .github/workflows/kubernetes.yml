@@ -81,7 +81,7 @@ jobs:
           # admission, not runtime resolution of secretKeyRefs.
           kubectl -n librefang apply --dry-run=server -f rendered-base.yaml
 
-      - name: Reject the manifests under enforced restricted Pod Security
+      - name: Accepted by an API server enforcing restricted Pod Security
         run: |
           set -euo pipefail
           # Positive control for #6632: with `enforce=restricted` the API server
