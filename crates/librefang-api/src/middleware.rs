@@ -228,6 +228,20 @@ fn plugin_route_executes_plugin_code(path: &str) -> bool {
     if path == "/api/plugins/install" {
         return true;
     }
+    // Same fetch as `/install`, plus it resolves the dependency graph and
+    // installs every unresolved dependency too — the identical capability
+    // through a second top-level path, so it needs its own exact-match check
+    // rather than falling through the `{name}/<action>` split below (this
+    // path has no `{name}` segment).
+    if path == "/api/plugins/install-with-deps" {
+        return true;
+    }
+    // Batch form of the per-plugin `reload` action below: pre-warms one or
+    // more plugins by calling the same `plugin_manager::reload_plugin`, just
+    // without a `{name}` segment to match on.
+    if path == "/api/plugins/prewarm" {
+        return true;
+    }
     let Some(rest) = path.strip_prefix("/api/plugins/") else {
         return false;
     };
@@ -251,6 +265,10 @@ fn plugin_route_executes_plugin_code(path: &str) -> bool {
             // picked up on the next call. The reload itself executes nothing;
             // it is how edited code goes live.
             | "reload"
+            // Same underlying `reload_plugin` call as `reload` above, invoked
+            // to warm persistent hook subprocesses ahead of the first real
+            // call rather than in response to an edit.
+            | "prewarm"
             // Recomputes and writes `[integrity]` hashes into plugin.toml.
             // Load-time verification (`plugin_manager`) rejects a hook whose
             // hash no longer matches, so re-signing is what makes a tampered
@@ -1912,11 +1930,14 @@ mod tests {
         let post = axum::http::Method::POST;
         for path in [
             "/api/plugins/install",
+            "/api/plugins/install-with-deps",
+            "/api/plugins/prewarm",
             "/api/plugins/evil/install-deps",
             "/api/plugins/evil/test-hook",
             "/api/plugins/evil/upgrade",
             "/api/plugins/evil/enable",
             "/api/plugins/evil/reload",
+            "/api/plugins/evil/prewarm",
             "/api/plugins/evil/sign",
         ] {
             assert!(
