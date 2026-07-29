@@ -169,10 +169,10 @@ export function CommsPage() {
     refetchInterval: 5_000,
   });
 
-  const channels = channelsQuery.data ?? [];
+  const channels = useMemo(() => channelsQuery.data ?? [], [channelsQuery.data]);
   const snapshot = snapshotQuery.data ?? null;
   const topology = topologyQuery.data ?? null;
-  const events = eventsQuery.data ?? [];
+  const events = useMemo(() => eventsQuery.data ?? [], [eventsQuery.data]);
   const isLoading = channelsQuery.isLoading || snapshotQuery.isLoading;
 
   const configuredCount = useMemo(() => channels.filter(c => c.configured).length, [channels]);

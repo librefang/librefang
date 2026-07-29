@@ -38,7 +38,10 @@ export function RecordsTab({
   const memoryQuery = useMemorySearchOrList(deferredSearch);
   const cleanupMutation = useCleanupMemories();
 
-  const allMemories = memoryQuery.data?.memories ?? [];
+  const allMemories = useMemo(
+    () => memoryQuery.data?.memories ?? [],
+    [memoryQuery.data?.memories],
+  );
   const totalCount = memoryQuery.data?.total ?? 0;
 
   const scopedMemories = useMemo(() => {

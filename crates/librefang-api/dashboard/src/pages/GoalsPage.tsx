@@ -128,7 +128,7 @@ export function GoalsPage() {
   const createMutation = useCreateGoal();
   const updateMutation = useUpdateGoal();
   const deleteMutation = useDeleteGoal();
-  const goals = goalsQuery.data ?? [];
+  const goals = useMemo(() => goalsQuery.data ?? [], [goalsQuery.data]);
   const templates = templatesQuery.data ?? [];
 
   const runBatch = async <T,>(items: readonly T[], action: (item: T) => Promise<unknown>) => {

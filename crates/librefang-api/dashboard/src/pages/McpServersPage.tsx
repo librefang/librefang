@@ -74,7 +74,6 @@ class LazyIconBoundary extends Component<
     return { hasError: true };
   }
   componentDidCatch(error: Error) {
-    // eslint-disable-next-line no-console
     console.warn("CatalogIcon: lazy icon failed to load, using fallback.", error);
   }
   render() {
@@ -1381,8 +1380,8 @@ export function McpServersPage() {
   const reloadMutation = useReloadMcp();
 
   const data = serversQuery.data;
-  const configured = data?.configured ?? [];
-  const connected = data?.connected ?? [];
+  const configured = useMemo(() => data?.configured ?? [], [data?.configured]);
+  const connected = useMemo(() => data?.connected ?? [], [data?.connected]);
 
   // First-time visitors with no servers configured land on the marketplace
   // tab — installing a template is the obvious next step, and the empty
@@ -1478,7 +1477,10 @@ export function McpServersPage() {
   // bookkeeping (mutation, env inputs, success/error toasts) lives there.
   // The page only owns which template is currently being installed.
 
-  const catalogEntries = catalogQuery.data?.entries ?? [];
+  const catalogEntries = useMemo(
+    () => catalogQuery.data?.entries ?? [],
+    [catalogQuery.data?.entries],
+  );
   // Catalog entries are already flagged `installed` by the backend, but the
   // dashboard also treats a server whose `template_id` matches as installed.
   const installedTemplateIds = useMemo(

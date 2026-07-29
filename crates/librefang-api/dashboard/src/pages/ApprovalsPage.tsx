@@ -729,7 +729,7 @@ export function ApprovalsPage() {
   const rejectMutation = useRejectApproval();
 
   const totpEnforced = totpQuery.data?.enforced ?? false;
-  const approvals = approvalsQuery.data ?? [];
+  const approvals = useMemo(() => approvalsQuery.data ?? [], [approvalsQuery.data]);
   const pendingApprovals = useMemo(
     () => approvals.filter((a) => !a.status || a.status === "pending"),
     [approvals],

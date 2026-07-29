@@ -110,7 +110,7 @@ export function SchedulerPage() {
   const updateTriggerMut = useUpdateTrigger();
   const deleteTriggerMut = useDeleteTrigger();
 
-  const agents = agentsQuery.data ?? [];
+  const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
   const workflows = workflowsQuery.data ?? [];
   const agentMap = useMemo(() => new Map(agents.map(a => [a.id, a])), [agents]);
   const schedules = useMemo(() => [...(schedulesQuery.data ?? [])].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "")), [schedulesQuery.data]);

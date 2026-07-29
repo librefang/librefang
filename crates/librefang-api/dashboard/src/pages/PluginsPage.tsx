@@ -153,10 +153,14 @@ export function PluginsPage() {
 
   const pluginsQuery = usePlugins();
   const registriesQuery = usePluginRegistries({ enabled: tab === "registry" });
+  const refetchPlugins = pluginsQuery.refetch;
+  const refetchRegistries = registriesQuery.refetch;
 
   const addToast = useUIStore((s) => s.addToast);
   const installMutation = useInstallPlugin();
   const uninstallMutation = useUninstallPlugin();
+  const installPlugin = installMutation.mutate;
+  const uninstallPlugin = uninstallMutation.mutate;
   const scaffoldMutation = useScaffoldPlugin();
   const depsMutation = useInstallPluginDeps();
 
@@ -176,9 +180,9 @@ export function PluginsPage() {
   const registries = registriesQuery.data?.registries ?? EMPTY_REGISTRIES;
 
   const onRefresh = useCallback(() => {
-    pluginsQuery.refetch();
-    registriesQuery.refetch();
-  }, [pluginsQuery.refetch, registriesQuery.refetch]);
+    void refetchPlugins();
+    void refetchRegistries();
+  }, [refetchPlugins, refetchRegistries]);
 
   const resetInstallForm = useCallback(() => {
     setInstallName(""); setInstallPath(""); setInstallUrl(""); setInstallBranch(""); setInstallRepo("");
@@ -203,16 +207,16 @@ export function PluginsPage() {
       local: { source: "local" as const, path: installPath },
       git: { source: "git" as const, url: installUrl, branch: installBranch || undefined },
     };
-    installMutation.mutate(payload[installSource], {
+    installPlugin(payload[installSource], {
       onSuccess: onInstallSuccess,
       onError: onInstallError,
       onSettled: () => setInstallingName(null),
     });
-  }, [installSource, installName, installRepo, installPath, installUrl, installBranch, installMutation.mutate, onInstallSuccess, onInstallError]);
+  }, [installSource, installName, installRepo, installPath, installUrl, installBranch, installPlugin, onInstallSuccess, onInstallError]);
 
   const handleRegistryInstall = useCallback((name: string, repo: string) => {
     setInstallingName(`${repo}:${name}`);
-    installMutation.mutate(
+    installPlugin(
       { source: "registry", name, github_repo: repo },
       {
         onSuccess: () => addToast(t("plugins.install_success", { defaultValue: "Plugin installed" }), "success"),
@@ -220,18 +224,18 @@ export function PluginsPage() {
         onSettled: () => setInstallingName(null),
       },
     );
-  }, [installMutation.mutate, addToast, t]);
+  }, [installPlugin, addToast, t]);
 
   const handleDelete = useCallback((name: string) => {
     if (confirmDelete !== name) { setConfirmDelete(name); return; }
-    uninstallMutation.mutate(name, {
+    uninstallPlugin(name, {
       onSuccess: () => {
         setConfirmDelete(null);
         addToast(t("plugins.uninstall_success", { defaultValue: "Plugin removed" }), "success");
       },
       onError: (e: unknown) => addToast(getErrorMessage(e) || t("plugins.uninstall_failed", { defaultValue: "Uninstall failed" }), "error"),
     });
-  }, [confirmDelete, uninstallMutation.mutate, addToast, t]);
+  }, [confirmDelete, uninstallPlugin, addToast, t]);
 
   const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand focus:ring-1 focus:ring-brand/20";
 

@@ -649,7 +649,7 @@ export function AgentsPage() {
     if (declared.length > 0 && toolsDraft === null) {
       setToolsDraft([...declared]);
     }
-  }, [agentTab, tabAgentToolsQuery.data]);
+  }, [agentTab, tabAgentToolsQuery.data, toolsDraft]);
 
   // Seed / reset the Skills draft, same shape as the Tools effect above.
   // Only an allowlist-mode agent (a pinned set) seeds the draft; "all" mode
@@ -665,7 +665,7 @@ export function AgentsPage() {
     if (pinned.length > 0 && skillsDraft === null) {
       setSkillsDraft([...pinned]);
     }
-  }, [agentTab, tabAgentSkillsQuery.data]);
+  }, [agentTab, skillsDraft, tabAgentSkillsQuery.data]);
 
   // Per-agent session list — Conversation tab uses this directly. The
   // global /api/sessions used previously was paginated to 50, so the
@@ -867,7 +867,7 @@ export function AgentsPage() {
     }
   }, [editingModel, modelDraft.provider, modelDraft.model, modelsQuery.isLoading, visibleModels]);
 
-  const agents = agentsQuery.data?.agents ?? [];
+  const agents = useMemo(() => agentsQuery.data?.agents ?? [], [agentsQuery.data?.agents]);
   const visibleAgents = useMemo(
     () => showHandAgents ? agents : agents.filter(a => !a.is_hand),
     [agents, showHandAgents],

@@ -4,19 +4,6 @@
   "version": "0.1.0",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
-  "pnpm": {
-    "overrides": {
-      "picomatch@<2.3.2": ">=2.3.2",
-      "picomatch@>=4.0.0 <4.0.4": ">=4.0.4",
-      "brace-expansion": ">=5.0.6",
-      "@eslint/config-array": ">=0.23.5"
-    },
-    "auditConfig": {
-      "ignoreGhsas": [
-        "GHSA-rmmr-r34h-pfm5"
-      ]
-    }
-  },
   "//audit-ignores-doc": "Every GHSA listed under pnpm.auditConfig.ignoreGhsas MUST have a matching section in ./AUDIT_IGNORES.md explaining the trade-off and unlock condition (refs #5667).",
   "scripts": {
     "dev": "vite",

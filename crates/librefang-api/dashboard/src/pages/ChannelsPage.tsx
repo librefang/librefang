@@ -770,7 +770,7 @@ export function ChannelsPage() {
     });
   };
 
-  const channels = channelsQuery.data ?? [];
+  const channels = useMemo(() => channelsQuery.data ?? [], [channelsQuery.data]);
   const configuredCount = useMemo(() => channels.filter(c => c.configured).length, [channels]);
   const unconfiguredCount = channels.length - configuredCount;
 

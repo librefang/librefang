@@ -1692,8 +1692,8 @@ export function HandsPage() {
   const resumeMutation = useResumeHand();
   const uninstallMutation = useUninstallHand();
 
-  const hands = handsQuery.data ?? [];
-  const instances = activeQuery.data ?? [];
+  const hands = useMemo(() => handsQuery.data ?? [], [handsQuery.data]);
+  const instances = useMemo(() => activeQuery.data ?? [], [activeQuery.data]);
 
   const handleChat = useCallback((instanceId: string, handName?: string) => {
     const inst = instances.find((i) => i.instance_id === instanceId);

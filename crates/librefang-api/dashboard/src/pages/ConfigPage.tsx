@@ -123,7 +123,6 @@ function pickType(node: JsonSchema): string {
   // Warn once so unexpected shapes surface during dev rather than silently
   // rendering as a text input.
   if (!node.anyOf && !node.oneOf && !node.$ref && !Array.isArray(node.enum)) {
-    // eslint-disable-next-line no-console
     console.warn("[ConfigPage] schema node missing 'type'; defaulting to string", node);
   }
   return "string";

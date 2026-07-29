@@ -282,7 +282,7 @@ export function OverviewPage() {
   const [dismissedAlerts, setDismissedAlerts] = useState<string[]>([]);
   const [showAllAlerts, setShowAllAlerts] = useState(false);
 
-  const agents       = snapshot?.agents ?? [];
+  const agents = useMemo(() => snapshot?.agents ?? [], [snapshot?.agents]);
   // Prefer the backend's pre-computed active count when available — it's
   // authoritative and matches the daemon's internal AgentState::Running
   // check exactly. Fall back to a client-side filter (case-insensitive,

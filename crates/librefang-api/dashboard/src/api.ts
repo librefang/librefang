@@ -1852,7 +1852,6 @@ export async function transcribeAudio(audioBlob: Blob): Promise<{ text: string; 
 // throws, and keeps the server-side label render-safe — no decode pass
 // needed at display time.
 function sanitizeFilenameForHeader(name: string): string {
-  // eslint-disable-next-line no-control-regex
   return name.replace(/[^\x20-\x7e]|["\r\n]/g, "_");
 }
 
