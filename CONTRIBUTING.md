@@ -910,10 +910,8 @@ tag (e.g. `v2026.4.27-beta6`) when you have it. Review the file, hand-edit
 the lead paragraph if the release deserves a narrative beyond the bullet
 list, then commit alongside the CHANGELOG bump.
 
-Fragments need no extra step here. `cargo xtask release` folds `changelog.d/`
-into `## [Unreleased]` before it cuts the dated section, and this script slices
-the dated section — which `cargo xtask changelog` generates from the merged PR
-titles in the tag range.
+Fragments need no extra step here.
+`cargo xtask release` folds `changelog.d/` into `## [Unreleased]` before it cuts the dated section, and this script slices the dated section — which `cargo xtask changelog` generates from the merged PR titles in the tag range.
 
 ---
 
@@ -981,24 +979,17 @@ Whichever path you take, end the entry with your GitHub login in parentheses, e.
 - Add Matrix channel adapter with E2EE support (#1234) (@your-login)
 ```
 
-This is enforced by `scripts/check-changelog-attribution.py` (wired into the
-`pre-commit` hook and the `CHANGELOG Attribution` CI job), which holds a
-`changelog.d/` fragment to exactly the same standard as an `[Unreleased]`
-bullet and additionally rejects a fragment in an unrecognised section
-directory — assembly has no heading to render such a fragment under, so it
-would be dropped without a word. The check runs **only against what your PR
-adds** — historical entries that predate this convention are not
-retroactively flagged, and you should not backfill them. To audit everything
-pending before cutting a release:
+This is enforced by `scripts/check-changelog-attribution.py` (wired into the `pre-commit` hook and the `CHANGELOG Attribution` CI job), which holds a `changelog.d/` fragment to exactly the same standard as an `[Unreleased]` bullet and additionally rejects a fragment in an unrecognised section directory — assembly has no heading to render such a fragment under, so it would be dropped without a word.
+The check runs **only against what your PR adds** — historical entries that predate this convention are not retroactively flagged, and you should not backfill them.
+To audit everything pending before cutting a release:
 
 ```
 python3 scripts/check-changelog-attribution.py --all-unreleased
 ```
 
 The accepted format is `(@username)` matching `\(@[A-Za-z0-9_][A-Za-z0-9_-]*\)`.
-The attribution may sit on any line of a multi-line entry, but not past a blank
-line: a blank line ends the bullet, so anything after it is a separate
-paragraph. See issue #3400 for the rationale.
+The attribution may sit on any line of a multi-line entry, but not past a blank line: a blank line ends the bullet, so anything after it is a separate paragraph.
+See issue #3400 for the rationale.
 
 ---
 

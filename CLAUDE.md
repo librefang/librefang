@@ -48,12 +48,8 @@ and warns if `core.hooksPath` hasn't been pointed at `.githooks/`.
 These run inside `git` itself (regardless of which tool invoked the commit),
 giving defense in depth on top of the Claude Code PreToolUse layer.
 
-- `pre-commit` — runs `cargo fmt --check` on staged Rust files; CHANGELOG
-  duplicate-`[Unreleased]` guard; `(@user)` attribution check on staged
-  additions to `[Unreleased]` **and on staged `changelog.d/` fragments**,
-  which also rejects a fragment in an unrecognised section directory
-  (#3400); `gitleaks protect --staged` scan against `.gitleaks.toml`
-  (soft-warn if not installed). Target: < 2s.
+- `pre-commit` — runs `cargo fmt --check` on staged Rust files; CHANGELOG duplicate-`[Unreleased]` guard; `(@user)` attribution check on staged additions to `[Unreleased]` **and on staged `changelog.d/` fragments**, which also rejects a fragment in an unrecognised section directory (#3400); `gitleaks protect --staged` scan against `.gitleaks.toml` (soft-warn if not installed).
+  Target: < 2s.
 - `pre-push` — refuses direct pushes to `main` / `master` and exits in
   &lt; 100ms. Heavy verification (clippy, openapi/SDK drift) intentionally
   lives in CI rather than gating every push — see #4532 for the

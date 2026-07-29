@@ -32,7 +32,10 @@ const FRAGMENT_SECTIONS: &[(&str, &str)] = &[
     ("documentation", "Documentation"),
 ];
 
-const FRAGMENT_DIR: &str = "changelog.d";
+/// The fragment directory, shared with `release::RELEASE_STAGED_PATHS` so the
+/// path the fold deletes from and the path the release commit stages are one
+/// definition rather than two string literals that can drift apart.
+pub(crate) const FRAGMENT_DIR: &str = "changelog.d";
 
 fn find_latest_stable_tag(root: &Path) -> Option<String> {
     let output = Command::new("git")
@@ -476,6 +479,22 @@ fn canonical_section_index(heading: &str) -> Option<usize> {
     FRAGMENT_SECTIONS.iter().position(|(_, h)| *h == heading)
 }
 
+/// Drop a leading Markdown list marker from an already-left-trimmed line.
+///
+/// The documented fragment format is the bullet body *without* a marker, but
+/// every CHANGELOG bullet a contributor has ever read carries one, so writing it
+/// anyway is the likely mistake — and it is not one the `(@user)` check can catch,
+/// because a marker-carrying fragment is otherwise perfectly valid. Stripping it
+/// here renders the bullet the author meant instead of `- - Fix foo`.
+fn strip_list_marker(line: &str) -> &str {
+    for marker in ["- ", "* ", "+ "] {
+        if let Some(rest) = line.strip_prefix(marker) {
+            return rest.trim_start();
+        }
+    }
+    line
+}
+
 /// Turn a fragment file's body into the lines of one CHANGELOG bullet.
 ///
 /// The body is the bullet text *without* the leading `- `. Leading and trailing
@@ -484,6 +503,9 @@ fn canonical_section_index(heading: &str) -> Option<usize> {
 /// spaces to match the surrounding style. A line that is already indented is
 /// copied byte-for-byte, so the documented two-space continuation indent — and
 /// any deeper nesting built on top of it — survives assembly unchanged.
+///
+/// A first line that carries a list marker of its own has it stripped rather
+/// than doubled; see `strip_list_marker`.
 ///
 /// Returns `None` for a body with no content at all.
 fn render_fragment_bullet(body: &str) -> Option<String> {
@@ -494,7 +516,7 @@ fn render_fragment_bullet(body: &str) -> Option<String> {
     for (i, line) in lines[first..=last].iter().enumerate() {
         if i == 0 {
             out.push_str("- ");
-            out.push_str(line.trim_start());
+            out.push_str(strip_list_marker(line.trim_start()));
         } else if line.is_empty() || line.starts_with(' ') || line.starts_with('\t') {
             out.push_str(line);
         } else {
@@ -734,7 +756,11 @@ fn warn_unrecognised_sections(fragment_root: &Path) {
 
 /// Fold every `changelog.d/<section>/*.md` fragment into `## [Unreleased]` and
 /// delete the files consumed. Returns how many fragments were folded in.
-fn collect_fragments_in(root: &Path) -> Result<usize, Box<dyn std::error::Error>> {
+///
+/// Deleting the fragments leaves the working tree with changes the caller has to
+/// stage — see `release::RELEASE_STAGED_PATHS`, which the release flow relies on
+/// to get those deletions into the release commit.
+pub(crate) fn collect_fragments_in(root: &Path) -> Result<usize, Box<dyn std::error::Error>> {
     let fragment_root = root.join(FRAGMENT_DIR);
     warn_unrecognised_sections(&fragment_root);
 
@@ -1130,6 +1156,74 @@ mod tests {
             "- First sentence.\n  Second sentence. (@houko)\n"
         );
         assert!(render_fragment_bullet("\n  \n").is_none());
+    }
+
+    #[test]
+    fn render_fragment_bullet_strips_a_marker_the_author_wrote_anyway() {
+        // The format says "no leading `- `", but a contributor copying the shape
+        // of an existing CHANGELOG bullet writes one, and nothing rejects it —
+        // the entry is otherwise valid. Doubling the marker would render
+        // `- - Fix foo` in the release notes.
+        for marker in ["- ", "-   ", "* ", "+ "] {
+            let body = format!("{marker}Fix the thing.\nSecond sentence. (#1) (@houko)\n");
+            assert_eq!(
+                render_fragment_bullet(&body).unwrap(),
+                "- Fix the thing.\n  Second sentence. (#1) (@houko)\n",
+                "marker {marker:?} was not stripped"
+            );
+        }
+        // A hyphen that is not a list marker is content and stays put.
+        assert_eq!(
+            render_fragment_bullet("-Wall is now passed to the linker (@houko)\n").unwrap(),
+            "- -Wall is now passed to the linker (@houko)\n"
+        );
+    }
+
+    /// `FRAGMENT_SECTIONS` here and `FRAGMENT_SECTIONS` in
+    /// `scripts/check-changelog-attribution.py` are a cross-language contract,
+    /// and the two drift directions are asymmetric. A section added only here
+    /// makes the validator reject every fragment written under it — loud, and
+    /// nothing is lost. A section added only to the validator makes the entries
+    /// pass review and then vanish at assembly time, because this list is what
+    /// decides which directories are read at all. The second one is the failure
+    /// this whole mechanism exists to prevent, so the lists are compared rather
+    /// than commented at each other.
+    #[test]
+    fn fragment_sections_match_the_python_validator() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask/ has a parent directory");
+        let script = repo.join("scripts/check-changelog-attribution.py");
+        let src = fs::read_to_string(&script)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", script.display()));
+
+        let literal = src
+            .lines()
+            .find_map(|l| l.strip_prefix("FRAGMENT_SECTIONS = frozenset({"))
+            .and_then(|rest| rest.split_once("})"))
+            .map(|(inner, _)| inner)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no `FRAGMENT_SECTIONS = frozenset({{...}})` line in {}",
+                    script.display()
+                )
+            });
+        let mut python: Vec<&str> = literal
+            .split(',')
+            .map(|s| s.trim().trim_matches('"').trim_matches('\''))
+            .filter(|s| !s.is_empty())
+            .collect();
+        python.sort_unstable();
+
+        let mut rust: Vec<&str> = FRAGMENT_SECTIONS.iter().map(|(dir, _)| *dir).collect();
+        rust.sort_unstable();
+
+        assert_eq!(
+            rust,
+            python,
+            "changelog.d section lists disagree: xtask/src/changelog.rs has {rust:?}, {} has {python:?}",
+            script.display()
+        );
     }
 
     /// Fold a fragment into a copy of the repo's OWN `CHANGELOG.md`.

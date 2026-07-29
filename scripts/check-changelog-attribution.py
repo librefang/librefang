@@ -72,7 +72,9 @@ CHANGELOG = "CHANGELOG.md"
 # Per-PR changelog fragments. Mirrors `FRAGMENT_DIR` / `FRAGMENT_SECTIONS` in
 # `xtask/src/changelog.rs`, which is the assembler: a section this set does not
 # list is a section assembly has no heading for. The two lists are a
-# cross-language contract — adding a section means editing both.
+# cross-language contract — adding a section means editing both, and the xtask
+# test `fragment_sections_match_the_python_validator` parses the literal below
+# and fails if they drift. Keep it a single-line `frozenset({...})` so it can.
 FRAGMENT_DIR = "changelog.d"
 FRAGMENT_SECTIONS = frozenset({"added", "changed", "documentation", "fixed", "security"})
 SECTION_CHOICES = ", ".join(sorted(FRAGMENT_SECTIONS))
