@@ -228,21 +228,12 @@ fn plugin_route_executes_plugin_code(path: &str) -> bool {
     if path == "/api/plugins/prewarm" {
         return true;
     }
-    // `POST /api/plugins/batch` dispatches on a body field
-    // (`{"operation": "...", "plugins": [...]}`) and accepts `enable` and
-    // `sign` — both Owner-only as per-plugin actions below. The auth layer sees
-    // only method and path, so there is no way to gate the dangerous operations
-    // and admit the safe ones here: leaving the path open would let an Admin
-    // reach `enable` and `sign` through it, in bulk, and defeat those gates
-    // entirely.
+    // `POST /api/plugins/batch` dispatches on a body field (`{"operation": "...", "plugins": [...]}`) and accepts `enable` and `sign` — both Owner-only as per-plugin actions below.
+    // The auth layer sees only method and path, so there is no way to gate the dangerous operations and admit the safe ones here: leaving the path open would let an Admin reach `enable` and `sign` through it, in bulk, and defeat those gates entirely.
     //
-    // The cost is that an Admin loses the batch convenience for `disable` and
-    // `lint`. That does not weaken incident response — the per-plugin
-    // `{name}/disable` stays at Admin precisely so a malicious plugin can be
-    // shut off, and doing that one at a time is still available. Splitting the
-    // route by operation (or moving the role check into the handler, where the
-    // body is visible) would restore the convenience; that is a larger change
-    // than closing the bypass and is not required to close it.
+    // The cost is that an Admin loses the batch convenience for `disable` and `lint`.
+    // That does not weaken incident response — the per-plugin `{name}/disable` stays at Admin precisely so a malicious plugin can be shut off, and doing that one at a time is still available.
+    // Splitting the route by operation (or moving the role check into the handler, where the body is visible) would restore the convenience; that is a larger change than closing the bypass and is not required to close it.
     if path == "/api/plugins/batch" {
         return true;
     }
@@ -259,10 +250,7 @@ fn plugin_route_executes_plugin_code(path: &str) -> bool {
         "install-deps"
             // Invokes a hook directly — the most direct execution path there is.
             | "test-hook"
-            // Also invokes the hook directly, via `run_hook_json` in a loop —
-            // `runs` executions per request rather than one, so it is
-            // `test-hook` with a multiplier, not a measurement of something
-            // already running.
+            // Also invokes the hook directly, via `run_hook_json` in a loop — `runs` executions per request rather than one, so it is `test-hook` with a multiplier, not a measurement of something already running.
             | "benchmark"
             // Pulls new code over the existing plugin from registry or git.
             | "upgrade"
@@ -1933,8 +1921,7 @@ mod tests {
             "/api/plugins/install",
             "/api/plugins/install-with-deps",
             "/api/plugins/prewarm",
-            // Dispatches on a body field and accepts `enable` / `sign`, so
-            // leaving it open reaches those gates in bulk.
+            // Dispatches on a body field and accepts `enable` / `sign`, so leaving it open reaches those gates in bulk.
             "/api/plugins/batch",
             "/api/plugins/evil/install-deps",
             "/api/plugins/evil/test-hook",
