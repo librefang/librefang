@@ -52,6 +52,11 @@
     "mobile_tabs": "하단 탐색",
     "console": "콘솔"
   },
+  "partner": {
+    "everyapi_label": "EveryAPI 공식 파트너 통합",
+    "official": "공식 파트너",
+    "librefang_everyapi": "LibreFang × EveryAPI"
+  },
   "common": {
     "copied": "복사됨",
     "copy_failed": "복사 실패",

@@ -52,6 +52,11 @@
     "mobile_tabs": "底部导航",
     "console": "控制台"
   },
+  "partner": {
+    "everyapi_label": "EveryAPI 官方合作伙伴集成",
+    "official": "官方合作伙伴",
+    "librefang_everyapi": "LibreFang × EveryAPI"
+  },
   "common": {
     "copied": "已复制",
     "show": "显示",

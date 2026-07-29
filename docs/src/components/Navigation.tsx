@@ -321,6 +321,12 @@ function NavigationGroup({
 
 const zhNavigation: Array<NavGroup> = [
 	{
+		title: "合作伙伴",
+		links: [
+			{ title: "LibreFang × EveryAPI", href: withPrefix("/zh/partners/everyapi") },
+		],
+	},
+	{
 		title: "入门",
 		links: [
 			{ title: "快速开始", href: withPrefix("/zh/getting-started") },
@@ -425,6 +431,12 @@ const zhNavigation: Array<NavGroup> = [
 ];
 
 export const enNavigation: Array<NavGroup> = [
+	{
+		title: "Partners",
+		links: [
+			{ title: "LibreFang × EveryAPI", href: withPrefix("/partners/everyapi") },
+		],
+	},
 	{
 		title: "Getting Started",
 		links: [

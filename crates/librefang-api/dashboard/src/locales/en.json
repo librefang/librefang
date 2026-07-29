@@ -52,6 +52,11 @@
     "mobile_tabs": "Bottom navigation",
     "console": "Console"
   },
+  "partner": {
+    "everyapi_label": "EveryAPI official partner integration",
+    "official": "Official partner",
+    "librefang_everyapi": "LibreFang × EveryAPI"
+  },
   "common": {
     "copied": "Copied",
     "copy_failed": "Copy failed",

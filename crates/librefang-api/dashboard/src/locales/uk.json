@@ -52,6 +52,11 @@
     "mobile_tabs": "Нижня навігація",
     "console": "Консоль"
   },
+  "partner": {
+    "everyapi_label": "Офіційна партнерська інтеграція EveryAPI",
+    "official": "Офіційний партнер",
+    "librefang_everyapi": "LibreFang × EveryAPI"
+  },
   "common": {
     "copied": "Скопійовано",
     "copy_failed": "Помилка копіювання",
