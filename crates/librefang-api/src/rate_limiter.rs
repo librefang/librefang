@@ -774,6 +774,11 @@ mod tests {
     #[test]
     fn test_costs() {
         assert_eq!(operation_cost("GET", "/api/health").get(), 1);
+        // Both spellings, kubelet-probe cost (#6633). See the comment on the
+        // match arm for why the versioned form must not silently fall through
+        // to the 5-token default.
+        assert_eq!(operation_cost("GET", "/api/ready").get(), 1);
+        assert_eq!(operation_cost("GET", "/api/v1/ready").get(), 1);
         assert_eq!(operation_cost("GET", "/api/tools").get(), 1);
         assert_eq!(operation_cost("POST", "/api/agents/1/message").get(), 30);
         assert_eq!(operation_cost("POST", "/api/agents").get(), 50);
