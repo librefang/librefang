@@ -987,7 +987,8 @@ Two things follow for how to write an entry:
 - Explain *why* the change was made and what it means for someone running LibreFang.
   The PR title is already covered for free, so a bullet that restates it adds nothing.
 - End the bullet with the PR reference, `(#1234)` or `(#1234, #1235)` for one entry covering two PRs.
-  Without it there is no way to tell which generated line your prose replaces, so the generator keeps the full list, your PR appears twice in the release body, and `cargo xtask release` prints a warning naming your bullet.
+  Without it there is no way to tell which generated line your prose replaces, so your PR keeps that line and appears twice in the release body, and `cargo xtask release` prints a warning naming your bullet.
+  The fallback is per bullet: yours missing a reference costs only your own entry, and every other bullet still suppresses its generated line.
 
 ### CHANGELOG Attribution
 

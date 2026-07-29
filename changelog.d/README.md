@@ -67,7 +67,8 @@ After `cargo xtask collect-fragments` that lands under `### Fixed` in `## [Unrel
 
 Not enforced, but it costs you if you skip it: end the bullet with its PR reference, `(#1234)` — or `(#1234, #1235)` when one entry covers two PRs.
 That group is how the release flow knows which generated line your prose replaces.
-Without it the generated list is kept in full, your PR appears twice in the release body, and `cargo xtask release` prints a warning naming the bullet.
+Without it your PR keeps its generated line, so it appears twice in the release body, and `cargo xtask release` prints a warning naming the bullet.
+That is the only cost, and it is yours alone: an unreferenced bullet does not stop anyone else's bullet from replacing its own generated line.
 Only the **last** `(#N)` group on the bullet's **last non-empty line** counts, so a mid-bullet cross-reference to some other PR is never mistaken for yours.
 
 Checked by the `pre-commit` hook and by the `CHANGELOG Attribution` CI jobs, in all of their modes:

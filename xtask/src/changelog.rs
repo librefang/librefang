@@ -461,7 +461,21 @@ fn bullet_excerpt(line: &str, max: usize) -> String {
     out
 }
 
-/// The PRs each curated bullet documents, or the bullets that name none.
+/// Which PRs the curated `[Unreleased]` prose documents, bullet by bullet.
+struct CuratedRefs {
+    /// Every PR number any curated bullet claims — the set whose generated
+    /// entries are suppressed so the release body does not carry them twice.
+    refs: BTreeSet<u64>,
+    /// The PRs claimed by each curated bullet, in section order, empty for a
+    /// bullet that names none. Bullet-level counts need this: one bullet can
+    /// document two PRs and one PR can be documented by two bullets, so the
+    /// flattened `refs` cannot answer "how many bullets are about this release".
+    per_bullet: Vec<BTreeSet<u64>>,
+    /// The marker line of every bullet that named no PR at all.
+    unreferenced: Vec<String>,
+}
+
+/// The PRs each curated bullet documents, and the bullets that name none.
 ///
 /// A bullet's reference is the **last** `(#N)` group on its **last non-empty
 /// line**, and nothing else in the bullet is consulted. Both halves of that rule
@@ -474,36 +488,53 @@ fn bullet_excerpt(line: &str, max: usize) -> String {
 /// - Another ends `... (#6594, #6595) (@houko)`, documenting two PRs in one
 ///   group, so reading a single number would leave the other one duplicated.
 ///
-/// `Err` carries the first line of every bullet with no usable reference. There
-/// is no way to know which PR such a bullet covers, so the caller keeps the whole
-/// generated list: a duplicated entry in a release body is cosmetic, a silently
-/// dropped PR is not.
-fn curated_pr_refs(curated: &str) -> Result<BTreeSet<u64>, Vec<String>> {
+/// A bullet naming no PR fails open **on its own** and does not disarm the
+/// others: there is no way to know which entry it replaces, so that PR keeps its
+/// generated line, while every bullet that did name a PR still suppresses it.
+/// Discarding the whole set instead — the earlier behaviour — turned three
+/// unreferenced bullets out of 160 into no suppression at all, which is strictly
+/// worse at zero benefit, since keeping the other 157 bullets' references drops
+/// nothing that all-or-nothing would have kept.
+fn curated_pr_refs(curated: &str) -> CuratedRefs {
     let group_re = Regex::new(r"\(#\d+(?:\s*,\s*#\d+)*\)").unwrap();
     let number_re = Regex::new(r"#(\d+)").unwrap();
     let mut refs = BTreeSet::new();
+    let mut per_bullet = Vec::new();
     let mut unreferenced = Vec::new();
     for bullet in split_bullets(curated) {
         let last_group = bullet
             .last()
             .and_then(|line| group_re.find_iter(line).last());
-        match last_group {
-            Some(group) => refs.extend(
-                number_re
-                    .captures_iter(group.as_str())
-                    .filter_map(|c| c[1].parse::<u64>().ok()),
-            ),
-            None => unreferenced.push(bullet[0].to_string()),
-        }
+        let claimed: BTreeSet<u64> = match last_group {
+            Some(group) => number_re
+                .captures_iter(group.as_str())
+                .filter_map(|c| c[1].parse::<u64>().ok())
+                .collect(),
+            None => {
+                unreferenced.push(bullet[0].to_string());
+                BTreeSet::new()
+            }
+        };
+        refs.extend(claimed.iter().copied());
+        per_bullet.push(claimed);
     }
-    if unreferenced.is_empty() {
-        Ok(refs)
-    } else {
-        Err(unreferenced)
+    CuratedRefs {
+        refs,
+        per_bullet,
+        unreferenced,
     }
 }
 
-/// Every top-level bullet line the file's `## [Unreleased]` section holds.
+/// Every top-level bullet the file's `## [Unreleased]` section holds, each as a
+/// whole block: the `- ` marker line plus its continuation lines, joined with `\n`.
+///
+/// Blocks rather than marker lines because the marker line is only the bullet's
+/// first sentence. This repo's `[Unreleased]` section holds 160 bullets of which
+/// 67 are multi-line — the one-sentence-per-line prose rule makes that the norm,
+/// not the exception — so a guard that compared marker lines alone would call a
+/// bullet "preserved" while every sentence after the first had been dropped.
+/// `split_bullets` supplies the block boundary, the same one the attribution gate
+/// in `scripts/check-changelog-attribution.py` uses.
 ///
 /// Deliberately a *different* parse from `drain_unreleased`: this one ends the
 /// section at the next **dated** `## [YYYY...]` heading, the drain ends it at the
@@ -513,16 +544,16 @@ fn curated_pr_refs(curated: &str) -> Result<BTreeSet<u64>, Vec<String>> {
 /// where the drain stops early and every bullet after it would quietly miss the
 /// release. Checking the composed body against this parse is what makes the
 /// no-loss guard an independent check rather than a restatement of the drain.
-fn unreleased_bullet_lines(content: &str) -> Vec<String> {
+fn unreleased_bullet_blocks(content: &str) -> Vec<String> {
     let lines: Vec<&str> = content.lines().collect();
     let Some((start, end)) = section_range(&lines, UNRELEASED_HEADING, is_dated_release_heading)
     else {
         return Vec::new();
     };
-    lines[start + 1..end]
+    let section = lines[start + 1..end].join("\n");
+    split_bullets(&section)
         .iter()
-        .filter(|l| l.starts_with("- "))
-        .map(|l| (*l).to_string())
+        .map(|bullet| bullet.join("\n"))
         .collect()
 }
 
@@ -535,7 +566,7 @@ struct DrainedUnreleased {
     /// The CHANGELOG with that body removed and the `## [Unreleased]` heading
     /// left in place. Byte-identical to the input when there was nothing to take.
     content: String,
-    /// Every top-level bullet the section held, per `unreleased_bullet_lines`.
+    /// Every top-level bullet the section held, whole, per `unreleased_bullet_blocks`.
     bullets: Vec<String>,
 }
 
@@ -550,10 +581,10 @@ struct DrainedUnreleased {
 ///
 /// The section ends at the next `## [` heading of any kind, the same boundary `fold_fragments` uses.
 /// That is the conservative choice for a *destructive* step: a stray `## [` in column 0 inside a bullet stops the drain early and leaves the rest of the section in the file, rather than sweeping content out from under a heading.
-/// `unreleased_bullet_lines` draws the boundary at the next *dated* heading instead, so the no-loss guard notices whatever a truncated drain left behind.
+/// `unreleased_bullet_blocks` draws the boundary at the next *dated* heading instead, so the no-loss guard notices whatever a truncated drain left behind.
 fn drain_unreleased(content: &str) -> DrainedUnreleased {
     let lines: Vec<&str> = content.lines().collect();
-    let bullets = unreleased_bullet_lines(content);
+    let bullets = unreleased_bullet_blocks(content);
     let intact = |bullets: Vec<String>| DrainedUnreleased {
         curated: String::new(),
         content: content.to_string(),
@@ -628,10 +659,13 @@ fn verify_no_curated_bullet_lost(
     body: &str,
     version: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Compared whole, reported by marker line: a bullet is preserved only if
+    // every continuation sentence made it, but echoing 160 whole blocks would
+    // bury the message under the section it is complaining about.
     let missing: Vec<String> = bullets
         .iter()
         .filter(|bullet| !body.contains(bullet.as_str()))
-        .map(|bullet| bullet_excerpt(bullet, 160))
+        .map(|bullet| bullet_excerpt(bullet.lines().next().unwrap_or(bullet), 160))
         .collect();
     if missing.is_empty() {
         return Ok(());
@@ -649,8 +683,13 @@ fn verify_no_curated_bullet_lost(
 /// Attributed bullets in an existing `## [VERSION]` section that regenerating it would drop.
 ///
 /// `render_changelog` replaces a section for a version that already exists, which was harmless while that section held nothing but generated PR titles.
-/// Now that the curated `[Unreleased]` prose is carried into it, a second `cargo xtask release` for the same version — the documented recovery from a run that failed partway — finds `[Unreleased]` already drained and regenerates the section without that prose.
+/// Now that the curated `[Unreleased]` prose is carried into it, a second `cargo xtask release` for the same version regenerates the section without that prose — and `[Unreleased]` has already been drained, so no other part of the file holds it either.
+/// That second run is not hypothetical: `release.rs` deletes and re-creates the tag, the bump branch, and the GitHub release when the tag already exists, three steps after `changelog::run` hard-fail (`codegen --openapi`, `codegen-sdks.py`, `schema-check gen`), and the preflight then refuses a dirty tree with "Commit or stash changes first" — so the natural recovery is to commit the drained CHANGELOG and re-run.
+/// `verify_no_curated_bullet_lost` cannot see this, because on the re-run it derives its expectation from an `[Unreleased]` section that is already empty.
+///
 /// Generated entries come back identical, so only a bullet carrying a `(@login)` attribution that the new body does not contain is reported: that is contributor prose, and after a fold the deleted `changelog.d/` fragment means `git` is the only place it still exists.
+/// Attribution is looked for anywhere in the bullet's block, not just on the `- ` marker line — the one-sentence-per-line prose rule pushes `(@login)` onto a continuation line for every multi-sentence bullet, which is 67 of the 160 in this repo's section today.
+/// The returned marker lines are for the diagnostic; the comparison behind them is on whole blocks.
 fn prose_dropped_by_regeneration(content: &str, version: &str, body: &str) -> Vec<String> {
     let attribution_re = Regex::new(r"\(@[A-Za-z0-9_][A-Za-z0-9_-]*\)").unwrap();
     let lines: Vec<&str> = content.lines().collect();
@@ -658,10 +697,14 @@ fn prose_dropped_by_regeneration(content: &str, version: &str, body: &str) -> Ve
     let Some((start, end)) = section_range(&lines, &heading, is_section_heading) else {
         return Vec::new();
     };
-    lines[start + 1..end]
+    let section = lines[start + 1..end].join("\n");
+    split_bullets(&section)
         .iter()
-        .filter(|l| l.starts_with("- ") && attribution_re.is_match(l) && !body.contains(**l))
-        .map(|l| (*l).to_string())
+        .filter(|bullet| {
+            bullet.iter().any(|l| attribution_re.is_match(l))
+                && !body.contains(bullet.join("\n").as_str())
+        })
+        .map(|bullet| bullet[0].to_string())
         .collect()
 }
 
@@ -697,19 +740,29 @@ fn write_changelog(
             .is_match(&drained.content)
         {
             println!("Replacing existing changelog entry for {}", version);
+            // The second no-loss guard, and the only one that can see this case:
+            // `verify_no_curated_bullet_lost` above derives its expectation from
+            // `[Unreleased]`, which a previous run for this same version already
+            // emptied. Aborts rather than warns — a warning scrolls past in a
+            // multi-minute release script, and what it would be warning about is
+            // prose leaving the file entirely.
             let dropped = prose_dropped_by_regeneration(&drained.content, version, &body);
             if !dropped.is_empty() {
-                eprintln!(
-                    "warning: the existing [{}] section holds {} attributed bullet(s) the regenerated section does not, and replacing it drops them: {}. \
-                     Recover them from git if they were hand-written or arrived as a changelog.d fragment.",
+                return Err(format!(
+                    "refusing to write CHANGELOG.md: regenerating the existing [{}] section would drop {} attributed bullet(s) it holds and the new section does not, and [Unreleased] no longer holds them either. \
+                     Nothing has been written. This is what a second release run for one version looks like once the first drained [Unreleased] into [{}]. \
+                     Two ways forward: move that prose back under `## [Unreleased]` and re-run, which is what resuming a partly-failed release wants; or delete the whole `## [{}]` section and re-run to cut it from scratch. Would be dropped: {}",
                     version,
                     dropped.len(),
+                    version,
+                    version,
                     dropped
                         .iter()
                         .map(|b| bullet_excerpt(b, 120))
                         .collect::<Vec<_>>()
                         .join(" | ")
-                );
+                )
+                .into());
             }
         }
         fs::write(
@@ -1188,30 +1241,29 @@ pub fn run(args: ChangelogArgs) -> Result<(), Box<dyn std::error::Error>> {
         String::new()
     };
     let drained = drain_unreleased(&existing);
-    let suppressed = match curated_pr_refs(&drained.curated) {
-        Ok(refs) => refs,
-        Err(unreferenced) => {
-            eprintln!(
-                "warning: {} curated [Unreleased] bullet(s) carry no `(#N)` PR reference, so there is no way to tell which generated entry they replace. \
-                 The full generated list is kept, which means every PR the curated prose covers appears twice in this release body. \
-                 Add the reference to: {}",
-                unreferenced.len(),
-                unreferenced
-                    .iter()
-                    .map(|b| bullet_excerpt(b, 120))
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            );
-            BTreeSet::new()
-        }
-    };
+    let curated_refs = curated_pr_refs(&drained.curated);
+    let suppressed = &curated_refs.refs;
+    if !curated_refs.unreferenced.is_empty() {
+        eprintln!(
+            "warning: {} curated [Unreleased] bullet(s) carry no `(#N)` PR reference, so there is no way to tell which generated entry they replace. \
+             Those PRs keep their generated title line and may therefore appear twice in this release body; every other curated bullet still suppresses its own entry. \
+             Add the reference to: {}",
+            curated_refs.unreferenced.len(),
+            curated_refs
+                .unreferenced
+                .iter()
+                .map(|b| bullet_excerpt(b, 120))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+    }
 
     // The generated list twice over: the full one feeds the summarizer, the
     // deduped one goes into the section body. Highlights are picked from
     // everything in the release on purpose — hiding the PRs the curated prose
     // covers would hide exactly the changes someone cared enough to write about.
     let full_classified = generate_classified_output(&prs, &BTreeSet::new());
-    let classified = generate_classified_output(&prs, &suppressed);
+    let classified = generate_classified_output(&prs, suppressed);
     let breaking = generate_breaking_changes(&prs).unwrap_or_default();
     let stats = generate_stats_line(&prs, base_tag.as_deref()).unwrap_or_default();
 
@@ -1235,16 +1287,41 @@ pub fn run(args: ChangelogArgs) -> Result<(), Box<dyn std::error::Error>> {
     if !drained.curated.is_empty() {
         // Count PRs actually in range, not references found: curated prose cites
         // plenty of older PRs that were never going to get a generated entry here.
-        let suppressed_in_range = prs
+        let in_range: BTreeSet<u64> = prs.iter().map(|p| p.number).collect();
+        let suppressed_in_range = suppressed.intersection(&in_range).count();
+        // Broken out by bullet, because the totals mean different things. Nothing
+        // prunes `[Unreleased]`, so it accumulates across releases: a bullet whose
+        // PRs are all outside this release's git range describes work that already
+        // shipped, and carrying it into a dated section re-announces it as new.
+        let about_this_release = curated_refs
+            .per_bullet
             .iter()
-            .filter(|p| suppressed.contains(&p.number))
+            .filter(|r| !r.is_disjoint(&in_range))
             .count();
+        let already_shipped = curated_refs
+            .per_bullet
+            .iter()
+            .filter(|r| !r.is_empty() && r.is_disjoint(&in_range))
+            .count();
+        // Total taken from the same split as the three parts, so they always sum.
         println!(
-            "Carried {} curated [Unreleased] bullet(s) into the {} section; {} generated entry/entries suppressed as already covered",
-            drained.bullets.len(),
+            "Carried {} curated [Unreleased] bullet(s) into the {} section: {} reference a PR in {} ({} generated entry/entries suppressed as already covered), {} reference only PRs outside that range, {} carry no reference at all",
+            curated_refs.per_bullet.len(),
             args.version,
-            suppressed_in_range
+            about_this_release,
+            git_range,
+            suppressed_in_range,
+            already_shipped,
+            curated_refs.unreferenced.len()
         );
+        if already_shipped > 0 {
+            eprintln!(
+                "warning: {} of those bullet(s) reference no PR in {}, so they describe work that shipped in an earlier release. \
+                 Nothing prunes [Unreleased], so it accumulates until someone does: this release body will announce them as new, contradicting the `Full diff` compare link published beside it. \
+                 Prune the already-shipped bullets from [Unreleased] before cutting if that is not what you want.",
+                already_shipped, git_range
+            );
+        }
     }
 
     // Print summary
@@ -1265,7 +1342,7 @@ mod tests {
     use super::{
         bullet_excerpt, collect_fragments_in, curated_pr_refs, drain_unreleased,
         generate_classified_output, parse_pr_numbers, prose_dropped_by_regeneration,
-        render_changelog, render_fragment_bullet, unreleased_bullet_lines,
+        render_changelog, render_fragment_bullet, unreleased_bullet_blocks,
         verify_no_curated_bullet_lost, write_changelog, GeneratedSections, PrInfo, FRAGMENT_DIR,
         FRAGMENT_SECTIONS, UNRELEASED_HEADING,
     };
@@ -1758,7 +1835,7 @@ mod tests {
     #[test]
     fn a_curated_pr_reference_suppresses_only_its_own_generated_entry() {
         let curated = "### Fixed\n\n- Curated prose about the approvals fix (#6605) (@houko)\n\n";
-        let refs = curated_pr_refs(curated).unwrap();
+        let refs = curated_pr_refs(curated).refs;
         assert_eq!(refs, BTreeSet::from([6605]));
 
         let prs = vec![
@@ -1789,45 +1866,53 @@ mod tests {
         // bullet documents. Reading the last `#N` anywhere would credit this
         // bullet to #6441 and drop #6441's own generated entry.
         let trailing_xref = "- Fix approvals approve (#6492): the re-resolve 400 was already correct (the latter via #6441). (@houko)\n";
-        assert_eq!(
-            curated_pr_refs(trailing_xref).unwrap(),
-            BTreeSet::from([6492])
-        );
+        assert_eq!(curated_pr_refs(trailing_xref).refs, BTreeSet::from([6492]));
 
         // One bullet can document two PRs in a single group.
         let two_prs = "- Carry `schedule` and `[autonomous]` through the flat format (#6594, #6595) (@houko)\n";
-        assert_eq!(
-            curated_pr_refs(two_prs).unwrap(),
-            BTreeSet::from([6594, 6595])
-        );
+        assert_eq!(curated_pr_refs(two_prs).refs, BTreeSet::from([6594, 6595]));
 
         // A mid-bullet reference on an earlier line is not consulted at all.
         let multiline = "- First sentence, as in (#983).\n  Second sentence (#6630) (@houko)\n";
-        assert_eq!(curated_pr_refs(multiline).unwrap(), BTreeSet::from([6630]));
+        assert_eq!(curated_pr_refs(multiline).refs, BTreeSet::from([6630]));
     }
 
-    /// Fail safe, not clever: a bullet with no reference makes the whole generated
-    /// list survive. A duplicated entry in a release body is cosmetic; a silently
-    /// dropped PR is not.
+    /// Fail safe, not clever, and **per bullet**: a bullet naming no PR keeps that
+    /// PR's generated line, and does not disarm suppression for the bullets that
+    /// did name one. A duplicated entry in a release body is cosmetic; a silently
+    /// dropped PR is not — but the fix for the former must not cost the latter.
     #[test]
-    fn a_curated_bullet_with_no_pr_reference_keeps_the_whole_generated_list() {
+    fn a_curated_bullet_with_no_pr_reference_fails_open_only_for_itself() {
         let curated = "### Fixed\n\n- Curated prose with no reference at all (@houko)\n\n### Added\n\n- Curated prose about the approvals fix (#6605) (@houko)\n\n";
-        let unreferenced =
-            curated_pr_refs(curated).expect_err("a bullet with no `(#N)` must not be guessed at");
+        let curated_refs = curated_pr_refs(curated);
         assert_eq!(
-            unreferenced,
+            curated_refs.unreferenced,
             vec!["- Curated prose with no reference at all (@houko)".to_string()],
             "the warning must name the bullet that needs the reference"
         );
+        assert_eq!(
+            curated_refs.refs,
+            BTreeSet::from([6605]),
+            "one unreferenced bullet must not discard the references the others carry"
+        );
 
-        // The caller falls back to an empty suppression set, so #6605 keeps its
-        // generated line even though a curated bullet covers it.
-        let prs = vec![pr(
-            6605,
-            "fix(cli): send a Content-Type on approvals approve",
-        )];
-        let classified = generate_classified_output(&prs, &BTreeSet::new());
-        assert!(classified.contains("(#6605)"), "{classified}");
+        // #6605 is covered by curated prose, so its generated line is suppressed.
+        // #6606 is not mentioned at all, so it keeps one.
+        let prs = vec![
+            pr(6605, "fix(cli): send a Content-Type on approvals approve"),
+            pr(6606, "fix(api): scrub the relay token from the log line"),
+        ];
+        let classified = generate_classified_output(&prs, &curated_refs.refs);
+        assert!(
+            !classified.contains("(#6605)"),
+            "suppression was disarmed by an unrelated unreferenced bullet:\n{classified}"
+        );
+        assert!(classified.contains("(#6606)"), "{classified}");
+
+        // The unreferenced bullet's own PR — whichever it is — cannot be suppressed,
+        // which is the whole point of failing open rather than guessing.
+        let body = sections_of(&classified).body(curated);
+        assert_eq!(body.matches("(#6605)").count(), 1, "{body}");
     }
 
     /// The empty-`[Unreleased]` path is what every release before this change
@@ -1997,10 +2082,14 @@ mod tests {
 
     /// Regenerating a section for a version that already exists replaces it
     /// wholesale, which was harmless while it held nothing but generated PR
-    /// titles. Now that curated prose is carried into it, a re-run of
-    /// `cargo xtask release` would drop that prose — so it is named on stderr.
+    /// titles. Now that curated prose is carried into it, a second
+    /// `cargo xtask release` for one version would delete that prose from the
+    /// only place left holding it — `[Unreleased]` was drained by the first run.
+    /// `verify_no_curated_bullet_lost` is blind to this: on the re-run it derives
+    /// its expectation from an already-empty `[Unreleased]`. So this is a second,
+    /// independent abort.
     #[test]
-    fn regenerating_a_section_reports_the_attributed_prose_it_would_drop() {
+    fn regenerating_a_section_aborts_rather_than_dropping_its_curated_prose() {
         const CUT: &str = "# Changelog\n\n## [Unreleased]\n\n## [2026.2.2] - 2026-02-02\n\n### Highlights\n\n- **Thing** — it works now\n\n### Fixed\n\n- Curated prose already carried into the release (#6605) (@houko)\n- Generated from a PR title (#6606) (@houko)\n\n## [2026.1.1] - 2026-01-01\n\n- old (#1) (@me)\n";
 
         // The regenerated body reproduces the generated line but not the curated prose.
@@ -2012,7 +2101,7 @@ mod tests {
         assert_eq!(
             dropped,
             vec!["- Curated prose already carried into the release (#6605) (@houko)".to_string()],
-            "the warning must name the prose that would vanish, and only that"
+            "the abort must name the prose that would vanish, and only that"
         );
 
         // A body that reproduces everything attributed reports nothing. The
@@ -2024,6 +2113,55 @@ mod tests {
             "### Fixed\n\n- Curated prose already carried into the release (#6605) (@houko)\n- Generated from a PR title (#6606) (@houko)\n\n",
         )
         .is_empty());
+
+        // Nothing is written, and the prose is still in the file afterwards.
+        let t = make_tree(CUT);
+        let err = cut_release(
+            &t,
+            "2026.2.2",
+            "### Fixed\n\n- Generated from a PR title (#6606) (@houko)\n\n",
+        )
+        .expect_err("regenerating over curated prose must abort, not write a lossy file");
+        assert!(
+            err.to_string().contains("Curated prose already carried"),
+            "the abort must name the bullet: {err}"
+        );
+        assert_eq!(
+            changelog_of(&t),
+            CUT,
+            "the file must be untouched when the write is refused"
+        );
+    }
+
+    /// The attribution that marks a bullet as contributor prose sits wherever the
+    /// sentence-per-line rule put it — for a multi-sentence bullet that is a
+    /// continuation line, never the `- ` marker. 67 of the 160 bullets in this
+    /// repo's `[Unreleased]` section are shaped exactly this way, so a per-line
+    /// attribution test would have waved 42% of the prose at risk straight
+    /// through, while reporting a count that read as if it were safe.
+    #[test]
+    fn attribution_on_a_continuation_line_still_marks_a_bullet_as_prose() {
+        const CUT: &str = "# Changelog\n\n## [Unreleased]\n\n## [2026.2.2] - 2026-02-02\n\n### Fixed\n\n- First sentence of the curated bullet, with the marker line carrying no attribution.\n  Second sentence, and the credit lands here (#6605) (@houko)\n\n## [2026.1.1] - 2026-01-01\n\n- old (#1) (@me)\n";
+
+        let dropped = prose_dropped_by_regeneration(CUT, "2026.2.2", "### Fixed\n\n");
+        assert_eq!(
+            dropped,
+            vec![
+                "- First sentence of the curated bullet, with the marker line carrying no attribution."
+                    .to_string()
+            ],
+            "a bullet whose `(@login)` is on a continuation line is still prose"
+        );
+
+        // And the guard compares whole blocks, so losing only the continuation
+        // sentences counts as losing the bullet.
+        let marker_only =
+            "### Fixed\n\n- First sentence of the curated bullet, with the marker line carrying no attribution.\n\n";
+        assert_eq!(
+            prose_dropped_by_regeneration(CUT, "2026.2.2", marker_only).len(),
+            1,
+            "a body holding only the marker line must not count the bullet as preserved"
+        );
     }
 
     /// Drain the repo's OWN `CHANGELOG.md`.
@@ -2059,7 +2197,7 @@ mod tests {
                 .count(),
             1
         );
-        assert!(unreleased_bullet_lines(&drained.content).is_empty());
+        assert!(unreleased_bullet_blocks(&drained.content).is_empty());
         // Nothing structural moved: no heading was swallowed and none invented.
         assert_eq!(
             drained
@@ -2082,13 +2220,21 @@ mod tests {
         .unwrap();
         let slice = awk_extract(&out, "2026.2.2");
         let slice_lines: Vec<&str> = slice.lines().collect();
+        // Whole blocks, verbatim: a multi-line bullet has to arrive with every
+        // continuation line intact and in order, not just its marker line.
         for bullet in &drained.bullets {
             assert!(
-                slice_lines.contains(&bullet.as_str()),
+                slice.contains(bullet.as_str()),
                 "curated bullet did not reach the sliced release body: {}",
-                bullet_excerpt(bullet, 120)
+                bullet_excerpt(bullet.lines().next().unwrap_or(bullet), 120)
             );
         }
+        // At least some of the real section is multi-line, or the block-level
+        // assertion above is silently only testing marker lines.
+        assert!(
+            drained.bullets.iter().any(|b| b.lines().count() > 1),
+            "no multi-line curated bullet in the real section, so blocks are untested"
+        );
         assert!(
             slice_lines.contains(&"- Generated from a PR title (#1) (@houko)"),
             "the generated list did not survive alongside the curated prose"
