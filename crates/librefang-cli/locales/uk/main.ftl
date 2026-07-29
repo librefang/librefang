@@ -963,7 +963,7 @@ doctor-audit-config-syntax-error-hint = Відредагуйте { $path } аб�
 doctor-everyapi-absent = Шлюз EveryAPI не виявлено (немає CLI у PATH, немає файлу облікових даних) — підключати нічого.
 doctor-everyapi-cli-not-logged-in = EveryAPI CLI є у PATH, але файл облікових даних не знайдено; спершу виконайте `everyapi login`, якщо хочете спрямувати LibreFang через цей шлюз.
 doctor-everyapi-credentials-incomplete = Файл облікових даних EveryAPI існує, але не містить придатного relay_key; виконайте `everyapi login` ще раз, щоб оновити його.
-doctor-everyapi-not-connected = Облікові дані EveryAPI знайдено, але LibreFang не має запису провайдера everyapi — виконайте `librefang models connect everyapi`, щоб зареєструвати шлюз як LLM-провайдера.
+doctor-everyapi-not-connected = Облікові дані EveryAPI знайдено; LibreFang автоматично виявить керованого провайдера й використає поточний relay key без копіювання.
 doctor-everyapi-provider-only = Запис провайдера EveryAPI активний у { $path }; API-драйвери йдуть через шлюз.
 doctor-everyapi-provider-without-credentials = Запис провайдера EveryAPI існує у { $path }, але придатного relay-ключа не знайдено; запити через шлюз не пройдуть автентифікацію.
 doctor-everyapi-provider-without-credentials-hint = Виконайте `everyapi login`, потім `librefang models connect everyapi`, щоб оновити збережений ключ.
@@ -2252,5 +2252,4 @@ tui-wizard-status-no-home = Не вдалося визначити домашн�
 tui-wizard-status-saved = Конфігурацію збережено — { $provider } / { $model }
 tui-wizard-status-save-fail = Не вдалося зберегти конфігурацію: { $error }
 tui-wizard-status-continuing = Продовження...
-
 

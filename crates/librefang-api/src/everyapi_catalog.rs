@@ -89,12 +89,13 @@ const RATIO_USD_PER_MILLION: f64 = 2.0;
 /// already rejected can only produce a 401 — retrying it every 15 minutes
 /// would burn requests and log noise to learn nothing.
 fn catalog_provider_is_configured(catalog: &ModelCatalog) -> bool {
-    catalog.get_provider(PROVIDER_ID).is_some_and(|provider| {
-        matches!(
-            provider.auth_status,
-            AuthStatus::Configured | AuthStatus::ValidatedKey | AuthStatus::AutoDetected
-        )
-    })
+    !catalog.is_suppressed(PROVIDER_ID)
+        && catalog.get_provider(PROVIDER_ID).is_some_and(|provider| {
+            matches!(
+                provider.auth_status,
+                AuthStatus::Configured | AuthStatus::ValidatedKey | AuthStatus::AutoDetected
+            ) || (!provider.is_custom && provider.auth_status == AuthStatus::Missing)
+        })
 }
 
 fn catalog_needs_initial_refresh(catalog: &ModelCatalog) -> bool {
@@ -515,7 +516,7 @@ async fn fetch_pricing(origin: &str) -> Result<HashMap<String, PricingEntry>, St
 }
 
 async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
-    let (base_url, api_key_env) = {
+    let (mut base_url, api_key_env, managed) = {
         let catalog = kernel.model_catalog_ref().load();
         let provider = catalog
             .get_provider(PROVIDER_ID)
@@ -528,19 +529,43 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
         } else {
             provider.api_key_env.clone()
         };
-        (provider.base_url.clone(), env_var)
+        (
+            provider.base_url.clone(),
+            env_var,
+            matches!(
+                provider.auth_status,
+                AuthStatus::AutoDetected | AuthStatus::Missing
+            ) && !provider.is_custom,
+        )
     };
 
-    // Treat an empty env var the same as an absent one — `/v1/models` answers
-    // an empty bearer with a 401 either way.
-    let api_key = std::env::var(&api_key_env)
-        .ok()
-        .filter(|key| !key.trim().is_empty())
-        .ok_or_else(|| format!("EveryAPI relay key env var {api_key_env} is not set"))?;
-
+    // Claim before invoking the managed credential process so a logged-out
+    // account cannot spawn one subprocess for every dashboard/model request.
     try_claim_refresh_slot(&base_url)?;
 
-    let live = fetch_live_models(&base_url, &api_key).await?;
+    let mut api_key = if managed {
+        let credential = resolve_managed_credential(kernel, false).await?;
+        base_url = credential.base_url;
+        credential.api_key
+    } else {
+        // Treat an empty env var the same as an absent one — `/v1/models`
+        // answers an empty bearer with a 401 either way.
+        std::env::var(&api_key_env)
+            .ok()
+            .filter(|key| !key.trim().is_empty())
+            .ok_or_else(|| format!("EveryAPI relay key env var {api_key_env} is not set"))?
+    };
+
+    let live = match fetch_live_models(&base_url, &api_key).await {
+        Err(error) if managed && (error.contains("HTTP 401") || error.contains("HTTP 403")) => {
+            let credential = resolve_managed_credential(kernel, true).await?;
+            base_url = credential.base_url;
+            api_key = credential.api_key;
+            fetch_live_models(&base_url, &api_key).await?
+        }
+        Err(error) => return Err(error),
+        Ok(live) => live,
+    };
     let pricing = match fetch_pricing(&pricing_origin(&base_url)).await {
         Ok(pricing) => pricing,
         Err(error) => {
@@ -582,6 +607,33 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
     Ok(model_count)
 }
 
+async fn resolve_managed_credential(
+    kernel: &Arc<dyn KernelApi>,
+    invalidate: bool,
+) -> Result<librefang_kernel::everyapi_credentials::EveryApiCredential, String> {
+    let resolved = tokio::task::spawn_blocking(move || {
+        librefang_kernel::everyapi_credentials::resolve(invalidate)
+    })
+    .await
+    .map_err(|error| format!("EveryAPI credential task failed: {error}"))?;
+    match resolved {
+        Ok(credential) => {
+            let base_url = credential.base_url.clone();
+            kernel.model_catalog_update(&mut move |catalog| {
+                catalog.ensure_managed_everyapi(&base_url);
+            });
+            Ok(credential)
+        }
+        Err(error) => {
+            kernel.model_catalog_update(&mut |catalog| {
+                catalog.set_provider_auth_status(PROVIDER_ID, AuthStatus::Missing);
+                catalog.clear_provider_available_models(PROVIDER_ID);
+            });
+            Err(format!("EveryAPI managed credential unavailable: {error}"))
+        }
+    }
+}
+
 /// Clear the retry window for one base URL so sequential integration tests on
 /// reused ephemeral ports do not contaminate each other (#6384).
 ///
@@ -605,6 +657,7 @@ mod tests {
             base_url: "https://api.everyapi.ai/v1".to_string(),
             key_required: true,
             auth_status,
+            is_custom: true,
             ..Default::default()
         }
     }
@@ -712,6 +765,24 @@ mod tests {
                 "{status:?} should not trigger a stale refresh"
             );
         }
+    }
+
+    #[test]
+    fn a_missing_managed_credential_remains_eligible_for_recovery() {
+        let mut catalog = ModelCatalog::default();
+        assert!(catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1"));
+        catalog.set_provider_auth_status(PROVIDER_ID, AuthStatus::Missing);
+        assert!(catalog_needs_initial_refresh(&catalog));
+    }
+
+    #[test]
+    fn a_suppressed_managed_provider_never_triggers_a_refresh() {
+        let mut catalog = ModelCatalog::default();
+        assert!(catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1"));
+        catalog.set_provider_auth_status(PROVIDER_ID, AuthStatus::Missing);
+        catalog.suppress_provider(PROVIDER_ID);
+        assert!(!catalog_needs_initial_refresh(&catalog));
+        assert!(!catalog_needs_stale_refresh(&catalog));
     }
 
     #[test]

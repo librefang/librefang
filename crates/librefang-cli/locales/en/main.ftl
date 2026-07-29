@@ -950,7 +950,7 @@ doctor-audit-config-syntax-error-hint = Edit { $path } or restore from a backup.
 doctor-everyapi-absent = No EveryAPI gateway detected (no CLI on PATH, no credentials) — nothing to wire.
 doctor-everyapi-cli-not-logged-in = EveryAPI CLI is on PATH but no credentials file was found; run `everyapi login` first if you want to route LibreFang through it.
 doctor-everyapi-credentials-incomplete = EveryAPI credentials file exists but carries no usable relay_key; re-run `everyapi login` to refresh it.
-doctor-everyapi-not-connected = EveryAPI credentials found, but LibreFang has no everyapi provider entry — run `librefang models connect everyapi` to register the gateway as an LLM provider.
+doctor-everyapi-not-connected = EveryAPI credentials found; LibreFang will auto-detect the managed provider and use the current relay key without copying it.
 doctor-everyapi-provider-only = EveryAPI provider entry active at { $path }; API drivers route through the gateway.
 doctor-everyapi-provider-without-credentials = EveryAPI provider entry exists at { $path }, but no usable relay key was found; requests through the gateway will fail authentication.
 doctor-everyapi-provider-without-credentials-hint = Run `everyapi login`, then `librefang models connect everyapi` to refresh the stored key.
@@ -2228,7 +2228,6 @@ tui-wizard-status-no-home = Could not determine home directory
 tui-wizard-status-saved = Config saved — { $provider } / { $model }
 tui-wizard-status-save-fail = Failed to save config: { $error }
 tui-wizard-status-continuing = Continuing...
-
 
 
 

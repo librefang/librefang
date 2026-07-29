@@ -478,7 +478,24 @@ impl LibreFangKernel {
         };
         // Primary driver failure is non-fatal: the dashboard should remain accessible
         // even if the LLM provider is misconfigured. Users can fix config via dashboard.
-        let primary_result = drivers::create_driver(&driver_config);
+        let managed_everyapi_default = config.default_model.provider == "everyapi"
+            && default_api_key.is_none()
+            && config.default_model.base_url.is_none()
+            && !config.provider_urls.contains_key("everyapi")
+            && !config
+                .home_dir
+                .join("providers")
+                .join("everyapi.toml")
+                .exists()
+            && crate::everyapi_credentials::resolve(false).is_ok();
+        let primary_result = if managed_everyapi_default {
+            Ok(Arc::new(crate::everyapi_driver::ManagedEveryApiDriver::new(
+                driver_config.clone(),
+                Arc::new(drivers::DriverCache::new()),
+            )) as Arc<dyn LlmDriver>)
+        } else {
+            drivers::create_driver(&driver_config)
+        };
         let mut driver_chain: Vec<Arc<dyn LlmDriver>> = Vec::new();
 
         let rotation_specs = collect_rotation_key_specs(
@@ -899,6 +916,37 @@ impl LibreFangKernel {
                 "applied {} provider URL override(s)",
                 config.provider_urls.len()
             );
+        }
+        let everyapi_explicit = config.provider_urls.contains_key("everyapi")
+            || config.provider_api_keys.contains_key("everyapi")
+            || config.auth_profiles.contains_key("everyapi")
+            || std::env::var("EVERYAPI_API_KEY").is_ok_and(|key| !key.trim().is_empty())
+            || model_catalog
+                .get_provider("everyapi")
+                .is_some_and(|provider| provider.is_custom);
+        if !everyapi_explicit {
+            match crate::everyapi_credentials::resolve(false) {
+                Ok(credential) => {
+                    if model_catalog.ensure_managed_everyapi(&credential.base_url) {
+                        info!(
+                            base_url = %credential.base_url,
+                            "Auto-detected EveryAPI managed provider"
+                        );
+                    }
+                }
+                Err(
+                    crate::everyapi_credentials::CredentialError::NotLoggedIn
+                    | crate::everyapi_credentials::CredentialError::NoRelayKey,
+                ) => {
+                    if model_catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1") {
+                        model_catalog.set_provider_auth_status(
+                            "everyapi",
+                            librefang_types::model_catalog::AuthStatus::Missing,
+                        );
+                    }
+                }
+                Err(_) => {}
+            }
         }
         if !config.provider_proxy_urls.is_empty() {
             model_catalog.apply_proxy_url_overrides(&config.provider_proxy_urls);

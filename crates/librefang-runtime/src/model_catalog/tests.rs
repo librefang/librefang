@@ -2312,3 +2312,20 @@ fn load_overrides_keeps_existing_on_parse_failure() {
         "a malformed overrides.json must not silently drop existing overrides (#5137)"
     );
 }
+#[test]
+fn managed_everyapi_registration_is_auto_detected_and_builtin() {
+    let mut catalog = ModelCatalog::default();
+    assert!(catalog.ensure_managed_everyapi("https://api-cn.everyapi.ai/v1"));
+    let provider = catalog.get_provider("everyapi").unwrap();
+    assert_eq!(provider.base_url, "https://api-cn.everyapi.ai/v1");
+    assert_eq!(provider.auth_status, AuthStatus::AutoDetected);
+    assert!(!provider.is_custom);
+}
+
+#[test]
+fn managed_everyapi_registration_honors_suppression() {
+    let mut catalog = ModelCatalog::default();
+    catalog.suppress_provider("everyapi");
+    assert!(!catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1"));
+    assert!(catalog.get_provider("everyapi").is_none());
+}

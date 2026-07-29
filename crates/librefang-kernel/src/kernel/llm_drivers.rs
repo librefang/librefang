@@ -14,6 +14,20 @@
 use super::*;
 use librefang_types::error::LibreFangError;
 
+fn should_use_managed_everyapi(
+    provider: &str,
+    api_key_present: bool,
+    explicit_key: bool,
+    explicit_url: bool,
+    managed_available: bool,
+) -> bool {
+    provider == "everyapi"
+        && !api_key_present
+        && !explicit_key
+        && !explicit_url
+        && managed_available
+}
+
 impl LibreFangKernel {
     /// Resolve the LLM driver for an agent.
     ///
@@ -71,6 +85,22 @@ impl LibreFangKernel {
             } else {
                 Some(p.api_key_env.clone())
             }
+        })
+    }
+
+    fn is_managed_everyapi(&self, provider: &str) -> bool {
+        if provider != "everyapi" {
+            return false;
+        }
+        let catalog = self.llm.model_catalog.load();
+        catalog.get_provider(provider).is_some_and(|entry| {
+            !entry.is_custom
+                && !catalog.is_suppressed(provider)
+                && matches!(
+                    entry.auth_status,
+                    librefang_types::model_catalog::AuthStatus::AutoDetected
+                        | librefang_types::model_catalog::AuthStatus::Missing
+                )
         })
     }
 
@@ -309,22 +339,35 @@ impl LibreFangKernel {
             );
 
             let driver_config = make_driver_config(api_key);
-
-            match self.llm.driver_cache.get_or_create(&driver_config) {
-                Ok(d) => d,
-                Err(e) => {
-                    if agent_provider == default_provider && !has_custom_key && !has_custom_url {
-                        debug!(
-                            provider = %agent_provider,
-                            error = %e,
-                            "Fresh driver creation failed, falling back to boot-time default"
-                        );
-                        Arc::clone(&self.llm.default_driver)
-                    } else {
-                        return Err(LibreFangError::BootFailed(format!(
-                            "Agent LLM driver init failed: {e}"
-                        ))
-                        .into());
+            if should_use_managed_everyapi(
+                agent_provider,
+                driver_config.api_key.is_some(),
+                has_custom_key,
+                has_custom_url,
+                self.is_managed_everyapi(agent_provider),
+            ) {
+                Arc::new(crate::everyapi_driver::ManagedEveryApiDriver::new(
+                    driver_config,
+                    Arc::clone(&self.llm.driver_cache),
+                ))
+            } else {
+                match self.llm.driver_cache.get_or_create(&driver_config) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        if agent_provider == default_provider && !has_custom_key && !has_custom_url
+                        {
+                            debug!(
+                                provider = %agent_provider,
+                                error = %e,
+                                "Fresh driver creation failed, falling back to boot-time default"
+                            );
+                            Arc::clone(&self.llm.default_driver)
+                        } else {
+                            return Err(LibreFangError::BootFailed(format!(
+                                "Agent LLM driver init failed: {e}"
+                            ))
+                            .into());
+                        }
                     }
                 }
             }
@@ -437,7 +480,21 @@ impl LibreFangKernel {
                         .copied()
                         .unwrap_or_else(|| DriverConfig::default().max_retries),
                 };
-                match self.llm.driver_cache.get_or_create(&config) {
+                let fallback_driver = if should_use_managed_everyapi(
+                    &fb_provider,
+                    config.api_key.is_some(),
+                    fb.api_key_env.is_some(),
+                    fb.base_url.is_some(),
+                    self.is_managed_everyapi(&fb_provider),
+                ) {
+                    Ok(Arc::new(crate::everyapi_driver::ManagedEveryApiDriver::new(
+                        config,
+                        Arc::clone(&self.llm.driver_cache),
+                    )) as Arc<dyn LlmDriver>)
+                } else {
+                    self.llm.driver_cache.get_or_create(&config)
+                };
+                match fallback_driver {
                     Ok(d) => chain.push((
                         d,
                         strip_provider_prefix(&fb.model, &fb_provider),
@@ -467,6 +524,27 @@ impl LibreFangKernel {
         }
 
         Ok(primary)
+    }
+}
+
+#[cfg(test)]
+mod managed_everyapi_tests {
+    use super::should_use_managed_everyapi;
+
+    #[test]
+    fn explicit_credentials_and_urls_override_managed_everyapi() {
+        assert!(!should_use_managed_everyapi(
+            "everyapi", true, false, false, true
+        ));
+        assert!(!should_use_managed_everyapi(
+            "everyapi", false, true, false, true
+        ));
+        assert!(!should_use_managed_everyapi(
+            "everyapi", false, false, true, true
+        ));
+        assert!(should_use_managed_everyapi(
+            "everyapi", false, false, false, true
+        ));
     }
 }
 

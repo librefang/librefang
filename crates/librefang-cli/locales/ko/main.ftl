@@ -950,7 +950,7 @@ doctor-audit-config-syntax-error-hint = { $path }을(를) 편집하거나 백업
 doctor-everyapi-absent = EveryAPI 게이트웨이가 감지되지 않았습니다(PATH에 CLI 없음, 자격 증명 파일 없음) — 연결할 대상이 없습니다.
 doctor-everyapi-cli-not-logged-in = EveryAPI CLI는 PATH에 있지만 자격 증명 파일을 찾을 수 없습니다. LibreFang을 이 게이트웨이로 라우팅하려면 먼저 `everyapi login`을 실행하십시오.
 doctor-everyapi-credentials-incomplete = EveryAPI 자격 증명 파일은 있으나 사용 가능한 relay_key가 없습니다. `everyapi login`을 다시 실행하여 갱신하십시오.
-doctor-everyapi-not-connected = EveryAPI 자격 증명을 찾았지만 LibreFang에 everyapi 프로바이더 항목이 없습니다 — `librefang models connect everyapi`를 실행하면 게이트웨이를 LLM 프로바이더로 등록할 수 있습니다.
+doctor-everyapi-not-connected = EveryAPI 자격 증명을 찾았습니다. LibreFang이 관리형 프로바이더를 자동 감지하고 키를 복사하지 않은 채 현재 relay key를 사용합니다.
 doctor-everyapi-provider-only = EveryAPI 프로바이더 항목이 { $path }에서 활성화되어 있습니다. API 드라이버는 이 게이트웨이를 경유합니다.
 doctor-everyapi-provider-without-credentials = EveryAPI 프로바이더 항목이 { $path }에 있지만 사용 가능한 relay key를 찾을 수 없습니다. 이 게이트웨이를 통한 요청은 인증에 실패합니다.
 doctor-everyapi-provider-without-credentials-hint = `everyapi login`을 실행한 뒤 `librefang models connect everyapi`로 저장된 키를 갱신하세요.
@@ -2228,7 +2228,6 @@ tui-wizard-status-no-home = 홈 디렉터리를 확인할 수 없음
 tui-wizard-status-saved = 구성 저장됨 — { $provider } / { $model }
 tui-wizard-status-save-fail = 구성 저장에 실패: { $error }
 tui-wizard-status-continuing = 계속하는 중...
-
 
 
 
