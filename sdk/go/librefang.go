@@ -1612,6 +1612,10 @@ func (r *SystemResource) QueueStatus() (interface{}, error) {
 	return r.client.request("GET", "/api/queue/status", nil, nil)
 }
 
+func (r *SystemResource) Ready() (interface{}, error) {
+	return r.client.request("GET", "/api/ready", nil, nil)
+}
+
 func (r *SystemResource) RestoreBackup(data map[string]interface{}) (interface{}, error) {
 	return r.client.request("POST", "/api/restore", data, nil)
 }

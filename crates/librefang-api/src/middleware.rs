@@ -1068,6 +1068,14 @@ pub const PUBLIC_ROUTES_ALWAYS: &[PublicRoute] = &[
     PublicRoute::exact_any("/api/pairing/complete"),
     // Minimal liveness probes
     PublicRoute::exact_any("/api/health"),
+    // Readiness probe (#6633). Must be public for the same reason
+    // `/api/health` is: a Kubernetes `readinessProbe` is issued by the
+    // kubelet, which holds no LibreFang credential, and a 401 would pin the
+    // pod permanently out of Service endpoints. Its payload is check
+    // names + coarse status only — no version, hostname, provider id, or
+    // error text (see `routes::config::system::ready`); detailed
+    // diagnostics stay behind the auth-gated `/api/health/detail`.
+    PublicRoute::exact_any("/api/ready"),
     // NOTE: `/api/health/detail` is intentionally NOT public here. Its
     // payload includes `panic_count`, `restart_count`, `agent_count`,
     // embedding / extraction model ids, `config_warnings` from

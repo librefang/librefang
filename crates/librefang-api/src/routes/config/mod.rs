@@ -25,6 +25,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/metrics", axum::routing::get(prometheus_metrics))
         .route("/health", axum::routing::get(health))
         .route("/health/detail", axum::routing::get(health_detail))
+        .route("/ready", axum::routing::get(ready))
         .route("/status", axum::routing::get(status))
         .route(
             "/dashboard/snapshot",

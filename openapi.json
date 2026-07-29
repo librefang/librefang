@@ -10233,6 +10233,38 @@
         }
       }
     },
+    "/api/ready": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/ready — Readiness probe (public, no auth required).",
+        "description": "Distinct from `/api/health` on purpose. `/api/health` answers \"is this\nprocess alive?\" and always returns 200 while the HTTP server can respond,\nso a Kubernetes `livenessProbe` pointed at it never restarts a pod over a\nrecoverable storage or provider incident. This endpoint answers \"can this\nprocess accept work?\" and returns 503 when a dependency required to do so\nis unavailable, which is what removes the pod from Service endpoints\nwithout killing it.\n\nThe body is deliberately minimal — check names and a coarse status only.\nIt carries no version, hostname, provider id, model name, path, or error\ntext, because an unauthenticated caller reaches it; detailed diagnostics\nremain behind `GET /api/health/detail`.",
+        "operationId": "ready",
+        "responses": {
+          "200": {
+            "description": "All required dependencies are ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A required dependency is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/restore": {
       "post": {
         "tags": [
