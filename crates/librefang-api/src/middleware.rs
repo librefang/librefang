@@ -242,6 +242,24 @@ fn plugin_route_executes_plugin_code(path: &str) -> bool {
     if path == "/api/plugins/prewarm" {
         return true;
     }
+    // `POST /api/plugins/batch` dispatches on a body field
+    // (`{"operation": "...", "plugins": [...]}`) and accepts `enable` and
+    // `sign` — both Owner-only as per-plugin actions below. The auth layer sees
+    // only method and path, so there is no way to gate the dangerous operations
+    // and admit the safe ones here: leaving the path open would let an Admin
+    // reach `enable` and `sign` through it, in bulk, and defeat those gates
+    // entirely.
+    //
+    // The cost is that an Admin loses the batch convenience for `disable` and
+    // `lint`. That does not weaken incident response — the per-plugin
+    // `{name}/disable` stays at Admin precisely so a malicious plugin can be
+    // shut off, and doing that one at a time is still available. Splitting the
+    // route by operation (or moving the role check into the handler, where the
+    // body is visible) would restore the convenience; that is a larger change
+    // than closing the bypass and is not required to close it.
+    if path == "/api/plugins/batch" {
+        return true;
+    }
     let Some(rest) = path.strip_prefix("/api/plugins/") else {
         return false;
     };
@@ -256,6 +274,11 @@ fn plugin_route_executes_plugin_code(path: &str) -> bool {
         "install-deps"
             // Invokes a hook directly — the most direct execution path there is.
             | "test-hook"
+            // Also invokes the hook directly, via `run_hook_json` in a loop —
+            // `runs` executions per request rather than one, so it is
+            // `test-hook` with a multiplier, not a measurement of something
+            // already running.
+            | "benchmark"
             // Pulls new code over the existing plugin from registry or git.
             | "upgrade"
             // Puts the plugin's hooks back in the dispatch path, so the next
@@ -1932,8 +1955,13 @@ mod tests {
             "/api/plugins/install",
             "/api/plugins/install-with-deps",
             "/api/plugins/prewarm",
+            // Dispatches on a body field and accepts `enable` / `sign`, so
+            // leaving it open reaches those gates in bulk.
+            "/api/plugins/batch",
             "/api/plugins/evil/install-deps",
             "/api/plugins/evil/test-hook",
+            // `run_hook_json` in a loop — `test-hook` with a multiplier.
+            "/api/plugins/evil/benchmark",
             "/api/plugins/evil/upgrade",
             "/api/plugins/evil/enable",
             "/api/plugins/evil/reload",
@@ -1995,6 +2023,99 @@ mod tests {
                 "Admin must retain GET {path}"
             );
         }
+    }
+
+    /// Fail-closed completeness guard for the plugin authorization surface.
+    ///
+    /// The original #6631 fix enumerated the Owner-only set by reading
+    /// `routes::plugins::router()` by hand, and missed `install-with-deps`,
+    /// `prewarm` (both forms), `batch`, and `benchmark` — each a path to a
+    /// capability that was already gated elsewhere. Adding those individually
+    /// fixes the instances; it does nothing about the next route someone adds.
+    ///
+    /// So this reflects the actual route table out of the source and requires
+    /// every `POST /plugins/...` to appear in exactly one of two explicit
+    /// lists. A new route is a test failure until someone classifies it, which
+    /// is the opposite of the silent-admission default that caused the misses.
+    #[test]
+    fn every_plugin_post_route_is_explicitly_classified() {
+        const PLUGINS_SRC: &str = include_str!("routes/plugins.rs");
+
+        // Routes that must stay reachable by Admin, each with its reason.
+        // Anything here is a deliberate decision, not an oversight.
+        const ADMIN_ALLOWED: &[&str] = &[
+            // Removes code from the execution path — Owner-gating it would
+            // block incident response.
+            "/plugins/uninstall",
+            "/plugins/{name}/disable",
+            // Writes a template into the plugins dir; executes nothing.
+            "/plugins/scaffold",
+            // Static validation of manifest and hook-script structure.
+            "/plugins/{name}/lint",
+            // Reads context-engine metrics for an already-running plugin.
+            "/plugins/{name}/health",
+        ];
+
+        // Pull the `router()` body so unrelated route strings elsewhere in the
+        // file cannot leak in.
+        let body_start = PLUGINS_SRC
+            .find("pub fn router()")
+            .expect("router() must exist in routes/plugins.rs");
+        let body = &PLUGINS_SRC[body_start..];
+        let body_end = body
+            .find("\n}\n")
+            .expect("router() body must terminate at a column-0 brace");
+        let body = &body[..body_end];
+
+        // Each `.route(` chunk holds one path literal and its method calls.
+        // Formatting splits these across lines, so operate per chunk rather
+        // than per line.
+        let mut unclassified = Vec::new();
+        let mut seen_post = 0usize;
+        for chunk in body.split(".route(").skip(1) {
+            let Some(path_start) = chunk.find('"') else {
+                continue;
+            };
+            let after = &chunk[path_start + 1..];
+            let Some(path_len) = after.find('"') else {
+                continue;
+            };
+            let route_path = &after[..path_len];
+            if !route_path.starts_with("/plugins") {
+                continue; // context-engine reads live in the same router
+            }
+            // Only the method calls for THIS route: stop at the next `.route(`
+            // boundary, which `split` already did for us.
+            if !after[path_len..].contains("routing::post") {
+                continue;
+            }
+            seen_post += 1;
+
+            let full = format!("/api{route_path}");
+            let owner_only = plugin_route_executes_plugin_code(&full);
+            let admin_ok = ADMIN_ALLOWED.contains(&route_path);
+
+            if owner_only == admin_ok {
+                // Either both (contradictory) or neither (unclassified).
+                unclassified.push(format!(
+                    "{route_path} (owner_only={owner_only}, in ADMIN_ALLOWED={admin_ok})"
+                ));
+            }
+        }
+
+        assert!(
+            seen_post >= 10,
+            "parsed only {seen_post} POST plugin routes — the extraction \
+             probably broke rather than the router shrinking that much"
+        );
+        assert!(
+            unclassified.is_empty(),
+            "these POST /plugins routes are not classified exactly once. Each \
+             must either execute plugin-controlled code (add it to \
+             `plugin_route_executes_plugin_code`) or be safe for Admin (add it \
+             to ADMIN_ALLOWED here, with the reason):\n  {}",
+            unclassified.join("\n  ")
+        );
     }
 
     /// The Owner-only predicate keys on the action segment, so a plugin whose
