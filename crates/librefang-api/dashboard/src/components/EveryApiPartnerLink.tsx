@@ -17,8 +17,8 @@ export function EveryApiPartnerLink({ collapsed }: { collapsed: boolean }) {
         collapsed ? "justify-center px-0" : "gap-2.5 px-3"
       }`}
     >
-      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-brand/10 font-mono text-[11px] font-bold text-brand">
-        E
+      <span className="flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-surface">
+        <img src={EVERYAPI_PARTNER.logoUrl} alt="" className="h-full w-full object-contain" aria-hidden="true" />
       </span>
       {!collapsed && (
         <span className="min-w-0 flex-1">

@@ -15,4 +15,8 @@ describe("EveryAPI partner links", () => {
   it("keeps EveryAPI's public product destination canonical", () => {
     expect(EVERYAPI_PARTNER.websiteUrl).toBe("https://everyapi.ai/");
   });
+
+  it("uses the official EveryAPI logo asset", () => {
+    expect(EVERYAPI_PARTNER.logoUrl).toBe("/dashboard/everyapi-logo.png");
+  });
 });
