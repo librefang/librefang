@@ -394,14 +394,26 @@ fn redacted_config_json(
         },
     );
 
+    // The `approval` section declares no explicit `fields` list in `ui_sections_overlay`, so the dashboard renders a control for every `ApprovalPolicy` field the derived schema knows about — and seven of the fourteen were absent here, rendering blank and reading back as their JSON zero value.
+    // `cache_approvals_per_session` was the visible one: it defaults to `true`, so an operator who left it alone still saw the box unchecked and had no way to tell whether per-session caching was on (#6636 observation (e)).
+    // None of the seven is writable, which is why `every_writable_config_leaf_is_readable` never saw them; `approval_policy_fields_are_all_readable` is the guard for this direction.
+    // Nothing added here is secret-bearing: `trusted_senders`, `channel_rules`, and `routing` hold operator-chosen user ids, channel names, tool globs, and notification recipients — the same class as the `external_auth` fields exposed in #6605, and credentials never live in `ApprovalPolicy`.
     set!("approval", {
         "require_approval": config.approval.require_approval,
         "timeout_secs": config.approval.timeout_secs,
         "auto_approve_autonomous": config.approval.auto_approve_autonomous,
         "auto_approve": config.approval.auto_approve,
+        "trusted_senders": config.approval.trusted_senders,
+        "channel_rules": serde_json::to_value(&config.approval.channel_rules).unwrap_or(serde_json::json!([])),
+        // Serde encoding, not `Debug` — see `enum_valued_fields_use_the_serde_encoding_not_debug`.
+        "timeout_fallback": serde_json::to_value(&config.approval.timeout_fallback).unwrap_or(serde_json::json!("deny")),
+        "routing": serde_json::to_value(&config.approval.routing).unwrap_or(serde_json::json!([])),
         "second_factor": serde_json::to_value(config.approval.second_factor).unwrap_or(serde_json::json!("none")),
         "totp_issuer": config.approval.totp_issuer,
         "totp_grace_period_secs": config.approval.totp_grace_period_secs,
+        "totp_tools": config.approval.totp_tools,
+        "audit_retention_days": config.approval.audit_retention_days,
+        "cache_approvals_per_session": config.approval.cache_approvals_per_session,
     });
 
     // `ExecSecurityMode` is `rename_all = "lowercase"` — the schema's select offers `deny | allowlist | full`, so `Debug`'s `"Allowlist"` never matched an option.
@@ -1654,6 +1666,79 @@ mod config_read_write_parity_tests {
                  (#6605); got {provider:#?}"
             );
         }
+    }
+
+    /// #6636 observation (e): every `ApprovalPolicy` field must be readable.
+    ///
+    /// The `approval` section declares no explicit `fields` list in `ui_sections_overlay`, so `ConfigPage` renders a control for whatever the derived schema says the struct has — but the response builder enumerated seven of fourteen fields by hand, and the rest rendered blank and read back as their JSON zero value.
+    /// `cache_approvals_per_session` made it visible: it defaults to `true`, so the dashboard showed it off for every operator who had never touched it, including one whose `config.toml` said `true`.
+    /// Only three approval paths are writable, so `every_writable_config_leaf_is_readable` covers three of fourteen and is blind to the rest by construction.
+    ///
+    /// The oracle is the serialized struct rather than a restated list, so a field added to `ApprovalPolicy` later fails here instead of quietly joining the gap.
+    /// The fixture sets non-default values so a response builder that emits the key with a hardcoded literal cannot pass.
+    #[test]
+    fn approval_policy_fields_are_all_readable() {
+        use librefang_types::approval::{ChannelToolRule, NotificationTarget};
+
+        let mut config = config_with_optional_sections_populated();
+        config.approval.cache_approvals_per_session = false;
+        config.approval.audit_retention_days = 7;
+        config.approval.trusted_senders = vec!["operator-1".into()];
+        config.approval.totp_tools = vec!["shell_exec".into()];
+        config.approval.timeout_fallback = librefang_types::approval::TimeoutFallback::Escalate {
+            extra_timeout_secs: 45,
+        };
+        config.approval.channel_rules = vec![ChannelToolRule {
+            channel: "telegram".into(),
+            allowed_tools: vec!["file_read".into()],
+            denied_tools: vec!["shell_exec".into()],
+        }];
+        config.approval.routing = vec![librefang_types::approval::ApprovalRoutingRule {
+            tool_pattern: "shell_*".into(),
+            route_to: vec![NotificationTarget {
+                channel_type: "telegram".into(),
+                recipient: "12345".into(),
+                thread_id: None,
+            }],
+        }];
+
+        let payload = super::redacted_config_json(&config, &BudgetConfig::default());
+        let serialized =
+            serde_json::to_value(&config.approval).expect("ApprovalPolicy derives Serialize");
+        let expected = serialized
+            .as_object()
+            .expect("ApprovalPolicy serializes to an object");
+
+        // Sanity floor: a refactor that empties the oracle would make the loop below pass vacuously.
+        assert!(
+            expected.len() >= 14,
+            "the ApprovalPolicy oracle enumerated only {} fields — the walk is broken, not the config",
+            expected.len()
+        );
+
+        let mut missing: Vec<&String> = Vec::new();
+        let mut mismatched: Vec<String> = Vec::new();
+        for (key, want) in expected {
+            match lookup(&payload, &format!("approval.{key}")) {
+                None => missing.push(key),
+                Some(got) if got != want => {
+                    mismatched.push(format!("approval.{key}: want {want}, got {got}"))
+                }
+                Some(_) => {}
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "GET /api/config omits these ApprovalPolicy fields, so the dashboard renders each one \
+             blank and reads it back as its zero value (#6636). Add them to `redacted_config_json`: \
+             {missing:#?}"
+        );
+        assert!(
+            mismatched.is_empty(),
+            "these ApprovalPolicy fields are emitted but do not carry the configured value: \
+             {mismatched:#?}"
+        );
     }
 
     /// One fully-populated provider.
