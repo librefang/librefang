@@ -4,7 +4,9 @@
 
 **Goal:** Automatically expose a locally authenticated EveryAPI account as a LibreFang OpenAI-compatible provider without copying its relay key into LibreFang-owned files.
 
-**Architecture:** EveryAPI owns credential selection, refresh, region resolution, and invalidation through a versioned credential-process command. LibreFang invokes that command through a bounded resolver, registers the provider in memory, resolves credentials again for live catalog requests and LLM calls, and retries one authentication failure after invalidation. Explicit LibreFang keys and URLs keep precedence over auto-detection.
+**Architecture:** EveryAPI owns credential selection, refresh, region resolution, and invalidation through a versioned credential-process command.
+LibreFang invokes that command through a bounded resolver, registers the provider in memory, resolves credentials again for live catalog requests and LLM calls, and retries one authentication failure after invalidation.
+Explicit LibreFang keys and URLs keep precedence over auto-detection.
 
 **Tech Stack:** Go CLI and SDK, Rust 2021, tokio, serde, existing OpenAI-compatible LLM driver and driver cache.
 
