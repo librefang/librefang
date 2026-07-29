@@ -235,7 +235,7 @@ impl LibreFangKernel {
             model: model.to_string(),
             messages: std::sync::Arc::new(vec![Message::user(prompt.to_string())]),
             tools: std::sync::Arc::new(vec![]),
-            max_tokens: 10,
+            max_tokens: 50, // enough for YES/NO + brief rationale
             temperature: 0.0,
             system: None,
             thinking: None,

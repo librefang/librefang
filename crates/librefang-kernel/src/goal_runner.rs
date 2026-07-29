@@ -50,6 +50,11 @@ const TICK_INTERVAL: Duration = Duration::from_secs(2);
 /// the background executor's circuit breaker (#5168) so a quota-exhausted
 /// provider does not get hammered on every iteration.
 const MAX_RATE_LIMIT_STREAK: u32 = 3;
+/// Consecutive non-rate-limit errors before the loop gives up. Prevents
+/// burning all max_iterations on a permanently broken condition (wrong
+/// API key, deleted agent, network down). Separate from the rate-limit
+/// circuit breaker so transient rate-limits don't also count.
+const MAX_ERROR_STREAK: u32 = 5;
 
 /// Result of parsing one agent reply for goal-control markers.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -640,6 +645,7 @@ async fn run_loop<F, Fut, S, Sfut, L, E, Efut>(
 {
     let mut iteration: u32 = 0;
     let mut rate_limit_streak: u32 = 0;
+    let mut error_streak: u32 = 0;
     // Learnings captured across iterations via `GOAL_LEARNED:` markers.
     // Persisted to shared memory on loop exit so the agent self-evolves.
     let mut accumulated_learnings: Vec<String> = Vec::new();
@@ -685,6 +691,7 @@ async fn run_loop<F, Fut, S, Sfut, L, E, Efut>(
         match send_message(agent_id, prompt).await {
             Ok(reply) => {
                 rate_limit_streak = 0;
+                error_streak = 0; // reset error streak on success
                 let parsed = parse_tick(&reply);
                 // Collect learnings for self-evolution (loop_engineering only).
                 if loop_engineering && !parsed.learnings.is_empty() {
@@ -830,6 +837,7 @@ async fn run_loop<F, Fut, S, Sfut, L, E, Efut>(
                     }
                     TickOutcome::Ok => {
                         rate_limit_streak = 0;
+                        error_streak = error_streak.saturating_add(1);
                     }
                 }
                 // Same lock discipline as success path: release before persist_run.
@@ -842,6 +850,11 @@ async fn run_loop<F, Fut, S, Sfut, L, E, Efut>(
                 persist_run(&store, &snapshot);
                 if rate_limit_streak >= MAX_RATE_LIMIT_STREAK {
                     break GoalRunPhase::RateLimited;
+                }
+                if error_streak >= MAX_ERROR_STREAK {
+                    warn!(goal_id = %goal_id, consecutive_errors = error_streak,
+                          "Goal run: stopping after too many consecutive errors");
+                    break GoalRunPhase::Stopped;
                 }
             }
         }
