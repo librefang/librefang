@@ -15,6 +15,40 @@ use super::*;
 use crate::MeteringSubsystemApi;
 use librefang_types::error::LibreFangError;
 
+fn select_everyapi_default_model(
+    catalog: &librefang_runtime::model_catalog::ModelCatalog,
+    available_ids: &[String],
+) -> Option<String> {
+    use librefang_types::model_catalog::{Modality, ModelTier};
+    use std::collections::HashSet;
+
+    let available: HashSet<String> = available_ids
+        .iter()
+        .map(|id| id.trim().to_ascii_lowercase())
+        .filter(|id| !id.is_empty())
+        .collect();
+    [
+        ModelTier::Smart,
+        ModelTier::Balanced,
+        ModelTier::Frontier,
+        ModelTier::Fast,
+    ]
+    .into_iter()
+    .flat_map(|tier| catalog.models_by_tier(tier))
+    .find(|model| {
+        model.modality == Modality::Text && available.contains(&model.id.to_ascii_lowercase())
+    })
+    .map(|model| model.id.clone())
+    .or_else(|| {
+        available_ids
+            .iter()
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
+            .min_by_key(|id| id.to_ascii_lowercase())
+            .map(str::to_string)
+    })
+}
+
 impl LibreFangKernel {
     /// Per-session stream-event hub (multi-client SSE attach).
     ///
@@ -460,7 +494,18 @@ impl LibreFangKernel {
             } else if !everyapi_suppressed
                 && (everyapi_explicit_key_available || everyapi_credential.is_some())
             {
-                let model = "claude-sonnet-5".to_string();
+                let catalog = librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
+                let model = everyapi_credential
+                    .as_ref()
+                    .and_then(|_| crate::everyapi_credentials::resolve_available_models().ok())
+                    .and_then(|available| select_everyapi_default_model(&catalog, &available))
+                    .unwrap_or_else(|| {
+                        warn!(
+                            "EveryAPI account model catalog unavailable or has no curated text model; \
+                             falling back to the built-in default"
+                        );
+                        "claude-sonnet-5".to_string()
+                    });
                 let auth_source = if everyapi_explicit_key_available {
                     "EveryAPI API key"
                 } else {
@@ -3342,6 +3387,54 @@ mod state_secret_validation {
         assert!(
             err.starts_with("the wrong length") || err.starts_with("not base64"),
             "expected length-or-decode rejection on empty string; got {err:?}",
+        );
+    }
+}
+
+#[cfg(test)]
+mod everyapi_default_model_selection {
+    use super::select_everyapi_default_model;
+    use librefang_runtime::model_catalog::ModelCatalog;
+    use librefang_types::model_catalog::{ModelCatalogEntry, ModelTier};
+
+    fn catalog() -> ModelCatalog {
+        let model = |id: &str, tier| ModelCatalogEntry {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            provider: "anthropic".to_string(),
+            tier,
+            context_window: 200_000,
+            max_output_tokens: 16_384,
+            ..ModelCatalogEntry::default()
+        };
+        ModelCatalog::from_entries(
+            vec![
+                model("claude-opus-5", ModelTier::Frontier),
+                model("claude-sonnet-5", ModelTier::Smart),
+            ],
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn selects_a_curated_model_the_account_can_reach() {
+        let catalog = catalog();
+        let available = vec!["claude-opus-5".to_string(), "claude-sonnet-5".to_string()];
+
+        assert_eq!(
+            select_everyapi_default_model(&catalog, &available).as_deref(),
+            Some("claude-sonnet-5")
+        );
+    }
+
+    #[test]
+    fn selects_an_unknown_model_after_the_cli_proves_it_is_chat_capable() {
+        let catalog = catalog();
+        let available = vec!["future-chat-model".to_string()];
+
+        assert_eq!(
+            select_everyapi_default_model(&catalog, &available).as_deref(),
+            Some("future-chat-model")
         );
     }
 }

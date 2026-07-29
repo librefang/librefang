@@ -173,6 +173,15 @@ struct CredentialProcessOutput {
     api_key: String,
     #[serde(default)]
     expires_at: Option<String>,
+    #[serde(default)]
+    models: Vec<ModelCatalogProcessEntry>,
+}
+
+#[derive(Deserialize)]
+struct ModelCatalogProcessEntry {
+    id: String,
+    #[serde(default)]
+    supported_endpoint_types: Vec<String>,
 }
 
 fn parse_credential_output(bytes: &[u8]) -> Result<EveryApiCredential, CredentialError> {
@@ -216,6 +225,52 @@ pub fn resolve(invalidate: bool) -> Result<EveryApiCredential, CredentialError> 
         &candidate_executables(),
         &config_dir,
     )
+}
+
+/// Return the current relay-key-scoped chat model IDs from the EveryAPI CLI.
+///
+/// This is used only while auto-selecting an initial model. Ordinary requests
+/// do not spawn this extra command.
+pub fn resolve_available_models() -> Result<Vec<String>, CredentialError> {
+    resolve_available_models_with(&SystemCredentialCommand, &candidate_executables())
+}
+
+fn resolve_available_models_with(
+    runner: &dyn CredentialCommand,
+    candidates: &[PathBuf],
+) -> Result<Vec<String>, CredentialError> {
+    for executable in candidates {
+        let result = match runner.run(
+            executable,
+            &["auth", "credential", "--format=json", "--include-models"],
+            COMMAND_TIMEOUT,
+        ) {
+            Ok(result) => result,
+            Err(CredentialError::ExecutableNotFound) => continue,
+            Err(error) => return Err(error),
+        };
+        if !result.success {
+            return Err(CredentialError::Unavailable);
+        }
+        let output: CredentialProcessOutput = serde_json::from_slice(&result.stdout)
+            .map_err(|error| CredentialError::InvalidOutput(error.to_string()))?;
+        if output.version != PROTOCOL_VERSION {
+            return Err(CredentialError::UnsupportedVersion(output.version));
+        }
+        return Ok(output
+            .models
+            .into_iter()
+            .filter(|model| {
+                model
+                    .supported_endpoint_types
+                    .iter()
+                    .any(|endpoint| endpoint.eq_ignore_ascii_case("openai"))
+            })
+            .map(|model| model.id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .collect());
+    }
+    Err(CredentialError::NotInstalled)
 }
 
 fn resolve_with(
@@ -437,6 +492,25 @@ mod tests {
         assert_eq!(
             *runner.seen_args.lock().unwrap(),
             ["auth", "credential", "--format=json", "--invalidate"]
+        );
+    }
+
+    #[test]
+    fn live_model_resolution_uses_the_versioned_cli_catalog() {
+        let runner = FakeRunner {
+            result: success(
+                r#"{"version":1,"base_url":"https://api.everyapi.ai/v1","api_key":"secret","models":[{"id":"image-only","supported_endpoint_types":["image-generation"]},{"id":"claude-sonnet-5","supported_endpoint_types":["openai","anthropic"]}]}"#,
+            ),
+            seen_args: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let models =
+            resolve_available_models_with(&runner, &[PathBuf::from("/opt/everyapi")]).unwrap();
+
+        assert_eq!(models, vec!["claude-sonnet-5"]);
+        assert_eq!(
+            *runner.seen_args.lock().unwrap(),
+            ["auth", "credential", "--format=json", "--include-models"]
         );
     }
 
