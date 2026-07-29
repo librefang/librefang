@@ -2014,6 +2014,7 @@ mod tests {
         // Anything here is a deliberate decision, not an oversight.
         const ADMIN_ALLOWED: &[&str] = &[
             // Removes code from the execution path — Owner-gating it would block incident response.
+            "POST /plugins/uninstall",
             "POST /plugins/{name}/disable",
             // Writes a template into the plugins dir; executes nothing.
             "POST /plugins/scaffold",
