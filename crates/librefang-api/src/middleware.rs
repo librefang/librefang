@@ -1994,24 +1994,32 @@ mod tests {
     /// The original #6631 fix enumerated the Owner-only set by reading `routes::plugins::router()` by hand, and missed `install-with-deps`, `prewarm` (both forms), `batch`, and `benchmark` — each a path to a capability that was already gated elsewhere.
     /// Adding those individually fixes the instances; it does nothing about the next route someone adds.
     ///
-    /// So this reflects the actual route table out of the source and requires every `POST /plugins/...` to appear in exactly one of two explicit lists.
+    /// So this reflects the actual route table out of the source and requires every mutating `/plugins/...` route to appear in exactly one of two explicit lists.
     /// A new route is a test failure until someone classifies it, which is the opposite of the silent-admission default that caused the misses.
+    ///
+    /// Two properties beyond "is each route classified":
+    ///
+    /// * Classification is decided by calling `user_role_allows_request` — the real gate — rather than `plugin_route_executes_plugin_code` directly, so the method dimension is exercised too.
+    ///   The predicate is consulted only for POST, and asking it about a path in isolation would report a `PUT /plugins/{name}/enable` as gated when the gate would in fact wave an Admin straight through.
+    /// * Every `ADMIN_ALLOWED` entry must be observed in the router.
+    ///   A stale entry for a route that no longer exists (or never did with that method) is fail-open: it silently pre-classifies whatever is registered there next as Admin-safe, with no review.
+    ///   Two such entries — a POST `lint` and a POST `health`, both GET-only in the router — were exactly that, and this assertion is what removed them.
     #[test]
-    fn every_plugin_post_route_is_explicitly_classified() {
+    fn every_mutating_plugin_route_is_explicitly_classified() {
         const PLUGINS_SRC: &str = include_str!("routes/plugins.rs");
 
-        // Routes that must stay reachable by Admin, each with its reason.
+        // Routes that must stay reachable by Admin, each with its reason,
+        // keyed `METHOD path` so a route's classification cannot silently
+        // carry over to a different method registered on the same path.
         // Anything here is a deliberate decision, not an oversight.
         const ADMIN_ALLOWED: &[&str] = &[
             // Removes code from the execution path — Owner-gating it would block incident response.
-            "/plugins/uninstall",
-            "/plugins/{name}/disable",
+            "POST /plugins/{name}/disable",
             // Writes a template into the plugins dir; executes nothing.
-            "/plugins/scaffold",
-            // Static validation of manifest and hook-script structure.
-            "/plugins/{name}/lint",
-            // Reads context-engine metrics for an already-running plugin.
-            "/plugins/{name}/health",
+            "POST /plugins/scaffold",
+            // Clears the plugin's persisted key-value state.
+            // Destroys data, runs no plugin code, and cannot make an unloadable hook loadable.
+            "DELETE /plugins/{name}/state",
         ];
 
         // Pull the `router()` body so unrelated route strings elsewhere in the file cannot leak in.
@@ -2027,7 +2035,7 @@ mod tests {
         // Each `.route(` chunk holds one path literal and its method calls.
         // Formatting splits these across lines, so operate per chunk rather than per line.
         let mut unclassified = Vec::new();
-        let mut seen_post = 0usize;
+        let mut seen: Vec<String> = Vec::new();
         for chunk in body.split(".route(").skip(1) {
             let Some(path_start) = chunk.find('"') else {
                 continue;
@@ -2040,36 +2048,59 @@ mod tests {
             if !route_path.starts_with("/plugins") {
                 continue; // context-engine reads live in the same router
             }
-            // Only the method calls for THIS route: stop at the next `.route(` boundary, which `split` already did for us.
-            if !after[path_len..].contains("routing::post") {
-                continue;
-            }
-            seen_post += 1;
+            // Only the method calls for THIS route: `split` already stopped at the next `.route(` boundary.
+            let methods_src = &after[path_len..];
 
-            let full = format!("/api{route_path}");
-            let owner_only = plugin_route_executes_plugin_code(&full);
-            let admin_ok = ADMIN_ALLOWED.contains(&route_path);
+            for (name, method) in [
+                ("post", axum::http::Method::POST),
+                ("put", axum::http::Method::PUT),
+                ("patch", axum::http::Method::PATCH),
+                ("delete", axum::http::Method::DELETE),
+            ] {
+                // `axum::routing::post(h)` for the first method on a route,
+                // `.delete(h)` for one chained onto it.
+                if !methods_src.contains(&format!("routing::{name}("))
+                    && !methods_src.contains(&format!(".{name}("))
+                {
+                    continue;
+                }
+                let key = format!("{} {route_path}", method.as_str());
+                seen.push(key.clone());
 
-            if owner_only == admin_ok {
-                // Either both (contradictory) or neither (unclassified).
-                unclassified.push(format!(
-                    "{route_path} (owner_only={owner_only}, in ADMIN_ALLOWED={admin_ok})"
-                ));
+                let full = format!("/api{route_path}");
+                let admin_can = user_role_allows_request(UserRole::Admin, &method, &full);
+                let listed = ADMIN_ALLOWED.contains(&key.as_str());
+                if admin_can != listed {
+                    unclassified.push(format!(
+                        "{key} (Admin reaches it: {admin_can}, in ADMIN_ALLOWED: {listed})"
+                    ));
+                }
             }
         }
 
         assert!(
-            seen_post >= 10,
-            "parsed only {seen_post} POST plugin routes — the extraction \
-             probably broke rather than the router shrinking that much"
+            seen.len() >= 14,
+            "parsed only {} mutating plugin routes — the extraction probably \
+             broke rather than the router shrinking that much. Parsed: {seen:?}",
+            seen.len()
         );
         assert!(
             unclassified.is_empty(),
-            "these POST /plugins routes are not classified exactly once. Each \
-             must either execute plugin-controlled code (add it to \
+            "these mutating /plugins routes are not classified exactly once. \
+             Each must either execute plugin-controlled code (gate it in \
              `plugin_route_executes_plugin_code`) or be safe for Admin (add it \
              to ADMIN_ALLOWED here, with the reason):\n  {}",
             unclassified.join("\n  ")
+        );
+        let stale: Vec<&&str> = ADMIN_ALLOWED
+            .iter()
+            .filter(|entry| !seen.iter().any(|s| s == **entry))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "these ADMIN_ALLOWED entries match no route in \
+             `routes::plugins::router()`. A stale entry pre-classifies a route \
+             that does not exist yet as Admin-safe, so remove it:\n  {stale:?}"
         );
     }
 

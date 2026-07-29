@@ -476,6 +476,19 @@ impl TokenStore {
     ) -> Option<(String, String, StoredTokens)> {
         use subtle::ConstantTimeEq;
 
+        // An empty needle must never match, and the length check below cannot
+        // save us: `StoredTokens::access_token` is taken verbatim from the
+        // provider's token response, so a provider that returned an empty
+        // string would leave an entry whose access token is `""` — and
+        // `{"access_token": ""}` would then compare equal to it and hand back
+        // that session's refresh token to a caller who proved nothing. Fail
+        // closed on the empty needle rather than relying on every IdP to be
+        // well-behaved. The handler rejects blank input too (#6629); this is
+        // the invariant at the primitive, so a future caller inherits it.
+        if access_token.is_empty() {
+            return None;
+        }
+
         let mut write = self.inner.write().await;
         let now = std::time::Instant::now();
 
@@ -1372,8 +1385,12 @@ pub struct RefreshRequest {
     pub refresh_token: Option<String>,
     /// The access token this caller received from its own login callback, proving which stored session it owns (#6629).
     ///
-    /// The callback returns the upstream access token to the client but keeps the refresh token server-side, so a client legitimately has no refresh token of its own to present.
-    /// Presenting the access token it *was* given is what lets the server resolve the matching entry without letting the caller name someone else's session: the value is high-entropy, issued by the identity provider, and never disclosed by any read route.
+    /// **Prefer `refresh_token` when the client still has it.**
+    /// `/api/auth/callback` returns both values — see the `SECURITY` note on `CallbackResponse::refresh_token`, which hands the refresh token to the client deliberately — so this field is a convenience for a client that kept only the access token it authenticates with, not the only credential a legitimate caller can present.
+    /// Presenting it resolves the matching entry without letting the caller name someone else's session: the value is high-entropy, issued by the identity provider, and never disclosed by any read route.
+    ///
+    /// The trade this accepts: an access token travels on every request as a `Bearer` header, so it is the more exposed of the two credentials, and exchanging one for a refresh token extends a leaked short-lived credential past its own lifetime.
+    /// It is bounded by the store's 24 h TTL and does not widen what a holder of that access token can already do while it is live, which is why the path is offered at all — but a client that holds its refresh token should send that instead.
     ///
     /// An expired access token still matches — entries live in the store for 24 h regardless of the access token's own lifetime, which is exactly the state a caller is in when it needs to refresh.
     #[serde(default)]
@@ -1401,10 +1418,11 @@ struct RefreshResponse {
 ///
 /// When the access token expires, clients call this instead of forcing a full re-authorization, presenting either:
 ///
-/// * `refresh_token` — one the client holds itself, or
-/// * `access_token` — the one its own login callback returned, which identifies the stored session whose server-side refresh token should be used.
+/// * `refresh_token` — the one `/api/auth/callback` returned to it, which is the preferred path, or
+/// * `access_token` — also returned by that callback, identifying the stored session whose server-side refresh token should be used, for a client that kept only this half.
 ///
 /// There is no third path.
+/// A blank string in either field counts as absent, so it reaches neither the store nor the provider.
 /// The endpoint used to fall back to scanning the token store for any entry matching a `provider` hint, or for literally any entry with a refresh token, and it is reachable by any Admin — so a caller could refresh a *different* local user's upstream session and be handed their credentials, with every scope that token carried.
 /// Both fallbacks are gone (#6629); a request that proves nothing gets a 400.
 #[utoipa::path(post, path = "/api/auth/refresh", tag = "auth", request_body = RefreshRequest, responses((status = 200, description = "New access token", body = crate::types::JsonObject), (status = 400, description = "Missing or invalid refresh token"), (status = 502, description = "Token refresh failed")))]
@@ -1424,8 +1442,25 @@ pub async fn auth_refresh(
 
     let providers = resolve_providers(ext_auth).await;
 
-    // Resolve the refresh token: prefer the request body, fall back to TOKEN_STORE.
-    let (refresh_token, stored_sub, provider) = if let Some(ref rt) = req.refresh_token {
+    // A field present but blank proves nothing, so treat it as absent instead
+    // of letting it select a branch (#6629). Left as `Some("")`, an empty
+    // `refresh_token` would fan out a doomed request to the provider's token
+    // endpoint, and an empty `access_token` would reach the store scan — where
+    // it is rejected, but the primitive should not be the only thing standing
+    // between a blank body and a credential lookup. Filtering on the trimmed
+    // form while passing the value through untrimmed keeps the comparison an
+    // exact match against what the provider issued.
+    let supplied_refresh = req
+        .refresh_token
+        .as_deref()
+        .filter(|rt| !rt.trim().is_empty());
+    let supplied_access = req
+        .access_token
+        .as_deref()
+        .filter(|at| !at.trim().is_empty());
+
+    // Resolve the refresh token from whichever credential the caller proved.
+    let (refresh_token, stored_sub, provider) = if let Some(rt) = supplied_refresh {
         // Client supplied a refresh token explicitly.
         let provider = if let Some(ref pid) = req.provider {
             providers.iter().find(|p| p.id == *pid)
@@ -1434,8 +1469,8 @@ pub async fn auth_refresh(
         } else {
             None
         };
-        (rt.clone(), None::<String>, provider.cloned())
-    } else if let Some(ref at) = req.access_token {
+        (rt.to_string(), None::<String>, provider.cloned())
+    } else if let Some(at) = supplied_access {
         // No refresh token, but the caller presented the access token it was issued — resolve the entry that token belongs to, and only that one (#6629).
         // The pre-fix code took a `provider` hint (or nothing at all) and selected an arbitrary matching entry, so an Admin could refresh another local user's upstream session and receive their credentials.
         match TOKEN_STORE.find_by_access_token(at).await {
@@ -1459,7 +1494,7 @@ pub async fn auth_refresh(
             }
         }
     } else {
-        // Neither credential supplied.
+        // Neither credential supplied, or both blank.
         // There is deliberately no fallback: any store lookup that is not keyed on something the caller proved it owns hands out someone else's tokens (#6629).
         return (
             StatusCode::BAD_REQUEST,
@@ -2412,6 +2447,29 @@ mod tests {
         );
 
         TOKEN_STORE.remove("sub-t2-lonely-6629").await;
+    }
+
+    /// The empty needle is a fail-open the length check cannot catch.
+    ///
+    /// `StoredTokens::access_token` is whatever the provider's token response carried, so an IdP that returned an empty `access_token` leaves an entry with `access_token: ""` — and `""` compares equal to `""`, both in length and under `ct_eq`.
+    /// Without the explicit guard in `find_by_access_token`, `{"access_token": ""}` would resolve that session and hand back its refresh token to a caller who proved nothing.
+    /// The refresh token here is deliberately non-empty: what must be rejected is the *lookup*, not the entry's usability.
+    #[tokio::test]
+    async fn refresh_lookup_rejects_an_empty_access_token_even_against_an_empty_stored_value() {
+        TOKEN_STORE
+            .store(
+                "sub-t4-emptyaccess-6629",
+                seeded_tokens("", "t4-real-refresh-eeeeeeeeeeeeeeeeeeee", "google"),
+            )
+            .await;
+
+        assert!(
+            TOKEN_STORE.find_by_access_token("").await.is_none(),
+            "an empty access token must never resolve a session, not even one \
+             whose stored access token is also empty"
+        );
+
+        TOKEN_STORE.remove("sub-t4-emptyaccess-6629").await;
     }
 
     /// An entry with no refresh token must not be resolvable — otherwise the caller gets an entry it cannot use and the handler would have to unwrap an `Option` that is only sometimes populated.
