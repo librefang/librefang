@@ -375,145 +375,43 @@ fn earliest_rendered_tail_idx(prompt: &str) -> Option<usize> {
     .min()
 }
 
-/// Append (or refresh) the rendered `## User Configuration` block on a
-/// manifest's `model.system_prompt` from a hand's `[[settings]]` schema +
-/// instance config.
+/// The `## User Configuration` tail for a hand's settings, fenced and ready to concatenate, plus the settings-derived env-var names.
 ///
-/// This is the single source of truth for the "settings -> system prompt"
-/// materialization. Three call sites use it:
-///
-/// 1. Hand activation (`activate_hand`) — turns the disk TOML's bare prompt
-///    into the runtime prompt with settings spliced in before save_agent.
-/// 2. Boot-time TOML drift detection (`new_with_config`) — when the disk
-///    manifest replaces the DB blob, the bare TOML doesn't carry the
-///    settings tail (it's runtime-materialized, not persisted), so without
-///    re-rendering here the agent loses its configured values on every
-///    restart until somebody re-runs `hand activate`.
-/// 3. [`rerender_hand_prompt_tails`], which serves the settings-save path (`PUT /api/hands/{id}/settings`) — see that function for why it must strip to the base prompt before calling this one.
-///
-/// Idempotency: if the prompt already ends with a `## User Configuration`
-/// tail, that tail is stripped before the freshly resolved one is appended.
-/// This keeps repeated calls (e.g. drift loop firing back-to-back) from
-/// growing the prompt without bound.
-///
-/// No-ops (no allocation, no mutation) when `settings` is empty or the
-/// resolved prompt block is empty.
-///
-/// Returns the env-var allowlist that callers may want to merge into
-/// `manifest.metadata["hand_allowed_env"]`.
-pub(super) fn apply_settings_block_to_manifest(
-    manifest: &mut AgentManifest,
+/// `None` when the hand declares no settings or every one of them renders empty.
+/// Pure: it never looks at an existing prompt, which is what lets [`rerender_hand_prompt_tails`] assemble all three tails without a single content search.
+fn render_settings_block(
     settings: &[librefang_hands::HandSetting],
     instance_config: &std::collections::HashMap<String, serde_json::Value>,
-) -> Vec<String> {
+) -> (Option<String>, Vec<String>) {
     let resolved = librefang_hands::resolve_settings(settings, instance_config);
-
     if resolved.prompt_block.is_empty() {
-        return resolved.env_vars;
+        return (None, resolved.env_vars);
     }
-
-    // Strip any pre-existing settings tail so we replace rather than append.
-    if let Some(idx) = manifest.model.system_prompt.find(USER_CONFIG_TAIL_MARKER) {
-        manifest.model.system_prompt.truncate(idx);
-    }
-
-    manifest.model.system_prompt = format!(
-        "{}\n\n---\n\n{}",
-        manifest.model.system_prompt, resolved.prompt_block
-    );
-
-    resolved.env_vars
+    (
+        Some(format!("\n\n---\n\n{}", resolved.prompt_block)),
+        resolved.env_vars,
+    )
 }
 
-/// Append (or refresh) the rendered `## Reference Knowledge` block on a
-/// manifest's `model.system_prompt` from a hand's skill content.
+/// The `## Reference Knowledge` tail for a role, fenced and ready to concatenate, or `None` when the hand ships no skill content for it.
 ///
-/// Per-role override (`def.agent_skill_content[role.to_lowercase()]`)
-/// takes precedence over the hand-shared `def.skill_content`. When neither
-/// is set, the call only strips any pre-existing tail without re-appending
-/// — covers the case where the hand's SKILL.md was deleted and the prompt
-/// must drop its now-stale reference section.
-///
-/// Idempotency: pre-existing `## Reference Knowledge` tails are stripped
-/// before re-appending, so repeated calls (e.g. drift loop firing
-/// back-to-back) do not duplicate the section.
-///
-/// Both call sites use this helper:
-///
-/// 1. Hand activation (`activate_hand_with_id`) — see `kernel/mod.rs`.
-/// 2. Boot-time TOML drift detection — when the disk manifest replaces
-///    the DB blob, the bare TOML doesn't carry the rendered tail and
-///    without re-rendering here the agent loses skill discoverability on
-///    every restart.
-pub(super) fn apply_skill_reference_block_to_manifest(
-    manifest: &mut AgentManifest,
+/// Per-role `agent_skill_content` wins over the hand-shared `skill_content`.
+fn render_skill_reference_block(
     role: &str,
     def: &librefang_hands::HandDefinition,
-) {
-    // Always strip first — covers the case where skill content is now
-    // empty (skill removed from hand) so the stale tail doesn't linger.
-    //
-    // Ordering note: at activation this helper runs BEFORE
-    // `apply_team_block_to_manifest`, so a stale team tail (which sits
-    // downstream of the skill marker) is also dropped by this truncate
-    // and re-appended afterwards. If callers ever invert the order,
-    // `apply_team_block_to_manifest` must be widened to strip both
-    // markers — otherwise a re-render leaves the team block stranded
-    // before the freshly appended skill block.
-    if let Some(idx) = manifest
-        .model
-        .system_prompt
-        .find(SKILL_REFERENCE_TAIL_MARKER)
-    {
-        manifest.model.system_prompt.truncate(idx);
-    }
-
+) -> Option<String> {
     let role_lower = role.to_lowercase();
-    let effective_skill = def
-        .agent_skill_content
+    def.agent_skill_content
         .get(&role_lower)
-        .or(def.skill_content.as_ref());
-
-    if let Some(skill_content) = effective_skill {
-        if !skill_content.is_empty() {
-            manifest.model.system_prompt = format!(
-                "{}\n\n---\n\n## Reference Knowledge\n\n{}",
-                manifest.model.system_prompt, skill_content
-            );
-        }
-    }
+        .or(def.skill_content.as_ref())
+        .filter(|content| !content.is_empty())
+        .map(|content| format!("\n\n---\n\n## Reference Knowledge\n\n{content}"))
 }
 
-/// Append (or refresh) the rendered `## Your Team` block on a manifest's
-/// `model.system_prompt` from the hand's peer roster. No-op for
-/// single-agent hands.
-///
-/// Idempotency: pre-existing `## Your Team` tails are stripped before
-/// re-appending, so repeated calls do not duplicate the section.
-///
-/// `role` identifies the agent we're rendering for; the agent's own role
-/// is excluded from the peer list. Each peer line uses
-/// `hand_agent.invoke_hint` when set, falling back to the peer's manifest
-/// description.
-pub(super) fn apply_team_block_to_manifest(
-    manifest: &mut AgentManifest,
-    role: &str,
-    def: &librefang_hands::HandDefinition,
-) {
-    // Always strip first — covers the case where the hand was edited from
-    // multi-agent down to single-agent so the stale Team tail must drop.
-    //
-    // Ordering note: this helper is the LAST tail appended at activation
-    // (settings -> reference -> team). Truncating at the team marker only
-    // drops the team block itself — no later tail can be lost. If a future
-    // change inserts a new tail after team, this strip will need to widen
-    // (or that tail's helper must run before this one).
-    if let Some(idx) = manifest.model.system_prompt.find(TEAM_TAIL_MARKER) {
-        manifest.model.system_prompt.truncate(idx);
-    }
-
+/// The `## Your Team` tail for a role, fenced and ready to concatenate, or `None` for a single-agent hand or a role with no peers.
+fn render_team_block(role: &str, def: &librefang_hands::HandDefinition) -> Option<String> {
     if !def.is_multi_agent() {
-        return;
+        return None;
     }
 
     let mut peer_lines = Vec::new();
@@ -530,10 +428,13 @@ pub(super) fn apply_team_block_to_manifest(
         ));
     }
 
-    if !peer_lines.is_empty() {
-        let team_block = format!("\n\n---\n\n## Your Team\n\n{}", peer_lines.join("\n"));
-        manifest.model.system_prompt = format!("{}{team_block}", manifest.model.system_prompt);
+    if peer_lines.is_empty() {
+        return None;
     }
+    Some(format!(
+        "\n\n---\n\n## Your Team\n\n{}",
+        peer_lines.join("\n")
+    ))
 }
 
 /// Return a clone of `manifest` with all known runtime-rendered prompt
@@ -596,14 +497,19 @@ pub(super) fn resolve_hand_allowed_env(
     allowed
 }
 
-/// Re-materialize all three rendered prompt tails on a manifest that is **already carrying them** — the live registry copy of a hand agent.
+/// Render a hand agent's complete system prompt: the author-written base plus the settings, reference-knowledge, and team tails, in that order.
 ///
-/// Activation and the boot drift loop both start from a tail-free manifest (activation clones the disk TOML; drift assigns `entry.manifest = disk_manifest` first), so they can call the three `apply_*` helpers directly.
-/// The settings-save path cannot: it re-renders the *live* manifest, whose prompt already ends in `[base][settings][reference][team]`.
-/// Calling `apply_settings_block_to_manifest` on that shape truncates at the settings marker — dropping the reference and team tails with it — and then appends settings last, after which `apply_skill_reference_block_to_manifest` truncates at the reference marker and drops the settings tail it just wrote.
-/// Stripping back to the base prompt first and re-appending in canonical order is what makes the operation idempotent for any input shape.
+/// This is the canonical renderer — every production path that materializes a hand prompt goes through it (activation, the boot TOML-drift loop, and the settings save), so the three cannot disagree about content or ordering.
 ///
-/// Returns the resolved env-var allowlist; the caller is responsible for filtering it and writing `metadata["hand_allowed_env"]`.
+/// It works for any input shape.
+/// A live registry manifest already ends in `[base][settings][reference][team]`, so the tails are stripped back to the base first via [`earliest_rendered_tail_idx`]; a manifest freshly parsed from disk has no tails and the strip is a no-op.
+///
+/// The tails are then **assembled from pure renderers rather than the `apply_*` helpers**, and that is the load-bearing difference.
+/// Each `apply_*` helper locates its own tail by searching the whole prompt for its marker, which is only sound while nothing downstream of that marker is author-controlled.
+/// It is not: a SKILL.md playbook may legitimately contain a `---` rule followed by a `## Your Team` heading, and once the reference tail has been appended, the team helper's search finds *that* copy and truncates the playbook there — silently dropping everything after it from what the LLM sees.
+/// Assembling in one pass never searches appended content, so author text cannot be mistaken for a marker.
+///
+/// Returns the filtered env-var passthrough allowlist for this instance (see [`resolve_hand_allowed_env`]); callers write it to `metadata["hand_allowed_env"]`, removing the key when the list is empty.
 pub(super) fn rerender_hand_prompt_tails(
     manifest: &mut AgentManifest,
     role: &str,
@@ -613,10 +519,35 @@ pub(super) fn rerender_hand_prompt_tails(
     if let Some(idx) = earliest_rendered_tail_idx(&manifest.model.system_prompt) {
         manifest.model.system_prompt.truncate(idx);
     }
-    let env_vars = apply_settings_block_to_manifest(manifest, &def.settings, instance_config);
-    apply_skill_reference_block_to_manifest(manifest, role, def);
-    apply_team_block_to_manifest(manifest, role, def);
-    env_vars
+
+    let (settings_block, _) = render_settings_block(&def.settings, instance_config);
+    for block in [
+        settings_block,
+        render_skill_reference_block(role, def),
+        render_team_block(role, def),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        manifest.model.system_prompt.push_str(&block);
+    }
+
+    resolve_hand_allowed_env(def, instance_config)
+}
+
+/// Write (or clear) a hand agent's env passthrough allowlist on its manifest metadata.
+///
+/// An empty list **removes** the key rather than storing `[]`: a settings change that drops the last `provider_env` has to narrow the passthrough, and an insert-only write would leave the previous, wider list in place.
+/// Mirrors `AgentRegistry::update_hand_rendered_prompt`, which applies the same rule to the live registry entry.
+pub(super) fn set_hand_allowed_env(manifest: &mut AgentManifest, allowed_env: &[String]) {
+    if allowed_env.is_empty() {
+        manifest.metadata.remove("hand_allowed_env");
+    } else {
+        manifest.metadata.insert(
+            "hand_allowed_env".to_string(),
+            serde_json::to_value(allowed_env).unwrap_or_default(),
+        );
+    }
 }
 
 pub fn shared_memory_agent_id() -> AgentId {
@@ -955,40 +886,50 @@ system_prompt = "p"
         m
     }
 
+    /// A hand with only settings: base prompt preserved, one fenced tail, env list returned.
     #[test]
-    fn apply_settings_appends_tail_when_settings_present() {
+    fn settings_only_hand_renders_one_fenced_tail() {
+        let def = parse_hand_with_settings(SINGLE_AGENT_HAND, "", &make_settings());
         let mut m = manifest_with_prompt("BASE");
-        let env = apply_settings_block_to_manifest(
-            &mut m,
-            &make_settings(),
-            &std::collections::HashMap::new(),
-        );
-        assert!(
-            m.model.system_prompt.contains("## User Configuration"),
-            "settings tail must be appended"
-        );
+        let env =
+            rerender_hand_prompt_tails(&mut m, "main", &def, &std::collections::HashMap::new());
         assert!(
             m.model.system_prompt.starts_with("BASE\n\n---\n\n"),
-            "base prompt must be preserved with the canonical separator"
+            "base prompt must be preserved with the canonical separator; got: {}",
+            m.model.system_prompt
         );
-        assert_eq!(env, vec!["GROQ_API_KEY".to_string()]);
+        assert!(m.model.system_prompt.contains(USER_CONFIG_TAIL_MARKER));
+        assert!(!m.model.system_prompt.contains("## Reference Knowledge"));
+        assert!(!m.model.system_prompt.contains("## Your Team"));
+        // The renderer returns the *filtered* allowlist, so the selected option's
+        // `provider_env = "GROQ_API_KEY"` is dropped by the secret blocklist rather
+        // than handed to the subprocess. A hand cannot widen the passthrough into
+        // the operator's credentials by naming one in a setting.
+        assert!(
+            env.is_empty(),
+            "GROQ_API_KEY ends in a blocked word and must not survive; got: {env:?}"
+        );
     }
 
+    /// A hand declaring nothing renderable leaves the prompt byte-identical.
     #[test]
-    fn apply_settings_is_noop_when_settings_empty() {
+    fn hand_with_no_tails_leaves_prompt_untouched() {
+        let def = parse_hand(SINGLE_AGENT_HAND, "");
         let mut m = manifest_with_prompt("BASE");
-        let env = apply_settings_block_to_manifest(&mut m, &[], &std::collections::HashMap::new());
-        assert_eq!(m.model.system_prompt, "BASE", "no settings -> no mutation");
+        let env =
+            rerender_hand_prompt_tails(&mut m, "main", &def, &std::collections::HashMap::new());
+        assert_eq!(m.model.system_prompt, "BASE");
         assert!(env.is_empty());
     }
 
     #[test]
-    fn apply_settings_is_idempotent_on_repeated_calls() {
-        let mut m = manifest_with_prompt("BASE");
+    fn settings_tail_is_not_duplicated_on_repeated_renders() {
+        let def = parse_hand_with_settings(SINGLE_AGENT_HAND, "", &make_settings());
         let cfg = std::collections::HashMap::new();
-        apply_settings_block_to_manifest(&mut m, &make_settings(), &cfg);
+        let mut m = manifest_with_prompt("BASE");
+        rerender_hand_prompt_tails(&mut m, "main", &def, &cfg);
         let after_first = m.model.system_prompt.clone();
-        apply_settings_block_to_manifest(&mut m, &make_settings(), &cfg);
+        rerender_hand_prompt_tails(&mut m, "main", &def, &cfg);
         assert_eq!(
             m.model.system_prompt, after_first,
             "second invocation must not duplicate the tail"
@@ -1003,21 +944,21 @@ system_prompt = "p"
         );
     }
 
-    #[test]
-    fn apply_settings_returns_none_for_standalone_agent_toml_marker() {
-        // Sanity: ensures the marker constant matches what `resolve_settings` emits.
-        let mut m = manifest_with_prompt("BASE");
-        apply_settings_block_to_manifest(
-            &mut m,
-            &make_settings(),
-            &std::collections::HashMap::new(),
-        );
-        assert!(m.model.system_prompt.contains(USER_CONFIG_TAIL_MARKER));
-    }
-
     fn parse_hand(toml: &str, skill: &str) -> librefang_hands::HandDefinition {
         librefang_hands::registry::parse_hand_toml(toml, skill, std::collections::HashMap::new())
             .expect("hand toml must parse")
+    }
+
+    /// `parse_hand` plus a settings schema grafted on, so a fixture hand can
+    /// exercise the settings tail without a second TOML constant per case.
+    fn parse_hand_with_settings(
+        toml: &str,
+        skill: &str,
+        settings: &[librefang_hands::HandSetting],
+    ) -> librefang_hands::HandDefinition {
+        let mut def = parse_hand(toml, skill);
+        def.settings = settings.to_vec();
+        def
     }
 
     const SINGLE_AGENT_HAND: &str = r#"
@@ -1068,10 +1009,10 @@ system_prompt = "BASE-WORKER"
 "#;
 
     #[test]
-    fn apply_skill_reference_appends_tail_when_skill_present() {
+    fn skill_reference_tail_is_appended_when_skill_present() {
         let def = parse_hand(SINGLE_AGENT_HAND, "RESOURCE A\nRESOURCE B");
         let mut m = manifest_with_prompt("BASE");
-        apply_skill_reference_block_to_manifest(&mut m, "main", &def);
+        rerender_hand_prompt_tails(&mut m, "main", &def, &std::collections::HashMap::new());
         assert!(
             m.model
                 .system_prompt
@@ -1081,20 +1022,13 @@ system_prompt = "BASE-WORKER"
     }
 
     #[test]
-    fn apply_skill_reference_is_noop_when_skill_empty() {
-        let def = parse_hand(SINGLE_AGENT_HAND, "");
-        let mut m = manifest_with_prompt("BASE");
-        apply_skill_reference_block_to_manifest(&mut m, "main", &def);
-        assert_eq!(m.model.system_prompt, "BASE");
-    }
-
-    #[test]
-    fn apply_skill_reference_is_idempotent() {
+    fn skill_reference_tail_is_not_duplicated_on_repeated_renders() {
         let def = parse_hand(SINGLE_AGENT_HAND, "STUFF");
+        let cfg = std::collections::HashMap::new();
         let mut m = manifest_with_prompt("BASE");
-        apply_skill_reference_block_to_manifest(&mut m, "main", &def);
+        rerender_hand_prompt_tails(&mut m, "main", &def, &cfg);
         let after_first = m.model.system_prompt.clone();
-        apply_skill_reference_block_to_manifest(&mut m, "main", &def);
+        rerender_hand_prompt_tails(&mut m, "main", &def, &cfg);
         assert_eq!(m.model.system_prompt, after_first);
         assert_eq!(
             m.model
@@ -1103,6 +1037,25 @@ system_prompt = "BASE-WORKER"
                 .count(),
             1,
         );
+    }
+
+    /// A per-role `SKILL-<role>.md` must win over the hand-shared `SKILL.md`, and the role that has no override must still get the shared one.
+    #[test]
+    fn per_role_skill_content_overrides_the_shared_one() {
+        let mut def = parse_hand(MULTI_AGENT_HAND, "SHARED PLAYBOOK");
+        def.agent_skill_content
+            .insert("lead".to_string(), "LEAD PLAYBOOK".to_string());
+        let cfg = std::collections::HashMap::new();
+
+        let mut lead = manifest_with_prompt("BASE-LEAD");
+        rerender_hand_prompt_tails(&mut lead, "lead", &def, &cfg);
+        assert!(lead.model.system_prompt.contains("LEAD PLAYBOOK"));
+        assert!(!lead.model.system_prompt.contains("SHARED PLAYBOOK"));
+
+        let mut worker = manifest_with_prompt("BASE-WORKER");
+        rerender_hand_prompt_tails(&mut worker, "worker", &def, &cfg);
+        assert!(worker.model.system_prompt.contains("SHARED PLAYBOOK"));
+        assert!(!worker.model.system_prompt.contains("LEAD PLAYBOOK"));
     }
 
     /// A base prompt that *talks about* the User Configuration section must not be mistaken for one.
@@ -1115,11 +1068,8 @@ system_prompt = "BASE-WORKER"
                     2. Read **User Configuration** section for trading_mode and watchlist\n\n\
                     ## Phase 6\n\nRead trading_mode from User Configuration:";
         let mut m = manifest_with_prompt(base);
-        apply_settings_block_to_manifest(
-            &mut m,
-            &make_settings(),
-            &std::collections::HashMap::new(),
-        );
+        let def = parse_hand_with_settings(SINGLE_AGENT_HAND, "", &make_settings());
+        rerender_hand_prompt_tails(&mut m, "main", &def, &std::collections::HashMap::new());
         assert!(
             m.model.system_prompt.starts_with(base),
             "prose mentions must survive verbatim; got: {}",
@@ -1152,41 +1102,74 @@ system_prompt = "BASE-WORKER"
     }
 
     #[test]
-    fn apply_skill_reference_replaces_stale_tail_when_content_changes() {
+    fn skill_reference_tail_replaces_stale_content() {
         let def_old = parse_hand(SINGLE_AGENT_HAND, "OLD");
         let def_new = parse_hand(SINGLE_AGENT_HAND, "NEW");
+        let cfg = std::collections::HashMap::new();
         let mut m = manifest_with_prompt("BASE");
-        apply_skill_reference_block_to_manifest(&mut m, "main", &def_old);
-        apply_skill_reference_block_to_manifest(&mut m, "main", &def_new);
+        rerender_hand_prompt_tails(&mut m, "main", &def_old, &cfg);
+        rerender_hand_prompt_tails(&mut m, "main", &def_new, &cfg);
         assert!(m.model.system_prompt.contains("NEW"));
         assert!(!m.model.system_prompt.contains("OLD"));
     }
 
     #[test]
-    fn apply_skill_reference_drops_tail_when_skill_removed() {
+    fn skill_reference_tail_is_dropped_when_skill_removed() {
         // Hand previously had skill content; on next render the SKILL.md is gone.
         let def_with = parse_hand(SINGLE_AGENT_HAND, "STUFF");
         let def_without = parse_hand(SINGLE_AGENT_HAND, "");
+        let cfg = std::collections::HashMap::new();
         let mut m = manifest_with_prompt("BASE");
-        apply_skill_reference_block_to_manifest(&mut m, "main", &def_with);
+        rerender_hand_prompt_tails(&mut m, "main", &def_with, &cfg);
         assert!(m.model.system_prompt.contains("STUFF"));
-        apply_skill_reference_block_to_manifest(&mut m, "main", &def_without);
+        rerender_hand_prompt_tails(&mut m, "main", &def_without, &cfg);
         assert_eq!(m.model.system_prompt, "BASE");
     }
 
+    /// The hazard behind #6637's review: a playbook may legitimately contain a `---` rule followed by a `## Your Team` heading.
+    /// Rendering must not mistake that author text for the rendered team tail and truncate the playbook there — and a second render must not compound the loss.
     #[test]
-    fn apply_team_block_noop_for_single_agent_hand() {
+    fn skill_content_containing_a_team_heading_survives_intact() {
+        let playbook =
+            "STEP 1\n\n---\n\n## Your Team\n\nthe roster is documented here\n\nSTEP 2 MUST SURVIVE";
+        let def = parse_hand(MULTI_AGENT_HAND, playbook);
+        let cfg = std::collections::HashMap::new();
+        let mut m = manifest_with_prompt("BASE-LEAD");
+
+        rerender_hand_prompt_tails(&mut m, "lead", &def, &cfg);
+        assert!(
+            m.model.system_prompt.contains("STEP 2 MUST SURVIVE"),
+            "author text after a `## Your Team` heading inside SKILL.md must reach the LLM; got: {}",
+            m.model.system_prompt
+        );
+        assert!(
+            m.model.system_prompt.contains("- **worker**:"),
+            "the real team tail must still be appended; got: {}",
+            m.model.system_prompt
+        );
+
+        // Idempotent even though the prompt now contains two `## Your Team` headings.
+        let after_first = m.model.system_prompt.clone();
+        rerender_hand_prompt_tails(&mut m, "lead", &def, &cfg);
+        assert_eq!(
+            m.model.system_prompt, after_first,
+            "a second render must neither duplicate nor erode the prompt"
+        );
+    }
+
+    #[test]
+    fn team_block_absent_for_single_agent_hand() {
         let def = parse_hand(SINGLE_AGENT_HAND, "");
         let mut m = manifest_with_prompt("BASE");
-        apply_team_block_to_manifest(&mut m, "main", &def);
+        rerender_hand_prompt_tails(&mut m, "main", &def, &std::collections::HashMap::new());
         assert_eq!(m.model.system_prompt, "BASE");
     }
 
     #[test]
-    fn apply_team_block_appends_peers_excluding_self() {
+    fn team_block_lists_peers_excluding_self() {
         let def = parse_hand(MULTI_AGENT_HAND, "");
         let mut m = manifest_with_prompt("BASE");
-        apply_team_block_to_manifest(&mut m, "lead", &def);
+        rerender_hand_prompt_tails(&mut m, "lead", &def, &std::collections::HashMap::new());
         let prompt = &m.model.system_prompt;
         assert!(
             prompt.contains("\n\n---\n\n## Your Team\n\n"),
@@ -1202,7 +1185,7 @@ system_prompt = "BASE-WORKER"
     }
 
     #[test]
-    fn apply_team_block_ignores_legacy_unfenced_tail() {
+    fn team_render_ignores_legacy_unfenced_tail() {
         // Lock-down for the LEGACY_TEAM_TAIL_MARKER cleanup. The pre-fence
         // form (`\n\n## Your Team`) is no longer recognised by the strip
         // logic, so a prompt carrying it gets a fresh fenced block appended
@@ -1219,7 +1202,7 @@ system_prompt = "BASE-WORKER"
         let mut m = manifest_with_prompt(
             "BASE\n\n## Your Team\n\n- **worker**: stale (use agent_send to message)",
         );
-        apply_team_block_to_manifest(&mut m, "lead", &def);
+        rerender_hand_prompt_tails(&mut m, "lead", &def, &std::collections::HashMap::new());
         let prompt = &m.model.system_prompt;
         assert!(
             prompt.contains("stale"),
@@ -1237,10 +1220,10 @@ system_prompt = "BASE-WORKER"
     }
 
     #[test]
-    fn apply_team_block_uses_invoke_hint_when_present() {
+    fn team_block_uses_invoke_hint_when_present() {
         let def = parse_hand(MULTI_AGENT_HAND, "");
         let mut m = manifest_with_prompt("BASE");
-        apply_team_block_to_manifest(&mut m, "worker", &def);
+        rerender_hand_prompt_tails(&mut m, "worker", &def, &std::collections::HashMap::new());
         // `lead` has invoke_hint = "delegates work", so the line must use that
         // instead of the manifest description.
         assert!(m.model.system_prompt.contains("- **lead**: delegates work"));
@@ -1248,12 +1231,13 @@ system_prompt = "BASE-WORKER"
     }
 
     #[test]
-    fn apply_team_block_is_idempotent() {
+    fn team_block_is_idempotent() {
         let def = parse_hand(MULTI_AGENT_HAND, "");
+        let cfg = std::collections::HashMap::new();
         let mut m = manifest_with_prompt("BASE");
-        apply_team_block_to_manifest(&mut m, "lead", &def);
+        rerender_hand_prompt_tails(&mut m, "lead", &def, &cfg);
         let after_first = m.model.system_prompt.clone();
-        apply_team_block_to_manifest(&mut m, "lead", &def);
+        rerender_hand_prompt_tails(&mut m, "lead", &def, &cfg);
         assert_eq!(m.model.system_prompt, after_first);
         assert_eq!(m.model.system_prompt.matches("## Your Team").count(), 1);
     }
@@ -1263,14 +1247,8 @@ system_prompt = "BASE-WORKER"
         // Build a prompt that contains all three tails in activation order.
         let base = "BASE";
         let mut m = manifest_with_prompt(base);
-        apply_settings_block_to_manifest(
-            &mut m,
-            &make_settings(),
-            &std::collections::HashMap::new(),
-        );
-        let def = parse_hand(MULTI_AGENT_HAND, "STUFF");
-        apply_skill_reference_block_to_manifest(&mut m, "lead", &def);
-        apply_team_block_to_manifest(&mut m, "lead", &def);
+        let def = parse_hand_with_settings(MULTI_AGENT_HAND, "STUFF", &make_settings());
+        rerender_hand_prompt_tails(&mut m, "lead", &def, &std::collections::HashMap::new());
         assert!(m.model.system_prompt.contains("## User Configuration"));
         assert!(m.model.system_prompt.contains("## Reference Knowledge"));
         assert!(m.model.system_prompt.contains("## Your Team"));
@@ -1284,14 +1262,14 @@ system_prompt = "BASE-WORKER"
         // Only Team tail present (no settings, no skills).
         let mut m = manifest_with_prompt("BASE");
         let def = parse_hand(MULTI_AGENT_HAND, "");
-        apply_team_block_to_manifest(&mut m, "lead", &def);
+        rerender_hand_prompt_tails(&mut m, "lead", &def, &std::collections::HashMap::new());
         let projected = manifest_for_diff(&m);
         assert_eq!(projected.model.system_prompt, "BASE");
 
         // Only Reference Knowledge.
         let mut m = manifest_with_prompt("BASE");
         let def = parse_hand(SINGLE_AGENT_HAND, "STUFF");
-        apply_skill_reference_block_to_manifest(&mut m, "main", &def);
+        rerender_hand_prompt_tails(&mut m, "main", &def, &std::collections::HashMap::new());
         let projected = manifest_for_diff(&m);
         assert_eq!(projected.model.system_prompt, "BASE");
     }
@@ -1371,16 +1349,13 @@ system_prompt = "BASE-WORKER"
     }
 
     /// The #6636 hazard in isolation: re-rendering a *live* prompt — one that already carries all three tails — must not lose the reference or team blocks.
-    /// Calling the three `apply_*` helpers directly on that shape does lose them, which is why the settings-save path goes through `rerender_hand_prompt_tails`.
     #[test]
     fn rerender_preserves_reference_and_team_tails() {
         let def = parse_hand(MULTI_AGENT_HAND_WITH_SETTINGS, "STUFF");
         let mut m = manifest_with_prompt("BASE-LEAD");
 
         // Materialize the activation-time shape.
-        apply_settings_block_to_manifest(&mut m, &def.settings, &std::collections::HashMap::new());
-        apply_skill_reference_block_to_manifest(&mut m, "lead", &def);
-        apply_team_block_to_manifest(&mut m, "lead", &def);
+        rerender_hand_prompt_tails(&mut m, "lead", &def, &std::collections::HashMap::new());
         assert!(m.model.system_prompt.contains("Paper Trading"));
 
         // Now re-render with a changed setting, as a settings save does.

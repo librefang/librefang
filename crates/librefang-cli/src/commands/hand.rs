@@ -444,44 +444,84 @@ pub(crate) fn cmd_hand_settings(id: &str) {
         ));
         std::process::exit(1);
     }
-    // `GET /api/hands/{id}/settings` answers with
-    // `{hand_id, settings, current_values}` — there is no `config` key, so
-    // the old lookup always fell through to "no settings" no matter how the
-    // hand was configured. Render the declared schema and overlay whichever
-    // keys the active instance has saved, so an inactive hand still shows
-    // what it can be configured with.
+    // `GET /api/hands/{id}/settings` answers with `{hand_id, settings,
+    // current_values, effective_values, unknown_values}` — there is no `config`
+    // key, so the old lookup always fell through to "no settings" no matter how
+    // the hand was configured.
+    //
+    // Render from `effective_values`, not `current_values`: the two differ
+    // whenever a stored value is non-scalar or, for a Select, names no declared
+    // option, and the resolver falls back to the schema default in those cases.
+    // Printing the stored value would confidently report a setting the agent is
+    // not using. The daemon computes the effective value with the same function
+    // that renders the prompt, so there is nothing here to drift out of sync.
     let schema = body
         .get("settings")
         .and_then(|s| s.as_array())
         .cloned()
         .unwrap_or_default();
     let saved = body.get("current_values").and_then(|c| c.as_object());
+    let effective = body.get("effective_values").and_then(|c| c.as_object());
 
     if schema.is_empty() {
         ui::step(&i18n::t_args("hand-no-settings", &[("id", id)]));
-        return;
-    }
+    } else {
+        ui::section(&i18n::t_args("hand-settings-title", &[("id", id)]));
+        for setting in &schema {
+            let Some(key) = setting.get("key").and_then(|k| k.as_str()) else {
+                continue;
+            };
+            let value = effective
+                .and_then(|e| e.get(key))
+                .map(render_setting_value)
+                .or_else(|| setting.get("default").map(render_setting_value))
+                .unwrap_or_default();
 
-    ui::section(&i18n::t_args("hand-settings-title", &[("id", id)]));
-    for setting in &schema {
-        let Some(key) = setting.get("key").and_then(|k| k.as_str()) else {
-            continue;
-        };
-        match saved.and_then(|s| s.get(key)) {
-            Some(value) => println!("  {}: {}", key.bold(), render_setting_value(value)),
-            None => {
-                let default = setting
-                    .get("default")
-                    .map(render_setting_value)
-                    .unwrap_or_default();
+            // "(default)" means the effective value came from the schema, either
+            // because nothing is stored or because what is stored was rejected.
+            let stored = saved.and_then(|s| s.get(key));
+            let on_default = match stored {
+                None => true,
+                Some(v) => render_setting_value(v) != value,
+            };
+            if on_default {
                 println!(
                     "  {}: {} {}",
                     key.bold(),
-                    default,
+                    value,
                     i18n::t("hand-setting-default-marker").dimmed()
                 );
+                // A stored value that lost to the default was silently discarded;
+                // say so rather than letting the operator assume it took effect.
+                if let Some(v) = stored {
+                    println!(
+                        "      {}",
+                        i18n::t_args(
+                            "hand-setting-value-ignored",
+                            &[("value", &render_setting_value(v))]
+                        )
+                        .dimmed()
+                    );
+                }
+            } else {
+                println!("  {}: {}", key.bold(), value);
             }
         }
+    }
+
+    // Stored keys the schema does not declare. `update_config` accepts any key,
+    // so `hand set <typo> <value>` is persisted, merged into every later save,
+    // and affects nothing — invisible unless it is reported here.
+    let unknown: Vec<&str> = body
+        .get("unknown_values")
+        .and_then(|u| u.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if !unknown.is_empty() {
+        ui::check_warn(&i18n::t_args(
+            "hand-settings-unknown-keys",
+            &[("keys", &unknown.join(", "))],
+        ));
     }
 }
 

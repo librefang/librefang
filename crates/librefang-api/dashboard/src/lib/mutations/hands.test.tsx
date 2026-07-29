@@ -173,7 +173,7 @@ describe("useSetHandSecret", () => {
 });
 
 describe("useUpdateHandSettings", () => {
-  it("invalidates handKeys.lists(), handKeys.detail(handId), and handKeys.settings(handId)", async () => {
+  it("invalidates the hand, agent and overview caches plus handKeys.settings(handId)", async () => {
     const args: UpdateHandSettingsInput = { handId: "h1", config: { foo: 1 } };
     vi.mocked(http.updateHandSettings).mockResolvedValue({
       status: "ok",
@@ -188,11 +188,16 @@ describe("useUpdateHandSettings", () => {
 
     await result.current.mutateAsync(args);
 
+    // Saving settings rewrites the system prompt of every live agent of the
+    // hand, so the agent-side caches are stale too — not just the hand ones.
     expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: handKeys.lists(),
+      queryKey: handKeys.all,
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: handKeys.detail("h1"),
+      queryKey: agentKeys.all,
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: overviewKeys.snapshot(),
     });
     // The settings query backs the editor's displayed values, so it
     // must be invalidated for saved inputs to reappear after save.

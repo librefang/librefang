@@ -1385,6 +1385,16 @@ impl HandRegistry {
         self.instances.get(&instance_id).map(|e| e.clone())
     }
 
+    /// The instance `active_index` currently designates for `hand_id`.
+    ///
+    /// Several instances can share a `hand_id`: `activate_with_id` skips the `AlreadyActive` check whenever an explicit `instance_id` is supplied, which is how restart recovery replays a persisted hand, and `deactivate` re-points the index at a surviving sibling rather than clearing it.
+    /// `active_index` is the single deterministic answer to "which one does `hand_id` mean"; `list_instances().find(|i| i.hand_id == …)` is a DashMap iteration whose order varies per process, so two callers using it can disagree — a settings write and the read that follows it landing on different instances, for one (#6636).
+    /// Reach for this whenever a `hand_id` has to resolve to exactly one instance.
+    pub fn active_instance(&self, hand_id: &str) -> Option<HandInstance> {
+        let instance_id = *self.active_index.get(hand_id)?.value();
+        self.get_instance(instance_id)
+    }
+
     /// Check which requirements are satisfied for a given hand.
     pub fn check_requirements(&self, hand_id: &str) -> HandResult<Vec<(HandRequirement, bool)>> {
         let def = self
