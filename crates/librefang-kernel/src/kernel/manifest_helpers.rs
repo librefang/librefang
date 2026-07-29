@@ -949,8 +949,7 @@ system_prompt = "p"
             .expect("hand toml must parse")
     }
 
-    /// `parse_hand` plus a settings schema grafted on, so a fixture hand can
-    /// exercise the settings tail without a second TOML constant per case.
+    /// `parse_hand` plus a settings schema grafted on, so a fixture hand can exercise the settings tail without a second TOML constant per case.
     fn parse_hand_with_settings(
         toml: &str,
         skill: &str,

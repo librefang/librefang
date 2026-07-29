@@ -794,10 +794,8 @@ impl LibreFangKernel {
             .map_err(KernelError::from)
     }
 
-    /// Per-instance serialization lock for mutations that span the
-    /// `HandInstance` and the live `AgentRegistry` entries it owns.
-    /// See the field comment on `hand_instance_locks` for the race this
-    /// guards against.
+    /// Per-instance serialization lock for mutations that span the `HandInstance` and the live `AgentRegistry` entries it owns.
+    /// See the field comment on `hand_instance_locks` for the race this guards against.
     fn hand_instance_lock(&self, instance_id: uuid::Uuid) -> Arc<std::sync::Mutex<()>> {
         self.agents
             .hand_instance_locks
