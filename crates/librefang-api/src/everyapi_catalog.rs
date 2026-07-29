@@ -625,8 +625,7 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
         base_url = credential.base_url;
         credential.api_key
     } else {
-        // Treat an empty env var the same as an absent one — `/v1/models`
-        // answers an empty bearer with a 401 either way.
+        // Treat an empty env var the same as an absent one — `/v1/models` answers an empty bearer with a 401 either way.
         std::env::var(&api_key_env)
             .ok()
             .filter(|key| !key.trim().is_empty())
