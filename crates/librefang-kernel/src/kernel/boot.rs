@@ -1936,33 +1936,14 @@ impl LibreFangKernel {
                                                     .hand_registry
                                                     .get_definition(&hand_id)
                                                 {
-                                                    // Re-render the whole prompt through the
-                                                    // canonical helper — the same one activation
-                                                    // and the settings-save path use, so the three
-                                                    // cannot disagree about content or ordering.
-                                                    // The bare disk TOML carries none of the
-                                                    // rendered tails, so without this the agent
-                                                    // silently loses its configured values, skill
-                                                    // discoverability and peer awareness on every
-                                                    // restart.
+                                                    // Re-render the whole prompt through the canonical helper — the same one activation and the settings-save path use, so the three cannot disagree about content or ordering.
+                                                    // The bare disk TOML carries none of the rendered tails, so without this the agent silently loses its configured values, skill discoverability and peer awareness on every restart.
                                                     //
-                                                    // The env passthrough allowlist is re-derived
-                                                    // from the same (definition, config) pair.
-                                                    // Discarding it here meant hand-injected env
-                                                    // passthrough silently disappeared on every
-                                                    // restart until a manual re-activation
-                                                    // (#5137); deriving it from the settings alone
-                                                    // dropped every `[[requires]]`-declared name,
-                                                    // which is the same disappearance one layer
-                                                    // down.
+                                                    // The env passthrough allowlist is re-derived from the same (definition, config) pair.
+                                                    // Discarding it here meant hand-injected env passthrough silently disappeared on every restart until a manual re-activation (#5137); deriving it from the settings alone dropped every `[[requires]]`-declared name, which is the same disappearance one layer down.
                                                     //
-                                                    // Recover the agent's role from the
-                                                    // `hand_role:<role>` tag stamped at
-                                                    // activation. Skip when the tag is missing —
-                                                    // the agent isn't hand-derived in a way we
-                                                    // recognise, and the activation path will
-                                                    // re-stamp the tags on the next
-                                                    // `hand activate`.
+                                                    // Recover the agent's role from the `hand_role:<role>` tag stamped at activation.
+                                                    // Skip when the tag is missing — the agent isn't hand-derived in a way we recognise, and the activation path will re-stamp the tags on the next `hand activate`.
                                                     let role_opt = entry
                                                         .manifest
                                                         .tags
@@ -1988,13 +1969,8 @@ impl LibreFangKernel {
                                                             &allowed_env,
                                                         );
                                                     } else {
-                                                        // Hand membership is known (we're inside
-                                                        // the `hand:<id>` branch) but the role tag
-                                                        // wasn't stamped — this agent will boot
-                                                        // without its rendered tails until
-                                                        // somebody re-runs `hand activate`. Log so
-                                                        // the silent degradation is at least
-                                                        // greppable.
+                                                        // Hand membership is known (we're inside the `hand:<id>` branch) but the role tag wasn't stamped — this agent will boot without its rendered tails until somebody re-runs `hand activate`.
+                                                        // Log so the silent degradation is at least greppable.
                                                         debug!(
                                                             agent = %name,
                                                             hand = %hand_id,

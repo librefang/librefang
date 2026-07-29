@@ -134,13 +134,8 @@ impl LibreFangKernel {
             // (e.g., `AlreadyActive` → 409 Conflict).
             .map_err(KernelError::from)?;
 
-        // Serialize the rest of activation against `update_hand_config` and the
-        // runtime-override paths: from here on we read this instance's config and
-        // write the live `AgentRegistry` entries it owns, and a settings save
-        // interleaving with the spawn loop would commit new values and then have
-        // them overwritten by the prompt this pass renders from its own snapshot.
-        // Taken after `activate_with_id` because the instance id is only known once
-        // the instance exists.
+        // Serialize the rest of activation against `update_hand_config` and the runtime-override paths: from here on we read this instance's config and write the live `AgentRegistry` entries it owns, and a settings save interleaving with the spawn loop would commit new values and then have them overwritten by the prompt this pass renders from its own snapshot.
+        // Taken after `activate_with_id` because the instance id is only known once the instance exists.
         let lock = self.hand_instance_lock(instance.instance_id);
         let _instance_guard = lock.lock().unwrap_or_else(|e| {
             warn!(
@@ -150,21 +145,16 @@ impl LibreFangKernel {
             e.into_inner()
         });
 
-        // Re-read under the lock: a save that committed between `activate_with_id`
-        // and the lock acquisition is in the registry but not in the snapshot above,
-        // and rendering from the stale copy is exactly the #6636 symptom.
+        // Re-read under the lock: a save that committed between `activate_with_id` and the lock acquisition is in the registry but not in the snapshot above, and rendering from the stale copy is exactly the #6636 symptom.
         let instance = self
             .skills
             .hand_registry
             .get_instance(instance.instance_id)
             .unwrap_or(instance);
 
-        // Pre-compute shared overrides from hand definition. The system-prompt
-        // tail is materialized later (after per-role manifest cloning) via
-        // `rerender_hand_prompt_tails` — keep this block aligned with the
-        // env-var allowlist only. `resolve_hand_allowed_env` carries the
-        // security rationale for the blocklist filter and is shared with
-        // `update_hand_config` so the two paths cannot drift.
+        // Pre-compute shared overrides from hand definition.
+        // The system-prompt tail is materialized later (after per-role manifest cloning) via `rerender_hand_prompt_tails` — keep this block aligned with the env-var allowlist only.
+        // `resolve_hand_allowed_env` carries the security rationale for the blocklist filter and is shared with `update_hand_config` so the two paths cannot drift.
         let allowed_env = resolve_hand_allowed_env(&def, &instance.config);
 
         let is_multi_agent = def.is_multi_agent();
@@ -432,20 +422,10 @@ impl LibreFangKernel {
                 }
             }
 
-            // Render the whole prompt — base plus the settings,
-            // reference-knowledge and team tails — through the canonical
-            // helper. The boot-time TOML drift loop and the settings-save path
-            // call the same function, so all three agree on content and
-            // ordering; the drift loop overwrites the DB blob with the bare
-            // disk TOML, which carries none of the tails, and without an
-            // identical re-render there the agent would silently lose its
-            // configured values, skill discoverability and peer awareness on
-            // every restart.
+            // Render the whole prompt — base plus the settings, reference-knowledge and team tails — through the canonical helper.
+            // The boot-time TOML drift loop and the settings-save path call the same function, so all three agree on content and ordering; the drift loop overwrites the DB blob with the bare disk TOML, which carries none of the tails, and without an identical re-render there the agent would silently lose its configured values, skill discoverability and peer awareness on every restart.
             //
-            // `allowed_env` was resolved once above from the same
-            // (definition, config) pair, so the returned value is identical
-            // per role; it is discarded rather than shadowing the outer
-            // binding to keep that obvious.
+            // `allowed_env` was resolved once above from the same (definition, config) pair, so the returned value is identical per role; it is discarded rather than shadowing the outer binding to keep that obvious.
             let _ = rerender_hand_prompt_tails(&mut manifest, role, &def, &instance.config);
             set_hand_allowed_env(&mut manifest, &allowed_env);
 
@@ -677,10 +657,7 @@ impl LibreFangKernel {
 
     /// Deactivate a hand: kill agent and remove instance.
     pub fn deactivate_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
-        // Serialize against `update_hand_config` and the runtime-override paths:
-        // this tears down the very `AgentRegistry` entries a concurrent settings
-        // save is rewriting, and the save would otherwise leave a freshly
-        // rendered prompt on an agent that is being killed.
+        // Serialize against `update_hand_config` and the runtime-override paths: this tears down the very `AgentRegistry` entries a concurrent settings save is rewriting, and the save would otherwise leave a freshly rendered prompt on an agent that is being killed.
         let lock = self.hand_instance_lock(instance_id);
         let guard = lock.lock().unwrap_or_else(|e| {
             warn!(
@@ -744,14 +721,10 @@ impl LibreFangKernel {
             }
         }
 
-        // Release before dropping the map entry: holding a mutex while deleting
-        // the entry that publishes it lets the next caller mint a fresh mutex and
-        // run concurrently with this call's tail, which is the opposite of what
-        // the lock is for.
+        // Release before dropping the map entry: holding a mutex while deleting the entry that publishes it lets the next caller mint a fresh mutex and run concurrently with this call's tail, which is the opposite of what the lock is for.
         drop(guard);
 
-        // Drop the per-instance mutex so reactivating with a fresh
-        // `instance_id` doesn't leak entries here.
+        // Drop the per-instance mutex so reactivating with a fresh `instance_id` doesn't leak entries here.
         self.agents.hand_instance_locks.remove(&instance_id);
 
         // Persist hand state so it survives restarts
