@@ -1,0 +1,4 @@
+Require Owner authorization for every plugin route that can put plugin-controlled code on an execution path.
+Admin is "config write" by design, but it could previously install a Git-backed plugin and then invoke dependency installation, so npm / pip / Bundler / Composer ran attacker-supplied package lifecycle scripts under the daemon UID — crossing the Admin/Owner boundary into arbitrary code execution with access to daemon secrets.
+Owner is now required for `install`, `install-deps`, `test-hook`, `upgrade`, `enable`, `reload`, and `sign`; `sign` is included because load-time integrity verification rejects a hook whose hash no longer matches, so re-signing is what makes a tampered script loadable again.
+`uninstall`, `disable`, and `scaffold` deliberately stay at Admin: the first two *remove* code from the execution path, and gating them would leave an Admin unable to shut a malicious plugin off during an incident (#6631) (@houko)
