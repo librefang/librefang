@@ -47,6 +47,32 @@ impl LibreFangKernel {
         if let Ok(listen) = std::env::var("LIBREFANG_LISTEN") {
             config.api_listen = listen;
         }
+        // `LIBREFANG_API_KEY` is the only way a Kubernetes Secret can supply
+        // the API bearer token (#6635). `config.toml` lives inside the
+        // daemon's own writable data dir (`$LIBREFANG_HOME/config.toml`), so
+        // it cannot be mounted from a Secret — the daemon rewrites it. Every
+        // other credential the deployment needs already has an env path
+        // (`LIBREFANG_VAULT_KEY`, `LIBREFANG_DASHBOARD_USER` /
+        // `LIBREFANG_DASHBOARD_PASS`, provider `*_API_KEY` vars); without
+        // this one, a manifest satisfying `api_key` had to bake the literal
+        // into the image or shell it into config.toml at boot.
+        //
+        // An empty or whitespace-only value is ignored rather than treated as
+        // "clear the key": a Secret key that exists but is unset would
+        // otherwise silently disarm bearer authentication, and on a
+        // non-loopback bind that turns into an open daemon. Refusing the
+        // override leaves whatever `config.toml` says, so the #3572 bind
+        // guard still gets the truth.
+        match resolve_api_key_override(std::env::var("LIBREFANG_API_KEY").ok().as_deref()) {
+            ApiKeyOverride::Use(key) => config.api_key = key,
+            ApiKeyOverride::IgnoredEmpty => warn!(
+                "LIBREFANG_API_KEY is set but empty — ignoring it and keeping the \
+                 api_key from config.toml. An empty value cannot be distinguished \
+                 from a misconfigured Secret, and silently clearing the key would \
+                 open the API on a non-loopback bind."
+            ),
+            ApiKeyOverride::Absent => {}
+        }
 
         // Clamp configuration bounds to prevent zero-value or unbounded misconfigs
         config.clamp_bounds();
@@ -2684,6 +2710,37 @@ system_prompt = "You are a helpful assistant."
     }
 }
 
+/// What the `LIBREFANG_API_KEY` env var asks `boot_with_config` to do.
+#[derive(Debug, PartialEq, Eq)]
+enum ApiKeyOverride {
+    /// Env unset — leave `config.toml`'s `api_key` alone.
+    Absent,
+    /// Env set to a usable value — replace `config.toml`'s `api_key` with it.
+    Use(String),
+    /// Env set but empty or whitespace-only. Treated as `Absent` plus a
+    /// warning, deliberately NOT as "clear the api_key": a Kubernetes Secret
+    /// key that exists but holds nothing is indistinguishable from this, and
+    /// clearing the key disarms bearer auth — which on a non-loopback bind
+    /// means an open daemon. Keeping `config.toml`'s value also keeps the
+    /// #3572 bind guard's inputs honest.
+    IgnoredEmpty,
+}
+
+/// Pure decision for the `LIBREFANG_API_KEY` override — `None` means env
+/// unset.
+///
+/// Separated from the env read for the same reason as
+/// `validate_state_secret_value` below: it makes the accept/reject envelope
+/// testable without mutating process-global env, which would force the suite
+/// serial and is unsound once other threads exist (Rust 1.80+).
+fn resolve_api_key_override(raw: Option<&str>) -> ApiKeyOverride {
+    match raw {
+        None => ApiKeyOverride::Absent,
+        Some(value) if value.trim().is_empty() => ApiKeyOverride::IgnoredEmpty,
+        Some(value) => ApiKeyOverride::Use(value.trim().to_string()),
+    }
+}
+
 /// Pure validator for the `LIBREFANG_STATE_SECRET` shape — `None`
 /// means env unset; otherwise the raw env value is checked for base64
 /// decodability and a 32-byte payload.
@@ -3086,6 +3143,54 @@ mod extraction_model_tests {
         );
         assert_eq!(p, "anthropic");
         assert_eq!(m, "weird/model");
+    }
+}
+
+#[cfg(test)]
+mod api_key_env_override {
+    //! `LIBREFANG_API_KEY` is the only path by which a Kubernetes Secret can
+    //! supply the API bearer token (#6635), because `config.toml` lives in the
+    //! daemon's own writable data dir and is rewritten at boot. The pure
+    //! resolver is pinned here so the security-relevant edge — an env var that
+    //! exists but is empty — cannot regress into "clear the key".
+    use super::{resolve_api_key_override, ApiKeyOverride};
+
+    #[test]
+    fn unset_env_leaves_config_alone() {
+        assert_eq!(resolve_api_key_override(None), ApiKeyOverride::Absent);
+    }
+
+    #[test]
+    fn a_real_value_overrides_config() {
+        assert_eq!(
+            resolve_api_key_override(Some("s3cret-token")),
+            ApiKeyOverride::Use("s3cret-token".to_string())
+        );
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed() {
+        // A Secret created with `--from-file` carries the file's trailing
+        // newline; a token with a stray \n would never match a bearer header.
+        assert_eq!(
+            resolve_api_key_override(Some("  s3cret-token\n")),
+            ApiKeyOverride::Use("s3cret-token".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_value_is_ignored_not_treated_as_clearing_the_key() {
+        // The security-relevant case. An empty Secret value must not disarm
+        // bearer authentication — on a non-loopback bind that is an open
+        // daemon, and the #3572 boot guard would see a cleared api_key and
+        // conclude no auth is configured.
+        for empty in ["", " ", "\n", "\t  \n"] {
+            assert_eq!(
+                resolve_api_key_override(Some(empty)),
+                ApiKeyOverride::IgnoredEmpty,
+                "empty value {empty:?} must be ignored, never applied"
+            );
+        }
     }
 }
 
