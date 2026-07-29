@@ -971,6 +971,24 @@ jobs:
           # The deeper fix — offline fixtures so the tests don't live-clone — is tracked as a follow-up.
           cargo nextest run --workspace --no-fail-fast \
             -E 'not (package(librefang-hands) and test(/registry::tests::/))'
+      # Mach-port abort guard — deliberately `cargo test`, not nextest.
+      #
+      # Wasmtime's macOS default parks a handler thread in a blocking `mach_msg`
+      # receive that aborts the process when a signal interrupts it, so any child
+      # process exiting while the WASM sandbox is live could kill the daemon
+      # (`macos_use_mach_ports(false)` in `runtime::sandbox::make_engine_config`
+      # is the fix). Nextest cannot observe that regression: it runs each test in
+      # its own process, so no single test accumulates the subprocess churn and
+      # thread count needed to land a signal on that one thread. `cargo test`
+      # runs all ~1300 kernel unit tests as threads in ONE process, which
+      # reproduces it reliably — verified by re-enabling mach ports locally
+      # (SIGABRT) and disabling them again (1335 passed).
+      #
+      # Scoped to librefang-kernel's lib target: it is the crate that both spawns
+      # subprocesses and constructs sandbox engines, and it keeps this step at
+      # ~2.5 min rather than a second full workspace run.
+      - name: Mach-port regression guard (single-process kernel unit tests)
+        run: cargo test -p librefang-kernel --lib
 
   # ── Linux aarch64 compile check: runs on PRs ───────────────────────────────────
   # The x86 Ubuntu shards never exercise aarch64-gated code paths, so an
