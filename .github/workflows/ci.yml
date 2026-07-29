@@ -384,9 +384,11 @@ jobs:
 
   # ── CHANGELOG attribution check ────────────────────────────────────────────────
   # Enforces the `(@username)` suffix on bullets *added* to the [Unreleased]
-  # section in this PR. Historical entries (1,800+ bullets, many predating
-  # any attribution convention) are NOT retroactively flagged — the validator
-  # only looks at lines this diff introduces. See #3400.
+  # section in this PR, and on `changelog.d/` fragments this PR introduces —
+  # a fragment is an [Unreleased] bullet with a delay on it. Historical
+  # entries (1,800+ bullets, many predating any attribution convention) are
+  # NOT retroactively flagged — the validator only looks at lines this diff
+  # introduces. See #3400.
   changelog-attribution:
     name: CHANGELOG Attribution
     if: github.event_name == 'pull_request'
@@ -398,7 +400,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
-      - name: Validate (@user) attribution on new [Unreleased] bullets
+      - name: Validate (@user) attribution on new [Unreleased] bullets and changelog.d fragments
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -411,6 +413,9 @@ jobs:
   # to a release without attribution. Runs on PR + push to main.
   # Lines exempted with `# pragma: no-attribution` (added before the convention
   # was enforced and no longer attributable) are not flagged.
+  # This mode also scans every pending `changelog.d/` fragment, so an
+  # unattributed fragment — or one in a section directory assembly has no
+  # heading for — cannot sit in the tree until release day.
   changelog-attribution-full:
     name: CHANGELOG Attribution (full [Unreleased])
     runs-on: ubuntu-latest
@@ -419,7 +424,12 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
-      - name: Validate (@user) attribution on all [Unreleased] bullets
+      # The validator's own unit tests. They existed but were never wired into
+      # CI, so a regression in the attribution predicate or the fragment rules
+      # could only be caught by running them by hand.
+      - name: Unit-test the attribution validator
+        run: python3 scripts/tests/test_check_changelog_attribution.py
+      - name: Validate (@user) attribution on all [Unreleased] bullets and changelog.d fragments
         run: python3 scripts/check-changelog-attribution.py --all-unreleased
 
   # ── OpenAPI / SDK drift check ──────────────────────────────────────────────────

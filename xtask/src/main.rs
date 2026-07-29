@@ -64,6 +64,11 @@ enum Command {
     /// Generate CHANGELOG.md entry from merged PRs since last tag
     Changelog(changelog::ChangelogArgs),
 
+    /// Fold `changelog.d/<section>/*.md` fragments into the `[Unreleased]`
+    /// section of CHANGELOG.md and delete the fragments consumed. Runs as part
+    /// of `release`; a no-op when there are no fragments.
+    CollectFragments(changelog::CollectFragmentsArgs),
+
     /// Sync version strings across Cargo.toml, JS/Python/Rust SDKs, Tauri, etc.
     SyncVersions(sync_versions::SyncVersionsArgs),
 
@@ -166,6 +171,7 @@ fn main() {
         Command::Ci(args) => ci::run(args),
         Command::ChannelPolicy(args) => ci::run_channel_policy(args),
         Command::Changelog(args) => changelog::run(args),
+        Command::CollectFragments(args) => changelog::collect_fragments(args),
         Command::SyncVersions(args) => sync_versions::run(args),
         Command::IntegrationTest(args) => integration_test::run(args),
         Command::PublishSdks(args) => publish_sdks::run(args),

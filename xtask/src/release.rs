@@ -707,6 +707,17 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         println!("✓ Cleaned up {}", tag);
     }
 
+    // --- Fold changelog.d fragments into [Unreleased] ---
+    // Deliberately ahead of `changelog::run`, which cuts the dated
+    // `## [VERSION]` section immediately below `## [Unreleased]`. Folding first
+    // means the fragments are already ordinary `[Unreleased]` bullets by the
+    // time a release heading exists, so nothing downstream has to learn about
+    // them: the `awk` extractors in `.github/workflows/release.yml` and
+    // `release-notify.yml` keep slicing exactly the file shape they always did.
+    println!();
+    println!("Folding changelog.d fragments into [Unreleased]...");
+    changelog::collect_fragments(changelog::CollectFragmentsArgs {})?;
+
     // --- Generate changelog ---
     println!();
     println!("Generating changelog...");

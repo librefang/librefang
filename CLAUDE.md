@@ -49,9 +49,11 @@ These run inside `git` itself (regardless of which tool invoked the commit),
 giving defense in depth on top of the Claude Code PreToolUse layer.
 
 - `pre-commit` — runs `cargo fmt --check` on staged Rust files; CHANGELOG
-  duplicate-`[Unreleased]` guard; CHANGELOG `(@user)` attribution check on
-  staged additions to `[Unreleased]` (#3400); `gitleaks protect --staged`
-  scan against `.gitleaks.toml` (soft-warn if not installed). Target: < 2s.
+  duplicate-`[Unreleased]` guard; `(@user)` attribution check on staged
+  additions to `[Unreleased]` **and on staged `changelog.d/` fragments**,
+  which also rejects a fragment in an unrecognised section directory
+  (#3400); `gitleaks protect --staged` scan against `.gitleaks.toml`
+  (soft-warn if not installed). Target: < 2s.
 - `pre-push` — refuses direct pushes to `main` / `master` and exits in
   &lt; 100ms. Heavy verification (clippy, openapi/SDK drift) intentionally
   lives in CI rather than gating every push — see #4532 for the
@@ -357,6 +359,14 @@ The daemon command is `start` (not `daemon`).
 
 ## Git Conventions
 - **Format**: Use conventional commits (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `perf:`, `test:`)
+- **Changelog entry = a new file under `changelog.d/`, NOT an edit to `CHANGELOG.md`.**
+  Appending to the single `## [Unreleased]` section conflicts with every other open PR that does the same, in a file where the conflict carries no information — both sides are correct and the resolution is always "keep both".
+  Write one fragment per entry in the section directory matching its `### ` heading (`added/`, `fixed/`, `changed/`, `security/`, `documentation/`), named after the PR or issue number so fragments sort usefully: `changelog.d/fixed/6623-wire-max-content-chars.md`.
+  The file holds the bullet body **without** the leading `- `, one sentence per line, continuation lines indented two spaces, ending `(#PR) (@your-github-login)`.
+  Format and a worked example: `changelog.d/README.md`.
+  `cargo xtask collect-fragments` folds fragments into `## [Unreleased]` and deletes the files consumed; `cargo xtask release` runs it before cutting the dated section, so a fragment reaches the CHANGELOG exactly as a hand-written bullet does.
+  Editing `## [Unreleased]` directly still works and assembly appends to whatever is already there — but the direct edit is the thing that conflicts, so don't reach for it.
+  A fragment in an unrecognised section directory is rejected by `scripts/check-changelog-attribution.py`, because assembly has no heading to render it under and would drop it silently.
 - **No AI / Claude attribution** in commit messages, PR bodies, or
   comments — see "Commit & PR hygiene" under GitHub Collaboration below
   for the canonical rule (the `commit-msg` hook enforces it server-side
