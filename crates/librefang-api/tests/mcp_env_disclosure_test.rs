@@ -1,18 +1,11 @@
-//! #6630 — `GET /api/mcp/servers` (and the `{name}` detail route) must never
-//! serialize MCP environment *values*.
+//! #6630 — `GET /api/mcp/servers` (and the `{name}` detail route) must never serialize MCP environment *values*.
 //!
-//! `McpServerConfigEntry::env` is documented as a list of variable names to
-//! pass through, but the supported representation also accepts an inline
-//! `KEY=VALUE`, so an operator can put a live credential there. Both read
-//! routes used to return the raw list. The report covers the Viewer-role case;
-//! it is worse than that — `/api/mcp/servers` sits in
-//! `PUBLIC_ROUTES_DASHBOARD_READS`, so with `require_auth_for_reads` unset (the
-//! default) an unauthenticated caller reads it too.
+//! `McpServerConfigEntry::env` is documented as a list of variable names to pass through, but the supported representation also accepts an inline `KEY=VALUE`, so an operator can put a live credential there.
+//! Both read routes used to return the raw list.
+//! The report covers the Viewer-role case; it is worse than that — `/api/mcp/servers` sits in `PUBLIC_ROUTES_DASHBOARD_READS`, so with `require_auth_for_reads` unset (the default) an unauthenticated caller reads it too.
 //!
-//! Redacting the read side alone would have been a data-loss bug worse than the
-//! disclosure, because `McpServersPage` hydrates its edit form from the list
-//! response and submits every field back on save. So the write path merges a
-//! bare `NAME` against what is stored, and that round-trip is pinned here too.
+//! Redacting the read side alone would have been a data-loss bug worse than the disclosure, because `McpServersPage` hydrates its edit form from the list response and submits every field back on save.
+//! So the write path merges a bare `NAME` against what is stored, and that round-trip is pinned here too.
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -22,13 +15,10 @@ use librefang_types::config::McpRuntimeStore;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-/// Distinctive enough that a substring search over a whole response body is a
-/// meaningful assertion — no chance of a coincidental match.
+/// Distinctive enough that a substring search over a whole response body is a meaningful assertion — no chance of a coincidental match.
 const SENTINEL: &str = "ghp_S3nt1nelMustNeverAppearInAnyResponseBody";
 const ENV_NAME: &str = "GITHUB_PERSONAL_ACCESS_TOKEN";
-/// A second variable with no inline value: the name-only form must survive
-/// untouched, which is what the dashboard's notice ("referenced by name only")
-/// describes.
+/// A second variable with no inline value: the name-only form must survive untouched, which is what the dashboard's notice ("referenced by name only") describes.
 const PLAIN_ENV_NAME: &str = "GITHUB_API_URL";
 
 struct Harness {
@@ -37,8 +27,7 @@ struct Harness {
     _test: TestAppState,
 }
 
-/// DB-backed store so the test can read the persisted entry directly and prove
-/// the inline value is still there after a round-trip.
+/// DB-backed store so the test can read the persisted entry directly and prove the inline value is still there after a round-trip.
 fn boot() -> Harness {
     let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(|cfg| {
         cfg.mcp_runtime_store = McpRuntimeStore::Db;
@@ -78,8 +67,7 @@ fn put_json(uri: &str, body: serde_json::Value) -> Request<Body> {
         .unwrap()
 }
 
-/// `false` exits immediately, so the connect attempt fails fast while the entry
-/// is still persisted and added to the effective set.
+/// `false` exits immediately, so the connect attempt fails fast while the entry is still persisted and added to the effective set.
 fn add_server_with_inline_secret(name: &str) -> Request<Body> {
     let body = serde_json::json!({
         "name": name,
@@ -109,8 +97,7 @@ async fn list_and_detail_never_disclose_inline_env_values() {
     let (status, _) = send(h.app.clone(), add_server_with_inline_secret("leaky")).await;
     assert_eq!(status, StatusCode::CREATED, "add should succeed");
 
-    // Precondition: the inline value really is stored, so the assertions below
-    // are about the response and not about the value never existing.
+    // Precondition: the inline value really is stored, so the assertions below are about the response and not about the value never existing.
     assert!(
         stored_env(&h.state, "leaky").contains(&format!("{ENV_NAME}={SENTINEL}")),
         "precondition: the inline value must be persisted for this test to mean anything"
@@ -123,9 +110,7 @@ async fn list_and_detail_never_disclose_inline_env_values() {
             !body.contains(SENTINEL),
             "GET {uri} disclosed the inline env value:\n{body}"
         );
-        // The name is the useful, non-secret half and must survive — the
-        // dashboard renders it and an operator needs to know what the server
-        // expects.
+        // The name is the useful, non-secret half and must survive — the dashboard renders it and an operator needs to know what the server expects.
         assert!(
             body.contains(ENV_NAME),
             "GET {uri} must still report the variable NAME:\n{body}"
@@ -134,8 +119,7 @@ async fn list_and_detail_never_disclose_inline_env_values() {
             body.contains(PLAIN_ENV_NAME),
             "GET {uri} must still report name-only entries:\n{body}"
         );
-        // Guard the specific shape a naive fix produces: `KEY=***` still
-        // round-trips into the stored config and destroys the real value.
+        // Guard the specific shape a naive fix produces: `KEY=***` still round-trips into the stored config and destroys the real value.
         assert!(
             !body.contains(&format!("{ENV_NAME}=")),
             "GET {uri} must return the bare name, not a masked `KEY=...` form \
@@ -144,17 +128,14 @@ async fn list_and_detail_never_disclose_inline_env_values() {
     }
 }
 
-/// The other half of the contract: a client that hydrates its form from the
-/// redacted list response and submits every field back must not wipe the inline
-/// value it was never shown.
+/// The other half of the contract: a client that hydrates its form from the redacted list response and submits every field back must not wipe the inline value it was never shown.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn round_tripping_the_redacted_env_preserves_the_stored_inline_value() {
     let h = boot();
     let (status, _) = send(h.app.clone(), add_server_with_inline_secret("roundtrip")).await;
     assert_eq!(status, StatusCode::CREATED);
 
-    // Read back exactly what a client sees, then submit it verbatim with one
-    // unrelated field changed — the dashboard's save flow.
+    // Read back exactly what a client sees, then submit it verbatim with one unrelated field changed — the dashboard's save flow.
     let (_, list) = send(h.app.clone(), get("/mcp/servers/roundtrip")).await;
     let detail: serde_json::Value = serde_json::from_str(&list).expect("detail is JSON");
     let env_from_response = detail
@@ -200,8 +181,7 @@ async fn round_tripping_the_redacted_env_preserves_the_stored_inline_value() {
     );
 }
 
-/// A submitted `NAME=value` is an explicit change and must win over what is
-/// stored, otherwise an operator could never rotate an inline credential.
+/// A submitted `NAME=value` is an explicit change and must win over what is stored, otherwise an operator could never rotate an inline credential.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_explicitly_submitted_value_overrides_the_stored_one() {
     let h = boot();
@@ -233,8 +213,7 @@ async fn an_explicitly_submitted_value_overrides_the_stored_one() {
     );
 }
 
-/// A name dropped from the submission is an explicit removal, not something to
-/// restore from the stored entry.
+/// A name dropped from the submission is an explicit removal, not something to restore from the stored entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn omitting_a_name_removes_it_rather_than_restoring_it() {
     let h = boot();

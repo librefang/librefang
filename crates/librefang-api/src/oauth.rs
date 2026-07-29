@@ -403,9 +403,7 @@ struct TokenResponse {
 #[derive(Debug, Clone)]
 struct StoredTokens {
     /// The OAuth2 access token (stored for future introspection/revocation).
-    /// Load-bearing since #6629: `find_by_access_token` matches on this to
-    /// prove a refresh caller owns the session it is refreshing, so it is no
-    /// longer dead code.
+    /// Load-bearing since #6629: `find_by_access_token` matches on this to prove a refresh caller owns the session it is refreshing, so it is no longer dead code.
     access_token: String,
     /// Optional refresh token for obtaining new access tokens.
     refresh_token: Option<String>,
@@ -461,29 +459,17 @@ impl TokenStore {
 
     /// Find the stored entry whose access token the caller presented (#6629).
     ///
-    /// This replaced `find_by_provider` and `find_any_with_refresh`, which
-    /// selected *an* entry matching a provider — or literally any entry with a
-    /// refresh token — without checking that it belonged to the caller. Since
-    /// the route is reachable by any Admin, that let one caller refresh another
-    /// local user's upstream session and receive their credentials, with every
-    /// scope that token had been granted.
+    /// This replaced `find_by_provider` and `find_any_with_refresh`, which selected *an* entry matching a provider — or literally any entry with a refresh token — without checking that it belonged to the caller.
+    /// Since the route is reachable by any Admin, that let one caller refresh another local user's upstream session and receive their credentials, with every scope that token had been granted.
     ///
-    /// Ownership is proven by presenting the access token the callback returned
-    /// to that client. There is no lesser predicate available here: the store is
-    /// keyed by upstream OIDC subject with no record of which local user owns an
-    /// entry, and a caller-supplied `sub` or `provider` is an assertion rather
-    /// than proof.
+    /// Ownership is proven by presenting the access token the callback returned to that client.
+    /// There is no lesser predicate available here: the store is keyed by upstream OIDC subject with no record of which local user owns an entry, and a caller-supplied `sub` or `provider` is an assertion rather than proof.
     ///
-    /// Comparison is constant-time. A short-circuiting `==` over a `HashMap`
-    /// scan leaks how many leading bytes matched, which for a
-    /// remotely-guessable-in-principle credential is a distinguisher worth
-    /// denying; `subtle::ConstantTimeEq` costs nothing at these lengths.
+    /// Comparison is constant-time.
+    /// A short-circuiting `==` over a `HashMap` scan leaks how many leading bytes matched, which for a remotely-guessable-in-principle credential is a distinguisher worth denying; `subtle::ConstantTimeEq` costs nothing at these lengths.
     ///
-    /// Returns the refresh token as a non-optional `String` so callers cannot
-    /// reach for `.unwrap()` on `entry.refresh_token` (audit:
-    /// `oauth-refresh-error-body-token-leak`, sub-finding "unwrap on
-    /// refresh_token"). The `Some(..)` arm is itself the proof that a refresh
-    /// token is present — the invariant lives in the type, not in a comment.
+    /// Returns the refresh token as a non-optional `String` so callers cannot reach for `.unwrap()` on `entry.refresh_token` (audit: `oauth-refresh-error-body-token-leak`, sub-finding "unwrap on refresh_token").
+    /// The `Some(..)` arm is itself the proof that a refresh token is present — the invariant lives in the type, not in a comment.
     async fn find_by_access_token(
         &self,
         access_token: &str,
@@ -497,8 +483,8 @@ impl TokenStore {
         write.retain(|_sub, entry| now.duration_since(entry.stored_at) <= TOKEN_STORE_TTL);
 
         write.iter().find_map(|(sub, entry)| {
-            // Length differs → cannot match. `ct_eq` requires equal lengths
-            // anyway, and the length of an IdP-issued token is not a secret.
+            // Length differs → cannot match.
+            // `ct_eq` requires equal lengths anyway, and the length of an IdP-issued token is not a secret.
             if entry.access_token.len() != access_token.len() {
                 return None;
             }
@@ -1381,23 +1367,15 @@ pub async fn auth_introspect(
 pub struct RefreshRequest {
     /// The refresh token obtained from the initial login callback.
     ///
-    /// When omitted, `access_token` must be supplied instead — the server no
-    /// longer searches the token store for "some" stored session (#6629).
+    /// When omitted, `access_token` must be supplied instead — the server no longer searches the token store for "some" stored session (#6629).
     #[serde(default)]
     pub refresh_token: Option<String>,
-    /// The access token this caller received from its own login callback,
-    /// proving which stored session it owns (#6629).
+    /// The access token this caller received from its own login callback, proving which stored session it owns (#6629).
     ///
-    /// The callback returns the upstream access token to the client but keeps
-    /// the refresh token server-side, so a client legitimately has no refresh
-    /// token of its own to present. Presenting the access token it *was* given
-    /// is what lets the server resolve the matching entry without letting the
-    /// caller name someone else's session: the value is high-entropy, issued by
-    /// the identity provider, and never disclosed by any read route.
+    /// The callback returns the upstream access token to the client but keeps the refresh token server-side, so a client legitimately has no refresh token of its own to present.
+    /// Presenting the access token it *was* given is what lets the server resolve the matching entry without letting the caller name someone else's session: the value is high-entropy, issued by the identity provider, and never disclosed by any read route.
     ///
-    /// An expired access token still matches — entries live in the store for
-    /// 24 h regardless of the access token's own lifetime, which is exactly the
-    /// state a caller is in when it needs to refresh.
+    /// An expired access token still matches — entries live in the store for 24 h regardless of the access token's own lifetime, which is exactly the state a caller is in when it needs to refresh.
     #[serde(default)]
     pub access_token: Option<String>,
     /// Optional provider hint (if the user logged in with a specific provider).
@@ -1421,19 +1399,14 @@ struct RefreshResponse {
 
 /// POST /api/auth/refresh — Exchange a refresh token for a new access token.
 ///
-/// When the access token expires, clients call this instead of forcing a full
-/// re-authorization, presenting either:
+/// When the access token expires, clients call this instead of forcing a full re-authorization, presenting either:
 ///
 /// * `refresh_token` — one the client holds itself, or
-/// * `access_token` — the one its own login callback returned, which identifies
-///   the stored session whose server-side refresh token should be used.
+/// * `access_token` — the one its own login callback returned, which identifies the stored session whose server-side refresh token should be used.
 ///
-/// There is no third path. The endpoint used to fall back to scanning the token
-/// store for any entry matching a `provider` hint, or for literally any entry
-/// with a refresh token, and it is reachable by any Admin — so a caller could
-/// refresh a *different* local user's upstream session and be handed their
-/// credentials, with every scope that token carried. Both fallbacks are gone
-/// (#6629); a request that proves nothing gets a 400.
+/// There is no third path.
+/// The endpoint used to fall back to scanning the token store for any entry matching a `provider` hint, or for literally any entry with a refresh token, and it is reachable by any Admin — so a caller could refresh a *different* local user's upstream session and be handed their credentials, with every scope that token carried.
+/// Both fallbacks are gone (#6629); a request that proves nothing gets a 400.
 #[utoipa::path(post, path = "/api/auth/refresh", tag = "auth", request_body = RefreshRequest, responses((status = 200, description = "New access token", body = crate::types::JsonObject), (status = 400, description = "Missing or invalid refresh token"), (status = 502, description = "Token refresh failed")))]
 pub async fn auth_refresh(
     State(state): State<Arc<AppState>>,
@@ -1463,11 +1436,8 @@ pub async fn auth_refresh(
         };
         (rt.clone(), None::<String>, provider.cloned())
     } else if let Some(ref at) = req.access_token {
-        // No refresh token, but the caller presented the access token it was
-        // issued — resolve the entry that token belongs to, and only that one
-        // (#6629). The pre-fix code took a `provider` hint (or nothing at all)
-        // and selected an arbitrary matching entry, so an Admin could refresh
-        // another local user's upstream session and receive their credentials.
+        // No refresh token, but the caller presented the access token it was issued — resolve the entry that token belongs to, and only that one (#6629).
+        // The pre-fix code took a `provider` hint (or nothing at all) and selected an arbitrary matching entry, so an Admin could refresh another local user's upstream session and receive their credentials.
         match TOKEN_STORE.find_by_access_token(at).await {
             Some((sub, refresh_token, entry)) => {
                 let provider = providers
@@ -1477,10 +1447,8 @@ pub async fn auth_refresh(
                 (refresh_token, Some(sub), provider)
             }
             None => {
-                // Deliberately one message for "no such session", "that session
-                // has no refresh token", and "it expired out of the store".
-                // Distinguishing them would turn this route into an oracle for
-                // which access tokens the daemon has seen.
+                // Deliberately one message for "no such session", "that session has no refresh token", and "it expired out of the store".
+                // Distinguishing them would turn this route into an oracle for which access tokens the daemon has seen.
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
@@ -1491,9 +1459,8 @@ pub async fn auth_refresh(
             }
         }
     } else {
-        // Neither credential supplied. There is deliberately no fallback: any
-        // store lookup that is not keyed on something the caller proved it owns
-        // hands out someone else's tokens (#6629).
+        // Neither credential supplied.
+        // There is deliberately no fallback: any store lookup that is not keyed on something the caller proved it owns hands out someone else's tokens (#6629).
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -2341,17 +2308,11 @@ mod tests {
 
     // ── #6629: refresh must only ever resolve the caller's own session ──
     //
-    // `TOKEN_STORE` is a process-global `LazyLock<HashMap>` keyed by upstream
-    // OIDC subject, with no record of which local user owns an entry. The two
-    // lookups that `auth_refresh` used to fall back on — `find_by_provider` and
-    // `find_any_with_refresh` — therefore selected *an* entry rather than the
-    // caller's, and the route is reachable by any Admin. These tests pin the
-    // replacement: the only way to reach a stored refresh token is to present
-    // the access token that session was issued.
+    // `TOKEN_STORE` is a process-global `LazyLock<HashMap>` keyed by upstream OIDC subject, with no record of which local user owns an entry.
+    // The two lookups that `auth_refresh` used to fall back on — `find_by_provider` and `find_any_with_refresh` — therefore selected *an* entry rather than the caller's, and the route is reachable by any Admin.
+    // These tests pin the replacement: the only way to reach a stored refresh token is to present the access token that session was issued.
     //
-    // Two subjects are seeded into the one global store, which is exactly the
-    // "two users" condition the issue asks to be proven — the interesting
-    // property is cross-selection, and that lives in this map.
+    // Two subjects are seeded into the one global store, which is exactly the "two users" condition the issue asks to be proven — the interesting property is cross-selection, and that lives in this map.
 
     fn seeded_tokens(access: &str, refresh: &str, provider: &str) -> StoredTokens {
         StoredTokens {
@@ -2363,17 +2324,11 @@ mod tests {
         }
     }
 
-    // Token values are per-test locals, never shared constants. `TOKEN_STORE`
-    // is a process-global `LazyLock` and libtest runs these on parallel
-    // threads, so two tests seeding the SAME access-token value under different
-    // subjects would race: `find_by_access_token` does a `find_map` over a
-    // `HashMap` and could return either subject, failing whichever test
-    // asserted on the other one. Distinct values per test keep them
-    // independent without serializing the suite.
+    // Token values are per-test locals, never shared constants.
+    // `TOKEN_STORE` is a process-global `LazyLock` and libtest runs these on parallel threads, so two tests seeding the SAME access-token value under different subjects would race: `find_by_access_token` does a `find_map` over a `HashMap` and could return either subject, failing whichever test asserted on the other one.
+    // Distinct values per test keep them independent without serializing the suite.
     //
-    // Within a test, values share a length so the constant-time comparison is
-    // actually exercised rather than short-circuited on the length check, and
-    // differ in their prefix so a mismatch cannot pass by coincidence.
+    // Within a test, values share a length so the constant-time comparison is actually exercised rather than short-circuited on the length check, and differ in their prefix so a mismatch cannot pass by coincidence.
 
     #[tokio::test]
     async fn refresh_lookup_resolves_only_the_presented_sessions_own_tokens() {
@@ -2408,9 +2363,7 @@ mod tests {
             .await
             .expect("the attacker's own session still resolves — that is fine");
         assert_eq!(sub, "sub-t1-attacker-6629");
-        // The whole point: presenting your own access token never yields
-        // someone else's refresh token, even with both in one store under the
-        // same provider.
+        // The whole point: presenting your own access token never yields someone else's refresh token, even with both in one store under the same provider.
         assert_eq!(refresh, attacker_refresh);
         assert_ne!(
             refresh, victim_refresh,
@@ -2448,8 +2401,7 @@ mod tests {
             );
         }
 
-        // Sanity: the real value still resolves, so the loop above is rejecting
-        // wrong inputs rather than the lookup being broken outright.
+        // Sanity: the real value still resolves, so the loop above is rejecting wrong inputs rather than the lookup being broken outright.
         assert!(
             TOKEN_STORE
                 .find_by_access_token(real_access)
@@ -2462,9 +2414,7 @@ mod tests {
         TOKEN_STORE.remove("sub-t2-lonely-6629").await;
     }
 
-    /// An entry with no refresh token must not be resolvable — otherwise the
-    /// caller gets an entry it cannot use and the handler would have to unwrap
-    /// an `Option` that is only sometimes populated.
+    /// An entry with no refresh token must not be resolvable — otherwise the caller gets an entry it cannot use and the handler would have to unwrap an `Option` that is only sometimes populated.
     #[tokio::test]
     async fn refresh_lookup_skips_sessions_without_a_refresh_token() {
         let access = "t3-norefresh-access-dddddddddddddddddd";

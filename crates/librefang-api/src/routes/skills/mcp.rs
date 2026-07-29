@@ -20,20 +20,12 @@ fn effective_mcp_servers_snapshot(
 
 /// Strip values out of an MCP `env` list, leaving only variable names (#6630).
 ///
-/// `McpServerConfigEntry::env` is documented as "variables to pass through"
-/// (`["GITHUB_PERSONAL_ACCESS_TOKEN"]`) but the supported representation also
-/// accepts an inline `KEY=VALUE`, so an operator can put a live credential in
-/// there. Every response that serialized the raw list therefore handed those
-/// credentials to the caller — and `GET /api/mcp/servers` is in
-/// `PUBLIC_ROUTES_DASHBOARD_READS`, so in open mode (`require_auth_for_reads`
-/// unset, the default) that caller does not even need a token. The reported
-/// Viewer-role exposure is the authenticated case of the same hole.
+/// `McpServerConfigEntry::env` is documented as "variables to pass through" (`["GITHUB_PERSONAL_ACCESS_TOKEN"]`) but the supported representation also accepts an inline `KEY=VALUE`, so an operator can put a live credential in there.
+/// Every response that serialized the raw list therefore handed those credentials to the caller — and `GET /api/mcp/servers` is in `PUBLIC_ROUTES_DASHBOARD_READS`, so in open mode (`require_auth_for_reads` unset, the default) that caller does not even need a token.
+/// The reported Viewer-role exposure is the authenticated case of the same hole.
 ///
-/// Names are kept because they are the useful, non-secret half: the dashboard
-/// renders them, and an operator needs to know which variables a server
-/// expects. The shape stays `Vec<String>` rather than becoming a list of
-/// objects so the dashboard's read-edit-write round-trip keeps working — see
-/// `merge_env_preserving_inline_values` for the other half of that contract.
+/// Names are kept because they are the useful, non-secret half: the dashboard renders them, and an operator needs to know which variables a server expects.
+/// The shape stays `Vec<String>` rather than becoming a list of objects so the dashboard's read-edit-write round-trip keeps working — see `merge_env_preserving_inline_values` for the other half of that contract.
 fn mcp_env_names(env: &[String]) -> Vec<String> {
     env.iter()
         .map(|entry| match entry.split_once('=') {
@@ -43,28 +35,19 @@ fn mcp_env_names(env: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Merge a submitted `env` list with what is already persisted, keeping inline
-/// values the caller could not have seen (#6630).
+/// Merge a submitted `env` list with what is already persisted, keeping inline values the caller could not have seen (#6630).
 ///
-/// Redacting the read side alone would have been a data-loss bug worse than
-/// the disclosure. `McpServersPage` hydrates its edit form from
-/// `GET /api/mcp/servers` and submits every field back on save, so a caller
-/// who changed only, say, `timeout_secs` would round-trip the name-only `env`
-/// list and silently wipe the inline values out of the stored config — and the
-/// server would then fail to connect for a reason nothing in the UI explains.
+/// Redacting the read side alone would have been a data-loss bug worse than the disclosure.
+/// `McpServersPage` hydrates its edit form from `GET /api/mcp/servers` and submits every field back on save, so a caller who changed only, say, `timeout_secs` would round-trip the name-only `env` list and silently wipe the inline values out of the stored config — and the server would then fail to connect for a reason nothing in the UI explains.
 ///
-/// So a submitted bare `NAME` is treated as "unchanged" when the stored entry
-/// for that name carries an inline value: the stored form wins. A submitted
-/// `NAME=value` is always taken as an explicit new value, and a name absent
-/// from the submission is dropped as an explicit removal.
+/// So a submitted bare `NAME` is treated as "unchanged" when the stored entry for that name carries an inline value: the stored form wins.
+/// A submitted `NAME=value` is always taken as an explicit new value, and a name absent from the submission is dropped as an explicit removal.
 ///
-/// Known limitation: because a bare `NAME` means "keep", an inline value cannot
-/// be *cleared* by editing it down to the bare name — remove the entry and add
-/// it back instead. That is the deliberate trade for never silently destroying
-/// a credential the caller was not shown.
+/// Known limitation: because a bare `NAME` means "keep", an inline value cannot be *cleared* by editing it down to the bare name — remove the entry and add it back instead.
+/// That is the deliberate trade for never silently destroying a credential the caller was not shown.
 fn merge_env_preserving_inline_values(incoming: &[String], existing: &[String]) -> Vec<String> {
-    // name → the stored entry in full (`NAME=value`). Only entries that
-    // actually carry an inline value are candidates for restoration.
+    // name → the stored entry in full (`NAME=value`).
+    // Only entries that actually carry an inline value are candidates for restoration.
     let stored_inline: std::collections::HashMap<&str, &String> = existing
         .iter()
         .filter_map(|entry| entry.split_once('=').map(|(name, _)| (name.trim(), entry)))
@@ -237,9 +220,8 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
                 "template_id": s.template_id,
                 "transport": transport,
                 "timeout_secs": s.timeout_secs,
-                // Names only — an inline `KEY=VALUE` must never reach a caller
-                // (#6630). This route is in PUBLIC_ROUTES_DASHBOARD_READS, so
-                // in open mode that caller can be unauthenticated.
+                // Names only — an inline `KEY=VALUE` must never reach a caller (#6630).
+                // This route is in PUBLIC_ROUTES_DASHBOARD_READS, so in open mode that caller can be unauthenticated.
                 "env": mcp_env_names(&s.env),
                 "auth_state": auth_state,
                 // Issue #3050: surface taint config so the dashboard tree
@@ -577,9 +559,8 @@ pub async fn update_mcp_server(
             }
         };
 
-    // Reads return `env` as names only (#6630), so a client that hydrated its
-    // form from GET and submitted every field back would otherwise wipe the
-    // inline values it was never shown. Restore them for any bare name.
+    // Reads return `env` as names only (#6630), so a client that hydrated its form from GET and submitted every field back would otherwise wipe the inline values it was never shown.
+    // Restore them for any bare name.
     if let Some(existing) = effective_mcp_servers_snapshot(&state)
         .into_iter()
         .find(|s| s.name == name)
