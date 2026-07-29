@@ -181,6 +181,9 @@ pub(super) fn build_agent_manifest_toml(
     tools: Vec<String>,
     shell: Vec<String>,
     network: bool,
+    profile: Option<&str>,
+    model_provider: Option<&str>,
+    model_name: Option<&str>,
 ) -> Result<String, String> {
     let mut tools = tools;
     let has_shell = !shell.is_empty();
@@ -200,11 +203,23 @@ pub(super) fn build_agent_manifest_toml(
         capabilities["shell"] = serde_json::json!(shell);
     }
 
+    let mut model_json = serde_json::json!({
+        "system_prompt": system_prompt,
+    });
+    // Apply model_override or profile to the spawned agent's model config.
+    if let Some(p) = model_provider {
+        model_json["provider"] = serde_json::json!(p);
+    }
+    if let Some(m) = model_name {
+        model_json["model"] = serde_json::json!(m);
+    }
+    if profile.is_some() {
+        model_json["mode"] = serde_json::json!("flexible");
+    }
+
     let manifest_json = serde_json::json!({
         "name": name,
-        "model": {
-            "system_prompt": system_prompt,
-        },
+        "model": model_json,
         "capabilities": capabilities,
     });
 
@@ -329,8 +344,25 @@ pub(super) async fn tool_agent_spawn(
         })
         .unwrap_or_default();
 
-    let manifest_toml = build_agent_manifest_toml(name, system_prompt, tools, shell, network)
-        .map_err(ToolError::upstream_msg)?;
+    let profile = input["profile"].as_str();
+    let model_provider = input["model_override"]
+        .get("provider")
+        .and_then(|v| v.as_str());
+    let model_name = input["model_override"]
+        .get("model")
+        .and_then(|v| v.as_str());
+
+    let manifest_toml = build_agent_manifest_toml(
+        name,
+        system_prompt,
+        tools,
+        shell,
+        network,
+        profile,
+        model_provider,
+        model_name,
+    )
+    .map_err(ToolError::upstream_msg)?;
     // Build parent capabilities from the parent's allowed tools list.
     // This prevents a sub-agent from escalating privileges beyond what
     // its parent is permitted to use (capability inheritance enforcement).
