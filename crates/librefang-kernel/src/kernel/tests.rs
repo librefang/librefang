@@ -1890,7 +1890,7 @@ fn assert_reactive_schedule(manifest: &AgentManifest, why: &str) {
     }
 }
 
-/// Regression test for issue #6595 — `max_iterations` is the agent-loop iteration cap, not a request for autonomous ticking, and a hand that declares no `[metadata]` block declares no wake-up cycle at all (`HandFrequency::default()` is `OnDemand`).
+/// Regression test for issue #6595 — `max_iterations` is the agent-loop iteration cap and nothing else, so a role that declares only that stays `Reactive`.
 ///
 /// Both assertions matter.
 /// The schedule staying `Reactive` is the fix; the `AutonomousConfig` surviving with the declared cap is what distinguishes this from the tempting "just leave `manifest.autonomous` as `None`" shortcut, which would silently drop the loop cap the hand author asked for (`librefang_runtime::agent_loop` resolves `manifest.autonomous.max_iterations` first — there is no other manifest field carrying it).
@@ -1918,8 +1918,8 @@ max_iterations = 80
 
     assert_reactive_schedule(
         &manifest,
-        "a hand agent declaring only `max_iterations`, with no declared hand \
-         frequency, must not be given a wake-up cycle (#6595)",
+        "a hand agent declaring only `max_iterations` must not be given a wake-up \
+         cycle (#6595)",
     );
     assert_eq!(
         manifest
@@ -1933,8 +1933,8 @@ max_iterations = 80
     );
 }
 
-/// The reporter's exact shape in #6595: a hand that says in its own metadata that it runs on demand, and whose agent declares a loop-depth cap.
-/// It used to tick every 30 seconds regardless of that declaration.
+/// A hand whose catalog metadata says it runs on demand, whose role declares nothing but a loop-depth cap, and which ticked every 30 seconds anyway.
+/// #6595 records the reporter reaching for `[metadata] frequency` to switch that off and finding it controls nothing — which is still true, and is why the fix has to come from the role's own manifest instead.
 #[test]
 fn hand_activation_keeps_reactive_schedule_for_on_demand_frequency() {
     let manifest = materialize_hand_agent_manifest(
@@ -1962,8 +1962,8 @@ max_iterations = 80
 
     assert_reactive_schedule(
         &manifest,
-        "a hand declaring `frequency = \"on-demand\"` must never be given a \
-         wake-up cycle, whatever loop cap its roles declare (#6595)",
+        "a role declaring only a loop cap must not be given a wake-up cycle, on an \
+         `on-demand` hand or any other (#6595)",
     );
     assert_eq!(
         manifest.autonomous.as_ref().map(|a| a.max_iterations),
@@ -1972,14 +1972,17 @@ max_iterations = 80
     );
 }
 
-/// The other half of #6595: `[metadata] frequency` is the wake-up declaration hand authors actually write, and the shipped hands rely on it — the bundled `devops` hand's own prompt says "The Hand is `frequency = \"continuous\"`, so the next tick will re-read `devops_queue.json`".
-/// So a `continuous` hand must still get a background loop, at the cadence its `[autonomous]` guardrails name.
+/// The decisive regression for #6595, in the exact shape of the bundled `researcher` hand: `[metadata] frequency = "continuous"`, and a role whose only autonomy-adjacent field is `max_iterations = 80`.
+/// `researcher`'s own HAND.toml sizes its `max_history_messages` off that number as "80 iterations × ~4 messages each", so the author plainly meant per-turn loop depth — and the hand still materialized `ScheduleMode::Continuous { check_interval_secs: 30 }` and woke up twice a minute forever.
+///
+/// Both assertions matter, and the second is the one that rules out #6595's own "minimal" suggestion of leaving `manifest.autonomous` as `None`: `librefang_runtime::agent_loop` resolves the cap from `manifest.autonomous.max_iterations` and no other manifest field carries it, so dropping the block to stop the ticking would silently discard the cap the author asked for.
+///
+/// `frequency = "continuous"` is deliberately the *loudest* possible catalog value here.
+/// #6603 promoted that field into a scheduling control, which would have kept this exact fixture ticking; the field is catalog-display metadata and must not influence the schedule.
 #[test]
-fn hand_activation_derives_continuous_schedule_from_hand_frequency() {
-    // Default `AutonomousConfig::heartbeat_interval_secs` is 30, which is the interval every ticking registry hand ran at before the fix.
-    // Deriving the schedule from `frequency` rather than from `autonomous.is_some()` must not change it.
-    let default_heartbeat = materialize_hand_agent_manifest(
-        "librefang-kernel-hand-continuous-default",
+fn hand_activation_keeps_reactive_schedule_for_loop_cap_on_a_continuous_hand() {
+    let manifest = materialize_hand_agent_manifest(
+        "librefang-kernel-hand-continuous-loop-cap",
         "continuous-test",
         r#"
 id = "continuous-test"
@@ -1993,47 +1996,54 @@ frequency = "continuous"
 
 [agents.worker]
 name = "continuous-worker"
-description = "A continuous hand's loop-running role"
+description = "Declares a loop-depth cap on a hand the catalog calls continuous"
 provider = "default"
 model = "default"
 system_prompt = "You are a test worker."
-max_iterations = 60
+max_iterations = 80
 "#,
     );
-    assert_continuous_schedule(
-        &default_heartbeat,
-        30,
-        "a `continuous` hand must keep ticking at its heartbeat interval — \
-         deleting the wake-up derivation outright would silently disable every \
-         monitoring hand and the shipped auto-evolution pipeline",
+
+    assert_reactive_schedule(
+        &manifest,
+        "a role declaring only `max_iterations` must stay reactive whatever the \
+         hand's catalog `frequency` says — this is the bundled `researcher` hand, \
+         the real-world instance reported in #6595",
     );
     assert_eq!(
-        default_heartbeat
+        manifest
             .autonomous
             .as_ref()
-            .map(|a| a.max_iterations),
-        Some(60),
-        "the loop cap is independent of the derived schedule"
+            .map(|a| a.max_iterations)
+            .expect("the declared loop cap must still reach the manifest"),
+        80,
+        "`max_iterations` must survive as the agent-loop iteration cap; dropping \
+         the whole `[autonomous]` block to stop the ticking would take the cap \
+         with it"
     );
+}
 
-    // `continuous` means "as often as this agent's heartbeat", so a role that raises `heartbeat_interval_secs` ticks that much less often.
-    // A hardcoded interval could not produce this.
-    let explicit_heartbeat = materialize_hand_agent_manifest(
-        "librefang-kernel-hand-continuous-explicit",
-        "continuous-slow-test",
+/// Route 2 end-to-end: a role that writes its own `[autonomous]` block ticks, at that block's `heartbeat_interval_secs`.
+///
+/// The parse-level counterpart lives in `librefang_hands` (`explicit_autonomous_block_yields_continuous_schedule_in_flat_format`).
+/// This one covers the rest of the path: the resolved schedule has to survive `activate_hand_with_id`'s manifest rewriting — which sets provider, tools, tags, skills, MCP servers, plugins, exec policy and the system-prompt tail — and land in the agent registry, which is where `background_lifecycle` reads it to decide whether to start a loop.
+///
+/// The interval is non-default on purpose: 30 is both the `AutonomousConfig` default and the interval the old `autonomous.is_some()` derivation produced, so a 30 here would pass under the behaviour this replaces.
+#[test]
+fn hand_activation_honours_explicit_autonomous_block() {
+    let manifest = materialize_hand_agent_manifest(
+        "librefang-kernel-hand-explicit-autonomous",
+        "explicit-autonomous-test",
         r#"
-id = "continuous-slow-test"
+id = "explicit-autonomous-test"
 version = "0.1.0"
-name = "Slow Continuous Test Hand"
+name = "Explicit Autonomous Test Hand"
 description = "Regression fixture for issue #6595"
 category = "development"
 
-[metadata]
-frequency = "continuous"
-
 [agents.worker]
-name = "continuous-slow-worker"
-description = "A continuous role that asks for a slower heartbeat"
+name = "explicit-autonomous-worker"
+description = "Declares autonomous guardrails of its own"
 provider = "default"
 model = "default"
 system_prompt = "You are a test worker."
@@ -2043,81 +2053,92 @@ max_iterations = 12
 heartbeat_interval_secs = 900
 "#,
     );
+
     assert_continuous_schedule(
-        &explicit_heartbeat,
+        &manifest,
         900,
-        "an explicit `heartbeat_interval_secs` must set the derived cadence",
+        "a role's own `[autonomous]` block is the opt-in to a wake-up cycle, and \
+         its `heartbeat_interval_secs` sets the cadence",
     );
     assert_eq!(
-        explicit_heartbeat
-            .autonomous
-            .as_ref()
-            .map(|a| a.max_iterations),
+        manifest.autonomous.as_ref().map(|a| a.max_iterations),
         Some(12),
-        "an explicit `[autonomous]` block must reach the manifest whole"
+        "an explicit `[autonomous]` block must reach the manifest whole, not just \
+         as a schedule"
     );
 }
 
-/// The fixed cadences are honoured as declared rather than collapsing to the `continuous` heartbeat.
-/// Before the fix an `hourly` hand with a loop cap ticked every 30 seconds — 120x its own declaration.
+/// `[metadata] frequency` is inert (#6595): one role definition, every catalog value plus no `[metadata]` block at all, and the resolved schedule never moves off `Reactive`.
+///
+/// This is the guard against re-promoting `frequency` to a scheduling control, and it is where the `hourly` and `daily` fixtures that used to assert derived 3600s / 86400s cadences now live, inverted.
+/// The table is exhaustive over `HandFrequency` on purpose: adding a variant without deciding what it means for scheduling should show up here.
 #[test]
-fn hand_activation_derives_fixed_cadence_from_hourly_and_daily_frequency() {
-    let hourly = materialize_hand_agent_manifest(
-        "librefang-kernel-hand-hourly",
-        "hourly-test",
-        r#"
-id = "hourly-test"
+fn hand_activation_schedule_ignores_hand_frequency() {
+    for (label, hand_id, metadata_block) in [
+        (
+            "librefang-kernel-hand-freq-continuous",
+            "freq-continuous-test",
+            "[metadata]\nfrequency = \"continuous\"\n",
+        ),
+        (
+            "librefang-kernel-hand-freq-hourly",
+            "freq-hourly-test",
+            "[metadata]\nfrequency = \"hourly\"\n",
+        ),
+        (
+            "librefang-kernel-hand-freq-daily",
+            "freq-daily-test",
+            "[metadata]\nfrequency = \"daily\"\n",
+        ),
+        (
+            "librefang-kernel-hand-freq-periodic",
+            "freq-periodic-test",
+            "[metadata]\nfrequency = \"periodic\"\n",
+        ),
+        (
+            "librefang-kernel-hand-freq-on-demand",
+            "freq-on-demand-test",
+            "[metadata]\nfrequency = \"on-demand\"\n",
+        ),
+        ("librefang-kernel-hand-freq-absent", "freq-absent-test", ""),
+    ] {
+        let hand_toml = format!(
+            r#"
+id = "{hand_id}"
 version = "0.1.0"
-name = "Hourly Test Hand"
+name = "Frequency Inertness Test Hand"
 description = "Regression fixture for issue #6595"
 category = "development"
 
-[metadata]
-frequency = "hourly"
-
+{metadata_block}
 [agents.worker]
-name = "hourly-worker"
-description = "An hourly hand's loop-running role"
+name = "{hand_id}-worker"
+description = "Declares a loop-depth cap and nothing else"
 provider = "default"
 model = "default"
 system_prompt = "You are a test worker."
-max_iterations = 50
-"#,
-    );
-    assert_continuous_schedule(
-        &hourly,
-        3_600,
-        "`frequency = \"hourly\"` must tick hourly, not at the 30s \
-         `AutonomousConfig` heartbeat default",
-    );
-
-    let daily = materialize_hand_agent_manifest(
-        "librefang-kernel-hand-daily",
-        "daily-test",
-        r#"
-id = "daily-test"
-version = "0.1.0"
-name = "Daily Test Hand"
-description = "Regression fixture for issue #6595"
-category = "development"
-
-[metadata]
-frequency = "daily"
-
-[agents.worker]
-name = "daily-worker"
-description = "A daily hand's loop-running role"
-provider = "default"
-model = "default"
-system_prompt = "You are a test worker."
-max_iterations = 50
-"#,
-    );
-    assert_continuous_schedule(&daily, 86_400, "`frequency = \"daily\"` must tick daily");
+max_iterations = 80
+"#
+        );
+        let manifest = materialize_hand_agent_manifest(label, hand_id, &hand_toml);
+        assert_reactive_schedule(
+            &manifest,
+            &format!(
+                "`frequency` is catalog-display metadata and must not affect \
+                 scheduling, but this fixture ({hand_id}) resolved to a non-reactive \
+                 schedule"
+            ),
+        );
+        assert_eq!(
+            manifest.autonomous.as_ref().map(|a| a.max_iterations),
+            Some(80),
+            "the loop cap is unaffected by `frequency` too ({hand_id})"
+        );
+    }
 }
 
-/// The hand's `frequency` decides *whether* its roles tick; the role's own `[autonomous]` guardrails decide *which* ones do.
-/// A multi-role hand gives guardrails only to the roles that run loops — the bundled `devops` hand has five roles and caps two — so a role with no guardrails must stay reactive even on a `continuous` hand, or activating such a hand would start background loops for sub-agents that exist purely to be delegated to.
+/// A role that declares no guardrails at all keeps its `Reactive` default.
+/// This is the ordinary shape of a multi-role hand's delegated sub-agents — the bundled `devops` hand has five roles and only two carry `max_iterations` — and activation must not invent a schedule for them from anything at the hand level.
 #[test]
 fn hand_activation_keeps_reactive_schedule_without_autonomous_guardrails() {
     let manifest = materialize_hand_agent_manifest(
@@ -2154,13 +2175,16 @@ system_prompt = "You are a test worker."
     );
 }
 
-/// The most specific declaration wins: a role that writes its own `[schedule.continuous]` keeps it verbatim, even when the hand's `frequency` would have derived a different cadence.
-/// This is also the only way to reach the `Periodic` (cron) and `Proactive` schedule variants, which `frequency` cannot express.
+/// Route 1 of the resolution order: an explicit `schedule` is honoured verbatim and wins over an explicit `[autonomous]` block on the same role.
+/// This is also the only way to reach the `Periodic` (cron) and `Proactive` variants, which no other declaration can express.
+///
+/// The two declarations are deliberately in conflict here — 900s in the schedule against a 60s heartbeat — because the resolution has to have a defined winner: the schedule is the field that says *when the role wakes up*, and `[autonomous]` is the field that says *how it behaves once awake*.
+/// A role can therefore want a heartbeat timeout of one minute and a wake-up cycle of fifteen.
 ///
 /// `ScheduleMode` is externally tagged, so the sub-table (or an inline `schedule = { continuous = { check_interval_secs = 900 } }`) is the form that parses — a bare `schedule = "continuous"` string cannot resolve a struct variant.
 /// The section is in the flat format on purpose: that is the path the `LegacyHandAgentConfig` passthrough enables.
 #[test]
-fn hand_activation_honours_explicit_continuous_schedule() {
+fn hand_activation_honours_explicit_schedule_over_explicit_autonomous() {
     let manifest = materialize_hand_agent_manifest(
         "librefang-kernel-hand-explicit-schedule",
         "explicit-schedule-test",
@@ -2180,28 +2204,31 @@ description = "Explicitly opts into continuous scheduling"
 provider = "default"
 model = "default"
 system_prompt = "You are a test worker."
-max_iterations = 80
 
 [agents.worker.schedule.continuous]
 check_interval_secs = 900
+
+[agents.worker.autonomous]
+max_iterations = 80
+heartbeat_interval_secs = 60
 "#,
     );
 
     assert_continuous_schedule(
         &manifest,
         900,
-        "a role's own `schedule` must win over the cadence derived from the \
-         hand's `frequency` (which would have been 3600 here)",
+        "a role's own `schedule` must be honoured verbatim, beating both the 60s \
+         heartbeat of its `[autonomous]` block and the hand's catalog `frequency`",
     );
     assert_eq!(
         manifest
             .autonomous
             .as_ref()
             .map(|a| a.max_iterations)
-            .expect("the declared loop cap must still reach the manifest"),
+            .expect("the declared guardrails must still reach the manifest"),
         80,
-        "an explicit schedule and a loop cap are independent knobs — declaring \
-         one must not drop the other"
+        "an explicit schedule and the autonomy guardrails are independent knobs — \
+         declaring one must not drop the other"
     );
 }
 

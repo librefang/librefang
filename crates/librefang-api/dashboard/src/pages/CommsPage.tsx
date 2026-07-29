@@ -1,8 +1,13 @@
 import { formatTime, formatUptime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { type CommsEventItem } from "../api";
+import { type ChannelItem, type CommsEventItem } from "../api";
 import { useChannels, useCommsTopology, useCommsEvents } from "../lib/queries/channels";
+import {
+  channelLiveness,
+  livenessLabel,
+  type TFunc,
+} from "../lib/channelLiveness";
 import { useDashboardSnapshot } from "../lib/queries/overview";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton, ListSkeleton } from "../components/ui/Skeleton";
@@ -97,6 +102,55 @@ function TopologyNode({ node, onClick }: { node: { id: string; name?: string; st
       </div>
       <div className={`w-2 h-2 rounded-full ${node.state === "Running" ? "bg-success" : node.state === "Idle" ? "bg-warning" : "bg-text-dim/30"}`} />
     </div>
+  );
+}
+
+/**
+ * One channel tile on the Channels tab.
+ *
+ * The badge reports the sidecar supervisor's real per-instance liveness, from the same `useChannels()` payload and the same shared mapping the Channels page uses (#6606).
+ * It previously read `configured ? "Online" : "Setup"`, which painted config presence as a health verdict: a Telegram bot dead for a day still rendered a green ONLINE badge here even after the Channels page began reporting it correctly.
+ *
+ * Unconfigured catalog rows are listed on this tab (unlike the Channels page, which filters them out) and deliberately keep the "Setup" badge.
+ * `channelLiveness` is only meaningful for a configured row: an unconfigured one carries none of the supervisor fields and would read "Not started", which says broken rather than never-set-up.
+ *
+ * The icon ring follows the badge variant so the two cannot disagree; unconfigured rows keep the neutral brand ring they always had.
+ */
+function ChannelTile({ channel: c, t }: { channel: ChannelItem; t: TFunc }) {
+  const liveness = c.configured ? channelLiveness(c) : null;
+  const statusLabel = liveness
+    ? livenessLabel(liveness.state, t)
+    : t("common.setup");
+  const ring = !liveness
+    ? "bg-brand/10 border border-brand/20"
+    : liveness.variant === "success"
+      ? "bg-success/10 border border-success/20"
+      : liveness.variant === "error"
+        ? "bg-error/10 border border-error/20"
+        : "bg-warning/10 border border-warning/20";
+  return (
+    <Card hover padding="md">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-3">
+          <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${ring}`}>
+            {getChannelIcon(c.name)}
+          </div>
+          <div>
+            <h3 className="text-sm font-bold">{c.display_name || c.name}</h3>
+            <p className="text-[10px] text-text-dim">{c.category || c.name}</p>
+          </div>
+        </div>
+        <Badge
+          variant={liveness ? liveness.variant : "warning"}
+          title={liveness?.error ?? undefined}
+        >
+          {statusLabel}
+        </Badge>
+      </div>
+      {c.description && (
+        <p className="text-xs text-text-dim line-clamp-2">{c.description}</p>
+      )}
+    </Card>
   );
 }
 
@@ -287,25 +341,7 @@ export function CommsPage() {
           ) : (
             <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6">
               {filteredChannels.map((c) => (
-                <Card key={c.name} hover padding="md">
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-3">
-                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${c.configured ? "bg-success/10 border border-success/20" : "bg-brand/10 border border-brand/20"}`}>
-                        {getChannelIcon(c.name)}
-                      </div>
-                      <div>
-                        <h3 className="text-sm font-bold">{c.display_name || c.name}</h3>
-                        <p className="text-[10px] text-text-dim">{c.category || c.name}</p>
-                      </div>
-                    </div>
-                    <Badge variant={c.configured ? "success" : "warning"}>
-                      {c.configured ? t("common.online") : t("common.setup")}
-                    </Badge>
-                  </div>
-                  {c.description && (
-                    <p className="text-xs text-text-dim line-clamp-2">{c.description}</p>
-                  )}
-                </Card>
+                <ChannelTile key={c.name} channel={c} t={t} />
               ))}
             </div>
           )}

@@ -95,9 +95,18 @@ function makeChannel(overrides: Partial<ChannelItem> = {}): ChannelItem {
     name: "slack",
     display_name: "Slack",
     category: "sidecar",
+    channel_type: "slack",
     configured: true,
     has_token: true,
-    msgs_24h: 12,
+    // Healthy default: supervised, connected, some per-instance traffic.
+    supervised: true,
+    connected: true,
+    started_at: "2030-01-01T00:00:00Z",
+    last_message_at: "2030-01-01T00:05:00Z",
+    messages_received: 7,
+    messages_sent: 5,
+    last_error: null,
+    msgs_24h_channel_type: 12,
     ...overrides,
   };
 }
@@ -550,5 +559,169 @@ describe("ChannelsPage", () => {
     // @ts-expect-error — bot_token is intentionally NOT a field.
     sample.bot_token = "leaked";
     expect(sample).toBeDefined();
+  });
+
+  // ── Status indicator (#6606) ──────────────────────────────────
+  //
+  // The card badge is driven by the supervisor's per-instance liveness, not
+  // by traffic. These render-level cases pin the two readings that the
+  // pre-fix `msgs_24h > 0 ? "running" : "idle"` rule got backwards.
+
+  it("does NOT render a disconnected channel as healthy even with traffic recorded", () => {
+    // The exact shape the issue reports: a bot that died after handling
+    // messages. The old rule keyed off traffic and painted it green.
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({
+          name: "tg-personal",
+          display_name: "tg-personal",
+          connected: false,
+          started_at: "2030-01-01T00:00:00Z",
+          messages_received: 34,
+          messages_sent: 21,
+          msgs_24h_channel_type: 35,
+        }),
+      ]),
+    );
+    renderPage();
+    expect(screen.getByText("channels.liveness.stopped")).toBeInTheDocument();
+    expect(screen.queryByText("channels.liveness.active")).not.toBeInTheDocument();
+    expect(screen.queryByText("channels.liveness.connected")).not.toBeInTheDocument();
+  });
+
+  it("renders a healthy-but-quiet channel as connected rather than idle-grey", () => {
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({
+          name: "tg-alerts",
+          display_name: "tg-alerts",
+          connected: true,
+          messages_received: 0,
+          messages_sent: 0,
+          // A busy sibling of the same type inflates the per-type figure;
+          // it must not influence this card's status.
+          msgs_24h_channel_type: 35,
+        }),
+      ]),
+    );
+    renderPage();
+    expect(screen.getByText("channels.liveness.connected")).toBeInTheDocument();
+  });
+
+  it("gives two same-type channels their own status from their own liveness", () => {
+    // Six Telegram sidecars shared one `msgs_24h` value before the fix, so
+    // every card turned green as soon as any one of them saw traffic.
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({
+          name: "tg-live",
+          display_name: "tg-live",
+          channel_type: "telegram",
+          connected: true,
+          messages_received: 30,
+          messages_sent: 25,
+          msgs_24h_channel_type: 35,
+        }),
+        makeChannel({
+          name: "tg-dead",
+          display_name: "tg-dead",
+          channel_type: "telegram",
+          connected: false,
+          started_at: "2030-01-01T00:00:00Z",
+          messages_received: 5,
+          messages_sent: 3,
+          last_error: "sidecar exited with status 1",
+          msgs_24h_channel_type: 35,
+        }),
+      ]),
+    );
+    renderPage();
+    expect(screen.getByText("channels.liveness.active")).toBeInTheDocument();
+    expect(screen.getByText("channels.liveness.failed")).toBeInTheDocument();
+  });
+
+  it("surfaces the sticky supervisor error in the details drawer", () => {
+    const err = "Failed to spawn sidecar (last cause: No such file or directory)";
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({
+          name: "tg-broken",
+          display_name: "tg-broken",
+          connected: true,
+          last_error: err,
+        }),
+      ]),
+    );
+    renderPage();
+    // Connected + error reads as degraded, never as healthy.
+    expect(screen.getByText("channels.liveness.degraded")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("tg-broken"));
+    expect(screen.getByText(err)).toBeInTheDocument();
+    expect(screen.getByText("channels.last_error_sticky_hint")).toBeInTheDocument();
+  });
+
+  it("labels the 24h figure as covering every channel of the type", () => {
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({
+          name: "tg-personal",
+          display_name: "tg-personal",
+          channel_type: "telegram",
+          msgs_24h_channel_type: 35,
+        }),
+      ]),
+    );
+    renderPage();
+    fireEvent.click(screen.getByText("tg-personal"));
+    // The drawer row carries the scope in its own label; the card no longer
+    // shows a number that could be read as this bot's traffic.
+    expect(screen.getByText("channels.msgs_24h_by_type")).toBeInTheDocument();
+    expect(screen.getByText("35")).toBeInTheDocument();
+  });
+
+  it("tells the operator when a configured channel has no live adapter", () => {
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({
+          name: "tg-unstarted",
+          display_name: "tg-unstarted",
+          supervised: false,
+          connected: false,
+          started_at: null,
+          last_message_at: null,
+          messages_received: 0,
+          messages_sent: 0,
+        }),
+      ]),
+    );
+    renderPage();
+    expect(screen.getByText("channels.liveness.not_supervised")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("tg-unstarted"));
+    expect(screen.getByText("channels.not_supervised_hint")).toBeInTheDocument();
+  });
+
+  it("shows an error, not the clean-install empty state, when the fetch fails", () => {
+    // A dead daemon yields `data: []` plus `isError`. Falling through to the
+    // "no channels yet" CTA would tell an operator their channels are gone
+    // when the truth is the page could not ask.
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([], { isError: true }),
+    );
+    renderPage();
+    expect(screen.getByText("channels.load_error")).toBeInTheDocument();
+    expect(screen.queryByText("channels.empty_title")).not.toBeInTheDocument();
+  });
+
+  it("keeps rendering cached channels when a background refetch fails", () => {
+    // The query polls every 30s and retains its last good `data` on failure,
+    // so one transient blip must not blank a working list.
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([makeChannel({ name: "tg-ops", display_name: "tg-ops" })], {
+        isError: true,
+      }),
+    );
+    renderPage();
+    expect(screen.getByText("tg-ops")).toBeInTheDocument();
+    expect(screen.queryByText("channels.load_error")).not.toBeInTheDocument();
   });
 });

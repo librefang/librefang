@@ -1081,7 +1081,13 @@ label-header-enabled = ENABLED
 label-header-url = URL
 
 # Channel command specific keys
-channel-header-msgs-24h = 24H MSGS
+# Scoped by channel TYPE, not by sidecar instance — usage_events.channel stores the type, so every bot of the same type shares the count (#6606).
+channel-header-msgs-24h-by-type = 24H MSGS (BY TYPE)
+channel-header-connected = CONNECTED
+channel-header-in-out = IN/OUT
+channel-liveness-not-started = NOT STARTED
+channel-last-errors-heading = Last reported error per channel (sticky — recorded on failure and not cleared on recovery):
+channel-last-error-entry = { $name }: { $error }
 channel-error-save-failed-no-body = save failed (no error body)
 
 # Models command specific keys

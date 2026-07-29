@@ -1081,7 +1081,13 @@ label-header-enabled = 활성화됨
 label-header-url = URL
 
 # Channel command specific keys
-channel-header-msgs-24h = 24시간 메시지
+# Scoped by channel TYPE, not by sidecar instance — usage_events.channel stores the type, so every bot of the same type shares the count (#6606).
+channel-header-msgs-24h-by-type = 24시간 메시지 (유형별)
+channel-header-connected = 연결됨
+channel-header-in-out = 수신/발신
+channel-liveness-not-started = 시작되지 않음
+channel-last-errors-heading = 채널별 마지막 오류 (고착됨 — 실패 시 기록되며 복구되어도 지워지지 않습니다):
+channel-last-error-entry = { $name }: { $error }
 channel-error-save-failed-no-body = 저장 실패 (오류 본문 없음)
 
 # Models command specific keys
