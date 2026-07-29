@@ -222,6 +222,8 @@ docker compose up -d
 单副本有状态部署的 Kustomize manifest，满足 `restricted` Pod Security Standard：
 
 ```bash
+git clone https://github.com/librefang/librefang.git
+cd librefang
 kubectl create namespace librefang
 kubectl -n librefang create secret generic librefang-auth \
   --from-literal=api-key="$(openssl rand -hex 32)" \

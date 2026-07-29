@@ -159,19 +159,26 @@ jobs:
           # Exercises the composition path a real operator uses — an overlay on
           # top of base that retargets the image — rather than mutating the
           # committed base in place.
-          mkdir -p /tmp/overlay
-          cat > /tmp/overlay/kustomization.yaml <<EOF
+          #
+          # The overlay must live INSIDE the repo tree and reference the base by
+          # a relative path. Kustomize refuses an absolute path as a resource
+          # root ("new root ... cannot be absolute") and `kubectl apply -k`
+          # exposes no `--load-restrictor` to relax it, so an overlay in /tmp
+          # pointing at $GITHUB_WORKSPACE cannot load. Generated rather than
+          # committed: it is CI-only and pins a local image tag.
+          mkdir -p deploy/kubernetes/ci-overlay
+          cat > deploy/kubernetes/ci-overlay/kustomization.yaml <<EOF
           apiVersion: kustomize.config.k8s.io/v1beta1
           kind: Kustomization
           namespace: ${NS}
           resources:
-            - ${GITHUB_WORKSPACE}/deploy/kubernetes/base
+            - ../base
           images:
             - name: ghcr.io/librefang/librefang
               newName: librefang
               newTag: ci
           EOF
-          kubectl apply -k /tmp/overlay
+          kubectl apply -k deploy/kubernetes/ci-overlay
 
       - name: Wait for rollout
         run: |

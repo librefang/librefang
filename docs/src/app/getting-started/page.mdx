@@ -223,6 +223,8 @@ docker compose up -d
 Kustomize manifests for a single stateful replica, satisfying the `restricted` Pod Security Standard:
 
 ```bash
+git clone https://github.com/librefang/librefang.git
+cd librefang
 kubectl create namespace librefang
 kubectl -n librefang create secret generic librefang-auth \
   --from-literal=api-key="$(openssl rand -hex 32)" \
