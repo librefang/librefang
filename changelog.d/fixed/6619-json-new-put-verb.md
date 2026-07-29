@@ -1,0 +1,4 @@
+Request `/json/new` with PUT when attaching to an `http://` `cdp_endpoint`, so HTTP target discovery works against current Chrome.
+Chrome has required that verb since 111 and answers a GET with `405 Method Not Allowed` and the body "Using unsafe HTTP verb GET to invoke /json/new. This action supports only PUT verb." — reproduced against Chrome for Testing 148.0.7778.96, where `attach()` walked straight into it and every browser session died before its first command.
+The failure surfaced as `Invalid JSON from /json/new`, because the 405 body is plain text and the response status was never checked; a non-2xx that is not a 405 is now reported as the status it was.
+A 405 on PUT falls back to GET rather than failing, since older Chromium builds and third-party CDP proxies may route only the older verb, and there is no version handshake to branch on (#6619) (@nevgenov)
