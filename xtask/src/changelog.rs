@@ -751,9 +751,12 @@ fn write_changelog(
                 return Err(format!(
                     "refusing to write CHANGELOG.md: regenerating the existing [{}] section would drop {} attributed bullet(s) it holds and the new section does not, and [Unreleased] no longer holds them either. \
                      Nothing has been written. This is what a second release run for one version looks like once the first drained [Unreleased] into [{}]. \
-                     Two ways forward: move that prose back under `## [Unreleased]` and re-run, which is what resuming a partly-failed release wants; or delete the whole `## [{}]` section and re-run to cut it from scratch. Would be dropped: {}",
+                     `cargo xtask release` folds and DELETES changelog.d fragments before this step, so for prose that arrived as a fragment this section and git history are now the only copies. \
+                     To keep it: move the prose from `## [{}]` back under `## [Unreleased]`, then re-run. \
+                     Delete the `## [{}]` section and re-run only if you mean to discard that prose — correct when [Unreleased] already holds the current text and this section is a stale artefact, destructive otherwise. Would be dropped: {}",
                     version,
                     dropped.len(),
+                    version,
                     version,
                     version,
                     dropped
@@ -1287,6 +1290,12 @@ pub fn run(args: ChangelogArgs) -> Result<(), Box<dyn std::error::Error>> {
     if !drained.curated.is_empty() {
         // Count PRs actually in range, not references found: curated prose cites
         // plenty of older PRs that were never going to get a generated entry here.
+        // Strictly the PRs in range that `gh` returned metadata for: `prs` is
+        // `extract_pr_numbers` over `git_range` filtered through `fetch_pr_info`,
+        // which drops a number silently when the lookup fails. A dropped in-range
+        // PR therefore counts as already-shipped and over-reports below, which is
+        // the benign direction — a spurious "consider pruning" line, never a
+        // wrongly written file.
         let in_range: BTreeSet<u64> = prs.iter().map(|p| p.number).collect();
         let suppressed_in_range = suppressed.intersection(&in_range).count();
         // Broken out by bullet, because the totals mean different things. Nothing
