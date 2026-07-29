@@ -673,6 +673,7 @@ fn test_spawn_agent_applies_local_default_model_override() {
                     context_window: None,
                     max_output_tokens: None,
                     extra_params: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -1150,6 +1151,7 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
                     context_window: None,
                     max_output_tokens: None,
                     extra_params: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -11751,6 +11753,7 @@ async fn reload_config_with_invalid_toml_preserves_live_config() {
             message_timeout_secs: 300,
             extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
+            ..Default::default()
         },
         ..KernelConfig::default()
     };
@@ -12761,6 +12764,7 @@ fn sync_default_model_agents_migrates_legacy_and_keeps_default_sentinel() {
                     context_window: None,
                     max_output_tokens: None,
                     extra_params: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -12788,6 +12792,7 @@ fn sync_default_model_agents_migrates_legacy_and_keeps_default_sentinel() {
                     context_window: None,
                     max_output_tokens: None,
                     extra_params: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -13095,6 +13100,7 @@ fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
                     context_window: None,
                     max_output_tokens: None,
                     extra_params: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -13123,6 +13129,7 @@ fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
                     context_window: None,
                     max_output_tokens: None,
                     extra_params: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
                 ..Default::default()
             },

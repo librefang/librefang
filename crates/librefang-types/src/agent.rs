@@ -603,6 +603,19 @@ pub enum SessionMode {
     New,
 }
 
+/// Model selection mode for an agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelMode {
+    /// Always use the hardcoded model in [`ModelConfig::model`].
+    /// Default — 100% backward compatible.
+    #[default]
+    Fixed,
+    /// Let the ModelRouter pick the best model for each task.
+    /// Only honoured when `[model_router] enabled = true` in config.toml.
+    Flexible,
+}
+
 /// Web search augmentation mode.
 ///
 /// Controls whether the agent loop automatically searches the web using the
@@ -875,6 +888,14 @@ impl ToolProfile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
+    /// Model selection mode. "fixed" (default) = always use the provider/model
+    /// listed below. "flexible" = let the ModelRouter pick based on task tags
+    /// and complexity. Only honoured when `[model_router] enabled = true`.
+    #[serde(default)]
+    pub mode: ModelMode,
+    /// Per-agent router overrides when mode is "flexible". Ignored for "fixed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_override: Option<crate::model_profile::AgentRouterOverride>,
     /// LLM provider name.
     pub provider: String,
     /// Model identifier.
@@ -928,6 +949,8 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
+            mode: ModelMode::default(),
+            router_override: None,
             provider: "default".to_string(),
             model: "default".to_string(),
             max_tokens: 4096,
@@ -3135,6 +3158,7 @@ model = "llama-3.3-70b-versatile"
             context_window: None,
             max_output_tokens: None,
             extra_params: extra,
+            ..Default::default()
         };
 
         // Serialize to TOML
