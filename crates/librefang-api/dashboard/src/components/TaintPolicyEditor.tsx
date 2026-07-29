@@ -316,7 +316,7 @@ function ToolPolicyRow({
       .map((s) => s.trim())
       .filter((s) => s.length > 0 && !knownRuleSetNames.has(s));
   }, [ruleSetsText, knownRuleSetNames]);
-  const paths = policy.paths ?? {};
+  const paths = useMemo(() => policy.paths ?? {}, [policy.paths]);
 
   const addPath = useCallback(() => {
     const newKey = uniquePathKey(paths, "$.field");

@@ -978,7 +978,7 @@ export function App() {
       cancelled = true;
       setOnUnauthorized(null);
     };
-  }, []);
+  }, [setTerminalEnabled]);
 
   useEffect(() => {
     const root = window.document.documentElement;

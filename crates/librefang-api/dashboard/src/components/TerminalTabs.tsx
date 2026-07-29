@@ -45,7 +45,7 @@ interface TerminalTabsProps {
 }
 
 // Match backend validate_window_name: any Unicode except control chars and '|', 1–64 chars.
-const WINDOW_NAME_RE = /^[^|\x00-\x1f\x7f]{1,64}$/u;
+const WINDOW_NAME_RE = /^[^|\p{Cc}]{1,64}$/u;
 
 const ORDER_KEY = "terminal.tabOrder";
 
