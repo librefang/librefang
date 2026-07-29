@@ -424,11 +424,28 @@ impl GoalRunner {
         let stop = Arc::new(AtomicBool::new(false));
         let generation = self.next_gen.fetch_add(1, Ordering::SeqCst);
 
-        let runs = self.runs.clone();
         let shutdown_rx = self.shutdown_rx.clone();
         let loop_state = state.clone();
         let loop_stop = stop.clone();
         let loop_store = self.store.clone();
+
+        // Insert the RunHandle BEFORE spawning so the spawned task's
+        // self-cleanup `remove_if` always finds its entry — even if the
+        // loop exits immediately (max_iterations=0, pre-signalled shutdown,
+        // goal not found, …). The generation guard ensures a concurrent
+        // `start()` replacement never has its entry removed by the old task.
+        let dashmap_key = goal_id;
+        let handle_generation = generation;
+        let runs_for_cleanup = Arc::clone(&self.runs);
+        self.runs.insert(
+            dashmap_key,
+            RunHandle {
+                task: None, // filled after spawn
+                state: state.clone(),
+                stop: stop.clone(),
+                generation,
+            },
+        );
 
         let task = tokio::spawn(async move {
             run_loop(
@@ -447,25 +464,18 @@ impl GoalRunner {
                 loop_store,
             )
             .await;
-            // Self-cleanup: drop the registry entry once the loop ends so a
-            // stale handle does not linger (mirrors the background executor).
-            // Guard on generation: if a concurrent `start()` already replaced
-            // this run, the entry now belongs to the NEW run — removing it
-            // unconditionally would orphan a live loop (unstoppable + invisible
-            // until it self-terminates at the iteration cap). `remove_if` only
-            // drops the entry when it is still ours.
-            runs.remove_if(&goal_id, |_, h| h.generation == generation);
+            // Self-cleanup: drop the registry entry once the loop ends.
+            // Guarded by generation so a replacement run is never removed.
+            runs_for_cleanup.remove_if(&goal_id, |_, h| h.generation == handle_generation);
         });
 
-        self.runs.insert(
-            goal_id,
-            RunHandle {
-                task: Some(task),
-                state,
-                stop,
-                generation,
-            },
-        );
+        // Backfill the task handle into the already-inserted RunHandle so
+        // `stop()` can abort the spawned task.
+        if let Some(mut entry) = self.runs.get_mut(&goal_id) {
+            if entry.generation == generation {
+                entry.task = Some(task);
+            }
+        }
         info!(goal_id = %goal_id, agent_id = %agent_id, max_iterations, "Goal run started");
     }
 
