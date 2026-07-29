@@ -152,6 +152,10 @@ fn redacted_config_json(
         .collect();
 
     // -- external_auth: redact secrets --
+    // Every field of `OidcProvider` is enumerated here.
+    // None of them holds a secret value: `client_secret_env` is the *name* of the environment variable the secret is read from (the secret itself is never stored in config), and `client_id` is the public half of the OAuth client registration — both were already emitted before #6605.
+    // `auth_url` / `token_url` / `userinfo_url` / `jwks_uri` / `audience` / `require_email_verified` were missing, which left an operator unable to tell from the API whether a non-OIDC provider's explicit endpoints were picked up or whether this provider overrides the global email-verification gate (#6605).
+    // These stay read-only: `external_auth.` is deliberately absent from `WRITABLE_SECTION_PREFIXES`, because flipping an endpoint or the verification gate post-auth is the #3703 impersonation vector.
     let external_auth_providers: Vec<serde_json::Value> = config
         .external_auth
         .providers
@@ -161,11 +165,18 @@ fn redacted_config_json(
                 "id": p.id,
                 "display_name": p.display_name,
                 "issuer_url": p.issuer_url,
+                "auth_url": p.auth_url,
+                "token_url": p.token_url,
+                "userinfo_url": p.userinfo_url,
+                "jwks_uri": p.jwks_uri,
                 "client_id": p.client_id,
                 "client_secret_env": p.client_secret_env,
                 "redirect_url": p.redirect_url,
                 "scopes": p.scopes,
                 "allowed_domains": p.allowed_domains,
+                "audience": p.audience,
+                // `None` renders as `null` — "inherit the global setting", which is a different state from an explicit `false` and must stay distinguishable.
+                "require_email_verified": p.require_email_verified,
             })
         })
         .collect();
@@ -641,6 +652,14 @@ fn redacted_config_json(
         ea.insert(
             "providers".into(),
             serde_json::json!(external_auth_providers),
+        );
+        // Read-only by design, and absent from this payload entirely until #6605.
+        // `external_auth.require_email_verified` is the #3703 mitigation — it rejects logins whose ID token does not carry `email_verified = true`, which is what stops an attacker registering an unverified address in an `allowed_domains` domain and inheriting that domain's authorization.
+        // It stays out of `WRITABLE_EXACT_PATHS` / `WRITABLE_SECTION_PREFIXES` precisely so an Owner-role caller with a leaked API key cannot turn it off, but the write-side exclusion is not a reason to hide the value: an operator otherwise has no way short of reading `config.toml` on the host to confirm the protection is on.
+        // The read/write parity guard cannot catch this class — it enforces `writable ⊆ readable`, and a field that is intentionally non-writable sits outside that invariant by construction.
+        ea.insert(
+            "require_email_verified".into(),
+            serde_json::json!(config.external_auth.require_email_verified),
         );
     }
 
@@ -1579,6 +1598,247 @@ mod config_read_write_parity_tests {
             assert!(
                 lookup(&payload, path).is_some(),
                 "`{path}` was reported missing from GET /api/config in #6596"
+            );
+        }
+    }
+
+    /// #6605: fields that are intentionally NOT writable but must still be readable.
+    ///
+    /// `every_writable_config_leaf_is_readable` enforces `writable ⊆ readable`, so it is blind to this direction by construction — a field deliberately excluded from the write allowlist sits outside that invariant.
+    /// `external_auth.require_email_verified` is the #3703 mitigation, and an operator who cannot read it back has no way to confirm the protection is active short of reading `config.toml` on the host.
+    /// The `OidcProvider` endpoint fields have the same problem: with them hidden, a non-OIDC provider's explicit endpoint overrides were invisible.
+    #[test]
+    fn non_writable_but_operator_visible_fields_are_readable() {
+        let mut config = config_with_optional_sections_populated();
+        // Deliberately the non-default value: `require_email_verified` defaults to `true`, so asserting `true` would also pass against a hardcoded literal in the response builder.
+        config.external_auth.require_email_verified = false;
+        config.external_auth.providers.push(oidc_provider_fixture());
+        let payload = super::redacted_config_json(&config, &BudgetConfig::default());
+
+        assert_eq!(
+            lookup(&payload, "external_auth.require_email_verified").and_then(|v| v.as_bool()),
+            Some(false),
+            "the #3703 email-verification gate must be readable, and read from config, even though \
+             it is deliberately non-writable (#6605)"
+        );
+
+        let provider = lookup(&payload, "external_auth.providers")
+            .and_then(|v| v.as_array())
+            .and_then(|providers| providers.first())
+            .and_then(|p| p.as_object())
+            .expect("the configured provider is rendered as an object");
+        for key in [
+            "id",
+            "display_name",
+            "issuer_url",
+            "auth_url",
+            "token_url",
+            "userinfo_url",
+            "jwks_uri",
+            "client_id",
+            "client_secret_env",
+            "redirect_url",
+            "scopes",
+            "allowed_domains",
+            "audience",
+            "require_email_verified",
+        ] {
+            // Presence is not enough: a response builder that emits the key but drops the value renders `"jwks_uri": null`, which a `contains_key` check accepts.
+            // The fixture populates all 14 fields, so a null here is always a dropped field.
+            // Exact values are pinned by the `get_config_exposes_non_writable_external_auth_fields` integration test rather than duplicated here.
+            assert!(
+                provider.get(key).is_some_and(|v| !v.is_null()),
+                "`external_auth.providers[].{key}` is missing or null in GET /api/config — every \
+                 `OidcProvider` field is non-secret, is set by the fixture, and must be visible \
+                 (#6605); got {provider:#?}"
+            );
+        }
+    }
+
+    /// One fully-populated provider.
+    /// `OidcProvider` derives no `Default`, so every field is spelled out; distinct values make it obvious in a failure which field a payload dropped.
+    fn oidc_provider_fixture() -> librefang_types::config::OidcProvider {
+        librefang_types::config::OidcProvider {
+            id: "corp".into(),
+            display_name: "Corporate SSO".into(),
+            issuer_url: "https://issuer.example.invalid".into(),
+            auth_url: "https://issuer.example.invalid/authorize".into(),
+            token_url: "https://issuer.example.invalid/token".into(),
+            userinfo_url: "https://issuer.example.invalid/userinfo".into(),
+            jwks_uri: "https://issuer.example.invalid/jwks".into(),
+            client_id: "corp-client".into(),
+            client_secret_env: "LIBREFANG_PARITY_GUARD_FIXTURE_SECRET".into(),
+            redirect_url: "http://127.0.0.1:4545/api/auth/callback".into(),
+            scopes: vec!["openid".into()],
+            allowed_domains: vec!["example.invalid".into()],
+            audience: "corp-audience".into(),
+            require_email_verified: Some(false),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Writable-allowlist backing-field guard (#6605)
+// ---------------------------------------------------------------------------
+
+/// Guards the mirror of the parity invariant above: every entry in the `POST /api/config/set` allowlist must name a field that actually exists on `KernelConfig`.
+///
+/// `config_set` validates the caller's dotted path against `is_writable_config_path` and then edits `config.toml` through `toml_edit` keyed by that path.
+/// Nothing between those two steps requires the path to correspond to a real field, and the post-edit `toml::from_str::<KernelConfig>` check cannot reject one either because `KernelConfig` does not set `deny_unknown_fields`.
+/// So a write against a path with no backing field is accepted, lands a table on disk, and is discarded by the next load: the caller gets a success status for a change that is never applied and never reads back.
+/// `ui.theme`, `ui.locale`, `ui.timezone`, and `ui.language` sat in the allowlist in exactly that state from #4113 until #6605 removed them.
+///
+/// `every_writable_config_leaf_is_readable` cannot catch this class: it derives its candidate paths *from* a serialized config, so a path naming a field that does not exist is structurally invisible to it.
+///
+/// The oracle here is the schemars-derived JSON Schema rather than a serialized `KernelConfig` value.
+/// A value walk cannot see a field whose `#[serde(skip_serializing_if = …)]` predicate holds for its default value, and `librefang-types/src/config/types.rs` carries 63 of those attributes — several on writable paths (`exec_policy.allowed_env_vars`, `budget.providers`, `tool_invoke.allowlist`, …) — so a value-based oracle would report real fields as dangling.
+/// The schema declares every field regardless of that attribute.
+#[cfg(test)]
+mod writable_allowlist_backing_field_tests {
+    /// Maximum `$ref` / combinator hops before the resolver gives up.
+    /// Descending through `properties` consumes a path segment, so only a `$ref` chain can recurse without making progress; schemars does not emit one that cycles, and the cap keeps a future schema shape from turning this test into a stack overflow.
+    const MAX_SCHEMA_DEPTH: usize = 32;
+
+    /// Does `segments` resolve to a field declared by the draft-07 schema rooted at `node`?
+    ///
+    /// Follows `$ref` into `definitions`.
+    /// Treats `allOf` / `anyOf` / `oneOf` as "any branch that resolves counts": schemars renders a struct-typed field as `allOf: [{$ref}]`, an `Option<T>` as `anyOf: [{$ref}, {"type": "null"}]`, and a `OneOrMany<T>` as a `T` / `[T]` branch pair, so the branch that matches is the one that answers the question.
+    /// `additionalProperties` consumes one segment: a map-typed section (`provider_urls`, `tool_timeouts`, …) has dynamic keys by design, and an allowlist entry addressing one is correct rather than dangling.
+    /// Everything else — including a dotted segment against an array or a scalar — is not a declared field.
+    fn schema_declares_path(
+        definitions: &serde_json::Map<String, serde_json::Value>,
+        node: &serde_json::Value,
+        segments: &[&str],
+        depth: usize,
+    ) -> bool {
+        if segments.is_empty() {
+            return true;
+        }
+        if depth >= MAX_SCHEMA_DEPTH {
+            return false;
+        }
+        let Some(obj) = node.as_object() else {
+            return false;
+        };
+        if let Some(reference) = obj.get("$ref").and_then(|v| v.as_str()) {
+            let name = reference.rsplit('/').next().unwrap_or_default();
+            return definitions.get(name).is_some_and(|target| {
+                schema_declares_path(definitions, target, segments, depth + 1)
+            });
+        }
+        for combinator in ["allOf", "anyOf", "oneOf"] {
+            let branch_resolves =
+                obj.get(combinator)
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|branches| {
+                        branches.iter().any(|branch| {
+                            schema_declares_path(definitions, branch, segments, depth + 1)
+                        })
+                    });
+            if branch_resolves {
+                return true;
+            }
+        }
+        if let Some(child) = obj
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .and_then(|properties| properties.get(segments[0]))
+        {
+            return schema_declares_path(definitions, child, &segments[1..], depth + 1);
+        }
+        // `additionalProperties: true` is a bool rather than a subschema — it means "anything goes", which is not a field declaration.
+        if let Some(values) = obj.get("additionalProperties").filter(|v| v.is_object()) {
+            return schema_declares_path(definitions, values, &segments[1..], depth + 1);
+        }
+        false
+    }
+
+    fn declares(
+        definitions: &serde_json::Map<String, serde_json::Value>,
+        schema: &serde_json::Value,
+        path: &str,
+    ) -> bool {
+        let segments: Vec<&str> = path.split('.').collect();
+        schema_declares_path(definitions, schema, &segments, 0)
+    }
+
+    #[test]
+    fn every_writable_allowlist_entry_has_a_backing_config_field() {
+        let schema =
+            serde_json::to_value(schemars::schema_for!(librefang_types::config::KernelConfig))
+                .expect("KernelConfig derives JsonSchema");
+        let definitions = schema
+            .get("definitions")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+
+        // A schemars upgrade to draft 2020-12 renames this block to `$defs`, which would leave every `$ref` dangling and report all ~90 entries as missing at once.
+        // Fail on the shape change directly so the cause is legible instead of inferred from the fallout.
+        assert!(
+            !definitions.is_empty(),
+            "the KernelConfig schema has no `definitions` block, so the resolver cannot follow a \
+             single `$ref` and its verdicts are meaningless (draft 2020-12 names it `$defs`)"
+        );
+
+        // Sanity floor, same purpose as the one in `every_writable_config_leaf_is_readable`: an assertion over an accidentally-empty enumeration passes vacuously.
+        let entry_count = super::super::WRITABLE_EXACT_PATHS.len()
+            + super::super::WRITABLE_SECTION_PREFIXES.len();
+        assert!(
+            entry_count > 50,
+            "the allowlist enumerated only {entry_count} entries — the lists shrank drastically or \
+             moved, so this guard is no longer checking the real write surface (expected 80+)"
+        );
+
+        // Negative controls.
+        // The failure mode of a resolver is over-permissiveness: one stray fallback, or a schema shape it walks past instead of rejecting, turns the guard into a no-op that still passes.
+        // `ui.theme` is the exact path #6605 removed, which also ties this guard to the defect it exists for.
+        for absent in [
+            "ui.theme",
+            "ui",
+            "nonexistent_section.nonexistent_field",
+            "log_level.nested_under_a_scalar",
+        ] {
+            assert!(
+                !declares(&definitions, &schema, absent),
+                "the resolver claims `{absent}` is a declared `KernelConfig` field — it is not, so \
+                 it cannot discriminate and the guard below is worthless"
+            );
+        }
+
+        let mut dangling: Vec<String> = Vec::new();
+        for &path in super::super::WRITABLE_EXACT_PATHS {
+            if !declares(&definitions, &schema, path) {
+                dangling.push(path.to_string());
+            }
+        }
+        // A section prefix is checked at its base.
+        // The prefix admits arbitrary leaves beneath it, so "this section exists" is the strongest claim available without enumerating what a caller might post — the leaf itself is only reachable at request time.
+        for &prefix in super::super::WRITABLE_SECTION_PREFIXES {
+            if !declares(&definitions, &schema, prefix.trim_end_matches('.')) {
+                dangling.push(prefix.to_string());
+            }
+        }
+        dangling.sort();
+
+        assert!(
+            dangling.is_empty(),
+            "these `POST /api/config/set` allowlist entries name no field on `KernelConfig`, so a \
+             write against one is accepted, lands in config.toml, and is silently discarded by the \
+             next load — a success status for a no-op (#6605). Add the backing field or drop the \
+             entry: {dangling:#?}"
+        );
+    }
+
+    /// `WRITABLE_DEPTH_2_ONLY_PREFIXES` is only consulted from inside the `WRITABLE_SECTION_PREFIXES` loop, so an entry missing from the latter restricts nothing at all.
+    /// Same defect shape as a dangling path: a rule that reads as a restriction but has no effect.
+    #[test]
+    fn every_depth_2_only_prefix_is_also_a_section_prefix() {
+        for &prefix in super::super::WRITABLE_DEPTH_2_ONLY_PREFIXES {
+            assert!(
+                super::super::WRITABLE_SECTION_PREFIXES.contains(&prefix),
+                "`{prefix}` restricts writes to depth 2 but is not a writable section prefix, so \
+                 the restriction is never reached"
             );
         }
     }

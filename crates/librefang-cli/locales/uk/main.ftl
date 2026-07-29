@@ -1095,7 +1095,13 @@ label-header-enabled = УВІМКНЕНО
 label-header-url = URL
 
 # Channel command specific keys
-channel-header-msgs-24h = ПОВІДОМЛЕНЬ ЗА 24 ГОД
+# Scoped by channel TYPE, not by sidecar instance — usage_events.channel stores the type, so every bot of the same type shares the count (#6606).
+channel-header-msgs-24h-by-type = ПОВІДОМЛЕНЬ ЗА 24 ГОД (ЗА ТИПОМ)
+channel-header-connected = ПІДКЛЮЧЕНО
+channel-header-in-out = ВХІД/ВИХІД
+channel-liveness-not-started = НЕ ЗАПУЩЕНО
+channel-last-errors-heading = Остання зафіксована помилка кожного каналу (залипає — записується при збої й не очищується після відновлення):
+channel-last-error-entry = { $name }: { $error }
 channel-error-save-failed-no-body = збереження відхилено (тіло помилки відсутнє)
 
 # Models command specific keys

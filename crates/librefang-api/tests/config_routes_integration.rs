@@ -24,7 +24,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
 use librefang_api::server;
 use librefang_kernel::LibreFangKernel;
-use librefang_types::config::{DefaultModelConfig, KernelConfig};
+use librefang_types::config::{DefaultModelConfig, ExternalAuthConfig, KernelConfig, OidcProvider};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -44,11 +44,20 @@ impl Drop for RouterHarness {
 }
 
 async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
+    boot_router_with_config(api_key, |_| {}).await
+}
+
+/// Same harness, with a hook to set config fields the default does not exercise.
+/// Used by the `external_auth` read test, which has to distinguish "the value came from config" from "the value is the default that happens to match".
+async fn boot_router_with_config(
+    api_key: &str,
+    customize: impl FnOnce(&mut KernelConfig),
+) -> RouterHarness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
 
-    let config = KernelConfig {
+    let mut config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),
         data_dir: tmp.path().join("data"),
         api_key: api_key.to_string(),
@@ -63,6 +72,7 @@ async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
         },
         ..KernelConfig::default()
     };
+    customize(&mut config);
 
     let home = config.home_dir.clone();
     let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
@@ -216,6 +226,103 @@ async fn get_config_exposes_writable_fields_that_used_to_be_write_only() {
         assert!(
             terminal.get(key).is_some(),
             "`terminal.{key}` missing from GET /api/config: {terminal}"
+        );
+    }
+}
+
+/// #6605: `external_auth` fields that are deliberately non-writable were also unreadable, which is the wrong asymmetry.
+/// `require_email_verified` is the #3703 mitigation — it rejects logins whose ID token lacks `email_verified = true`, which is what stops an unverified address in an `allowed_domains` domain from inheriting that domain's authorization.
+/// Keeping it out of the write allowlist is correct (an Owner-role caller with a leaked API key must not be able to turn it off); hiding it from `GET /api/config` left an operator no way to confirm the protection is on without shell access to read `config.toml`.
+/// The `OidcProvider` endpoint overrides had the same problem.
+///
+/// Every asserted value is one the harness set explicitly, and `require_email_verified` is set to the non-default `false` on purpose — asserting its default `true` would also pass against a hardcoded literal in the response builder, which proves nothing about where the value came from.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_config_exposes_non_writable_external_auth_fields() {
+    let h = boot_router_with_config(API_KEY, |config| {
+        config.external_auth = ExternalAuthConfig {
+            // Non-default: proves the response reads the configured value rather than emitting a constant.
+            require_email_verified: false,
+            providers: vec![OidcProvider {
+                id: "corp".to_string(),
+                display_name: "Corporate SSO".to_string(),
+                issuer_url: "https://issuer.example.invalid".to_string(),
+                auth_url: "https://issuer.example.invalid/authorize".to_string(),
+                token_url: "https://issuer.example.invalid/token".to_string(),
+                userinfo_url: "https://issuer.example.invalid/userinfo".to_string(),
+                jwks_uri: "https://issuer.example.invalid/jwks".to_string(),
+                client_id: "corp-client".to_string(),
+                client_secret_env: "LIBREFANG_CONFIG_ROUTES_TEST_DOES_NOT_EXIST".to_string(),
+                redirect_url: "http://127.0.0.1:4545/api/auth/callback".to_string(),
+                scopes: vec!["openid".to_string()],
+                allowed_domains: vec!["example.invalid".to_string()],
+                audience: "corp-audience".to_string(),
+                // `Some(false)` rather than `None`: an explicit per-provider override must stay distinguishable from "inherit the global setting", which renders as `null`.
+                require_email_verified: Some(false),
+            }],
+            ..Default::default()
+        };
+    })
+    .await;
+
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+
+    assert_eq!(
+        dig(&json, "external_auth.require_email_verified").and_then(|v| v.as_bool()),
+        Some(false),
+        "GET /api/config must report the configured value of the #3703 email-verification gate \
+         (#6605); body: {json}"
+    );
+
+    let Some(provider) = dig(&json, "external_auth.providers")
+        .and_then(|v| v.as_array())
+        .and_then(|providers| providers.first())
+    else {
+        panic!("configured OIDC provider missing from GET /api/config: {json}");
+    };
+
+    for (key, expected) in [
+        ("auth_url", "https://issuer.example.invalid/authorize"),
+        ("token_url", "https://issuer.example.invalid/token"),
+        ("userinfo_url", "https://issuer.example.invalid/userinfo"),
+        ("jwks_uri", "https://issuer.example.invalid/jwks"),
+        ("audience", "corp-audience"),
+    ] {
+        assert_eq!(
+            provider.get(key).and_then(|v| v.as_str()),
+            Some(expected),
+            "`external_auth.providers[].{key}` must round-trip its configured value (#6605); \
+             provider: {provider}"
+        );
+    }
+    assert_eq!(
+        provider
+            .get("require_email_verified")
+            .and_then(|v| v.as_bool()),
+        Some(false),
+        "the per-provider `require_email_verified` override must be readable and must not collapse \
+         an explicit `false` into `null` (#6605); provider: {provider}"
+    );
+
+    // The read side is additive only — these paths stay closed to `POST /api/config/set`.
+    for path in [
+        "external_auth.require_email_verified",
+        "external_auth.audience",
+    ] {
+        let (status, _) = send(
+            h.app.clone(),
+            auth_post_json(
+                "/api/config/set",
+                serde_json::json!({"path": path, "value": true}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "`{path}` became readable in #6605 but MUST stay non-writable — flipping it post-auth \
+             is the #3703 regression vector"
         );
     }
 }
@@ -421,10 +528,8 @@ async fn config_export_requires_auth_when_key_set() {
 #[tokio::test(flavor = "multi_thread")]
 async fn config_set_writes_allowlisted_path_to_tempdir_toml() {
     let h = boot_router_with_api_key(API_KEY).await;
-    // `log_level` is a real top-level KernelConfig field on the allowlist;
-    // it round-trips through the schema validator AND survives the post-write
-    // kernel reload (which re-serializes the in-memory config), unlike
-    // dashboard-only paths such as `ui.theme` that the kernel doesn't model.
+    // `log_level` is a real top-level KernelConfig field on the allowlist; it round-trips through the schema validator AND survives the post-write kernel reload (which re-serializes the in-memory config).
+    // `ui.theme` used to be named here as the counter-example of an allowlisted path the kernel does not model; #6605 removed those four `ui.*` entries from the allowlist, so the write path no longer accepts any such path.
     let (status, body) = send(
         h.app.clone(),
         auth_post_json(
@@ -515,7 +620,9 @@ async fn config_set_rejects_missing_value_field() {
     let h = boot_router_with_api_key(API_KEY).await;
     let (status, _) = send(
         h.app.clone(),
-        auth_post_json("/api/config/set", serde_json::json!({"path": "ui.theme"})),
+        // A real allowlisted path, so the 400 can only come from the missing `value` field.
+        // Was `ui.theme` until #6605 dropped it from the allowlist.
+        auth_post_json("/api/config/set", serde_json::json!({"path": "log_level"})),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -735,8 +842,10 @@ async fn config_set_requires_auth_when_key_set() {
         .method(Method::POST)
         .uri("/api/config/set")
         .header(header::CONTENT_TYPE, "application/json")
+        // Any well-formed body will do — the 401 comes from the auth layer before the handler runs.
+        // Was `ui.theme` until #6605 dropped it from the allowlist.
         .body(Body::from(
-            serde_json::json!({"path": "ui.theme", "value": "dark"}).to_string(),
+            serde_json::json!({"path": "log_level", "value": "debug"}).to_string(),
         ))
         .unwrap();
     let (status, _) = send(h.app.clone(), req).await;

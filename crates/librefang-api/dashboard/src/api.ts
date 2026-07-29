@@ -167,11 +167,34 @@ export interface ChannelItem {
    *  if they prefer hand-editing over the configure drawer. Emitted
    *  by the backend on every row. */
   config_template?: string;
-  /** Messages exchanged through this channel in the last 24 hours.
-   *  Computed via a single grouped query on `usage_events` keyed by
-   *  the `channel` column. Surfaced as the `kind · N msgs/24h`
-   *  meta-line on the Channels page card. */
-  msgs_24h?: number;
+  /** Channel type this instance speaks (`telegram`, `slack`, …).
+   *  Several `[[sidecar_channels]]` instances can share one type. */
+  channel_type?: string;
+  /** LLM calls in the last 24h for this channel **type**, NOT for this instance.
+   *  `usage_events.channel` stores the type (it is derived from `SenderContext.channel`, which also keys session derivation and so cannot be re-pointed at the instance name), so every sidecar of the same type reports the same number.
+   *  Label it as a per-type figure — presenting it per-bot is the defect #6606 documents.
+   *  Per-instance traffic is `messages_received` / `messages_sent`. */
+  msgs_24h_channel_type?: number;
+  /** Whether a live adapter is registered for this instance name at all.
+   *  False means the sidecar was never started, or its bridge start failed and the registration was rolled back — the API layer cannot tell those apart.
+   *  Everything below is meaningless when false, and all of it is absent on an unconfigured catalog row. */
+  supervised?: boolean;
+  /** Supervisor's live connection flag: true between a successful child spawn and the child going away.
+   *  The only real per-bot liveness signal on this payload. */
+  connected?: boolean;
+  /** RFC 3339 timestamp of the last successful child spawn — reset on every supervised restart, so it is "up since", not "created". */
+  started_at?: string | null;
+  /** RFC 3339 timestamp of the last inbound message. */
+  last_message_at?: string | null;
+  /** Inbound message count since the adapter was created.
+   *  Survives supervised restarts (the counter lives on the adapter, not the child), so it is NOT a 24h or since-`started_at` figure. */
+  messages_received?: number;
+  /** Outbound message count, same lifetime as `messages_received`. */
+  messages_sent?: number;
+  /** Last error the supervisor recorded — a sidecar `error` event, a failed spawn, or a circuit-break.
+   *  **Sticky**: never cleared, not even by the successful respawn that follows.
+   *  A connected channel carrying one is degraded, not dead. */
+  last_error?: string | null;
 }
 
 export interface SkillItem {

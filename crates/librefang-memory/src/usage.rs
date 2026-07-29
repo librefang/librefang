@@ -1245,10 +1245,15 @@ impl UsageStore {
         Ok(out)
     }
 
-    /// 24h message counts per channel — backs the dashboard's Channels
-    /// page so each row can show `slack · 142 msgs/24h` per the design.
+    /// 24h LLM-call counts grouped by channel **type**, keyed by the `usage_events.channel` value.
     /// Single grouped SQL pass (uses idx_usage_channel_time).
-    pub fn channels_msgs_24h_bulk(
+    ///
+    /// The key is a channel *type* (`telegram`, `slack`, `api`, `cron`, …), never a per-instance sidecar name, so every sidecar of the same type shares one bucket.
+    /// That column is written from `UsageRecord.channel`, which the kernel derives from `SenderContext.channel`; the bridge builds that from `channel_type_str(&ChannelMessage.channel)` and `ChannelMessage` carries only a `ChannelType`, so the sidecar instance name never reaches this table.
+    /// `SenderContext.channel` additionally feeds `SessionId::for_channel(agent, channel)` and the auth `identify(&channel, …)` binding, so it cannot be re-keyed to the instance name without re-deriving every existing channel session.
+    /// Per-instance traffic is available instead from the supervisor's `ChannelStatus.messages_received` / `messages_sent` counters — see `crates/librefang-api/src/routes/channels.rs::sidecar_channel_rows`.
+    /// Callers must label the returned figure as per-type; presenting it per-instance is the defect #6606 documents.
+    pub fn channel_type_msgs_24h_bulk(
         &self,
     ) -> LibreFangResult<std::collections::HashMap<String, u64>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;

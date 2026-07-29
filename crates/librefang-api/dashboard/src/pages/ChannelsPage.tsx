@@ -10,9 +10,16 @@ import {
 import QRCode from "qrcode";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
+import { formatDateTime } from "../lib/datetime";
+import {
+  channelLiveness,
+  livenessLabel,
+  type TFunc,
+} from "../lib/channelLiveness";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -59,7 +66,7 @@ interface ChannelCardProps {
   onConfigure: (channel: Channel) => void;
   onRemove: (channel: Channel) => void;
   onViewDetails: (channel: Channel) => void;
-  t: (key: string, opts?: { defaultValue?: string }) => string;
+  t: TFunc;
 }
 
 const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, onRemove, onViewDetails, t }: ChannelCardProps) {
@@ -77,21 +84,36 @@ const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode
       openDetails();
     }
   };
+
+  // Compact card matching the design canvas: 30×30 accent icon, mono
+  // name, mono `type · N in / N out` sub-line, status badge. Both list and
+  // grid views use the same shape now since the page only shows
+  // configured channels (configure-flow chips moved to the picker
+  // drawer where they actually help selection).
+  //
+  // The sub-line reports the supervisor's per-instance counters.
+  // The old `N msgs/24h` figure it replaces was a per-channel-type aggregate, so six Telegram bots all showed the same number (#6606); the correctly-scoped per-type figure now lives in the details drawer where it can be labelled.
+  // The counters are since-adapter-start, which the card has no room to spell out, so the scope rides on a `title` — an operator used to reading a 24h number in that exact position would otherwise carry the old scope over to the new figure.
+  const liveness = channelLiveness(c);
+  const statusLabel = livenessLabel(liveness.state, t);
+  const received = c.messages_received ?? 0;
+  const sent = c.messages_sent ?? 0;
+  const kind = c.channel_type || c.category || c.name;
+
+  // The card's own aria-label overrides its inner text for screen readers, so
+  // the status has to be part of it — otherwise the indicator would be
+  // colour-only for assistive tech.
   const cardA11y = {
     onClick: openDetails,
     onKeyDown: cardKeyDown,
     role: "button" as const,
     tabIndex: 0,
-    "aria-label": c.display_name || c.name,
+    "aria-label": t("channels.card_aria", {
+      defaultValue: "{{name}} — status: {{status}}",
+      name: c.display_name || c.name,
+      status: statusLabel,
+    }),
   };
-
-  // Compact card matching the design canvas: 30×30 accent icon, mono
-  // name, mono `kind · N msgs/24h` sub-line, status dot. Both list and
-  // grid views use the same shape now since the page only shows
-  // configured channels (configure-flow chips moved to the picker
-  // drawer where they actually help selection).
-  const msgs = typeof c.msgs_24h === "number" ? c.msgs_24h : 0;
-  const kind = c.category || c.name;
   return (
     <Card
       hover
@@ -113,16 +135,31 @@ const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode
         <div className="font-mono text-[13px] truncate text-text-main">
           {c.display_name || c.name}
         </div>
-        <div className="font-mono text-[11px] text-text-dim mt-0.5 truncate">
-          {kind} · {msgs} {t("channels.msgs_24h", { defaultValue: "msgs/24h" })}
+        <div
+          className="font-mono text-[11px] text-text-dim mt-0.5 truncate"
+          title={t("channels.traffic_since_start", {
+            defaultValue: "Messages since adapter start",
+          })}
+        >
+          {kind} ·{" "}
+          {t("channels.traffic_in_out", {
+            defaultValue: "{{received}} in / {{sent}} out",
+            received,
+            sent,
+          })}
         </div>
       </div>
-      {/* Status dot — running when there's recent activity, idle otherwise.
-          Matches the design's `status: 'running' | 'idle'` field. */}
-      <Badge variant={msgs > 0 ? "success" : "default"} dot className="shrink-0">
-        <span className="sr-only">
-          {msgs > 0 ? t("common.running") : t("common.idle")}
-        </span>
+      {/* Status badge — the supervisor's real liveness for THIS instance, not
+          a traffic proxy. Label is visible (not sr-only) so the colour is
+          never the only carrier of meaning; the sticky error text, when
+          present, rides on the tooltip and is spelled out in the drawer. */}
+      <Badge
+        variant={liveness.variant}
+        dot
+        className="shrink-0"
+        title={liveness.error ?? undefined}
+      >
+        {statusLabel}
       </Badge>
       {/* Sidecar channels are config.toml-managed (no /api/channels
           configure endpoint — it would 404), so suppress the inline
@@ -294,8 +331,9 @@ function ChannelQrSection({ channelName, t }: { channelName: string; t: (key: st
 function DetailsModal({ channel, onClose, t }: {
   channel: Channel;
   onClose: () => void;
-  t: (key: string) => string
+  t: TFunc;
 }) {
+  const liveness = channelLiveness(channel);
   return (
     <DrawerPanel isOpen onClose={onClose} size="lg" hideCloseButton>
         {/* Coloured strip + custom header are kept inline so the
@@ -327,11 +365,24 @@ function DetailsModal({ channel, onClose, t }: {
           <div className="space-y-3">
             <h3 className="text-xs font-black uppercase tracking-wider text-text-dim">{t("common.properties")}</h3>
             <div className="space-y-2">
+              {/* Liveness, not config presence. This row used to report
+                  `configured ? online : setup`, which said only "a
+                  [[sidecar_channels]] block exists" while looking like a
+                  health verdict (#6606). Config presence now has its own row
+                  below so both facts stay visible. */}
               <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
                 <span className="text-xs font-bold text-text-dim">{t("common.status")}</span>
-                <Badge variant={channel.configured ? "success" : "warning"}>
-                  {channel.configured ? t("common.online") : t("common.setup")}
+                <Badge variant={liveness.variant} dot>
+                  {livenessLabel(liveness.state, t)}
                 </Badge>
+              </div>
+              <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
+                <span className="text-xs font-bold text-text-dim">
+                  {t("channels.configured_label", { defaultValue: "Configured" })}
+                </span>
+                <span className={`text-xs font-bold ${channel.configured ? "text-success" : "text-warning"}`}>
+                  {channel.configured ? t("common.yes") : t("common.no")}
+                </span>
               </div>
               <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
                 <span className="text-xs font-bold text-text-dim">{t("channels.has_token")}</span>
@@ -339,7 +390,79 @@ function DetailsModal({ channel, onClose, t }: {
                   {channel.has_token ? t("common.yes") : t("common.no")}
                 </span>
               </div>
+              <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
+                <span className="text-xs font-bold text-text-dim">
+                  {t("channels.started_at", { defaultValue: "Up since" })}
+                </span>
+                <span className="text-xs font-mono text-text-main">
+                  {channel.started_at ? formatDateTime(channel.started_at) : t("common.never")}
+                </span>
+              </div>
+              <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
+                <span className="text-xs font-bold text-text-dim">
+                  {t("channels.last_message_at", { defaultValue: "Last message" })}
+                </span>
+                <span className="text-xs font-mono text-text-main">
+                  {channel.last_message_at ? formatDateTime(channel.last_message_at) : t("common.never")}
+                </span>
+              </div>
+              {/* Since the adapter was created, NOT since `started_at` — the
+                  counters live on the adapter and survive supervised restarts. */}
+              <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
+                <span className="text-xs font-bold text-text-dim">
+                  {t("channels.traffic_since_start", {
+                    defaultValue: "Messages since adapter start",
+                  })}
+                </span>
+                <span className="text-xs font-mono text-text-main">
+                  {t("channels.traffic_in_out", {
+                    defaultValue: "{{received}} in / {{sent}} out",
+                    received: channel.messages_received ?? 0,
+                    sent: channel.messages_sent ?? 0,
+                  })}
+                </span>
+              </div>
+              {/* Explicitly scoped: this number covers every channel of the
+                  same type on this daemon, because `usage_events.channel`
+                  records the type and not the instance name. */}
+              <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
+                <span className="text-xs font-bold text-text-dim">
+                  {t("channels.msgs_24h_by_type", {
+                    defaultValue: "24h messages (all {{type}} channels)",
+                    type: channel.channel_type || channel.name,
+                  })}
+                </span>
+                <span className="text-xs font-mono text-text-main">
+                  {channel.msgs_24h_channel_type ?? 0}
+                </span>
+              </div>
             </div>
+            {liveness.state === "not_supervised" && channel.configured && (
+              <div className="p-3 rounded-lg border border-warning/30 bg-warning/5">
+                <p className="text-[11px] text-text-dim leading-relaxed">
+                  {t("channels.not_supervised_hint", {
+                    defaultValue:
+                      "No live adapter is registered for this channel. Reload channels to start it, or check the daemon log for a failed sidecar start.",
+                  })}
+                </p>
+              </div>
+            )}
+            {liveness.error && (
+              <div className="p-3 rounded-lg border border-error/30 bg-error/5 space-y-1">
+                <p className="text-[11px] font-bold text-error">
+                  {t("channels.last_error", { defaultValue: "Last error" })}
+                </p>
+                <p className="text-[11px] font-mono text-text-dim leading-relaxed break-words">
+                  {liveness.error}
+                </p>
+                <p className="text-[10px] text-text-dim/80 leading-relaxed">
+                  {t("channels.last_error_sticky_hint", {
+                    defaultValue:
+                      "Recorded when the supervisor last saw a failure. It is not cleared on recovery, so a connected channel can still show one.",
+                  })}
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Fields */}
@@ -810,6 +933,23 @@ export function ChannelsPage() {
         <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
           {[1, 2, 3].map((i) => <CardSkeleton key={i} />)}
         </div>
+      ) : channelsQuery.isError && channels.length === 0 ? (
+        // A failed fetch must not fall through to the "no channels yet" card
+        // below: `channels` is `[]` on error, so an unreachable daemon would
+        // render as a clean install, on the page whose whole job (#6606) is
+        // telling an operator whether their channels are alive.
+        //
+        // Gated on an empty list rather than `isError` alone: the query polls
+        // every 30s and keeps its last successful `data` across a failed
+        // refetch, so the bare flag would blank a working list on one
+        // transient blip. The header's refresh spinner already covers that
+        // case; this branch is only for having nothing to show.
+        <ErrorState
+          message={t("channels.load_error", {
+            defaultValue: "Could not load channels",
+          })}
+          onRetry={() => void channelsQuery.refetch()}
+        />
       ) : configuredCount === 0 ? (
         // No channels configured yet — surface the picker as a primary
         // CTA instead of a tab buried below. Mirrors the design canvas
