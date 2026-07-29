@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Single-replica LibreFang daemon. See ../README.md before applying — the
+# Secrets referenced by the StatefulSet are NOT created here on purpose, so a
+# credential never lands in version control.
+
+resources:
+  - statefulset.yaml
+  - service.yaml
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: librefang
+
+# Pin a release rather than tracking `latest`: an image rolled forward under a
+# pod you did not intend to restart is how a cluster ends up on an untested
+# build. Override per-environment with:
+#   kustomize edit set image ghcr.io/librefang/librefang=ghcr.io/librefang/librefang:vYYYY.M.D
+images:
+  - name: ghcr.io/librefang/librefang
+    newTag: latest
