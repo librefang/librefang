@@ -2329,3 +2329,14 @@ fn managed_everyapi_registration_honors_suppression() {
     assert!(!catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1"));
     assert!(catalog.get_provider("everyapi").is_none());
 }
+
+#[test]
+fn explicit_url_converts_managed_everyapi_to_custom() {
+    let mut catalog = ModelCatalog::default();
+    assert!(catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1"));
+    assert!(catalog.set_provider_url("everyapi", "https://relay.example/v1"));
+    let provider = catalog.get_provider("everyapi").unwrap();
+    assert_eq!(provider.base_url, "https://relay.example/v1");
+    assert_eq!(provider.auth_status, AuthStatus::Configured);
+    assert!(provider.is_custom);
+}

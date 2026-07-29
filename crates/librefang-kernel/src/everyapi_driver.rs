@@ -84,11 +84,7 @@ fn credential_error_to_llm(error: CredentialError) -> LlmError {
 fn is_authentication_error(error: &LlmError) -> bool {
     matches!(
         error,
-        LlmError::AuthenticationFailed(_)
-            | LlmError::Api {
-                status: 401 | 403,
-                ..
-            }
+        LlmError::AuthenticationFailed(_) | LlmError::Api { status: 401, .. }
     )
 }
 
@@ -202,5 +198,14 @@ mod tests {
 
         assert_eq!(response.text(), "ok");
         assert_eq!(*source.invalidations.lock().unwrap(), [false, true]);
+    }
+
+    #[test]
+    fn quota_or_policy_forbidden_does_not_rotate_credentials() {
+        assert!(!is_authentication_error(&LlmError::Api {
+            status: 403,
+            message: "quota or policy rejection".to_string(),
+            code: None,
+        }));
     }
 }

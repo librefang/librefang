@@ -370,6 +370,31 @@ impl LibreFangKernel {
             .is_ok()
         }
 
+        let everyapi_suppressed = {
+            let mut catalog = librefang_runtime::model_catalog::ModelCatalog::default();
+            catalog.load_suppressed(
+                &config
+                    .home_dir
+                    .join("data")
+                    .join("suppressed_providers.json"),
+            );
+            catalog.is_suppressed("everyapi")
+        };
+        let everyapi_explicit = config.provider_urls.contains_key("everyapi")
+            || config.provider_api_keys.contains_key("everyapi")
+            || config.auth_profiles.contains_key("everyapi")
+            || std::env::var("EVERYAPI_API_KEY").is_ok_and(|key| !key.trim().is_empty())
+            || config
+                .home_dir
+                .join("providers")
+                .join("everyapi.toml")
+                .exists();
+        let everyapi_credential = if everyapi_suppressed || everyapi_explicit {
+            None
+        } else {
+            crate::everyapi_credentials::resolve(false).ok()
+        };
+
         // Resolve "auto" provider: scan environment for the first available API key.
         if config.default_model.provider == "auto" || config.default_model.provider.is_empty() {
             if let Some((provider, model_hint, env_var)) = drivers::detect_available_provider() {
@@ -396,6 +421,19 @@ impl LibreFangKernel {
                 config.default_model.provider = provider.to_string();
                 config.default_model.model = model;
                 config.default_model.api_key_env = env_var.to_string();
+            } else if everyapi_credential.is_some() {
+                let model = librefang_runtime::model_catalog::ModelCatalog::default()
+                    .default_model_for_provider("anthropic")
+                    .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+                info!(
+                    provider = "everyapi",
+                    model = %model,
+                    auth_source = "EveryAPI CLI login",
+                    "Auto-detected default provider"
+                );
+                config.default_model.provider = "everyapi".to_string();
+                config.default_model.model = model;
+                config.default_model.api_key_env = String::new();
             } else if is_ollama_reachable() {
                 // Ollama is running locally — use the catalog's default model, not a hardcoded one.
                 let model = librefang_runtime::model_catalog::ModelCatalog::default()
@@ -482,12 +520,9 @@ impl LibreFangKernel {
             && default_api_key.is_none()
             && config.default_model.base_url.is_none()
             && !config.provider_urls.contains_key("everyapi")
-            && !config
-                .home_dir
-                .join("providers")
-                .join("everyapi.toml")
-                .exists()
-            && crate::everyapi_credentials::resolve(false).is_ok();
+            && !everyapi_suppressed
+            && !everyapi_explicit
+            && everyapi_credential.is_some();
         let primary_result = if managed_everyapi_default {
             Ok(Arc::new(crate::everyapi_driver::ManagedEveryApiDriver::new(
                 driver_config.clone(),
@@ -917,7 +952,9 @@ impl LibreFangKernel {
                 config.provider_urls.len()
             );
         }
-        let everyapi_explicit = config.provider_urls.contains_key("everyapi")
+        let everyapi_explicit = everyapi_suppressed
+            || everyapi_explicit
+            || config.provider_urls.contains_key("everyapi")
             || config.provider_api_keys.contains_key("everyapi")
             || config.auth_profiles.contains_key("everyapi")
             || std::env::var("EVERYAPI_API_KEY").is_ok_and(|key| !key.trim().is_empty())
@@ -925,7 +962,11 @@ impl LibreFangKernel {
                 .get_provider("everyapi")
                 .is_some_and(|provider| provider.is_custom);
         if !everyapi_explicit {
-            match crate::everyapi_credentials::resolve(false) {
+            match everyapi_credential
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(|| crate::everyapi_credentials::resolve(false))
+            {
                 Ok(credential) => {
                     if model_catalog.ensure_managed_everyapi(&credential.base_url) {
                         info!(

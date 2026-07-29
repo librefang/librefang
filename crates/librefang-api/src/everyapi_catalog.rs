@@ -460,6 +460,26 @@ fn try_claim_refresh_slot(base_url: &str) -> Result<(), String> {
     }
 }
 
+fn metadata_donors(catalog: &ModelCatalog, live: &[LiveModel]) -> Vec<ModelCatalogEntry> {
+    let mut entries: Vec<ModelCatalogEntry> = catalog
+        .models_by_provider(PROVIDER_ID)
+        .into_iter()
+        .cloned()
+        .collect();
+    for model in live {
+        if entries
+            .iter()
+            .any(|entry| entry.id.eq_ignore_ascii_case(&model.id))
+        {
+            continue;
+        }
+        if let Some(entry) = catalog.find_model(&model.id) {
+            entries.push(entry.clone());
+        }
+    }
+    entries
+}
+
 /// Fetch the authenticated model listing.
 ///
 /// The relay key is placed in the `Authorization` header only. It never
@@ -557,7 +577,7 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
     };
 
     let live = match fetch_live_models(&base_url, &api_key).await {
-        Err(error) if managed && (error.contains("HTTP 401") || error.contains("HTTP 403")) => {
+        Err(error) if managed && error.contains("HTTP 401") => {
             let credential = resolve_managed_credential(kernel, true).await?;
             base_url = credential.base_url;
             api_key = credential.api_key;
@@ -581,11 +601,10 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
     // of reads that could observe a partially-updated catalog.
     let existing: Vec<ModelCatalogEntry> = {
         let catalog = kernel.model_catalog_ref().load();
-        catalog
-            .models_by_provider(PROVIDER_ID)
-            .into_iter()
-            .cloned()
-            .collect()
+        // A freshly auto-detected provider has no EveryAPI snapshot yet.
+        // Borrow published limits/capabilities from the built-in entry with
+        // the same model id, matching the existing `everyapi connect` flow.
+        metadata_donors(&catalog, &live)
     };
     let entries = build_catalog_entries(&live, &pricing, &existing);
     if entries.is_empty() {
@@ -773,6 +792,18 @@ mod tests {
         assert!(catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1"));
         catalog.set_provider_auth_status(PROVIDER_ID, AuthStatus::Missing);
         assert!(catalog_needs_initial_refresh(&catalog));
+    }
+
+    #[test]
+    fn fresh_managed_catalog_borrows_builtin_model_metadata() {
+        let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
+        let catalog = ModelCatalog::new(&home);
+        let live = vec![live("claude-sonnet-4-6", &["openai"], None)];
+        let donors = metadata_donors(&catalog, &live);
+        let entries = build_catalog_entries(&live, &HashMap::new(), &donors);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].context_window > 0);
+        assert!(entries[0].max_output_tokens > 0);
     }
 
     #[test]

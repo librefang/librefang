@@ -1081,6 +1081,12 @@ impl ModelCatalog {
     pub fn set_provider_url(&mut self, provider: &str, url: &str) -> bool {
         if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider) {
             p.base_url = url.to_string();
+            // Repointing an auto-managed EveryAPI entry is an explicit user
+            // override. Stop replacing its endpoint with the CLI-managed URL.
+            if provider == "everyapi" && !p.is_custom {
+                p.is_custom = true;
+                p.auth_status = AuthStatus::Configured;
+            }
             true
         } else {
             // Custom provider — add a new entry so it appears in /api/providers

@@ -209,6 +209,14 @@ impl LibreFangKernel {
 
         let has_custom_key = manifest.model.api_key_env.is_some();
         let has_custom_url = manifest.model.base_url.is_some();
+        let has_explicit_key = has_custom_key
+            || cfg.provider_api_keys.contains_key(agent_provider)
+            || cfg.auth_profiles.contains_key(agent_provider)
+            || (agent_provider == default_provider
+                && !effective_default.api_key_env.trim().is_empty());
+        let has_explicit_url = has_custom_url
+            || cfg.provider_urls.contains_key(agent_provider)
+            || (agent_provider == default_provider && effective_default.base_url.is_some());
 
         // CLI profile rotation: when the agent uses the default provider
         // and CLI profiles are configured, use the boot-time
@@ -342,8 +350,8 @@ impl LibreFangKernel {
             if should_use_managed_everyapi(
                 agent_provider,
                 driver_config.api_key.is_some(),
-                has_custom_key,
-                has_custom_url,
+                has_explicit_key,
+                has_explicit_url,
                 self.is_managed_everyapi(agent_provider),
             ) {
                 Arc::new(crate::everyapi_driver::ManagedEveryApiDriver::new(
@@ -483,8 +491,10 @@ impl LibreFangKernel {
                 let fallback_driver = if should_use_managed_everyapi(
                     &fb_provider,
                     config.api_key.is_some(),
-                    fb.api_key_env.is_some(),
-                    fb.base_url.is_some(),
+                    fb.api_key_env.is_some()
+                        || cfg.provider_api_keys.contains_key(&fb_provider)
+                        || cfg.auth_profiles.contains_key(&fb_provider),
+                    fb.base_url.is_some() || cfg.provider_urls.contains_key(&fb_provider),
                     self.is_managed_everyapi(&fb_provider),
                 ) {
                     Ok(Arc::new(crate::everyapi_driver::ManagedEveryApiDriver::new(
