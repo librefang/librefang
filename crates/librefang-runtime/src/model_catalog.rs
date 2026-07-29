@@ -456,13 +456,9 @@ impl ModelCatalog {
             }
 
             // Managed EveryAPI credentials live behind EveryAPI's local credential-process command rather than in a LibreFang env var.
-            // Preserve the successful boot/runtime discovery marker across unrelated catalog re-detection passes.
-            // The API refresh path owns demotion when the credential process later disappears.
-            if provider.id == "everyapi"
-                && provider.auth_status == AuthStatus::AutoDetected
-                && !suppressed
-                && !provider.is_custom
-            {
+            // No env var can describe this entry's auth, so the whole status is owned by the API refresh path — including demotion when the credential process later disappears.
+            // Probing `api_key_env` here would otherwise promote a CLI-managed entry on the strength of an unrelated key and send its refresh down the explicit-key branch.
+            if provider.id == "everyapi" && provider.cli_managed && !suppressed {
                 continue;
             }
 
@@ -1083,6 +1079,7 @@ impl ModelCatalog {
             // Stop replacing its endpoint with the CLI-managed URL.
             if provider == "everyapi" && !p.is_custom {
                 p.is_custom = true;
+                p.cli_managed = false;
                 p.auth_status = AuthStatus::Configured;
             }
             true
@@ -1103,6 +1100,8 @@ impl ModelCatalog {
                 available_models: Vec::new(),
                 // Added at runtime via set_provider_url → always custom.
                 is_custom: true,
+                // Credentials come from the derived env var above.
+                cli_managed: false,
                 proxy_url: None,
             });
             // Re-detect auth for the newly added provider
@@ -1130,6 +1129,12 @@ impl ModelCatalog {
             }
             provider.base_url = base_url.to_string();
             provider.auth_status = AuthStatus::AutoDetected;
+            // Boot only reaches this call after ruling out every explicit
+            // source, so adopting a registry-shipped entry here is correct.
+            // Runtime callers arrive through `resolve_managed_credential`,
+            // which is gated on this same flag — so an entry that was never
+            // CLI-managed can no longer be repointed at the CLI's endpoint.
+            provider.cli_managed = true;
             return true;
         }
         self.providers.push(ProviderInfo {
@@ -1145,6 +1150,7 @@ impl ModelCatalog {
             media_capabilities: Vec::new(),
             available_models: Vec::new(),
             is_custom: false,
+            cli_managed: true,
             proxy_url: None,
         });
         true
@@ -1176,6 +1182,9 @@ impl ModelCatalog {
                 AuthStatus::Missing
             };
             provider.is_custom = true;
+            // Explicit configuration takes the entry back from CLI-managed
+            // discovery: its credentials now come from `api_key_env`.
+            provider.cli_managed = false;
             return true;
         }
         self.providers.push(ProviderInfo {
@@ -1195,6 +1204,7 @@ impl ModelCatalog {
             media_capabilities: Vec::new(),
             available_models: Vec::new(),
             is_custom: true,
+            cli_managed: false,
             proxy_url: None,
         });
         true
@@ -1564,6 +1574,12 @@ impl ModelCatalog {
                     // Keep the previous env var when catalog payload omits/empties it.
                     if !prov_toml.api_key_env.trim().is_empty() {
                         existing.api_key_env = prov_toml.api_key_env;
+                        // A provider file naming its own key env var is an
+                        // explicit credential source, so it takes the entry
+                        // back from CLI-managed discovery. Without this, the
+                        // operator's file would keep its endpoint rewritten
+                        // from the CLI account on every credential refresh.
+                        existing.cli_managed = false;
                     }
                     existing.key_required = prov_toml.key_required;
                 }
