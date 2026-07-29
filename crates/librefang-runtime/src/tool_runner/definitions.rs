@@ -138,6 +138,7 @@ pub const ALWAYS_NATIVE_TOOLS: &[&str] = &[
     tool_name::FILE_LIST,
     tool_name::CODE_SEARCH,
     tool_name::AGENT_SEND,
+    tool_name::AGENT_SPAWN,
     tool_name::AGENT_LIST,
     tool_name::CHANNEL_SEND,
     tool_name::NOTIFY_OWNER,
