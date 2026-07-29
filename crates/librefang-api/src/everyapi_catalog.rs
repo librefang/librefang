@@ -685,7 +685,20 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
                 && if managed {
                     is_managed_provider_active(catalog)
                 } else {
-                    provider.is_custom && provider.api_key_env == expected_api_key_env
+                    // The snapshot was fetched with the key named by
+                    // `expected_api_key_env`, so what must still hold is that the
+                    // entry has not been taken over by CLI-managed discovery and
+                    // still declares that same credential env var.
+                    //
+                    // `is_custom` is deliberately NOT part of the invariant.
+                    // `models connect everyapi` registers the gateway as a
+                    // provider file, and `new_from_dir_with_registry` falls back
+                    // to `is_custom = false` for every loaded provider whenever
+                    // `registry/providers/` is missing or unreadable — so an
+                    // explicitly configured gateway is routinely non-custom, and
+                    // requiring the flag here discarded its refresh silently.
+                    !is_managed_provider_active(catalog)
+                        && provider.api_key_env == expected_api_key_env
                 }
         });
         if unchanged {
@@ -916,6 +929,56 @@ mod tests {
             ModelCatalog::from_entries(Vec::new(), vec![provider(AuthStatus::Configured)]);
         assert!(catalog_needs_initial_refresh(&catalog));
         assert!(catalog_needs_stale_refresh(&catalog));
+    }
+
+    /// `models connect everyapi` registers the gateway as a provider file, and
+    /// both the boot loader and the runtime `load_catalog_file` path land it
+    /// with `is_custom = false` — the former because
+    /// `new_from_dir_with_registry` falls back to that for every provider when
+    /// `registry/providers/` is missing or unreadable, the latter because
+    /// `From<ProviderCatalogToml>` has no better answer.
+    /// `detect_auth` then promotes it to `Configured` once the declared key env
+    /// var is present, leaving the flag alone.
+    ///
+    /// So an explicitly configured gateway is routinely non-custom. It must
+    /// stay refresh-eligible and must NOT be read as CLI-managed: the write-back
+    /// guard in `refresh_now` keys on those two predicates, and requiring
+    /// `is_custom` there discarded the whole refresh silently.
+    #[test]
+    fn a_file_loaded_gateway_is_configured_yet_never_classified_as_managed() {
+        // Distinct per test: `std::env::set_var` is process-global.
+        let key_env = "LIBREFANG_TEST_EVERYAPI_FILE_LOADED_KEY";
+        std::env::set_var(key_env, "relay-secret-must-not-leak");
+
+        let mut catalog = ModelCatalog::default();
+        catalog.merge_catalog_file(librefang_types::model_catalog::ModelCatalogFile {
+            provider: Some(librefang_types::model_catalog::ProviderCatalogToml {
+                id: PROVIDER_ID.to_string(),
+                display_name: "EveryAPI".to_string(),
+                api_key_env: key_env.to_string(),
+                base_url: "https://api.everyapi.ai/v1".to_string(),
+                key_required: true,
+                signup_url: None,
+                regions: HashMap::new(),
+                media_capabilities: Vec::new(),
+            }),
+            models: vec![text_entry("claude-sonnet-5")],
+        });
+        catalog.detect_auth();
+
+        let provider = catalog
+            .get_provider(PROVIDER_ID)
+            .expect("the provider file registers an entry");
+        assert!(
+            !provider.is_custom,
+            "a file-loaded provider carries is_custom = false"
+        );
+        assert_eq!(provider.auth_status, AuthStatus::Configured);
+        assert!(catalog_needs_initial_refresh(&catalog));
+        assert!(
+            !is_managed_provider_active(&catalog),
+            "the credential source is the declared env var, not the EveryAPI CLI"
+        );
     }
 
     #[test]
