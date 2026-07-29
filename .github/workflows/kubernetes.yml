@@ -266,9 +266,8 @@ jobs:
           [ "$sentinel" = "persisted" ] || {
             echo "::error::/data did not survive pod replacement (read '$sentinel')"; exit 1; }
           after="$(kubectl -n "$NS" exec statefulset/librefang -- stat -c '%i' /data/config.toml | tr -d '\r')"
-          # One line on purpose. A backslash continuation here put the next
-          # line at column 0, which ends the `run: |` block scalar and made the
-          # whole workflow file fail to parse — no job ever started.
+          # One line on purpose.
+          # A backslash continuation here put the next line at column 0, which ends the `run: |` block scalar and made the whole workflow file fail to parse — no job ever started.
           [ "$before" = "$after" ] || {
             echo "::error::config.toml was recreated ($before -> $after) — the pod came up on a fresh volume instead of reattaching the PVC"; exit 1; }
           echo "✓ /data survived pod replacement (config.toml inode $after unchanged)"

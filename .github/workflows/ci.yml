@@ -263,13 +263,9 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
-      # A workflow file that fails to parse cannot report that it failed to
-      # parse: GitHub records a run with no jobs, it never appears in a PR's
-      # check rollup, and nothing goes red. `kubernetes.yml` shipped that way —
-      # a backslash continuation inside a `run: |` block put the next line at
-      # column 0, ending the block scalar — and was merged to main having never
-      # executed a single step. Parsing every workflow from a job that does run
-      # is the only thing that catches this class.
+      # A workflow file that fails to parse cannot report that it failed to parse: GitHub records a run with no jobs, it never appears in a PR's check rollup, and nothing goes red.
+      # `kubernetes.yml` shipped that way — a backslash continuation inside a `run: |` block put the next line at column 0, ending the block scalar — and was merged to main having never executed a single step.
+      # Parsing every workflow from a job that does run is the only thing that catches this class.
       - name: Validate workflow YAML parses
         run: |
           python3 - <<'PY'
