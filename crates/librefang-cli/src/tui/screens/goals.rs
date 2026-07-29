@@ -627,7 +627,7 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
     ));
     f.render_widget(Paragraph::new(Line::from(step_line)), chunks[2]);
 
-    let (label, _value, hint): (&str, &str, &str) = match state.create_step {
+    let (label, value, hint): (&str, &str, &str) = match state.create_step {
         0 => ("Title:", &state.create_title, "e.g. \"Fix login timeout\""),
         1 => (
             "Description:",
@@ -664,6 +664,33 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
         )])),
         chunks[4],
     );
+
+    // Render the user's typed value
+    if state.create_step != 3 {
+        let display = if value.is_empty() {
+            Span::styled("  \u{258c}", Style::default().fg(theme::TEXT_TERTIARY))
+        } else {
+            Span::styled(
+                format!("  {value}"),
+                Style::default().fg(theme::TEXT_PRIMARY),
+            )
+        };
+        f.render_widget(Paragraph::new(Line::from(vec![display])), chunks[5]);
+    } else {
+        // Step 3 is the toggle — show Auto-review status
+        let toggle_text = if state.create_loop_engineering {
+            "\u{25a3} Auto-review enabled (reviewer will check each iteration)"
+        } else {
+            "\u{25a1} Auto-review disabled"
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                format!("  {toggle_text}"),
+                Style::default().fg(theme::TEXT_PRIMARY),
+            )])),
+            chunks[5],
+        );
+    }
 
     // Info hint with ⓘ icon
     if !hint.is_empty() {

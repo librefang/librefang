@@ -284,6 +284,18 @@ pub(super) async fn tool_agent_spawn(
         )));
     }
 
+    // Depth guard: prevent unbounded recursive spawn chains. Mirrors the
+    // agent_send guard. Without this, a spawned agent calls agent_spawn to
+    // create another, which spawns another — burning tokens indefinitely.
+    let max_depth = kh.max_agent_call_depth();
+    let current_depth = AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0);
+    if current_depth >= max_depth {
+        return Err(ToolError::PermissionDenied(format!(
+            "Agent spawn depth exceeded (max {max_depth}). \
+             Too many nested agent_spawn calls."
+        )));
+    }
+
     let tools: Vec<String> = input["tools"]
         .as_array()
         .map(|arr| {
