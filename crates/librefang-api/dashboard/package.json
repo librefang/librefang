@@ -59,7 +59,7 @@
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^5.2.0",
     "globals": "^17.8.0",
-    "jsdom": "^29.1.1",
+    "jsdom": "^30.0.1",
     "openapi-typescript": "^7.13.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.9.2",
