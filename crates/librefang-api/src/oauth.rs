@@ -476,15 +476,9 @@ impl TokenStore {
     ) -> Option<(String, String, StoredTokens)> {
         use subtle::ConstantTimeEq;
 
-        // An empty needle must never match, and the length check below cannot
-        // save us: `StoredTokens::access_token` is taken verbatim from the
-        // provider's token response, so a provider that returned an empty
-        // string would leave an entry whose access token is `""` — and
-        // `{"access_token": ""}` would then compare equal to it and hand back
-        // that session's refresh token to a caller who proved nothing. Fail
-        // closed on the empty needle rather than relying on every IdP to be
-        // well-behaved. The handler rejects blank input too (#6629); this is
-        // the invariant at the primitive, so a future caller inherits it.
+        // An empty needle must never match, and the length check below cannot save us: `StoredTokens::access_token` is taken verbatim from the provider's token response, so a provider that returned an empty string would leave an entry whose access token is `""` — and `{"access_token": ""}` would then compare equal to it and hand back that session's refresh token to a caller who proved nothing.
+        // Fail closed on the empty needle rather than relying on every IdP to be well-behaved.
+        // The handler rejects blank input too (#6629); this is the invariant at the primitive, so a future caller inherits it.
         if access_token.is_empty() {
             return None;
         }
@@ -1442,14 +1436,9 @@ pub async fn auth_refresh(
 
     let providers = resolve_providers(ext_auth).await;
 
-    // A field present but blank proves nothing, so treat it as absent instead
-    // of letting it select a branch (#6629). Left as `Some("")`, an empty
-    // `refresh_token` would fan out a doomed request to the provider's token
-    // endpoint, and an empty `access_token` would reach the store scan — where
-    // it is rejected, but the primitive should not be the only thing standing
-    // between a blank body and a credential lookup. Filtering on the trimmed
-    // form while passing the value through untrimmed keeps the comparison an
-    // exact match against what the provider issued.
+    // A field present but blank proves nothing, so treat it as absent instead of letting it select a branch (#6629).
+    // Left as `Some("")`, an empty `refresh_token` would fan out a doomed request to the provider's token endpoint, and an empty `access_token` would reach the store scan — where it is rejected, but the primitive should not be the only thing standing between a blank body and a credential lookup.
+    // Filtering on the trimmed form while passing the value through untrimmed keeps the comparison an exact match against what the provider issued.
     let supplied_refresh = req
         .refresh_token
         .as_deref()

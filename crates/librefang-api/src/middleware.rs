@@ -2008,9 +2008,7 @@ mod tests {
     fn every_mutating_plugin_route_is_explicitly_classified() {
         const PLUGINS_SRC: &str = include_str!("routes/plugins.rs");
 
-        // Routes that must stay reachable by Admin, each with its reason,
-        // keyed `METHOD path` so a route's classification cannot silently
-        // carry over to a different method registered on the same path.
+        // Routes that must stay reachable by Admin, each with its reason, keyed `METHOD path` so a route's classification cannot silently carry over to a different method registered on the same path.
         // Anything here is a deliberate decision, not an oversight.
         const ADMIN_ALLOWED: &[&str] = &[
             // Removes code from the execution path — Owner-gating it would block incident response.
@@ -2058,8 +2056,7 @@ mod tests {
                 ("patch", axum::http::Method::PATCH),
                 ("delete", axum::http::Method::DELETE),
             ] {
-                // `axum::routing::post(h)` for the first method on a route,
-                // `.delete(h)` for one chained onto it.
+                // `axum::routing::post(h)` for the first method on a route, `.delete(h)` for one chained onto it.
                 if !methods_src.contains(&format!("routing::{name}("))
                     && !methods_src.contains(&format!(".{name}("))
                 {
