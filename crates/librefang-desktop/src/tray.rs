@@ -523,6 +523,7 @@ mod platform_tray {
                             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                             if handle.update(|_| {}).await.is_none() {
                                 warn!("Linux system tray service disconnected; will attempt to reconnect.");
+                                let _ = handle.shutdown().await;
                                 break;
                             }
                         }
