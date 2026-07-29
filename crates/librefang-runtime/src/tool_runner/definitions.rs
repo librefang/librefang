@@ -366,6 +366,19 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                             "type": "array",
                             "items": { "type": "string" },
                             "description": "Preset necessary shell commands based on the agent's task (e.g., [\"uv *\", \"pnpm *\"]). "
+                        },
+                        "profile": {
+                            "type": "string",
+                            "description": "Model profile name to use for this spawn (e.g. 'coder', 'architect', 'quick'). When set, overrides the parent agent's model. When omitted and the ModelRouter is enabled, the router picks the best profile based on task complexity."
+                        },
+                        "model_override": {
+                            "type": "object",
+                            "description": "Raw model/provider override. Use when you need a specific model not covered by profiles. Keys: provider (string), model (string), context_window (integer, optional).",
+                            "properties": {
+                                "provider": { "type": "string" },
+                                "model": { "type": "string" },
+                                "context_window": { "type": "integer" }
+                            }
                         }
                     },
                     "required": ["name", "system_prompt"]
