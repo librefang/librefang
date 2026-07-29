@@ -1153,6 +1153,57 @@ impl ModelCatalog {
         true
     }
 
+    /// Register an explicitly configured EveryAPI endpoint/key source.
+    /// Unlike CLI-managed discovery, this entry is custom and is never
+    /// rewritten from the EveryAPI credential process.
+    pub fn ensure_explicit_everyapi(
+        &mut self,
+        base_url: &str,
+        api_key_env: &str,
+        credential_present: bool,
+    ) -> bool {
+        const PROVIDER_ID: &str = "everyapi";
+        if self.suppressed_providers.contains(PROVIDER_ID) {
+            return false;
+        }
+        let base_url = base_url.trim().trim_end_matches('/');
+        let api_key_env = api_key_env.trim();
+        if base_url.is_empty() || api_key_env.is_empty() {
+            return false;
+        }
+        if let Some(provider) = self.providers.iter_mut().find(|p| p.id == PROVIDER_ID) {
+            provider.base_url = base_url.to_string();
+            provider.api_key_env = api_key_env.to_string();
+            provider.auth_status = if credential_present {
+                AuthStatus::Configured
+            } else {
+                AuthStatus::Missing
+            };
+            provider.is_custom = true;
+            return true;
+        }
+        self.providers.push(ProviderInfo {
+            id: PROVIDER_ID.to_string(),
+            display_name: "EveryAPI".to_string(),
+            api_key_env: api_key_env.to_string(),
+            base_url: base_url.to_string(),
+            key_required: true,
+            auth_status: if credential_present {
+                AuthStatus::Configured
+            } else {
+                AuthStatus::Missing
+            },
+            model_count: 0,
+            signup_url: Some("https://everyapi.ai".to_string()),
+            regions: std::collections::HashMap::new(),
+            media_capabilities: Vec::new(),
+            available_models: Vec::new(),
+            is_custom: true,
+            proxy_url: None,
+        });
+        true
+    }
+
     /// Apply a batch of provider URL overrides from config.
     ///
     /// Each entry maps a provider ID to a custom base URL.

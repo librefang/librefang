@@ -2340,3 +2340,14 @@ fn explicit_url_converts_managed_everyapi_to_custom() {
     assert_eq!(provider.auth_status, AuthStatus::Configured);
     assert!(provider.is_custom);
 }
+
+#[test]
+fn explicit_everyapi_registration_survives_without_a_registry_entry() {
+    let mut catalog = ModelCatalog::default();
+    assert!(catalog.ensure_explicit_everyapi("https://relay.example/v1/", "MY_EVERYAPI_KEY", true));
+    let provider = catalog.get_provider("everyapi").unwrap();
+    assert_eq!(provider.base_url, "https://relay.example/v1");
+    assert_eq!(provider.api_key_env, "MY_EVERYAPI_KEY");
+    assert_eq!(provider.auth_status, AuthStatus::Configured);
+    assert!(provider.is_custom);
+}

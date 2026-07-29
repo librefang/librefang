@@ -383,6 +383,9 @@ impl LibreFangKernel {
         let everyapi_explicit = config.provider_urls.contains_key("everyapi")
             || config.provider_api_keys.contains_key("everyapi")
             || config.auth_profiles.contains_key("everyapi")
+            || (config.default_model.provider == "everyapi"
+                && (config.default_model.base_url.is_some()
+                    || !config.default_model.api_key_env.trim().is_empty()))
             || std::env::var("EVERYAPI_API_KEY").is_ok_and(|key| !key.trim().is_empty())
             || config
                 .home_dir
@@ -394,6 +397,18 @@ impl LibreFangKernel {
         } else {
             crate::everyapi_credentials::resolve(false).ok()
         };
+        let everyapi_explicit_key_available =
+            if let Some(env_var) = config.provider_api_keys.get("everyapi") {
+                std::env::var(env_var).is_ok_and(|key| !key.trim().is_empty())
+            } else if let Some(profile) = config
+                .auth_profiles
+                .get("everyapi")
+                .and_then(|profiles| profiles.iter().min_by_key(|profile| profile.priority))
+            {
+                std::env::var(&profile.api_key_env).is_ok_and(|key| !key.trim().is_empty())
+            } else {
+                std::env::var("EVERYAPI_API_KEY").is_ok_and(|key| !key.trim().is_empty())
+            };
 
         // Resolve "auto" provider: scan environment for the first available API key.
         if config.default_model.provider == "auto" || config.default_model.provider.is_empty() {
@@ -421,14 +436,17 @@ impl LibreFangKernel {
                 config.default_model.provider = provider.to_string();
                 config.default_model.model = model;
                 config.default_model.api_key_env = env_var.to_string();
-            } else if everyapi_credential.is_some() {
-                let model = librefang_runtime::model_catalog::ModelCatalog::default()
-                    .default_model_for_provider("anthropic")
-                    .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+            } else if everyapi_explicit_key_available || everyapi_credential.is_some() {
+                let model = "claude-sonnet-5".to_string();
+                let auth_source = if everyapi_explicit_key_available {
+                    "EveryAPI API key"
+                } else {
+                    "EveryAPI CLI login"
+                };
                 info!(
                     provider = "everyapi",
                     model = %model,
-                    auth_source = "EveryAPI CLI login",
+                    auth_source,
                     "Auto-detected default provider"
                 );
                 config.default_model.provider = "everyapi".to_string();
@@ -518,16 +536,17 @@ impl LibreFangKernel {
         // even if the LLM provider is misconfigured. Users can fix config via dashboard.
         let managed_everyapi_default = config.default_model.provider == "everyapi"
             && default_api_key.is_none()
-            && config.default_model.base_url.is_none()
-            && !config.provider_urls.contains_key("everyapi")
             && !everyapi_suppressed
             && !everyapi_explicit
             && everyapi_credential.is_some();
         let primary_result = if managed_everyapi_default {
-            Ok(Arc::new(crate::everyapi_driver::ManagedEveryApiDriver::new(
-                driver_config.clone(),
-                Arc::new(drivers::DriverCache::new()),
-            )) as Arc<dyn LlmDriver>)
+            Ok(
+                Arc::new(crate::everyapi_driver::ManagedEveryApiDriver::new_gated(
+                    driver_config.clone(),
+                    Arc::new(drivers::DriverCache::new()),
+                    config.home_dir.clone(),
+                )) as Arc<dyn LlmDriver>,
+            )
         } else {
             drivers::create_driver(&driver_config)
         };
@@ -952,16 +971,49 @@ impl LibreFangKernel {
                 config.provider_urls.len()
             );
         }
-        let everyapi_explicit = everyapi_suppressed
-            || everyapi_explicit
+        let everyapi_explicit = everyapi_explicit
             || config.provider_urls.contains_key("everyapi")
             || config.provider_api_keys.contains_key("everyapi")
             || config.auth_profiles.contains_key("everyapi")
-            || std::env::var("EVERYAPI_API_KEY").is_ok_and(|key| !key.trim().is_empty())
-            || model_catalog
+            || std::env::var("EVERYAPI_API_KEY").is_ok_and(|key| !key.trim().is_empty());
+        if !everyapi_suppressed && everyapi_explicit {
+            let base_url = config
+                .default_model
+                .base_url
+                .clone()
+                .filter(|_| config.default_model.provider == "everyapi")
+                .or_else(|| config.provider_urls.get("everyapi").cloned())
+                .or_else(|| {
+                    model_catalog
+                        .get_provider("everyapi")
+                        .filter(|provider| provider.is_custom)
+                        .map(|provider| provider.base_url.clone())
+                })
+                .unwrap_or_else(|| "https://api.everyapi.ai/v1".to_string());
+            let api_key_env = if config.default_model.provider == "everyapi"
+                && !config.default_model.api_key_env.trim().is_empty()
+            {
+                config.default_model.api_key_env.clone()
+            } else if let Some(env_var) = config.provider_api_keys.get("everyapi") {
+                env_var.clone()
+            } else if let Some(profile) = config
+                .auth_profiles
+                .get("everyapi")
+                .and_then(|profiles| profiles.iter().min_by_key(|profile| profile.priority))
+            {
+                profile.api_key_env.clone()
+            } else if let Some(provider) = model_catalog
                 .get_provider("everyapi")
-                .is_some_and(|provider| provider.is_custom);
-        if !everyapi_explicit {
+                .filter(|provider| provider.is_custom)
+            {
+                provider.api_key_env.clone()
+            } else {
+                "EVERYAPI_API_KEY".to_string()
+            };
+            let credential_present =
+                std::env::var(&api_key_env).is_ok_and(|key| !key.trim().is_empty());
+            model_catalog.ensure_explicit_everyapi(&base_url, &api_key_env, credential_present);
+        } else if !everyapi_suppressed {
             match everyapi_credential
                 .clone()
                 .map(Ok)

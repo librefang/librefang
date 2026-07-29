@@ -12,7 +12,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const PROTOCOL_VERSION: u64 = 1;
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+// EveryAPI's credential refresh HTTP client has a 30-second deadline.
+// Leave enough time for the CLI to persist a rotated refresh token before
+// terminating it; killing at a shorter deadline can strand OAuth credentials.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_COMMAND_OUTPUT_BYTES: u64 = 64 * 1024;
 const GLOBAL_API_BASE: &str = "https://api.everyapi.ai";
 const CHINA_API_BASE: &str = "https://api-cn.everyapi.ai";
@@ -202,7 +205,7 @@ fn parse_credential_output(bytes: &[u8]) -> Result<EveryApiCredential, Credentia
 
 /// Resolve the current default EveryAPI relay credential.
 ///
-/// `invalidate` is used only after an authenticated request returned 401/403.
+/// `invalidate` is used only after an authenticated request returned 401.
 /// It asks EveryAPI to discard an ordinary cached relay key before resolving
 /// again. The caller remains responsible for bounding its retry count.
 pub fn resolve(invalidate: bool) -> Result<EveryApiCredential, CredentialError> {

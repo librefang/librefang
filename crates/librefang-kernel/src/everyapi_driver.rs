@@ -7,6 +7,7 @@ use librefang_llm_driver::{
     StreamEvent,
 };
 use librefang_llm_drivers::drivers::DriverCache;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[async_trait]
@@ -34,6 +35,7 @@ pub struct ManagedEveryApiDriver {
     source: Arc<dyn EveryApiCredentialSource>,
     cache: Arc<DriverCache>,
     base_config: DriverConfig,
+    managed_gate: Option<PathBuf>,
 }
 
 impl ManagedEveryApiDriver {
@@ -42,6 +44,20 @@ impl ManagedEveryApiDriver {
             source: Arc::new(LocalEveryApiCredentialSource),
             cache,
             base_config,
+            managed_gate: None,
+        }
+    }
+
+    pub fn new_gated(
+        base_config: DriverConfig,
+        cache: Arc<DriverCache>,
+        home_dir: PathBuf,
+    ) -> Self {
+        Self {
+            source: Arc::new(LocalEveryApiCredentialSource),
+            cache,
+            base_config,
+            managed_gate: Some(home_dir),
         }
     }
 
@@ -55,10 +71,20 @@ impl ManagedEveryApiDriver {
                 max_retries,
                 ..DriverConfig::default()
             },
+            managed_gate: None,
         }
     }
 
     async fn resolve_driver(&self, invalidate: bool) -> Result<Arc<dyn LlmDriver>, LlmError> {
+        if self
+            .managed_gate
+            .as_ref()
+            .is_some_and(|home| managed_everyapi_is_disabled(home))
+        {
+            return Err(LlmError::MissingApiKey(
+                "EveryAPI managed provider is disabled or explicitly configured".to_string(),
+            ));
+        }
         let credential = self
             .source
             .resolve(invalidate)
@@ -70,6 +96,19 @@ impl ManagedEveryApiDriver {
         config.base_url = Some(credential.base_url);
         self.cache.get_or_create(&config)
     }
+}
+
+fn managed_everyapi_is_disabled(home_dir: &std::path::Path) -> bool {
+    if std::env::var("EVERYAPI_API_KEY").is_ok_and(|key| !key.trim().is_empty())
+        || home_dir.join("providers").join("everyapi.toml").exists()
+    {
+        return true;
+    }
+    let path = home_dir.join("data").join("suppressed_providers.json");
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
+        .is_some_and(|providers| providers.iter().any(|provider| provider == "everyapi"))
 }
 
 fn credential_error_to_llm(error: CredentialError) -> LlmError {
@@ -207,5 +246,17 @@ mod tests {
             message: "quota or policy rejection".to_string(),
             code: None,
         }));
+    }
+
+    #[test]
+    fn persisted_suppression_disables_boot_time_managed_driver() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("data")).unwrap();
+        std::fs::write(
+            home.path().join("data/suppressed_providers.json"),
+            br#"["everyapi"]"#,
+        )
+        .unwrap();
+        assert!(managed_everyapi_is_disabled(home.path()));
     }
 }

@@ -25,8 +25,8 @@
 //!   gateway's own billing ratios plus a context window for the models that
 //!   declare one.
 //!
-//! Anything neither endpoint publishes — most importantly `max_output_tokens`,
-//! which the gateway exposes nowhere — is carried forward from the entry the
+//! Anything the endpoints omit — especially `max_output_tokens` on rows
+//! without `/v1/models.max_output` — is carried forward from the entry the
 //! connect command already wrote, because
 //! [`ModelCatalog::reconcile_live_provider_models`] replaces a provider's
 //! whole non-custom entry set. Refreshing without that carry-forward would
@@ -95,6 +95,17 @@ fn catalog_provider_is_configured(catalog: &ModelCatalog) -> bool {
                 provider.auth_status,
                 AuthStatus::Configured | AuthStatus::ValidatedKey | AuthStatus::AutoDetected
             ) || (!provider.is_custom && provider.auth_status == AuthStatus::Missing)
+        })
+}
+
+fn is_managed_provider_active(catalog: &ModelCatalog) -> bool {
+    !catalog.is_suppressed(PROVIDER_ID)
+        && catalog.get_provider(PROVIDER_ID).is_some_and(|provider| {
+            !provider.is_custom
+                && matches!(
+                    provider.auth_status,
+                    AuthStatus::AutoDetected | AuthStatus::Missing
+                )
         })
 }
 
@@ -182,10 +193,12 @@ pub(crate) fn pricing_origin(base_url: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LiveModel {
     pub(crate) id: String,
+    pub(crate) owned_by: String,
     pub(crate) supported_endpoint_types: Vec<String>,
     /// Present only for the models that declare one; authoritative over the
     /// pricing feed because it is what the serving endpoint will accept.
     pub(crate) context_window: Option<u64>,
+    pub(crate) max_output_tokens: Option<u64>,
 }
 
 /// Per-model figures recovered from `GET {origin}/api/pricing`.
@@ -215,6 +228,12 @@ pub(crate) fn parse_live_models(body: &serde_json::Value) -> Vec<LiveModel> {
             }
             Some(LiveModel {
                 id: id.to_string(),
+                owned_by: item
+                    .get("owned_by")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string(),
                 supported_endpoint_types: item
                     .get("supported_endpoint_types")
                     .and_then(|v| v.as_array())
@@ -227,6 +246,10 @@ pub(crate) fn parse_live_models(body: &serde_json::Value) -> Vec<LiveModel> {
                     .unwrap_or_default(),
                 context_window: item
                     .get("context_window")
+                    .and_then(serde_json::Value::as_u64)
+                    .filter(|v| *v > 0),
+                max_output_tokens: item
+                    .get("max_output")
                     .and_then(serde_json::Value::as_u64)
                     .filter(|v| *v > 0),
             })
@@ -343,8 +366,8 @@ pub(crate) fn infer_modality(supported_endpoint_types: &[String]) -> Modality {
 /// entry for the provider and installs this vec wholesale, and its own
 /// carry-forward only donates `tier` / `reasoning_echo_policy` / `aliases`.
 /// Everything else that the gateway does not publish — above all
-/// `max_output_tokens`, which appears in neither endpoint — has to be carried
-/// forward here or it is destroyed by the very act of refreshing.
+/// `max_output_tokens` when `/v1/models.max_output` is absent — has to be
+/// carried forward here or it is destroyed by the very act of refreshing.
 ///
 /// Ids are emitted bare (`claude-sonnet-5`), matching what the connect command
 /// writes. Prefixing them the way the OpenRouter path does would make the
@@ -383,9 +406,14 @@ pub(crate) fn build_catalog_entries(
                 .or_else(|| priced.map(|p| p.context_window).filter(|c| *c > 0))
                 .or_else(|| prior.map(|p| p.context_window).filter(|c| *c > 0))
                 .unwrap_or(0);
-            // The gateway publishes no max-output figure on either endpoint,
-            // so a previously-registered value is the only source there is.
-            let max_output_tokens = prior.map(|p| p.max_output_tokens).unwrap_or(0);
+            let max_output_tokens = model
+                .max_output_tokens
+                .or_else(|| {
+                    prior
+                        .map(|p| p.max_output_tokens)
+                        .filter(|value| *value > 0)
+                })
+                .unwrap_or(0);
 
             if modality == Modality::Text && (context_window == 0 || max_output_tokens == 0) {
                 return None;
@@ -473,11 +501,47 @@ fn metadata_donors(catalog: &ModelCatalog, live: &[LiveModel]) -> Vec<ModelCatal
         {
             continue;
         }
-        if let Some(entry) = catalog.find_model(&model.id) {
-            entries.push(entry.clone());
+        let snapshot = snapshot_lookup_ids(&model.owned_by, &model.id)
+            .into_iter()
+            .find_map(|candidate| catalog.find_model_for_provider("openrouter", &candidate));
+        let donor = snapshot.or_else(|| catalog.find_model(&model.id));
+        if let Some(entry) = donor {
+            let mut entry = entry.clone();
+            entry.id.clone_from(&model.id);
+            entry.input_cost_per_m = 0.0;
+            entry.output_cost_per_m = 0.0;
+            entry.pricing_known = false;
+            entries.push(entry);
         }
     }
     entries
+}
+
+fn snapshot_lookup_ids(owned_by: &str, model_id: &str) -> Vec<String> {
+    let owned_by = owned_by.trim();
+    if owned_by.is_empty() {
+        return Vec::new();
+    }
+    let mut ids = vec![format!("openrouter/{owned_by}/{model_id}")];
+    let normalized: String = model_id
+        .char_indices()
+        .map(|(index, character)| {
+            let bytes = model_id.as_bytes();
+            let between_digits = character == '-'
+                && index > 0
+                && bytes[index - 1].is_ascii_digit()
+                && bytes.get(index + 1).is_some_and(u8::is_ascii_digit);
+            if between_digits {
+                '.'
+            } else {
+                character
+            }
+        })
+        .collect();
+    if normalized != model_id {
+        ids.push(format!("openrouter/{owned_by}/{normalized}"));
+    }
+    ids
 }
 
 /// Fetch the authenticated model listing.
@@ -616,12 +680,29 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
     let mut available_models: Vec<String> = live.iter().map(|model| model.id.clone()).collect();
     available_models.sort();
     let model_count = entries.len();
+    if !is_managed_provider_active(&kernel.model_catalog_ref().load()) && managed {
+        return Err("EveryAPI managed provider changed during catalog refresh".to_string());
+    }
+    let expected_base_url = base_url.clone();
+    let expected_api_key_env = api_key_env.clone();
     kernel.model_catalog_update(&mut move |catalog| {
-        catalog.reconcile_live_provider_models(
-            PROVIDER_ID,
-            available_models.clone(),
-            entries.clone(),
-        );
+        let unchanged = catalog.get_provider(PROVIDER_ID).is_some_and(|provider| {
+            !catalog.is_suppressed(PROVIDER_ID)
+                && provider.base_url.trim_end_matches('/')
+                    == expected_base_url.trim_end_matches('/')
+                && if managed {
+                    is_managed_provider_active(catalog)
+                } else {
+                    provider.is_custom && provider.api_key_env == expected_api_key_env
+                }
+        });
+        if unchanged {
+            catalog.reconcile_live_provider_models(
+                PROVIDER_ID,
+                available_models.clone(),
+                entries.clone(),
+            );
+        }
     });
     Ok(model_count)
 }
@@ -641,12 +722,18 @@ async fn resolve_managed_credential(
             kernel.model_catalog_update(&mut move |catalog| {
                 catalog.ensure_managed_everyapi(&base_url);
             });
-            Ok(credential)
+            if is_managed_provider_active(&kernel.model_catalog_ref().load()) {
+                Ok(credential)
+            } else {
+                Err("EveryAPI managed provider changed during credential resolution".to_string())
+            }
         }
         Err(error) => {
             kernel.model_catalog_update(&mut |catalog| {
-                catalog.set_provider_auth_status(PROVIDER_ID, AuthStatus::Missing);
-                catalog.clear_provider_available_models(PROVIDER_ID);
+                if is_managed_provider_active(catalog) {
+                    catalog.set_provider_auth_status(PROVIDER_ID, AuthStatus::Missing);
+                    catalog.clear_provider_available_models(PROVIDER_ID);
+                }
             });
             Err(format!("EveryAPI managed credential unavailable: {error}"))
         }
@@ -704,8 +791,10 @@ mod tests {
     fn live(id: &str, endpoints: &[&str], context_window: Option<u64>) -> LiveModel {
         LiveModel {
             id: id.to_string(),
+            owned_by: String::new(),
             supported_endpoint_types: endpoints.iter().map(|s| s.to_string()).collect(),
             context_window,
+            max_output_tokens: None,
         }
     }
 
@@ -796,14 +885,27 @@ mod tests {
 
     #[test]
     fn fresh_managed_catalog_borrows_builtin_model_metadata() {
-        let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
-        let catalog = ModelCatalog::new(&home);
-        let live = vec![live("claude-sonnet-4-6", &["openai"], None)];
+        let home = tempfile::tempdir().unwrap();
+        let catalog = ModelCatalog::new(home.path());
+        let mut live = vec![
+            live("claude-haiku-4-5", &["openai", "anthropic"], None),
+            live("claude-opus-5", &["openai", "anthropic"], None),
+            live("claude-sonnet-5", &["openai", "anthropic"], None),
+            live("gpt-5.6-sol", &["openai-response"], None),
+            live("MiniMax-M3", &["openai"], None),
+        ];
+        for (model, owner) in
+            live.iter_mut()
+                .zip(["anthropic", "anthropic", "anthropic", "openai", "minimax"])
+        {
+            model.owned_by = owner.to_string();
+        }
         let donors = metadata_donors(&catalog, &live);
         let entries = build_catalog_entries(&live, &HashMap::new(), &donors);
-        assert_eq!(entries.len(), 1);
-        assert!(entries[0].context_window > 0);
-        assert!(entries[0].max_output_tokens > 0);
+        assert_eq!(entries.len(), live.len());
+        assert!(entries
+            .iter()
+            .all(|entry| entry.context_window > 0 && entry.max_output_tokens > 0));
     }
 
     #[test]
