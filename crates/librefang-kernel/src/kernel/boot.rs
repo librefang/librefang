@@ -370,15 +370,18 @@ impl LibreFangKernel {
             .is_ok()
         }
 
-        let everyapi_suppressed = {
-            let mut catalog = librefang_runtime::model_catalog::ModelCatalog::default();
+        let (everyapi_suppressed, early_everyapi_provider) = {
+            let mut catalog = librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
             catalog.load_suppressed(
                 &config
                     .home_dir
                     .join("data")
                     .join("suppressed_providers.json"),
             );
-            catalog.is_suppressed("everyapi")
+            (
+                catalog.is_suppressed("everyapi"),
+                catalog.get_provider("everyapi").cloned(),
+            )
         };
         let everyapi_explicit = config.provider_urls.contains_key("everyapi")
             || config.provider_api_keys.contains_key("everyapi")
@@ -397,18 +400,36 @@ impl LibreFangKernel {
         } else {
             crate::everyapi_credentials::resolve(false).ok()
         };
-        let everyapi_explicit_key_available =
-            if let Some(env_var) = config.provider_api_keys.get("everyapi") {
-                std::env::var(env_var).is_ok_and(|key| !key.trim().is_empty())
-            } else if let Some(profile) = config
-                .auth_profiles
-                .get("everyapi")
-                .and_then(|profiles| profiles.iter().min_by_key(|profile| profile.priority))
-            {
-                std::env::var(&profile.api_key_env).is_ok_and(|key| !key.trim().is_empty())
-            } else {
-                std::env::var("EVERYAPI_API_KEY").is_ok_and(|key| !key.trim().is_empty())
-            };
+        let everyapi_explicit_key_available = if config.default_model.provider == "everyapi"
+            && !config.default_model.api_key_env.trim().is_empty()
+        {
+            std::env::var(&config.default_model.api_key_env).is_ok_and(|key| !key.trim().is_empty())
+        } else if let Some(env_var) = config.provider_api_keys.get("everyapi") {
+            std::env::var(env_var).is_ok_and(|key| !key.trim().is_empty())
+        } else if let Some(profile) = config
+            .auth_profiles
+            .get("everyapi")
+            .and_then(|profiles| profiles.iter().min_by_key(|profile| profile.priority))
+        {
+            std::env::var(&profile.api_key_env).is_ok_and(|key| !key.trim().is_empty())
+        } else if let Some(provider) = early_everyapi_provider.as_ref() {
+            std::env::var(&provider.api_key_env).is_ok_and(|key| !key.trim().is_empty())
+        } else {
+            std::env::var("EVERYAPI_API_KEY").is_ok_and(|key| !key.trim().is_empty())
+        };
+        if config.default_model.provider == "everyapi"
+            && everyapi_explicit_key_available
+            && config.default_model.base_url.is_none()
+            && !config.provider_urls.contains_key("everyapi")
+        {
+            config.default_model.base_url = Some(
+                early_everyapi_provider
+                    .as_ref()
+                    .map(|provider| provider.base_url.clone())
+                    .filter(|url| !url.trim().is_empty())
+                    .unwrap_or_else(|| "https://api.everyapi.ai/v1".to_string()),
+            );
+        }
 
         // Resolve "auto" provider: scan environment for the first available API key.
         if config.default_model.provider == "auto" || config.default_model.provider.is_empty() {
@@ -436,7 +457,9 @@ impl LibreFangKernel {
                 config.default_model.provider = provider.to_string();
                 config.default_model.model = model;
                 config.default_model.api_key_env = env_var.to_string();
-            } else if everyapi_explicit_key_available || everyapi_credential.is_some() {
+            } else if !everyapi_suppressed
+                && (everyapi_explicit_key_available || everyapi_credential.is_some())
+            {
                 let model = "claude-sonnet-5".to_string();
                 let auth_source = if everyapi_explicit_key_available {
                     "EveryAPI API key"
@@ -452,6 +475,18 @@ impl LibreFangKernel {
                 config.default_model.provider = "everyapi".to_string();
                 config.default_model.model = model;
                 config.default_model.api_key_env = String::new();
+                if everyapi_explicit_key_available
+                    && config.default_model.base_url.is_none()
+                    && !config.provider_urls.contains_key("everyapi")
+                {
+                    config.default_model.base_url = Some(
+                        early_everyapi_provider
+                            .as_ref()
+                            .map(|provider| provider.base_url.clone())
+                            .filter(|url| !url.trim().is_empty())
+                            .unwrap_or_else(|| "https://api.everyapi.ai/v1".to_string()),
+                    );
+                }
             } else if is_ollama_reachable() {
                 // Ollama is running locally — use the catalog's default model, not a hardcoded one.
                 let model = librefang_runtime::model_catalog::ModelCatalog::default()
@@ -539,7 +574,11 @@ impl LibreFangKernel {
             && !everyapi_suppressed
             && !everyapi_explicit
             && everyapi_credential.is_some();
-        let primary_result = if managed_everyapi_default {
+        let primary_result = if everyapi_suppressed && config.default_model.provider == "everyapi" {
+            Err(LlmError::MissingApiKey(
+                "EveryAPI provider is suppressed".to_string(),
+            ))
+        } else if managed_everyapi_default {
             Ok(
                 Arc::new(crate::everyapi_driver::ManagedEveryApiDriver::new_gated(
                     driver_config.clone(),
@@ -759,6 +798,10 @@ impl LibreFangKernel {
             );
         }
         for fb in &config.fallback_providers {
+            if everyapi_suppressed && fb.provider == "everyapi" {
+                warn!("EveryAPI fallback provider is suppressed; skipping slot");
+                continue;
+            }
             // Governance allowlist (issue #6459): never add a disallowed provider
             // to the boot default_driver fallback chain. This driver seeds
             // aux.primary and the CLI-profile / init-failure primary shortcuts, so

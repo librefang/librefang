@@ -206,6 +206,14 @@ impl LibreFangKernel {
             let reason = cfg.providers.rejection_reason(agent_provider);
             return Err(LibreFangError::CapabilityDenied(reason).into());
         }
+        if agent_provider == "everyapi"
+            && self.llm.model_catalog.load().is_suppressed(agent_provider)
+        {
+            return Err(LibreFangError::CapabilityDenied(
+                "EveryAPI provider is suppressed".to_string(),
+            )
+            .into());
+        }
 
         let has_custom_key = manifest.model.api_key_env.is_some();
         let has_custom_url = manifest.model.base_url.is_some();
@@ -419,6 +427,12 @@ impl LibreFangKernel {
                 } else {
                     fb.provider.clone()
                 };
+                if fb_provider == "everyapi"
+                    && self.llm.model_catalog.load().is_suppressed(&fb_provider)
+                {
+                    warn!("EveryAPI fallback provider is suppressed; skipping slot");
+                    continue;
+                }
                 // Governance allowlist (issue #6459): never add a disallowed
                 // provider to the fallback chain. Fail-closed skip + WARN,
                 // mirroring the init-failure skip below.
