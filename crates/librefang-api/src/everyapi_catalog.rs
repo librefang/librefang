@@ -25,12 +25,8 @@
 //!   gateway's own billing ratios plus a context window for the models that
 //!   declare one.
 //!
-//! Anything the endpoints omit — especially `max_output_tokens` on rows
-//! without `/v1/models.max_output` — is carried forward from the entry the
-//! connect command already wrote, because
-//! [`ModelCatalog::reconcile_live_provider_models`] replaces a provider's
-//! whole non-custom entry set. Refreshing without that carry-forward would
-//! silently delete the metadata the user just imported.
+//! Anything the endpoints omit — especially `max_output_tokens` on rows without `/v1/models.max_output` — is carried forward from the entry the connect command already wrote, because [`ModelCatalog::reconcile_live_provider_models`] replaces a provider's whole non-custom entry set.
+//! Refreshing without that carry-forward would silently delete the metadata the user just imported.
 
 use dashmap::DashMap;
 use librefang_kernel::kernel_api::KernelApi;
@@ -365,9 +361,7 @@ pub(crate) fn infer_modality(supported_endpoint_types: &[String]) -> Modality {
 /// [`ModelCatalog::reconcile_live_provider_models`] deletes every non-custom
 /// entry for the provider and installs this vec wholesale, and its own
 /// carry-forward only donates `tier` / `reasoning_echo_policy` / `aliases`.
-/// Everything else that the gateway does not publish — above all
-/// `max_output_tokens` when `/v1/models.max_output` is absent — has to be
-/// carried forward here or it is destroyed by the very act of refreshing.
+/// Everything else that the gateway does not publish — above all `max_output_tokens` when `/v1/models.max_output` is absent — has to be carried forward here or it is destroyed by the very act of refreshing.
 ///
 /// Ids are emitted bare (`claude-sonnet-5`), matching what the connect command
 /// writes. Prefixing them the way the OpenRouter path does would make the
@@ -623,8 +617,7 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
         )
     };
 
-    // Claim before invoking the managed credential process so a logged-out
-    // account cannot spawn one subprocess for every dashboard/model request.
+    // Claim before invoking the managed credential process so a logged-out account cannot spawn one subprocess for every dashboard/model request.
     try_claim_refresh_slot(&base_url)?;
 
     let mut api_key = if managed {
@@ -666,8 +659,7 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
     let existing: Vec<ModelCatalogEntry> = {
         let catalog = kernel.model_catalog_ref().load();
         // A freshly auto-detected provider has no EveryAPI snapshot yet.
-        // Borrow published limits/capabilities from the built-in entry with
-        // the same model id, matching the existing `everyapi connect` flow.
+        // Borrow published limits/capabilities from the built-in entry with the same model id, matching the existing `everyapi connect` flow.
         metadata_donors(&catalog, &live)
     };
     let entries = build_catalog_entries(&live, &pricing, &existing);

@@ -1,8 +1,7 @@
 //! EveryAPI's local credential-process integration.
 //!
-//! EveryAPI remains the authority for relay-key selection, OAuth refresh,
-//! gateway-region resolution, and rejected-key invalidation. LibreFang only
-//! consumes the versioned machine response and never persists the secret.
+//! EveryAPI remains the authority for relay-key selection, OAuth refresh, gateway-region resolution, and rejected-key invalidation.
+//! LibreFang only consumes the versioned machine response and never persists the secret.
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -13,8 +12,7 @@ use std::time::{Duration, Instant};
 
 const PROTOCOL_VERSION: u64 = 1;
 // EveryAPI's credential refresh HTTP client has a 30-second deadline.
-// Leave enough time for the CLI to persist a rotated refresh token before
-// terminating it; killing at a shorter deadline can strand OAuth credentials.
+// Leave enough time for the CLI to persist a rotated refresh token before terminating it; killing at a shorter deadline can strand OAuth credentials.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_COMMAND_OUTPUT_BYTES: u64 = 64 * 1024;
 const GLOBAL_API_BASE: &str = "https://api.everyapi.ai";
@@ -136,12 +134,9 @@ impl CredentialCommand for SystemCredentialCommand {
                 Ok(None) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    // Do not block the timeout path on pipe-reader joins. A
-                    // misbehaving executable may have spawned descendants
-                    // that inherited stdout/stderr; those descendants can
-                    // keep the pipe open even after the direct child is dead.
-                    // Dropping the JoinHandles detaches the readers, which
-                    // exit when the inherited descriptors finally close.
+                    // Do not block the timeout path on pipe-reader joins.
+                    // A misbehaving executable may have spawned descendants that inherited stdout/stderr; those descendants can keep the pipe open even after the direct child is dead.
+                    // Dropping the JoinHandles detaches the readers, which exit when the inherited descriptors finally close.
                     drop(stdout_reader);
                     drop(stderr_reader);
                     return Err(CredentialError::Timeout);
@@ -215,8 +210,8 @@ fn parse_credential_output(bytes: &[u8]) -> Result<EveryApiCredential, Credentia
 /// Resolve the current default EveryAPI relay credential.
 ///
 /// `invalidate` is used only after an authenticated request returned 401.
-/// It asks EveryAPI to discard an ordinary cached relay key before resolving
-/// again. The caller remains responsible for bounding its retry count.
+/// It asks EveryAPI to discard an ordinary cached relay key before resolving again.
+/// The caller remains responsible for bounding its retry count.
 pub fn resolve(invalidate: bool) -> Result<EveryApiCredential, CredentialError> {
     let config_dir = everyapi_config_dir().ok_or(CredentialError::NotInstalled)?;
     resolve_with(
@@ -229,8 +224,8 @@ pub fn resolve(invalidate: bool) -> Result<EveryApiCredential, CredentialError> 
 
 /// Return the current relay-key-scoped chat model IDs from the EveryAPI CLI.
 ///
-/// This is used only while auto-selecting an initial model. Ordinary requests
-/// do not spawn this extra command.
+/// This is used only while auto-selecting an initial model.
+/// Ordinary requests do not spawn this extra command.
 pub fn resolve_available_models() -> Result<Vec<String>, CredentialError> {
     resolve_available_models_with(&SystemCredentialCommand, &candidate_executables())
 }

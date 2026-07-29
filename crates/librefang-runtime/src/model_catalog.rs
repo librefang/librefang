@@ -455,11 +455,9 @@ impl ModelCatalog {
                 continue;
             }
 
-            // Managed EveryAPI credentials live behind EveryAPI's local
-            // credential-process command rather than in a LibreFang env var.
-            // Preserve the successful boot/runtime discovery marker across
-            // unrelated catalog re-detection passes. The API refresh path
-            // owns demotion when the credential process later disappears.
+            // Managed EveryAPI credentials live behind EveryAPI's local credential-process command rather than in a LibreFang env var.
+            // Preserve the successful boot/runtime discovery marker across unrelated catalog re-detection passes.
+            // The API refresh path owns demotion when the credential process later disappears.
             if provider.id == "everyapi"
                 && provider.auth_status == AuthStatus::AutoDetected
                 && !suppressed
@@ -1081,8 +1079,8 @@ impl ModelCatalog {
     pub fn set_provider_url(&mut self, provider: &str, url: &str) -> bool {
         if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider) {
             p.base_url = url.to_string();
-            // Repointing an auto-managed EveryAPI entry is an explicit user
-            // override. Stop replacing its endpoint with the CLI-managed URL.
+            // Repointing an auto-managed EveryAPI entry is an explicit user override.
+            // Stop replacing its endpoint with the CLI-managed URL.
             if provider == "everyapi" && !p.is_custom {
                 p.is_custom = true;
                 p.auth_status = AuthStatus::Configured;
@@ -1113,8 +1111,7 @@ impl ModelCatalog {
         }
     }
 
-    /// Register or refresh the built-in EveryAPI provider discovered through
-    /// EveryAPI's local credential process.
+    /// Register or refresh the built-in EveryAPI provider discovered through EveryAPI's local credential process.
     ///
     /// User-created provider entries and explicit suppression always win.
     /// Returns `true` only when managed registration is active.
@@ -1154,8 +1151,7 @@ impl ModelCatalog {
     }
 
     /// Register an explicitly configured EveryAPI endpoint/key source.
-    /// Unlike CLI-managed discovery, this entry is custom and is never
-    /// rewritten from the EveryAPI credential process.
+    /// Unlike CLI-managed discovery, this entry is custom and is never rewritten from the EveryAPI credential process.
     pub fn ensure_explicit_everyapi(
         &mut self,
         base_url: &str,

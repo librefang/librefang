@@ -28,9 +28,8 @@ impl EveryApiCredentialSource for LocalEveryApiCredentialSource {
 
 /// Resolves the current EveryAPI relay key for each request.
 ///
-/// A rejected credential is invalidated and resolved once more. The retry is
-/// deliberately bounded to one attempt so an account or gateway failure cannot
-/// create an authentication loop.
+/// A rejected credential is invalidated and resolved once more.
+/// The retry is deliberately bounded to one attempt so an account or gateway failure cannot create an authentication loop.
 pub struct ManagedEveryApiDriver {
     source: Arc<dyn EveryApiCredentialSource>,
     cache: Arc<DriverCache>,
