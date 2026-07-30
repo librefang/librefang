@@ -771,8 +771,17 @@ fn test_agent_spawn_manifest_all_cases() {
     let mut toml;
 
     // Case 1: Minimal - only name and system_prompt
-    toml =
-        build_agent_manifest_toml("test-agent", "You are helpful.", vec![], vec![], false).unwrap();
+    toml = build_agent_manifest_toml(
+        "test-agent",
+        "You are helpful.",
+        vec![],
+        vec![],
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     assert!(toml.contains("name = \"test-agent\""));
     assert!(toml.contains("system_prompt = \"You are helpful.\""));
     assert!(toml.contains("tools = []"));
