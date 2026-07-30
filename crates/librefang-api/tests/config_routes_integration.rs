@@ -1789,8 +1789,7 @@ async fn config_schema_reports_the_paths_the_write_endpoint_refuses() {
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
 
-    // Sanity floor: an empty or near-empty set would make every assertion below
-    // vacuous and would silently restore the old always-editable rendering.
+    // Sanity floor: an empty or near-empty set would make every assertion below vacuous and would silently restore the old always-editable rendering.
     assert!(
         non_writable.len() > 20,
         "x-non-writable enumerated only {} paths — the schema walk is broken",
@@ -1811,8 +1810,7 @@ async fn config_schema_reports_the_paths_the_write_endpoint_refuses() {
         );
     }
 
-    // Writable paths must NOT be listed, or the dashboard would grey out fields
-    // the operator can legitimately change.
+    // Writable paths must NOT be listed, or the dashboard would grey out fields the operator can legitimately change.
     for path in [
         "approval.auto_approve",
         "approval.totp_grace_period_secs",
@@ -1825,8 +1823,7 @@ async fn config_schema_reports_the_paths_the_write_endpoint_refuses() {
         );
     }
 
-    // Cross-check the verdict against the write endpoint for one of each, so the
-    // emitted set cannot drift from the rule it is supposed to mirror.
+    // Cross-check the verdict against the write endpoint for one of each, so the emitted set cannot drift from the rule it is supposed to mirror.
     let (status, _) = send(
         h.app.clone(),
         auth_post_json(
