@@ -1154,11 +1154,13 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
 /// Every schema path `POST /api/config/set` would reject, so the dashboard can render those fields read-only instead of offering an edit that 403s (#6636 observation (d)).
 ///
 /// The server sends the resolved verdict rather than the allowlists themselves.
-/// `is_writable_config_path` is not a lookup — it layers an exact-path list, section prefixes, a depth-2-only rule for some of those prefixes, and a suffix scrub for secret-bearing and privilege-bearing key names. Re-implementing that in TypeScript would make the SPA a third place to keep in sync with the two Rust lists, and it would drift silently: the UI would grey out the wrong fields while the write path kept its own opinion.
+/// `is_writable_config_path` is not a lookup — it layers an exact-path list, section prefixes, a depth-2-only rule for some of those prefixes, and a suffix scrub for secret-bearing and privilege-bearing key names.
+/// Re-implementing that in TypeScript would make the SPA a third place to keep in sync with the two Rust lists, and it would drift silently: the UI would grey out the wrong fields while the write path kept its own opinion.
 ///
 /// The oracle is the schema, not a serialized config, for the same reason `every_writable_allowlist_entry_has_a_backing_config_field` chose it: `config/types.rs` carries dozens of `#[serde(skip_serializing_if = …)]` attributes, so a value walk cannot see a field whose predicate holds for its default.
 ///
-/// Depth mirrors what the allowlist accepts — root leaves and one nested level. A path absent from this set is treated as writable by the dashboard, which is exactly today's behaviour, so an enumeration gap degrades to the status quo rather than to a field the operator cannot edit.
+/// Depth mirrors what the allowlist accepts — root leaves and one nested level.
+/// A path absent from this set is treated as writable by the dashboard, which is exactly today's behaviour, so an enumeration gap degrades to the status quo rather than to a field the operator cannot edit.
 fn non_writable_schema_paths(root: &serde_json::Value) -> Vec<String> {
     /// Name of the definition a property `$ref`s, directly or through `allOf` / `anyOf`.
     fn referenced_definition(prop: &serde_json::Value) -> Option<&str> {

@@ -1774,7 +1774,8 @@ async fn ready_ignores_an_embedding_provider_introduced_by_a_later_config_reload
 ///
 /// Without it the SPA rendered an editable control for a deliberately non-writable field, the operator changed it, and the save came back 403 with no explanation — reported as "the per-field save appears to succeed, config.toml is unchanged" (#6636 observation (d)).
 ///
-/// The server sends the resolved verdict rather than the allowlists, because writability is decided by an exact-path list, section prefixes, a depth-2-only rule and a secret-suffix scrub; re-deriving that in TypeScript would make the SPA a third place to keep in sync. This test is the guard that the emitted set agrees with the write path itself.
+/// The server sends the resolved verdict rather than the allowlists, because writability is decided by an exact-path list, section prefixes, a depth-2-only rule and a secret-suffix scrub; re-deriving that in TypeScript would make the SPA a third place to keep in sync.
+/// This test is the guard that the emitted set agrees with the write path itself.
 #[tokio::test(flavor = "multi_thread")]
 async fn config_schema_reports_the_paths_the_write_endpoint_refuses() {
     let h = boot_router_with_api_key(API_KEY).await;
