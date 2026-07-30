@@ -5,10 +5,13 @@
 //! `ALWAYS_NATIVE_TOOLS` shortlist used in lazy-load mode (#3044).
 
 #[cfg(feature = "media")]
-use super::media::SUPPORTED_AUDIO_EXTS_DOC;
+use super::media::{SUPPORTED_AUDIO_EXTS_DOC, SUPPORTED_VIDEO_EXTS_DOC};
 #[cfg(not(feature = "media"))]
 #[allow(dead_code)]
 const SUPPORTED_AUDIO_EXTS_DOC: &str = "(media feature disabled)";
+#[cfg(not(feature = "media"))]
+#[allow(dead_code)]
+const SUPPORTED_VIDEO_EXTS_DOC: &str = "(media feature disabled)";
 use librefang_types::tool::ToolDefinition;
 use std::sync::OnceLock;
 
@@ -785,12 +788,13 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             },
             ToolDefinition {
                 name: tool_name::MEDIA_TRANSCRIBE.to_string(),
-                description: "Transcribe audio to text using speech-to-text. Auto-selects the best available provider (Groq Whisper or OpenAI Whisper). Returns the transcript.".to_string(),
+                description: "Transcribe audio to text using speech-to-text. Auto-selects the best available provider (Groq Whisper or OpenAI Whisper). Also accepts video containers — the audio track is extracted server-side and the video is discarded. Returns the transcript.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": format!("Path to the audio file (relative to workspace). Supported: {SUPPORTED_AUDIO_EXTS_DOC}.") },
-                        "language": { "type": "string", "description": "Optional ISO-639-1 language code (e.g., 'en', 'es', 'ja')" }
+                        "path": { "type": "string", "description": format!("Path to the audio or video file (relative to workspace). Audio: {SUPPORTED_AUDIO_EXTS_DOC}. Video (audio track extracted, video discarded): {SUPPORTED_VIDEO_EXTS_DOC}.") },
+                        "language": { "type": "string", "description": "Optional ISO-639-1 language code (e.g., 'en', 'es', 'ja'). Improves accuracy when known; the provider auto-detects when omitted." },
+                        "prompt": { "type": "string", "description": "Optional context to guide transcription — domain vocabulary, proper nouns, or acronyms likely to appear. Also improves punctuation and casing on long recordings." }
                     },
                     "required": ["path"]
                 }),
@@ -1033,12 +1037,13 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             },
             ToolDefinition {
                 name: tool_name::SPEECH_TO_TEXT.to_string(),
-                description: format!("Transcribe audio to text using speech-to-text. Auto-selects Groq Whisper or OpenAI Whisper. Supported formats: {SUPPORTED_AUDIO_EXTS_DOC}."),
+                description: format!("Transcribe audio to text using speech-to-text. Auto-selects Groq Whisper or OpenAI Whisper. Supported audio formats: {SUPPORTED_AUDIO_EXTS_DOC}. Also accepts video containers ({SUPPORTED_VIDEO_EXTS_DOC}) — the audio track is extracted server-side and the video is discarded."),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "Path to the audio file (relative to workspace)" },
-                        "language": { "type": "string", "description": "Optional ISO-639-1 language code (e.g., 'en', 'es', 'ja')" }
+                        "path": { "type": "string", "description": "Path to the audio or video file (relative to workspace)" },
+                        "language": { "type": "string", "description": "Optional ISO-639-1 language code (e.g., 'en', 'es', 'ja'). Improves accuracy when known; the provider auto-detects when omitted." },
+                        "prompt": { "type": "string", "description": "Optional context to guide transcription — domain vocabulary, proper nouns, or acronyms likely to appear. Also improves punctuation and casing on long recordings." }
                     },
                     "required": ["path"]
                 }),

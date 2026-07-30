@@ -2293,7 +2293,12 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             size_bytes,
         };
 
-        match self.kernel.media().transcribe_audio(&attachment).await {
+        match self
+            .kernel
+            .media()
+            .transcribe_audio(&attachment, None, None)
+            .await
+        {
             Ok(result) => Ok(Some(result.description)),
             Err(reason) => Err(reason),
         }

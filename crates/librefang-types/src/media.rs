@@ -124,6 +124,16 @@ pub struct MediaConfig {
     pub audio_provider: Option<String>,
     /// Preferred audio transcription model (provider default if None).
     pub audio_model: Option<String>,
+    /// Fallback ISO-639-1 language hint for transcription, used when a
+    /// `media_transcribe` / `speech_to_text` call omits its own `language`
+    /// (#6678). Per-call value always wins; this only applies when the tool
+    /// call left the field unset.
+    pub audio_language: Option<String>,
+    /// Fallback transcription prompt (domain vocabulary, proper nouns) used
+    /// when a `media_transcribe` / `speech_to_text` call omits its own
+    /// `prompt` (#6678). Per-call value always wins; this only applies when
+    /// the tool call left the field unset.
+    pub audio_prompt: Option<String>,
     /// Custom / self-hosted STT endpoint configuration.
     ///
     /// When `audio_provider` is set to a name that is not one of the
@@ -146,6 +156,8 @@ impl Default for MediaConfig {
             image_model: None,
             audio_provider: None,
             audio_model: None,
+            audio_language: None,
+            audio_prompt: None,
             custom_stt: CustomSttConfig::default(),
         }
     }
@@ -204,7 +216,20 @@ pub const ALLOWED_AUDIO_TYPES: &[&str] = &[
 ];
 
 /// Allowed video MIME types.
-pub const ALLOWED_VIDEO_TYPES: &[&str] = &["video/mp4", "video/quicktime", "video/webm"];
+///
+/// `video/x-matroska` (`.mkv`) and `video/x-msvideo` (`.avi`) are audio-only
+/// consumers here (#6679: `media_transcribe` / `speech_to_text` extract the
+/// audio track and discard the video), not general video-understanding
+/// inputs — `describe_video` only ever builds `video/mp4` / `video/quicktime`
+/// / `video/webm` attachments today, so widening this list has no effect
+/// there.
+pub const ALLOWED_VIDEO_TYPES: &[&str] = &[
+    "video/mp4",
+    "video/quicktime",
+    "video/webm",
+    "video/x-matroska",
+    "video/x-msvideo",
+];
 
 /// Extract the bare `type/subtype` from a MIME string, discarding parameters
 /// and whitespace (RFC 2045). E.g. `"audio/ogg; codecs=opus"` → `"audio/ogg"`.

@@ -4,7 +4,7 @@
 
 use super::error::{ToolError, ToolResult};
 use super::resolve_file_path_ext;
-use librefang_types::media::{MAX_AUDIO_BYTES, MAX_IMAGE_BYTES};
+use librefang_types::media::{MAX_AUDIO_BYTES, MAX_IMAGE_BYTES, MAX_VIDEO_BYTES};
 use std::path::Path;
 use tracing::warn;
 
@@ -24,8 +24,8 @@ fn resolve_media_path(
 }
 
 const ALLOWED_MEDIA_EXTS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "mp4", "mp3", "wav", "ogg", "oga", "flac",
-    "m4a", "webm", "pdf",
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "mp4", "mov", "mkv", "avi", "mp3", "wav",
+    "ogg", "oga", "flac", "m4a", "webm", "pdf",
 ];
 
 fn validate_ext(ext: &str) -> Result<(), ToolError> {
@@ -122,6 +122,12 @@ pub(super) async fn tool_media_describe(
 /// so the agent-facing format list cannot drift from the actual mapping.
 pub(super) const SUPPORTED_AUDIO_EXTS_DOC: &str = "mp3, wav, ogg, oga, flac, m4a, webm";
 
+/// Human-readable list of video-container extensions accepted by
+/// `video_mime_from_ext` (#6679) — kept separate from
+/// `SUPPORTED_AUDIO_EXTS_DOC` because these route through a different
+/// mapping function and a different budget (`MAX_VIDEO_BYTES`).
+pub(super) const SUPPORTED_VIDEO_EXTS_DOC: &str = "mp4, mov, mkv, avi";
+
 /// Map an audio file extension to the MIME type expected by
 /// `MediaEngine::transcribe_audio`. `.oga` is intentionally mapped to
 /// `audio/oga` (NOT `audio/ogg`) so the downstream transcode path in
@@ -141,14 +147,72 @@ pub(super) fn audio_mime_from_ext(ext: &str) -> Option<&'static str> {
     }
 }
 
-/// Transcribe audio to text using speech-to-text.
+/// Map a video-container-only extension to its MIME type (#6679).
+///
+/// `.webm` is deliberately absent here — it is also a valid audio container
+/// and already reaches the provider unchanged via `audio_mime_from_ext`, so
+/// routing it through the video (extract-then-transcode) path would only add
+/// an unnecessary ffmpeg hop. Only extensions that hold nothing *but* video
+/// belong on this list.
+pub(super) fn video_mime_from_ext(ext: &str) -> Option<&'static str> {
+    match ext {
+        "mp4" => Some("video/mp4"),
+        "mov" => Some("video/quicktime"),
+        "mkv" => Some("video/x-matroska"),
+        "avi" => Some("video/x-msvideo"),
+        _ => None,
+    }
+}
+
+/// Build the audio (or video, extracted server-side) attachment for a
+/// transcription tool call. Shared by `tool_media_transcribe` and
+/// `tool_speech_to_text` so the two tools admit the same set of extensions
+/// and budget video containers against `MAX_VIDEO_BYTES` rather than the
+/// tighter `MAX_AUDIO_BYTES` (#6678, #6679).
+async fn build_transcription_attachment(
+    resolved: &Path,
+    ext: &str,
+) -> Result<librefang_types::media::MediaAttachment, ToolError> {
+    use base64::Engine;
+
+    if let Some(video_mime) = video_mime_from_ext(ext) {
+        let data = read_with_size_limit(resolved, MAX_VIDEO_BYTES).await?;
+        return Ok(librefang_types::media::MediaAttachment {
+            media_type: librefang_types::media::MediaType::Video,
+            mime_type: video_mime.to_string(),
+            source: librefang_types::media::MediaSource::Base64 {
+                data: base64::engine::general_purpose::STANDARD.encode(&data),
+                mime_type: video_mime.to_string(),
+            },
+            size_bytes: data.len() as u64,
+        });
+    }
+
+    let audio_mime = audio_mime_from_ext(ext).ok_or_else(|| ToolError::InvalidParameter {
+        name: "path",
+        reason: format!(
+            "Unsupported audio format: .{ext} (supported: {SUPPORTED_AUDIO_EXTS_DOC}, {SUPPORTED_VIDEO_EXTS_DOC})"
+        ),
+    })?;
+    let data = read_with_size_limit(resolved, MAX_AUDIO_BYTES).await?;
+    Ok(librefang_types::media::MediaAttachment {
+        media_type: librefang_types::media::MediaType::Audio,
+        mime_type: audio_mime.to_string(),
+        source: librefang_types::media::MediaSource::Base64 {
+            data: base64::engine::general_purpose::STANDARD.encode(&data),
+            mime_type: audio_mime.to_string(),
+        },
+        size_bytes: data.len() as u64,
+    })
+}
+
+/// Transcribe audio (or a video container's audio track) to text.
 pub(super) async fn tool_media_transcribe(
     input: &serde_json::Value,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
     workspace_root: Option<&Path>,
     additional_roots: &[&Path],
 ) -> ToolResult {
-    use base64::Engine;
     let engine = media_engine.ok_or(ToolError::Unavailable("Media engine"))?;
     let raw_path = input["path"]
         .as_str()
@@ -161,25 +225,13 @@ pub(super) async fn tool_media_transcribe(
         .unwrap_or("")
         .to_lowercase();
     validate_ext(&ext)?;
-    let mime = audio_mime_from_ext(&ext).ok_or_else(|| ToolError::InvalidParameter {
-        name: "path",
-        reason: format!("Unsupported audio format: .{ext}"),
-    })?;
 
-    let data = read_with_size_limit(&resolved, MAX_AUDIO_BYTES).await?;
-
-    let attachment = librefang_types::media::MediaAttachment {
-        media_type: librefang_types::media::MediaType::Audio,
-        mime_type: mime.to_string(),
-        source: librefang_types::media::MediaSource::Base64 {
-            data: base64::engine::general_purpose::STANDARD.encode(&data),
-            mime_type: mime.to_string(),
-        },
-        size_bytes: data.len() as u64,
-    };
+    let attachment = build_transcription_attachment(&resolved, &ext).await?;
+    let language = input["language"].as_str();
+    let prompt = input["prompt"].as_str();
 
     let understanding = engine
-        .transcribe_audio(&attachment)
+        .transcribe_audio(&attachment, language, prompt)
         .await
         .map_err(ToolError::upstream_msg)?;
     Ok(serde_json::to_string_pretty(&understanding)?)
@@ -928,15 +980,17 @@ pub(super) async fn tool_speech_to_text(
     workspace_root: Option<&Path>,
     additional_roots: &[&Path],
 ) -> ToolResult {
+    use base64::Engine;
+    use librefang_types::media::{MediaAttachment, MediaSource, MediaType};
+
     let engine = media_engine.ok_or(ToolError::Unavailable("Media engine"))?;
     let raw_path = input["path"]
         .as_str()
         .ok_or(ToolError::MissingParameter("path"))?;
-    let _language = input["language"].as_str();
+    let language = input["language"].as_str();
+    let prompt = input["prompt"].as_str();
 
     let resolved = resolve_media_path(raw_path, workspace_root, additional_roots)?;
-
-    let data = read_with_size_limit(&resolved, MAX_AUDIO_BYTES).await?;
 
     // Determine MIME type from extension. Unknown extensions fall back to
     // audio/mpeg here (the speech_to_text path is permissive); the strict
@@ -946,24 +1000,38 @@ pub(super) async fn tool_speech_to_text(
         .and_then(|e| e.to_str())
         .unwrap_or("mp3")
         .to_lowercase();
-    let mime_type = audio_mime_from_ext(&ext).unwrap_or("audio/mpeg");
 
-    use librefang_types::media::{MediaAttachment, MediaSource, MediaType};
-    let attachment = MediaAttachment {
-        media_type: MediaType::Audio,
-        mime_type: mime_type.to_string(),
-        source: MediaSource::Base64 {
-            data: {
-                use base64::Engine;
-                base64::engine::general_purpose::STANDARD.encode(&data)
+    // A recognised video container (#6679) still needs the ffmpeg extraction
+    // path and the wider `MAX_VIDEO_BYTES` budget — sending its bytes under
+    // a fabricated "audio/mpeg" label, which the permissive branch below
+    // would otherwise do, does not make Whisper able to decode them.
+    let attachment = if let Some(video_mime) = video_mime_from_ext(&ext) {
+        let data = read_with_size_limit(&resolved, MAX_VIDEO_BYTES).await?;
+        MediaAttachment {
+            media_type: MediaType::Video,
+            mime_type: video_mime.to_string(),
+            source: MediaSource::Base64 {
+                data: base64::engine::general_purpose::STANDARD.encode(&data),
+                mime_type: video_mime.to_string(),
             },
+            size_bytes: data.len() as u64,
+        }
+    } else {
+        let data = read_with_size_limit(&resolved, MAX_AUDIO_BYTES).await?;
+        let mime_type = audio_mime_from_ext(&ext).unwrap_or("audio/mpeg");
+        MediaAttachment {
+            media_type: MediaType::Audio,
             mime_type: mime_type.to_string(),
-        },
-        size_bytes: data.len() as u64,
+            source: MediaSource::Base64 {
+                data: base64::engine::general_purpose::STANDARD.encode(&data),
+                mime_type: mime_type.to_string(),
+            },
+            size_bytes: data.len() as u64,
+        }
     };
 
     let understanding = engine
-        .transcribe_audio(&attachment)
+        .transcribe_audio(&attachment, language, prompt)
         .await
         .map_err(ToolError::upstream_msg)?;
 

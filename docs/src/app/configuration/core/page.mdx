@@ -320,6 +320,9 @@ max_concurrency = 2
 | `max_concurrency` | usize | `2` | Maximum number of concurrent media processing tasks. |
 | `image_provider` | string or null | `null` | Preferred provider for image description. Auto-detected from available providers if `null`. |
 | `audio_provider` | string or null | `null` | Preferred provider for audio transcription. Auto-detected from available providers if `null`. |
+| `audio_model` | string or null | `null` | Preferred model for audio transcription. Provider default if `null`. |
+| `audio_language` | string or null | `null` | Fallback ISO-639-1 language hint for `media_transcribe` / `speech_to_text` calls that omit their own `language`. The per-call value always wins. |
+| `audio_prompt` | string or null | `null` | Fallback transcription prompt (domain vocabulary, proper nouns) for calls that omit their own `prompt`. The per-call value always wins. |
 
 ---
 

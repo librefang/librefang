@@ -318,6 +318,9 @@ max_concurrency = 2
 | `max_concurrency` | usize | `2` | 并发媒体处理任务的最大数量。 |
 | `image_provider` | string 或 null | `null` | 首选的图片描述提供商。为 `null` 时根据可用提供商自动检测。 |
 | `audio_provider` | string 或 null | `null` | 首选的音频转录提供商。为 `null` 时根据可用提供商自动检测。 |
+| `audio_model` | string 或 null | `null` | 首选的音频转录模型。为 `null` 时使用提供商的默认模型。 |
+| `audio_language` | string 或 null | `null` | 当 `media_transcribe` / `speech_to_text` 调用未指定 `language` 时使用的兜底 ISO-639-1 语言代码。单次调用的值始终优先。 |
+| `audio_prompt` | string 或 null | `null` | 当调用未指定 `prompt` 时使用的兜底转录提示（专有名词、领域词汇等）。单次调用的值始终优先。 |
 
 ---
 

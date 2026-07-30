@@ -176,7 +176,12 @@ pub async fn upload_file(
             },
             size_bytes: size as u64,
         };
-        match state.kernel.media().transcribe_audio(&attachment).await {
+        match state
+            .kernel
+            .media()
+            .transcribe_audio(&attachment, None, None)
+            .await
+        {
             Ok(result) => {
                 tracing::info!(chars = result.description.len(), provider = %result.provider, "Audio transcribed");
                 Some(result.description)

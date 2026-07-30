@@ -197,10 +197,12 @@ impl MediaEngine {
     pub async fn transcribe_audio(
         &self,
         attachment: &MediaAttachment,
+        language: Option<&str>,
+        prompt: Option<&str>,
     ) -> Result<MediaUnderstanding, String> {
         attachment.validate()?;
-        if attachment.media_type != MediaType::Audio {
-            return Err("Expected audio attachment".into());
+        if attachment.media_type != MediaType::Audio && attachment.media_type != MediaType::Video {
+            return Err("Expected audio or video attachment".into());
         }
 
         let explicit = self.config.audio_provider.is_some();
@@ -223,27 +225,32 @@ impl MediaEngine {
 
         let _permit = self.semaphore.acquire().await.map_err(|e| e.to_string())?;
 
-        // Read audio bytes from source
+        // Read attachment bytes from source. For a Video attachment these are
+        // the still-muxed container bytes; the video branch below extracts
+        // the audio track before anything past it runs.
         let mut audio_bytes = match &attachment.source {
-            MediaSource::FilePath { path } => tokio::fs::read(path)
-                .await
-                .map_err(|e| format!("Failed to read audio file '{}': {}", path, e))?,
+            MediaSource::FilePath { path } => tokio::fs::read(path).await.map_err(|e| {
+                format!(
+                    "Failed to read {} file '{path}': {e}",
+                    attachment.media_type
+                )
+            })?,
             MediaSource::Base64 { data, .. } => {
                 use base64::Engine;
                 base64::engine::general_purpose::STANDARD
                     .decode(data)
-                    .map_err(|e| format!("Failed to decode base64 audio: {}", e))?
+                    .map_err(|e| {
+                        format!("Failed to decode base64 {}: {e}", attachment.media_type)
+                    })?
             }
             MediaSource::Url { url } => {
                 return Err(format!(
-                    "URL-based audio source not supported for transcription: {}",
-                    url
+                    "URL-based source not supported for transcription: {url}"
                 ));
             }
             other => {
                 return Err(format!(
-                    "Unsupported audio source variant for transcription: {:?}",
-                    other
+                    "Unsupported source variant for transcription: {other:?}"
                 ));
             }
         };
@@ -262,6 +269,25 @@ impl MediaEngine {
             // or unknown (e.g. `application/octet-stream`).
             source_ext.clone().unwrap_or_else(|| "wav".to_string())
         });
+
+        // Video containers (#6679): drop the video stream and re-encode
+        // whatever audio codec the container held to Ogg/Opus, the same
+        // target the `.oga` path below produces — so the whisper-upload code
+        // that follows never has to know a video container was involved.
+        if attachment.media_type == MediaType::Video {
+            let extracted = extract_video_audio_track(&audio_bytes)
+                .await
+                .map_err(|e| format!("ffmpeg audio extraction failed: {e}"))?;
+            info!(
+                original_size = audio_bytes.len(),
+                extracted_size = extracted.len(),
+                container = %ext,
+                "Extracted audio track from video before Whisper upload"
+            );
+            audio_bytes = extracted;
+            ext = "ogg".to_string();
+            mime = "audio/ogg".to_string();
+        }
 
         // Telegram voice notes arrive as `.oga` / `audio/oga`. Whisper's
         // format probe rejects both — re-encode to Ogg/Opus so the same
@@ -303,6 +329,14 @@ impl MediaEngine {
 
         info!(provider, model, filename = %filename, size = audio_bytes.len(), "Sending audio for transcription");
 
+        // Per-call value first, `[media]` operator default as the fallback —
+        // same precedence `tool_text_to_speech` already uses for TTS (#6678).
+        // Only the whisper-protocol arms below receive these: Gemini and
+        // ElevenLabs are separate provider contracts (multimodal content /
+        // `model_id` form field) with no equivalent parameter here.
+        let effective_language = language.or(self.config.audio_language.as_deref());
+        let effective_prompt = prompt.or(self.config.audio_prompt.as_deref());
+
         // Capture the provider dispatch as a `Result` so any failure is counted
         // with its provider/model before propagating — the STT analogue of the
         // vision "hosted model silently retired" signal (#6538).
@@ -311,8 +345,17 @@ impl MediaEngine {
                 // Whisper-compatible providers (OpenAI multipart protocol)
                 "groq" | "openai" | "minimax" | "fireworks" | "together" | "siliconflow" => {
                     let (api_url, api_key) = whisper_provider_config(provider)?;
-                    whisper_transcribe(&api_url, &api_key, model, audio_bytes, &filename, &mime)
-                        .await
+                    whisper_transcribe(WhisperTranscribeParams {
+                        api_url: &api_url,
+                        api_key: &api_key,
+                        model,
+                        audio_bytes,
+                        filename: &filename,
+                        mime: &mime,
+                        language: effective_language,
+                        prompt: effective_prompt,
+                    })
+                    .await
                 }
                 // Gemini — multimodal content generation with audio input
                 "gemini" => gemini_transcribe(model, audio_bytes, &mime).await,
@@ -321,8 +364,17 @@ impl MediaEngine {
                 // Custom / self-hosted OpenAI-compatible Whisper endpoint
                 _other => {
                     let (api_url, api_key) = custom_stt_config(provider, &self.config.custom_stt)?;
-                    whisper_transcribe(&api_url, &api_key, model, audio_bytes, &filename, &mime)
-                        .await
+                    whisper_transcribe(WhisperTranscribeParams {
+                        api_url: &api_url,
+                        api_key: &api_key,
+                        model,
+                        audio_bytes,
+                        filename: &filename,
+                        mime: &mime,
+                        language: effective_language,
+                        prompt: effective_prompt,
+                    })
+                    .await
                 }
             }
         }
@@ -415,7 +467,7 @@ impl MediaEngine {
                 };
                 match attachment.media_type {
                     MediaType::Image => engine.describe_image(&attachment).await,
-                    MediaType::Audio => engine.transcribe_audio(&attachment).await,
+                    MediaType::Audio => engine.transcribe_audio(&attachment, None, None).await,
                     MediaType::Video => engine.describe_video(&attachment).await,
                     other => Err(format!("Unsupported media type: {}", other)),
                 }
@@ -762,24 +814,53 @@ fn custom_stt_config(
     Ok((cfg.base_url.clone(), api_key))
 }
 
-/// Transcribe using an OpenAI-compatible Whisper endpoint.
-async fn whisper_transcribe(
-    api_url: &str,
-    api_key: &str,
-    model: &str,
+/// Parameters for `whisper_transcribe`. A plain field bag rather than a
+/// builder: this is a private helper with two call sites in this module,
+/// not a public request type — the struct exists only to stay under
+/// clippy's argument-count lint.
+struct WhisperTranscribeParams<'a> {
+    api_url: &'a str,
+    api_key: &'a str,
+    model: &'a str,
     audio_bytes: Vec<u8>,
-    filename: &str,
-    mime: &str,
-) -> Result<String, String> {
+    filename: &'a str,
+    mime: &'a str,
+    language: Option<&'a str>,
+    prompt: Option<&'a str>,
+}
+
+/// Transcribe using an OpenAI-compatible Whisper endpoint.
+///
+/// `language` and `prompt` are emitted only when set (#6678): an install
+/// that configures neither sees byte-identical requests to before either
+/// parameter existed.
+async fn whisper_transcribe(params: WhisperTranscribeParams<'_>) -> Result<String, String> {
+    let WhisperTranscribeParams {
+        api_url,
+        api_key,
+        model,
+        audio_bytes,
+        filename,
+        mime,
+        language,
+        prompt,
+    } = params;
+
     let file_part = reqwest::multipart::Part::bytes(audio_bytes)
         .file_name(filename.to_string())
         .mime_str(mime)
         .map_err(|e| format!("Failed to set MIME type: {}", e))?;
 
-    let form = reqwest::multipart::Form::new()
+    let mut form = reqwest::multipart::Form::new()
         .part("file", file_part)
         .text("model", model.to_string())
         .text("response_format", "text");
+    if let Some(lang) = language {
+        form = form.text("language", lang.to_string());
+    }
+    if let Some(p) = prompt {
+        form = form.text("prompt", p.to_string());
+    }
 
     let client = librefang_http::proxied_client();
     // Only add Authorization header when an API key is provided. Keyless
@@ -948,38 +1029,31 @@ fn mime_to_ext(mime: &str) -> Option<String> {
     }
 }
 
-/// Re-encode `.oga` into Ogg/Opus. Input streams in via stdin, output
-/// streams out of stdout — no scratch files on disk. Same Opus payload,
-/// just re-packetised.
+/// Run `ffmpeg` with the given arguments, feeding `input_bytes` on stdin and
+/// collecting stdout — no scratch files on disk. Shared by every ffmpeg-based
+/// transcode in this module so the spawn / pipe / timeout / kill-on-timeout
+/// plumbing exists once.
 ///
-/// Requires `ffmpeg` on `PATH`. 30 s wall-clock cap; on timeout the child
-/// is killed and reaped explicitly so there are no zombies.
-async fn transcode_oga_to_ogg_opus(input_bytes: &[u8]) -> Result<Vec<u8>, String> {
+/// `install_hint` names the feature that needs ffmpeg, so the "not on PATH"
+/// error tells the operator what stopped working rather than just that a
+/// subprocess failed to spawn. 30 s wall-clock cap; on timeout the child is
+/// killed and reaped explicitly so there are no zombies.
+async fn run_ffmpeg_pipe(
+    args: &[&str],
+    input_bytes: &[u8],
+    install_hint: &str,
+) -> Result<Vec<u8>, String> {
     use std::process::Stdio;
 
     let mut child = tokio::process::Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "ogg",
-            "-i",
-            "pipe:0",
-            "-vn",
-            "-c:a",
-            "copy",
-            "-f",
-            "ogg",
-            "pipe:1",
-        ])
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| {
             format!(
-                "ffmpeg not available ({e}) — install it (brew install ffmpeg / apt install ffmpeg) to process .oga voice notes"
+                "ffmpeg not available ({e}) — install it (brew install ffmpeg / apt install ffmpeg) to {install_hint}"
             )
         })?;
 
@@ -1040,6 +1114,67 @@ async fn transcode_oga_to_ogg_opus(input_bytes: &[u8]) -> Result<Vec<u8>, String
         return Err("ffmpeg produced an empty output stream".to_string());
     }
     Ok(out)
+}
+
+/// Re-encode `.oga` into Ogg/Opus. Same Opus payload, just re-packetised —
+/// `-c:a copy` avoids a re-encode since the input is already Opus.
+async fn transcode_oga_to_ogg_opus(input_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    run_ffmpeg_pipe(
+        &[
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "ogg",
+            "-i",
+            "pipe:0",
+            "-vn",
+            "-c:a",
+            "copy",
+            "-f",
+            "ogg",
+            "pipe:1",
+        ],
+        input_bytes,
+        "process .oga voice notes",
+    )
+    .await
+}
+
+/// Extract the audio track from a video container and re-encode it to
+/// Ogg/Opus (#6679). Unlike the `.oga` re-mux above, this always re-encodes
+/// (`-c:a libopus`) rather than copying: `mp4`/`mov`/`mkv`/`avi` carry
+/// whatever audio codec the source used (AAC, PCM, Vorbis, AC3, …), and
+/// re-encoding to one known-good target is what lets the same Whisper-upload
+/// path handle all of them without per-codec branching. No `-f` is given on
+/// the input side — ffmpeg auto-detects the container from its content,
+/// which is what makes this work across `mp4`/`mov`/`mkv`/`avi` uniformly
+/// rather than needing a format hint per extension.
+async fn extract_video_audio_track(input_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    run_ffmpeg_pipe(
+        &[
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-vn",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "32k",
+            "-ar",
+            "48000",
+            "-ac",
+            "1",
+            "-f",
+            "ogg",
+            "pipe:1",
+        ],
+        input_bytes,
+        "extract audio from video files",
+    )
+    .await
 }
 
 /// Detect which audio transcription provider is available.
@@ -1307,6 +1442,207 @@ mod tests {
         );
     }
 
+    /// #6679: a synthetic mp4 (color bars + a tone, generated by ffmpeg
+    /// itself via `-f lavfi` so the test needs no bundled fixture) must come
+    /// out as a playable Ogg/Opus stream with the video stream dropped.
+    #[tokio::test]
+    async fn extract_video_audio_track_smoke() {
+        if !ffmpeg_available() {
+            eprintln!("ffmpeg not on PATH — skipping");
+            return;
+        }
+        let gen = tokio::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=64x64:rate=10",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440",
+                "-t",
+                "0.5",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "aac",
+                "-f",
+                "mp4",
+                "-movflags",
+                "frag_keyframe+empty_moov",
+                "pipe:1",
+            ])
+            .output()
+            .await
+            .expect("ffmpeg must run");
+        assert!(
+            gen.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&gen.stderr)
+        );
+        let mp4_bytes = gen.stdout;
+        assert!(!mp4_bytes.is_empty());
+
+        let out = extract_video_audio_track(&mp4_bytes)
+            .await
+            .expect("extraction must succeed on a valid mp4 with an audio track");
+        assert!(!out.is_empty());
+        assert_eq!(&out[..4], b"OggS", "output must be an Ogg container");
+
+        // The extracted stream must be smaller than the source mp4 — proof
+        // the video track (64x64 color bars) was actually dropped rather
+        // than the whole container being passed through unchanged.
+        assert!(
+            out.len() < mp4_bytes.len(),
+            "extracted audio-only stream ({} bytes) should be smaller than the \
+             source mp4 with video ({} bytes)",
+            out.len(),
+            mp4_bytes.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_video_audio_track_rejects_non_video_input() {
+        if !ffmpeg_available() {
+            eprintln!("ffmpeg not on PATH — skipping");
+            return;
+        }
+        let garbage: Vec<u8> = (0..=255u8).collect();
+        let err = extract_video_audio_track(&garbage).await.unwrap_err();
+        assert!(
+            err.contains("ffmpeg exited") || err.contains("empty output"),
+            "expected ffmpeg to reject non-video junk, got: {err}"
+        );
+    }
+
+    // ── whisper_transcribe language / prompt (#6678) ─────────────────────
+    //
+    // No HTTP mock crate is a dependency of this crate, so these spin up a
+    // raw `TcpListener`, read the request `whisper_transcribe` actually
+    // sends, and answer with a minimal valid response — same shape as the
+    // raw-socket pattern already used in `librefang-runtime::a2a` tests.
+
+    /// Read one HTTP/1.1 request off `stream`: headers, then exactly
+    /// `Content-Length` more bytes for the body. Good enough for a
+    /// single-shot local test server; not a general HTTP parser.
+    async fn read_one_http_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt as _};
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let header_end = loop {
+            let n = stream.read(&mut chunk).await.expect("read request chunk");
+            assert!(n > 0, "connection closed before headers completed");
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+        let header_text = String::from_utf8_lossy(&buf[..header_end]);
+        let content_length: usize = header_text
+            .lines()
+            .find_map(|l| {
+                l.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(|v| v.trim().to_string())
+            })
+            .and_then(|v| v.parse().ok())
+            .expect("request must carry Content-Length");
+        while buf.len() < header_end + content_length {
+            let n = stream.read(&mut chunk).await.expect("read request body");
+            assert!(n > 0, "connection closed before body completed");
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let _ = stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
+            .await;
+        let _ = stream.shutdown().await;
+        buf
+    }
+
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    #[tokio::test]
+    async fn whisper_transcribe_sends_language_and_prompt_when_set() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_one_http_request(&mut stream).await
+        });
+
+        let url = format!("http://{addr}/v1/audio/transcriptions");
+        let result = whisper_transcribe(WhisperTranscribeParams {
+            api_url: &url,
+            api_key: "test-key",
+            model: "whisper-1",
+            audio_bytes: b"fake audio bytes".to_vec(),
+            filename: "audio.mp3",
+            mime: "audio/mpeg",
+            language: Some("en"),
+            prompt: Some("proper nouns: LibreFang, Whisper"),
+        })
+        .await;
+
+        let captured = server.await.unwrap();
+        let body = String::from_utf8_lossy(&captured);
+
+        assert_eq!(result.as_deref(), Ok("hello"));
+        assert!(
+            body.contains("name=\"language\"") && body.contains("\r\n\r\nen\r\n"),
+            "request body must carry the language field:\n{body}"
+        );
+        assert!(
+            body.contains("name=\"prompt\"") && body.contains("proper nouns: LibreFang, Whisper"),
+            "request body must carry the prompt field:\n{body}"
+        );
+    }
+
+    /// The doc comment on `whisper_transcribe` promises a byte-identical
+    /// request when neither parameter is set — assert the request the
+    /// server actually received omits both field names entirely, not just
+    /// that the call succeeds.
+    #[tokio::test]
+    async fn whisper_transcribe_omits_language_and_prompt_when_unset() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_one_http_request(&mut stream).await
+        });
+
+        let url = format!("http://{addr}/v1/audio/transcriptions");
+        let result = whisper_transcribe(WhisperTranscribeParams {
+            api_url: &url,
+            api_key: "test-key",
+            model: "whisper-1",
+            audio_bytes: b"fake audio bytes".to_vec(),
+            filename: "audio.mp3",
+            mime: "audio/mpeg",
+            language: None,
+            prompt: None,
+        })
+        .await;
+
+        let captured = server.await.unwrap();
+        let body = String::from_utf8_lossy(&captured);
+
+        assert_eq!(result.as_deref(), Ok("hello"));
+        assert!(
+            !body.contains("name=\"language\"") && !body.contains("name=\"prompt\""),
+            "request body must not carry either field when both are unset:\n{body}"
+        );
+    }
+
     #[tokio::test]
     async fn test_describe_image_wrong_type() {
         let engine = MediaEngine::new(MediaConfig::default());
@@ -1321,6 +1657,56 @@ mod tests {
         let result = engine.describe_image(&attachment).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Expected image"));
+    }
+
+    /// #6679: `transcribe_audio` must accept `MediaType::Video` (it used to
+    /// reject every non-`Audio` type outright) — asserted by checking the
+    /// call gets PAST the type guard and fails on provider resolution
+    /// instead, which needs no ffmpeg and no configured provider.
+    #[tokio::test]
+    async fn transcribe_audio_accepts_video_type() {
+        let engine = MediaEngine::new(MediaConfig::default());
+        let attachment = MediaAttachment {
+            media_type: MediaType::Video,
+            mime_type: "video/mp4".into(),
+            source: MediaSource::FilePath {
+                path: "test.mp4".into(),
+            },
+            size_bytes: 1024,
+        };
+        let err = engine
+            .transcribe_audio(&attachment, None, None)
+            .await
+            .unwrap_err();
+        assert!(
+            !err.contains("Expected audio"),
+            "Video must pass the type guard, got: {err}"
+        );
+        assert!(
+            err.contains("No audio transcription provider configured"),
+            "expected to fail on provider resolution instead, got: {err}"
+        );
+    }
+
+    /// The type guard must still reject an unrelated type — this is not the
+    /// same coverage as `test_describe_image_wrong_type` above, which
+    /// exercises a *different* method (`describe_image`).
+    #[tokio::test]
+    async fn transcribe_audio_still_rejects_image_type() {
+        let engine = MediaEngine::new(MediaConfig::default());
+        let attachment = MediaAttachment {
+            media_type: MediaType::Image,
+            mime_type: "image/png".into(),
+            source: MediaSource::FilePath {
+                path: "test.png".into(),
+            },
+            size_bytes: 1024,
+        };
+        let err = engine
+            .transcribe_audio(&attachment, None, None)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Expected audio or video"), "got: {err}");
     }
 
     #[tokio::test]
@@ -1364,7 +1750,7 @@ mod tests {
             },
             size_bytes: 1024,
         };
-        let result = engine.transcribe_audio(&attachment).await;
+        let result = engine.transcribe_audio(&attachment, None, None).await;
         assert!(result.is_err());
     }
 
@@ -1519,7 +1905,7 @@ mod tests {
             },
             size_bytes: 1024,
         };
-        let result = engine.transcribe_audio(&attachment).await;
+        let result = engine.transcribe_audio(&attachment, None, None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Expected audio"));
     }
@@ -1536,7 +1922,7 @@ mod tests {
             },
             size_bytes: 1024,
         };
-        let result = engine.transcribe_audio(&attachment).await;
+        let result = engine.transcribe_audio(&attachment, None, None).await;
         // Either fails with "No audio transcription provider" or file read error
         assert!(result.is_err());
     }
@@ -1557,11 +1943,14 @@ mod tests {
             },
             size_bytes: 1024,
         };
-        let result = engine.transcribe_audio(&attachment).await;
+        let result = engine.transcribe_audio(&attachment, None, None).await;
         assert!(result.is_err());
+        // Wording generalized from "URL-based audio source" to "URL-based
+        // source" when this code path started accepting Video attachments
+        // too (#6679) — the same rejection now applies to both.
         assert!(result
             .unwrap_err()
-            .contains("URL-based audio source not supported"));
+            .contains("URL-based source not supported"));
     }
 
     #[tokio::test]
@@ -1579,7 +1968,7 @@ mod tests {
             },
             size_bytes: 1024,
         };
-        let result = engine.transcribe_audio(&attachment).await;
+        let result = engine.transcribe_audio(&attachment, None, None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to read audio file"));
     }

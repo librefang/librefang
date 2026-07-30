@@ -4,7 +4,9 @@
 use super::agent::{build_agent_manifest_toml, tools_to_parent_capabilities};
 use super::channel::parse_poll_options;
 use super::image::{detect_image_format, extract_image_dimensions, format_file_size};
-use super::media::{audio_mime_from_ext, SUPPORTED_AUDIO_EXTS_DOC};
+use super::media::{
+    audio_mime_from_ext, video_mime_from_ext, SUPPORTED_AUDIO_EXTS_DOC, SUPPORTED_VIDEO_EXTS_DOC,
+};
 use super::schedule::parse_schedule_to_cron;
 use super::*;
 use librefang_skills::registry::SkillRegistry;
@@ -49,6 +51,67 @@ fn supported_audio_exts_doc_lists_every_implemented_extension() {
         assert!(
             audio_mime_from_ext(ext).is_some(),
             "SUPPORTED_AUDIO_EXTS_DOC lists '{ext}' but audio_mime_from_ext does not map it"
+        );
+    }
+}
+
+// ── video_mime_from_ext (#6679) ──────────────────────────────────────────
+
+#[test]
+fn video_mime_from_ext_maps_known_video_containers() {
+    assert_eq!(video_mime_from_ext("mp4"), Some("video/mp4"));
+    assert_eq!(video_mime_from_ext("mov"), Some("video/quicktime"));
+    assert_eq!(video_mime_from_ext("mkv"), Some("video/x-matroska"));
+    assert_eq!(video_mime_from_ext("avi"), Some("video/x-msvideo"));
+}
+
+#[test]
+fn video_mime_from_ext_excludes_webm() {
+    // `.webm` is a dual-purpose container: it already reaches the provider
+    // via `audio_mime_from_ext` unchanged, and must not also be claimed here
+    // — routing it through both mappings would be ambiguous about which
+    // path a caller takes.
+    assert_eq!(video_mime_from_ext("webm"), None);
+    assert!(audio_mime_from_ext("webm").is_some());
+}
+
+#[test]
+fn video_and_audio_ext_maps_are_disjoint() {
+    let audio_exts: Vec<&str> = SUPPORTED_AUDIO_EXTS_DOC
+        .split(", ")
+        .map(str::trim)
+        .collect();
+    let video_exts: Vec<&str> = SUPPORTED_VIDEO_EXTS_DOC
+        .split(", ")
+        .map(str::trim)
+        .collect();
+    for ext in &video_exts {
+        assert!(
+            audio_mime_from_ext(ext).is_none(),
+            "'{ext}' is claimed by both the audio and video ext maps — \
+             build_transcription_attachment's video-first branch would silently \
+             shadow the audio mapping"
+        );
+    }
+    for ext in &audio_exts {
+        assert!(
+            !video_exts.contains(ext),
+            "'{ext}' is listed in both SUPPORTED_AUDIO_EXTS_DOC and SUPPORTED_VIDEO_EXTS_DOC"
+        );
+    }
+}
+
+#[test]
+fn supported_video_exts_doc_lists_every_implemented_extension() {
+    let exts: Vec<&str> = SUPPORTED_VIDEO_EXTS_DOC
+        .split(", ")
+        .map(|s| s.trim())
+        .collect();
+    assert!(!exts.is_empty(), "const must list at least one extension");
+    for ext in &exts {
+        assert!(
+            video_mime_from_ext(ext).is_some(),
+            "SUPPORTED_VIDEO_EXTS_DOC lists '{ext}' but video_mime_from_ext does not map it"
         );
     }
 }
