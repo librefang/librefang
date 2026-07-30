@@ -3018,11 +3018,8 @@ export interface ConfigSchemaRoot extends JsonSchema {
   /**
    * Dotted paths `POST /api/config/set` rejects with 403.
    *
-   * The server sends the resolved verdict, not the allowlists: writability is
-   * decided by an exact-path list, section prefixes, a depth-2-only rule and a
-   * secret-suffix scrub, and re-deriving that here would make the SPA a third
-   * place to keep in sync. A path absent from this array is treated as
-   * writable, so an enumeration gap degrades to the previous behaviour.
+   * The server sends the resolved verdict, not the allowlists: writability is decided by an exact-path list, section prefixes, a depth-2-only rule and a secret-suffix scrub, and re-deriving that here would make the SPA a third place to keep in sync.
+   * A path absent from this array is treated as writable, so an enumeration gap degrades to the previous behaviour.
    */
   "x-non-writable"?: string[];
 }
