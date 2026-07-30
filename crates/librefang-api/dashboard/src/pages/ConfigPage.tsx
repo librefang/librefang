@@ -350,13 +350,8 @@ function CopyPathButton({ path }: { path: string }) {
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // `copyToClipboard` resolves to `false` instead of rejecting, so the flag
-  // must be gated on the result: a dashboard served over plain HTTP on a LAN
-  // address has no `navigator.clipboard` at all, and showing the check mark
-  // regardless would report a copy that never happened. The failure needs a
-  // toast rather than a silent return, or a total failure reproduces the
-  // reported symptom exactly — no clipboard write, no error, no feedback —
-  // and matches what the other five converted call sites do.
+  // `copyToClipboard` resolves to `false` instead of rejecting, so the flag must be gated on the result: a dashboard served over plain HTTP on a LAN address has no `navigator.clipboard` at all, and showing the check mark regardless would report a copy that never happened.
+  // The failure needs a toast rather than a silent return, or a total failure reproduces the reported symptom exactly — no clipboard write, no error, no feedback — and matches what the other five converted call sites do.
   const handleCopy = useCallback(() => {
     void copyToClipboard(path).then(ok => {
       if (!ok) {

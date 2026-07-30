@@ -101,9 +101,7 @@ export function TomlViewer({
     }
   }, [onSave, draft]);
 
-  // Branch on the helper's boolean rather than wrapping it in try/catch: it
-  // swallows its own failures and reports them through the return value, so a
-  // catch block would make the "copy failed" toast unreachable.
+  // Branch on the helper's boolean rather than wrapping it in try/catch: it swallows its own failures and reports them through the return value, so a catch block would make the "copy failed" toast unreachable.
   const onCopy = useCallback(async () => {
     const text = editing ? draft : body;
     if (!text) return;

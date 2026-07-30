@@ -208,8 +208,7 @@ export function SkillInstallCommand({
 }: {
   hub: SkillHubId;
   slug: string;
-  /** Fired only after a confirmed clipboard write, so a caller rendering a
-   * "Copied" affordance never shows one for a copy that silently failed. */
+  /** Fired only after a confirmed clipboard write, so a caller rendering a "Copied" affordance never shows one for a copy that silently failed. */
   onCopied?: () => void;
 }) {
   const { t } = useTranslation();

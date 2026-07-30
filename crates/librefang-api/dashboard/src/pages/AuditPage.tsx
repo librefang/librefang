@@ -629,10 +629,7 @@ export function AuditPage() {
   // multiple buttons in the modal each show their own check briefly
   // without tripping over each other.
   //
-  // `copyToClipboard` reports failure by resolving to `false` rather than
-  // throwing, so the outcome is branched on the return value: a `try`/`catch`
-  // around it would leave the failure path unreachable and show "Copied" for
-  // a write that never landed.
+  // `copyToClipboard` reports failure by resolving to `false` rather than throwing, so the outcome is branched on the return value: a `try`/`catch` around it would leave the failure path unreachable and show "Copied" for a write that never landed.
   const copyField = async (text: string, fieldKey: string) => {
     if (!(await copyToClipboard(text))) {
       addToast(t("common.copy_failed", "Copy failed"), "error");

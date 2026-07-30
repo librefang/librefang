@@ -547,11 +547,8 @@ function RotatedKeyModal({
     return () => document.removeEventListener("keydown", handler, true);
   }, [rotatedKey, hasCopied]);
 
-  // `hasCopied` unlocks the close button on a key that is shown exactly once,
-  // so it must only flip on a confirmed write. `copyToClipboard` signals
-  // failure by resolving to `false` rather than throwing — a `catch` here
-  // would never fire, and the operator would be free to close the modal on a
-  // key that never reached their clipboard.
+  // `hasCopied` unlocks the close button on a key that is shown exactly once, so it must only flip on a confirmed write.
+  // `copyToClipboard` signals failure by resolving to `false` rather than throwing — a `catch` here would never fire, and the operator would be free to close the modal on a key that never reached their clipboard.
   const handleCopy = useCallback(async () => {
     if (!rotatedKey) return;
     if (await copyToClipboard(rotatedKey.plaintext)) {

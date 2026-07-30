@@ -718,11 +718,8 @@ function PendingCard({
 /**
  * Narrow the untyped `GET /api/config` body down to `approval.trusted_senders`.
  *
- * The config endpoint is `Record<string, unknown>` by design — it mirrors
- * whatever `KernelConfig` serializes — so the shape is checked here rather
- * than asserted. A malformed section yields an empty list, which renders the
- * same as "nobody is on it"; that is the safe direction to fail, because the
- * alternative is inventing entries that are not configured.
+ * The config endpoint is `Record<string, unknown>` by design — it mirrors whatever `KernelConfig` serializes — so the shape is checked here rather than asserted.
+ * A malformed section yields an empty list, which renders the same as "nobody is on it"; that is the safe direction to fail, because the alternative is inventing entries that are not configured.
  */
 function readTrustedSenders(config: Record<string, unknown> | undefined): string[] {
   if (!config) return [];
@@ -736,13 +733,8 @@ function readTrustedSenders(config: Record<string, unknown> | undefined): string
 /**
  * Read-only audit surface for `approval.trusted_senders` (#6611).
  *
- * A sender on this list skips the approval prompt for every tool the risk
- * classifier does not rank high, so it is the one approval setting whose
- * *populated* state deserves attention — an empty list means every sender
- * goes through the gate, which is the safe configuration and is presented as
- * such. The list is deliberately not editable here: it is excluded from the
- * config write allowlist so that holding an API key is not enough to grant
- * yourself the bypass.
+ * A sender on this list skips the approval prompt for every tool the risk classifier does not rank high, so it is the one approval setting whose *populated* state deserves attention — an empty list means every sender goes through the gate, which is the safe configuration and is presented as such.
+ * The list is deliberately not editable here: it is excluded from the config write allowlist so that holding an API key is not enough to grant yourself the bypass.
  */
 function TrustedSendersCard() {
   const { t } = useTranslation();

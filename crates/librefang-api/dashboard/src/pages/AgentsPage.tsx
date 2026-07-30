@@ -2210,10 +2210,7 @@ export function AgentsPage() {
               const text = events
                 .map((e) => `${fmtTime(e.timestamp)} INFO ${e.provider || "—"} ${formatLine(e)}`)
                 .join("\n");
-              // The toast has to follow the result: `copyToClipboard` resolves
-              // to `false` on a non-secure origin rather than throwing, and a
-              // "Copied" toast for a write that never happened is the same
-              // silent failure as no toast at all.
+              // The toast has to follow the result: `copyToClipboard` resolves to `false` on a non-secure origin rather than throwing, and a "Copied" toast for a write that never happened is the same silent failure as no toast at all.
               void copyToClipboard(text).then((ok) =>
                 ok
                   ? addToast(t("common.copied", { defaultValue: "Copied" }), "success")
