@@ -1989,6 +1989,101 @@ mod tests {
         }
     }
 
+    /// Extract every mutating route registered in `routes::plugins::router()`.
+    ///
+    /// Shared by the classification guard and by
+    /// `plugin_route_extraction_is_line_ending_agnostic`, which is what makes
+    /// the CRLF case provable without a Windows runner.
+    ///
+    /// Line endings are normalised first. `include_str!` yields the file's
+    /// bytes verbatim and a Windows checkout stores CRLF, so the `"\n}\n"`
+    /// body terminator matched nothing there — the guard panicked on `.expect`
+    /// and the Windows shard was the only lane that went red.
+    ///
+    /// Returns an empty vec rather than panicking when the shape is
+    /// unrecognisable: the caller asserts on the count, which produces a
+    /// message naming what it did parse instead of an opaque `expect`.
+    fn extract_mutating_plugin_routes(src: &str) -> Vec<(axum::http::Method, String)> {
+        let src = src.replace("\r\n", "\n");
+        let Some(body_start) = src.find("pub fn router()") else {
+            return Vec::new();
+        };
+        let body = &src[body_start..];
+        let Some(body_end) = body.find("\n}\n") else {
+            return Vec::new();
+        };
+        let body = &body[..body_end];
+
+        let mut out = Vec::new();
+        // Each `.route(` chunk holds one path literal and its method calls.
+        // Formatting splits these across lines, so operate per chunk rather
+        // than per line.
+        for chunk in body.split(".route(").skip(1) {
+            let Some(path_start) = chunk.find('"') else {
+                continue;
+            };
+            let after = &chunk[path_start + 1..];
+            let Some(path_len) = after.find('"') else {
+                continue;
+            };
+            let route_path = &after[..path_len];
+            if !route_path.starts_with("/plugins") {
+                continue; // context-engine reads live in the same router
+            }
+            // Only the method calls for THIS route: `split` already stopped at
+            // the next `.route(` boundary.
+            let methods_src = &after[path_len..];
+
+            for (name, method) in [
+                ("post", axum::http::Method::POST),
+                ("put", axum::http::Method::PUT),
+                ("patch", axum::http::Method::PATCH),
+                ("delete", axum::http::Method::DELETE),
+            ] {
+                // `axum::routing::post(h)` for the first method on a route,
+                // `.delete(h)` for one chained onto it.
+                if methods_src.contains(&format!("routing::{name}("))
+                    || methods_src.contains(&format!(".{name}("))
+                {
+                    out.push((method, route_path.to_string()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Regression for the Windows-only failure of the guard below.
+    ///
+    /// The bug was invisible on Linux and macOS because a checkout there stores
+    /// LF, so a platform-independent test has to supply the CRLF form itself
+    /// rather than rely on the host's line endings (refs #5716).
+    #[test]
+    fn plugin_route_extraction_is_line_ending_agnostic() {
+        const PLUGINS_SRC: &str = include_str!("routes/plugins.rs");
+
+        let lf_src = PLUGINS_SRC.replace("\r\n", "\n");
+        let crlf_src = lf_src.replace('\n', "\r\n");
+        assert!(
+            crlf_src.contains("\r\n"),
+            "the CRLF fixture must actually contain CRLF, or this proves nothing"
+        );
+
+        let from_lf = extract_mutating_plugin_routes(&lf_src);
+        let from_crlf = extract_mutating_plugin_routes(&crlf_src);
+
+        assert!(
+            !from_lf.is_empty(),
+            "extraction found no routes even with LF input — the parser is \
+             broken independently of line endings"
+        );
+        assert_eq!(
+            from_lf, from_crlf,
+            "extraction must not depend on line endings: a Windows checkout \
+             stores CRLF and previously yielded nothing here, which panicked \
+             the classification guard on that shard only"
+        );
+    }
+
     /// Fail-closed completeness guard for the plugin authorization surface.
     ///
     /// The original #6631 fix enumerated the Owner-only set by reading `routes::plugins::router()` by hand, and missed `install-with-deps`, `prewarm` (both forms), `batch`, and `benchmark` — each a path to a capability that was already gated elsewhere.
@@ -2021,58 +2116,28 @@ mod tests {
             "DELETE /plugins/{name}/state",
         ];
 
-        // Pull the `router()` body so unrelated route strings elsewhere in the file cannot leak in.
-        let body_start = PLUGINS_SRC
-            .find("pub fn router()")
-            .expect("router() must exist in routes/plugins.rs");
-        let body = &PLUGINS_SRC[body_start..];
-        let body_end = body
-            .find("\n}\n")
-            .expect("router() body must terminate at a column-0 brace");
-        let body = &body[..body_end];
+        // `include_str!` yields the file's bytes verbatim, and a Windows
+        // checkout stores CRLF, so `find("\n}\n")` matched nothing there and
+        // this test panicked on `.expect` — green on Linux and macOS, red on
+        // the Windows shard only. Normalise once so every literal below is
+        // line-ending agnostic; `extract_mutating_plugin_routes` is the shared
+        // implementation so the CRLF case is provable without a Windows runner
+        // (see `plugin_route_extraction_is_line_ending_agnostic`).
+        let routes = extract_mutating_plugin_routes(PLUGINS_SRC);
 
-        // Each `.route(` chunk holds one path literal and its method calls.
-        // Formatting splits these across lines, so operate per chunk rather than per line.
         let mut unclassified = Vec::new();
         let mut seen: Vec<String> = Vec::new();
-        for chunk in body.split(".route(").skip(1) {
-            let Some(path_start) = chunk.find('"') else {
-                continue;
-            };
-            let after = &chunk[path_start + 1..];
-            let Some(path_len) = after.find('"') else {
-                continue;
-            };
-            let route_path = &after[..path_len];
-            if !route_path.starts_with("/plugins") {
-                continue; // context-engine reads live in the same router
-            }
-            // Only the method calls for THIS route: `split` already stopped at the next `.route(` boundary.
-            let methods_src = &after[path_len..];
+        for (method, route_path) in routes {
+            let key = format!("{} {route_path}", method.as_str());
+            seen.push(key.clone());
 
-            for (name, method) in [
-                ("post", axum::http::Method::POST),
-                ("put", axum::http::Method::PUT),
-                ("patch", axum::http::Method::PATCH),
-                ("delete", axum::http::Method::DELETE),
-            ] {
-                // `axum::routing::post(h)` for the first method on a route, `.delete(h)` for one chained onto it.
-                if !methods_src.contains(&format!("routing::{name}("))
-                    && !methods_src.contains(&format!(".{name}("))
-                {
-                    continue;
-                }
-                let key = format!("{} {route_path}", method.as_str());
-                seen.push(key.clone());
-
-                let full = format!("/api{route_path}");
-                let admin_can = user_role_allows_request(UserRole::Admin, &method, &full);
-                let listed = ADMIN_ALLOWED.contains(&key.as_str());
-                if admin_can != listed {
-                    unclassified.push(format!(
-                        "{key} (Admin reaches it: {admin_can}, in ADMIN_ALLOWED: {listed})"
-                    ));
-                }
+            let full = format!("/api{route_path}");
+            let admin_can = user_role_allows_request(UserRole::Admin, &method, &full);
+            let listed = ADMIN_ALLOWED.contains(&key.as_str());
+            if admin_can != listed {
+                unclassified.push(format!(
+                    "{key} (Admin reaches it: {admin_can}, in ADMIN_ALLOWED: {listed})"
+                ));
             }
         }
 
