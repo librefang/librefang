@@ -535,18 +535,11 @@ function HandAgentEditor({
 
   // Adopt a new saved value only while the draft is untouched.
   //
-  // `currentPrompt` starts as the HAND.toml baseline and switches to the live
-  // value the moment `useAgentDetail` resolves — which for a hand agent always
-  // differs, since the live prompt carries the rendered `## User Configuration`
-  // / `## Reference Knowledge` / `## Your Team` tails. A bare
-  // `useEffect(() => setPrompt(currentPrompt), [currentPrompt])` therefore wipes
-  // whatever the operator typed in the window between opening the tab and the
-  // query landing. Comparing against the last value we applied distinguishes
-  // "the server moved" from "the user typed", and only the former wins.
+  // `currentPrompt` starts as the HAND.toml baseline and switches to the live value the moment `useAgentDetail` resolves — which for a hand agent always differs, since the live prompt carries the rendered `## User Configuration` / `## Reference Knowledge` / `## Your Team` tails.
+  // A bare `useEffect(() => setPrompt(currentPrompt), [currentPrompt])` therefore wipes whatever the operator typed in the window between opening the tab and the query landing.
+  // Comparing against the last value we applied distinguishes "the server moved" from "the user typed", and only the former wins.
   //
-  // Switching agent or hand is not handled here: `HandAgentEditor` is keyed by
-  // role and `HandDetailPanel` by hand id, so both remount and reset every
-  // draft outright.
+  // Switching agent or hand is not handled here: `HandAgentEditor` is keyed by role and `HandDetailPanel` by hand id, so both remount and reset every draft outright.
   const appliedPrompt = useRef(currentPrompt);
   useEffect(() => {
     setPrompt((draft) => (draft === appliedPrompt.current ? currentPrompt : draft));

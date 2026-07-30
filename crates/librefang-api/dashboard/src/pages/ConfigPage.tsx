@@ -591,11 +591,9 @@ export function ConfigPage({ category }: { category: string }) {
     return out;
   }, [schemaRoot]);
 
-  // Paths the write endpoint refuses. Rendering an editable control for one
-  // meant the operator changed it, hit Save, and got a bare 403 with no
-  // explanation — the reported symptom was "the save appears to succeed and
-  // config.toml is unchanged". These stay visible (an operator must be able to
-  // read back a security setting) but are not offered as editable.
+  // Paths the write endpoint refuses.
+  // Rendering an editable control for one meant the operator changed it, hit Save, and got a bare 403 with no explanation — the reported symptom was "the save appears to succeed and config.toml is unchanged".
+  // These stay visible (an operator must be able to read back a security setting) but are not offered as editable.
   const nonWritablePaths = useMemo(
     () => new Set(schemaRoot?.["x-non-writable"] ?? []),
     [schemaRoot],
@@ -1143,13 +1141,8 @@ export function ConfigPage({ category }: { category: string }) {
                   const isSaving = saveMutation.isPending && saveMutation.variables?.path === path;
                   const statusForField = saveStatus[path] ?? null;
                   // Section-qualified key first, bare leaf name as fallback.
-                  // Keying on the leaf alone made every `mode` field in the
-                  // config — exec_policy, reload, docker, privacy, sanitize —
-                  // render the root-level `mode` description ("Kernel operating
-                  // mode"), which is wrong for all five. Most leaf names are
-                  // genuinely section-neutral (`enabled`, `timeout_secs`,
-                  // `model`), so the fallback keeps them on one string and only
-                  // the ambiguous ones need a qualified entry.
+                  // Keying on the leaf alone made every `mode` field in the config — exec_policy, reload, docker, privacy, sanitize — render the root-level `mode` description ("Kernel operating mode"), which is wrong for all five.
+                  // Most leaf names are genuinely section-neutral (`enabled`, `timeout_secs`, `model`), so the fallback keeps them on one string and only the ambiguous ones need a qualified entry.
                   const readOnly = nonWritablePaths.has(path);
                   const fieldDesc =
                     t(`config.desc_${sKey}_${fieldKey}`, "") || t(`config.desc_${fieldKey}`, "");
@@ -1198,10 +1191,7 @@ export function ConfigPage({ category }: { category: string }) {
                         </div>
                       </div>
                       <div className="flex-1 min-w-0 flex flex-col gap-1 pt-1">
-                        {/* `inert` rather than a `disabled` prop threaded into
-                            every ConfigFieldInput branch: it blocks pointer *and*
-                            keyboard interaction for the whole subtree, including
-                            the composite editors that render several controls. */}
+                        {/* `inert` rather than a `disabled` prop threaded into every ConfigFieldInput branch: it blocks pointer *and* keyboard interaction for the whole subtree, including the composite editors that render several controls. */}
                         <div
                           inert={readOnly || undefined}
                           className={readOnly ? "opacity-60" : undefined}
