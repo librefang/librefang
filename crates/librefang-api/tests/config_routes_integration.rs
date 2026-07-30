@@ -406,6 +406,53 @@ async fn get_config_exposes_non_writable_approval_fields() {
     }
 }
 
+/// `[registry] auto_sync` must round-trip through both halves of the config surface.
+///
+/// It is the operator's only durable way to stop the daemon fast-forwarding `~/.librefang/registry/` with `git reset --hard origin/main`, which destroys local modifications under that checkout — including the ones `PUT /api/hands/{id}/manifest` writes for a hand that shipped with the registry (#6636 observation (a)).
+/// A knob that reads back as its default would leave an operator unable to confirm the freeze took, which is the same class of gap #6605 and #6618 closed elsewhere in this file.
+#[tokio::test(flavor = "multi_thread")]
+async fn registry_auto_sync_round_trips_through_get_and_set() {
+    let h = boot_router_with_config(API_KEY, |config| {
+        // Non-default, so a hardcoded literal in the response builder cannot pass.
+        config.registry.auto_sync = false;
+    })
+    .await;
+
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        dig(&json, "registry.auto_sync").and_then(|v| v.as_bool()),
+        Some(false),
+        "GET /api/config must report the configured value; body: {json}"
+    );
+
+    // Writable too — `registry.` is a writable section prefix, and an operator who
+    // froze the registry from the dashboard has to be able to unfreeze it there.
+    let (status, _) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "registry.auto_sync", "value": true}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "registry.auto_sync must be writable"
+    );
+
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        dig(&json, "registry.auto_sync").and_then(|v| v.as_bool()),
+        Some(true),
+        "the write must be readable back; body: {json}"
+    );
+}
+
 /// #6596: enum-valued config fields were rendered with `format!("{:?}", …)`, which emits the Rust variant name (`"Allowlist"`, `"DuckDuckGo"`).
 /// The write path, `config.toml`, and the schema's `select` options all use serde's rename form, so the dashboard dropdown matched none of its own options.
 /// Asserting the absence of upper-case characters catches any new field that reintroduces `Debug` formatting, not just the seven that were fixed.

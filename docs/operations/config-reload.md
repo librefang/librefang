@@ -184,7 +184,7 @@ classified differently — the row note spells out which is which.
 | `a2a` | H | Agent-to-Agent protocol config. |
 | `skills` | H | Skills config (bundled + user-installed) — reloads registry. |
 | `plugins` | R | Plugin registry config. |
-| `registry` | R | Registry sync config (cache TTL, …). |
+| `registry` | R | Registry sync config (cache TTL, mirror, host, `auto_sync`). `auto_sync` is the exception the R classification understates: the 24 h catalog task re-reads the config each tick, so flipping it off stops the next automatic refresh without a restart — but boot's own sync pass has already run by then, so a restart is still what makes the whole section's behaviour match the file. |
 | `hands` | N | Hands marketplace SSRF allowlist (`registry_allowed_hosts`) — read live by the install handler per request. |
 | `bindings` | R | Agent bindings for multi-account routing. |
 

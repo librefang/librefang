@@ -5566,6 +5566,16 @@ pub struct RegistryConfig {
     /// Set to a full base URL such as `"https://codeberg.org"` to consume a Codeberg-hosted registry; the tarball, git-clone, and tarball-prefix values are all derived from it.
     #[serde(default)]
     pub registry_host: Option<String>,
+    /// Whether the daemon refreshes `~/.librefang/registry/` from upstream on its own (default: `true`).
+    ///
+    /// That checkout is a git clone the sync fast-forwards with `git reset --hard origin/main`, so every local modification under it is destroyed — including the ones `PUT /api/hands/{id}/manifest` writes, which land in `registry/hands/<id>/HAND.toml` for a hand that shipped with the registry.
+    /// Set to `false` to freeze the checkout: boot skips its `sync_registry` pass and the periodic catalog task skips the network refresh while still rebuilding the model catalog from what is already on disk.
+    ///
+    /// Only *automatic* refreshes are gated. `librefang init`, `POST /api/catalog/update`, and `POST /api/hands/reload` are explicit operator actions and still sync, so freezing the registry does not strand an operator who wants an update.
+    ///
+    /// Equivalent to setting `LIBREFANG_REGISTRY_OFFLINE=1`, except it is scoped to the automatic paths rather than every fetch in the process tree, and it survives in `config.toml` rather than in whatever launched the daemon.
+    #[serde(default = "default_true")]
+    pub auto_sync: bool,
 }
 
 fn default_registry_cache_ttl_secs() -> u64 {
@@ -5578,6 +5588,7 @@ impl Default for RegistryConfig {
             cache_ttl_secs: default_registry_cache_ttl_secs(),
             registry_mirror: String::new(),
             registry_host: None,
+            auto_sync: true,
         }
     }
 }

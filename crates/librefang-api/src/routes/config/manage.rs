@@ -802,6 +802,7 @@ fn redacted_config_json(
         "cache_ttl_secs": config.registry.cache_ttl_secs,
         "registry_mirror": config.registry.registry_mirror,
         "registry_host": config.registry.registry_host,
+        "auto_sync": config.registry.auto_sync,
     });
 
     // ── privacy ──
