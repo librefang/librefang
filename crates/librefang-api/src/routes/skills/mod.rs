@@ -708,7 +708,8 @@ fn serialize_mcp_transport(
                 tools.iter().map(http_compat_tool_summary).collect();
             let header_summaries: Vec<serde_json::Value> =
                 headers.iter().map(http_compat_header_summary).collect();
-            // A `tools_count` key used to sit here. It is `tools.len()` — derivable by any caller from the array right next to it — and it is not a field of the variant, so it fails the round trip.
+            // A `tools_count` key used to sit here.
+            // It is `tools.len()` — derivable by any caller from the array right next to it — and it is not a field of the variant, so it fails the round trip.
             // The `tools_count` the dashboard reads is a different key on a different object: the live-connection entry (`connected[].tools_count`), which is a genuine count of discovered tools rather than of configured ones.
             serde_json::json!({
                 "type": "http_compat",

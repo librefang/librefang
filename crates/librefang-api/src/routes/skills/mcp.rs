@@ -617,7 +617,8 @@ pub async fn update_mcp_server(
         };
 
     // Reads return `env` as names only (#6630), so a client that hydrated its form from GET and submitted every field back would otherwise wipe the inline values it was never shown.
-    // Restore them for any bare name. Static `http_compat` header values are redacted on read for the same reason and get the same treatment (#6612).
+    // Restore them for any bare name.
+    // Static `http_compat` header values are redacted on read for the same reason and get the same treatment (#6612).
     if let Some(existing) = effective_mcp_servers_snapshot(&state)
         .into_iter()
         .find(|s| s.name == name)
