@@ -1769,3 +1769,87 @@ async fn ready_ignores_an_embedding_provider_introduced_by_a_later_config_reload
         "the requirement is a boot-time property: {json}"
     );
 }
+
+/// `GET /api/config/schema` must tell the dashboard which paths the write endpoint refuses.
+///
+/// Without it the SPA rendered an editable control for a deliberately non-writable field, the operator changed it, and the save came back 403 with no explanation — reported as "the per-field save appears to succeed, config.toml is unchanged" (#6636 observation (d)).
+///
+/// The server sends the resolved verdict rather than the allowlists, because writability is decided by an exact-path list, section prefixes, a depth-2-only rule and a secret-suffix scrub; re-deriving that in TypeScript would make the SPA a third place to keep in sync. This test is the guard that the emitted set agrees with the write path itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_schema_reports_the_paths_the_write_endpoint_refuses() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(h.app.clone(), auth_get("/api/config/schema")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+
+    let non_writable: std::collections::HashSet<&str> = json
+        .get("x-non-writable")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    // Sanity floor: an empty or near-empty set would make every assertion below
+    // vacuous and would silently restore the old always-editable rendering.
+    assert!(
+        non_writable.len() > 20,
+        "x-non-writable enumerated only {} paths — the schema walk is broken",
+        non_writable.len()
+    );
+
+    // Deliberately non-writable, and the two the issue named.
+    for path in [
+        "approval.require_approval",
+        "approval.second_factor",
+        "external_auth.require_email_verified",
+    ] {
+        assert!(
+            non_writable.contains(path),
+            "`{path}` is refused by POST /api/config/set, so the dashboard must be told to \
+             render it read-only; got {} entries",
+            non_writable.len()
+        );
+    }
+
+    // Writable paths must NOT be listed, or the dashboard would grey out fields
+    // the operator can legitimately change.
+    for path in [
+        "approval.auto_approve",
+        "approval.totp_grace_period_secs",
+        "registry.cache_ttl_secs",
+        "log_level",
+    ] {
+        assert!(
+            !non_writable.contains(path),
+            "`{path}` is writable and must stay editable in the dashboard"
+        );
+    }
+
+    // Cross-check the verdict against the write endpoint for one of each, so the
+    // emitted set cannot drift from the rule it is supposed to mirror.
+    let (status, _) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "approval.require_approval", "value": []}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the path reported as non-writable must actually be refused"
+    );
+    let (status, _) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "approval.auto_approve", "value": false}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the path reported as writable must actually be accepted"
+    );
+}
