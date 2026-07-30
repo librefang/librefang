@@ -329,7 +329,7 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                         },
                         "async": {
                             "type": "boolean",
-                            "description": "When true, returns immediately with a task_id instead of blocking for the reply. The target agent's response is delivered back to your session automatically when it finishes, so you can continue or end your turn. Use this for any delegation that might take longer than a few seconds (it avoids the tool-execution timeout). Defaults to false (blocking)."
+                            "description": "When true, requests non-blocking delegation. On success you get back a task_id and the target agent's response is delivered to your session automatically when it finishes, so you can continue or end your turn. Async tracking needs a live caller session: on surfaces that have none (the MCP HTTP bridge, the REST tool endpoint) the delegation runs inline and you get the target's reply itself rather than a task_id — read what you receive rather than assuming a task is pending. Use this for any delegation that might take longer than a few seconds (it avoids the tool-execution timeout). Defaults to false (blocking)."
                         }
                     },
                     "required": ["agent_id", "message"]

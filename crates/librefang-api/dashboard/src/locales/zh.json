@@ -2693,6 +2693,7 @@
   "goals": {
     "title": "目标",
     "subtitle": "战略规划和任务跟踪。",
+    "loadError": "加载目标失败。守护进程报告了存储错误——请检查其日志。",
     "total": "总目标",
     "pending": "待处理",
     "in_progress": "进行中",

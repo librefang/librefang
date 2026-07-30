@@ -2727,6 +2727,7 @@
   "goals": {
     "title": "Goals",
     "subtitle": "Strategic planning and task tracking.",
+    "loadError": "Failed to load goals. The daemon reported a storage error — check its logs.",
     "total": "Total",
     "pending": "Pending",
     "in_progress": "In Progress",
