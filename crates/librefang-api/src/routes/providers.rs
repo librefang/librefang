@@ -3066,8 +3066,7 @@ pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResp
     let cfg = state.kernel.config_ref();
     let mirror = &cfg.registry.registry_mirror;
     let host = cfg.registry.registry_host.as_deref();
-    // `true`, not `cfg.registry.auto_sync`: this handler is an explicit operator
-    // request to fetch, and `auto_sync` gates only the automatic paths.
+    // `true`, not `cfg.registry.auto_sync`: this handler is an explicit operator request to fetch, and `auto_sync` gates only the automatic paths.
     match librefang_kernel::catalog_sync::sync_catalog_to(
         state.kernel.home_dir(),
         mirror,
