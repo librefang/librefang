@@ -28,6 +28,8 @@ const TOOL_OPTIONS: &[(&str, &str)] = &[
 
 const DEFAULT_TOOLS: &[bool] = &[true, false, true, true, true, true, false, false, false];
 
+const COST_BUDGET_OPTIONS: &[&str] = &["default", "cheap", "medium", "expensive"];
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum AgentSubScreen {
     /// Pick an existing agent or "create new"
@@ -50,10 +52,16 @@ pub enum AgentSubScreen {
     CustomSkills,
     /// Custom builder: MCP server selection
     CustomMcpServers,
+    /// Custom builder: model routing configuration
+    CustomModelRouting,
+    /// Browse prompts library
+    PromptPicker,
     /// Edit skills for existing agent
     EditSkills,
     /// Edit MCP servers for existing agent
     EditMcpServers,
+    /// Edit model routing for existing agent
+    EditModelRouting,
     /// Spawning agent (waiting for result)
     Spawning,
 }
@@ -95,6 +103,18 @@ pub struct AgentSelectState {
     pub skill_cursor: usize,
     pub available_mcp: Vec<(String, bool)>,
     pub mcp_cursor: usize,
+
+    // Prompt picker
+    pub prompt_list: Vec<PromptEntry>,
+    pub prompt_list_state: ListState,
+
+    // Model routing
+    pub model_mode: String,                   // "fixed" or "flexible"
+    pub router_profiles: Vec<(String, bool)>, // (name, allowed)
+    pub router_profile_cursor: usize,
+    pub cost_budget_idx: usize,
+    /// Available router profile names (loaded from the backend).
+    pub available_router_profiles: Vec<String>,
 
     // Result
     pub spawned_toml: Option<String>,
@@ -138,6 +158,13 @@ pub struct AgentDetail {
     pub mcp_servers_mode: String,
 }
 
+/// A prompt entry from the fleet-wide prompts library.
+#[derive(Clone, Debug)]
+pub struct PromptEntry {
+    pub agent_name: String,
+    pub content: String,
+}
+
 /// What the agent screen decided.
 pub enum AgentAction {
     /// No action yet, keep rendering.
@@ -158,6 +185,10 @@ pub enum AgentAction {
     FetchAgentSkills(String),
     /// Fetch MCP data for an agent.
     FetchAgentMcpServers(String),
+    /// Load prompts library from API.
+    LoadPrompts,
+    /// Load router profiles from the kernel/config.
+    LoadRouterProfiles,
 }
 
 impl AgentSelectState {
@@ -183,6 +214,13 @@ impl AgentSelectState {
             skill_cursor: 0,
             available_mcp: Vec::new(),
             mcp_cursor: 0,
+            prompt_list: Vec::new(),
+            prompt_list_state: ListState::default(),
+            model_mode: "fixed".to_string(),
+            router_profiles: Vec::new(),
+            router_profile_cursor: 0,
+            cost_budget_idx: 0,
+            available_router_profiles: Vec::new(),
             spawned_toml: None,
             status_msg: String::new(),
         }
@@ -202,6 +240,13 @@ impl AgentSelectState {
         self.skill_cursor = 0;
         self.available_mcp.clear();
         self.mcp_cursor = 0;
+        self.prompt_list.clear();
+        self.prompt_list_state = ListState::default();
+        self.model_mode = "fixed".to_string();
+        self.router_profiles.clear();
+        self.router_profile_cursor = 0;
+        self.cost_budget_idx = 0;
+        self.available_router_profiles.clear();
         self.spawned_toml = None;
         self.status_msg.clear();
         self.search_active = false;
@@ -377,6 +422,9 @@ impl AgentSelectState {
             AgentSubScreen::CustomMcpServers => self.handle_custom_mcp_servers(key),
             AgentSubScreen::EditSkills => self.handle_edit_skills(key),
             AgentSubScreen::EditMcpServers => self.handle_edit_mcp_servers(key),
+            AgentSubScreen::EditModelRouting => self.handle_edit_model_routing(key),
+            AgentSubScreen::PromptPicker => self.handle_prompt_picker(key),
+            AgentSubScreen::CustomModelRouting => self.handle_custom_model_routing(key),
             AgentSubScreen::Spawning => AgentAction::Continue,
         }
     }
@@ -497,6 +545,13 @@ impl AgentSelectState {
                     let id = detail.id.clone();
                     self.sub = AgentSubScreen::EditMcpServers;
                     return AgentAction::FetchAgentMcpServers(id);
+                }
+            }
+            KeyCode::Char('r') => {
+                // Edit model routing for this agent
+                if self.detail.is_some() {
+                    self.sub = AgentSubScreen::EditModelRouting;
+                    return AgentAction::LoadRouterProfiles;
                 }
             }
             _ => {}
@@ -638,6 +693,11 @@ impl AgentSelectState {
             KeyCode::Enter => {
                 self.sub = AgentSubScreen::CustomTools;
             }
+            KeyCode::Tab => {
+                // Open prompt picker
+                self.prompt_list_state.select(Some(0));
+                return AgentAction::LoadPrompts;
+            }
             KeyCode::Char(c) => {
                 self.custom_prompt.push(c);
             }
@@ -720,8 +780,169 @@ impl AgentSelectState {
                 *checked = !*checked;
             }
             KeyCode::Enter => {
+                // Advance to model routing configuration
+                self.sub = AgentSubScreen::CustomModelRouting;
+            }
+            _ => {}
+        }
+        AgentAction::Continue
+    }
+
+    fn handle_prompt_picker(&mut self, key: KeyEvent) -> AgentAction {
+        let len = self.prompt_list.len();
+        match key.code {
+            KeyCode::Esc => {
+                self.sub = AgentSubScreen::CustomPrompt;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let i = self.prompt_list_state.selected().unwrap_or(0);
+                let next = if i == 0 { len.saturating_sub(1) } else { i - 1 };
+                self.prompt_list_state.select(Some(next));
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let i = self.prompt_list_state.selected().unwrap_or(0);
+                let next = (i + 1).min(len.saturating_sub(1));
+                self.prompt_list_state.select(Some(next));
+            }
+            KeyCode::Enter => {
+                if let Some(idx) = self.prompt_list_state.selected() {
+                    if idx < len {
+                        self.custom_prompt = self.prompt_list[idx].content.clone();
+                    }
+                }
+                self.sub = AgentSubScreen::CustomPrompt;
+            }
+            _ => {}
+        }
+        AgentAction::Continue
+    }
+
+    fn handle_custom_model_routing(&mut self, key: KeyEvent) -> AgentAction {
+        let router_items = self.router_profiles.len();
+        let budget_opts = COST_BUDGET_OPTIONS.len();
+        match key.code {
+            KeyCode::Esc => {
+                self.sub = AgentSubScreen::CustomMcpServers;
+            }
+            // Toggle Fixed ↔ Flexible
+            KeyCode::Char(' ') if self.router_profiles.is_empty() => {
+                if self.model_mode == "fixed" {
+                    self.model_mode = "flexible".to_string();
+                    // Pre-populate profiles from available list
+                    if self.router_profiles.is_empty() && !self.available_router_profiles.is_empty()
+                    {
+                        self.router_profiles = self
+                            .available_router_profiles
+                            .iter()
+                            .map(|n| (n.clone(), true))
+                            .collect();
+                    }
+                } else {
+                    self.model_mode = "fixed".to_string();
+                }
+            }
+            // Navigate profiles (only in flexible mode)
+            KeyCode::Up | KeyCode::Char('k')
+                if self.model_mode == "flexible" && router_items > 0 =>
+            {
+                if self.router_profile_cursor > 0 {
+                    self.router_profile_cursor -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if self.model_mode == "flexible" && router_items > 0 =>
+            {
+                if self.router_profile_cursor < router_items.saturating_sub(1) {
+                    self.router_profile_cursor += 1;
+                }
+            }
+            // Toggle profile allowed
+            KeyCode::Tab if self.model_mode == "flexible" && router_items > 0 => {
+                let checked = &mut self.router_profiles[self.router_profile_cursor].1;
+                *checked = !*checked;
+            }
+            // Left/Right for cost budget
+            KeyCode::Right | KeyCode::Char('l')
+                if self.model_mode == "flexible" && budget_opts > 0 =>
+            {
+                self.cost_budget_idx = (self.cost_budget_idx + 1) % budget_opts;
+            }
+            KeyCode::Left | KeyCode::Char('h')
+                if self.model_mode == "flexible" && budget_opts > 0 =>
+            {
+                self.cost_budget_idx = if self.cost_budget_idx == 0 {
+                    budget_opts.saturating_sub(1)
+                } else {
+                    self.cost_budget_idx - 1
+                };
+            }
+            KeyCode::Enter => {
                 let toml = self.build_custom_toml();
                 return AgentAction::CreatedManifest(toml);
+            }
+            _ => {}
+        }
+        AgentAction::Continue
+    }
+
+    fn handle_edit_model_routing(&mut self, key: KeyEvent) -> AgentAction {
+        let router_items = self.router_profiles.len();
+        let budget_opts = COST_BUDGET_OPTIONS.len();
+        match key.code {
+            KeyCode::Esc => {
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            // Toggle Fixed ↔ Flexible
+            KeyCode::Char(' ') if self.router_profiles.is_empty() => {
+                if self.model_mode == "fixed" {
+                    self.model_mode = "flexible".to_string();
+                    if self.router_profiles.is_empty() && !self.available_router_profiles.is_empty()
+                    {
+                        self.router_profiles = self
+                            .available_router_profiles
+                            .iter()
+                            .map(|n| (n.clone(), true))
+                            .collect();
+                    }
+                } else {
+                    self.model_mode = "fixed".to_string();
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k')
+                if self.model_mode == "flexible" && router_items > 0 =>
+            {
+                if self.router_profile_cursor > 0 {
+                    self.router_profile_cursor -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if self.model_mode == "flexible" && router_items > 0 =>
+            {
+                if self.router_profile_cursor < router_items.saturating_sub(1) {
+                    self.router_profile_cursor += 1;
+                }
+            }
+            KeyCode::Tab if self.model_mode == "flexible" && router_items > 0 => {
+                let checked = &mut self.router_profiles[self.router_profile_cursor].1;
+                *checked = !*checked;
+            }
+            KeyCode::Right | KeyCode::Char('l')
+                if self.model_mode == "flexible" && budget_opts > 0 =>
+            {
+                self.cost_budget_idx = (self.cost_budget_idx + 1) % budget_opts;
+            }
+            KeyCode::Left | KeyCode::Char('h')
+                if self.model_mode == "flexible" && budget_opts > 0 =>
+            {
+                self.cost_budget_idx = if self.cost_budget_idx == 0 {
+                    budget_opts.saturating_sub(1)
+                } else {
+                    self.cost_budget_idx - 1
+                };
+            }
+            KeyCode::Enter => {
+                // Save model routing — return to detail (for now just go back)
+                self.sub = AgentSubScreen::AgentDetail;
             }
             _ => {}
         }
@@ -827,6 +1048,28 @@ impl AgentSelectState {
             .collect();
         let mcp_str = selected_mcp.join(", ");
 
+        // Model routing section
+        let routing_section = if self.model_mode == "flexible" {
+            let allowed_profiles: Vec<String> = self
+                .router_profiles
+                .iter()
+                .filter(|(_, allowed)| *allowed)
+                .map(|(name, _)| format!("\"{}\"", name))
+                .collect();
+            let profiles_str = allowed_profiles.join(", ");
+            let cost_budget = COST_BUDGET_OPTIONS[self.cost_budget_idx];
+            format!(
+                r#"
+[model.router_override]
+fixed = false
+allowed_profiles = [{profiles_str}]
+cost_budget = "{cost_budget}"
+"#
+            )
+        } else {
+            String::new()
+        };
+
         format!(
             r#"name = "{name}"
 version = "{version}"
@@ -840,8 +1083,7 @@ mcp_servers = [{mcp_str}]
 [model]
 max_tokens = 8192
 temperature = 0.5
-system_prompt = """{prompt}"""
-
+system_prompt = """{prompt}"""{routing_section}
 [resources]
 # 0 = unlimited hourly LLM-token budget; set a positive value to rate-limit.
 max_llm_tokens_per_hour = 0
@@ -879,6 +1121,14 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
             draw_edit_allowlist(f, area, state);
             return;
         }
+        AgentSubScreen::EditModelRouting => {
+            draw_edit_model_routing(f, area, state);
+            return;
+        }
+        AgentSubScreen::PromptPicker => {
+            draw_prompt_picker(f, area, state);
+            return;
+        }
         _ => {}
     }
 
@@ -886,7 +1136,9 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
         AgentSubScreen::AgentList
         | AgentSubScreen::AgentDetail
         | AgentSubScreen::EditSkills
-        | AgentSubScreen::EditMcpServers => unreachable!(),
+        | AgentSubScreen::EditMcpServers
+        | AgentSubScreen::EditModelRouting
+        | AgentSubScreen::PromptPicker => unreachable!(),
         AgentSubScreen::CreateMethod => crate::i18n::t("tui-agents-title-create-method"),
         AgentSubScreen::TemplatePicker => crate::i18n::t("tui-agents-title-templates"),
         AgentSubScreen::CustomName => crate::i18n::t("tui-agents-title-custom-name"),
@@ -895,6 +1147,9 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
         AgentSubScreen::CustomTools => crate::i18n::t("tui-agents-title-custom-tools"),
         AgentSubScreen::CustomSkills => crate::i18n::t("tui-agents-title-custom-skills"),
         AgentSubScreen::CustomMcpServers => crate::i18n::t("tui-agents-title-custom-mcp"),
+        AgentSubScreen::CustomModelRouting => {
+            crate::i18n::t("tui-agents-title-custom-model-routing")
+        }
         AgentSubScreen::Spawning => crate::i18n::t("tui-agents-title-spawning"),
     };
 
@@ -939,7 +1194,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
             &state.custom_desc,
             &crate::i18n::t("tui-agents-placeholder-desc"),
         ),
-        AgentSubScreen::CustomPrompt => draw_text_input(
+        AgentSubScreen::CustomPrompt => draw_prompt_input(
             f,
             inner,
             &crate::i18n::t("tui-agents-prompt-prompt"),
@@ -949,6 +1204,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
         AgentSubScreen::CustomTools => draw_tool_select(f, inner, state),
         AgentSubScreen::CustomSkills => draw_skill_select(f, inner, state),
         AgentSubScreen::CustomMcpServers => draw_mcp_select(f, inner, state),
+        AgentSubScreen::CustomModelRouting => draw_model_routing(f, inner, state),
         AgentSubScreen::Spawning => {
             let msg = Paragraph::new(Line::from(vec![Span::styled(
                 crate::i18n::t("tui-agents-prompt-spawning"),
@@ -1244,6 +1500,42 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
                 ]));
             }
 
+            // Model routing
+            if state.model_mode == "flexible" {
+                let allowed: Vec<String> = state
+                    .router_profiles
+                    .iter()
+                    .filter(|(_, ok)| *ok)
+                    .map(|(n, _)| n.clone())
+                    .collect();
+                let budget = COST_BUDGET_OPTIONS[state.cost_budget_idx];
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        crate::i18n::t("tui-agents-detail-routing"),
+                        Style::default(),
+                    ),
+                    Span::styled("Flexible", Style::default().fg(theme::GREEN)),
+                ]));
+                if !allowed.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled("  profiles: ", Style::default()),
+                        Span::styled(allowed.join(", "), Style::default().fg(theme::CYAN)),
+                    ]));
+                }
+                lines.push(Line::from(vec![
+                    Span::styled("  budget: ", Style::default()),
+                    Span::styled(budget, Style::default().fg(theme::YELLOW)),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        crate::i18n::t("tui-agents-detail-routing"),
+                        Style::default(),
+                    ),
+                    Span::styled("Fixed", Style::default().fg(theme::YELLOW)),
+                ]));
+            }
+
             f.render_widget(Paragraph::new(lines), chunks[0]);
         }
         None => {
@@ -1513,6 +1805,198 @@ fn draw_checkbox_list(
     }
 
     f.render_widget(widgets::hint_bar(hints_text), chunks[2]);
+}
+
+/// Draw the model routing configuration step in the custom builder.
+fn draw_model_routing(f: &mut Frame, area: Rect, state: &AgentSelectState) {
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    let prompt = Paragraph::new(crate::i18n::t("tui-agents-prompt-routing"));
+    f.render_widget(prompt, chunks[0]);
+
+    let mut lines = vec![Line::from(vec![
+        Span::raw("  Mode: "),
+        if state.model_mode == "flexible" {
+            Span::styled(
+                "Flexible",
+                Style::default()
+                    .fg(theme::GREEN)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled("Fixed", Style::default().fg(theme::YELLOW))
+        },
+        Span::styled("  (Space to toggle)", theme::dim_style()),
+    ])];
+
+    if state.model_mode == "flexible" {
+        // Cost budget
+        lines.push(Line::from(""));
+        let current_budget = COST_BUDGET_OPTIONS[state.cost_budget_idx];
+        lines.push(Line::from(vec![
+            Span::styled("  Cost Budget: ", Style::default()),
+            Span::styled(
+                format!("< {} >", current_budget),
+                Style::default()
+                    .fg(theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  (h/l to change)", theme::dim_style()),
+        ]));
+
+        // Allowed profiles
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            "  Allowed Profiles (Tab to toggle):",
+            Style::default().fg(theme::TEXT_PRIMARY),
+        )]));
+
+        if state.router_profiles.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                "    (no profiles available)",
+                theme::dim_style(),
+            )]));
+        } else {
+            for (i, (name, allowed)) in state.router_profiles.iter().enumerate() {
+                let check = if *allowed { "\u{25c9}" } else { "\u{25cb}" };
+                let highlight = if i == state.router_profile_cursor {
+                    Style::default()
+                        .fg(theme::CYAN)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::from(vec![Span::styled(
+                    format!("    {check} {name}"),
+                    highlight,
+                )]));
+            }
+        }
+    }
+
+    f.render_widget(Paragraph::new(lines), chunks[1]);
+
+    let hints = if state.model_mode == "flexible" {
+        crate::i18n::t("tui-agents-hints-routing-flexible")
+    } else {
+        crate::i18n::t("tui-agents-hints-routing-fixed")
+    };
+    f.render_widget(widgets::hint_bar(&hints), chunks[2]);
+}
+
+/// Draw the edit model routing overlay.
+fn draw_edit_model_routing(f: &mut Frame, area: Rect, state: &AgentSelectState) {
+    let inner =
+        widgets::render_screen_block(f, area, &crate::i18n::t("tui-agents-title-edit-routing"));
+    draw_model_routing(f, inner, state);
+}
+
+/// Draw the prompt picker overlay.
+fn draw_prompt_picker(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
+    let inner =
+        widgets::render_screen_block(f, area, &crate::i18n::t("tui-agents-title-prompt-picker"));
+
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let prompt = Paragraph::new(crate::i18n::t("tui-agents-prompt-select-prompt"));
+    f.render_widget(prompt, chunks[0]);
+
+    if state.prompt_list.is_empty() {
+        f.render_widget(
+            widgets::empty_state(&crate::i18n::t("tui-agents-label-no-prompts")),
+            chunks[1],
+        );
+    } else {
+        let items: Vec<ListItem> = state
+            .prompt_list
+            .iter()
+            .map(|entry| {
+                let preview: String = entry
+                    .content
+                    .chars()
+                    .take(80)
+                    .collect::<String>()
+                    .replace('\n', " ");
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("  {:<20}", widgets::truncate(&entry.agent_name, 18)),
+                        Style::default().fg(theme::CYAN),
+                    ),
+                    Span::styled(preview, theme::dim_style()),
+                ]))
+            })
+            .collect();
+
+        let list = widgets::themed_list(items);
+        let mut list_state = state.prompt_list_state.clone();
+        f.render_stateful_widget(list, chunks[1], &mut list_state);
+    }
+
+    f.render_widget(
+        widgets::hint_bar(&crate::i18n::t("tui-agents-hints-prompt-picker")),
+        chunks[2],
+    );
+}
+
+/// Wrap the text input's hint bar to show "Tab to browse prompts" hint.
+fn draw_prompt_input(f: &mut Frame, area: Rect, label: &str, value: &str, placeholder: &str) {
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    let prompt = Paragraph::new(format!("  {label}"));
+    f.render_widget(prompt, chunks[0]);
+
+    let display = if value.is_empty() { placeholder } else { value };
+    let style = if value.is_empty() {
+        theme::dim_style()
+    } else {
+        theme::input_style()
+    };
+
+    let input = Paragraph::new(Line::from(vec![
+        Span::raw("  > "),
+        Span::styled(display, style),
+        Span::styled(
+            "\u{2588}",
+            Style::default()
+                .fg(theme::GREEN)
+                .add_modifier(Modifier::SLOW_BLINK),
+        ),
+    ]));
+    f.render_widget(input, chunks[1]);
+
+    if value.is_empty() {
+        let hint_text = crate::i18n::t_args(
+            "tui-agents-label-placeholder",
+            &[("placeholder", placeholder)],
+        );
+        let hint = Paragraph::new(Line::from(vec![Span::styled(
+            hint_text,
+            theme::dim_style(),
+        )]));
+        f.render_widget(hint, chunks[2]);
+    }
+
+    f.render_widget(
+        widgets::hint_bar(&crate::i18n::t("tui-agents-hints-input-prompt")),
+        chunks[4],
+    );
 }
 
 #[cfg(test)]
