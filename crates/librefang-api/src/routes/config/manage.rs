@@ -364,6 +364,8 @@ fn redacted_config_json(
         "image_model": config.media.image_model,
         "audio_provider": config.media.audio_provider,
         "audio_model": config.media.audio_model,
+        "audio_language": config.media.audio_language,
+        "audio_prompt": config.media.audio_prompt,
         "custom_stt": serde_json::to_value(&config.media.custom_stt).unwrap_or_default(),
         "stt_available": stt_available,
     });
