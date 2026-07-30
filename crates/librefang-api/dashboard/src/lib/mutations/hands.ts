@@ -133,8 +133,12 @@ export function useUpdateHandSettings() {
       config: Record<string, unknown>;
     }) => updateHandSettings(handId, config),
     onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: handKeys.lists() });
-      qc.invalidateQueries({ queryKey: handKeys.detail(variables.handId) });
+      // Saving settings rewrites `model.system_prompt` and
+      // `metadata.hand_allowed_env` on every live agent of the hand, so the
+      // agent-side caches are stale too — same reason useUpdateHandManifest
+      // reaches for this helper ("hands surface as agents"). Without it the
+      // agent detail view keeps serving the pre-save prompt.
+      invalidateHandAndAgentCaches(qc);
       // The settings editor reads saved values back from this query's
       // `current_values`; without invalidating it the freshly saved inputs
       // never reappear once the local draft is cleared.

@@ -113,7 +113,7 @@ pub(super) async fn tool_agent_send(
             reason: "async agent_send requires a known caller agent context".to_string(),
         })?;
         let session_str = caller_session_id.map(|s| s.0.to_string());
-        let task_id = kh
+        let outcome = kh
             .send_to_agent_async_tracked(
                 agent_id,
                 message,
@@ -124,14 +124,21 @@ pub(super) async fn tool_agent_send(
             )
             .await
             .map_err(ToolError::upstream)?;
-        return Ok(serde_json::json!({
-            "task_id": task_id,
-            "status": "delegated",
-            "note": "Delegation started asynchronously; the target's reply will be \
-                     delivered to this session when it completes. Do not wait — \
-                     continue or end your turn.",
-        })
-        .to_string());
+        // Branch on what the kernel actually did (#6650). The tracked and fallback outcomes used to arrive as an indistinguishable `String`, so the fallback's *response body* was rendered as `task_id` under a note telling the model to stop and wait for a completion event that would never fire — the answer it already held.
+        // Surfaces that pass no session (the MCP HTTP bridge, the REST `/api/tools/{name}` bridge) hit that path on every `async: true` call.
+        return Ok(match outcome {
+            AsyncSendOutcome::Tracked(task_id) => serde_json::json!({
+                "task_id": task_id,
+                "status": "delegated",
+                "note": "Delegation started asynchronously; the target's reply will be \
+                         delivered to this session when it completes. Do not wait — \
+                         continue or end your turn.",
+            })
+            .to_string(),
+            // No session to deliver a completion event to, so the kernel ran the delegation inline.
+            // Hand back the reply exactly as the blocking path below does — same shape, same expectations.
+            AsyncSendOutcome::Inline(response) => response,
+        });
     }
 
     AGENT_CALL_DEPTH

@@ -48,18 +48,14 @@ and warns if `core.hooksPath` hasn't been pointed at `.githooks/`.
 These run inside `git` itself (regardless of which tool invoked the commit),
 giving defense in depth on top of the Claude Code PreToolUse layer.
 
-- `pre-commit` — runs `cargo fmt --check` on staged Rust files; CHANGELOG
-  duplicate-`[Unreleased]` guard; CHANGELOG `(@user)` attribution check on
-  staged additions to `[Unreleased]` (#3400); `gitleaks protect --staged`
-  scan against `.gitleaks.toml` (soft-warn if not installed). Target: < 2s.
+- `pre-commit` — runs `cargo fmt --check` on staged Rust files; CHANGELOG duplicate-`[Unreleased]` guard; `(@user)` attribution check on staged additions to `[Unreleased]` **and on staged `changelog.d/` fragments**, which also rejects a fragment in an unrecognised section directory (#3400); `gitleaks protect --staged` scan against `.gitleaks.toml` (soft-warn if not installed).
+  Target: < 2s.
 - `pre-push` — refuses direct pushes to `main` / `master` and exits in
   &lt; 100ms. Heavy verification (clippy, openapi/SDK drift) intentionally
   lives in CI rather than gating every push — see #4532 for the
   rationale. Skip the branch guard for a maintainer hotfix with
   `LIBREFANG_PREPUSH_SKIP=1`.
-- `commit-msg` — rejects commit messages containing Claude / Anthropic
-  attribution (catches heredocs and `git commit -F file` that the PreToolUse
-  Bash hook cannot see).
+- `commit-msg` — rejects commit messages containing Claude / Anthropic attribution (catches heredocs and `git commit -F file` that the PreToolUse Bash hook cannot see), and separately rejects a commit whose *author identity* (`git var GIT_AUTHOR_IDENT`, so the `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` env overrides are covered) resolves to Claude / Anthropic even when the message itself is clean.
 
 **Enable once per clone** by running setup:
 ```bash
@@ -357,6 +353,18 @@ The daemon command is `start` (not `daemon`).
 
 ## Git Conventions
 - **Format**: Use conventional commits (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `perf:`, `test:`)
+- **Changelog entry = a new file under `changelog.d/`, NOT an edit to `CHANGELOG.md`.**
+  Appending to the single `## [Unreleased]` section conflicts with every other open PR that does the same, in a file where the conflict carries no information — both sides are correct and the resolution is always "keep both".
+  Write one fragment per entry in the section directory matching its `### ` heading (`added/`, `fixed/`, `changed/`, `security/`, `documentation/`), named after the PR or issue number so fragments sort usefully: `changelog.d/fixed/6623-wire-max-content-chars.md`.
+  The file holds the bullet body **without** the leading `- `, one sentence per line, continuation lines indented two spaces, ending `(#PR) (@your-github-login)`.
+  Format and a worked example: `changelog.d/README.md`.
+  `cargo xtask collect-fragments` folds fragments into `## [Unreleased]` and deletes the files consumed; `cargo xtask release` runs it before cutting the dated section, so a fragment reaches the CHANGELOG exactly as a hand-written bullet does.
+  Editing `## [Unreleased]` directly still works and assembly appends to whatever is already there — but the direct edit is the thing that conflicts, so don't reach for it.
+  A fragment in an unrecognised section directory is rejected by `scripts/check-changelog-attribution.py`, because assembly has no heading to render it under and would drop it silently.
+  **The entry ends up in the GitHub release body verbatim.**
+  `cargo xtask release` moves the whole `## [Unreleased]` body into the dated `## [VERSION]` section it cuts, leaving the heading behind and empty for the next cycle, and `.github/workflows/release.yml` slices that section into the release notes, the Dev.to article, and the social post.
+  Generated `- <PR title> (#N) (@author)` lines fill only the gaps: a PR whose number appears in a curated bullet's trailing `(#N)` group gets no generated line, so it is described once, in the words someone chose.
+  Write the entry as prose that explains *why*, not a restatement of the PR title — the title is already covered for free.
 - **No AI / Claude attribution** in commit messages, PR bodies, or
   comments — see "Commit & PR hygiene" under GitHub Collaboration below
   for the canonical rule (the `commit-msg` hook enforces it server-side

@@ -49,6 +49,15 @@ respawn (or restart the daemon) — an in-place activate/status flip
 silently keeps the old cap. See
 [`../architecture/trigger-dispatch-concurrency.md`](../architecture/trigger-dispatch-concurrency.md).
 
+### Gotcha: rotating a `vault:` credential needs a reload, because the vault file is not watched
+
+`api_key`, `dashboard_user`, and `dashboard_pass` accept a `vault:NAME` value, resolved out of `vault.enc`.
+The config-file watcher polls `config.toml`'s mtime, and `librefang vault set NAME` writes `vault.enc` — so rotating the secret behind a `vault:` reference changes nothing the watcher can see.
+Call `POST /api/config/reload` after the rotation; that is where the env / `vault:` indirection is re-run and the result pushed into the live auth handles (`server.rs::refresh_master_credential`).
+A daemon restart is not required.
+
+This is also true of `LIBREFANG_API_KEY` and the `LIBREFANG_DASHBOARD_*` variables, for the stronger reason that a process cannot observe an edit to its own environment at all: those need a restart of the daemon (or of the container / unit that sets them).
+
 ### Conditional: `log_level`
 
 `log_level` is **HotReload** only when the embedding binary installed a
@@ -86,7 +95,8 @@ classified differently — the row note spells out which is which.
 
 | Field | Class | Meaning |
 |---|---|---|
-| `api_key` | N | API bearer key (effective immediately via config swap). |
+| `api_key` | N | API bearer key, resolved from `LIBREFANG_API_KEY` / `vault:KEY` / the literal value (effective immediately via config swap). |
+| `api_key_hash` | N | Hash of the API bearer key, `$sha256$…` (recommended, from `librefang hash-api-key`) or `$argon2id$…` (effective immediately via config swap). |
 | `dashboard_user` | H | Dashboard login username (config swap suffices). |
 | `dashboard_pass` | H | Dashboard login password. |
 | `dashboard_pass_hash` | H | Argon2id hash of the dashboard password. |
@@ -184,7 +194,7 @@ classified differently — the row note spells out which is which.
 | `a2a` | H | Agent-to-Agent protocol config. |
 | `skills` | H | Skills config (bundled + user-installed) — reloads registry. |
 | `plugins` | R | Plugin registry config. |
-| `registry` | R | Registry sync config (cache TTL, …). |
+| `registry` | R/N | Registry sync config. `cache_ttl_secs` / `registry_mirror` / `registry_host` are **R**: they are read when the checkout is set up. `auto_sync` is **N**: the 24 h catalog task calls `config_snapshot()` at the top of each tick and passes the value into `sync_catalog_to`, so flipping it off freezes `~/.librefang/registry/` from the next tick on, with no restart. Splitting the section this way is what makes that true — while the whole section was classified R, a registry-only reload produced neither a hot action nor a noop change, so `should_store_config` discarded the new config and the task kept reading the old value until the daemon restarted. Boot's own sync pass has of course already run by reload time, so `auto_sync = false` written *before* a start is still what prevents the boot-time fast-forward. |
 | `hands` | N | Hands marketplace SSRF allowlist (`registry_allowed_hosts`) — read live by the install handler per request. |
 | `bindings` | R | Agent bindings for multi-account routing. |
 

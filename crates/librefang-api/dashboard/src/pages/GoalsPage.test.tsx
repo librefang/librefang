@@ -172,6 +172,35 @@ describe("GoalsPage", () => {
     expect(screen.getByText("goals.use_template")).toBeInTheDocument();
   });
 
+  // #6654: a failed load and an empty daemon are different things.
+  // The server now answers a goals storage failure with a 500 rather than an empty page, but the page had no error branch — the query yielded no goals and the template picker rendered over data that had failed to load, telling the operator to start from scratch.
+  it("renders the error state, not the template picker, when the goals query fails", () => {
+    useGoalsMock.mockReturnValue(
+      makeQuery<GoalItem[] | undefined>(undefined, { isError: true }),
+    );
+    useGoalTemplatesMock.mockReturnValue(
+      makeQuery<GoalTemplate[]>([SAMPLE_TEMPLATE]),
+    );
+    renderPage();
+
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(screen.getByText("goals.loadError")).toBeInTheDocument();
+    expect(screen.queryByText("goals.pick_template")).not.toBeInTheDocument();
+    expect(screen.queryByText("goals.use_template")).not.toBeInTheDocument();
+  });
+
+  it("retries the goals query from the error state", () => {
+    const query = makeQuery<GoalItem[] | undefined>(undefined, {
+      isError: true,
+    });
+    useGoalsMock.mockReturnValue(query);
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    renderPage();
+
+    fireEvent.click(within(screen.getByRole("alert")).getByRole("button"));
+    expect(query.refetch).toHaveBeenCalled();
+  });
+
   it("applies a template by calling create once per goal in the template", async () => {
     useGoalsMock.mockReturnValue(makeQuery<GoalItem[]>([]));
     useGoalTemplatesMock.mockReturnValue(

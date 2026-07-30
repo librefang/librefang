@@ -982,6 +982,7 @@ async fn test_capability_enforcement_aliased_denied() {
 async fn test_shell_exec_full_policy_skips_approval_gate() {
     let approval_requests = Arc::new(AtomicUsize::new(0));
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::clone(&approval_requests),
         user_gate_override: None,
     });
@@ -1037,6 +1038,7 @@ async fn test_shell_exec_full_policy_skips_approval_gate() {
 async fn test_shell_exec_non_full_policy_still_requires_approval() {
     let approval_requests = Arc::new(AtomicUsize::new(0));
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::clone(&approval_requests),
         user_gate_override: None,
     });
@@ -1100,6 +1102,7 @@ async fn test_shell_exec_non_full_policy_still_requires_approval() {
 async fn test_shell_exec_safe_bins_skip_approval_when_enabled() {
     let approval_requests = Arc::new(AtomicUsize::new(0));
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::clone(&approval_requests),
         user_gate_override: None,
     });
@@ -1160,6 +1163,7 @@ async fn test_shell_exec_safe_bins_skip_approval_when_enabled() {
 async fn test_shell_exec_safe_bins_still_require_approval_by_default() {
     let approval_requests = Arc::new(AtomicUsize::new(0));
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::clone(&approval_requests),
         user_gate_override: None,
     });
@@ -1218,6 +1222,7 @@ async fn test_shell_exec_safe_bins_still_require_approval_by_default() {
 async fn test_shell_exec_safe_bins_chained_non_safe_still_requires_approval() {
     let approval_requests = Arc::new(AtomicUsize::new(0));
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::clone(&approval_requests),
         user_gate_override: None,
     });
@@ -1277,6 +1282,7 @@ async fn test_shell_exec_safe_bins_chained_non_safe_still_requires_approval() {
 async fn test_shell_exec_safe_bins_redirect_still_requires_approval() {
     let approval_requests = Arc::new(AtomicUsize::new(0));
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::clone(&approval_requests),
         user_gate_override: None,
     });
@@ -1336,6 +1342,7 @@ async fn test_shell_exec_safe_bins_redirect_still_requires_approval() {
 async fn test_shell_exec_safe_bins_command_substitution_still_requires_approval() {
     let approval_requests = Arc::new(AtomicUsize::new(0));
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::clone(&approval_requests),
         user_gate_override: None,
     });
@@ -1397,6 +1404,7 @@ async fn test_shell_exec_safe_bins_command_substitution_still_requires_approval(
 async fn test_shell_exec_safe_bins_skip_approval_respects_rbac_needs_approval() {
     let approval_requests = Arc::new(AtomicUsize::new(0));
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::clone(&approval_requests),
         user_gate_override: Some(librefang_types::user_policy::UserToolGate::NeedsApproval {
             reason: "rbac".to_string(),
@@ -1451,6 +1459,187 @@ async fn test_shell_exec_safe_bins_skip_approval_respects_rbac_needs_approval() 
     assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
 }
 
+/// Shared driver for the `exec_policy.full_mode_skips_approval` cases below (#6594).
+/// Returns the tool result together with how many approval submissions the mock kernel recorded.
+///
+/// `requires_approval_override` models the operator's global `approval.require_approval` list: `None` leaves the mock's default, which requires approval for `shell_exec` (matching `ApprovalPolicy::default()`), and `Some(false)` models a list that does not name the tool.
+async fn run_full_mode_approval_case(
+    policy: &librefang_types::config::ExecPolicy,
+    command: &str,
+    user_gate_override: Option<librefang_types::user_policy::UserToolGate>,
+    requires_approval_override: Option<bool>,
+) -> (ToolResult, usize) {
+    let approval_requests = Arc::new(AtomicUsize::new(0));
+    let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override,
+        approval_requests: Arc::clone(&approval_requests),
+        user_gate_override,
+    });
+    let workspace = tempfile::tempdir().expect("tempdir");
+
+    let result = execute_tool(
+        "test-id",
+        "shell_exec",
+        &serde_json::json!({"command": command}),
+        Some(&kernel),
+        None,
+        Some("agent-1"),
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        Some(workspace.path()),
+        None, // media_engine
+        None, // media_drivers
+        Some(policy),
+        None,
+        None,
+        None,
+        None,
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+
+    let count = approval_requests.load(Ordering::SeqCst);
+    (result, count)
+}
+
+/// #6594, the load-bearing default: `mode = "full"` with the new flag left alone still waives the global `require_approval` list, so no existing install starts prompting.
+/// `ApprovalPolicy::default()` lists `shell_exec` and `Kernel::spawn` promotes standalone `shell_exec` agents to `Full`, so a flipped default would prompt on every shell command on a stock install.
+/// Constructed through `..Default::default()` deliberately — this must fail if the `Default` impl entry is flipped.
+#[tokio::test]
+async fn test_shell_exec_full_mode_skips_approval_by_default() {
+    let policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Full,
+        ..Default::default()
+    };
+    assert!(
+        policy.full_mode_skips_approval,
+        "the default must preserve the historical Full-waives-approval coupling"
+    );
+
+    let (result, approvals) =
+        run_full_mode_approval_case(&policy, "echo full-default-ok", None, None).await;
+
+    assert!(
+        !result.content.contains("requires human approval"),
+        "Full with the flag at its default must still bypass approval, got: {}",
+        result.content
+    );
+    assert_eq!(approvals, 0);
+}
+
+/// #6594: with the flag off, `Full` no longer speaks for `[approval]` — a `shell_exec` named in the global `require_approval` list routes through the approval queue while still running unrestricted commands.
+#[tokio::test]
+async fn test_shell_exec_full_mode_honours_require_approval_when_flag_disabled() {
+    let policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Full,
+        full_mode_skips_approval: false,
+        ..Default::default()
+    };
+
+    let (result, approvals) =
+        run_full_mode_approval_case(&policy, "echo full-flag-off", None, None).await;
+
+    assert!(
+        result.content.contains("requires human approval"),
+        "with full_mode_skips_approval = false the global require_approval list \
+         must be honoured, got: {}",
+        result.content
+    );
+    assert_eq!(approvals, 1);
+}
+
+/// #6594: the flag makes the gate *honour* `[approval]`, it does not invent a prompt.
+/// With the flag off and `shell_exec` absent from the global `require_approval` list there is nothing to honour, so the call still runs unattended.
+#[tokio::test]
+async fn test_shell_exec_full_mode_flag_disabled_skips_when_not_in_require_list() {
+    let policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Full,
+        full_mode_skips_approval: false,
+        ..Default::default()
+    };
+
+    let (result, approvals) =
+        run_full_mode_approval_case(&policy, "echo full-not-required", None, Some(false)).await;
+
+    assert!(
+        !result.content.contains("requires human approval"),
+        "nothing in require_approval means nothing to prompt for, got: {}",
+        result.content
+    );
+    assert_eq!(approvals, 0);
+}
+
+/// #6594: the new flag is scoped to `Full`.
+/// The #5962 all-safe-bins waiver in `allowlist` mode is an explicit approval opt-out by its own name, so it keeps skipping in both positions of `full_mode_skips_approval`.
+#[tokio::test]
+async fn test_safe_bins_skip_approval_unaffected_by_full_mode_flag() {
+    for full_mode_skips_approval in [true, false] {
+        let policy = librefang_types::config::ExecPolicy {
+            mode: librefang_types::config::ExecSecurityMode::Allowlist,
+            safe_bins: vec!["env".to_string()],
+            safe_bins_skip_approval: true,
+            full_mode_skips_approval,
+            ..Default::default()
+        };
+
+        let (result, approvals) = run_full_mode_approval_case(&policy, "env", None, None).await;
+
+        assert!(
+            !result.content.contains("requires human approval"),
+            "safe_bins_skip_approval must be unaffected by \
+             full_mode_skips_approval = {full_mode_skips_approval}, got: {}",
+            result.content
+        );
+        assert_eq!(
+            approvals, 0,
+            "safe_bins_skip_approval must be unaffected by \
+             full_mode_skips_approval = {full_mode_skips_approval}"
+        );
+    }
+}
+
+/// #6594: a per-user RBAC `NeedsApproval` still wins over the Full waiver.
+/// Run with the flag at its default (`true`) on purpose — with the flag off the global list would queue the call anyway and the assertion would pass without ever exercising the `!force_approval` conjunct.
+#[tokio::test]
+async fn test_shell_exec_full_mode_respects_rbac_needs_approval() {
+    let policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Full,
+        ..Default::default()
+    };
+    assert!(policy.full_mode_skips_approval);
+
+    let (result, approvals) = run_full_mode_approval_case(
+        &policy,
+        "echo full-rbac",
+        Some(librefang_types::user_policy::UserToolGate::NeedsApproval {
+            reason: "rbac".to_string(),
+        }),
+        // Also prove it is the RBAC gate and not the global list doing the work: the list does not name the tool here.
+        Some(false),
+    )
+    .await;
+
+    assert!(
+        result.content.contains("requires human approval"),
+        "an RBAC NeedsApproval gate must override the Full waiver, got: {}",
+        result.content
+    );
+    assert_eq!(approvals, 1);
+}
+
 /// Regression: shell_exec must NOT deadlock when a child writes more
 /// stdout than the OS pipe buffer can hold. Container kernels often have
 /// 8 KB pipe buffers; the previous implementation polled `try_wait()`
@@ -1465,6 +1654,7 @@ async fn test_shell_exec_safe_bins_skip_approval_respects_rbac_needs_approval() 
 async fn test_shell_exec_drains_pipe_above_buffer_size() {
     let approval_requests = Arc::new(AtomicUsize::new(0));
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        requires_approval_override: None,
         approval_requests: Arc::clone(&approval_requests),
         user_gate_override: None,
     });

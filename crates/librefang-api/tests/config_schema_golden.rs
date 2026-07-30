@@ -87,15 +87,10 @@ fn normalize_path_like(value: &mut serde_json::Value) {
     }
 }
 
-// TEMPORARILY IGNORED — golden fixture drifted by 490 bytes (same line
-// count, value/string change somewhere in KernelConfig's schema). Pre-existing
-// drift on main; never surfaced on Quality before because of the long
-// compile-break window.  Regenerate with:
-//     cargo test --test config_schema_golden -p librefang-api -- \
-//         --ignored regenerate_golden --nocapture
-// then drop this `#[ignore]`.  Tracked separately so #4084 can land.
+// Was `#[ignore]`d as a temporary measure while a 490-byte drift went unresolved, with the attribute meant to come off once the fixture was regenerated.
+// It did not, and the guard stayed off long enough for real schema changes to land unreviewed — see the PR that re-enabled it for the inventory.
+// If this fails, review the diff before regenerating: an unexplained change here is a wire-format change to `GET /api/config/schema`.
 #[test]
-#[ignore = "golden fixture out of date — see header comment to regen"]
 fn kernel_config_schema_matches_golden_fixture() {
     let actual = generate_schema_json();
     let expected = std::fs::read_to_string(fixture_path())

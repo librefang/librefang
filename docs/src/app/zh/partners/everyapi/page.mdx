@@ -1,0 +1,46 @@
+# LibreFang × EveryAPI
+
+**Agent OS + 统一 AI 基础设施。**
+
+LibreFang 负责运行自主 Agent。
+EveryAPI 为这些 Agent 提供托管模型网关、实时模型目录、价格与账户操作能力。
+双方提供原生但非排他的集成：LibreFang 继续支持其他 provider，EveryAPI 也继续服务其他客户端。
+
+[查看 EveryAPI 集成页 →](https://everyapi.ai/integrations/librefang?utm_source=librefang_docs_zh&utm_medium=partner&utm_campaign=librefang_everyapi)
+
+## 当前已经可用
+
+- **自动发现凭据。** LibreFang 可以识别已有的 EveryAPI CLI 登录，通过凭据进程获取托管网关凭据，不需要把密钥复制进 LibreFang 配置。
+- **实时模型与价格。** LibreFang 从网关刷新 EveryAPI 模型目录，并为使用 EveryAPI 的 Agent 执行 provider 范围内的路由。
+- **通过 MCP 操作网关。** `everyapi mcp` 可以向获准的 LibreFang Agent 提供账户状态、充值、seller、marketplace 与边缘节点工具。
+- **CLI 原生指引。** EveryAPI CLI 已将 `librefang` 识别为 MCP 客户端，并输出 LibreFang 专用的安装、配置和审批说明。
+
+## 连接两个产品
+
+安装并登录公开的 [EveryAPI CLI](https://github.com/everyapi-ai/everyapi-ai)：
+
+```bash
+everyapi auth login
+```
+
+正常启动 LibreFang。
+LibreFang 会在启动时检测 EveryAPI 凭据进程，并在账户可用时加入托管 provider。
+
+```bash
+librefang start
+```
+
+如需显式连接或将 EveryAPI 设为默认 provider：
+
+```bash
+librefang models connect everyapi --set-default
+```
+
+Provider 路由与 MCP 账户工具是两条独立集成。
+安全和审批细节见 [EveryAPI provider 配置](/zh/configuration/providers/platforms#everyapi)与 [EveryAPI MCP 设置](/zh/integrations/mcp-a2a#every-api-mcp)。
+
+## 公开链接
+
+- [EveryAPI 集成指南](https://everyapi.ai/integrations/librefang?utm_source=librefang_docs_zh&utm_medium=partner&utm_campaign=librefang_everyapi)
+- [EveryAPI](https://everyapi.ai/)
+- [LibreFang 源码](https://github.com/librefang/librefang)

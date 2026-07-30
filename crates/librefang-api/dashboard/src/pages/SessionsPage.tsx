@@ -39,7 +39,7 @@ export function SessionsPage() {
   const navigate = useNavigate();
   const labelMutation = useSetSessionLabel();
 
-  const agents = agentsQuery.data ?? [];
+  const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
   const agentMap = useMemo(() => new Map(agents.map(a => [a.id, a])), [agents]);
 
   const sessions = useMemo(() => {

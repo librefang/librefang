@@ -653,6 +653,9 @@ hand-no-active-instance = '{ $id }'에 대한 활성 핸드 인스턴스를 찾�
 hand-info-not-found = 핸드를 찾을 수 없음: { $error }
 hand-no-settings = 핸드 '{ $id }'에 구성 가능한 설정이 없습니다.
 hand-settings-title = '{ $id }'의 설정
+hand-setting-default-marker = (기본값)
+hand-setting-value-ignored = 저장된 값 "{ $value }"은(는) 이 설정에 유효하지 않아 무시되었습니다
+hand-settings-unknown-keys = 이 핸드가 선언하지 않아 무시된 저장 키: { $keys }
 hand-set-setting-success = 핸드 '{ $id }'에 { $key }={ $value }을(를) 설정함.
 hand-reloaded-summary = 핸드 다시 불러옴: { $added }개 추가됨, { $updated }개 업데이트됨, 총 { $total }개.
 label-chat-with = 다음과 채팅
@@ -950,7 +953,7 @@ doctor-audit-config-syntax-error-hint = { $path }을(를) 편집하거나 백업
 doctor-everyapi-absent = EveryAPI 게이트웨이가 감지되지 않았습니다(PATH에 CLI 없음, 자격 증명 파일 없음) — 연결할 대상이 없습니다.
 doctor-everyapi-cli-not-logged-in = EveryAPI CLI는 PATH에 있지만 자격 증명 파일을 찾을 수 없습니다. LibreFang을 이 게이트웨이로 라우팅하려면 먼저 `everyapi login`을 실행하십시오.
 doctor-everyapi-credentials-incomplete = EveryAPI 자격 증명 파일은 있으나 사용 가능한 relay_key가 없습니다. `everyapi login`을 다시 실행하여 갱신하십시오.
-doctor-everyapi-not-connected = EveryAPI 자격 증명을 찾았지만 LibreFang에 everyapi 프로바이더 항목이 없습니다 — `librefang models connect everyapi`를 실행하면 게이트웨이를 LLM 프로바이더로 등록할 수 있습니다.
+doctor-everyapi-not-connected = EveryAPI 자격 증명을 찾았습니다. LibreFang이 관리형 프로바이더를 자동 감지하고 키를 복사하지 않은 채 현재 relay key를 사용합니다.
 doctor-everyapi-provider-only = EveryAPI 프로바이더 항목이 { $path }에서 활성화되어 있습니다. API 드라이버는 이 게이트웨이를 경유합니다.
 doctor-everyapi-provider-without-credentials = EveryAPI 프로바이더 항목이 { $path }에 있지만 사용 가능한 relay key를 찾을 수 없습니다. 이 게이트웨이를 통한 요청은 인증에 실패합니다.
 doctor-everyapi-provider-without-credentials-hint = `everyapi login`을 실행한 뒤 `librefang models connect everyapi`로 저장된 키를 갱신하세요.
@@ -1080,7 +1083,13 @@ label-header-enabled = 활성화됨
 label-header-url = URL
 
 # Channel command specific keys
-channel-header-msgs-24h = 24시간 메시지
+# Scoped by channel TYPE, not by sidecar instance — usage_events.channel stores the type, so every bot of the same type shares the count (#6606).
+channel-header-msgs-24h-by-type = 24시간 메시지 (유형별)
+channel-header-connected = 연결됨
+channel-header-in-out = 수신/발신
+channel-liveness-not-started = 시작되지 않음
+channel-last-errors-heading = 채널별 마지막 오류 (고착됨 — 실패 시 기록되며 복구되어도 지워지지 않습니다):
+channel-last-error-entry = { $name }: { $error }
 channel-error-save-failed-no-body = 저장 실패 (오류 본문 없음)
 
 # Models command specific keys
@@ -1119,6 +1128,12 @@ auth-pool-key-requests = requests={ $count }
 auth-pool-key-item =     - [{ $label }] { $key_display }  priority={ $pri }{ $reqs_str }  status={ $status }
 auth-hash-add-config-hint = config.toml에 추가하십시오:
 auth-hash-config-entry =   dashboard_pass_hash = "{ $hash }"
+auth-enter-api-key-prompt = API 키를 입력하십시오:
+auth-api-key-empty = API 키는 비어 있을 수 없습니다.
+auth-api-key-generated = 새 API 키 (클라이언트에 전달하십시오 — 한 번만 표시됩니다):
+auth-api-key-config-entry =   api_key_hash = "{ $hash }"
+auth-api-key-remove-plaintext-hint = 그런 다음 평문 `api_key` 줄을 제거하십시오. 클라이언트는 계속 같은 키를 전송하며, 데몬이 저장하는 사본만 바뀝니다.
+auth-api-key-cli-driver-caveat = 예외: CLI 기반 드라이버(claude-code)를 사용한다면 전송 가능한 사본을 남겨 두십시오 — `api_key = "vault:NAME"` 또는 LIBREFANG_API_KEY 변수입니다. 이런 드라이버는 데몬 자신의 /mcp 엔드포인트를 호출하며, 해시는 bearer 토큰으로 전송할 수 없으므로 둘 다 없으면 모든 도구 호출이 401을 받습니다.
 
 # Agent command specific keys
 agent-spawn-id-label =   ID:   { $id }
@@ -2221,7 +2236,6 @@ tui-wizard-status-no-home = 홈 디렉터리를 확인할 수 없음
 tui-wizard-status-saved = 구성 저장됨 — { $provider } / { $model }
 tui-wizard-status-save-fail = 구성 저장에 실패: { $error }
 tui-wizard-status-continuing = 계속하는 중...
-
 
 
 

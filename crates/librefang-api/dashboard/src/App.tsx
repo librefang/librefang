@@ -56,6 +56,7 @@ import { useKeyboardShortcuts } from "./lib/useKeyboardShortcuts";
 import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, dashboardLogout, getDashboardUsername, getStatus, getVersionInfo, isPasskeySupported, loginWithPasskey, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { OfflineBanner } from "./components/OfflineBanner";
+import { EveryApiPartnerLink } from "./components/EveryApiPartnerLink";
 
 const USER_AVATAR_STYLE = { background: "linear-gradient(135deg,#a78bfa,#7c3aed)" } as const;
 const BRAND_MARK_STYLE = { background: "linear-gradient(135deg,#38bdf8,#0ea5e9)" } as const;
@@ -977,7 +978,7 @@ export function App() {
       cancelled = true;
       setOnUnauthorized(null);
     };
-  }, []);
+  }, [setTerminalEnabled]);
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -1234,6 +1235,8 @@ export function App() {
             })}
           </div>
         </nav>
+
+        <EveryApiPartnerLink collapsed={isSidebarCollapsed} />
 
         {/* User-avatar footer — opens the unified user menu (theme / language /
             settings / change credentials / logout). Replaces the old "daemon

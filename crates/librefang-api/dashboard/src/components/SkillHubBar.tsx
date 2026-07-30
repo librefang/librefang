@@ -10,6 +10,7 @@
  */
 import { Boxes, Check, Loader2, AlertCircle } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { copyToClipboard } from "../lib/clipboard";
 import { SKILL_HUBS, type SkillHub, type SkillHubId, getSkillHub } from "../lib/skillHubs";
 
 export type HubFilter = "all" | SkillHubId;
@@ -207,6 +208,7 @@ export function SkillInstallCommand({
 }: {
   hub: SkillHubId;
   slug: string;
+  /** Fired only after a confirmed clipboard write, so a caller rendering a "Copied" affordance never shows one for a copy that silently failed. */
   onCopied?: () => void;
 }) {
   const { t } = useTranslation();
@@ -226,10 +228,13 @@ export function SkillInstallCommand({
         type="button"
         onClick={(e) => {
           e.stopPropagation();
-          if (typeof navigator !== "undefined" && navigator.clipboard) {
-            void navigator.clipboard.writeText(cmd);
-          }
-          onCopied?.();
+          // The old guard skipped the write entirely when `navigator.clipboard`
+          // was undefined — which is exactly the plain-HTTP LAN case — and then
+          // fired `onCopied` anyway. The helper falls back to `execCommand` and
+          // reports whether anything landed, so the callback is now gated.
+          void copyToClipboard(cmd).then((ok) => {
+            if (ok) onCopied?.();
+          });
         }}
         className="text-text-dim/70 hover:text-text-main transition-colors p-0.5"
         title={t("skills.copy_command", { defaultValue: "Copy command" })}

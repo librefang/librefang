@@ -9,7 +9,9 @@
 #
 # Checks performed:
 #   1. cargo fmt --check on staged *.rs files only (no full-workspace scan)
-#   2. CHANGELOG guard: reject duplicate `## [Unreleased]` headings (#3395)
+#   2. CHANGELOG guard: reject duplicate `## [Unreleased]` headings (#3395),
+#      plus `(@user)` attribution on staged [Unreleased] bullets and staged
+#      changelog.d/ fragments (#3400)
 #   3. gitleaks scan of staged changes (soft-warn if gitleaks is missing;
 #      set LIBREFANG_SKIP_SECRETS_SCAN=1 to silence the warning)
 #   4. openapi.sha256 baseline auto-sync when openapi.json is staged (#4690)
@@ -68,22 +70,29 @@ fi
 # (`.github/workflows/release.yml` awk extractor and
 # `xtask/src/changelog.rs`) silently picks the first match and drops
 # subsequent blocks. See #3395.
-if git diff --cached --name-only | grep -qx "CHANGELOG.md"; then
+STAGED_NAMES=$(git diff --cached --name-only)
+if printf '%s\n' "$STAGED_NAMES" | grep -qx "CHANGELOG.md"; then
     UNRELEASED_COUNT=$(grep -c '^## \[Unreleased\]' CHANGELOG.md || true)
     if [ "$UNRELEASED_COUNT" -gt 1 ]; then
         echo "Error: CHANGELOG.md has $UNRELEASED_COUNT '## [Unreleased]' sections; expected exactly 1."
         echo "Release tooling will silently drop entries from all but the first. Merge them into one block."
         exit 1
     fi
+fi
 
-    # 2b. (@username) attribution on staged additions to [Unreleased]. See
-    # #3400. Only fails when the staged diff adds a bullet without `(@user)`
-    # — never penalises historical entries. Soft-skip if python3 is missing.
+# 2b. (@username) attribution on staged additions to [Unreleased] AND on staged
+# changelog.d/ fragments. See #3400. A fragment is an [Unreleased] bullet with a
+# delay on it, so it has to be gated here as well — a PR that writes a fragment
+# never touches CHANGELOG.md, and gating on that path alone would let every
+# fragment through unchecked. Only fails on what the staged diff adds; never
+# penalises historical entries. Soft-skip if python3 is missing.
+if printf '%s\n' "$STAGED_NAMES" | grep -qE '^(CHANGELOG\.md$|changelog\.d/)'; then
     if command -v python3 >/dev/null 2>&1; then
         if ! python3 scripts/check-changelog-attribution.py --staged; then
-            echo 'Error: staged CHANGELOG.md additions to [Unreleased] are missing'
-            echo '       a `(@your-github-login)` suffix. Add it at the end of each bullet.'
-            echo '       Audit current section: python3 scripts/check-changelog-attribution.py --all-unreleased'
+            echo 'Error: a staged CHANGELOG.md [Unreleased] bullet or changelog.d/ fragment is'
+            echo '       missing a `(@your-github-login)` suffix, or a fragment sits in a section'
+            echo '       directory assembly does not recognise. See the paths listed above.'
+            echo '       Audit everything pending: python3 scripts/check-changelog-attribution.py --all-unreleased'
             exit 1
         fi
     else

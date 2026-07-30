@@ -188,13 +188,14 @@ export function useTtsManager(config?: TtsSpeechConfig): UseTtsManagerReturn {
   );
 
   useEffect(() => {
+    const cache = cacheRef.current;
     return () => {
-      for (const url of cacheRef.current.values()) {
+      for (const url of cache.values()) {
         if (url.startsWith("blob:")) {
           URL.revokeObjectURL(url);
         }
       }
-      cacheRef.current.clear();
+      cache.clear();
       if (audioRef.current) {
         audioRef.current.pause();
         audioRef.current = null;

@@ -475,26 +475,31 @@ model = "glm-4-plus"
 | **认证方式** | `Authorization: Bearer` 请求头 |
 | **模型数** | 取决于网关账户开放的范围 —— Claude、GPT、Gemini、MiniMax 以及多媒体模型都经由同一个端点路由 |
 
-与本页其他条目不同，EveryAPI 不在内置目录中，也没有固定的模型清单。它是一个可自托管的聚合网关，可用模型取决于你的账户而非 LibreFang。有一条专门的 CLI 命令负责读取网关凭据并合成 provider 条目。
+EveryAPI 是托管 provider，没有固定的模型清单。
+可用模型取决于你的账户而非 LibreFang。
+LibreFang 通过 EveryAPI CLI 的凭据进程获取当前网关与 relay 凭据，再加载账户的实时模型目录。
 
 **设置：**
-1. 安装 [EveryAPI CLI](https://github.com/everyapi-ai/everyapi) 并登录，该步骤会写入 `~/.config/everyapi/credentials.json`：
+1. 安装公开的 [EveryAPI CLI](https://github.com/everyapi-ai/everyapi-ai) 并登录：
    ```bash
-   everyapi login
+   everyapi auth login
    ```
-2. 向 LibreFang 注册该网关：
+2. 启动 LibreFang。它会检测已登录的 EveryAPI CLI，并自动注册托管 provider：
    ```bash
-   librefang models connect everyapi
+   librefang start
    ```
-3. 也可以在同一步顺带设为守护进程默认：
+3. 如需显式连接或将 EveryAPI 设为默认 provider，可运行：
    ```bash
    librefang models connect everyapi --set-default
    ```
 
-该命令从凭据文件读取 `api_base` 与 `relay_key`（遵循 `$XDG_CONFIG_HOME`），拉取网关实时的 `/v1/models` 列表，将 API 密钥以 `EVERYAPI_API_KEY` 写入 `~/.librefang/.env`，随后持久化 provider —— 守护进程在运行时经由它写入以便目录就地重载，未运行时则直接写 `~/.librefang/providers/everyapi.toml`。密钥不会写进 provider TOML，也不会打印到终端或日志。
+托管发现模式下，EveryAPI 始终是凭据权威。
+LibreFang 在需要凭据时调用 `everyapi auth credential --format=json`，且不会持久化返回的密钥。
+旧版兼容 CLI 的凭据仍可作为回退读取。
+显式端点或环境变量配置仍然可用，并优先于托管发现。
 
 除了这套 provider 接线之外，EveryAPI CLI 还内置了一个 MCP 服务器（`everyapi mcp`），为 agent 提供检视网关账户本身的工具 —— 配额、卖家渠道、边缘节点。
-它直接读取同一份凭据文件，因此无论是否跑过 `models connect everyapi` 都能工作；反过来，接好 provider 也不会启用它。详见[接入 EveryAPI MCP 服务器](/zh/integrations/mcp-a2a#every-api-mcp)。
+它独立使用 EveryAPI 账户，因此无论是否跑过 `models connect everyapi` 都能工作；反过来，接好 provider 也不会启用它。详见[接入 EveryAPI MCP 服务器](/zh/integrations/mcp-a2a#every-api-mcp)。
 
 **说明：**
 

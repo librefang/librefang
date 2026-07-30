@@ -375,9 +375,11 @@ pub fn validate_executable_path(path: &str) -> Result<(), String> {
 
 ## 危险命令检测
 
-**源码：** `librefang-runtime/src/dangerous_commands.rs`
+**源码：** `librefang-runtime/src/dangerous_command.rs`
 
-在执行任何 shell 命令之前，LibreFang 会将命令字符串与 **39 个正则表达式规则**进行匹配，这些规则涵盖 11 类危险操作。此检测在能力检查和污点检查的基础上提供额外的语义安全层。
+在执行任何 shell 命令之前，LibreFang 会将命令字符串与 **42 个正则表达式规则**进行匹配，这些规则涵盖 13 类危险操作。此检测在能力检查和污点检查的基础上提供额外的语义安全层。
+
+该扫描与 `exec_policy.mode` 无关，在 `deny`、`allowlist`、`full` 下都会执行——`full` 关闭的是白名单*校验*，而不是这份黑名单。
 
 ### 危险操作分类
 
@@ -387,13 +389,15 @@ pub fn validate_executable_path(path: &str) -> Result<(), String> {
 | **权限提升** | 获取更高权限 | `sudo`、`su`、`chmod 777`、`chown root` |
 | **磁盘操作** | 绕过文件系统的底层写入 | `dd if=`、`mkfs`、`fdisk`、`parted` |
 | **SQL 删除** | 破坏性数据库语句 | `DROP TABLE`、`DROP DATABASE`、`TRUNCATE` |
+| **守护进程数据库写入** | 针对守护进程自身 `librefang.db` 的写入——该文件保存了主机上所有 Agent、会话与审批记录 | `sqlite3 librefang.db "DELETE FROM …"`、`> librefang.db` |
 | **系统文件覆写** | 直接写入关键 OS 路径 | `> /etc/passwd`、`> /etc/shadow`、`> /boot/` |
-| **服务管理** | 停止或禁用系统服务 | `systemctl stop`、`service … stop`、`kill -9 1` |
+| **服务管理** | 停止或禁用系统服务，以及重启共享的 LibreFang 守护进程 | `systemctl stop`、`systemctl disable`、`librefang stop`、`librefang gateway restart` |
 | **进程杀死** | 向进程发送致命信号 | `kill -9`、`killall`、`pkill -9` |
 | **Fork 炸弹** | 耗尽资源的自复制进程 | `:()&#123; :\|:& &#125;;:` 及其变体 |
 | **任意代码执行** | 将远程内容直接管道到 shell | `curl … \| bash`、`wget … \| sh`、`eval $(…)` |
 | **破坏性 find** | 使用 `find` 删除或覆写文件 | `find … -exec rm`、`find … -delete` |
 | **破坏性 git** | 强制推送或销毁历史的 git 操作 | `git push --force`、`git reset --hard HEAD~`、`git clean -fdx` |
+| **容器权限提升** | 进入容器以在 Agent 自身沙箱之外执行操作 | `docker exec` |
 
 ### 审批模式
 

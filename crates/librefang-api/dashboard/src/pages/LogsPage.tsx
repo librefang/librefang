@@ -31,7 +31,10 @@ export function LogsPage() {
     refetchInterval: REFRESH_MS, // Logs page polls faster so the live tail stays responsive.
   });
 
-  const logs = auditQuery.data?.items ?? auditQuery.data?.entries ?? [];
+  const logs = useMemo(
+    () => auditQuery.data?.items ?? auditQuery.data?.entries ?? [],
+    [auditQuery.data?.entries, auditQuery.data?.items],
+  );
   const modules = useMemo(
     () => Array.from(new Set(logs.map(logModule).filter(Boolean))) as string[],
     [logs],
@@ -47,7 +50,7 @@ export function LogsPage() {
       const matchesModule = !moduleFilter || logModule(l) === moduleFilter;
       return matchesSearch && matchesModule;
     }),
-    [logs, searchLower, moduleFilter],
+    [logs, moduleFilter, search, searchLower],
   );
 
   const handleExport = () => {

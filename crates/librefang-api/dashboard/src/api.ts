@@ -167,11 +167,34 @@ export interface ChannelItem {
    *  if they prefer hand-editing over the configure drawer. Emitted
    *  by the backend on every row. */
   config_template?: string;
-  /** Messages exchanged through this channel in the last 24 hours.
-   *  Computed via a single grouped query on `usage_events` keyed by
-   *  the `channel` column. Surfaced as the `kind · N msgs/24h`
-   *  meta-line on the Channels page card. */
-  msgs_24h?: number;
+  /** Channel type this instance speaks (`telegram`, `slack`, …).
+   *  Several `[[sidecar_channels]]` instances can share one type. */
+  channel_type?: string;
+  /** LLM calls in the last 24h for this channel **type**, NOT for this instance.
+   *  `usage_events.channel` stores the type (it is derived from `SenderContext.channel`, which also keys session derivation and so cannot be re-pointed at the instance name), so every sidecar of the same type reports the same number.
+   *  Label it as a per-type figure — presenting it per-bot is the defect #6606 documents.
+   *  Per-instance traffic is `messages_received` / `messages_sent`. */
+  msgs_24h_channel_type?: number;
+  /** Whether a live adapter is registered for this instance name at all.
+   *  False means the sidecar was never started, or its bridge start failed and the registration was rolled back — the API layer cannot tell those apart.
+   *  Everything below is meaningless when false, and all of it is absent on an unconfigured catalog row. */
+  supervised?: boolean;
+  /** Supervisor's live connection flag: true between a successful child spawn and the child going away.
+   *  The only real per-bot liveness signal on this payload. */
+  connected?: boolean;
+  /** RFC 3339 timestamp of the last successful child spawn — reset on every supervised restart, so it is "up since", not "created". */
+  started_at?: string | null;
+  /** RFC 3339 timestamp of the last inbound message. */
+  last_message_at?: string | null;
+  /** Inbound message count since the adapter was created.
+   *  Survives supervised restarts (the counter lives on the adapter, not the child), so it is NOT a 24h or since-`started_at` figure. */
+  messages_received?: number;
+  /** Outbound message count, same lifetime as `messages_received`. */
+  messages_sent?: number;
+  /** Last error the supervisor recorded — a sidecar `error` event, a failed spawn, or a circuit-break.
+   *  **Sticky**: never cleared, not even by the successful respawn that follows.
+   *  A connected channel carrying one is degraded, not dead. */
+  last_error?: string | null;
 }
 
 export interface SkillItem {
@@ -669,6 +692,24 @@ export interface ScheduleItem {
    * (possibly empty) on round-trip.
    */
   delivery_targets?: CronDeliveryTarget[];
+  /**
+   * Primary output destination, in addition to any `delivery_targets`.
+   * Settable on create and patchable on update.
+   */
+  delivery?: CronDeliverySpec;
+  /**
+   * Peer/user id the fire runs under; `null` when unset. Settable on create
+   * only — `PUT /api/schedules/{id}` rejects a *change* with a 400 (the
+   * scheduler cannot patch it), though echoing the stored value back is a
+   * no-op so a read-modify-write round trip still works.
+   */
+  peer_id?: string | null;
+  /**
+   * Whether every fire shares one persistent session or gets an isolated
+   * one. `null` when unset — the job then follows the agent's own default.
+   * Same create-only write contract as `peer_id`.
+   */
+  session_mode?: "persistent" | "new" | null;
 }
 
 export interface TriggerItem {
@@ -817,6 +858,14 @@ export interface SessionDetailResponse {
   label?: string | null;
   messages?: AgentSessionMessage[];
   created_at?: string;
+  model_override?: string | null;
+  active?: boolean;
+  /** Aggregated from `usage_events`; `0` for a session with no metered calls. */
+  total_tokens?: number;
+  /** Aggregated from `usage_events`; `0` for a session with no metered calls. */
+  cost_usd?: number;
+  /** First-to-last stamped message span; `null` below two stamped messages. */
+  duration_ms?: number | null;
 }
 
 export interface MemoryItem {
@@ -1829,7 +1878,6 @@ export async function transcribeAudio(audioBlob: Blob): Promise<{ text: string; 
 // throws, and keeps the server-side label render-safe — no decode pass
 // needed at display time.
 function sanitizeFilenameForHeader(name: string): string {
-  // eslint-disable-next-line no-control-regex
   return name.replace(/[^\x20-\x7e]|["\r\n]/g, "_");
 }
 
@@ -2993,6 +3041,13 @@ export interface ConfigSectionDescriptor {
 export interface ConfigSchemaRoot extends JsonSchema {
   "x-sections"?: ConfigSectionDescriptor[];
   "x-ui-options"?: Record<string, UiFieldOptions>;
+  /**
+   * Dotted paths `POST /api/config/set` rejects with 403.
+   *
+   * The server sends the resolved verdict, not the allowlists: writability is decided by an exact-path list, section prefixes, a depth-2-only rule and a secret-suffix scrub, and re-deriving that here would make the SPA a third place to keep in sync.
+   * A path absent from this array is treated as writable, so an enumeration gap degrades to the previous behaviour.
+   */
+  "x-non-writable"?: string[];
 }
 
 export async function getConfigSchema(): Promise<ConfigSchemaRoot> {
@@ -3274,6 +3329,38 @@ export async function modifyAndRetryApproval(
   return post(`/api/approvals/${encodeURIComponent(id)}/modify`, { feedback });
 }
 
+/**
+ * Decision values the daemon is known to put on an `approval_audit` row.
+ *
+ * Cross-language contract (#6607) — the authoritative writers are:
+ * - `"pending"` — written at submission time by `ApprovalManager::request_approval` (`crates/librefang-kernel/src/approval.rs`) so a crash mid-flight still leaves a record of the request.
+ *   It is NOT a resolved decision.
+ * - `"approved" | "denied" | "timed_out" | "modify_and_retry" | "skipped"` — `ApprovalDecision::as_str()` (`crates/librefang-types/src/approval.rs`), written on resolution by `ApprovalManager::push_recent`.
+ *
+ * `"rejected"` is the spelling `crates/librefang-api/src/routes/approvals.rs` uses for `Denied` on sibling shapes (the `status` field of `GET /api/approvals`, and the `decision` field of the reject-all response), and `"approve"` / `"reject"` are the request verbs its batch endpoint accepts.
+ * No site persists those three onto an audit row today; they are carried here because the History table has always accepted them and dropping the aliases would be a silent behaviour regression if any surface ever does.
+ */
+export type KnownApprovalDecision =
+  | "pending"
+  | "approved"
+  | "approve"
+  | "denied"
+  | "rejected"
+  | "reject"
+  | "timed_out"
+  | "modify_and_retry"
+  | "skipped";
+
+/**
+ * `KnownApprovalDecision` plus an escape hatch for anything else the daemon sends.
+ *
+ * The union is what the UI is checked against; the `string` arm is the honest admission that a newer daemon can send a variant this build has never heard of.
+ * Consumers must keep a runtime fallback for that case — see `decisionPresentation` in `pages/ApprovalsPage.tsx`.
+ */
+export type ApprovalDecisionValue =
+  | KnownApprovalDecision
+  | (string & Record<never, never>);
+
 export interface ApprovalAuditEntry {
   id: string;
   request_id: string;
@@ -3282,11 +3369,17 @@ export interface ApprovalAuditEntry {
   description: string;
   action_summary: string;
   risk_level: string;
-  decision: string;
+  decision: ApprovalDecisionValue;
   decided_by?: string;
   decided_at: string;
   requested_at: string;
   feedback?: string;
+  /**
+   * Whether a TOTP second factor was used for this decision.
+   *
+   * Always present: the Rust field is a plain `bool` (not an `Option`), and `GET /api/approvals/audit` serializes `Vec<ApprovalAuditEntry>` straight through, so serde always emits it.
+   */
+  second_factor_used: boolean;
 }
 
 export async function queryApprovalAudit(params: {

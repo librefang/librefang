@@ -381,12 +381,14 @@ process, preventing shell injection via metacharacters like `;`, `|`, `&&`.
 
 ## Dangerous Command Detection
 
-**Source:** `librefang-runtime/src/dangerous_commands.rs`
+**Source:** `librefang-runtime/src/dangerous_command.rs`
 
 Before any shell command is executed, LibreFang scans the command string
-against **39 regular-expression patterns** grouped into 11 categories of
+against **42 regular-expression patterns** grouped into 13 categories of
 dangerous operations.  This adds a semantic safety layer on top of the
 capability and taint checks.
+
+The screen is independent of `exec_policy.mode` and runs under `deny`, `allowlist`, and `full` alike -- `full` disables allowlist *validation*, not this denylist.
 
 ### Danger Categories
 
@@ -396,13 +398,15 @@ capability and taint checks.
 | **Privilege escalation** | Gaining elevated permissions | `sudo`, `su`, `chmod 777`, `chown root` |
 | **Disk operations** | Low-level disk writes that bypass the filesystem | `dd if=`, `mkfs`, `fdisk`, `parted` |
 | **SQL drops** | Destructive database statements | `DROP TABLE`, `DROP DATABASE`, `TRUNCATE` |
+| **Daemon database mutation** | Writes against the daemon's own `librefang.db`, which holds every agent, session, and approval record on the host | `sqlite3 librefang.db "DELETE FROM …"`, `> librefang.db` |
 | **System file overwrites** | Writing directly to critical OS paths | `> /etc/passwd`, `> /etc/shadow`, `> /boot/` |
-| **Service management** | Stopping or disabling system services | `systemctl stop`, `service … stop`, `kill -9 1` |
+| **Service management** | Stopping or disabling system services, and bouncing the shared LibreFang daemon | `systemctl stop`, `systemctl disable`, `librefang stop`, `librefang gateway restart` |
 | **Process kill** | Sending fatal signals to processes | `kill -9`, `killall`, `pkill -9` |
 | **Fork bomb** | Self-replicating processes that exhaust resources | `:()&#123; :\|:& &#125;;:` and variants |
 | **Arbitrary code execution** | Piping remote content directly into a shell | `curl … \| bash`, `wget … \| sh`, `eval $(…)` |
 | **Destructive find** | Using `find` to delete or overwrite files | `find … -exec rm`, `find … -delete` |
 | **Destructive git** | Force-pushing or history-destroying git operations | `git push --force`, `git reset --hard HEAD~`, `git clean -fdx` |
+| **Container privilege escalation** | Entering a container to act outside the agent's own sandbox | `docker exec` |
 
 ### Approval Modes
 

@@ -65,7 +65,6 @@ export function Typewriter_v2({ text, speed = 20 }: { text: string; speed?: numb
       },
     });
     return () => controls.stop();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text, speed]);
 
   const remarkPlugins = useMemo(

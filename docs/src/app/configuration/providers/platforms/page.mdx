@@ -475,26 +475,31 @@ model = "glm-4-plus"
 | **Auth** | `Authorization: Bearer` header |
 | **Models** | Whatever the gateway account exposes — Claude, GPT, Gemini, MiniMax, and media models are all routed through one endpoint |
 
-Unlike every other entry on this page, EveryAPI is not registered in the builtin catalog and has no fixed model list. It is a self-hostable aggregating gateway, so the available models are a property of your account rather than of LibreFang. A dedicated CLI command reads your gateway credentials and synthesises the provider entry.
+EveryAPI is a managed provider with no fixed model list.
+The available models are a property of your account rather than of LibreFang.
+LibreFang asks the EveryAPI CLI credential process for the current gateway and relay credential, then loads the account's live catalog.
 
 **Setup:**
-1. Install the [EveryAPI CLI](https://github.com/everyapi-ai/everyapi) and sign in, which writes `~/.config/everyapi/credentials.json`:
+1. Install the public [EveryAPI CLI](https://github.com/everyapi-ai/everyapi-ai) and sign in:
    ```bash
-   everyapi login
+   everyapi auth login
    ```
-2. Register the gateway with LibreFang:
+2. Start LibreFang. It detects the authenticated EveryAPI CLI and registers the managed provider automatically:
    ```bash
-   librefang models connect everyapi
+   librefang start
    ```
-3. Optionally make it the daemon default in the same step:
+3. To connect explicitly or make EveryAPI the default provider, run:
    ```bash
    librefang models connect everyapi --set-default
    ```
 
-The command reads `api_base` and `relay_key` from the credentials file (honouring `$XDG_CONFIG_HOME`), fetches the gateway's live `/v1/models` listing, writes the API key to `~/.librefang/.env` as `EVERYAPI_API_KEY`, and persists the provider — through the running daemon when one is up, so the catalog reloads in place, or by writing `~/.librefang/providers/everyapi.toml` directly when it is not. The key is never written into the provider TOML, and it is never printed to the terminal or the logs.
+For managed discovery, EveryAPI remains the credential authority.
+LibreFang invokes `everyapi auth credential --format=json` when it needs a credential and never persists the returned secret.
+Older compatible CLI credentials can still be read as a fallback.
+Explicit endpoint or environment-variable configuration remains available and takes precedence over managed discovery.
 
 Separately from this provider wiring, the EveryAPI CLI also ships an MCP server (`everyapi mcp`) that gives an agent tools for inspecting the gateway account itself — quota, seller channels, edge nodes.
-It reads the same credentials file directly, so it works whether or not `models connect everyapi` has run, and connecting the provider does not enable it: see [Connect the EveryAPI MCP server](/integrations/mcp-a2a#connect-the-every-api-mcp-server).
+It uses the EveryAPI account independently of provider routing, so it works whether or not `models connect everyapi` has run, and connecting the provider does not enable it: see [Connect the EveryAPI MCP server](/integrations/mcp-a2a#connect-the-every-api-mcp-server).
 
 **Notes:**
 

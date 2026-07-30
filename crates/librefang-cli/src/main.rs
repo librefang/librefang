@@ -677,6 +677,7 @@ fn main() {
             keep_config,
         }) => cmd_uninstall(confirm, keep_config),
         Some(Commands::HashPassword { password }) => cmd_hash_password(password),
+        Some(Commands::HashApiKey { key, generate }) => cmd_hash_api_key(key, generate),
     }
 }
 

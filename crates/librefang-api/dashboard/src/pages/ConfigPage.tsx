@@ -24,6 +24,8 @@ import {
   useSetConfigValue,
   useReloadConfig,
 } from "../lib/mutations/config";
+import { copyToClipboard } from "../lib/clipboard";
+import { useUIStore } from "../lib/store";
 import { TomlViewer } from "../components/TomlViewer";
 import { StringMapEditor } from "../components/config/StringMapEditor";
 import { StructListEditor } from "../components/config/StructListEditor";
@@ -123,7 +125,6 @@ function pickType(node: JsonSchema): string {
   // Warn once so unexpected shapes surface during dev rather than silently
   // rendering as a text input.
   if (!node.anyOf && !node.oneOf && !node.$ref && !Array.isArray(node.enum)) {
-    // eslint-disable-next-line no-console
     console.warn("[ConfigPage] schema node missing 'type'; defaulting to string", node);
   }
   return "string";
@@ -344,16 +345,24 @@ function FieldTypeBadge({ type }: { type: string }) {
 /* ------------------------------------------------------------------ */
 
 function CopyPathButton({ path }: { path: string }) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // `copyToClipboard` resolves to `false` instead of rejecting, so the flag must be gated on the result: a dashboard served over plain HTTP on a LAN address has no `navigator.clipboard` at all, and showing the check mark regardless would report a copy that never happened.
+  // The failure needs a toast rather than a silent return, or a total failure reproduces the reported symptom exactly — no clipboard write, no error, no feedback — and matches what the other five converted call sites do.
   const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(path).then(() => {
+    void copyToClipboard(path).then(ok => {
+      if (!ok) {
+        addToast(t("common.copy_failed", "Copy failed"), "error");
+        return;
+      }
       setCopied(true);
       if (timerRef.current) clearTimeout(timerRef.current);
       timerRef.current = setTimeout(() => setCopied(false), 1500);
     });
-  }, [path]);
+  }, [path, addToast, t]);
 
   useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
 
@@ -591,6 +600,14 @@ export function ConfigPage({ category }: { category: string }) {
     }
     return out;
   }, [schemaRoot]);
+
+  // Paths the write endpoint refuses.
+  // Rendering an editable control for one meant the operator changed it, hit Save, and got a bare 403 with no explanation — the reported symptom was "the save appears to succeed and config.toml is unchanged".
+  // These stay visible (an operator must be able to read back a security setting) but are not offered as editable.
+  const nonWritablePaths = useMemo(
+    () => new Set(schemaRoot?.["x-non-writable"] ?? []),
+    [schemaRoot],
+  );
 
   const resolvedFields = useMemo<Record<string, Array<[string, FieldRender]>>>(() => {
     const out: Record<string, Array<[string, FieldRender]>> = {};
@@ -1133,8 +1150,15 @@ export function ConfigPage({ category }: { category: string }) {
                   const hasPending = path in pendingChanges;
                   const isSaving = saveMutation.isPending && saveMutation.variables?.path === path;
                   const statusForField = saveStatus[path] ?? null;
-                  const fieldDesc = t(`config.desc_${fieldKey}`, "");
-                  const fieldLabel = t(`config.fld_${fieldKey}`, fieldLabelFallback(fieldKey));
+                  // Section-qualified key first, bare leaf name as fallback.
+                  // Keying on the leaf alone made every `mode` field in the config — exec_policy, reload, docker, privacy, sanitize — render the root-level `mode` description ("Kernel operating mode"), which is wrong for all five.
+                  // Most leaf names are genuinely section-neutral (`enabled`, `timeout_secs`, `model`), so the fallback keeps them on one string and only the ambiguous ones need a qualified entry.
+                  const readOnly = nonWritablePaths.has(path);
+                  const fieldDesc =
+                    t(`config.desc_${sKey}_${fieldKey}`, "") || t(`config.desc_${fieldKey}`, "");
+                  const fieldLabel =
+                    t(`config.fld_${sKey}_${fieldKey}`, "") ||
+                    t(`config.fld_${fieldKey}`, fieldLabelFallback(fieldKey));
 
                   // Cascading filter: when editing model in default_model, only show
                   // models matching the selected provider.
@@ -1177,23 +1201,12 @@ export function ConfigPage({ category }: { category: string }) {
                         </div>
                       </div>
                       <div className="flex-1 min-w-0 flex flex-col gap-1 pt-1">
-                        {isComposite ? (
-                          <div role="group" aria-labelledby={fieldLabelId}>
-                            <ConfigFieldInput
-                              inputId={fieldInputId}
-                              fieldKey={fieldKey}
-                              fieldType={fieldType}
-                              options={options}
-                              min={min}
-                              max={max}
-                              step={step}
-                              value={currentValue}
-                              onChange={(v) => handleFieldChange(sKey, fieldKey, v, useRootSemantics)}
-                              itemSchema={itemSchema}
-                              schemaRoot={schemaRoot}
-                            />
-                          </div>
-                        ) : (
+                        {/* `inert` rather than a `disabled` prop threaded into every ConfigFieldInput branch: it blocks pointer *and* keyboard interaction for the whole subtree, including the composite editors that render several controls. */}
+                        <div
+                          inert={readOnly || undefined}
+                          className={readOnly ? "opacity-60" : undefined}
+                          {...(isComposite ? { role: "group", "aria-labelledby": fieldLabelId } : {})}
+                        >
                           <ConfigFieldInput
                             inputId={fieldInputId}
                             fieldKey={fieldKey}
@@ -1207,6 +1220,14 @@ export function ConfigPage({ category }: { category: string }) {
                             itemSchema={itemSchema}
                             schemaRoot={schemaRoot}
                           />
+                        </div>
+                        {readOnly && (
+                          <p className="text-[10px] text-warning leading-relaxed">
+                            {t(
+                              "config.read_only_field",
+                              "Not editable from the dashboard — change it in config.toml and reload.",
+                            )}
+                          </p>
                         )}
                         {fieldDesc && (
                           <p className="text-[10px] text-text-dim leading-relaxed">{fieldDesc}</p>

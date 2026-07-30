@@ -506,6 +506,14 @@ impl MemorySubstrate {
         self.sessions.list_sessions_paginated(limit, offset)
     }
 
+    /// Cost / token totals for one session — the single-session form of the aggregate the paginated listing computes per row (#6611).
+    pub fn session_usage_totals(
+        &self,
+        session_id: SessionId,
+    ) -> LibreFangResult<crate::session::SessionUsageTotals> {
+        self.sessions.session_usage_totals(session_id)
+    }
+
     /// Total number of sessions stored.
     pub fn count_sessions(&self) -> LibreFangResult<usize> {
         self.sessions.count_sessions()

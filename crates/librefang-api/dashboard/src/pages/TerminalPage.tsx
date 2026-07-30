@@ -143,6 +143,7 @@ export function TerminalPage() {
     const parsed = stored ? parseInt(stored, 10) : NaN;
     return Number.isFinite(parsed) ? Math.max(10, Math.min(20, parsed)) : 13;
   });
+  const initialFontSizeRef = useRef(fontSize);
 
   const terminalEnabled = useUIStore((s) => s.terminalEnabled);
   const addToast = useUIStore((s) => s.addToast);
@@ -387,7 +388,7 @@ export function TerminalPage() {
         }
       }, delay);
     };
-  }, [t, terminalEnabled, queryClient, addToast]);
+  }, [t, terminalEnabled, queryClient, addToast, removeToast]);
 
   connectRef.current = connect;
 
@@ -508,7 +509,7 @@ export function TerminalPage() {
 
     const term = new Terminal({
       theme: TERMINAL_THEME,
-      fontSize: fontSize,
+      fontSize: initialFontSizeRef.current,
       fontFamily:
         "'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, 'Liberation Mono', monospace",
       lineHeight: 1.2,
@@ -719,9 +720,8 @@ export function TerminalPage() {
             }}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
-                e.shiftKey
-                  ? searchAddonRef.current?.findPrevious(searchQuery)
-                  : searchAddonRef.current?.findNext(searchQuery);
+                if (e.shiftKey) searchAddonRef.current?.findPrevious(searchQuery);
+                else searchAddonRef.current?.findNext(searchQuery);
               }
               if (e.key === "Escape") {
                 setSearchVisible(false);

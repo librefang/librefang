@@ -910,6 +910,9 @@ tag (e.g. `v2026.4.27-beta6`) when you have it. Review the file, hand-edit
 the lead paragraph if the release deserves a narrative beyond the bullet
 list, then commit alongside the CHANGELOG bump.
 
+Fragments need no extra step here.
+`cargo xtask release` folds `changelog.d/` into `## [Unreleased]` before it cuts the dated section, and this script slices the dated section — which `cargo xtask changelog` generates from the merged PR titles in the tag range.
+
 ---
 
 ## Pull Request Process
@@ -941,26 +944,72 @@ Fix session restore crash on kernel reboot
 Refactor capability manager to use DashMap
 ```
 
+### CHANGELOG Entries
+
+**Write your changelog entry as a fragment file under `changelog.d/`, not as an edit to `CHANGELOG.md`.**
+
+Every PR that appends a bullet to the single `## [Unreleased]` section conflicts with every other PR doing the same, in a file where the conflict carries no information: both sides are correct and the resolution is always "keep both".
+A fragment is one file holding one bullet, so two PRs never touch the same file and the conflict is structurally impossible rather than merely less likely.
+This matters most for fork PRs, where the maintainer cannot rebase the branch themselves.
+
+Create one file per entry under the section directory that matches the `### ` heading it belongs to — `added/`, `fixed/`, `changed/`, `security/`, or `documentation/`.
+The file holds the bullet body **without** the leading `- `, one sentence per line with continuation lines indented two spaces, ending with the PR number and your GitHub login:
+
+```
+changelog.d/fixed/1234-matrix-e2ee.md
+```
+
+```markdown
+Add Matrix channel adapter with E2EE support (#1234) (@your-login)
+```
+
+Name the file after the PR or issue number so fragments sort usefully — bullets are assembled in file-name order within each section.
+`changelog.d/README.md` carries the full format and a multi-sentence worked example.
+
+`cargo xtask collect-fragments` folds every fragment into `## [Unreleased]` and deletes the files consumed; `cargo xtask release` runs that step before cutting the dated release section, so a fragment reaches the CHANGELOG the same way a hand-written bullet does.
+
+Editing `## [Unreleased]` directly is **still supported** and still works — the fragment mechanism appends to whatever is already there and never rewrites it.
+Prefer a fragment anyway: the direct edit is what conflicts.
+
+### Where the entry ends up
+
+In the GitHub release body, verbatim.
+
+`cargo xtask release` moves the whole `## [Unreleased]` body into the dated `## [VERSION]` section it cuts — the `### ` subsections and their order exactly as they were written — and leaves the `## [Unreleased]` heading behind, empty, for the next cycle.
+`.github/workflows/release.yml` then slices that section out of `CHANGELOG.md` and publishes it as the release notes; `release-notify.yml` reuses the same slice for the announcement article and the social post.
+
+The rest of the section is generated from PR metadata, and it fills only the gaps.
+Every merged PR in the range gets a `- <PR title> (#N) (@author)` line **unless** its number appears in the trailing `(#N)` group of a bullet you wrote, in which case your bullet is the entry and no generated line is added.
+So each PR is described exactly once — in your words where you wrote them, from its title otherwise.
+
+Two things follow for how to write an entry:
+
+- Explain *why* the change was made and what it means for someone running LibreFang.
+  The PR title is already covered for free, so a bullet that restates it adds nothing.
+- End the bullet with the PR reference, `(#1234)` or `(#1234, #1235)` for one entry covering two PRs.
+  Without it there is no way to tell which generated line your prose replaces, so your PR keeps that line and appears twice in the release body, and `cargo xtask release` prints a warning naming your bullet.
+  The fallback is per bullet: yours missing a reference costs only your own entry, and every other bullet still suppresses its generated line.
+
 ### CHANGELOG Attribution
 
-When you add a bullet to the `## [Unreleased]` section of `CHANGELOG.md`,
-end the line with your GitHub login in parentheses, e.g.
+Whichever path you took above — fragment or direct edit — end the entry with your GitHub login in parentheses, e.g.
 
 ```
 - Add Matrix channel adapter with E2EE support (#1234) (@your-login)
 ```
 
-This is enforced by `scripts/check-changelog-attribution.py` (wired into the
-`pre-commit` hook and the `CHANGELOG Attribution` CI job). The check runs
-**only against the lines your PR adds** — historical entries that predate
-this convention are not retroactively flagged, and you should not backfill
-them. To audit the current `[Unreleased]` block before cutting a release:
+That login is published: it travels with the bullet into the dated release section and out to the release notes, so the credit is on the release itself rather than only in `git log`.
+
+This is enforced by `scripts/check-changelog-attribution.py` (wired into the `pre-commit` hook and the `CHANGELOG Attribution` CI job), which holds a `changelog.d/` fragment to exactly the same standard as an `[Unreleased]` bullet and additionally rejects a fragment in an unrecognised section directory — assembly has no heading to render such a fragment under, so it would be dropped without a word.
+The check runs **only against what your PR adds** — historical entries that predate this convention are not retroactively flagged, and you should not backfill them.
+To audit everything pending before cutting a release:
 
 ```
 python3 scripts/check-changelog-attribution.py --all-unreleased
 ```
 
 The accepted format is `(@username)` matching `\(@[A-Za-z0-9_][A-Za-z0-9_-]*\)`.
+The attribution may sit on any line of a multi-line entry, but not past a blank line: a blank line ends the bullet, so anything after it is a separate paragraph.
 See issue #3400 for the rationale.
 
 ---

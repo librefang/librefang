@@ -2351,6 +2351,7 @@ mod tests {
         let state = Arc::new(AppState {
             kernel,
             started_at: std::time::Instant::now(),
+            readiness_requires_embedding: false,
             bridge_manager: arc_swap::ArcSwap::new(std::sync::Arc::new(None)),
             channels_config: tokio::sync::RwLock::new(Default::default()),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
@@ -2365,6 +2366,7 @@ mod tests {
             media_drivers: librefang_kernel::media::MediaDriverCache::new(),
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            master_key: Default::default(),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             config_write_lock: tokio::sync::Mutex::new(()),
             pending_a2a_agents: dashmap::DashMap::new(),

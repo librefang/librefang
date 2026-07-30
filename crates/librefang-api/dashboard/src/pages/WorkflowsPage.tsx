@@ -432,7 +432,7 @@ export function WorkflowsPage() {
       .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "")),
     [workflowsQuery.data, searchQuery]
   );
-  const allWorkflows = workflowsQuery.data ?? [];
+  const allWorkflows = useMemo(() => workflowsQuery.data ?? [], [workflowsQuery.data]);
   const scheduledWf = useMemo(
     () => allWorkflows.find(w => w.id === scheduleWorkflowId),
     [allWorkflows, scheduleWorkflowId]
@@ -684,7 +684,7 @@ export function WorkflowsPage() {
   };
 
   const templatesQuery = useWorkflowTemplates();
-  const apiTemplates = templatesQuery.data ?? [];
+  const apiTemplates = useMemo(() => templatesQuery.data ?? [], [templatesQuery.data]);
   const lang = i18n.language?.split("-")[0] ?? "en";
   const tmplName = (tmpl: WorkflowTemplate) => tmpl.i18n?.[lang]?.name || tmpl.name;
   const tmplDesc = (tmpl: WorkflowTemplate) => tmpl.i18n?.[lang]?.description || tmpl.description;

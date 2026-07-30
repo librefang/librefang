@@ -311,6 +311,13 @@ fn sanitize_session_title(raw: &str) -> String {
         .to_string()
 }
 
+/// Env var that overrides `KernelConfig.api_key` (#6635). Read by
+/// `boot_with_config` to fold the value into the live config, and again by
+/// `build_mcp_bridge_cfg` because a config reload drops that fold. Mirrors
+/// `librefang_api::server::API_KEY_ENV`, which the crate boundary keeps us
+/// from sharing.
+pub(crate) const API_KEY_ENV: &str = "LIBREFANG_API_KEY";
+
 /// Build the MCP bridge config that lets CLI-based drivers (Claude Code)
 /// reach back into the daemon's own `/mcp` endpoint. Uses loopback when the
 /// API listens on a wildcard address.
@@ -327,14 +334,69 @@ fn build_mcp_bridge_cfg(cfg: &KernelConfig) -> librefang_llm_driver::McpBridgeCo
     } else {
         format!("http://{listen}")
     };
-    let api_key = if cfg.api_key.is_empty() {
-        None
-    } else {
-        Some(cfg.api_key.clone())
+    // Outbound leg of #6613: this bearer is *transmitted* to the daemon's own
+    // API, so unlike the inbound auth path it needs the plaintext, not a hash.
+    // Resolve the same env / `vault:` indirection the API layer applies when
+    // deciding what to accept — sending the literal string `vault:master` would
+    // fail against a daemon that resolved the same field to the vault's value.
+    //
+    // `LIBREFANG_API_KEY` is consulted here rather than relied upon to already
+    // sit in `cfg.api_key`. `boot_with_config` does fold it in at boot, but
+    // `reload_config` re-reads `config.toml` from disk and never re-applies the
+    // override — so on an env-only deployment the next driver rebuild after a
+    // reload would hand the bridge an empty key and every self-call would 401.
+    // Same precedence as the API layer's `resolve_credential`: env, then
+    // `vault:`, then the literal.
+    let api_key = match std::env::var(API_KEY_ENV) {
+        Ok(key) if !key.trim().is_empty() => key.trim().to_string(),
+        _ => resolve_vault_prefixed(cfg.api_key.trim(), &cfg.home_dir),
     };
+    // A hash-only config is the one posture that resolves to nothing here while the daemon still enforces auth, and it is the posture `api_key_hash`'s own documentation and `librefang hash-api-key` both recommend ("put the hash here and leave `api_key` unset").
+    // `api_key_hash` cannot be substituted: a verifier does not yield the secret it verifies, and this leg *transmits* the credential.
+    // So the bridge goes out with no `Authorization` header and the daemon's own middleware answers 401 — precisely because #6613 made it treat a hash as configured auth.
+    //
+    // Nothing downstream can explain that: the driver reports a failed tool call, not a missing kernel-side credential.
+    // Say it here, where the empty result is produced, and name the two fixes that keep the secret out of `config.toml` while staying transmittable.
+    if api_key.is_empty() && !cfg.api_key_hash.trim().is_empty() {
+        warn!(
+            "[mcp bridge] no transmittable api_key: `api_key_hash` is set but `api_key` \
+             and ${API_KEY_ENV} are empty. CLI-based drivers (claude-code) call this \
+             daemon's own /mcp endpoint and will get 401 on every tool call, because a \
+             hash verifies a key rather than yielding one. Set `api_key = \
+             \"vault:NAME\"` or ${API_KEY_ENV} — the hash stays in use for inbound auth."
+        );
+    }
     librefang_llm_driver::McpBridgeConfig {
         base_url: base,
-        api_key,
+        api_key: (!api_key.is_empty()).then_some(api_key),
+    }
+}
+
+/// Expand a `vault:KEY_NAME` reference against `<home_dir>/vault.enc`, leaving
+/// any other value untouched.
+///
+/// Mirrors step 2 of the API layer's credential resolution
+/// (`librefang_api::server::resolve_credential`). Kept as a separate small
+/// function rather than shared because the two live on opposite sides of the
+/// kernel/API boundary and carry opposite directions of trust: the API layer
+/// decides what to *accept*, this decides what to *send*.
+fn resolve_vault_prefixed(value: &str, home_dir: &std::path::Path) -> String {
+    let Some(vault_key) = value.strip_prefix("vault:") else {
+        return value.to_string();
+    };
+    let mut vault = librefang_extensions::vault::CredentialVault::new(home_dir.join("vault.enc"));
+    match vault.unlock() {
+        Ok(()) => match vault.get(vault_key) {
+            Some(secret) => secret.to_string(),
+            None => {
+                warn!("Vault key '{vault_key}' not found in vault; MCP bridge will be unauthenticated");
+                String::new()
+            }
+        },
+        Err(e) => {
+            warn!("Could not unlock vault to resolve the MCP bridge api_key: {e}");
+            String::new()
+        }
     }
 }
 

@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: librefang
+  labels:
+    app.kubernetes.io/name: librefang
+    app.kubernetes.io/component: daemon
+spec:
+  # ClusterIP: the API exposes shell exec, the credential vault, and provider
+  # keys behind one bearer token. Reaching it from outside the cluster should
+  # be a deliberate act — put an Ingress with TLS in front of it, or use
+  # `kubectl port-forward svc/librefang 4545:4545` for ad-hoc access.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: librefang
+  ports:
+    - name: http
+      port: 4545
+      targetPort: http
+      protocol: TCP
+---
+# The governing Service named by `StatefulSet.spec.serviceName`. It must be
+# headless: that is what gives the pod its stable per-pod DNS name
+# (`librefang-0.librefang-headless.<ns>.svc`). The ClusterIP Service above is
+# what clients should talk to; this one exists so the StatefulSet contract is
+# satisfied rather than silently half-wired.
+apiVersion: v1
+kind: Service
+metadata:
+  name: librefang-headless
+  labels:
+    app.kubernetes.io/name: librefang
+    app.kubernetes.io/component: daemon
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: librefang
+  ports:
+    - name: http
+      port: 4545
+      targetPort: http
+      protocol: TCP

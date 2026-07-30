@@ -52,6 +52,11 @@
     "mobile_tabs": "底部导航",
     "console": "控制台"
   },
+  "partner": {
+    "everyapi_label": "EveryAPI 官方合作伙伴集成",
+    "official": "官方合作伙伴",
+    "librefang_everyapi": "LibreFang × EveryAPI"
+  },
   "common": {
     "copied": "已复制",
     "show": "显示",
@@ -982,7 +987,26 @@
     "empty_title": "尚未配置通道",
     "has_token": "已有令牌",
     "help": "Channels 是让人类跟你的 agent 对话的入站 / 出站桥梁——Slack、Discord、Telegram、邮件、webhook 等。每个 channel 有自己的 adapter；在这里配置 channel 等于把 adapter 跟一份凭据接起来并启用。\n\n使用步骤：\n\n1. 浏览目录。卡片显示运行时支持的所有 channel adapter，带 \"已配置 / 未配置\" 徽标和难度提示。\n\n2. 配置。在某个 channel 上点 \"Configure\"，填必填字段（token、app id、webhook URL 等）。保存后写入 config 并热重载 adapter——无需重启 daemon。\n\n3. 扫码登录。某些 adapter（如 WhatsApp Web）用扫码登录而非 token，点 \"QR login\" 用手机 app 扫。\n\n4. 验证。保存后卡片翻为 \"已配置\"，通信页就能看到该 adapter 的实时事件流。\n\n典型场景：\n\n  · 把 agent 接入团队 Slack，让任何人都能 DM 它。\n  · 配一个入站 webhook，让 agent 在 GitHub 事件上触发。\n  · 一个实例跑多个 Telegram 机器人，通过 channel binding 路由到不同 agent。\n\n注意事项：\n\n  · Channel binding（哪个 agent 在哪个 channel 上回应）写在 agent 的 manifest 里——本页只管 adapter 凭据。\n  · 部分 channel 字段是平台级密钥，存在本地 config，仅管理员可见。\n  · 重载会重新解析 channel 配置而不重启 daemon；重载失败时旧配置继续运行。",
-    "msgs_24h": "条/24h",
+    "card_aria": "{{name}} — 状态：{{status}}",
+    "configured_label": "已配置",
+    "last_error": "最近一次错误",
+    "last_error_sticky_hint": "记录于监控器最后一次检测到故障时。恢复后不会清除，因此已连接的通道也可能仍显示该错误。",
+    "last_message_at": "最近一条消息",
+    "liveness": {
+      "active": "活跃",
+      "connected": "已连接",
+      "degraded": "降级",
+      "failed": "失败",
+      "not_supervised": "未启动",
+      "starting": "正在启动",
+      "stopped": "已停止"
+    },
+    "load_error": "无法加载频道",
+    "msgs_24h_by_type": "24 小时消息数（全部 {{type}} 通道）",
+    "not_supervised_hint": "该通道没有正在运行的适配器。请重新加载通道以启动它，或查看守护进程日志中 sidecar 启动失败的原因。",
+    "started_at": "启动于",
+    "traffic_in_out": "收 {{received}} / 发 {{sent}}",
+    "traffic_since_start": "自适配器启动以来的消息数",
     "name": "名称",
     "no_configured": "暂无已配置的通道",
     "no_results": "没有匹配的通道",
@@ -2346,6 +2370,12 @@
     "desc_log_level": "日志输出级别",
     "desc_network_enabled": "启用 P2P 网络，支持多节点通信",
     "desc_mode": "内核运行模式 — stable（稳定）、default（默认）或 dev（开发）",
+    "read_only_field": "无法在面板中修改 —— 请编辑 config.toml 后重新加载。",
+    "desc_exec_policy_mode": "Shell 执行策略 —— deny 阻止全部命令，allowlist 仅允许清单内命令，full 全部允许（不安全，仅限开发）",
+    "desc_reload_mode": "配置变更的生效方式 —— hybrid、watch 或 manual",
+    "desc_docker_mode": "哪些 agent 运行在 Docker 沙箱中 —— off、non_main 或 all",
+    "desc_privacy_mode": "出站内容的隐私处理 —— off、redact 或 pseudonymize",
+    "desc_sanitize_mode": "工具输出在送达模型前应用的净化方式",
     "desc_language": "Agent 回复的默认语言",
     "desc_usage_footer": "每次回复后显示的使用量信息",
     "desc_stable_prefix_mode": "使用稳定的消息 ID 前缀以实现确定性缓存",
@@ -2669,6 +2699,7 @@
   "goals": {
     "title": "目标",
     "subtitle": "战略规划和任务跟踪。",
+    "loadError": "加载目标失败。守护进程报告了存储错误——请检查其日志。",
     "total": "总目标",
     "pending": "待处理",
     "in_progress": "进行中",
@@ -2781,6 +2812,10 @@
     "totpBadge": "TOTP",
     "requestedAgo": "{{ago}} 前请求",
     "approveWithTotp": "使用 TOTP 批准",
+    "trustedSendersTitle": "受信任的发送者",
+    "trustedSendersDesc": "列在此处的发送者会跳过所有未被判定为高风险的工具的审批提示。请在 config.toml 中编辑该列表 —— 它被有意设为无法通过 API 写入。",
+    "trustedSendersEmpty": "没有受信任的发送者 —— 所有发送者都会经过审批关卡。",
+    "trustedSendersLoadError": "无法加载审批配置。",
     "editApprove": "编辑并批准",
     "editApproveTitle": "编辑并批准",
     "editApproveSubmit": "提交并批准",
@@ -2796,7 +2831,13 @@
       "decisions": {
         "approved": "已批准",
         "denied": "已拒绝",
-        "edited": "已修改"
+        "edited": "已修改",
+        "pending": "待处理",
+        "timedOut": "已超时",
+        "skipped": "已跳过",
+        "unknown": "未知状态",
+        "aria": "决定：{{label}}",
+        "unknownAria": "无法识别的决定：{{value}}"
       },
       "cols": {
         "decision": "决定",

@@ -217,6 +217,24 @@ cd librefang/deploy
 docker compose up -d
 ```
 
+**Kubernetes**
+
+单副本有状态部署的 Kustomize manifest，满足 `restricted` Pod Security Standard：
+
+```bash
+git clone https://github.com/librefang/librefang.git
+cd librefang
+kubectl create namespace librefang
+kubectl -n librefang create secret generic librefang-auth \
+  --from-literal=api-key="$(openssl rand -hex 32)" \
+  --from-literal=vault-key="$(openssl rand -base64 32)" \
+  --from-literal=dashboard-user=admin \
+  --from-literal=dashboard-pass="$(openssl rand -hex 24)"
+kubectl -n librefang apply -k deploy/kubernetes/base
+```
+
+`replicas` 必须保持为 1 —— 支持边界、卷所有权要求和探针契约见 [deploy/kubernetes/README.md](https://github.com/librefang/librefang/tree/main/deploy/kubernetes)。
+
 **验证安装**
 
 ```bash

@@ -208,6 +208,74 @@ pub struct ResolvedSettings {
     pub env_vars: Vec<String>,
 }
 
+/// Render one stored setting value as the string the schema compares against.
+///
+/// `HandSetting.default` and `HandSettingOption.value` are declared as TOML strings, so the whole resolver works on `&str`.
+/// Stored values, though, come from a `serde_json::Value` map that any API client can post — the dashboard sends strings, but `true` and `100` are equally valid JSON for a toggle or a numeric text field.
+/// A plain `as_str()` returns `None` for those and the setting silently reverts to its schema default, which is the same user-visible failure as not saving at all.
+/// Coerce the scalar forms; arrays / objects / null have no meaningful scalar rendering and still fall through to the default.
+fn setting_value_as_str(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// The value a setting actually resolves to, after coercion and schema validation.
+///
+/// This is the single definition of "what is this setting set to" — [`resolve_settings`] renders the prompt from it, and the HTTP layer reports it as `effective_values` so no other surface has to re-derive the rules and drift (#6636).
+///
+/// A stored value is honoured only when it coerces to a scalar **and**, for a `Select`, names a declared option.
+/// Anything else falls back to `setting.default`, which the hand author wrote and which a `Select` default is expected to match.
+/// Dropping that second condition is what let `{"trading_mode": true}` render the line `- Trading Mode: true (true)` for the LLM and, because no option matched, silently drop that option's `provider_env` from the subprocess env allowlist.
+pub fn effective_setting_value(
+    setting: &HandSetting,
+    config: &HashMap<String, serde_json::Value>,
+) -> String {
+    let Some(stored) = config.get(&setting.key).and_then(setting_value_as_str) else {
+        return setting.default.clone();
+    };
+    if setting.setting_type == HandSettingType::Select
+        && !setting.options.is_empty()
+        && !setting.options.iter().any(|o| o.value == stored)
+    {
+        return setting.default.clone();
+    }
+    stored
+}
+
+/// Every setting's effective value, keyed by `setting.key`.
+///
+/// `BTreeMap` because this is reported over HTTP and rendered by the CLI; a stable order keeps both outputs diffable.
+pub fn effective_setting_values(
+    settings: &[HandSetting],
+    config: &HashMap<String, serde_json::Value>,
+) -> std::collections::BTreeMap<String, String> {
+    settings
+        .iter()
+        .map(|s| (s.key.clone(), effective_setting_value(s, config)))
+        .collect()
+}
+
+/// Saved config keys that the schema does not declare.
+///
+/// `update_config` accepts any key, so a typo (`tradingmode` for `trading_mode`) is stored permanently and merged into every later save while affecting nothing.
+/// Reporting the strays is what lets an operator notice the setting they thought they changed is inert (#6636).
+pub fn undeclared_setting_keys(
+    settings: &[HandSetting],
+    config: &HashMap<String, serde_json::Value>,
+) -> Vec<String> {
+    let mut stray: Vec<String> = config
+        .keys()
+        .filter(|k| !settings.iter().any(|s| &&s.key == k))
+        .cloned()
+        .collect();
+    stray.sort();
+    stray
+}
+
 /// Resolve user config values against a hand's settings schema.
 ///
 /// For each setting, looks up the user's choice in `config` (falling back to
@@ -222,10 +290,8 @@ pub fn resolve_settings(
     let mut env_vars: Vec<String> = Vec::new();
 
     for setting in settings {
-        let chosen_value = config
-            .get(&setting.key)
-            .and_then(|v| v.as_str())
-            .unwrap_or(&setting.default);
+        let chosen = effective_setting_value(setting, config);
+        let chosen_value: &str = &chosen;
 
         match setting.setting_type {
             HandSettingType::Select => {
@@ -314,7 +380,7 @@ struct LegacyHandAgentConfig {
     #[serde(default)]
     schedule: Option<ScheduleMode>,
     /// Explicit autonomous guardrails.
-    /// Wins over the block synthesized from `max_iterations`.
+    /// Wins over the block synthesized from `max_iterations`, and — unlike that synthesized block — is the author's opt-in to a wake-up cycle, resolved by [`apply_explicit_autonomous_schedule`] (#6595).
     #[serde(default)]
     autonomous: Option<AutonomousConfig>,
     /// Explicit per-hand exec policy.
@@ -395,15 +461,50 @@ fn parse_single_agent_section(value: &toml::Value) -> Result<AgentManifest, Stri
         .map(|v| v.is_table())
         .unwrap_or(false);
 
-    if has_model_table {
+    let mut manifest = if has_model_table {
         AgentManifest::deserialize(value.clone())
             .or_else(|_| LegacyHandAgentConfig::deserialize(value.clone()).map(AgentManifest::from))
-            .map_err(|e| format!("Failed to parse [agent] section: {e}"))
+            .map_err(|e| format!("Failed to parse [agent] section: {e}"))?
     } else {
         LegacyHandAgentConfig::deserialize(value.clone())
             .map(AgentManifest::from)
             .or_else(|_| AgentManifest::deserialize(value.clone()))
-            .map_err(|e| format!("Failed to parse [agent] section: {e}"))
+            .map_err(|e| format!("Failed to parse [agent] section: {e}"))?
+    };
+
+    apply_explicit_autonomous_schedule(value, &mut manifest);
+    Ok(manifest)
+}
+
+/// Turn an author-written `[autonomous]` block into a continuous schedule (#6595).
+///
+/// `manifest.autonomous` cannot answer "did the author ask for autonomy?", because it is also the carrier for the flat `max_iterations` field: `From<LegacyHandAgentConfig>` synthesizes an `AutonomousConfig` just to hold that agent-loop iteration cap.
+/// Hand activation used to read `autonomous.is_some()` and gave every such role a 30s wake-up cycle it never declared — the defect in #6595, whose own example is the bundled `researcher` hand declaring `max_iterations = 80` with an author comment saying it is a loop-depth cap.
+///
+/// The raw TOML table can answer it, which is why the decision is made here rather than downstream: an `autonomous` key is present only if somebody wrote `[autonomous]`.
+/// Reading the raw table also makes this format-agnostic — the flat/legacy agent shape and the nested `[model]` shape hit the same code path, with no "was this explicit?" flag threaded through two structs.
+///
+/// An explicit `schedule` is left alone in both spellings that can reach here.
+/// The `schedule` key check is the load-bearing one, and `schedule = "reactive"` is the input it discriminates: an author switching ticking *off* while keeping the guardrails, whose resolved mode is indistinguishable from having declared nothing.
+/// The `ScheduleMode::Reactive` check that follows is redundant — `ScheduleMode`'s `Default` is `Reactive`, so a table with no `schedule` key always resolves to it — and is kept deliberately as a cheap guard on the function's contract: never overwrite a schedule the author asked for.
+///
+/// Scope: this rule is hand-specific, and that asymmetry is deliberate rather than overlooked.
+/// `spawn_agent_inner` derives no schedule from `[autonomous]`, so a standalone `agent.toml` carrying that block stays `Reactive` — which means the same file ticks when a hand names it as a `base =` template (the merged table reaches here with the `autonomous` key intact) and does not tick when it is spawned directly.
+/// Extending the rule to standalone agents would start loops for agents that have never had one, a behaviour change #6595 does not ask for, so it is left as a separate decision instead of being smuggled in here.
+fn apply_explicit_autonomous_schedule(value: &toml::Value, manifest: &mut AgentManifest) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    if !table.contains_key("autonomous") || table.contains_key("schedule") {
+        return;
+    }
+    if !matches!(manifest.schedule, ScheduleMode::Reactive) {
+        return;
+    }
+    if let Some(autonomous) = manifest.autonomous.as_ref() {
+        manifest.schedule = ScheduleMode::Continuous {
+            check_interval_secs: autonomous.heartbeat_interval_secs,
+        };
     }
 }
 
@@ -873,47 +974,20 @@ impl<'de> Deserialize<'de> for HandDefinition {
 
 /// How often a Hand runs.
 ///
-/// This is the hand-level declaration of *whether and how often* the hand's autonomous roles wake up, consumed by hand activation in `librefang-kernel` (#6595).
-/// It used to be catalog-display metadata only, while the wake-up schedule was inferred from the presence of an agent's `max_iterations` — a loop-depth cap that says nothing about scheduling.
-/// The declaration and the implementation now agree.
+/// Catalog-display metadata: it describes the hand's intended usage pattern for the marketplace listing and is not read by the kernel.
+/// A role's wake-up schedule comes from its own manifest — an explicit `schedule` or an explicit `[autonomous]` block — never from this field (#6595).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HandFrequency {
     Continuous,
     Periodic,
-    /// No wake-up cycle: the hand's agents run only when a message or event arrives.
-    /// `reactive` is accepted as an alias because it is the `ScheduleMode` spelling of the same thing and the natural value to reach for when switching a hand's ticking off.
+    /// The hand's agents are meant to be used when a message or event arrives.
+    /// `reactive` is accepted as an alias because it is the `ScheduleMode` spelling of the same idea, and an author reaching for it should get a hand that parses rather than a TOML error.
     #[default]
     #[serde(rename = "on-demand", alias = "reactive")]
     OnDemand,
     Daily,
     Hourly,
-}
-
-/// Wake-up cadence used for [`HandFrequency::Periodic`], which names a recurring cycle without saying how long it is.
-/// Matches the `check_interval_secs` default of `librefang_types::agent::ScheduleMode`, so a `periodic` hand ticks at the same rate as an agent that writes `[schedule.continuous]` and leaves the interval out.
-const PERIODIC_TICK_INTERVAL_SECS: u64 = 300;
-
-impl HandFrequency {
-    /// Wake-up cadence in seconds that this frequency declares, or `None` when it declares no wake-up cycle at all ([`HandFrequency::OnDemand`]).
-    ///
-    /// `heartbeat_interval_secs` comes from the role's own `[autonomous]` guardrails and is used for [`HandFrequency::Continuous`], which means "as often as this agent's heartbeat" rather than a fixed period.
-    /// The fixed cadences ignore it: an author who wrote `hourly` asked for an hour, not for the 30s `AutonomousConfig` heartbeat default.
-    pub fn tick_interval_secs(&self, heartbeat_interval_secs: u64) -> Option<u64> {
-        match self {
-            Self::Continuous => Some(heartbeat_interval_secs),
-            Self::Hourly => Some(3_600),
-            Self::Daily => Some(86_400),
-            Self::Periodic => Some(PERIODIC_TICK_INTERVAL_SECS),
-            Self::OnDemand => None,
-        }
-    }
-
-    /// Whether this frequency declares a wake-up cycle at all, independent of how long it is.
-    /// Derived from [`Self::tick_interval_secs`] so the two can never disagree about which variants are scheduled.
-    pub fn declares_wake_up_cycle(&self) -> bool {
-        self.tick_interval_secs(0).is_some()
-    }
 }
 
 /// Relative token consumption level of a Hand.
@@ -1211,7 +1285,9 @@ timeout_secs = 45
                 check_interval_secs,
             } => assert_eq!(
                 check_interval_secs, 900,
-                "an explicitly declared check interval must survive the flat-format parse"
+                "an explicitly declared check interval must survive the flat-format \
+                 parse, and must win over the 600s heartbeat of the explicit \
+                 [autonomous] block below (#6595)"
             ),
             ref other => panic!("expected an explicit continuous schedule, got {other:?}"),
         }
@@ -1287,6 +1363,238 @@ max_iterations = 80
             "a flat agent section declaring no [exec_policy] must leave it unset \
              so hand activation inherits the operator's global policy"
         );
+    }
+
+    /// An author-written `[autonomous]` block is the opt-in to a wake-up cycle, and it resolves to `Continuous` at the block's own `heartbeat_interval_secs` (#6595).
+    ///
+    /// This is the half of the fix that cannot be expressed as "leave `manifest.autonomous` alone": the synthesized block and the declared block are indistinguishable *after* deserialization, so the decision is made against the raw TOML table where only the declared one shows up as an `autonomous` key.
+    /// A non-default interval is used on purpose — 30 is both the `AutonomousConfig` default and the value the old `autonomous.is_some()` derivation produced, so asserting 30 here would pass under the very behaviour this replaces.
+    #[test]
+    fn explicit_autonomous_block_yields_continuous_schedule_in_flat_format() {
+        let toml_content = r#"
+id = "flat-explicit-autonomous"
+version = "0.1.0"
+name = "Flat Explicit Autonomous Hand"
+description = "Regression fixture for issue #6595"
+category = "development"
+
+[agents.worker]
+name = "flat-autonomous-worker"
+description = "Declares autonomous guardrails in the flat agent format"
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+
+[agents.worker.autonomous]
+max_iterations = 12
+heartbeat_interval_secs = 900
+"#;
+
+        let def = registry::parse_hand_toml(toml_content, "", HashMap::new())
+            .expect("flat-format hand should parse");
+        let manifest = &def
+            .agents
+            .get("worker")
+            .expect("worker role must be present")
+            .manifest;
+
+        match manifest.schedule {
+            ScheduleMode::Continuous {
+                check_interval_secs,
+            } => assert_eq!(
+                check_interval_secs, 900,
+                "an explicit [autonomous] block must schedule the role at its own \
+                 heartbeat interval, not at the 30s default"
+            ),
+            ref other => panic!(
+                "an explicit [autonomous] block must yield a continuous schedule, got {other:?}"
+            ),
+        }
+        assert_eq!(
+            manifest.autonomous.as_ref().map(|a| a.max_iterations),
+            Some(12),
+            "the declared guardrails must reach the manifest whole, not just \
+             their heartbeat"
+        );
+    }
+
+    /// The same declaration in the nested `[model]` agent format must behave identically.
+    ///
+    /// That format takes the `AgentManifest::deserialize` branch of `parse_single_agent_section` rather than the `LegacyHandAgentConfig` one, so a fix threaded through the legacy struct would cover only half the hands.
+    /// Inspecting the raw TOML table is what makes the resolution format-agnostic, and this test is what proves it.
+    #[test]
+    fn explicit_autonomous_block_yields_continuous_schedule_in_nested_model_format() {
+        let toml_content = r#"
+id = "nested-explicit-autonomous"
+version = "0.1.0"
+name = "Nested Explicit Autonomous Hand"
+description = "Regression fixture for issue #6595"
+category = "development"
+
+[agents.worker]
+name = "nested-autonomous-worker"
+description = "Declares autonomous guardrails in the nested agent format"
+
+[agents.worker.model]
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+
+[agents.worker.autonomous]
+max_iterations = 12
+heartbeat_interval_secs = 900
+"#;
+
+        let def = registry::parse_hand_toml(toml_content, "", HashMap::new())
+            .expect("nested-format hand should parse");
+        let manifest = &def
+            .agents
+            .get("worker")
+            .expect("worker role must be present")
+            .manifest;
+
+        // Fixture sanity: if this took the flat branch the test would prove nothing about the nested one.
+        assert_eq!(
+            manifest.model.system_prompt, "You are a test worker.",
+            "fixture sanity: the nested [model] sub-table must have been parsed"
+        );
+        match manifest.schedule {
+            ScheduleMode::Continuous {
+                check_interval_secs,
+            } => assert_eq!(
+                check_interval_secs, 900,
+                "the nested agent format must resolve an explicit [autonomous] \
+                 block exactly like the flat one"
+            ),
+            ref other => panic!(
+                "an explicit [autonomous] block must yield a continuous schedule in \
+                 the nested format too, got {other:?}"
+            ),
+        }
+    }
+
+    /// `schedule = "reactive"` is an author switching a role's wake-up cycle off while keeping its guardrails — quiet hours, restart caps, a heartbeat channel — and it must be honoured verbatim.
+    ///
+    /// This is the only input the `schedule`-key check in `apply_explicit_autonomous_schedule` discriminates: every non-reactive spelling is already excluded by the resulting mode not being `Reactive`.
+    /// Without this case the check looks redundant.
+    #[test]
+    fn explicit_reactive_schedule_wins_over_explicit_autonomous_block() {
+        let toml_content = r#"
+id = "explicit-reactive"
+version = "0.1.0"
+name = "Explicit Reactive Hand"
+description = "Regression fixture for issue #6595"
+category = "development"
+
+[agents.worker]
+name = "explicit-reactive-worker"
+description = "Keeps its guardrails but asks not to be woken up"
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+schedule = "reactive"
+
+[agents.worker.autonomous]
+max_iterations = 12
+heartbeat_interval_secs = 900
+"#;
+
+        let def = registry::parse_hand_toml(toml_content, "", HashMap::new())
+            .expect("flat-format hand should parse");
+        let manifest = &def
+            .agents
+            .get("worker")
+            .expect("worker role must be present")
+            .manifest;
+
+        match manifest.schedule {
+            ScheduleMode::Reactive => {}
+            ref other => panic!(
+                "an explicit `schedule = \"reactive\"` must survive an explicit \
+                 [autonomous] block, got {other:?}"
+            ),
+        }
+        assert_eq!(
+            manifest.autonomous.as_ref().map(|a| a.max_iterations),
+            Some(12),
+            "switching the wake-up cycle off must not discard the guardrails"
+        );
+    }
+
+    /// Resolving the schedule at parse time has to be idempotent, because the resolution's own output is a manifest carrying an `autonomous` block that reads as explicit on a second pass.
+    ///
+    /// A role that declared only `max_iterations` ends up with a *synthesized* `AutonomousConfig`.
+    /// Serialize that manifest and the synthesized block becomes a real `autonomous` key, so re-parsing the serialized form would schedule the role continuously and reintroduce #6595 through the back door — unless the serialized form also carries `schedule`, which the `schedule`-key check then honours.
+    /// `AgentManifest::schedule` has no `skip_serializing_if`, so it always does; this test is what keeps it that way, since adding one would be an innocuous-looking change with that consequence.
+    ///
+    /// No production path re-parses a serialized `HandDefinition` today — `install_from_content_persisted` writes the author's original HAND.toml and `reload_from_disk` re-parses that — but `HandDefinition` does derive `Serialize`, so the round trip is one refactor away.
+    #[test]
+    fn schedule_resolution_is_idempotent_across_a_serialize_reparse_round_trip() {
+        let toml_content = r#"
+id = "round-trip"
+version = "0.1.0"
+name = "Round Trip Hand"
+description = "Regression fixture for issue #6595"
+category = "development"
+
+[agents.cap_only]
+name = "round-trip-cap-only"
+description = "Only declares a loop-depth cap"
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+max_iterations = 80
+
+[agents.autonomous_role]
+name = "round-trip-autonomous"
+description = "Declares autonomous guardrails of its own"
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+
+[agents.autonomous_role.autonomous]
+max_iterations = 12
+heartbeat_interval_secs = 900
+"#;
+
+        let first =
+            registry::parse_hand_toml(toml_content, "", HashMap::new()).expect("hand should parse");
+        let reserialized =
+            toml::to_string(&first).expect("a parsed definition must re-serialize to TOML");
+        let second = registry::parse_hand_toml(&reserialized, "", HashMap::new())
+            .expect("a re-serialized definition must parse back");
+
+        for def in [&first, &second] {
+            match def
+                .agents
+                .get("cap_only")
+                .expect("cap_only role must be present")
+                .manifest
+                .schedule
+            {
+                ScheduleMode::Reactive => {}
+                ref other => panic!(
+                    "a role declaring only `max_iterations` must stay reactive on \
+                     every pass, got {other:?}"
+                ),
+            }
+            match def
+                .agents
+                .get("autonomous_role")
+                .expect("autonomous_role must be present")
+                .manifest
+                .schedule
+            {
+                ScheduleMode::Continuous {
+                    check_interval_secs,
+                } => assert_eq!(
+                    check_interval_secs, 900,
+                    "an explicitly scheduled role must keep its interval across the \
+                     round trip, not drift to a default"
+                ),
+                ref other => panic!("expected a continuous schedule, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -1522,6 +1830,174 @@ metrics = []
         let resolved = resolve_settings(&settings, &config);
         assert!(resolved.prompt_block.contains("Enabled"));
         assert!(resolved.prompt_block.contains("large-v3"));
+    }
+
+    /// Stored values arrive as arbitrary JSON.
+    /// A non-string scalar used to fall out of `as_str()` as `None` and silently revert the setting to its schema default — the same user-visible symptom as not saving at all (#6636).
+    /// The dashboard stringifies, but the HTTP API accepts any client.
+    #[test]
+    fn resolve_settings_coerces_non_string_scalars() {
+        let settings = vec![
+            HandSetting {
+                key: "approval_mode".to_string(),
+                label: "Approval".to_string(),
+                description: String::new(),
+                setting_type: HandSettingType::Toggle,
+                default: "true".to_string(),
+                options: vec![],
+                env_var: None,
+            },
+            HandSetting {
+                key: "initial_capital".to_string(),
+                label: "Initial Capital".to_string(),
+                description: String::new(),
+                setting_type: HandSettingType::Text,
+                default: "10000".to_string(),
+                options: vec![],
+                env_var: None,
+            },
+        ];
+
+        let mut config = HashMap::new();
+        config.insert("approval_mode".to_string(), serde_json::json!(false));
+        config.insert("initial_capital".to_string(), serde_json::json!(100));
+        let resolved = resolve_settings(&settings, &config);
+        assert!(
+            resolved.prompt_block.contains("- Approval: Disabled"),
+            "JSON `false` must read as the toggle's off state, not fall back \
+             to the `true` default; got: {}",
+            resolved.prompt_block
+        );
+        assert!(
+            resolved.prompt_block.contains("- Initial Capital: 100"),
+            "JSON number must render verbatim; got: {}",
+            resolved.prompt_block
+        );
+        assert!(
+            !resolved.prompt_block.contains("10000"),
+            "the schema default must not survive an explicit numeric value; got: {}",
+            resolved.prompt_block
+        );
+    }
+
+    /// A coerced scalar that names no declared option must not reach the prompt or the env allowlist.
+    ///
+    /// The old `as_str()` guard made this unreachable by accident: a non-string always fell back to `setting.default`, which for a `Select` matches a declared option by construction.
+    /// Coercion alone would have removed that guarantee, rendering `- Trading Mode: true (true)` for the LLM and dropping the matched option's `provider_env`, which `update_hand_rendered_prompt` then removes from the live agent's passthrough the instant the save returns 200.
+    #[test]
+    fn resolve_settings_rejects_a_select_value_that_matches_no_option() {
+        let settings = vec![HandSetting {
+            key: "trading_mode".to_string(),
+            label: "Trading Mode".to_string(),
+            description: String::new(),
+            setting_type: HandSettingType::Select,
+            default: "paper".to_string(),
+            options: vec![
+                HandSettingOption {
+                    value: "paper".to_string(),
+                    label: "Paper Trading".to_string(),
+                    provider_env: None,
+                    binary: None,
+                },
+                HandSettingOption {
+                    value: "live".to_string(),
+                    label: "Live Trading".to_string(),
+                    provider_env: Some("BROKER_ACCOUNT_ID".to_string()),
+                    binary: None,
+                },
+            ],
+            env_var: None,
+        }];
+
+        for bogus in [
+            serde_json::json!(true),
+            serde_json::json!(3),
+            serde_json::json!("LIVE"),
+        ] {
+            let mut config = HashMap::new();
+            config.insert("trading_mode".to_string(), bogus.clone());
+            let resolved = resolve_settings(&settings, &config);
+            assert!(
+                resolved
+                    .prompt_block
+                    .contains("- Trading Mode: Paper Trading (paper)"),
+                "{bogus} names no option, so the schema default must render; got: {}",
+                resolved.prompt_block
+            );
+            assert_eq!(
+                effective_setting_value(&settings[0], &config),
+                "paper",
+                "{bogus} must resolve to the schema default"
+            );
+        }
+
+        // A value that does name an option still wins, and still contributes its env var.
+        let mut config = HashMap::new();
+        config.insert("trading_mode".to_string(), serde_json::json!("live"));
+        let resolved = resolve_settings(&settings, &config);
+        assert!(resolved
+            .prompt_block
+            .contains("- Trading Mode: Live Trading (live)"));
+        assert_eq!(resolved.env_vars, vec!["BROKER_ACCOUNT_ID".to_string()]);
+    }
+
+    /// An open-ended `Select` — one declaring no options — keeps accepting any coerced scalar.
+    #[test]
+    fn resolve_settings_keeps_free_form_select_without_options() {
+        let setting = HandSetting {
+            key: "region".to_string(),
+            label: "Region".to_string(),
+            description: String::new(),
+            setting_type: HandSettingType::Select,
+            default: "eu".to_string(),
+            options: vec![],
+            env_var: None,
+        };
+        let mut config = HashMap::new();
+        config.insert("region".to_string(), serde_json::json!("us"));
+        assert_eq!(effective_setting_value(&setting, &config), "us");
+    }
+
+    #[test]
+    fn undeclared_keys_are_reported_sorted() {
+        let settings = vec![HandSetting {
+            key: "trading_mode".to_string(),
+            label: "Trading Mode".to_string(),
+            description: String::new(),
+            setting_type: HandSettingType::Text,
+            default: "paper".to_string(),
+            options: vec![],
+            env_var: None,
+        }];
+        let mut config = HashMap::new();
+        config.insert("trading_mode".to_string(), serde_json::json!("live"));
+        config.insert("tradingmode".to_string(), serde_json::json!("live"));
+        config.insert("aaa_typo".to_string(), serde_json::json!(1));
+
+        assert_eq!(
+            undeclared_setting_keys(&settings, &config),
+            vec!["aaa_typo".to_string(), "tradingmode".to_string()],
+            "declared keys are excluded and strays come back sorted"
+        );
+    }
+
+    /// Non-scalar JSON has no meaningful rendering against a schema whose `default` and option `value`s are strings, so it still falls back.
+    #[test]
+    fn resolve_settings_falls_back_for_non_scalar_json() {
+        let settings = vec![HandSetting {
+            key: "watchlist".to_string(),
+            label: "Watchlist".to_string(),
+            description: String::new(),
+            setting_type: HandSettingType::Text,
+            default: "SPY".to_string(),
+            options: vec![],
+            env_var: None,
+        }];
+
+        let mut config = HashMap::new();
+        config.insert("watchlist".to_string(), serde_json::json!(["BTC", "ETH"]));
+        let resolved = resolve_settings(&settings, &config);
+        assert!(resolved.prompt_block.contains("- Watchlist: SPY"));
     }
 
     #[test]
@@ -1937,8 +2413,9 @@ metrics = []
         assert_eq!(meta.activation_warning, "This hand uses paid API calls");
     }
 
-    /// `frequency` is the hand-level wake-up declaration hand activation reads (#6595), and `reactive` is the `ScheduleMode` spelling of `on-demand` — the natural value to reach for when switching a hand's ticking off.
-    /// It used to be a TOML parse error, which is a dead end for exactly the operator trying to stop unwanted ticks.
+    /// `reactive` is the `ScheduleMode` spelling of the catalog's `on-demand`, and #6595 records an operator reaching for it while trying to stop unwanted ticks.
+    /// It used to be a TOML parse error, so the whole hand failed to load over a synonym.
+    /// The alias only fixes the parse: `frequency` is catalog-display metadata and does not control scheduling either way.
     #[test]
     fn hand_frequency_accepts_reactive_as_an_alias_for_on_demand() {
         let toml_str = r#"
@@ -1963,48 +2440,9 @@ system_prompt = "Test."
                 .expect("metadata should be present")
                 .frequency,
             HandFrequency::OnDemand,
-            "`reactive` must resolve to the same no-wake-up-cycle variant as \
-             `on-demand` rather than failing the parse"
+            "`reactive` must resolve to the same catalog variant as `on-demand` \
+             rather than failing the parse"
         );
-    }
-
-    /// The cadence each frequency declares, which hand activation turns into a `ScheduleMode` (#6595).
-    /// `continuous` defers to the role's own heartbeat; the named cadences ignore it, because an author who wrote `hourly` asked for an hour and not for the 30s `AutonomousConfig` heartbeat default.
-    #[test]
-    fn hand_frequency_tick_interval_matches_the_declared_cadence() {
-        assert_eq!(HandFrequency::Continuous.tick_interval_secs(30), Some(30));
-        assert_eq!(HandFrequency::Continuous.tick_interval_secs(900), Some(900));
-        assert_eq!(HandFrequency::Hourly.tick_interval_secs(30), Some(3_600));
-        assert_eq!(HandFrequency::Daily.tick_interval_secs(30), Some(86_400));
-        assert_eq!(HandFrequency::Periodic.tick_interval_secs(30), Some(300));
-        assert_eq!(
-            HandFrequency::OnDemand.tick_interval_secs(30),
-            None,
-            "an on-demand hand declares no wake-up cycle at all, so there is no \
-             cadence to derive"
-        );
-        assert_eq!(
-            HandFrequency::default().tick_interval_secs(30),
-            None,
-            "a hand with no `[metadata]` block declares no wake-up cycle either"
-        );
-
-        // `declares_wake_up_cycle` must agree with `tick_interval_secs` on
-        // every variant — it exists so activation can ask the yes/no question
-        // without inventing a second list of scheduled variants.
-        for frequency in [
-            HandFrequency::Continuous,
-            HandFrequency::Hourly,
-            HandFrequency::Daily,
-            HandFrequency::Periodic,
-            HandFrequency::OnDemand,
-        ] {
-            assert_eq!(
-                frequency.declares_wake_up_cycle(),
-                frequency.tick_interval_secs(30).is_some(),
-                "{frequency:?} disagrees with its own cadence"
-            );
-        }
     }
 
     #[test]

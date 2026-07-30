@@ -94,6 +94,53 @@ fn is_worktree_clean(root: &Path) -> bool {
     diff_ok && cached_ok
 }
 
+/// Paths the release commit stages, on top of a generated Dev.to article.
+///
+/// The last entry is a directory, and deliberately so: the fold step
+/// (`changelog::collect_fragments`) **deletes** every fragment it consumed, and
+/// a deletion has to be staged like any other change. Naming the fragments
+/// individually could not do it — `stage_release_files` skips a path that no
+/// longer exists, which is precisely the state a consumed fragment is in. The
+/// directory itself survives the fold because the `.gitkeep` files do, so
+/// `git add -f changelog.d` stages the deletions beneath it (`git add <dir>` has
+/// implied `--all` semantics since git 2.0). Without it the release commit would
+/// carry the folded bullets while leaving the fragment files on `main`, and the
+/// next release would fold the same entries in a second time.
+const RELEASE_STAGED_PATHS: &[&str] = &[
+    "Cargo.toml",
+    "Cargo.lock",
+    "CHANGELOG.md",
+    "openapi.json",
+    "sdk/javascript/package.json",
+    "sdk/javascript/index.js",
+    "sdk/python/setup.py",
+    "sdk/python/librefang/librefang_client.py",
+    "sdk/rust/Cargo.toml",
+    "sdk/rust/README.md",
+    "sdk/rust/src/lib.rs",
+    "sdk/go/librefang.go",
+    "packages/whatsapp-gateway/package.json",
+    "crates/librefang-desktop/tauri.conf.json",
+    changelog::FRAGMENT_DIR,
+];
+
+/// Stage the release commit's file set, skipping paths this repo does not have.
+///
+/// A per-path `git add` failure is swallowed because the commit step downstream
+/// reports the real outcome: an empty index there is already handled, and a
+/// half-staged index shows up in the release PR's diff before anything ships.
+fn stage_release_files(root: &Path) {
+    for file in RELEASE_STAGED_PATHS {
+        let path = root.join(file);
+        if path.exists() {
+            let _ = Command::new("git")
+                .args(["add", "-f", file])
+                .current_dir(root)
+                .status();
+        }
+    }
+}
+
 fn read_workspace_version(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
     let content = fs::read_to_string(root.join("Cargo.toml"))?;
     let doc = content.parse::<toml_edit::DocumentMut>()?;
@@ -707,6 +754,17 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         println!("✓ Cleaned up {}", tag);
     }
 
+    // --- Fold changelog.d fragments into [Unreleased] ---
+    // Deliberately ahead of `changelog::run`, which cuts the dated
+    // `## [VERSION]` section immediately below `## [Unreleased]`. Folding first
+    // means the fragments are already ordinary `[Unreleased]` bullets by the
+    // time a release heading exists, so nothing downstream has to learn about
+    // them: the `awk` extractors in `.github/workflows/release.yml` and
+    // `release-notify.yml` keep slicing exactly the file shape they always did.
+    println!();
+    println!("Folding changelog.d fragments into [Unreleased]...");
+    changelog::collect_fragments(changelog::CollectFragmentsArgs {})?;
+
     // --- Generate changelog ---
     println!();
     println!("Generating changelog...");
@@ -888,32 +946,7 @@ pip install librefang-sdk
     println!();
     println!("Committing version bump...");
 
-    let files_to_add = [
-        "Cargo.toml",
-        "Cargo.lock",
-        "CHANGELOG.md",
-        "openapi.json",
-        "sdk/javascript/package.json",
-        "sdk/javascript/index.js",
-        "sdk/python/setup.py",
-        "sdk/python/librefang/librefang_client.py",
-        "sdk/rust/Cargo.toml",
-        "sdk/rust/README.md",
-        "sdk/rust/src/lib.rs",
-        "sdk/go/librefang.go",
-        "packages/whatsapp-gateway/package.json",
-        "crates/librefang-desktop/tauri.conf.json",
-    ];
-
-    for file in &files_to_add {
-        let path = root.join(file);
-        if path.exists() {
-            let _ = Command::new("git")
-                .args(["add", "-f", file])
-                .current_dir(&root)
-                .status();
-        }
-    }
+    stage_release_files(&root);
 
     // Add article if generated
     if let Some(ref article) = article_path {
@@ -1198,6 +1231,70 @@ fn run_lts_patch(root: &Path, args: &ReleaseArgs) -> Result<(), Box<dyn std::err
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The seam between the fold and the release commit: `collect_fragments_in`
+    /// deletes the fragments it consumed, and only `stage_release_files` can get
+    /// those deletions into the commit.
+    ///
+    /// Both halves are unit-tested in isolation and neither one catches this —
+    /// the fold's own tests run against a scratch tree with no git in it at all,
+    /// so a staging set that omits `changelog.d` would leave the deletions
+    /// unstaged, ship a release whose fragments survive on `main`, and fold the
+    /// same bullets in again on the next release. Hence a real repository here:
+    /// the assertion is about `git add` semantics as much as about the path list.
+    #[test]
+    fn release_staging_carries_the_fragment_deletions() {
+        let root = std::env::temp_dir().join(format!("lf-release-stage-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let hooks = root.join("no-hooks");
+        fs::create_dir_all(&hooks).unwrap();
+
+        git(&root, &["init", "-q", "."]).unwrap();
+        git(&root, &["config", "user.email", "release@example.invalid"]).unwrap();
+        git(&root, &["config", "user.name", "release test"]).unwrap();
+        // Neutralise whatever the developer's own git config does to a commit:
+        // this repo points `core.hooksPath` at `scripts/hooks`, and a global
+        // signing key would make `git commit` prompt or fail outright.
+        git(
+            &root,
+            &["config", "core.hooksPath", &hooks.display().to_string()],
+        )
+        .unwrap();
+        git(&root, &["config", "commit.gpgsign", "false"]).unwrap();
+
+        fs::write(
+            root.join("CHANGELOG.md"),
+            "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Existing bullet (#1) (@houko)\n",
+        )
+        .unwrap();
+        let section = root.join(changelog::FRAGMENT_DIR).join("fixed");
+        fs::create_dir_all(&section).unwrap();
+        fs::write(section.join(".gitkeep"), "").unwrap();
+        fs::write(section.join("6623-probe.md"), "Probe. (#6623) (@houko)\n").unwrap();
+        git(&root, &["add", "CHANGELOG.md", changelog::FRAGMENT_DIR]).unwrap();
+        git(&root, &["commit", "-qm", "seed"]).unwrap();
+
+        assert_eq!(changelog::collect_fragments_in(&root).unwrap(), 1);
+        stage_release_files(&root);
+        let staged = git(&root, &["diff", "--cached", "--name-status"]).unwrap();
+
+        // Clean up before asserting so a failure cannot leave the tree behind.
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(
+            staged.contains("M\tCHANGELOG.md"),
+            "folded bullets not staged:\n{staged}"
+        );
+        assert!(
+            staged.contains("D\tchangelog.d/fixed/6623-probe.md"),
+            "consumed fragment's deletion not staged, so it would survive the release:\n{staged}"
+        );
+        assert!(
+            !staged.contains("changelog.d/fixed/.gitkeep"),
+            ".gitkeep must be untouched, or the section directory stops being tracked:\n{staged}"
+        );
+    }
 
     /// Reproduces the closure in `run()` so the generator's output format
     /// is locked down by a unit test. Issue #3310 unified pre-release tags

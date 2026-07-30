@@ -33,6 +33,10 @@ git config commit.gpgsign false
 
 mkdir -p xtask/baselines
 
+# The hook's secret scan runs `gitleaks protect --config .gitleaks.toml`, whose path is relative to the repo it is invoked in.
+# Without this copy the throwaway repo has no config, gitleaks exits non-zero on "unable to load gitleaks config", and the test fails on any machine where gitleaks is installed — i.e. it only passed where the hook was soft-warning past that step entirely.
+cp "$REPO_ROOT/.gitleaks.toml" .gitleaks.toml
+
 # Seed baseline with a wrong digest so the hook MUST rewrite it.
 echo "0000000000000000000000000000000000000000000000000000000000000000  openapi.json" \
     > xtask/baselines/openapi.sha256

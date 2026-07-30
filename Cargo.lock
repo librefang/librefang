@@ -4476,6 +4476,7 @@ dependencies = [
  "rand 0.10.2",
  "reqwest",
  "rsa 0.9.10",
+ "rusqlite",
  "rustix",
  "schemars 0.8.22",
  "serde",
@@ -4771,6 +4772,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
  "zeroize",
 ]
 

@@ -25,12 +25,8 @@
 //!   gateway's own billing ratios plus a context window for the models that
 //!   declare one.
 //!
-//! Anything neither endpoint publishes — most importantly `max_output_tokens`,
-//! which the gateway exposes nowhere — is carried forward from the entry the
-//! connect command already wrote, because
-//! [`ModelCatalog::reconcile_live_provider_models`] replaces a provider's
-//! whole non-custom entry set. Refreshing without that carry-forward would
-//! silently delete the metadata the user just imported.
+//! Anything the endpoints omit — especially `max_output_tokens` on rows without `/v1/models.max_output` — is carried forward from the entry the connect command already wrote, because [`ModelCatalog::reconcile_live_provider_models`] replaces a provider's whole non-custom entry set.
+//! Refreshing without that carry-forward would silently delete the metadata the user just imported.
 
 use dashmap::DashMap;
 use librefang_kernel::kernel_api::KernelApi;
@@ -89,12 +85,26 @@ const RATIO_USD_PER_MILLION: f64 = 2.0;
 /// already rejected can only produce a 401 — retrying it every 15 minutes
 /// would burn requests and log noise to learn nothing.
 fn catalog_provider_is_configured(catalog: &ModelCatalog) -> bool {
-    catalog.get_provider(PROVIDER_ID).is_some_and(|provider| {
-        matches!(
-            provider.auth_status,
-            AuthStatus::Configured | AuthStatus::ValidatedKey | AuthStatus::AutoDetected
-        )
-    })
+    !catalog.is_suppressed(PROVIDER_ID)
+        && catalog.get_provider(PROVIDER_ID).is_some_and(|provider| {
+            // The `Missing` arm keeps a CLI-managed entry eligible while the credential process is unreachable, so a later login recovers on its own.
+            // It is keyed on `cli_managed` rather than `!is_custom`: an explicit provider file whose key env var is simply unset must not be sent down the CLI credential path.
+            matches!(
+                provider.auth_status,
+                AuthStatus::Configured | AuthStatus::ValidatedKey | AuthStatus::AutoDetected
+            ) || (provider.cli_managed && provider.auth_status == AuthStatus::Missing)
+        })
+}
+
+/// Whether this entry's credentials come from the EveryAPI CLI rather than from a declared env var.
+///
+/// Keys on `cli_managed` alone.
+/// `auth_status` used to carry part of this answer (`AutoDetected | Missing`), but it describes availability, not provenance — and pairing it with `!is_custom` classified an explicitly configured provider file as CLI-managed, which let `ensure_managed_everyapi` repoint the operator's endpoint at whatever account the CLI was logged into.
+fn is_managed_provider_active(catalog: &ModelCatalog) -> bool {
+    !catalog.is_suppressed(PROVIDER_ID)
+        && catalog
+            .get_provider(PROVIDER_ID)
+            .is_some_and(|provider| provider.cli_managed)
 }
 
 fn catalog_needs_initial_refresh(catalog: &ModelCatalog) -> bool {
@@ -181,10 +191,12 @@ pub(crate) fn pricing_origin(base_url: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LiveModel {
     pub(crate) id: String,
+    pub(crate) owned_by: String,
     pub(crate) supported_endpoint_types: Vec<String>,
     /// Present only for the models that declare one; authoritative over the
     /// pricing feed because it is what the serving endpoint will accept.
     pub(crate) context_window: Option<u64>,
+    pub(crate) max_output_tokens: Option<u64>,
 }
 
 /// Per-model figures recovered from `GET {origin}/api/pricing`.
@@ -214,6 +226,12 @@ pub(crate) fn parse_live_models(body: &serde_json::Value) -> Vec<LiveModel> {
             }
             Some(LiveModel {
                 id: id.to_string(),
+                owned_by: item
+                    .get("owned_by")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string(),
                 supported_endpoint_types: item
                     .get("supported_endpoint_types")
                     .and_then(|v| v.as_array())
@@ -226,6 +244,10 @@ pub(crate) fn parse_live_models(body: &serde_json::Value) -> Vec<LiveModel> {
                     .unwrap_or_default(),
                 context_window: item
                     .get("context_window")
+                    .and_then(serde_json::Value::as_u64)
+                    .filter(|v| *v > 0),
+                max_output_tokens: item
+                    .get("max_output")
                     .and_then(serde_json::Value::as_u64)
                     .filter(|v| *v > 0),
             })
@@ -341,9 +363,7 @@ pub(crate) fn infer_modality(supported_endpoint_types: &[String]) -> Modality {
 /// [`ModelCatalog::reconcile_live_provider_models`] deletes every non-custom
 /// entry for the provider and installs this vec wholesale, and its own
 /// carry-forward only donates `tier` / `reasoning_echo_policy` / `aliases`.
-/// Everything else that the gateway does not publish — above all
-/// `max_output_tokens`, which appears in neither endpoint — has to be carried
-/// forward here or it is destroyed by the very act of refreshing.
+/// Everything else that the gateway does not publish — above all `max_output_tokens` when `/v1/models.max_output` is absent — has to be carried forward here or it is destroyed by the very act of refreshing.
 ///
 /// Ids are emitted bare (`claude-sonnet-5`), matching what the connect command
 /// writes. Prefixing them the way the OpenRouter path does would make the
@@ -382,9 +402,14 @@ pub(crate) fn build_catalog_entries(
                 .or_else(|| priced.map(|p| p.context_window).filter(|c| *c > 0))
                 .or_else(|| prior.map(|p| p.context_window).filter(|c| *c > 0))
                 .unwrap_or(0);
-            // The gateway publishes no max-output figure on either endpoint,
-            // so a previously-registered value is the only source there is.
-            let max_output_tokens = prior.map(|p| p.max_output_tokens).unwrap_or(0);
+            let max_output_tokens = model
+                .max_output_tokens
+                .or_else(|| {
+                    prior
+                        .map(|p| p.max_output_tokens)
+                        .filter(|value| *value > 0)
+                })
+                .unwrap_or(0);
 
             if modality == Modality::Text && (context_window == 0 || max_output_tokens == 0) {
                 return None;
@@ -459,6 +484,62 @@ fn try_claim_refresh_slot(base_url: &str) -> Result<(), String> {
     }
 }
 
+fn metadata_donors(catalog: &ModelCatalog, live: &[LiveModel]) -> Vec<ModelCatalogEntry> {
+    let mut entries: Vec<ModelCatalogEntry> = catalog
+        .models_by_provider(PROVIDER_ID)
+        .into_iter()
+        .cloned()
+        .collect();
+    for model in live {
+        if entries
+            .iter()
+            .any(|entry| entry.id.eq_ignore_ascii_case(&model.id))
+        {
+            continue;
+        }
+        let snapshot = snapshot_lookup_ids(&model.owned_by, &model.id)
+            .into_iter()
+            .find_map(|candidate| catalog.find_model_for_provider("openrouter", &candidate));
+        let donor = snapshot.or_else(|| catalog.find_model(&model.id));
+        if let Some(entry) = donor {
+            let mut entry = entry.clone();
+            entry.id.clone_from(&model.id);
+            entry.input_cost_per_m = 0.0;
+            entry.output_cost_per_m = 0.0;
+            entry.pricing_known = false;
+            entries.push(entry);
+        }
+    }
+    entries
+}
+
+fn snapshot_lookup_ids(owned_by: &str, model_id: &str) -> Vec<String> {
+    let owned_by = owned_by.trim();
+    if owned_by.is_empty() {
+        return Vec::new();
+    }
+    let mut ids = vec![format!("openrouter/{owned_by}/{model_id}")];
+    let normalized: String = model_id
+        .char_indices()
+        .map(|(index, character)| {
+            let bytes = model_id.as_bytes();
+            let between_digits = character == '-'
+                && index > 0
+                && bytes[index - 1].is_ascii_digit()
+                && bytes.get(index + 1).is_some_and(u8::is_ascii_digit);
+            if between_digits {
+                '.'
+            } else {
+                character
+            }
+        })
+        .collect();
+    if normalized != model_id {
+        ids.push(format!("openrouter/{owned_by}/{normalized}"));
+    }
+    ids
+}
+
 /// Fetch the authenticated model listing.
 ///
 /// The relay key is placed in the `Authorization` header only. It never
@@ -515,7 +596,7 @@ async fn fetch_pricing(origin: &str) -> Result<HashMap<String, PricingEntry>, St
 }
 
 async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
-    let (base_url, api_key_env) = {
+    let (mut base_url, api_key_env, managed) = {
         let catalog = kernel.model_catalog_ref().load();
         let provider = catalog
             .get_provider(PROVIDER_ID)
@@ -528,19 +609,35 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
         } else {
             provider.api_key_env.clone()
         };
-        (provider.base_url.clone(), env_var)
+        // Which credential source to use is the entry's provenance, not its current availability: an explicitly configured provider file whose key env var happens to be unset must NOT fall through to the CLI's credential process, or `ensure_managed_everyapi` would repoint it.
+        (provider.base_url.clone(), env_var, provider.cli_managed)
     };
 
-    // Treat an empty env var the same as an absent one — `/v1/models` answers
-    // an empty bearer with a 401 either way.
-    let api_key = std::env::var(&api_key_env)
-        .ok()
-        .filter(|key| !key.trim().is_empty())
-        .ok_or_else(|| format!("EveryAPI relay key env var {api_key_env} is not set"))?;
-
+    // Claim before invoking the managed credential process so a logged-out account cannot spawn one subprocess for every dashboard/model request.
     try_claim_refresh_slot(&base_url)?;
 
-    let live = fetch_live_models(&base_url, &api_key).await?;
+    let mut api_key = if managed {
+        let credential = resolve_managed_credential(kernel, false).await?;
+        base_url = credential.base_url;
+        credential.api_key
+    } else {
+        // Treat an empty env var the same as an absent one — `/v1/models` answers an empty bearer with a 401 either way.
+        std::env::var(&api_key_env)
+            .ok()
+            .filter(|key| !key.trim().is_empty())
+            .ok_or_else(|| format!("EveryAPI relay key env var {api_key_env} is not set"))?
+    };
+
+    let live = match fetch_live_models(&base_url, &api_key).await {
+        Err(error) if managed && error.contains("HTTP 401") => {
+            let credential = resolve_managed_credential(kernel, true).await?;
+            base_url = credential.base_url;
+            api_key = credential.api_key;
+            fetch_live_models(&base_url, &api_key).await?
+        }
+        Err(error) => return Err(error),
+        Ok(live) => live,
+    };
     let pricing = match fetch_pricing(&pricing_origin(&base_url)).await {
         Ok(pricing) => pricing,
         Err(error) => {
@@ -556,11 +653,9 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
     // of reads that could observe a partially-updated catalog.
     let existing: Vec<ModelCatalogEntry> = {
         let catalog = kernel.model_catalog_ref().load();
-        catalog
-            .models_by_provider(PROVIDER_ID)
-            .into_iter()
-            .cloned()
-            .collect()
+        // A freshly auto-detected provider has no EveryAPI snapshot yet.
+        // Borrow published limits/capabilities from the built-in entry with the same model id, matching the existing `everyapi connect` flow.
+        metadata_donors(&catalog, &live)
     };
     let entries = build_catalog_entries(&live, &pricing, &existing);
     if entries.is_empty() {
@@ -572,14 +667,71 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
     let mut available_models: Vec<String> = live.iter().map(|model| model.id.clone()).collect();
     available_models.sort();
     let model_count = entries.len();
+    if !is_managed_provider_active(&kernel.model_catalog_ref().load()) && managed {
+        return Err("EveryAPI managed provider changed during catalog refresh".to_string());
+    }
+    let expected_base_url = base_url.clone();
+    let expected_api_key_env = api_key_env.clone();
     kernel.model_catalog_update(&mut move |catalog| {
-        catalog.reconcile_live_provider_models(
-            PROVIDER_ID,
-            available_models.clone(),
-            entries.clone(),
-        );
+        let unchanged = catalog.get_provider(PROVIDER_ID).is_some_and(|provider| {
+            !catalog.is_suppressed(PROVIDER_ID)
+                && provider.base_url.trim_end_matches('/')
+                    == expected_base_url.trim_end_matches('/')
+                && if managed {
+                    is_managed_provider_active(catalog)
+                } else {
+                    // The snapshot was fetched with the key named by
+                    // `expected_api_key_env`, so what must still hold is that the
+                    // entry has not been taken over by CLI-managed discovery and
+                    // still declares that same credential env var.
+                    //
+                    // `is_custom` is deliberately NOT part of the invariant — it answers "may the dashboard delete this?" and the catalog loader leaves it `false` for every provider whenever `registry/providers/` is unreadable, so an explicitly configured gateway is routinely non-custom and requiring the flag here discarded its refresh silently.
+                    !is_managed_provider_active(catalog)
+                        && provider.api_key_env == expected_api_key_env
+                }
+        });
+        if unchanged {
+            catalog.reconcile_live_provider_models(
+                PROVIDER_ID,
+                available_models.clone(),
+                entries.clone(),
+            );
+        }
     });
     Ok(model_count)
+}
+
+async fn resolve_managed_credential(
+    kernel: &Arc<dyn KernelApi>,
+    invalidate: bool,
+) -> Result<librefang_kernel::everyapi_credentials::EveryApiCredential, String> {
+    let resolved = tokio::task::spawn_blocking(move || {
+        librefang_kernel::everyapi_credentials::resolve(invalidate)
+    })
+    .await
+    .map_err(|error| format!("EveryAPI credential task failed: {error}"))?;
+    match resolved {
+        Ok(credential) => {
+            let base_url = credential.base_url.clone();
+            kernel.model_catalog_update(&mut move |catalog| {
+                catalog.ensure_managed_everyapi(&base_url);
+            });
+            if is_managed_provider_active(&kernel.model_catalog_ref().load()) {
+                Ok(credential)
+            } else {
+                Err("EveryAPI managed provider changed during credential resolution".to_string())
+            }
+        }
+        Err(error) => {
+            kernel.model_catalog_update(&mut |catalog| {
+                if is_managed_provider_active(catalog) {
+                    catalog.set_provider_auth_status(PROVIDER_ID, AuthStatus::Missing);
+                    catalog.clear_provider_available_models(PROVIDER_ID);
+                }
+            });
+            Err(format!("EveryAPI managed credential unavailable: {error}"))
+        }
+    }
 }
 
 /// Clear the retry window for one base URL so sequential integration tests on
@@ -605,6 +757,7 @@ mod tests {
             base_url: "https://api.everyapi.ai/v1".to_string(),
             key_required: true,
             auth_status,
+            is_custom: true,
             ..Default::default()
         }
     }
@@ -632,8 +785,10 @@ mod tests {
     fn live(id: &str, endpoints: &[&str], context_window: Option<u64>) -> LiveModel {
         LiveModel {
             id: id.to_string(),
+            owned_by: String::new(),
             supported_endpoint_types: endpoints.iter().map(|s| s.to_string()).collect(),
             context_window,
+            max_output_tokens: None,
         }
     }
 
@@ -715,11 +870,150 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_managed_credential_remains_eligible_for_recovery() {
+        let mut catalog = ModelCatalog::default();
+        assert!(catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1"));
+        catalog.set_provider_auth_status(PROVIDER_ID, AuthStatus::Missing);
+        assert!(catalog_needs_initial_refresh(&catalog));
+    }
+
+    #[test]
+    fn fresh_managed_catalog_borrows_builtin_model_metadata() {
+        let home = tempfile::tempdir().unwrap();
+        let catalog = ModelCatalog::new(home.path());
+        let mut live = vec![
+            live("claude-haiku-4-5", &["openai", "anthropic"], None),
+            live("claude-opus-5", &["openai", "anthropic"], None),
+            live("claude-sonnet-5", &["openai", "anthropic"], None),
+            live("gpt-5.6-sol", &["openai-response"], None),
+            live("MiniMax-M3", &["openai"], None),
+        ];
+        for (model, owner) in
+            live.iter_mut()
+                .zip(["anthropic", "anthropic", "anthropic", "openai", "minimax"])
+        {
+            model.owned_by = owner.to_string();
+        }
+        let donors = metadata_donors(&catalog, &live);
+        let entries = build_catalog_entries(&live, &HashMap::new(), &donors);
+        assert_eq!(entries.len(), live.len());
+        assert!(entries
+            .iter()
+            .all(|entry| entry.context_window > 0 && entry.max_output_tokens > 0));
+    }
+
+    #[test]
+    fn a_suppressed_managed_provider_never_triggers_a_refresh() {
+        let mut catalog = ModelCatalog::default();
+        assert!(catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1"));
+        catalog.set_provider_auth_status(PROVIDER_ID, AuthStatus::Missing);
+        catalog.suppress_provider(PROVIDER_ID);
+        assert!(!catalog_needs_initial_refresh(&catalog));
+        assert!(!catalog_needs_stale_refresh(&catalog));
+    }
+
+    #[test]
     fn a_configured_provider_with_no_live_fetch_is_both_missing_and_stale() {
         let catalog =
             ModelCatalog::from_entries(Vec::new(), vec![provider(AuthStatus::Configured)]);
         assert!(catalog_needs_initial_refresh(&catalog));
         assert!(catalog_needs_stale_refresh(&catalog));
+    }
+
+    /// `models connect everyapi` registers the gateway as a provider file, and
+    /// both the boot loader and the runtime `load_catalog_file` path land it
+    /// with `is_custom = false` — the former because
+    /// `new_from_dir_with_registry` falls back to that for every provider when
+    /// `registry/providers/` is missing or unreadable, the latter because
+    /// `From<ProviderCatalogToml>` has no better answer.
+    /// `detect_auth` then promotes it to `Configured` once the declared key env
+    /// var is present, leaving the flag alone.
+    ///
+    /// So an explicitly configured gateway is routinely non-custom. It must
+    /// stay refresh-eligible and must NOT be read as CLI-managed: the write-back
+    /// guard in `refresh_now` keys on those two predicates, and requiring
+    /// `is_custom` there discarded the whole refresh silently.
+    #[test]
+    fn a_file_loaded_gateway_is_configured_yet_never_classified_as_managed() {
+        // Distinct per test: `std::env::set_var` is process-global.
+        let key_env = "LIBREFANG_TEST_EVERYAPI_FILE_LOADED_KEY";
+        std::env::set_var(key_env, "relay-secret-must-not-leak");
+
+        let mut catalog = ModelCatalog::default();
+        catalog.merge_catalog_file(librefang_types::model_catalog::ModelCatalogFile {
+            provider: Some(librefang_types::model_catalog::ProviderCatalogToml {
+                id: PROVIDER_ID.to_string(),
+                display_name: "EveryAPI".to_string(),
+                api_key_env: key_env.to_string(),
+                base_url: "https://api.everyapi.ai/v1".to_string(),
+                key_required: true,
+                signup_url: None,
+                regions: HashMap::new(),
+                media_capabilities: Vec::new(),
+            }),
+            models: vec![text_entry("claude-sonnet-5")],
+        });
+        catalog.detect_auth();
+
+        let provider = catalog
+            .get_provider(PROVIDER_ID)
+            .expect("the provider file registers an entry");
+        assert!(
+            !provider.is_custom,
+            "a file-loaded provider carries is_custom = false"
+        );
+        assert!(
+            !provider.cli_managed,
+            "a provider file declares its own key env var, so it is never CLI-managed"
+        );
+        assert_eq!(provider.auth_status, AuthStatus::Configured);
+        assert!(catalog_needs_initial_refresh(&catalog));
+        assert!(
+            !is_managed_provider_active(&catalog),
+            "the credential source is the declared env var, not the EveryAPI CLI"
+        );
+    }
+
+    /// The mirror of the write-back bug, and the more damaging half.
+    ///
+    /// A provider file installed at runtime before its key is set lands as non-custom + `Missing`.
+    /// The gate used to admit that shape through `(!is_custom && Missing)`, and `refresh_now` used to read the same pair as "CLI-managed" — so the refresh spawned the EveryAPI credential process and `ensure_managed_everyapi` rewrote the operator's `base_url` to whatever account the CLI was logged into.
+    /// A self-hosted or regional gateway was silently repointed until the next daemon restart, where `everyapi_explicit` would have classified it correctly.
+    ///
+    /// Provenance now lives in `cli_managed`, so the entry is inert until its own key appears.
+    #[test]
+    fn a_keyless_provider_file_is_inert_rather_than_read_as_cli_managed() {
+        let mut catalog = ModelCatalog::default();
+        catalog.merge_catalog_file(librefang_types::model_catalog::ModelCatalogFile {
+            provider: Some(librefang_types::model_catalog::ProviderCatalogToml {
+                id: PROVIDER_ID.to_string(),
+                display_name: "EveryAPI".to_string(),
+                // Never set in this test's environment.
+                api_key_env: "LIBREFANG_TEST_EVERYAPI_KEYLESS_FILE".to_string(),
+                base_url: "https://relay.self-hosted.example/v1".to_string(),
+                key_required: true,
+                signup_url: None,
+                regions: HashMap::new(),
+                media_capabilities: Vec::new(),
+            }),
+            models: vec![text_entry("claude-sonnet-5")],
+        });
+        catalog.detect_auth();
+
+        let provider = catalog
+            .get_provider(PROVIDER_ID)
+            .expect("the provider file registers an entry");
+        assert_eq!(provider.auth_status, AuthStatus::Missing);
+        assert!(!provider.cli_managed);
+        assert!(
+            !is_managed_provider_active(&catalog),
+            "a keyless provider file is not a CLI login"
+        );
+        assert!(
+            !catalog_needs_initial_refresh(&catalog),
+            "an entry with no reachable credential must not spawn the credential process"
+        );
+        assert!(!catalog_needs_stale_refresh(&catalog));
     }
 
     #[test]

@@ -4489,6 +4489,18 @@ impl SystemResource {
         .await
     }
 
+    pub async fn ready(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &"/api/ready".to_string(),
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn restore_backup(&self, data: Value) -> Result<Value> {
         do_req(
             &self.client,

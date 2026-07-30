@@ -1554,6 +1554,8 @@ no_output_timeout_secs = 30
 |-------|------|---------|-------------|
 | `mode` | string | `"allowlist"` | Security mode. See below. |
 | `safe_bins` | list of strings | `["sleep","true","false","cat","sort","uniq","cut","tr","head","tail","wc","date","echo","printf","basename","dirname","pwd","env"]` | Commands that always bypass the allowlist check (stdin-only POSIX utilities). |
+| `safe_bins_skip_approval` | bool | `false` | Opt-in: in `allowlist` mode, a `shell_exec` whose every base command is a declared `safe_bin` also skips the human-approval prompt. A chained command with any non-safe base still routes through approval. |
+| `full_mode_skips_approval` | bool | `true` | Whether `mode = "full"` also waives the global `approval.require_approval` list for `shell_exec`. Set `false` for unrestricted commands that still prompt. |
 | `allowed_commands` | list of strings | `[]` | Additional commands permitted when `mode = "allowlist"`. |
 | `timeout_secs` | u64 | `30` | Maximum wall-clock execution time per command in seconds. |
 | `max_output_bytes` | usize | `102400` | Maximum combined stdout+stderr output size in bytes (100 KB default). |
@@ -1566,6 +1568,17 @@ no_output_timeout_secs = 30
 | `deny` | `none`, `disabled` | Block all shell execution. |
 | `allowlist` | `restricted` | Only allow commands in `safe_bins` or `allowed_commands` (default). |
 | `full` | `allow`, `all`, `unrestricted` | Allow all commands. Unsafe -- development use only. |
+
+`mode` and approval are separate decisions.
+Historically `full` implied both "skip allowlist validation" and "skip the approval prompt"; `full_mode_skips_approval = false` decouples them, so `require_approval` is honoured under `full` exactly as it is under `allowlist`.
+The default stays `true` because `approval.require_approval` ships with `shell_exec` in it and a standalone agent that declares `shell_exec` is promoted to `full` at spawn, so flipping the default would make a stock install prompt on every command.
+
+Like every other `exec_policy` field, this one is copied into each agent's manifest when the agent is spawned or restored, so `POST /api/config/reload` does not retrofit it onto agents that are already running -- kill the agent and let it respawn, or restart the daemon.
+Without that step, setting it to `false` looks like a silent no-op: no new prompts appear, and the natural reading is that nothing needed approval.
+
+The dangerous-command denylist is independent of `mode` and screens every command under `deny`, `allowlist`, and `full` alike -- `full` disables allowlist *validation*, not the denylist.
+It covers, among others, LibreFang daemon lifecycle commands (`librefang stop` / `start` / `restart`, including the `gateway` alias and path-qualified invocations), which bounce every agent and channel adapter sharing the daemon, and mutating SQL or output redirection against the daemon's own `librefang.db`.
+Read-only inspection of that database (`select`, `.schema`, `.dump`) and `librefang status` are deliberately not matched.
 
 ---
 

@@ -30,18 +30,28 @@ pub(crate) fn cmd_channel_list() {
     }
     let yes_str = i18n::t("label-yes");
     let no_str = i18n::t("label-no");
+    let not_started_str = i18n::t("channel-liveness-not-started");
     let name_header = i18n::t("label-header-name");
     let kind_header = i18n::t("label-header-kind");
     let conf_header = i18n::t("label-header-configured");
     let token_header = i18n::t("label-header-token");
-    let msgs_header = i18n::t("channel-header-msgs-24h");
+    let connected_header = i18n::t("channel-header-connected");
+    let in_out_header = i18n::t("channel-header-in-out");
+    let msgs_header = i18n::t("channel-header-msgs-24h-by-type");
     let mut t = crate::table::Table::new(&[
         &name_header,
         &kind_header,
         &conf_header,
         &token_header,
+        &connected_header,
+        &in_out_header,
         &msgs_header,
     ]);
+    // Sticky per-instance errors are collected and printed under the table
+    // rather than squeezed into a column — the supervisor's message is a full
+    // sentence (spawn failure, circuit-break cause) and truncating it to a
+    // cell width would drop the actionable part.
+    let mut errors: Vec<(String, String)> = Vec::new();
     for ch in &items {
         let name = ch.get("name").and_then(|v| v.as_str()).unwrap_or("?");
         let kind = ch.get("category").and_then(|v| v.as_str()).unwrap_or("?");
@@ -53,16 +63,83 @@ pub(crate) fn cmd_channel_list() {
             .get("has_token")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let msgs = ch.get("msgs_24h").and_then(|v| v.as_u64()).unwrap_or(0);
+        // Raw supervisor facts, not a derived health verdict — the state
+        // mapping lives in one place (the dashboard) so the two surfaces
+        // cannot drift into disagreeing about what "healthy" means (#6606).
+        // `supervised` distinguishes "no adapter registered for this name"
+        // from "adapter registered but its child is down".
+        let supervised = ch
+            .get("supervised")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let connected = ch
+            .get("connected")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let received = ch
+            .get("messages_received")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let sent = ch
+            .get("messages_sent")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if let Some(err) = ch.get("last_error").and_then(|v| v.as_str()) {
+            errors.push((name.to_string(), err.to_string()));
+        }
+        // Per channel TYPE, shared by every sidecar instance of that type;
+        // per-instance traffic is the IN/OUT column above.
+        let msgs = ch
+            .get("msgs_24h_channel_type")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        // Unconfigured catalog rows describe an adapter nobody has wired up,
+        // so they have no instance to be alive or dead — leave their liveness
+        // and traffic cells blank rather than reporting a definite "no".
+        let dash = "-";
+        let connected_cell: &str = if !configured {
+            dash
+        } else if !supervised {
+            &not_started_str
+        } else if connected {
+            &yes_str
+        } else {
+            &no_str
+        };
+        let in_out_cell = if configured {
+            format!("{received}/{sent}")
+        } else {
+            dash.to_string()
+        };
+        let msgs_cell = if configured {
+            msgs.to_string()
+        } else {
+            dash.to_string()
+        };
         t.add_row(&[
             name,
             kind,
             if configured { &yes_str } else { &no_str },
             if has_token { &yes_str } else { &no_str },
-            &msgs.to_string(),
+            connected_cell,
+            &in_out_cell,
+            &msgs_cell,
         ]);
     }
     t.print();
+    if !errors.is_empty() {
+        println!();
+        println!("{}", i18n::t("channel-last-errors-heading"));
+        for (name, err) in &errors {
+            println!(
+                "  {}",
+                i18n::t_args(
+                    "channel-last-error-entry",
+                    &[("name", name.as_str()), ("error", err.as_str())]
+                )
+            );
+        }
+    }
 }
 
 pub(crate) fn cmd_channel_reload() {

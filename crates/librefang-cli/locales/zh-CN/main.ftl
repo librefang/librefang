@@ -1610,6 +1610,9 @@ hand-no-active-instance = 未找到 `{ $id }` 的活动 Hand 实例。
 hand-info-not-found = 未找到 Hand：{ $error }
 hand-no-settings = Hand `{ $id }` 没有可配置设置。
 hand-settings-title = `{ $id }` 的设置
+hand-setting-default-marker = （默认）
+hand-setting-value-ignored = 已保存的值 "{ $value }" 对该设置无效，已忽略
+hand-settings-unknown-keys = 该 Hand 未声明、已被忽略的已保存键：{ $keys }
 hand-set-setting-success = 已为 Hand `{ $id }` 设置 { $key }={ $value }。
 hand-reloaded-summary = Hands 已重新加载：新增 { $added }，更新 { $updated }，总计 { $total }。
 label-chat-with = 聊天对象
@@ -1888,7 +1891,7 @@ doctor-audit-config-syntax-error-hint = 编辑 { $path }，或从备份恢复。
 doctor-everyapi-absent = 未检测到 EveryAPI 网关（PATH 中没有 CLI，也没有凭据文件），无需接入。
 doctor-everyapi-cli-not-logged-in = PATH 中存在 EveryAPI CLI，但未找到凭据文件；若要让 LibreFang 走该网关，请先执行 `everyapi login`。
 doctor-everyapi-credentials-incomplete = EveryAPI 凭据文件存在，但其中没有可用的 relay_key；请重新执行 `everyapi login` 刷新凭据。
-doctor-everyapi-not-connected = 已找到 EveryAPI 凭据，但 LibreFang 中没有 everyapi provider 条目 —— 执行 `librefang models connect everyapi` 即可把该网关注册为 LLM provider。
+doctor-everyapi-not-connected = 已找到 EveryAPI 凭据；LibreFang 会自动识别托管 provider，并直接使用当前 relay key，不再复制密钥。
 doctor-everyapi-provider-only = EveryAPI provider 条目已在 { $path } 生效；API driver 会经由该网关。
 doctor-everyapi-provider-without-credentials = EveryAPI provider 条目存在于 { $path }，但找不到可用的 relay key；经由该网关的请求会认证失败。
 doctor-everyapi-provider-without-credentials-hint = 先运行 `everyapi login`，再运行 `librefang models connect everyapi` 刷新已保存的密钥。
@@ -2012,7 +2015,13 @@ label-header-value = 值
 label-header-enabled = 已启用
 label-header-url = URL
 # Channel command specific keys
-channel-header-msgs-24h = 24 小时消息数
+# Scoped by channel TYPE, not by sidecar instance — usage_events.channel stores the type, so every bot of the same type shares the count (#6606).
+channel-header-msgs-24h-by-type = 24 小时消息数（按类型）
+channel-header-connected = 已连接
+channel-header-in-out = 收/发
+channel-liveness-not-started = 未启动
+channel-last-errors-heading = 各通道最近一次报告的错误（粘性记录——失败时写入，恢复后不会清除）：
+channel-last-error-entry = { $name }: { $error }
 channel-error-save-failed-no-body = 保存失败（没有错误正文）
 # Models command specific keys
 model-none-in-catalog = 目录中没有模型。
@@ -2048,6 +2057,12 @@ auth-pool-key-requests = requests={ $count }
 auth-pool-key-item =     - [{ $label }] { $key_display }  priority={ $pri }{ $reqs_str }  status={ $status }
 auth-hash-add-config-hint = 添加到 config.toml：
 auth-hash-config-entry =   dashboard_pass_hash = "{ $hash }"
+auth-enter-api-key-prompt = 输入 API 密钥：
+auth-api-key-empty = API 密钥不能为空。
+auth-api-key-generated = 新的 API 密钥（请交给客户端使用——仅显示一次）：
+auth-api-key-config-entry =   api_key_hash = "{ $hash }"
+auth-api-key-remove-plaintext-hint = 然后删除明文 `api_key` 行。客户端仍然发送密钥本身，只是守护进程保存的副本发生了变化。
+auth-api-key-cli-driver-caveat = 例外：如果使用基于 CLI 的驱动（claude-code），请保留一份可发送的副本 —— `api_key = "vault:NAME"` 或 LIBREFANG_API_KEY 环境变量。这类驱动会调用守护进程自身的 /mcp 端点，而哈希无法作为 bearer 令牌发送，两者都不配置时每次工具调用都会返回 401。
 # Agent command specific keys
 agent-spawn-id-label =   ID：  { $id }
 agent-spawn-name-label =   名称：{ $name }

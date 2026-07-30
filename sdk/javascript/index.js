@@ -1514,6 +1514,10 @@ class SystemResource {
     return this._c._request("GET", "/api/queue/status");
   }
 
+  async ready() {
+    return this._c._request("GET", "/api/ready");
+  }
+
   async restoreBackup(data) {
     return this._c._request("POST", "/api/restore", data, undefined);
   }

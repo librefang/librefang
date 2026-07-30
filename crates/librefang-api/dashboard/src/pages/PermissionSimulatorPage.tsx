@@ -135,7 +135,7 @@ export function PermissionSimulatorPage() {
   const usersQuery = useUsers();
   const [selectedName, setSelectedName] = useState<string>("");
 
-  const users = usersQuery.data ?? [];
+  const users = useMemo(() => usersQuery.data ?? [], [usersQuery.data]);
   const selected = useMemo(
     () => users.find(u => u.name === selectedName) ?? users[0],
     [users, selectedName],

@@ -294,6 +294,8 @@ no_output_timeout_secs = 30
 |------|------|--------|------|
 | `mode` | string | `"allowlist"` | 安全模式。见下表。 |
 | `safe_bins` | list of strings | `["sleep","true","false","cat","sort","uniq","cut","tr","head","tail","wc","date","echo","printf","basename","dirname","pwd","env"]` | 始终绕过白名单检查的命令（仅标准输入的 POSIX 工具）。 |
+| `safe_bins_skip_approval` | bool | `false` | 可选开启：在 `allowlist` 模式下，若 `shell_exec` 的每个基础命令都在 `safe_bins` 中，则同时跳过人工审批提示。链式命令中只要有一个基础命令不在其中，仍走审批流程。 |
+| `full_mode_skips_approval` | bool | `true` | `mode = "full"` 是否同时对 `shell_exec` 豁免全局 `approval.require_approval` 列表。设为 `false` 即可实现"命令不受限但仍需审批"。 |
 | `allowed_commands` | list of strings | `[]` | 当 `mode = "allowlist"` 时额外允许的命令。 |
 | `timeout_secs` | u64 | `30` | 每条命令的最大挂钟执行时间（秒）。 |
 | `max_output_bytes` | usize | `102400` | stdout+stderr 合并输出的最大大小（字节）。默认 100 KB。 |
@@ -306,6 +308,17 @@ no_output_timeout_secs = 30
 | `deny` | `none`、`disabled` | 阻止所有 Shell 执行。 |
 | `allowlist` | `restricted` | 仅允许 `safe_bins` 或 `allowed_commands` 中的命令（默认）。 |
 | `full` | `allow`、`all`、`unrestricted` | 允许所有命令。不安全——仅限开发使用。 |
+
+`mode` 与审批是两个独立的决定。
+历史上 `full` 同时意味着"跳过白名单校验"和"跳过审批提示"；`full_mode_skips_approval = false` 将两者解耦，使 `require_approval` 在 `full` 下与在 `allowlist` 下被同样对待。
+默认值保持 `true`，因为 `approval.require_approval` 默认就包含 `shell_exec`，而声明了 `shell_exec` 的独立 Agent 在 spawn 时会被提升为 `full`，翻转默认值会让标准安装在每条命令上都弹出审批。
+
+与 `exec_policy` 的其他字段一样，该字段在 Agent spawn 或恢复时被复制进该 Agent 的 manifest，因此 `POST /api/config/reload` 不会把它追加到已经在运行的 Agent 上——需要杀掉该 Agent 让其重新 spawn，或者重启守护进程。
+少了这一步，把它设为 `false` 看起来就像静默失效：没有任何新的审批提示出现，而最自然的解读会是"没有命令需要审批"。
+
+危险命令黑名单与 `mode` 无关，在 `deny`、`allowlist`、`full` 下都会扫描每条命令——`full` 关闭的是白名单*校验*，而不是这份黑名单。
+其覆盖范围包括 LibreFang 守护进程生命周期命令（`librefang stop` / `start` / `restart`，含 `gateway` 别名与带路径的调用形式），它们会连带重启同一守护进程上的所有 Agent 与频道适配器；以及针对守护进程自身 `librefang.db` 的写入型 SQL 与输出重定向。
+对该数据库的只读检查（`select`、`.schema`、`.dump`）以及 `librefang status` 被有意排除在外。
 
 ---
 

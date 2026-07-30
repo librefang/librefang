@@ -365,13 +365,37 @@ pub async fn agent_ws(
     uri: axum::http::Uri,
 ) -> impl IntoResponse {
     // SECURITY: Authenticate WebSocket upgrades (bypasses HTTP middleware).
-    // Single snapshot so all three derived flags come from the same hot-reload
-    // generation (#3744 review #2).
+    // Single snapshot for the user-key and dashboard flags, so they come from
+    // the same hot-reload generation (#3744 review #2). The master credential
+    // is read from the live handles instead — those are written from one
+    // snapshot by `refresh_master_credential`, so this is still a coherent
+    // view, not a mix of generations.
     let auth_snap = librefang_kernel::kernel_handle::ApiAuth::auth_snapshot(state.kernel.as_ref());
-    let valid_tokens = crate::server::valid_api_tokens(&auth_snap);
+    // Master credential comes from the live handles on `AppState`, NOT from a
+    // fresh `master_credential(&auth_snap)` (#6613). Resolving it from a
+    // snapshot re-runs the env / `vault:` indirection per upgrade, and for a
+    // `vault:NAME` value that means constructing a `CredentialVault`, reading
+    // the keyring, and AEAD-decrypting the file — twice on this path, since
+    // `valid_api_tokens` resolves it again — on a route reachable before any
+    // credential has been presented. The handles hold the already-resolved
+    // value and are rewritten from one snapshot by
+    // `server::refresh_master_credential` on boot, `POST /api/config/reload`,
+    // the config-file watcher, and a dashboard credential change, so they are
+    // as current as the snapshot without the per-connection cost.
+    let master_tokens = state.api_key_lock.read().await.clone();
+    let master_hash = state.master_key.hash().await;
     let user_api_keys = crate::server::configured_user_api_keys(&auth_snap);
     let dashboard_auth = crate::server::has_dashboard_credentials(&auth_snap);
-    let auth_required = !valid_tokens.is_empty() || !user_api_keys.is_empty() || dashboard_auth;
+    // NOT `!valid_tokens.is_empty()` (#6613): a daemon whose master key is
+    // configured only as `api_key_hash` lists no plaintext token, so that test
+    // would report "no auth configured" and fall into the loopback bypass
+    // below on a daemon that is fully bearer-gated.
+    let auth_required = crate::server::master_auth_required(
+        &master_tokens,
+        &master_hash,
+        &user_api_keys,
+        dashboard_auth,
+    );
 
     // Mirror middleware: when no auth is configured, only allow loopback
     // unless the operator opted in via LIBREFANG_ALLOW_NO_AUTH=1.
@@ -405,20 +429,20 @@ pub async fn agent_ws(
             );
             return axum::http::StatusCode::UNAUTHORIZED.into_response();
         }
-        // SECURITY: Use constant-time comparison to prevent timing attacks on auth tokens.
-        let matches_any = |token: &str| -> bool {
-            use subtle::ConstantTimeEq;
-            valid_tokens.iter().any(|key| {
-                token.len() == key.len() && token.as_bytes().ct_eq(key.as_bytes()).into()
-            })
-        };
-
         let provided_token = ws_auth_token(&headers, &uri);
         let mut session_auth = false;
         let mut user_key_auth = false;
         let mut api_auth = false;
         if let Some(token_str) = provided_token.as_deref() {
-            api_auth = matches_any(token_str);
+            // SECURITY: constant-time comparison against the plaintext
+            // composite first (`matches_master_token`, shared with the HTTP
+            // middleware and the terminal upgrade), then the master
+            // `api_key_hash` (#6613) — same order and rationale as the
+            // middleware: a plaintext-configured daemon never pays the hash
+            // verify, and a hash-only daemon has an empty composite so the
+            // hash is the only match it can make.
+            api_auth = crate::server::matches_master_token(&master_tokens, token_str)
+                || crate::server::master_hash_matches(&master_hash, token_str).await;
             let mut sessions = state.active_sessions.write().await;
             sessions.retain(|_, st| {
                 !crate::password_hash::is_token_expired(

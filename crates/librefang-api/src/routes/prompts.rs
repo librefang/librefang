@@ -172,10 +172,9 @@ async fn create_prompt_version(
         }
     };
     // Audit: `docs/issues/prompt-version-system-prompt-no-cap.md`.
-    // Reject oversize `system_prompt` BEFORE any write. Once a version is
-    // activated, its `system_prompt` rides every LLM call — an uncapped
-    // field is a direct token-cost amplification vector. Cheked against
-    // both a byte cap (memory) and a character cap (token / billing).
+    // Reject oversize `system_prompt` BEFORE any write.
+    // Once a version is activated, its `system_prompt` rides every LLM call — an uncapped field is a direct token-cost amplification vector.
+    // Checked against both a byte cap (memory) and a character cap (token / billing).
     if let Err(e) = crate::validation::check_system_prompt_size(&version.system_prompt) {
         return e.into_response();
     }

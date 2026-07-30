@@ -261,6 +261,13 @@ impl AuxClient {
             );
             return Err(self.kernel_config.providers.rejection_reason(provider));
         }
+        if self
+            .model_catalog
+            .as_ref()
+            .is_some_and(|catalog| catalog.is_suppressed(provider))
+        {
+            return Err(format!("provider '{provider}' is suppressed"));
+        }
 
         let api_key = self.resolve_api_key(provider);
 

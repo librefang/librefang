@@ -262,6 +262,32 @@ jobs:
             libgtk-3-dev \
             librsvg2-dev \
             patchelf
+      # A workflow file that fails to parse cannot report that it failed to parse: GitHub records a run with no jobs, it never appears in a PR's check rollup, and nothing goes red.
+      # `kubernetes.yml` shipped that way — a backslash continuation inside a `run: |` block put the next line at column 0, ending the block scalar — and was merged to main having never executed a single step.
+      # Parsing every workflow from a job that does run is the only thing that catches this class.
+      - name: Validate workflow YAML parses
+        run: |
+          python3 - <<'PY'
+          import glob, sys, yaml
+          bad = []
+          for path in sorted(glob.glob('.github/workflows/*.yml')):
+              try:
+                  doc = yaml.safe_load(open(path))
+              except Exception as exc:
+                  bad.append(f'{path}: {type(exc).__name__}: {exc}')
+                  continue
+              # `on` is truthy-keyed by YAML 1.1, so it can land under `True`.
+              if not (doc.get('on') or doc.get(True)):
+                  bad.append(f'{path}: parsed but declares no triggers')
+              if not doc.get('jobs'):
+                  bad.append(f'{path}: parsed but declares no jobs')
+          if bad:
+              print('::error::invalid workflow definitions:')
+              for line in bad:
+                  print(f'  {line}')
+              sys.exit(1)
+          print(f'{len(glob.glob(".github/workflows/*.yml"))} workflow files parse and declare triggers + jobs')
+          PY
       - name: Check formatting
         run: cargo xtask fmt
       - name: Check API error response shape (issue #3505)
@@ -381,11 +407,32 @@ jobs:
         # and resolve the out-of-workspace `../librefang-sidecar` path dep.
         run: cross build --release --target aarch64-unknown-linux-musl --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
 
+  # ── git-side hook corpus tests ─────────────────────────────────────────────────
+  # `scripts/hooks/*` run inside git, so nothing in the Rust or dashboard test suites covers them, and their corpus tests under `scripts/tests/` existed without ever being wired into CI — the same gap #3400 closed for the changelog validator's own unit tests, one directory over.
+  # A regression in the attribution predicates could therefore only be caught by running these by hand, which is exactly what nobody does before pushing a hook edit.
+  githook-tests:
+    name: Git Hook Corpus Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # Message text and author identity, rejected and accepted corpora.
+      - name: commit-msg attribution corpus
+        run: bash scripts/tests/commit-msg-attribution.sh
+      # Staged-path handling: filenames with spaces must still be checked.
+      - name: pre-commit space-in-filename handling
+        run: bash scripts/tests/pre-commit-spaces.sh
+      # The openapi baseline refresh must work on a box with sha256sum but no shasum.
+      # Self-skips when sha256sum is absent, so it is safe anywhere.
+      - name: pre-commit sha256sum fallback
+        run: bash scripts/tests/pre-commit-sha-fallback.sh
+
   # ── CHANGELOG attribution check ────────────────────────────────────────────────
   # Enforces the `(@username)` suffix on bullets *added* to the [Unreleased]
-  # section in this PR. Historical entries (1,800+ bullets, many predating
-  # any attribution convention) are NOT retroactively flagged — the validator
-  # only looks at lines this diff introduces. See #3400.
+  # section in this PR, and on `changelog.d/` fragments this PR introduces —
+  # a fragment is an [Unreleased] bullet with a delay on it. Historical
+  # entries (1,800+ bullets, many predating any attribution convention) are
+  # NOT retroactively flagged — the validator only looks at lines this diff
+  # introduces. See #3400.
   changelog-attribution:
     name: CHANGELOG Attribution
     if: github.event_name == 'pull_request'
@@ -397,7 +444,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
-      - name: Validate (@user) attribution on new [Unreleased] bullets
+      - name: Validate (@user) attribution on new [Unreleased] bullets and changelog.d fragments
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -410,6 +457,9 @@ jobs:
   # to a release without attribution. Runs on PR + push to main.
   # Lines exempted with `# pragma: no-attribution` (added before the convention
   # was enforced and no longer attributable) are not flagged.
+  # This mode also scans every pending `changelog.d/` fragment, so an
+  # unattributed fragment — or one in a section directory assembly has no
+  # heading for — cannot sit in the tree until release day.
   changelog-attribution-full:
     name: CHANGELOG Attribution (full [Unreleased])
     runs-on: ubuntu-latest
@@ -418,7 +468,12 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
-      - name: Validate (@user) attribution on all [Unreleased] bullets
+      # The validator's own unit tests. They existed but were never wired into
+      # CI, so a regression in the attribution predicate or the fragment rules
+      # could only be caught by running them by hand.
+      - name: Unit-test the attribution validator
+        run: python3 scripts/tests/test_check_changelog_attribution.py
+      - name: Validate (@user) attribution on all [Unreleased] bullets and changelog.d fragments
         run: python3 scripts/check-changelog-attribution.py --all-unreleased
 
   # ── OpenAPI / SDK drift check ──────────────────────────────────────────────────
@@ -557,7 +612,7 @@ jobs:
           version: 10
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
           cache-dependency-path: |
             web/pnpm-lock.yaml
@@ -958,6 +1013,24 @@ jobs:
           # The deeper fix — offline fixtures so the tests don't live-clone — is tracked as a follow-up.
           cargo nextest run --workspace --no-fail-fast \
             -E 'not (package(librefang-hands) and test(/registry::tests::/))'
+      # Mach-port abort guard — deliberately `cargo test`, not nextest.
+      #
+      # Wasmtime's macOS default parks a handler thread in a blocking `mach_msg`
+      # receive that aborts the process when a signal interrupts it, so any child
+      # process exiting while the WASM sandbox is live could kill the daemon
+      # (`macos_use_mach_ports(false)` in `runtime::sandbox::make_engine_config`
+      # is the fix). Nextest cannot observe that regression: it runs each test in
+      # its own process, so no single test accumulates the subprocess churn and
+      # thread count needed to land a signal on that one thread. `cargo test`
+      # runs all ~1300 kernel unit tests as threads in ONE process, which
+      # reproduces it reliably — verified by re-enabling mach ports locally
+      # (SIGABRT) and disabling them again (1335 passed).
+      #
+      # Scoped to librefang-kernel's lib target: it is the crate that both spawns
+      # subprocesses and constructs sandbox engines, and it keeps this step at
+      # ~2.5 min rather than a second full workspace run.
+      - name: Mach-port regression guard (single-process kernel unit tests)
+        run: cargo test -p librefang-kernel --lib
 
   # ── Linux aarch64 compile check: runs on PRs ───────────────────────────────────
   # The x86 Ubuntu shards never exercise aarch64-gated code paths, so an
@@ -1013,6 +1086,7 @@ jobs:
       - quality
       - skills-wasm-sdk
       - rust-telegram-sidecar
+      - githook-tests
       - changelog-attribution
       - changelog-attribution-full
       - openapi-drift

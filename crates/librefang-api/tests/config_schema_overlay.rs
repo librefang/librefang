@@ -217,6 +217,10 @@ fn every_kernel_config_struct_field_is_exposed_via_overlay() {
         "log_level",
         "api_listen",
         "api_key",
+        // Password hash of the master api_key (#6613). Like `dashboard_pass_hash`
+        // below, it is written by hand into config.toml (or copied from the
+        // upgrade-hint file), never edited through a dashboard row.
+        "api_key_hash",
         "cors_origin",
         "trusted_hosts",
         "trusted_proxies",

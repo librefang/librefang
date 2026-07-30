@@ -634,22 +634,26 @@ fn resolve_hand_agent(
 // ---------------------------------------------------------------------------
 // MCP server endpoints
 // ---------------------------------------------------------------------------
+/// Read-side projection of one `[[mcp_servers.transport.headers]]` entry.
+///
+/// Every key here must be a real field of `HttpCompatHeaderConfig`, which carries `deny_unknown_fields` (#6612): the read routes' `transport` object is submitted back verbatim by any client doing read-modify-write, so a synthesised key is a 400 on the way in, and serde short-circuits at the first one it meets.
+/// A derived `source` discriminator (`"env"` / `"static"` / `"unset"`) used to live here and did exactly that — it is dropped rather than renamed, because there is no name outside the guarded field set that would survive.
+/// Nothing consumed it: the dashboard's `McpTransport` type has no `http_compat` variant at all.
+///
+/// `value` is omitted deliberately and is not a losslessness gap — a static header value is a credential, and `/api/mcp/servers` is in `PUBLIC_ROUTES_DASHBOARD_READS`, so in open mode an unauthenticated caller reads this (#6630).
+/// The write side restores it from the stored entry, exactly as `env` does — see `merge_http_compat_secrets`.
 fn http_compat_header_summary(
     header: &librefang_types::config::HttpCompatHeaderConfig,
 ) -> serde_json::Value {
     serde_json::json!({
         "name": header.name,
         "value_env": header.value_env,
-        "source": if header.value_env.is_some() {
-            "env"
-        } else if header.value.is_some() {
-            "static"
-        } else {
-            "unset"
-        },
     })
 }
 
+/// Read-side projection of one `[[mcp_servers.transport.tools]]` entry, under the same round-trip contract as [`http_compat_header_summary`].
+///
+/// `input_schema` is included because it has `#[serde(default = "default_http_compat_input_schema")]`: omitting it made a `GET` → `PUT` silently overwrite an operator's hand-authored JSON Schema with `{"type":"object"}`, which is a lossy round-trip that no status code reports.
 fn http_compat_tool_summary(
     tool: &librefang_types::config::HttpCompatToolConfig,
 ) -> serde_json::Value {
@@ -662,9 +666,16 @@ fn http_compat_tool_summary(
             .unwrap_or(serde_json::json!("json_body")),
         "response_mode": serde_json::to_value(&tool.response_mode)
             .unwrap_or(serde_json::json!("json")),
+        "input_schema": tool.input_schema,
     })
 }
 
+/// Project a stored transport into the JSON the read routes return.
+///
+/// This is a faithful representation of the variant, not a display summary, and the distinction is enforced rather than conventional: `McpTransportEntry` and the two structs under its `http_compat` variant carry `deny_unknown_fields` (#6612), so every key emitted here has to be a real field of the variant it is emitted for.
+/// A client that reads `transport`, edits it, and `PUT`s it back is the workflow that constraint protects; a derived key breaks it for every external client at once, and the dashboard would not notice because it rebuilds the transport from form state rather than echoing this object.
+///
+/// The one intentional omission is a static `http_compat` header `value`, which is a credential (#6630); the write path merges it back from the stored entry.
 fn serialize_mcp_transport(
     transport: &librefang_types::config::McpTransportEntry,
 ) -> serde_json::Value {
@@ -697,11 +708,13 @@ fn serialize_mcp_transport(
                 tools.iter().map(http_compat_tool_summary).collect();
             let header_summaries: Vec<serde_json::Value> =
                 headers.iter().map(http_compat_header_summary).collect();
+            // A `tools_count` key used to sit here.
+            // It is `tools.len()` — derivable by any caller from the array right next to it — and it is not a field of the variant, so it fails the round trip.
+            // The `tools_count` the dashboard reads is a different key on a different object: the live-connection entry (`connected[].tools_count`), which is a genuine count of discovered tools rather than of configured ones.
             serde_json::json!({
                 "type": "http_compat",
                 "base_url": base_url,
                 "headers": header_summaries,
-                "tools_count": tool_summaries.len(),
                 "tools": tool_summaries,
             })
         }
@@ -1412,6 +1425,107 @@ mod tests {
         match &parsed.mcp_servers[0].transport {
             Some(McpTransportEntry::Http { url }) => assert_eq!(url, "http://new:9090/mcp"),
             other => panic!("expected http transport, got {other:?}"),
+        }
+    }
+
+    /// #6612 — the `File` store round-trips an entry through `serde_json` → `json_to_toml_value` → `toml` → disk → serde, and TOML has no null.
+    /// `json_to_toml_value` maps `Null` to an *empty string* (`routes/config/mod.rs:942`) rather than dropping the key, which is why `McpServerConfigEntry::template_id` and `oauth` both carry `skip_serializing_if = "Option::is_none"` with comments calling it load-bearing.
+    ///
+    /// `HttpCompatHeaderConfig` has two `Option<String>` fields under exactly that path and neither is skipped, so an env-sourced header would be written as `value = ""` and reload as `Some("")`.
+    /// That is not cosmetic: `apply_http_compat_headers` tests `value` *before* `value_env` (`librefang-runtime-mcp/src/lib.rs:3363`), so an empty-string `value` wins and the transport sends an empty header instead of resolving the variable — a silent credential failure, the same class of bug the guard on these structs exists to prevent.
+    #[test]
+    fn upsert_mcp_server_preserves_an_env_sourced_http_compat_header_6612() {
+        use librefang_types::config::{HttpCompatHeaderConfig, HttpCompatToolConfig};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        std::fs::write(&config_path, "").unwrap();
+
+        let entry = McpServerConfigEntry {
+            name: "compat".to_string(),
+            template_id: None,
+            transport: Some(McpTransportEntry::HttpCompat {
+                base_url: "https://example.invalid".to_string(),
+                headers: vec![
+                    // `value` is None — the case that would be written as `value = ""`.
+                    HttpCompatHeaderConfig {
+                        name: "Authorization".to_string(),
+                        value: None,
+                        value_env: Some("COMPAT_TOKEN".to_string()),
+                    },
+                    // The mirror image: `value_env` is None.
+                    HttpCompatHeaderConfig {
+                        name: "X-Api-Key".to_string(),
+                        value: Some("static-secret".to_string()),
+                        value_env: None,
+                    },
+                ],
+                tools: vec![HttpCompatToolConfig {
+                    name: "ping".to_string(),
+                    path: "/ping".to_string(),
+                    // Spelled out rather than `..Default::default()`: the derived `Default` leaves `input_schema` as `Value::Null`, which deserialization can never produce because the field carries `#[serde(default = "default_http_compat_input_schema")]`.
+                    // Using the derived default here would make the test assert on a state production cannot reach.
+                    input_schema: serde_json::json!({"type": "object"}),
+                    ..Default::default()
+                }],
+            }),
+            timeout_secs: 30,
+            env: vec![],
+            headers: vec![],
+            oauth: None,
+            taint_scanning: true,
+            taint_policy: None,
+        };
+
+        upsert_mcp_server_config(&config_path, &entry).expect("upsert should succeed");
+
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !raw.contains(r#"value = """#),
+            "an absent Option must not be written as an empty string — it reloads as Some(\"\") \
+             and beats `value_env` in the runtime's header resolution:\n{raw}"
+        );
+
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            mcp_servers: Vec<McpServerConfigEntry>,
+        }
+        // `deny_unknown_fields` is on these types now, so this also asserts the writer emits no key the reader rejects.
+        let parsed: Wrapper = toml::from_str(&raw).unwrap_or_else(|e| {
+            panic!("config.toml must reload into the guarded types: {e}\n{raw}")
+        });
+
+        match &parsed.mcp_servers[0].transport {
+            Some(McpTransportEntry::HttpCompat { headers, tools, .. }) => {
+                let auth = headers
+                    .iter()
+                    .find(|h| h.name == "Authorization")
+                    .expect("env-sourced header survives");
+                assert_eq!(auth.value_env.as_deref(), Some("COMPAT_TOKEN"));
+                assert!(
+                    auth.value.is_none(),
+                    "an env-sourced header must reload with `value` still absent, or the runtime \
+                     sends an empty header and never reads the variable: {auth:?}"
+                );
+
+                let static_header = headers
+                    .iter()
+                    .find(|h| h.name == "X-Api-Key")
+                    .expect("static header survives");
+                assert_eq!(static_header.value.as_deref(), Some("static-secret"));
+                assert!(
+                    static_header.value_env.is_none(),
+                    "the mirror case must hold too: {static_header:?}"
+                );
+
+                assert_eq!(tools.len(), 1);
+                assert_eq!(
+                    tools[0].input_schema,
+                    serde_json::json!({"type": "object"}),
+                    "the defaulted input_schema must survive the TOML round-trip"
+                );
+            }
+            other => panic!("expected http_compat transport, got {other:?}"),
         }
     }
 

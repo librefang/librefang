@@ -13,7 +13,10 @@ use r2d2_sqlite::SqliteConnectionManager;
 /// case — labels are only set when a user/agent explicitly names a session).
 /// Returns `None` if the session has no user message yet, so callers can
 /// keep the field nullable for fully empty sessions.
-fn derive_session_label(messages: &[Message]) -> Option<String> {
+///
+/// Public because `GET /api/sessions/{id}` has to resolve the label the same way `list_sessions_paginated` does (#6611); the detail route returned the bare column and so reported `null` for a session the list showed a snippet for.
+/// `list_agent_sessions` deliberately does *not* apply this fallback — it skips the message blob entirely to keep the chat picker O(N), and its doc comment records that trade-off.
+pub fn derive_session_label(messages: &[Message]) -> Option<String> {
     const MAX_LEN: usize = 60;
     let first_user = messages.iter().find(|m| m.role == Role::User)?;
     let text = match &first_user.content {
@@ -47,6 +50,36 @@ fn derive_session_label(messages: &[Message]) -> Option<String> {
     };
     Some(truncated)
 }
+
+/// Wall-clock span between the first and last message that carries a timestamp.
+///
+/// `None` when fewer than two stamped messages exist — an empty session, a single-turn session, or a session written before `Message::timestamp` was populated.
+/// Messages without a timestamp are skipped rather than treated as "now", so a pre-timestamp session does not report a span anchored to the moment it was read.
+///
+/// Shared by the session list query and the single-session detail lookup so the two views cannot drift (#6611): the detail endpoint previously omitted the field entirely, and re-deriving it there would have re-created the same class of divergence one refactor later.
+pub fn session_duration_ms(messages: &[Message]) -> Option<i64> {
+    let mut stamps = messages.iter().filter_map(|m| m.timestamp);
+    let first = stamps.next();
+    // `next_back()` on the same iterator rather than `last()`: the adapter is a `DoubleEndedIterator` (`Vec::iter` + `filter_map`), so walking from the tail finds the latest stamped message without scanning the remainder.
+    // `clippy::double_ended_iterator_last` enforces this.
+    let last = stamps.next_back().or(first);
+    match (first, last) {
+        (Some(a), Some(b)) if b > a => Some((b - a).num_milliseconds()),
+        _ => None,
+    }
+}
+
+/// Per-session cost and token totals aggregated from `usage_events`.
+///
+/// Both fields are the `COALESCE`d sums, so a session with no metered events reports `0.0` / `0` rather than null — callers distinguish "ran but cost nothing" from "no metering data" via the message count, matching what the list query's `LEFT JOIN` has always produced.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SessionUsageTotals {
+    /// Sum of `usage_events.cost_usd` for the session.
+    pub cost_usd: f64,
+    /// Sum of `usage_events.input_tokens + output_tokens` for the session.
+    pub total_tokens: i64,
+}
+
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1043,25 +1076,9 @@ impl SessionStore {
                     rmp_serde::from_slice(&messages_blob).unwrap_or_default();
                 let msg_count = stored_msg_count.max(0) as usize;
                 let resolved_label = label.clone().or_else(|| derive_session_label(&messages));
-                // Duration spans the first to the last message that carries
-                // a timestamp. Skip messages with no timestamp so
-                // pre-`Message::timestamp` sessions don't anchor the span
-                // to "now-vs-now". `None` if fewer than two stamped
-                // messages exist.
-                let duration_ms: Option<i64> = {
-                    let mut stamps = messages.iter().filter_map(|m| m.timestamp);
-                    let first = stamps.next();
-                    // next_back() on the same iterator instead of last(): the
-                    // adapter is DoubleEndedIterator (Vec::iter + filter_map),
-                    // so walking from the tail finds the latest stamped
-                    // message in O(k) rather than scanning every remaining
-                    // element. clippy::double_ended_iterator_last enforces.
-                    let last = stamps.next_back().or(first);
-                    match (first, last) {
-                        (Some(a), Some(b)) if b > a => Some((b - a).num_milliseconds()),
-                        _ => None,
-                    }
-                };
+                // Duration spans the first to the last stamped message —
+                // see `session_duration_ms`, shared with the detail lookup.
+                let duration_ms: Option<i64> = session_duration_ms(&messages);
                 // Cost / tokens default to 0 via COALESCE. Surface them as
                 // numeric (not null) so the dashboard formatter can
                 // distinguish "session existed but cost zero" from
@@ -1085,6 +1102,31 @@ impl SessionStore {
             sessions.push(row.map_err(LibreFangError::memory)?);
         }
         Ok(sessions)
+    }
+
+    /// Cost and token totals for one session, aggregated from `usage_events`.
+    ///
+    /// This is the single-session form of the `LEFT JOIN` inside [`SessionStore::list_sessions_paginated`], so the detail endpoint reports the same numbers the list row shows for the same id (#6611).
+    /// Events written before schema v30 carry `session_id IS NULL` and contribute nothing, which is why a pre-v30 session reports zeros rather than the owning agent's lifetime spend.
+    pub fn session_usage_totals(
+        &self,
+        session_id: SessionId,
+    ) -> LibreFangResult<SessionUsageTotals> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let (cost_usd, total_tokens) = conn
+            .query_row(
+                "SELECT COALESCE(SUM(cost_usd), 0.0),
+                        COALESCE(SUM(input_tokens + output_tokens), 0)
+                 FROM usage_events
+                 WHERE session_id = ?1",
+                rusqlite::params![session_id.0.to_string()],
+                |row| Ok((row.get::<_, f64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .map_err(LibreFangError::memory)?;
+        Ok(SessionUsageTotals {
+            cost_usd,
+            total_tokens: total_tokens.max(0),
+        })
     }
 
     /// Create a new empty session for an agent.

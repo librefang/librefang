@@ -2119,6 +2119,19 @@ pub struct ExecPolicy {
     /// (The skip is gated to a strict subset of the execution allowlist — metacharacters and wrappers are still rejected — but the approval prompt is gone.)
     #[serde(default)]
     pub safe_bins_skip_approval: bool,
+    /// Whether `mode = "full"` also waives the global `approval.require_approval` list for `shell_exec`.
+    ///
+    /// Default `true` preserves the historical coupling, and the default is deliberately NOT flipped (#6594).
+    /// Two facts make a flipped default a breaking change for ordinary installs: `ApprovalPolicy::default()` puts `shell_exec` in `require_approval`, and `Kernel::spawn` promotes any standalone agent whose `capabilities.tools` contains `shell_exec` or `*` and which declares no `exec_policy` to `mode = "full"`.
+    /// So on a default install this waiver is the only reason ordinary agents run shell commands unattended, and flipping it would make every install prompt on every command.
+    ///
+    /// Set `false` to hold both positions at once — unrestricted commands that still prompt.
+    /// `Full` then waives only allowlist *validation*, and `require_approval` is honoured exactly as it is for any other mode.
+    /// This overrides a coupling that was deliberate rather than accidental: `Full` skipping the approval queue was documented behaviour, and `false` narrows `Full` to what its name describes — a command-validation mode — leaving who-must-confirm to `[approval]`.
+    ///
+    /// Independent of this flag in both positions: a per-user RBAC `NeedsApproval` still forces the approval queue, and the dangerous-command denylist still screens every command under `full`.
+    #[serde(default = "default_full_mode_skips_approval")]
+    pub full_mode_skips_approval: bool,
     /// Global command allowlist (when mode = allowlist).
     pub allowed_commands: Vec<String>,
     /// Environment variables explicitly allowed to pass through to `shell_exec`.
@@ -2138,6 +2151,10 @@ fn default_no_output_timeout() -> u64 {
     30
 }
 
+fn default_full_mode_skips_approval() -> bool {
+    true
+}
+
 impl Default for ExecPolicy {
     fn default() -> Self {
         Self {
@@ -2150,6 +2167,7 @@ impl Default for ExecPolicy {
             .map(String::from)
             .collect(),
             safe_bins_skip_approval: false,
+            full_mode_skips_approval: default_full_mode_skips_approval(),
             allowed_commands: Vec::new(),
             allowed_env_vars: Vec::new(),
             timeout_secs: 30,
@@ -3300,8 +3318,49 @@ pub struct KernelConfig {
     pub channels: ChannelsConfig,
     /// API authentication key. When set, all API endpoints (except /api/health)
     /// require a `Authorization: Bearer <key>` header.
-    /// If empty, the API is unauthenticated (local development only).
+    /// If empty (and no `api_key_hash` is set), the API is unauthenticated (local development only).
+    ///
+    /// The value is resolved by the API layer in three steps, the same order the dashboard credentials use:
+    /// 1. The `LIBREFANG_API_KEY` environment variable, when set to a non-empty value, wins over whatever this field holds.
+    /// 2. A `vault:KEY_NAME` prefix reads `KEY_NAME` out of the encrypted vault (`$LIBREFANG_HOME/vault.enc`).
+    ///    Example: `api_key = "vault:master_api_key"`, then run `librefang vault set master_api_key`.
+    /// 3. Anything else is the literal bearer token.
+    ///
+    /// Steps 1 and 2 keep the working secret out of `config.toml` entirely, which matters because the daemon rewrites that file and cannot read it from a read-only Kubernetes Secret mount.
+    /// Resolution happens per auth snapshot rather than once at boot, so an env-sourced or vault-sourced key survives `POST /api/config/reload` — a reload re-reads `config.toml` from disk and would otherwise clobber the boot-time override.
+    ///
+    /// Prefer [`KernelConfig::api_key_hash`] when the daemon only needs to *verify* the key rather than transmit it — run `librefang hash-api-key` to produce the value.
+    /// The two can be combined, and a plaintext value here is verified with a constant-time comparison.
     pub api_key: String,
+    /// Hash of the API authentication key, so the master credential does not have to sit in cleartext on disk.
+    ///
+    /// When set, a presented bearer token is verified against this hash after the constant-time comparison against `api_key` misses.
+    ///
+    /// **Generate it with `librefang hash-api-key`** — `--generate` mints a fresh 256-bit key and prints it beside its hash, or omit the flag to hash a key you already have.
+    /// Put the hash here, give the key to your clients, and leave `api_key` unset.
+    ///
+    /// The recommended form is `$sha256$…` (what `hash-api-key` produces).
+    /// `$argon2id$…` is also accepted, dispatched by prefix exactly as the per-user `users[].api_key_hash` column is, so a hand-written value keeps working.
+    ///
+    /// The default is SHA-256 rather than Argon2id on purpose, and it is the reverse of the advice for [`KernelConfig::dashboard_pass_hash`].
+    /// A dashboard password is human-chosen and low-entropy, so a memory-hard KDF is what makes an offline dictionary attack uneconomic.
+    /// A master API key is a machine-generated bearer token: there is no dictionary to enumerate, so the KDF buys nothing against an offline attacker and charges its cost to every request instead.
+    /// That cost is ~50–100 ms of CPU per verify by construction, and with `api_key` unset *every* presented token reaches it — including every wrong one, from an unauthenticated caller, on paths with no login-attempt limiter.
+    /// So an `$argon2id$` value here is verified on a blocking thread rather than inline, which keeps the async runtime responsive but does not make the CPU cost go away.
+    /// If you want a short human-memorable master key, `$argon2id$` is the right trade; otherwise use a generated key and the cheap verifier.
+    ///
+    /// Existing plaintext deployments keep working and are upgraded transparently: the first request that authenticates against a plaintext-only `api_key` writes a `$sha256$` hash of it to `$LIBREFANG_HOME/api-key-hash.upgrade-hint` (mode 0600) and logs a pointer to the file.
+    /// Copy the value into `api_key_hash`, remove `api_key`, delete the hint file.
+    /// Clients keep sending the same key — only the daemon's stored copy changes.
+    /// The hash itself is never logged — it is the verifier, so anyone reading the log stream could paste it into their own config and authenticate.
+    ///
+    /// **A hash alone is not enough if you run a CLI-based driver** (`claude-code`, and any other driver that reaches the daemon's own `/mcp` endpoint).
+    /// Those drivers are clients of this daemon, so they need the key itself, and a hash cannot yield it: the daemon would have to reverse its own verifier.
+    /// With `api_key` unset and no `LIBREFANG_API_KEY`, the MCP bridge goes out with no `Authorization` header and the daemon's own middleware answers 401 — precisely because the hash *is* honoured as configured auth.
+    /// Keep a transmittable copy for that case: `api_key = "vault:master_api_key"` or `LIBREFANG_API_KEY`, either of which keeps the secret out of `config.toml` while leaving the bridge able to authenticate.
+    /// The kernel logs a `WARN` naming this at every driver rebuild when the bridge ends up keyless while a hash is set, so it fails loudly rather than as an unexplained 401 on every tool call.
+    #[serde(default)]
+    pub api_key_hash: String,
     /// Controls whether the dashboard read-endpoint allowlist (agents,
     /// config, budget, sessions, approvals, hands, skills, workflows, …)
     /// requires a bearer token.
@@ -5548,6 +5607,17 @@ pub struct RegistryConfig {
     /// Set to a full base URL such as `"https://codeberg.org"` to consume a Codeberg-hosted registry; the tarball, git-clone, and tarball-prefix values are all derived from it.
     #[serde(default)]
     pub registry_host: Option<String>,
+    /// Whether the daemon refreshes `~/.librefang/registry/` from upstream on its own (default: `true`).
+    ///
+    /// That checkout is a git clone the sync fast-forwards with `git reset --hard origin/main`, so every local modification under it is destroyed — including the ones `PUT /api/hands/{id}/manifest` writes, which land in `registry/hands/<id>/HAND.toml` for a hand that shipped with the registry.
+    /// Set to `false` to freeze the checkout: boot skips its `sync_registry` pass and the periodic catalog task skips the network refresh while still rebuilding the model catalog from what is already on disk.
+    ///
+    /// Only *automatic* refreshes are gated. `librefang init` and `POST /api/catalog/update` are explicit operator actions and still fetch, so freezing the registry does not strand an operator who wants an update.
+    /// `POST /api/hands/reload` never fetched from upstream in the first place — it only reloads hand definitions already on disk into memory — so it is unaffected either way.
+    ///
+    /// Equivalent to setting `LIBREFANG_REGISTRY_OFFLINE=1`, except it is scoped to the automatic paths rather than every fetch in the process tree, and it survives in `config.toml` rather than in whatever launched the daemon.
+    #[serde(default = "default_true")]
+    pub auto_sync: bool,
 }
 
 fn default_registry_cache_ttl_secs() -> u64 {
@@ -5560,6 +5630,7 @@ impl Default for RegistryConfig {
             cache_ttl_secs: default_registry_cache_ttl_secs(),
             registry_mirror: String::new(),
             registry_host: None,
+            auto_sync: true,
         }
     }
 }
@@ -6191,17 +6262,28 @@ pub enum HttpCompatResponseMode {
 }
 
 /// Header injection config for the built-in HTTP compatibility transport.
+//
+// `deny_unknown_fields` for the same reason as [`McpServerConfigEntry`] and [`McpTransportEntry`]: this struct is only ever reached through `[[mcp_servers.transport.headers]]`, which the `detect_unknown_nested_fields` walker cannot descend into because every hop is an array of tables.
+// Without the attribute a typo such as `value_from_env` deserialises into a header with neither `value` nor `value_env` set, and the transport sends the header unset instead of reporting the mistake (#6612).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HttpCompatHeaderConfig {
     pub name: String,
-    #[serde(default)]
+    // `skip_serializing_if` is load-bearing here for the same reason it is on [`McpServerConfigEntry::template_id`] and `oauth`, and the consequence is worse than theirs (#6612).
+    // `upsert_mcp_server_config` writes the `File` store by going serde_json → `json_to_toml_value` → TOML, and TOML has no null: that converter maps `Value::Null` to an *empty string* rather than dropping the key, so an absent `Option` is written as `value = ""` and reloads as `Some("")` instead of `None`.
+    // `apply_http_compat_headers` tests `value` *before* `value_env`, so an env-sourced header that survived a config write would send an empty header and never resolve its variable — a silent credential failure with no error anywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_env: Option<String>,
 }
 
 /// Declarative tool mapping for the built-in HTTP compatibility transport.
+//
+// `deny_unknown_fields` for the same reason as [`HttpCompatHeaderConfig`] — `[[mcp_servers.transport.tools]]` is an array of tables nested inside another array of tables, so serde is the only layer that can see a typo here.
+// Every field except `name` and `path` has a `#[serde(default)]`, which means a misspelled `responce_mode` would otherwise leave the tool silently wired to the default JSON response mode (#6612).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HttpCompatToolConfig {
     pub name: String,
     #[serde(default)]
@@ -6218,8 +6300,18 @@ pub struct HttpCompatToolConfig {
 }
 
 /// Transport configuration for an MCP server.
+//
+// `deny_unknown_fields` mirrors the guard on the parent [`McpServerConfigEntry`] (#6612).
+// Without it a misspelled or unsupported key inside `[mcp_servers.transport]` was accepted and dropped: an operator who wrote a `[mcp_servers.transport.env]` table — plausible, but not the mechanism, which is the parent's `env: Vec<String>` name list — got a server that looked configured and ran on its own hardcoded fallbacks, with the failure deferred to the next credential rotation.
+// The `detect_unknown_nested_fields` walker cannot reach here (it bails on array-of-table paths such as `mcp_servers`, the same limitation that motivated the parent's guard in #5130), so serde is the only layer that sees the key at all.
+//
+// The attribute applies per variant on an internally-tagged enum: serde buffers the content and each variant rejects fields outside its own set, so the discriminating `type` key itself is still accepted.
+// That behaviour is not obvious from the attribute alone — `deny_unknown_fields` is documented as unsupported on *adjacently*- and *untagged*-enum containers — so it is pinned by `mcp_transport_rejects_unknown_key_in_transport_table_6612` rather than left to the reader to assume.
+//
+// Guarding the enum makes `GET /api/mcp/servers/{name}` → `PUT` load-bearing rather than merely conventional: any key the read route synthesises into the `transport` object that is not a real field now fails the write.
+// `serialize_mcp_transport` in `librefang-api` is therefore a faithful representation of the stored variant, not a display summary — see the comment on that function.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum McpTransportEntry {
     /// Subprocess with JSON-RPC over stdin/stdout.
     Stdio {
@@ -6370,6 +6462,7 @@ impl Default for KernelConfig {
             network: NetworkConfig::default(),
             channels: ChannelsConfig::default(),
             api_key: String::new(),
+            api_key_hash: String::new(),
             require_auth_for_reads: None,
             external_auth_proxy: false,
             trusted_manifest_signers: Vec::new(),
@@ -6557,6 +6650,16 @@ impl std::fmt::Debug for KernelConfig {
             .field(
                 "api_key",
                 &if self.api_key.is_empty() {
+                    "<empty>"
+                } else {
+                    "<redacted>"
+                },
+            )
+            // The PHC string is the verifier: anyone who reads it can paste it into
+            // their own config.toml and authenticate. Redact it like the plaintext.
+            .field(
+                "api_key_hash",
+                &if self.api_key_hash.is_empty() {
                     "<empty>"
                 } else {
                     "<redacted>"

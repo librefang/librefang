@@ -53,6 +53,17 @@ pub fn is_rate_limit_exempt(path: &str) -> bool {
 pub fn operation_cost(method: &str, path: &str) -> NonZeroU32 {
     match (method, path) {
         (_, "/api/health") => NonZeroU32::new(1).unwrap(),
+        // Priced with `/api/health`, not at the 5-token fallback: a
+        // Kubernetes pod runs startup + liveness + readiness probes
+        // concurrently, and all three arrive from the node's kubelet — one
+        // source IP, which is what the GCRA limiter keys on. At the fallback
+        // cost a startup probe on a 1s period alone would drain the
+        // 500-token/min budget and 429 the pod out of its own rollout.
+        // Both spellings are listed because `operation_cost` matches the raw
+        // path with no version normalisation, and a probe URL is written by
+        // hand into a manifest — an operator who reaches for the versioned
+        // form should not silently get the expensive tier.
+        (_, "/api/ready") | (_, "/api/v1/ready") => NonZeroU32::new(1).unwrap(),
         ("GET", "/api/status") => NonZeroU32::new(1).unwrap(),
         ("GET", "/api/version") => NonZeroU32::new(1).unwrap(),
         ("GET", "/api/tools") => NonZeroU32::new(1).unwrap(),
@@ -763,6 +774,11 @@ mod tests {
     #[test]
     fn test_costs() {
         assert_eq!(operation_cost("GET", "/api/health").get(), 1);
+        // Both spellings, kubelet-probe cost (#6633). See the comment on the
+        // match arm for why the versioned form must not silently fall through
+        // to the 5-token default.
+        assert_eq!(operation_cost("GET", "/api/ready").get(), 1);
+        assert_eq!(operation_cost("GET", "/api/v1/ready").get(), 1);
         assert_eq!(operation_cost("GET", "/api/tools").get(), 1);
         assert_eq!(operation_cost("POST", "/api/agents/1/message").get(), 30);
         assert_eq!(operation_cost("POST", "/api/agents").get(), 50);

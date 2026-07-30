@@ -12,10 +12,12 @@ export const NodeEditor = React.memo(function NodeEditor({ node, onUpdate }: Nod
   const pendingRef = useRef<{ id: string; label: string } | null>(null);
   const [localLabel, setLocalLabel] = useState(node?.data?.label ?? "");
   const prevNodeId = useRef<string | null>(node?.id ?? null);
+  const nodeId = node?.id ?? null;
+  const nodeLabel = node?.data?.label ?? "";
 
   useEffect(() => {
-    if (node) {
-      if (prevNodeId.current && prevNodeId.current !== node.id) {
+    if (nodeId) {
+      if (prevNodeId.current && prevNodeId.current !== nodeId) {
         const pending = pendingRef.current;
         if (pending && pending.id === prevNodeId.current) {
           onUpdate(pending.id, { label: pending.label });
@@ -23,10 +25,10 @@ export const NodeEditor = React.memo(function NodeEditor({ node, onUpdate }: Nod
         pendingRef.current = null;
       }
       if (timerRef.current) clearTimeout(timerRef.current);
-      prevNodeId.current = node.id;
-      setLocalLabel(node.data?.label ?? "");
+      prevNodeId.current = nodeId;
+      setLocalLabel(nodeLabel);
     }
-  }, [node?.id, onUpdate]);
+  }, [nodeId, nodeLabel, onUpdate]);
 
   useEffect(() => {
     return () => {

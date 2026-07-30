@@ -653,6 +653,9 @@ hand-no-active-instance = No active hand instance found for '{ $id }'.
 hand-info-not-found = Hand not found: { $error }
 hand-no-settings = Hand '{ $id }' has no configurable settings.
 hand-settings-title = Settings for '{ $id }'
+hand-setting-default-marker = (default)
+hand-setting-value-ignored = saved value "{ $value }" is not valid for this setting and was ignored
+hand-settings-unknown-keys = Saved keys not declared by this hand and ignored: { $keys }
 hand-set-setting-success = Set { $key }={ $value } for hand '{ $id }'.
 hand-reloaded-summary = Reloaded hands: { $added } added, { $updated } updated, { $total } total.
 label-chat-with = Chat with
@@ -950,7 +953,7 @@ doctor-audit-config-syntax-error-hint = Edit { $path } or restore from a backup.
 doctor-everyapi-absent = No EveryAPI gateway detected (no CLI on PATH, no credentials) — nothing to wire.
 doctor-everyapi-cli-not-logged-in = EveryAPI CLI is on PATH but no credentials file was found; run `everyapi login` first if you want to route LibreFang through it.
 doctor-everyapi-credentials-incomplete = EveryAPI credentials file exists but carries no usable relay_key; re-run `everyapi login` to refresh it.
-doctor-everyapi-not-connected = EveryAPI credentials found, but LibreFang has no everyapi provider entry — run `librefang models connect everyapi` to register the gateway as an LLM provider.
+doctor-everyapi-not-connected = EveryAPI credentials found; LibreFang will auto-detect the managed provider and use the current relay key without copying it.
 doctor-everyapi-provider-only = EveryAPI provider entry active at { $path }; API drivers route through the gateway.
 doctor-everyapi-provider-without-credentials = EveryAPI provider entry exists at { $path }, but no usable relay key was found; requests through the gateway will fail authentication.
 doctor-everyapi-provider-without-credentials-hint = Run `everyapi login`, then `librefang models connect everyapi` to refresh the stored key.
@@ -1080,7 +1083,13 @@ label-header-enabled = ENABLED
 label-header-url = URL
 
 # Channel command specific keys
-channel-header-msgs-24h = 24H MSGS
+# Scoped by channel TYPE, not by sidecar instance — usage_events.channel stores the type, so every bot of the same type shares the count (#6606).
+channel-header-msgs-24h-by-type = 24H MSGS (BY TYPE)
+channel-header-connected = CONNECTED
+channel-header-in-out = IN/OUT
+channel-liveness-not-started = NOT STARTED
+channel-last-errors-heading = Last reported error per channel (sticky — recorded on failure and not cleared on recovery):
+channel-last-error-entry = { $name }: { $error }
 channel-error-save-failed-no-body = save failed (no error body)
 
 # Models command specific keys
@@ -1119,6 +1128,12 @@ auth-pool-key-requests = requests={ $count }
 auth-pool-key-item =     - [{ $label }] { $key_display }  priority={ $pri }{ $reqs_str }  status={ $status }
 auth-hash-add-config-hint = Add to config.toml:
 auth-hash-config-entry =   dashboard_pass_hash = "{ $hash }"
+auth-enter-api-key-prompt = Enter API key:
+auth-api-key-empty = API key cannot be empty.
+auth-api-key-generated = New API key (give this to your clients — it is shown only once):
+auth-api-key-config-entry =   api_key_hash = "{ $hash }"
+auth-api-key-remove-plaintext-hint = Then remove the plaintext `api_key` line. Clients keep sending the key itself; only the daemon's stored copy changes.
+auth-api-key-cli-driver-caveat = Exception: if you run a CLI-based driver (claude-code), keep a transmittable copy — `api_key = "vault:NAME"` or the LIBREFANG_API_KEY variable. Those drivers call the daemon's own /mcp endpoint, and a hash cannot be sent as a bearer token, so with neither set every tool call gets 401.
 
 # Agent command specific keys
 agent-spawn-id-label =   ID:   { $id }
@@ -2221,7 +2236,6 @@ tui-wizard-status-no-home = Could not determine home directory
 tui-wizard-status-saved = Config saved — { $provider } / { $model }
 tui-wizard-status-save-fail = Failed to save config: { $error }
 tui-wizard-status-continuing = Continuing...
-
 
 
 

@@ -668,6 +668,9 @@ hand-no-active-instance = Не знайдено активного інстан�
 hand-info-not-found = Hands не знайдено: { $error }
 hand-no-settings = Hands '{ $id }' не має конфігурованих налаштувань.
 hand-settings-title = Налаштування для '{ $id }'
+hand-setting-default-marker = (за замовчуванням)
+hand-setting-value-ignored = збережене значення "{ $value }" недійсне для цього налаштування та проігноровано
+hand-settings-unknown-keys = Збережені ключі, не оголошені цим Hands, проігноровано: { $keys }
 hand-set-setting-success = Встановлено { $key }={ $value } для Hands '{ $id }'.
 hand-reloaded-summary = Перезавантажено Hands: { $added } додано, { $updated } оновлено, всього { $total }.
 
@@ -963,7 +966,7 @@ doctor-audit-config-syntax-error-hint = Відредагуйте { $path } аб�
 doctor-everyapi-absent = Шлюз EveryAPI не виявлено (немає CLI у PATH, немає файлу облікових даних) — підключати нічого.
 doctor-everyapi-cli-not-logged-in = EveryAPI CLI є у PATH, але файл облікових даних не знайдено; спершу виконайте `everyapi login`, якщо хочете спрямувати LibreFang через цей шлюз.
 doctor-everyapi-credentials-incomplete = Файл облікових даних EveryAPI існує, але не містить придатного relay_key; виконайте `everyapi login` ще раз, щоб оновити його.
-doctor-everyapi-not-connected = Облікові дані EveryAPI знайдено, але LibreFang не має запису провайдера everyapi — виконайте `librefang models connect everyapi`, щоб зареєструвати шлюз як LLM-провайдера.
+doctor-everyapi-not-connected = Облікові дані EveryAPI знайдено; LibreFang автоматично виявить керованого провайдера й використає поточний relay key без копіювання.
 doctor-everyapi-provider-only = Запис провайдера EveryAPI активний у { $path }; API-драйвери йдуть через шлюз.
 doctor-everyapi-provider-without-credentials = Запис провайдера EveryAPI існує у { $path }, але придатного relay-ключа не знайдено; запити через шлюз не пройдуть автентифікацію.
 doctor-everyapi-provider-without-credentials-hint = Виконайте `everyapi login`, потім `librefang models connect everyapi`, щоб оновити збережений ключ.
@@ -1094,7 +1097,13 @@ label-header-enabled = УВІМКНЕНО
 label-header-url = URL
 
 # Channel command specific keys
-channel-header-msgs-24h = ПОВІДОМЛЕНЬ ЗА 24 ГОД
+# Scoped by channel TYPE, not by sidecar instance — usage_events.channel stores the type, so every bot of the same type shares the count (#6606).
+channel-header-msgs-24h-by-type = ПОВІДОМЛЕНЬ ЗА 24 ГОД (ЗА ТИПОМ)
+channel-header-connected = ПІДКЛЮЧЕНО
+channel-header-in-out = ВХІД/ВИХІД
+channel-liveness-not-started = НЕ ЗАПУЩЕНО
+channel-last-errors-heading = Остання зафіксована помилка кожного каналу (залипає — записується при збої й не очищується після відновлення):
+channel-last-error-entry = { $name }: { $error }
 channel-error-save-failed-no-body = збереження відхилено (тіло помилки відсутнє)
 
 # Models command specific keys
@@ -1133,6 +1142,12 @@ auth-pool-key-requests = запитів={ $count }
 auth-pool-key-item =     - [{ $label }] { $key_display }  priority={ $pri }{ $reqs_str }  status={ $status }
 auth-hash-add-config-hint = Додайте до config.toml:
 auth-hash-config-entry =   dashboard_pass_hash = "{ $hash }"
+auth-enter-api-key-prompt = Введіть ключ API:
+auth-api-key-empty = Ключ API не може бути порожнім.
+auth-api-key-generated = Новий ключ API (передайте його своїм клієнтам — він показується лише один раз):
+auth-api-key-config-entry =   api_key_hash = "{ $hash }"
+auth-api-key-remove-plaintext-hint = Потім видаліть рядок `api_key` із відкритим текстом. Клієнти й далі надсилають сам ключ; змінюється лише копія, яку зберігає демон.
+auth-api-key-cli-driver-caveat = Виняток: якщо ви використовуєте драйвер на основі CLI (claude-code), залиште копію, яку можна надіслати — `api_key = "vault:NAME"` або змінну LIBREFANG_API_KEY. Такі драйвери звертаються до власної точки /mcp демона, а хеш не можна надіслати як bearer-токен, тож без жодного з них кожен виклик інструмента отримує 401.
 
 # Agent command specific keys
 agent-spawn-id-label =   ID:   { $id }
@@ -2245,5 +2260,4 @@ tui-wizard-status-no-home = Не вдалося визначити домашн�
 tui-wizard-status-saved = Конфігурацію збережено — { $provider } / { $model }
 tui-wizard-status-save-fail = Не вдалося зберегти конфігурацію: { $error }
 tui-wizard-status-continuing = Продовження...
-
 

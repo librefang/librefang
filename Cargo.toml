@@ -294,6 +294,16 @@ debug = "line-tables-only"
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
+# Emit debug info into a *separate* file rather than dropping it (#6659).
+# `strip = "symbols"` above still applies to the executable, so the shipped binary is byte-for-byte what it was — the debug info lives in the `.dSYM` bundle / `.dwp` file beside it, which the release workflow uploads as its own artifact.
+#
+# Why this is not optional tooling polish: #6659 is a `tokio-rt-worker` stack overflow whose crash report shows a six-function cycle repeating in a 52-frame window — an unbounded recursion whose culprit is one `atos` invocation away.
+# It could not be run, because no shipped build and no CI artifact carried symbols, and offsets from an existing crash report cannot be mapped onto a later rebuild.
+# Without this the next occurrence is diagnosed no better than the last one.
+#
+# `line-tables-only` matches `[profile.dev]` above and is what makes the cost small: function names and `file:line` for every frame, without the variable-inspection DWARF that dominates debug-info size.
+debug = "line-tables-only"
+split-debuginfo = "packed"
 # Size-optimized: daemon bottleneck is network I/O (LLM calls), not CPU.
 # "s" trims ~5-15% binary vs opt-level=3 with negligible runtime impact.
 opt-level = "s"

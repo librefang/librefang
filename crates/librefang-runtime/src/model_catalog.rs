@@ -455,6 +455,13 @@ impl ModelCatalog {
                 continue;
             }
 
+            // Managed EveryAPI credentials live behind EveryAPI's local credential-process command rather than in a LibreFang env var.
+            // No env var can describe this entry's auth, so the whole status is owned by the API refresh path — including demotion when the credential process later disappears.
+            // Probing `api_key_env` here would otherwise promote a CLI-managed entry on the strength of an unrelated key and send its refresh down the explicit-key branch.
+            if provider.id == "everyapi" && provider.cli_managed && !suppressed {
+                continue;
+            }
+
             if !provider.key_required {
                 if suppressed {
                     // User explicitly hid this provider. Holding it as
@@ -1068,6 +1075,13 @@ impl ModelCatalog {
     pub fn set_provider_url(&mut self, provider: &str, url: &str) -> bool {
         if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider) {
             p.base_url = url.to_string();
+            // Repointing an auto-managed EveryAPI entry is an explicit user override.
+            // Stop replacing its endpoint with the CLI-managed URL.
+            if provider == "everyapi" && !p.is_custom {
+                p.is_custom = true;
+                p.cli_managed = false;
+                p.auth_status = AuthStatus::Configured;
+            }
             true
         } else {
             // Custom provider — add a new entry so it appears in /api/providers
@@ -1086,12 +1100,110 @@ impl ModelCatalog {
                 available_models: Vec::new(),
                 // Added at runtime via set_provider_url → always custom.
                 is_custom: true,
+                // Credentials come from the derived env var above.
+                cli_managed: false,
                 proxy_url: None,
             });
             // Re-detect auth for the newly added provider
             self.detect_auth();
             true
         }
+    }
+
+    /// Register or refresh the built-in EveryAPI provider discovered through EveryAPI's local credential process.
+    ///
+    /// User-created provider entries and explicit suppression always win.
+    /// Returns `true` only when managed registration is active.
+    pub fn ensure_managed_everyapi(&mut self, base_url: &str) -> bool {
+        const PROVIDER_ID: &str = "everyapi";
+        if self.suppressed_providers.contains(PROVIDER_ID) {
+            return false;
+        }
+        let base_url = base_url.trim().trim_end_matches('/');
+        if base_url.is_empty() {
+            return false;
+        }
+        if let Some(provider) = self.providers.iter_mut().find(|p| p.id == PROVIDER_ID) {
+            if provider.is_custom {
+                return false;
+            }
+            provider.base_url = base_url.to_string();
+            provider.auth_status = AuthStatus::AutoDetected;
+            // Boot only reaches this call after ruling out every explicit source, so adopting a registry-shipped entry here is correct.
+            // Runtime callers arrive through `resolve_managed_credential`, which is gated on this same flag — so an entry that was never CLI-managed can no longer be repointed at the CLI's endpoint.
+            provider.cli_managed = true;
+            return true;
+        }
+        self.providers.push(ProviderInfo {
+            id: PROVIDER_ID.to_string(),
+            display_name: "EveryAPI".to_string(),
+            api_key_env: "EVERYAPI_API_KEY".to_string(),
+            base_url: base_url.to_string(),
+            key_required: true,
+            auth_status: AuthStatus::AutoDetected,
+            model_count: 0,
+            signup_url: Some("https://everyapi.ai".to_string()),
+            regions: std::collections::HashMap::new(),
+            media_capabilities: Vec::new(),
+            available_models: Vec::new(),
+            is_custom: false,
+            cli_managed: true,
+            proxy_url: None,
+        });
+        true
+    }
+
+    /// Register an explicitly configured EveryAPI endpoint/key source.
+    /// Unlike CLI-managed discovery, this entry is custom and is never rewritten from the EveryAPI credential process.
+    pub fn ensure_explicit_everyapi(
+        &mut self,
+        base_url: &str,
+        api_key_env: &str,
+        credential_present: bool,
+    ) -> bool {
+        const PROVIDER_ID: &str = "everyapi";
+        if self.suppressed_providers.contains(PROVIDER_ID) {
+            return false;
+        }
+        let base_url = base_url.trim().trim_end_matches('/');
+        let api_key_env = api_key_env.trim();
+        if base_url.is_empty() || api_key_env.is_empty() {
+            return false;
+        }
+        if let Some(provider) = self.providers.iter_mut().find(|p| p.id == PROVIDER_ID) {
+            provider.base_url = base_url.to_string();
+            provider.api_key_env = api_key_env.to_string();
+            provider.auth_status = if credential_present {
+                AuthStatus::Configured
+            } else {
+                AuthStatus::Missing
+            };
+            provider.is_custom = true;
+            // Explicit configuration takes the entry back from CLI-managed discovery: its credentials now come from `api_key_env`.
+            provider.cli_managed = false;
+            return true;
+        }
+        self.providers.push(ProviderInfo {
+            id: PROVIDER_ID.to_string(),
+            display_name: "EveryAPI".to_string(),
+            api_key_env: api_key_env.to_string(),
+            base_url: base_url.to_string(),
+            key_required: true,
+            auth_status: if credential_present {
+                AuthStatus::Configured
+            } else {
+                AuthStatus::Missing
+            },
+            model_count: 0,
+            signup_url: Some("https://everyapi.ai".to_string()),
+            regions: std::collections::HashMap::new(),
+            media_capabilities: Vec::new(),
+            available_models: Vec::new(),
+            is_custom: true,
+            cli_managed: false,
+            proxy_url: None,
+        });
+        true
     }
 
     /// Apply a batch of provider URL overrides from config.
@@ -1460,6 +1572,11 @@ impl ModelCatalog {
                         existing.api_key_env = prov_toml.api_key_env;
                     }
                     existing.key_required = prov_toml.key_required;
+                    // A provider file is an explicit configuration, so it takes the entry back from CLI-managed discovery.
+                    //
+                    // Unconditional, and specifically not tied to the `api_key_env` branch above: this function has already overwritten `base_url` either way, so leaving the entry CLI-managed would let the next credential refresh rewrite the endpoint the file just set.
+                    // Only EveryAPI ever sets the flag, so clearing it is a no-op for every other provider.
+                    existing.cli_managed = false;
                 }
             } else {
                 self.providers.push(prov_toml.into());

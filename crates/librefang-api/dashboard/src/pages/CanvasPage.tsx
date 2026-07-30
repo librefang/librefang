@@ -209,6 +209,12 @@ const NODE_TYPES = [
 
 // Node types that require an agent binding
 const AGENT_NODE_TYPES_SET = new Set(["agent", "channel", "respond", "condition", "loop", "parallel", "collect"]);
+const NODE_MODE_MAP: Readonly<Record<string, string>> = {
+  condition: "conditional",
+  loop: "loop",
+  parallel: "fan_out",
+  collect: "collect",
+};
 
 // Lucide icon for each node-type, used as the small glyph next to the
 // UPPERCASE kind label inside CustomNode. Mirrors the design bundle's
@@ -941,9 +947,9 @@ function CanvasPageInner() {
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const queryClient = useQueryClient();
   const agentsQuery = useAgents();
-  const agents = agentsQuery.data ?? [];
+  const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
   const workflowsQuery = useWorkflows();
-  const workflows = workflowsQuery.data ?? [];
+  const workflows = useMemo(() => workflowsQuery.data ?? [], [workflowsQuery.data]);
   const [selectedWorkflow, setSelectedWorkflow] = useState<WorkflowItem | null>(null);
   const [workflowName, setWorkflowName] = useState("");
   const [workflowDescription, setWorkflowDescription] = useState("");
@@ -1437,11 +1443,7 @@ function CanvasPageInner() {
         }}
       />
     ),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }), []);
-
-  // Node types that require an agent (all backend steps need an agent)
-  const AGENT_NODE_TYPES = AGENT_NODE_TYPES_SET;
 
   // Load template data (agents list passed in for auto-assignment)
   const loadTemplate = useCallback((availableAgents: AgentItem[]) => {
@@ -1464,7 +1466,7 @@ function CanvasPageInner() {
         const newNodes = templateNodes.map((n, idx) => {
           const nd = n.data;
           const nodeType = nd?.nodeType;
-          const needsAgent = AGENT_NODE_TYPES.has(nodeType ?? "");
+          const needsAgent = AGENT_NODE_TYPES_SET.has(nodeType ?? "");
           const rawPrompt = nd?.prompt || (nd?.description ? t(nd.description) : "");
           // Either keep the existing agent binding, or auto-assign the
           // default agent for nodes that need one. Computing this as a
@@ -1660,14 +1662,6 @@ function CanvasPageInner() {
       workflowDescription,
     });
   }, [nodes, edges, workflowName, workflowDescription, selectedWorkflow, routeWorkflowId, persistDraft, clearDraft]);
-
-  // nodeType -> default stepMode mapping
-  const NODE_MODE_MAP: Record<string, string> = {
-    condition: "conditional",
-    loop: "loop",
-    parallel: "fan_out",
-    collect: "collect",
-  };
 
   // Add node
   const addNode = useCallback((type: string) => {
@@ -2056,7 +2050,7 @@ function CanvasPageInner() {
     } finally {
       setRunningWorkflowId(null);
     }
-  }, [selectedWorkflow, nodes.length, ensureSavedWorkflow, toErrorMessage, showError, runInput, runWorkflowMutation]);
+  }, [selectedWorkflow, nodes.length, ensureSavedWorkflow, toErrorMessage, showError, runInput, runWorkflowMutation, setEdges, setNodes]);
 
   // Dry-run: resolve agents and expand prompts without calling any LLMs
   const handleDryRun = useCallback(async (id?: string) => {
@@ -2078,7 +2072,7 @@ function CanvasPageInner() {
     } finally {
       setIsDryRunning(false);
     }
-  }, [selectedWorkflow, runInput, showError, t, dryRunWorkflowMutation]);
+  }, [selectedWorkflow, runInput, showError, t, dryRunWorkflowMutation, toErrorMessage]);
 
   // Delete workflow
   const handleDeleteConfirmed = useCallback(async (id: string) => {
@@ -2095,7 +2089,7 @@ function CanvasPageInner() {
     } catch (e: unknown) {
       showError(toErrorMessage(e));
     }
-  }, [selectedWorkflow, deleteWorkflowMutation, clearDraft, navigate, showError, toErrorMessage]);
+  }, [selectedWorkflow, deleteWorkflowMutation, clearDraft, navigate, showError, toErrorMessage, setEdges, setNodes]);
 
   // Select saved workflow
   const handleSelectWorkflow = useCallback(async (w: WorkflowItem) => {
@@ -2339,7 +2333,12 @@ function CanvasPageInner() {
                   placeholder={t("canvas.run_input_placeholder")}
                   rows={4} autoFocus
                   className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs outline-none focus:border-brand resize-none"
-                  onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) showRunInput === "dry" ? handleDryRun() : handleRunConfirm(); }}
+                  onKeyDown={e => {
+                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                      if (showRunInput === "dry") handleDryRun();
+                      else handleRunConfirm();
+                    }
+                  }}
                 />
                 <div className="flex gap-2">
                   {showRunInput === "dry" ? (
