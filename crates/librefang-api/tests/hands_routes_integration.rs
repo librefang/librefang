@@ -1837,11 +1837,8 @@ async fn update_hand_manifest_valid_toml_persists_and_reads_back() {
     );
 }
 
-/// Seed a hand into the registry checkout (`<home>/registry/hands/<id>/`) — the
-/// layout the shared librefang-registry tarball produces and the sync
-/// fast-forwards with `git reset --hard origin/main` — then reload so the daemon
-/// picks it up. This is the "built-in hand" shape that `POST /api/hands/install`
-/// cannot produce.
+/// Seed a hand into the registry checkout (`<home>/registry/hands/<id>/`) — the layout the shared librefang-registry tarball produces and the sync fast-forwards with `git reset --hard origin/main` — then reload so the daemon picks it up.
+/// This is the "built-in hand" shape that `POST /api/hands/install` cannot produce.
 async fn seed_registry_hand(h: &Harness, id: &str, description: &str, skill: &str) -> String {
     let toml = manifest_edit_toml(id, "Registry Hand", description);
     let dir = h._tmp.path().join("registry").join("hands").join(id);
@@ -1854,16 +1851,10 @@ async fn seed_registry_hand(h: &Harness, id: &str, description: &str, skill: &st
     toml
 }
 
-/// Editing a registry-shipped hand writes an operator override that the editor
-/// reads back — the end-to-end half of the #6636 follow-up.
+/// Editing a registry-shipped hand writes an operator override that the editor reads back — the end-to-end half of the #6636 follow-up.
 ///
-/// The write used to land in `registry/hands/<id>/HAND.toml`, inside the checkout
-/// the registry sync hard-resets, so the supported way to customise a built-in
-/// hand erased itself. This asserts the three properties that make the override
-/// durable rather than merely written: the edit lands in `<home>/hands/<id>/`, the
-/// checkout is left byte-identical to upstream, and `GET /manifest` returns the
-/// override instead of upstream's copy — without which the dashboard editor would
-/// show a stale manifest and silently revert the customisation on the next save.
+/// The write used to land in `registry/hands/<id>/HAND.toml`, inside the checkout the registry sync hard-resets, so the supported way to customise a built-in hand erased itself.
+/// This asserts the three properties that make the override durable rather than merely written: the edit lands in `<home>/hands/<id>/`, the checkout is left byte-identical to upstream, and `GET /manifest` returns the override instead of upstream's copy — without which the dashboard editor would show a stale manifest and silently revert the customisation on the next save.
 #[tokio::test(flavor = "multi_thread")]
 async fn editing_a_registry_hand_writes_an_override_the_editor_reads_back() {
     let h = boot_router_open().await;

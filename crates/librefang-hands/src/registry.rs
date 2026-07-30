@@ -191,19 +191,14 @@ fn scan_agent_skill_files(dir: &Path) -> HashMap<String, String> {
     skills
 }
 
-/// Copy `SKILL.md` and every `SKILL-{role}.md` from `src` into `dst`, leaving any
-/// file that already exists in `dst` untouched.
+/// Copy `SKILL.md` and every `SKILL-{role}.md` from `src` into `dst`, leaving any file that already exists in `dst` untouched.
 ///
-/// Used when minting an operator override of a registry-shipped hand: the
-/// override directory becomes the only directory `scan_hands_dir` reads for that
-/// id, so the skill files have to travel with the manifest or the hand loses the
-/// content that becomes its agents' system prompts. Existing files are skipped so
-/// a second manifest edit cannot revert a skill file the operator edited in place.
+/// Used when minting an operator override of a registry-shipped hand: the override directory becomes the only directory `scan_hands_dir` reads for that id, so the skill files have to travel with the manifest or the hand loses the content that becomes its agents' system prompts.
+/// Existing files are skipped so a second manifest edit cannot revert a skill file the operator edited in place.
 fn copy_missing_skill_files(src: &Path, dst: &Path) -> std::io::Result<()> {
     let entries = match std::fs::read_dir(src) {
         Ok(entries) => entries,
-        // The caller only reaches this for a hand whose registry copy exists, so
-        // a vanished directory means a concurrent sync — nothing to carry over.
+        // The caller only reaches this for a hand whose registry copy exists, so a vanished directory means a concurrent sync — nothing to carry over.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
@@ -228,50 +223,27 @@ fn copy_missing_skill_files(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 /// Directory holding operator overrides of hand definitions: `<home>/hands/`.
 ///
-/// Deliberately outside `registry/`, which is a git checkout the sync
-/// fast-forwards with `git reset --hard origin/main`, and outside `workspaces/`,
-/// which already means "installed here" rather than "customised here".
+/// Deliberately outside `registry/`, which is a git checkout the sync fast-forwards with `git reset --hard origin/main`, and outside `workspaces/`, which already means "installed here" rather than "customised here".
 ///
-/// Nothing but an explicit edit writes into it, so unlike a precedence flip
-/// between the two existing directories this cannot be satisfied by a file some
-/// earlier install happened to leave behind: an override exists only if someone
-/// created one.
+/// Nothing but an explicit edit writes into it, so unlike a precedence flip between the two existing directories this cannot be satisfied by a file some earlier install happened to leave behind: an override exists only if someone created one.
 pub fn hand_override_dir(home_dir: &Path) -> std::path::PathBuf {
     home_dir.join("hands")
 }
 
-/// Scan for subdirectories containing HAND.toml across the operator override
-/// directory (`home_dir/hands/`), the read-only registry
-/// (`home_dir/registry/hands/`) and the user-writable workspaces directory
-/// (`home_dir/workspaces/`), where `install_from_content_persisted` writes
-/// locally-installed hands.
+/// Scan for subdirectories containing HAND.toml across the operator override directory (`home_dir/hands/`), the read-only registry (`home_dir/registry/hands/`) and the user-writable workspaces directory (`home_dir/workspaces/`), where `install_from_content_persisted` writes locally-installed hands.
 ///
 /// All three locations are scanned because they have different lifetimes.
-/// `hands/` holds operator overrides and is owned by the user — nothing but an
-/// explicit edit writes there, and nothing ever deletes it except an uninstall
-/// of a hand that lives only there.
-/// `registry/hands/` is a git checkout of the shared librefang-registry that
-/// the sync fast-forwards with `git reset --hard origin/main`, so it is upstream's
-/// copy and only upstream's.
-/// `workspaces/` holds hands installed through the dashboard "install from
-/// content" flow, which must survive daemon restarts.
+/// `hands/` holds operator overrides and is owned by the user — nothing but an explicit edit writes there, and nothing ever deletes it except an uninstall of a hand that lives only there.
+/// `registry/hands/` is a git checkout of the shared librefang-registry that the sync fast-forwards with `git reset --hard origin/main`, so it is upstream's copy and only upstream's.
+/// `workspaces/` holds hands installed through the dashboard "install from content" flow, which must survive daemon restarts.
 ///
-/// Precedence follows that ownership: the first hit for an id wins (the `seen`
-/// set drops later duplicates), so an override beats upstream and upstream beats
-/// a locally-installed hand of the same id.
+/// Precedence follows that ownership: the first hit for an id wins (the `seen` set drops later duplicates), so an override beats upstream and upstream beats a locally-installed hand of the same id.
 ///
 /// The override directory is what makes editing a registry-shipped hand durable.
-/// Writing the edit back into `registry/hands/<id>/HAND.toml` — which is what
-/// `update_manifest_persisted` used to do, because that was the only way to win
-/// the precedence race — put it inside the checkout the next sync hard-resets,
-/// so the supported way to customise a built-in hand erased itself (#6636).
+/// Writing the edit back into `registry/hands/<id>/HAND.toml` — which is what `update_manifest_persisted` used to do, because that was the only way to win the precedence race — put it inside the checkout the next sync hard-resets, so the supported way to customise a built-in hand erased itself (#6636).
 ///
-/// Subdirectories of `workspaces/` that are not hands (e.g. agent workspace
-/// directories) are naturally filtered out by the `HAND.toml` existence check.
-/// That check also decides whether an id counts as `seen`: a directory without a
-/// readable `HAND.toml` must not shadow the same id in a later location, or a
-/// half-written override would delete a registry hand from the registry's view
-/// rather than override it.
+/// Subdirectories of `workspaces/` that are not hands (e.g. agent workspace directories) are naturally filtered out by the `HAND.toml` existence check.
+/// That check also decides whether an id counts as `seen`: a directory without a readable `HAND.toml` must not shadow the same id in a later location, or a half-written override would delete a registry hand from the registry's view rather than override it.
 ///
 /// Returns `(hand_id, toml_content, shared_skill_content, per_agent_skill_content)`.
 /// Per-agent skill files follow the pattern `SKILL-{role}.md` (e.g. `SKILL-pm.md`).
@@ -791,12 +763,9 @@ impl HandRegistry {
         Ok(stored)
     }
 
-    /// Install a hand from raw TOML + skill content and persist it under
-    /// `<home_dir>/workspaces/<id>/`.
+    /// Install a hand from raw TOML + skill content and persist it under `<home_dir>/workspaces/<id>/`.
     ///
-    /// Note that this is *not* `<home_dir>/hands/`, which
-    /// [`hand_override_dir`] reserves for operator overrides of hands the
-    /// registry ships.
+    /// Note that this is *not* `<home_dir>/hands/`, which [`hand_override_dir`] reserves for operator overrides of hands the registry ships.
     pub fn install_from_content_persisted(
         &self,
         home_dir: &std::path::Path,
@@ -888,19 +857,11 @@ impl HandRegistry {
     /// 4. Run the shared supply-chain audit on a staged copy (the manifest's
     ///    agent `system_prompt`s are caller-supplied, the same boundary the
     ///    install path scans).
-    /// 5. Write the file to the location that both wins on reload and survives a
-    ///    registry sync: `hands/<id>/` (the operator override directory) for a
-    ///    hand the registry checkout ships, `workspaces/<id>/` for every other
-    ///    hand. Then reload definitions from disk so the in-memory
-    ///    [`HandDefinition`] (and any `SKILL.md`) refresh.
+    /// 5. Write the file to the location that both wins on reload and survives a registry sync: `hands/<id>/` (the operator override directory) for a hand the registry checkout ships, `workspaces/<id>/` for every other hand.
+    ///    Then reload definitions from disk so the in-memory [`HandDefinition`] (and any `SKILL.md`) refresh.
     ///
-    /// Note that a hand instance already spawned keeps its old manifest until
-    /// it is deactivated and reactivated — this refreshes the *definition*,
-    /// which is what the next activation (and the dashboard listing) reads.
-    /// Editing a built-in (registry) hand takes effect immediately and keeps
-    /// taking effect: the edit lands outside the checkout the sync hard-resets,
-    /// so the next refresh updates upstream's copy while the override continues
-    /// to shadow it (#6636).
+    /// Note that a hand instance already spawned keeps its old manifest until it is deactivated and reactivated — this refreshes the *definition*, which is what the next activation (and the dashboard listing) reads.
+    /// Editing a built-in (registry) hand takes effect immediately and keeps taking effect: the edit lands outside the checkout the sync hard-resets, so the next refresh updates upstream's copy while the override continues to shadow it (#6636).
     ///
     /// Returns the reloaded [`HandDefinition`].
     pub fn update_manifest_persisted(
@@ -959,23 +920,12 @@ impl HandRegistry {
 
         // 4. Write the edit where it both wins on reload and survives a sync.
         //
-        //    An override is minted only when the registry checkout ships this
-        //    hand, because that is the only case where writing next to the copy
-        //    the hand loads from is destructive. This used to write back into
-        //    `registry/hands/<id>/HAND.toml` — the only way to win the
-        //    precedence race at the time — which put the edit inside the
-        //    checkout the sync fast-forwards with `git reset --hard origin/main`,
-        //    so the supported way to customise a built-in hand erased itself on
-        //    the next refresh (#6636). `scan_hands_dir` reads the override
-        //    directory first, so the edit wins on reload without the registry
-        //    checkout being touched at all.
+        //    An override is minted only when the registry checkout ships this hand, because that is the only case where writing next to the copy the hand loads from is destructive.
+        //    This used to write back into `registry/hands/<id>/HAND.toml` — the only way to win the precedence race at the time — which put the edit inside the checkout the sync fast-forwards with `git reset --hard origin/main`, so the supported way to customise a built-in hand erased itself on the next refresh (#6636).
+        //    `scan_hands_dir` reads the override directory first, so the edit wins on reload without the registry checkout being touched at all.
         //
-        //    Every other hand keeps being edited in `workspaces/<id>/`: a hand
-        //    installed from content has no upstream copy to shadow, and moving
-        //    it would orphan the `SKILL.md` and per-role skill files sitting
-        //    beside it. That also covers a hand registered in memory with no
-        //    on-disk file — the workspaces copy is created here and the reload
-        //    below picks it up, as it did before the override directory existed.
+        //    Every other hand keeps being edited in `workspaces/<id>/`: a hand installed from content has no upstream copy to shadow, and moving it would orphan the `SKILL.md` and per-role skill files sitting beside it.
+        //    That also covers a hand registered in memory with no on-disk file — the workspaces copy is created here and the reload below picks it up, as it did before the override directory existed.
         let registry_dir = home_dir.join("registry").join("hands").join(hand_id);
         let shadows_registry_copy = registry_dir.join("HAND.toml").exists();
         let target_dir = if shadows_registry_copy {
@@ -985,13 +935,8 @@ impl HandRegistry {
         };
         std::fs::create_dir_all(&target_dir)?;
 
-        // An override replaces the shadowed directory wholesale — `scan_hands_dir`
-        // reads `SKILL.md` and `SKILL-{role}.md` from the same directory as the
-        // `HAND.toml` it accepted, so an override carrying only a manifest would
-        // strip the hand's skill content (which becomes the agent's system
-        // prompt) instead of overriding its manifest. Seed the skill files from
-        // the copy being shadowed, and never overwrite one the operator has
-        // already edited by hand.
+        // An override replaces the shadowed directory wholesale — `scan_hands_dir` reads `SKILL.md` and `SKILL-{role}.md` from the same directory as the `HAND.toml` it accepted, so an override carrying only a manifest would strip the hand's skill content (which becomes the agent's system prompt) instead of overriding its manifest.
+        // Seed the skill files from the copy being shadowed, and never overwrite one the operator has already edited by hand.
         if shadows_registry_copy {
             copy_missing_skill_files(&registry_dir, &target_dir)?;
         }
@@ -1131,9 +1076,7 @@ impl HandRegistry {
         }
     }
 
-    /// Uninstall a user-installed hand — removes it from memory and deletes its
-    /// `workspaces/{id}/` directory on disk, or its `hands/{id}/` override
-    /// directory when that is the only place it lives.
+    /// Uninstall a user-installed hand — removes it from memory and deletes its `workspaces/{id}/` directory on disk, or its `hands/{id}/` override directory when that is the only place it lives.
     ///
     /// Refuses to uninstall built-in hands (those that live under
     /// `registry/hands/`), since the next registry sync would just recreate
@@ -1153,14 +1096,9 @@ impl HandRegistry {
         // workspace entry would be pointless, and touching the registry dir
         // is out of scope. Refuse.
         //
-        // An override in `hands/{id}/` is the hand's only on-disk home when no
-        // registry copy shadows it — which happens when upstream drops an id the
-        // operator had customised. Without this branch such a hand is
-        // un-uninstallable: `BuiltinHand` is reported for a hand the registry no
-        // longer ships, and the override keeps resurrecting it on every reload.
-        // Where a registry copy *does* exist the override stays untouched: the
-        // hand is still a built-in, and deleting the operator's customisation as
-        // a side effect of a refused uninstall would be its own bug.
+        // An override in `hands/{id}/` is the hand's only on-disk home when no registry copy shadows it — which happens when upstream drops an id the operator had customised.
+        // Without this branch such a hand is un-uninstallable: `BuiltinHand` is reported for a hand the registry no longer ships, and the override keeps resurrecting it on every reload.
+        // Where a registry copy *does* exist the override stays untouched: the hand is still a built-in, and deleting the operator's customisation as a side effect of a refused uninstall would be its own bug.
         let workspace_dir = home_dir.join("workspaces").join(hand_id);
         let override_dir = hand_override_dir(home_dir).join(hand_id);
         let install_dir = if workspace_dir.join("HAND.toml").exists() {
@@ -2044,12 +1982,8 @@ system_prompt = "Test"
 
     /// Editing a registry-shipped hand must survive the next registry sync.
     ///
-    /// The edit used to be written back into `registry/hands/<id>/HAND.toml`,
-    /// which is inside the git checkout the sync fast-forwards with
-    /// `git reset --hard origin/main` — so the supported way to customise a
-    /// built-in hand erased itself (#6636). Simulating the reset by restoring
-    /// the upstream file is what makes this a durability test rather than a
-    /// "the write landed somewhere" test.
+    /// The edit used to be written back into `registry/hands/<id>/HAND.toml`, which is inside the git checkout the sync fast-forwards with `git reset --hard origin/main` — so the supported way to customise a built-in hand erased itself (#6636).
+    /// Simulating the reset by restoring the upstream file is what makes this a durability test rather than a "the write landed somewhere" test.
     #[test]
     fn editing_a_registry_hand_survives_a_registry_reset() {
         let reg = HandRegistry::new();
@@ -2091,8 +2025,7 @@ system_prompt = "Test"
             "the registry checkout must be left exactly as upstream wrote it"
         );
 
-        // Simulate `git reset --hard origin/main`: upstream's copy is restored
-        // verbatim and anything else under the checkout is gone.
+        // Simulate `git reset --hard origin/main`: upstream's copy is restored verbatim and anything else under the checkout is gone.
         std::fs::write(reg_hand_dir.join("HAND.toml"), &upstream).unwrap();
         reg.reload_from_disk(tmp.path());
 
@@ -2105,8 +2038,7 @@ system_prompt = "Test"
 
     /// A hand that exists only in `workspaces/` keeps being edited in place.
     ///
-    /// There is no upstream copy to shadow, and relocating it would orphan the
-    /// `SKILL.md` and per-role skill files that sit beside it.
+    /// There is no upstream copy to shadow, and relocating it would orphan the `SKILL.md` and per-role skill files that sit beside it.
     #[test]
     fn editing_a_workspaces_only_hand_stays_in_workspaces() {
         let reg = HandRegistry::new();
@@ -2151,10 +2083,7 @@ system_prompt = "Test"
 
     /// An override must carry the shadowed hand's skill files.
     ///
-    /// `scan_hands_dir` reads `SKILL.md` / `SKILL-{role}.md` from the same
-    /// directory as the `HAND.toml` it accepted, and the override directory wins
-    /// outright — so a manifest-only override would silently strip the content
-    /// that becomes the hand's agents' system prompts.
+    /// `scan_hands_dir` reads `SKILL.md` / `SKILL-{role}.md` from the same directory as the `HAND.toml` it accepted, and the override directory wins outright — so a manifest-only override would silently strip the content that becomes the hand's agents' system prompts.
     #[test]
     fn minting_an_override_carries_the_shadowed_skill_files() {
         let reg = HandRegistry::new();
@@ -2232,12 +2161,9 @@ system_prompt = "Test"
         );
     }
 
-    /// A directory without a readable `HAND.toml` must not shadow the same id in a
-    /// later location.
+    /// A directory without a readable `HAND.toml` must not shadow the same id in a later location.
     ///
-    /// The override directory is scanned first, so marking an id as seen before
-    /// the manifest check would let a half-written `hands/<id>/` delete a registry
-    /// hand from the registry's view instead of overriding it.
+    /// The override directory is scanned first, so marking an id as seen before the manifest check would let a half-written `hands/<id>/` delete a registry hand from the registry's view instead of overriding it.
     #[test]
     fn an_override_dir_without_a_manifest_does_not_hide_the_registry_hand() {
         let reg = HandRegistry::new();
@@ -2255,9 +2181,7 @@ system_prompt = "Test"
 
     /// A hand whose only on-disk home is an override must be uninstallable.
     ///
-    /// This is the state left when upstream drops an id the operator had
-    /// customised: reporting `BuiltinHand` for a hand the registry no longer ships
-    /// would leave the override resurrecting it on every reload with no way out.
+    /// This is the state left when upstream drops an id the operator had customised: reporting `BuiltinHand` for a hand the registry no longer ships would leave the override resurrecting it on every reload with no way out.
     #[test]
     fn uninstalling_an_override_only_hand_removes_the_override() {
         let reg = HandRegistry::new();
@@ -2271,8 +2195,7 @@ system_prompt = "Test"
         reg.update_manifest_persisted(tmp.path(), "dropped-upstream", &edited)
             .expect("edit must persist");
 
-        // Upstream drops the hand: the next `git reset --hard origin/main` leaves
-        // the checkout without it, and only the override remains.
+        // Upstream drops the hand: the next `git reset --hard origin/main` leaves the checkout without it, and only the override remains.
         std::fs::remove_dir_all(
             tmp.path()
                 .join("registry")
@@ -2303,8 +2226,7 @@ system_prompt = "Test"
         );
     }
 
-    /// While the registry still ships the hand, uninstall stays refused — and the
-    /// refusal must not delete the operator's override as a side effect.
+    /// While the registry still ships the hand, uninstall stays refused — and the refusal must not delete the operator's override as a side effect.
     #[test]
     fn uninstall_is_refused_for_an_overridden_registry_hand_and_keeps_the_override() {
         let reg = HandRegistry::new();
