@@ -398,10 +398,8 @@ fn redacted_config_json(
     // `cache_approvals_per_session` was the visible one: it defaults to `true`, so an operator who left it alone still saw the box unchecked and had no way to tell whether per-session caching was on (#6636 observation (e)).
     // None of the seven is writable, which is why `every_writable_config_leaf_is_readable` never saw them; `approval_policy_fields_are_all_readable` is the guard for this direction.
     // Nothing added here is secret-bearing: `trusted_senders`, `channel_rules`, and `routing` hold operator-chosen user ids, channel names, tool globs, and notification recipients — the same class as the `external_auth` fields exposed in #6605, and credentials never live in `ApprovalPolicy`.
-    // `trusted_senders` is an approval-*bypass* list: a sender on it skips the prompt for every tool `classify_risk` ranks below `High` (see `ApprovalManager::requires_approval_with_context_for`).
-    // It was absent from this response, so the only way to audit who holds that waiver was shell access to `config.toml` (#6611).
-    // Read-only on purpose — it stays out of `WRITABLE_EXACT_PATHS` so an Owner-role caller holding a leaked API key cannot add themselves to it over HTTP, which is also why the `writable ⊆ readable` guard never noticed the omission.
-    // Nothing secret is disclosed: the entries are operator-chosen sender ids of the same class as the channel bindings already exposed elsewhere.
+    // Of those seven, `trusted_senders` is the one with teeth: it is an approval-*bypass* list, so a sender on it skips the prompt for every tool `classify_risk` ranks below `High` (see `ApprovalManager::requires_approval_with_context_for`), which is why the Approvals page renders it as its own card rather than leaving it to the generic config form (#6611).
+    // Read-only on purpose — it stays out of `WRITABLE_EXACT_PATHS` so an Owner-role caller holding a leaked API key cannot add themselves to it over HTTP, which is also why the `writable ⊆ readable` guard never noticed while it was missing from this response.
     set!("approval", {
         "require_approval": config.approval.require_approval,
         "timeout_secs": config.approval.timeout_secs,
