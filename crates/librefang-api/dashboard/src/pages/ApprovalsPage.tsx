@@ -16,8 +16,9 @@ import {
   useRejectApproval,
   useModifyAndRetryApproval,
 } from "../lib/mutations/approvals";
+import { useFullConfig } from "../lib/queries/config";
 import { useListNav } from "../lib/useListNav";
-import { ListSkeleton } from "../components/ui/Skeleton";
+import { Skeleton, ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ErrorState } from "../components/ui/ErrorState";
 import { Card } from "../components/ui/Card";
@@ -40,6 +41,7 @@ import {
   History as HistoryIcon,
   Hourglass,
   SkipForward,
+  UserCheck,
   Zap,
 } from "lucide-react";
 
@@ -710,6 +712,96 @@ function PendingCard({
 }
 
 /* ------------------------------------------------------------------ */
+/*  Trusted senders (approval bypass list)                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Narrow the untyped `GET /api/config` body down to `approval.trusted_senders`.
+ *
+ * The config endpoint is `Record<string, unknown>` by design — it mirrors whatever `KernelConfig` serializes — so the shape is checked here rather than asserted.
+ * A malformed section yields an empty list, which renders the same as "nobody is on it"; that is the safe direction to fail, because the alternative is inventing entries that are not configured.
+ */
+function readTrustedSenders(config: Record<string, unknown> | undefined): string[] {
+  if (!config) return [];
+  const approval = config["approval"];
+  if (typeof approval !== "object" || approval === null) return [];
+  const senders = (approval as Record<string, unknown>)["trusted_senders"];
+  if (!Array.isArray(senders)) return [];
+  return senders.filter((s): s is string => typeof s === "string");
+}
+
+/**
+ * Read-only audit surface for `approval.trusted_senders` (#6611).
+ *
+ * A sender on this list skips the approval prompt for every tool the risk classifier does not rank high, so it is the one approval setting whose *populated* state deserves attention — an empty list means every sender goes through the gate, which is the safe configuration and is presented as such.
+ * The list is deliberately not editable here: it is excluded from the config write allowlist so that holding an API key is not enough to grant yourself the bypass.
+ */
+function TrustedSendersCard() {
+  const { t } = useTranslation();
+  const configQuery = useFullConfig();
+  const senders = useMemo(
+    () => readTrustedSenders(configQuery.data),
+    [configQuery.data],
+  );
+
+  return (
+    <Card padding="md" className="mb-4">
+      <div className="flex items-center gap-2 mb-2">
+        <UserCheck className="w-3.5 h-3.5 text-text-dim" aria-hidden="true" />
+        <h3 className="m-0 text-[12.5px] font-semibold">
+          {t("approvals.trustedSendersTitle", "Trusted senders")}
+        </h3>
+        {senders.length > 0 && (
+          <span className="font-mono text-[10px] px-1.5 py-px rounded-full bg-warning/15 text-warning">
+            {senders.length}
+          </span>
+        )}
+      </div>
+      <p className="text-[11.5px] text-text-dim mb-2.5">
+        {t(
+          "approvals.trustedSendersDesc",
+          "Senders listed here skip the approval prompt for every tool that is not classified high-risk. Edit the list in config.toml — it is intentionally not writable over the API.",
+        )}
+      </p>
+      {configQuery.isLoading ? (
+        <div className="flex gap-2" role="status" aria-busy="true">
+          <Skeleton className="h-5 w-24" />
+          <Skeleton className="h-5 w-20" />
+        </div>
+      ) : configQuery.isError ? (
+        <ErrorState
+          message={t(
+            "approvals.trustedSendersLoadError",
+            "Could not load the approval configuration.",
+          )}
+          onRetry={() => configQuery.refetch()}
+        />
+      ) : senders.length === 0 ? (
+        <p className="text-[11.5px] text-success">
+          {t(
+            "approvals.trustedSendersEmpty",
+            "No trusted senders — every sender goes through the approval gate.",
+          )}
+        </p>
+      ) : (
+        <ul
+          className="flex flex-wrap gap-1.5 list-none m-0 p-0"
+          aria-label={t("approvals.trustedSendersTitle", "Trusted senders")}
+        >
+          {senders.map((sender) => (
+            <li key={sender}>
+              <code className="inline-block rounded-md border border-warning/20 bg-warning/10 px-1.5 py-0.5 font-mono text-[11px] text-warning break-all">
+                {sender}
+              </code>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  Main page                                                         */
 /* ------------------------------------------------------------------ */
 
@@ -893,6 +985,9 @@ export function ApprovalsPage() {
 
       {/* Body */}
       <div className="flex-1 overflow-y-auto p-4 lg:p-5">
+        {/* Who currently bypasses this queue.
+            Sits above the queue itself because it explains requests that never arrive. */}
+        {activeTab === "pending" && <TrustedSendersCard />}
         {activeTab === "history" ? (
           <HistoryTab />
         ) : approvalsQuery.isLoading ? (

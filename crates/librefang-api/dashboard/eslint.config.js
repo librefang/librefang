@@ -80,6 +80,35 @@ export default [
       // always a bug.
       "react/no-danger-with-children": "error",
 
+      // Ban the raw clipboard API outside the helper that wraps it.
+      // The API is undefined outside a secure context, so on a dashboard served over plain HTTP on a LAN / VPN address the property access throws before the promise exists — the copy button does nothing and says nothing.
+      // `lib/clipboard.ts` already falls back to `document.execCommand('copy')`; this rule exists because six call sites reintroduced the raw API after that helper landed (#6611).
+      //
+      // Coverage, measured against this config rather than inferred from it.
+      // Caught: `navigator.clipboard…`, `navigator?.clipboard?.…`, and `const { clipboard } = navigator` — `no-restricted-properties` checks destructuring patterns as well as member reads.
+      // `no-restricted-syntax` adds the `<obj>.navigator.clipboard` spelling (`window.` / `globalThis.` prefixed), which `no-restricted-properties` cannot see because its `object` option only matches a bare identifier and here the object is itself a member expression.
+      // Not caught: an aliased receiver (`const n = navigator; n.clipboard`) and `const { clipboard } = window.navigator`.
+      // Both need type-aware alias tracking; these are syntactic rules with no notion of what an identifier was assigned.
+      // Nobody writes either shape in this codebase, and the review that catches a hand-rolled copy path at all catches those too.
+      "no-restricted-properties": [
+        "error",
+        {
+          object: "navigator",
+          property: "clipboard",
+          message:
+            "Use `copyToClipboard` from `lib/clipboard` — `navigator.clipboard` is undefined outside secure contexts (plain HTTP on a LAN IP), so the copy silently no-ops.",
+        },
+      ],
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector:
+            'MemberExpression[property.name="clipboard"][object.type="MemberExpression"][object.property.name="navigator"]',
+          message:
+            "Use `copyToClipboard` from `lib/clipboard` — `navigator.clipboard` is undefined outside secure contexts (plain HTTP on a LAN IP), so the copy silently no-ops.",
+        },
+      ],
+
       // ── Pragmatic adjustments for this codebase ────────────────────
       // Vite + automatic JSX runtime: React import is not required.
       "react/react-in-jsx-scope": "off",
@@ -136,6 +165,15 @@ export default [
       "@typescript-eslint/no-unused-expressions": "warn",
       "no-irregular-whitespace": "warn",
       "no-control-regex": "warn",
+    },
+  },
+
+  // The clipboard helper is the one place allowed to touch the raw API — it is the fallback the `no-restricted-properties` rule above points everyone else at.
+  // Only that rule is disabled: the helper reads a bare `navigator.clipboard`, so the `window.navigator.clipboard` spelling that `no-restricted-syntax` covers stays banned even here.
+  {
+    files: ["src/lib/clipboard.ts"],
+    rules: {
+      "no-restricted-properties": "off",
     },
   },
 

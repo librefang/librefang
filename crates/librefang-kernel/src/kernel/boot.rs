@@ -97,7 +97,7 @@ impl LibreFangKernel {
         // non-loopback bind that turns into an open daemon. Refusing the
         // override leaves whatever `config.toml` says, so the #3572 bind
         // guard still gets the truth.
-        match resolve_api_key_override(std::env::var("LIBREFANG_API_KEY").ok().as_deref()) {
+        match resolve_api_key_override(std::env::var(super::API_KEY_ENV).ok().as_deref()) {
             ApiKeyOverride::Use(key) => config.api_key = key,
             ApiKeyOverride::IgnoredEmpty => warn!(
                 "LIBREFANG_API_KEY is set but empty — ignoring it and keeping the \
@@ -1034,12 +1034,21 @@ impl LibreFangKernel {
         // Auto-sync registry content on first boot or after upgrade when
         // Sync registry: downloads if cache is stale, pre-installs providers/agents/integrations.
         // Skips download if cache is fresh; skips copy if files already exist.
-        librefang_runtime::registry_sync::sync_registry(
-            &config.home_dir,
-            config.registry.cache_ttl_secs,
-            &config.registry.registry_mirror,
-            config.registry.registry_host.as_deref(),
-        );
+        // `[registry] auto_sync = false` freezes `~/.librefang/registry/`: the sync fast-forwards that checkout with `git reset --hard origin/main`, which destroys every local modification under it — including the ones `PUT /api/hands/{id}/manifest` writes for a registry-shipped hand.
+        // Explicit operator actions (`librefang init`, `POST /api/catalog/update`) still fetch; `POST /api/hands/reload` only reloads whatever is already on disk and never fetched from upstream, so it is unaffected either way.
+        if config.registry.auto_sync {
+            librefang_runtime::registry_sync::sync_registry(
+                &config.home_dir,
+                config.registry.cache_ttl_secs,
+                &config.registry.registry_mirror,
+                config.registry.registry_host.as_deref(),
+            );
+        } else {
+            info!(
+                "[registry] auto_sync = false — skipping the boot registry sync; \
+                 run POST /api/catalog/update to refresh on demand"
+            );
+        }
 
         // One-shot: reclaim the duplicate registry checkout that older
         // librefang versions maintained under `~/.librefang/cache/registry/`.

@@ -350,11 +350,15 @@ pub async fn get_hand_manifest(
     };
 
     let home = state.kernel.home_dir();
-    // Two install layouts that scan_hands_dir actually walks
-    // (librefang-hands/src/registry.rs:165). Anything else is a
-    // codebase inconsistency that wouldn't make it into the registry,
-    // so the gate above would already 404 it before we get here.
+    // The three layouts scan_hands_dir walks, in its precedence order (`librefang_hands::registry::scan_hands_dir`).
+    // Anything else is a codebase inconsistency that wouldn't make it into the registry, so the gate above would already 404 it before we get here.
+    //
+    // The operator override has to come first for the same reason the scan reads it first: it is what the daemon loads.
+    // Returning upstream's copy instead would show a stale manifest in the editor, and saving it back would silently revert the operator's customisation.
     let candidates = [
+        librefang_hands::registry::hand_override_dir(home)
+            .join(&hand_id)
+            .join("HAND.toml"),
         home.join("registry")
             .join("hands")
             .join(&hand_id)

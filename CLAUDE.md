@@ -55,9 +55,7 @@ giving defense in depth on top of the Claude Code PreToolUse layer.
   lives in CI rather than gating every push — see #4532 for the
   rationale. Skip the branch guard for a maintainer hotfix with
   `LIBREFANG_PREPUSH_SKIP=1`.
-- `commit-msg` — rejects commit messages containing Claude / Anthropic
-  attribution (catches heredocs and `git commit -F file` that the PreToolUse
-  Bash hook cannot see).
+- `commit-msg` — rejects commit messages containing Claude / Anthropic attribution (catches heredocs and `git commit -F file` that the PreToolUse Bash hook cannot see), and separately rejects a commit whose *author identity* (`git var GIT_AUTHOR_IDENT`, so the `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` env overrides are covered) resolves to Claude / Anthropic even when the message itself is clean.
 
 **Enable once per clone** by running setup:
 ```bash

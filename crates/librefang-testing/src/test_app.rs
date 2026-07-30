@@ -145,12 +145,59 @@ impl TestAppState {
     }
 
     /// Sets the global API key so auth middleware accepts it.
+    ///
+    /// Writes both live handles the middleware consults, matching what
+    /// `server::refresh_master_credential` does in production — otherwise the
+    /// transparent-upgrade path could not tell that the configured token is
+    /// the master key.
     pub fn with_api_key(self, key: &str) -> Self {
         *self
             .state
             .api_key_lock
             .try_write()
             .expect("api key lock should be uncontended during test setup") = key.to_string();
+        self.state
+            .master_key
+            .set_blocking(key.to_string(), String::new());
+        self
+    }
+
+    /// Configures the master API key as an `api_key_hash` with no plaintext,
+    /// the posture an operator lands in after the transparent upgrade.
+    ///
+    /// Clears the plaintext side of **both** live handles as well as setting the
+    /// hash, because "hash-only" is the whole point of the fixture: a leftover
+    /// plaintext token — from `KernelConfig.api_key`, which `build_state` seeds
+    /// the handles from — would let a test authenticate without ever reaching
+    /// the hash path it means to exercise.
+    ///
+    /// Writes the **live handles only**. It does not touch
+    /// `KernelConfig.api_key_hash`, so a test that also exercises a path
+    /// deriving from `auth_snapshot()` (the boot-time bind guard,
+    /// `configured_user_api_keys`, `has_dashboard_credentials`) must set the
+    /// config field too:
+    ///
+    /// ```rust,ignore
+    /// let hash = librefang_api::password_hash::hash_device_token("secret-key");
+    /// let h = hash.clone();
+    /// TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
+    ///     cfg.api_key_hash = h;
+    /// }))
+    /// .with_api_key_hash(&hash);
+    /// ```
+    ///
+    /// Setting only one of the two is the failure mode worth naming: the
+    /// handler sees an unconfigured daemon and the test passes for the wrong
+    /// reason.
+    pub fn with_api_key_hash(self, hash: &str) -> Self {
+        *self
+            .state
+            .api_key_lock
+            .try_write()
+            .expect("api key lock should be uncontended during test setup") = String::new();
+        self.state
+            .master_key
+            .set_blocking(String::new(), hash.to_string());
         self
     }
 
@@ -223,6 +270,41 @@ impl TestAppState {
             }
         };
 
+        // Seed the live auth handles from the test's `KernelConfig`, which is
+        // what `server::refresh_master_credential` does at boot in production
+        // (#6613). Without this a test that configures `cfg.api_key` or
+        // `cfg.api_key_hash` through `MockKernelBuilder::with_config` leaves
+        // both handles empty, and every surface that reads them — the auth
+        // middleware, the WS and terminal upgrades, `security_status`,
+        // `dashboard_auth_check` — sees an unconfigured daemon while
+        // `auth_snapshot()` reports a configured one. That split is exactly the
+        // class of disagreement #6613 was about, so the harness must not
+        // reproduce it.
+        //
+        // The env / `vault:` indirection is deliberately NOT applied here: a
+        // fixture's credential is whatever its config literally says, and
+        // resolving would make the harness depend on the developer's
+        // environment and on-disk vault. `with_api_key` / `with_api_key_hash`
+        // still override both handles afterwards for tests that want a
+        // credential the config does not mention.
+        //
+        // One `config_ref()` for both fields, so the pair comes from a single
+        // generation exactly as `refresh_master_credential` takes them from a
+        // single `ApiAuthSnapshot`.
+        let (master_plaintext, master_hash) = {
+            let cfg = kernel.config_ref();
+            (
+                cfg.api_key.trim().to_string(),
+                cfg.api_key_hash.trim().to_string(),
+            )
+        };
+        // Rooted at the test's temp home so a transparent api_key upgrade hint
+        // (#6613) lands there rather than in the process CWD.
+        let master_key = Arc::new(librefang_api::middleware::MasterKeyState::new(
+            tmp.path().to_path_buf(),
+        ));
+        master_key.set_blocking(master_plaintext.clone(), master_hash);
+
         Arc::new(AppState {
             kernel,
             started_at: Instant::now(),
@@ -241,7 +323,8 @@ impl TestAppState {
                 tmp.path().join("test_webhooks.json"),
             ),
             active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(master_plaintext)),
+            master_key,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             media_drivers: librefang_runtime::media::MediaDriverCache::new(),
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),

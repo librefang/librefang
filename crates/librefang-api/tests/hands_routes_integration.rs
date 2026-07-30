@@ -1837,6 +1837,94 @@ async fn update_hand_manifest_valid_toml_persists_and_reads_back() {
     );
 }
 
+/// Seed a hand into the registry checkout (`<home>/registry/hands/<id>/`) — the layout the shared librefang-registry tarball produces and the sync fast-forwards with `git reset --hard origin/main` — then reload so the daemon picks it up.
+/// This is the "built-in hand" shape that `POST /api/hands/install` cannot produce.
+async fn seed_registry_hand(h: &Harness, id: &str, description: &str, skill: &str) -> String {
+    let toml = manifest_edit_toml(id, "Registry Hand", description);
+    let dir = h._tmp.path().join("registry").join("hands").join(id);
+    std::fs::create_dir_all(&dir).expect("create registry hand dir");
+    std::fs::write(dir.join("HAND.toml"), &toml).expect("write registry HAND.toml");
+    std::fs::write(dir.join("SKILL.md"), skill).expect("write registry SKILL.md");
+
+    let (status, body) = json_request(&h.app, Method::POST, "/api/hands/reload", None).await;
+    assert_eq!(status, StatusCode::OK, "reload after seeding: {body}");
+    toml
+}
+
+/// Editing a registry-shipped hand writes an operator override that the editor reads back — the end-to-end half of the #6636 follow-up.
+///
+/// The write used to land in `registry/hands/<id>/HAND.toml`, inside the checkout the registry sync hard-resets, so the supported way to customise a built-in hand erased itself.
+/// This asserts the three properties that make the override durable rather than merely written: the edit lands in `<home>/hands/<id>/`, the checkout is left byte-identical to upstream, and `GET /manifest` returns the override instead of upstream's copy — without which the dashboard editor would show a stale manifest and silently revert the customisation on the next save.
+#[tokio::test(flavor = "multi_thread")]
+async fn editing_a_registry_hand_writes_an_override_the_editor_reads_back() {
+    let h = boot_router_open().await;
+    let id = "manifest-edit-registry";
+    let upstream = seed_registry_hand(&h, id, "Upstream description.", "# Upstream skill\n").await;
+
+    let registry_manifest = h
+        ._tmp
+        .path()
+        .join("registry")
+        .join("hands")
+        .join(id)
+        .join("HAND.toml");
+    let override_dir = h._tmp.path().join("hands").join(id);
+
+    let (status, text) = get_manifest_text(&h, id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        text.contains("Upstream description."),
+        "pre-check: the editor must start from upstream's manifest, got:\n{text}"
+    );
+
+    let edited = manifest_edit_toml(id, "Registry Hand", "Operator description.");
+    let (status, body) = json_request(
+        &h.app,
+        Method::PUT,
+        &format!("/api/hands/{id}/manifest"),
+        Some(serde_json::json!({ "toml_content": edited })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "valid edit must 200: {body}");
+    assert_eq!(
+        body["description"].as_str(),
+        Some("Operator description."),
+        "response must carry the reloaded definition: {body}"
+    );
+
+    assert!(
+        override_dir.join("HAND.toml").exists(),
+        "the edit must land in the override directory, not the registry checkout"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&registry_manifest).expect("read registry HAND.toml"),
+        upstream,
+        "the registry checkout must be left exactly as upstream wrote it"
+    );
+    assert_eq!(
+        std::fs::read_to_string(override_dir.join("SKILL.md")).expect("read override SKILL.md"),
+        "# Upstream skill\n",
+        "the shadowed SKILL.md must travel with the override — the override directory \
+         is the only one scanned for this id, so a manifest-only override would strip \
+         the content that becomes the agents' system prompts"
+    );
+
+    let (status, text) = get_manifest_text(&h, id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        text.contains("Operator description.") && !text.contains("Upstream description."),
+        "GET /manifest must return the override, not upstream's copy, got:\n{text}"
+    );
+
+    let (status, def) = get_json(&h.app, &format!("/api/hands/{id}")).await;
+    assert_eq!(status, StatusCode::OK, "{def}");
+    assert_eq!(
+        def["description"].as_str(),
+        Some("Operator description."),
+        "the reloaded definition must reflect the edit: {def}"
+    );
+}
+
 /// Editing must not rename the hand: an `id` that no longer matches the path
 /// segment is rejected with 400 and the file is left untouched (the on-disk
 /// directory and the registry key are both keyed by id).

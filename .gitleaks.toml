@@ -69,6 +69,10 @@ regexes = [
   # The canonical jwt.io HS256 example token (its fixed public signature),
   # embedded in JWT-handling tests and docs; not a real signing key.
   '''SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c''',
+  # The `Sec-WebSocket-Key` example value from RFC 6455 section 1.3 — base64 of the ASCII string "the sample nonce".
+  # A WebSocket handshake nonce is client-generated per connection and carries no authorization; it is echoed back hashed as `Sec-WebSocket-Accept` purely to prove the peer speaks the protocol.
+  # Used verbatim by the raw-socket upgrade tests, which have to write the handshake by hand.
+  '''dGhlIHNhbXBsZSBub25jZQ==''',
   # Intentional fake credentials embedded in redaction / sanitization / driver
   # tests (the tests assert these get stripped) and one openfang→librefang doc
   # example. Each is a fixed literal or a tight test-only convention, so

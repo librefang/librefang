@@ -13,6 +13,7 @@ import {
   useRejectApproval,
   useModifyAndRetryApproval,
 } from "../lib/mutations/approvals";
+import { useFullConfig } from "../lib/queries/config";
 import type { ApprovalAuditEntry, ApprovalItem } from "../api";
 
 vi.mock("../lib/queries/approvals", () => ({
@@ -25,6 +26,10 @@ vi.mock("../lib/mutations/approvals", () => ({
   useApproveApproval: vi.fn(),
   useRejectApproval: vi.fn(),
   useModifyAndRetryApproval: vi.fn(),
+}));
+
+vi.mock("../lib/queries/config", () => ({
+  useFullConfig: vi.fn(),
 }));
 
 vi.mock("react-i18next", async () => {
@@ -63,6 +68,7 @@ const useTotpStatusMock = useTotpStatus as unknown as ReturnType<typeof vi.fn>;
 const useApproveApprovalMock = useApproveApproval as unknown as ReturnType<typeof vi.fn>;
 const useRejectApprovalMock = useRejectApproval as unknown as ReturnType<typeof vi.fn>;
 const useModifyAndRetryApprovalMock = useModifyAndRetryApproval as unknown as ReturnType<typeof vi.fn>;
+const useFullConfigMock = useFullConfig as unknown as ReturnType<typeof vi.fn>;
 
 function makeApproval(overrides: Partial<ApprovalItem> = {}): ApprovalItem {
   return {
@@ -119,6 +125,18 @@ function setApprovalsList(items: ApprovalItem[] | undefined, opts: {
   });
 }
 
+function setFullConfig(
+  config: Record<string, unknown> | undefined,
+  opts: { isLoading?: boolean; isError?: boolean } = {},
+) {
+  useFullConfigMock.mockReturnValue({
+    data: config,
+    isLoading: opts.isLoading ?? false,
+    isError: opts.isError ?? false,
+    refetch: vi.fn(),
+  });
+}
+
 function setTotpEnforced(enforced: boolean) {
   useTotpStatusMock.mockReturnValue({
     data: { enforced },
@@ -166,6 +184,8 @@ describe("ApprovalsPage", () => {
     vi.clearAllMocks();
     setMutationDefaults();
     setTotpEnforced(false);
+    // The trusted-senders card reads the full config on the Pending tab; default to an empty approval section so unrelated cases render it as the "nobody bypasses the gate" state.
+    setFullConfig({ approval: { trusted_senders: [] } });
     // Audit hook is only consumed when the History tab is active; default to
     // an empty page so any incidental render does not blow up.
     useApprovalAuditMock.mockReturnValue({
@@ -426,6 +446,69 @@ describe("ApprovalsPage", () => {
           "approvals.history.decisions.unknownAria:escalated_to_oncall",
         ),
       ).toBeInTheDocument();
+    });
+  });
+  // -------------------------------------------------------------------
+  // Trusted senders — approval-bypass audit surface (#6611)
+  // -------------------------------------------------------------------
+
+  describe("trusted senders", () => {
+    it("lists every configured sender on the pending tab", () => {
+      setApprovalsList([]);
+      setFullConfig({
+        approval: { trusted_senders: ["operator-1", "ops-oncall"] },
+      });
+      renderPage();
+
+      const list = screen.getByRole("list", {
+        name: "approvals.trustedSendersTitle",
+      });
+      expect(within(list).getByText("operator-1")).toBeInTheDocument();
+      expect(within(list).getByText("ops-oncall")).toBeInTheDocument();
+    });
+
+    it("reports an empty list as every sender going through the gate", () => {
+      setApprovalsList([]);
+      setFullConfig({ approval: { trusted_senders: [] } });
+      renderPage();
+
+      expect(screen.getByText("approvals.trustedSendersEmpty")).toBeInTheDocument();
+      expect(
+        screen.queryByRole("list", { name: "approvals.trustedSendersTitle" }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("shows an error state when the config query fails", () => {
+      setApprovalsList([]);
+      setFullConfig(undefined, { isError: true });
+      renderPage();
+
+      expect(
+        screen.getByText("approvals.trustedSendersLoadError"),
+      ).toBeInTheDocument();
+    });
+
+    it("renders a busy placeholder while the config is loading", () => {
+      setApprovalsList([]);
+      setFullConfig(undefined, { isLoading: true });
+      renderPage();
+
+      const busy = screen
+        .getAllByRole("status")
+        .filter((el) => el.getAttribute("aria-busy") === "true");
+      expect(busy.length).toBeGreaterThan(0);
+      expect(
+        screen.queryByText("approvals.trustedSendersEmpty"),
+      ).not.toBeInTheDocument();
+    });
+
+    it("ignores a malformed approval section instead of crashing the page", () => {
+      // `GET /api/config` is untyped on the wire, so a section of the wrong shape must degrade to "nothing configured" rather than throw and take the whole approvals queue down with it.
+      setApprovalsList([]);
+      setFullConfig({ approval: { trusted_senders: "operator-1" } });
+      renderPage();
+
+      expect(screen.getByText("approvals.trustedSendersEmpty")).toBeInTheDocument();
     });
   });
 });

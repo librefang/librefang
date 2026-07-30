@@ -695,3 +695,172 @@ async fn get_tool_builtin_carries_source_field() {
         "builtin detail endpoint must not carry mcp_server: {body:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/sessions/{id} — metric parity with GET /api/sessions (#6611)
+// ---------------------------------------------------------------------------
+
+/// The list endpoint derives `cost_usd` / `total_tokens` from a `usage_events`
+/// join and `duration_ms` from the message timestamps. The detail endpoint used
+/// to hand-build a fixed object carrying none of the three, so the same session
+/// answered differently depending on which route you asked.
+///
+/// The assertion compares the two responses against each other rather than
+/// against expected numbers: that is what catches a future change to either
+/// derivation, and it holds without the test knowing the pricing model.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_detail_reports_same_metrics_as_the_list_row() {
+    use librefang_memory::usage::UsageRecord;
+    use librefang_types::message::Message;
+
+    let h = boot().await;
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let substrate = h.state.kernel.memory_substrate();
+    let mut session = substrate.create_session(agent_id).expect("seed session");
+
+    // Two messages five seconds apart so `duration_ms` is a real span rather
+    // than the `None` an empty session produces — a 0 == 0 comparison would
+    // pass even against the unfixed handler.
+    let t0 = chrono::Utc::now();
+    let mut user = Message::user("hello");
+    user.timestamp = Some(t0);
+    let mut assistant = Message::assistant("hi");
+    assistant.timestamp = Some(t0 + chrono::Duration::seconds(5));
+    session.messages.push(user);
+    session.messages.push(assistant);
+    substrate.save_session(&session).expect("save session");
+
+    // Metered usage tagged to this session, plus one untagged event that must
+    // not leak into either view.
+    let mut metered =
+        UsageRecord::anonymous(agent_id, "groq", "test-model", 120, 80, 0.0125, 0, 90);
+    metered.session_id = Some(session.id);
+    substrate.usage().record(&metered).expect("record usage");
+    substrate
+        .usage()
+        .record(&UsageRecord::anonymous(
+            agent_id,
+            "groq",
+            "test-model",
+            999,
+            999,
+            9.99,
+            0,
+            10,
+        ))
+        .expect("record untagged usage");
+
+    let sid = session.id.0.to_string();
+    let (detail_status, detail) = get_json(&h, &format!("/api/sessions/{sid}")).await;
+    assert_eq!(detail_status, StatusCode::OK, "{detail:?}");
+
+    let (_, list) = get_json(&h, "/api/sessions?limit=500").await;
+    let row = list["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .find(|s| s["session_id"].as_str() == Some(sid.as_str()))
+        .expect("seeded session must appear in the list page");
+
+    for field in ["cost_usd", "total_tokens", "duration_ms", "label"] {
+        assert_eq!(
+            detail[field], row[field],
+            "`{field}` must match between /api/sessions/{{id}} and the /api/sessions row: \
+             detail={detail:?} row={row:?}"
+        );
+    }
+    // `label` is in that loop because it diverged the same way: the session
+    // has no explicit label, so the list derives a snippet from the first
+    // user message while the detail route returned the bare column as null.
+    assert_eq!(detail["label"].as_str(), Some("hello"), "{detail:?}");
+
+    // Pin the values themselves so a change that makes both views wrong in the
+    // same way still fails: only the session-tagged event counts.
+    assert_eq!(detail["total_tokens"].as_i64(), Some(200), "{detail:?}");
+    let cost = detail["cost_usd"].as_f64().expect("cost is numeric");
+    assert!(
+        (cost - 0.0125).abs() < 1e-9,
+        "untagged usage must not be counted: {detail:?}"
+    );
+    let duration = detail["duration_ms"].as_i64().expect("duration present");
+    assert!(
+        (4_900..=5_100).contains(&duration),
+        "duration must span the two stamped messages: {detail:?}"
+    );
+}
+
+/// A session with no metered events and fewer than two stamped messages still
+/// carries all three keys: numeric zeros for the aggregates (the list's
+/// `COALESCE` shape) and an explicit null duration. A client that reads the
+/// field must not have to special-case its absence on the detail route only.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_detail_metrics_are_present_on_an_unmetered_session() {
+    let h = boot().await;
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let session = h
+        .state
+        .kernel
+        .memory_substrate()
+        .create_session(agent_id)
+        .expect("seed session");
+
+    let (status, body) = get_json(&h, &format!("/api/sessions/{}", session.id.0)).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["cost_usd"].as_f64(), Some(0.0), "{body:?}");
+    assert_eq!(body["total_tokens"].as_i64(), Some(0), "{body:?}");
+    assert!(
+        body.get("duration_ms").is_some() && body["duration_ms"].is_null(),
+        "duration_ms must be present-and-null, not absent: {body:?}"
+    );
+}
+
+/// Both label branches on the detail route, in the order that matters.
+///
+/// An earlier version of this test only seeded an explicit label and asserted
+/// the response carried it — which the unfixed handler already did, because it
+/// emitted `session.label` verbatim. The fallback was never exercised, so the
+/// test passed against the code it was written to pin. The unlabeled case is
+/// therefore first and is the load-bearing assertion: no explicit label, so the
+/// response must carry the snippet derived from the first user message. The
+/// labeled case follows, because applying the fallback on top of a name the
+/// operator chose would be a bug in the other direction.
+///
+/// The snippet text is deliberately distinct from the one in
+/// `session_detail_reports_same_metrics_as_the_list_row` so the two tests
+/// cannot pass by pinning the same string for different reasons.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_detail_label_falls_back_to_the_snippet_then_prefers_an_explicit_value() {
+    use librefang_types::message::Message;
+
+    let h = boot().await;
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let substrate = h.state.kernel.memory_substrate();
+
+    // No explicit label — the derived snippet is the only thing that can fill
+    // the field, and the pre-fix handler returned null here.
+    let mut unlabeled = substrate.create_session(agent_id).expect("seed session");
+    unlabeled
+        .messages
+        .push(Message::user("rotate the staging credentials"));
+    substrate.save_session(&unlabeled).expect("save session");
+
+    let (status, body) = get_json(&h, &format!("/api/sessions/{}", unlabeled.id.0)).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        body["label"].as_str(),
+        Some("rotate the staging credentials"),
+        "an unlabeled session must report the derived snippet, not null: {body:?}"
+    );
+
+    // Explicit label — the fallback must not overwrite it.
+    let mut labeled = substrate.create_session(agent_id).expect("seed session");
+    labeled
+        .messages
+        .push(Message::user("rotate the staging credentials"));
+    labeled.label = Some("release triage".to_string());
+    substrate.save_session(&labeled).expect("save session");
+
+    let (status, body) = get_json(&h, &format!("/api/sessions/{}", labeled.id.0)).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["label"].as_str(), Some("release triage"), "{body:?}");
+}

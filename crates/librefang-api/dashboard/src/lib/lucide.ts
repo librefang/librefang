@@ -151,6 +151,7 @@ export { default as TrendingUp } from "lucide-react/dist/esm/icons/trending-up.m
 export { default as Upload } from "lucide-react/dist/esm/icons/upload.mjs";
 export { default as UploadCloud } from "lucide-react/dist/esm/icons/cloud-upload.mjs";
 export { default as User } from "lucide-react/dist/esm/icons/user.mjs";
+export { default as UserCheck } from "lucide-react/dist/esm/icons/user-check.mjs";
 export { default as UserCircle } from "lucide-react/dist/esm/icons/circle-user.mjs";
 export { default as Users } from "lucide-react/dist/esm/icons/users.mjs";
 export { default as Volume2 } from "lucide-react/dist/esm/icons/volume-2.mjs";

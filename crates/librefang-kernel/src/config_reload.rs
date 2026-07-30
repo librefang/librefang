@@ -294,6 +294,11 @@ pub fn build_reload_plan_with_caps(
             .push("api_key changed (effective immediately via config swap)".to_string());
     }
 
+    if old.api_key_hash != new.api_key_hash {
+        plan.noop_changes
+            .push("api_key_hash changed (effective immediately via config swap)".to_string());
+    }
+
     if old.dashboard_user != new.dashboard_user
         || old.dashboard_pass != new.dashboard_pass
         || old.dashboard_pass_hash != new.dashboard_pass_hash
@@ -937,6 +942,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         // -- hand-tuned branches at the top of build_reload_plan --
         "api_listen",
         "api_key",
+        "api_key_hash",
         "dashboard_user",
         "dashboard_pass",
         "dashboard_pass_hash",

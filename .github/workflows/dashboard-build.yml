@@ -53,7 +53,7 @@ jobs:
           version: 10
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
-          node-version: 20
+          node-version: 24
       - name: Install dependencies
         working-directory: crates/librefang-api/dashboard
         run: pnpm install --frozen-lockfile --config.strict-dep-builds=false
@@ -73,7 +73,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Install dependencies
         working-directory: crates/librefang-api/dashboard

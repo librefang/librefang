@@ -32,8 +32,16 @@ pub struct DashboardRawConfig {
 /// pre-reload and post-reload config when a reload races with the request.
 #[derive(Debug, Clone, Default)]
 pub struct ApiAuthSnapshot {
-    /// Raw `api_key` value from config (may be empty when auth is open).
+    /// Raw `api_key` value from config, before env-var / vault resolution
+    /// (may be empty when auth is open, or when the key is supplied only as
+    /// `api_key_hash` / `LIBREFANG_API_KEY`).
     pub api_key: String,
+    /// Hash of the master `api_key` (`$sha256$…` recommended, `$argon2id$…`
+    /// accepted). Unlike `api_key` this needs no resolution — a hash is a
+    /// verifier, not a secret to be fetched from elsewhere — but it travels in
+    /// the same snapshot so every auth decision observes one hot-reload
+    /// generation.
+    pub api_key_hash: String,
     /// Raw dashboard credential strings (before env-var / vault resolution).
     pub dashboard: DashboardRawConfig,
     /// Absolute path to the daemon home directory (owned so the snapshot

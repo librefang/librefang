@@ -58,6 +58,7 @@ import { useChannels } from "../lib/queries/channels";
 import { ApiError } from "../lib/http/errors";
 import { getStoredApiKey } from "../api";
 import { formatRelativeTime } from "../lib/datetime";
+import { copyToClipboard } from "../lib/clipboard";
 import type { AuditQueryFilters } from "../lib/http/client";
 import type { AuditQueryEntry } from "../api";
 import { useUIStore } from "../lib/store";
@@ -627,17 +628,15 @@ export function AuditPage() {
   // Copy helpers + transient "Copied" affordance. The keyed state lets
   // multiple buttons in the modal each show their own check briefly
   // without tripping over each other.
-  const copyToClipboard = async (text: string, fieldKey: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopiedField(fieldKey);
-      setTimeout(() => setCopiedField((cur) => (cur === fieldKey ? null : cur)), 1500);
-    } catch (err) {
-      addToast(
-        err instanceof Error ? err.message : t("audit.error_title"),
-        "error",
-      );
+  //
+  // `copyToClipboard` reports failure by resolving to `false` rather than throwing, so the outcome is branched on the return value: a `try`/`catch` around it would leave the failure path unreachable and show "Copied" for a write that never landed.
+  const copyField = async (text: string, fieldKey: string) => {
+    if (!(await copyToClipboard(text))) {
+      addToast(t("common.copy_failed", "Copy failed"), "error");
+      return;
     }
+    setCopiedField(fieldKey);
+    setTimeout(() => setCopiedField((cur) => (cur === fieldKey ? null : cur)), 1500);
   };
 
   const buildPermalink = (entry: AuditQueryEntry): string => {
@@ -1226,7 +1225,7 @@ export function AuditPage() {
                 <button
                   type="button"
                   onClick={() =>
-                    copyToClipboard(buildPermalink(detailEntry), "permalink")
+                    copyField(buildPermalink(detailEntry), "permalink")
                   }
                   className="inline-flex items-center gap-1 rounded-lg border border-border-subtle bg-surface px-2 py-1 text-[10px] font-bold text-text-dim hover:text-brand hover:border-brand/30 transition-colors"
                   title={t("audit.detail_copy_link")}
@@ -1239,7 +1238,7 @@ export function AuditPage() {
                 <button
                   type="button"
                   onClick={() =>
-                    copyToClipboard(
+                    copyField(
                       JSON.stringify(detailEntry, null, 2),
                       "json",
                     )
@@ -1291,7 +1290,7 @@ export function AuditPage() {
                   </code>
                   <button
                     type="button"
-                    onClick={() => copyToClipboard(detailEntry.hash, "hash")}
+                    onClick={() => copyField(detailEntry.hash, "hash")}
                     className="shrink-0 text-text-dim hover:text-brand transition-colors"
                     title={t("audit.detail_copy_hash")}
                   >

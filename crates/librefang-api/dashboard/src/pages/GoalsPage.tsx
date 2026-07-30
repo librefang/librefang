@@ -11,6 +11,7 @@ import {
 } from "../lib/mutations/goals";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
+import { ErrorState } from "../components/ui/ErrorState";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -318,6 +319,13 @@ export function GoalsPage() {
 
       {goalsQuery.isLoading ? (
         <ListSkeleton rows={4} />
+      ) : goalsQuery.isError ? (
+        // A failed load must not fall through to the empty state (#6654).
+        // `GET /api/goals` now answers a storage failure with a 500 instead of an empty page, but with no error branch here the query simply yielded no goals and the page drew "pick a template" over data it had failed to read — the same swallow, one layer up.
+        <ErrorState
+          message={t("goals.loadError")}
+          onRetry={() => void goalsQuery.refetch()}
+        />
       ) : goals.length === 0 ? (
         <div className="flex flex-col gap-6">
           <div className="text-center py-8">

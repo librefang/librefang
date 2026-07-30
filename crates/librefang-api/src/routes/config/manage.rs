@@ -398,6 +398,8 @@ fn redacted_config_json(
     // `cache_approvals_per_session` was the visible one: it defaults to `true`, so an operator who left it alone still saw the box unchecked and had no way to tell whether per-session caching was on (#6636 observation (e)).
     // None of the seven is writable, which is why `every_writable_config_leaf_is_readable` never saw them; `approval_policy_fields_are_all_readable` is the guard for this direction.
     // Nothing added here is secret-bearing: `trusted_senders`, `channel_rules`, and `routing` hold operator-chosen user ids, channel names, tool globs, and notification recipients — the same class as the `external_auth` fields exposed in #6605, and credentials never live in `ApprovalPolicy`.
+    // Of those seven, `trusted_senders` is the one with teeth: it is an approval-*bypass* list, so a sender on it skips the prompt for every tool `classify_risk` ranks below `High` (see `ApprovalManager::requires_approval_with_context_for`), which is why the Approvals page renders it as its own card rather than leaving it to the generic config form (#6611).
+    // Read-only on purpose — it stays out of `WRITABLE_EXACT_PATHS` so an Owner-role caller holding a leaked API key cannot add themselves to it over HTTP, which is also why the `writable ⊆ readable` guard never noticed while it was missing from this response.
     set!("approval", {
         "require_approval": config.approval.require_approval,
         "timeout_secs": config.approval.timeout_secs,
@@ -802,6 +804,7 @@ fn redacted_config_json(
         "cache_ttl_secs": config.registry.cache_ttl_secs,
         "registry_mirror": config.registry.registry_mirror,
         "registry_host": config.registry.registry_host,
+        "auto_sync": config.registry.auto_sync,
     });
 
     // ── privacy ──
@@ -962,6 +965,18 @@ pub async fn config_reload(
     );
     match state.kernel.reload_config().await {
         Ok(plan) => {
+            // `api_key` / `api_key_hash` are classified as read-live in
+            // `build_reload_plan`, which is true for the WS and terminal
+            // upgrade paths (they call `valid_api_tokens(&auth_snapshot())`
+            // per connection) but was never true for the HTTP middleware:
+            // `api_key_lock` was written only at boot and on a dashboard
+            // credential change, so a reloaded master key kept authenticating
+            // with the old value until the daemon restarted. Push the fresh
+            // snapshot into both live handles here (#6613).
+            let snap = state.kernel.auth_snapshot();
+            crate::server::refresh_master_credential(&snap, &state.api_key_lock, &state.master_key)
+                .await;
+
             // If channel config changed, the kernel already cleared the adapter
             // registry — but we also need to stop the old BridgeManager and
             // restart adapters from the new config.
@@ -1124,16 +1139,74 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
         serde_json::to_value(schemars::schema_for!(librefang_types::config::KernelConfig))
             .unwrap_or_else(|_| serde_json::json!({}));
 
-    // Attach the UI overlay: sections + option/range hints.
+    // Attach the UI overlay: sections + option/range hints + read-only paths.
+    let non_writable = non_writable_schema_paths(&root);
     if let Some(obj) = root.as_object_mut() {
         obj.insert("x-sections".into(), ui_sections_overlay());
         obj.insert(
             "x-ui-options".into(),
             ui_options_overlay(provider_options, model_options),
         );
+        obj.insert("x-non-writable".into(), serde_json::json!(non_writable));
     }
 
     Json(root)
+}
+
+/// Every schema path `POST /api/config/set` would reject, so the dashboard can render those fields read-only instead of offering an edit that 403s (#6636 observation (d)).
+///
+/// The server sends the resolved verdict rather than the allowlists themselves.
+/// `is_writable_config_path` is not a lookup — it layers an exact-path list, section prefixes, a depth-2-only rule for some of those prefixes, and a suffix scrub for secret-bearing and privilege-bearing key names.
+/// Re-implementing that in TypeScript would make the SPA a third place to keep in sync with the two Rust lists, and it would drift silently: the UI would grey out the wrong fields while the write path kept its own opinion.
+///
+/// The oracle is the schema, not a serialized config, for the same reason `every_writable_allowlist_entry_has_a_backing_config_field` chose it: `config/types.rs` carries dozens of `#[serde(skip_serializing_if = …)]` attributes, so a value walk cannot see a field whose predicate holds for its default.
+///
+/// Depth mirrors what the allowlist accepts — root leaves and one nested level.
+/// A path absent from this set is treated as writable by the dashboard, which is exactly today's behaviour, so an enumeration gap degrades to the status quo rather than to a field the operator cannot edit.
+fn non_writable_schema_paths(root: &serde_json::Value) -> Vec<String> {
+    /// Name of the definition a property `$ref`s, directly or through `allOf` / `anyOf`.
+    fn referenced_definition(prop: &serde_json::Value) -> Option<&str> {
+        if let Some(r) = prop.get("$ref").and_then(|v| v.as_str()) {
+            return r.rsplit('/').next();
+        }
+        for combinator in ["allOf", "anyOf", "oneOf"] {
+            if let Some(entries) = prop.get(combinator).and_then(|v| v.as_array()) {
+                for entry in entries {
+                    if let Some(r) = entry.get("$ref").and_then(|v| v.as_str()) {
+                        return r.rsplit('/').next();
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    let definitions = root.get("definitions").and_then(|v| v.as_object());
+    let Some(properties) = root.get("properties").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+
+    let mut paths = Vec::new();
+    for (section, prop) in properties {
+        if !super::is_writable_config_path(section) {
+            paths.push(section.clone());
+        }
+        let Some(nested) = referenced_definition(prop)
+            .and_then(|name| definitions?.get(name))
+            .and_then(|d| d.get("properties"))
+            .and_then(|v| v.as_object())
+        else {
+            continue;
+        };
+        for field in nested.keys() {
+            let path = format!("{section}.{field}");
+            if !super::is_writable_config_path(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths.sort();
+    paths
 }
 
 // ---------------------------------------------------------------------------

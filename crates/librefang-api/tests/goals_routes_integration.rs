@@ -70,6 +70,34 @@ async fn create_goal(h: &Harness, payload: serde_json::Value) -> serde_json::Val
     body
 }
 
+/// Make every `structured_get(goals_agent, __librefang_goals)` fail (#6654).
+///
+/// Overwrites the goals row's blob with bytes that are valid UTF-8 but not JSON, writing directly through the connection pool so the store's own `set` (which serializes a `serde_json::Value`) cannot normalize them.
+/// That is the shape a manual SQL edit, a partial write, or upstream serde drift leaves behind, and it makes `StructuredStore::get` return `Err(LibreFangError::Serialization)` at the `serde_json::from_slice` step — the arm every route in this file treated as "no goals".
+///
+/// The row must already exist: the seeding path is `create_goal`, so the caller is corrupting a store that demonstrably held real goals a moment ago.
+/// That is what makes the assertions meaningful — a 200 empty page here is data loss reported as success, not an honest empty daemon.
+fn corrupt_goals_blob(h: &Harness) {
+    let pool = h._state.kernel.memory_substrate().pool();
+    let conn = pool.get().expect("pool connection");
+    let updated = conn
+        .execute(
+            "UPDATE kv_store SET value = ?3 WHERE agent_id = ?1 AND key = ?2",
+            rusqlite::params![
+                librefang_types::goal::goals_storage_agent_id()
+                    .0
+                    .to_string(),
+                librefang_types::goal::GOALS_STORAGE_KEY,
+                b"this is not json".as_slice(),
+            ],
+        )
+        .expect("corrupting the goals blob must succeed");
+    assert_eq!(
+        updated, 1,
+        "the goals row must already exist — seed it with create_goal first"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/goals
 // ---------------------------------------------------------------------------
@@ -457,6 +485,109 @@ async fn goals_children_unknown_parent_returns_empty_list() {
     // Endpoint returns 200 with empty list rather than 404 — encode that.
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], 0);
+}
+
+// ---------------------------------------------------------------------------
+// Storage-failure surfacing (#6653, #6654)
+//
+// Every read in this module used to fold `Err(_)` from the substrate into the same empty value it returns for "nothing stored yet", so a corrupt or unreadable store was reported to the operator as an empty daemon.
+// These pin the distinction: absent key → 200 empty (already covered above), substrate failure → scrubbed 500.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_list_returns_500_on_storage_failure_6654() {
+    let h = boot().await;
+    create_goal(&h, serde_json::json!({"title": "will become unreadable"})).await;
+    corrupt_goals_blob(&h);
+
+    let (status, body) = json_request(&h, Method::GET, "/api/goals", None).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "an unreadable store must not render as an empty goal list: {body:?}"
+    );
+    // Same scrubbed envelope as every other 500 (#3639 nested + flat alias).
+    assert_eq!(
+        body["error"]["message"].as_str().unwrap_or_default(),
+        "Internal server error",
+        "{body:?}"
+    );
+    assert_eq!(
+        body["message"].as_str().unwrap_or_default(),
+        "Internal server error",
+        "{body:?}"
+    );
+    // The empty-page shape must be gone, not merely accompanied by an error.
+    assert!(
+        body.get("items").is_none() && body.get("total").is_none(),
+        "a failed read must not also serve a paginated body a client could consume: {body:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_children_returns_scrubbed_500_on_storage_failure_6653() {
+    let h = boot().await;
+    let parent = create_goal(&h, serde_json::json!({"title": "parent"})).await;
+    let pid = parent["id"].as_str().unwrap().to_string();
+    corrupt_goals_blob(&h);
+
+    let (status, body) =
+        json_request(&h, Method::GET, &format!("/api/goals/{pid}/children"), None).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a failed read must not be a 200: {body:?}"
+    );
+    assert_eq!(
+        body["error"]["message"].as_str().unwrap_or_default(),
+        "Internal server error",
+        "{body:?}"
+    );
+    // Leak guard: the pre-fix body carried a raw `format!("{e}")` under an `error` key on a 200.
+    // Nothing from the underlying error chain may reach the client anywhere in the response.
+    let whole = body.to_string().to_lowercase();
+    for needle in [
+        "serialization",
+        "expected value",
+        "sqlite",
+        "kv_store",
+        "this is not json",
+    ] {
+        assert!(
+            !whole.contains(needle),
+            "response leaks internal detail {needle:?}: {body:?}"
+        );
+    }
+    assert!(
+        body.get("children").is_none(),
+        "a failed read must not also serve an empty children list: {body:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_start_returns_500_not_404_on_storage_failure() {
+    // Sibling of #6653/#6654 found in the same file: `start_goal_run`'s catch-all `_ => Vec::new()` turned an unreadable store into "Goal not found", telling the operator to re-create a goal that exists.
+    let h = boot().await;
+    let goal = create_goal(
+        &h,
+        serde_json::json!({"title": "startable", "agent_id": "11111111-1111-1111-1111-111111111111"}),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+    corrupt_goals_blob(&h);
+
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/start"), None).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "an unreadable store must not be reported as a missing goal: {body:?}"
+    );
+    assert_eq!(
+        body["error"]["message"].as_str().unwrap_or_default(),
+        "Internal server error",
+        "{body:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

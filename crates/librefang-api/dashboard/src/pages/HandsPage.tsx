@@ -497,6 +497,11 @@ function HandAgentConfigTab({
   );
 }
 
+/// Order-sensitive equality for a tool list — the editor treats reordering as an edit.
+function sameTools(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((t, i) => t === b[i]);
+}
+
 function HandAgentEditor({
   agent,
   agentId,
@@ -528,8 +533,24 @@ function HandAgentEditor({
   const [tools, setTools] = useState<string[]>(currentTools);
   const [newTool, setNewTool] = useState("");
 
-  useEffect(() => { setPrompt(currentPrompt); }, [currentPrompt]);
-  useEffect(() => { setTools(currentTools); }, [currentTools]);
+  // Adopt a new saved value only while the draft is untouched.
+  //
+  // `currentPrompt` starts as the HAND.toml baseline and switches to the live value the moment `useAgentDetail` resolves — which for a hand agent always differs, since the live prompt carries the rendered `## User Configuration` / `## Reference Knowledge` / `## Your Team` tails.
+  // A bare `useEffect(() => setPrompt(currentPrompt), [currentPrompt])` therefore wipes whatever the operator typed in the window between opening the tab and the query landing.
+  // Comparing against the last value we applied distinguishes "the server moved" from "the user typed", and only the former wins.
+  //
+  // Switching agent or hand is not handled here: `HandAgentEditor` is keyed by role and `HandDetailPanel` by hand id, so both remount and reset every draft outright.
+  const appliedPrompt = useRef(currentPrompt);
+  useEffect(() => {
+    setPrompt((draft) => (draft === appliedPrompt.current ? currentPrompt : draft));
+    appliedPrompt.current = currentPrompt;
+  }, [currentPrompt]);
+
+  const appliedTools = useRef(currentTools);
+  useEffect(() => {
+    setTools((draft) => (sameTools(draft, appliedTools.current) ? currentTools : draft));
+    appliedTools.current = currentTools;
+  }, [currentTools]);
 
   const patchAgent = usePatchAgent();
   const updateTools = useUpdateAgentTools();
@@ -538,7 +559,7 @@ function HandAgentEditor({
   const promptDirty = prompt !== currentPrompt;
   // Dirty = draft differs from the live/current value (what's saved).
   const toolsDirty = useMemo(
-    () => tools.length !== currentTools.length || tools.some((tt, i) => tt !== currentTools[i]),
+    () => !sameTools(tools, currentTools),
     [tools, currentTools],
   );
   // Whether the draft already matches the manifest default (disables reset).

@@ -32,6 +32,7 @@ import { Badge } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
 import { PromptsExperimentsModal } from "../components/PromptsExperimentsModal";
 import { useUIStore } from "../lib/store";
+import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
 import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library } from "lucide-react";
@@ -2209,8 +2210,12 @@ export function AgentsPage() {
               const text = events
                 .map((e) => `${fmtTime(e.timestamp)} INFO ${e.provider || "—"} ${formatLine(e)}`)
                 .join("\n");
-              void navigator.clipboard?.writeText(text);
-              addToast(t("common.copied", { defaultValue: "Copied" }), "success");
+              // The toast has to follow the result: `copyToClipboard` resolves to `false` on a non-secure origin rather than throwing, and a "Copied" toast for a write that never happened is the same silent failure as no toast at all.
+              void copyToClipboard(text).then((ok) =>
+                ok
+                  ? addToast(t("common.copied", { defaultValue: "Copied" }), "success")
+                  : addToast(t("common.copy_failed", { defaultValue: "Copy failed" }), "error"),
+              );
             }}
           >
             {t("common.copy", { defaultValue: "Copy" })}
@@ -3149,8 +3154,13 @@ export function AgentsPage() {
                       onClick={() => {
                         const text =
                           previewTab === "toml" ? serializedFormToml : serializedFormMarkdown;
-                        void navigator.clipboard.writeText(text).then(() =>
-                          addToast(t("agents.form.copied"), "success"),
+                        void copyToClipboard(text).then((ok) =>
+                          ok
+                            ? addToast(t("agents.form.copied"), "success")
+                            : addToast(
+                                t("common.copy_failed", { defaultValue: "Copy failed" }),
+                                "error",
+                              ),
                         );
                       }}
                       className="text-[10px] font-bold text-text-dim hover:text-brand"

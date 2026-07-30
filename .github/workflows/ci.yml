@@ -408,6 +408,25 @@ jobs:
         # and resolve the out-of-workspace `../librefang-sidecar` path dep.
         run: cross build --release --target aarch64-unknown-linux-musl --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
 
+  # ── git-side hook corpus tests ─────────────────────────────────────────────────
+  # `scripts/hooks/*` run inside git, so nothing in the Rust or dashboard test suites covers them, and their corpus tests under `scripts/tests/` existed without ever being wired into CI — the same gap #3400 closed for the changelog validator's own unit tests, one directory over.
+  # A regression in the attribution predicates could therefore only be caught by running these by hand, which is exactly what nobody does before pushing a hook edit.
+  githook-tests:
+    name: Git Hook Corpus Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # Message text and author identity, rejected and accepted corpora.
+      - name: commit-msg attribution corpus
+        run: bash scripts/tests/commit-msg-attribution.sh
+      # Staged-path handling: filenames with spaces must still be checked.
+      - name: pre-commit space-in-filename handling
+        run: bash scripts/tests/pre-commit-spaces.sh
+      # The openapi baseline refresh must work on a box with sha256sum but no shasum.
+      # Self-skips when sha256sum is absent, so it is safe anywhere.
+      - name: pre-commit sha256sum fallback
+        run: bash scripts/tests/pre-commit-sha-fallback.sh
+
   # ── CHANGELOG attribution check ────────────────────────────────────────────────
   # Enforces the `(@username)` suffix on bullets *added* to the [Unreleased]
   # section in this PR, and on `changelog.d/` fragments this PR introduces —
@@ -594,7 +613,7 @@ jobs:
           version: 10
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
           cache-dependency-path: |
             web/pnpm-lock.yaml
@@ -1070,6 +1089,7 @@ jobs:
       - quality
       - skills-wasm-sdk
       - rust-telegram-sidecar
+      - githook-tests
       - changelog-attribution
       - changelog-attribution-full
       - openapi-drift

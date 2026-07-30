@@ -45,6 +45,7 @@ import {
 } from "../lib/mutations/users";
 import { parseUsersCsv } from "../lib/csvParser";
 import { useUIStore } from "../lib/store";
+import { copyToClipboard } from "../lib/clipboard";
 
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
@@ -546,21 +547,22 @@ function RotatedKeyModal({
     return () => document.removeEventListener("keydown", handler, true);
   }, [rotatedKey, hasCopied]);
 
+  // `hasCopied` unlocks the close button on a key that is shown exactly once, so it must only flip on a confirmed write.
+  // `copyToClipboard` signals failure by resolving to `false` rather than throwing — a `catch` here would never fire, and the operator would be free to close the modal on a key that never reached their clipboard.
   const handleCopy = useCallback(async () => {
     if (!rotatedKey) return;
-    try {
-      await navigator.clipboard.writeText(rotatedKey.plaintext);
+    if (await copyToClipboard(rotatedKey.plaintext)) {
       setHasCopied(true);
       addToast(t("common.copied", "Copied"), "success");
-    } catch {
-      addToast(
-        t(
-          "users.rotate_key_copy_failed",
-          "Copy failed — select the key and copy it manually before closing.",
-        ),
-        "error",
-      );
+      return;
     }
+    addToast(
+      t(
+        "users.rotate_key_copy_failed",
+        "Copy failed — select the key and copy it manually before closing.",
+      ),
+      "error",
+    );
   }, [rotatedKey, addToast, t]);
 
   return (

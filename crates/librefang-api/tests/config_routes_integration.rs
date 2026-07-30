@@ -406,6 +406,53 @@ async fn get_config_exposes_non_writable_approval_fields() {
     }
 }
 
+/// `[registry] auto_sync` must round-trip through both halves of the config surface.
+///
+/// It is the operator's only durable way to stop the daemon fast-forwarding `~/.librefang/registry/` with `git reset --hard origin/main`, which destroys local modifications under that checkout — including the ones `PUT /api/hands/{id}/manifest` writes for a hand that shipped with the registry (#6636 observation (a)).
+/// A knob that reads back as its default would leave an operator unable to confirm the freeze took, which is the same class of gap #6605 and #6618 closed elsewhere in this file.
+#[tokio::test(flavor = "multi_thread")]
+async fn registry_auto_sync_round_trips_through_get_and_set() {
+    let h = boot_router_with_config(API_KEY, |config| {
+        // Non-default, so a hardcoded literal in the response builder cannot pass.
+        config.registry.auto_sync = false;
+    })
+    .await;
+
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        dig(&json, "registry.auto_sync").and_then(|v| v.as_bool()),
+        Some(false),
+        "GET /api/config must report the configured value; body: {json}"
+    );
+
+    // Writable too — `registry.` is a writable section prefix, and an operator who
+    // froze the registry from the dashboard has to be able to unfreeze it there.
+    let (status, _) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "registry.auto_sync", "value": true}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "registry.auto_sync must be writable"
+    );
+
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        dig(&json, "registry.auto_sync").and_then(|v| v.as_bool()),
+        Some(true),
+        "the write must be readable back; body: {json}"
+    );
+}
+
 /// #6596: enum-valued config fields were rendered with `format!("{:?}", …)`, which emits the Rust variant name (`"Allowlist"`, `"DuckDuckGo"`).
 /// The write path, `config.toml`, and the schema's `select` options all use serde's rename form, so the dashboard dropdown matched none of its own options.
 /// Asserting the absence of upper-case characters catches any new field that reintroduces `Debug` formatting, not just the seven that were fixed.
@@ -1720,5 +1767,87 @@ async fn ready_ignores_an_embedding_provider_introduced_by_a_later_config_reload
             .and_then(|r| r.as_bool()),
         Some(false),
         "the requirement is a boot-time property: {json}"
+    );
+}
+
+/// `GET /api/config/schema` must tell the dashboard which paths the write endpoint refuses.
+///
+/// Without it the SPA rendered an editable control for a deliberately non-writable field, the operator changed it, and the save came back 403 with no explanation — reported as "the per-field save appears to succeed, config.toml is unchanged" (#6636 observation (d)).
+///
+/// The server sends the resolved verdict rather than the allowlists, because writability is decided by an exact-path list, section prefixes, a depth-2-only rule and a secret-suffix scrub; re-deriving that in TypeScript would make the SPA a third place to keep in sync.
+/// This test is the guard that the emitted set agrees with the write path itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_schema_reports_the_paths_the_write_endpoint_refuses() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(h.app.clone(), auth_get("/api/config/schema")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+
+    let non_writable: std::collections::HashSet<&str> = json
+        .get("x-non-writable")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    // Sanity floor: an empty or near-empty set would make every assertion below vacuous and would silently restore the old always-editable rendering.
+    assert!(
+        non_writable.len() > 20,
+        "x-non-writable enumerated only {} paths — the schema walk is broken",
+        non_writable.len()
+    );
+
+    // Deliberately non-writable, and the two the issue named.
+    for path in [
+        "approval.require_approval",
+        "approval.second_factor",
+        "external_auth.require_email_verified",
+    ] {
+        assert!(
+            non_writable.contains(path),
+            "`{path}` is refused by POST /api/config/set, so the dashboard must be told to \
+             render it read-only; got {} entries",
+            non_writable.len()
+        );
+    }
+
+    // Writable paths must NOT be listed, or the dashboard would grey out fields the operator can legitimately change.
+    for path in [
+        "approval.auto_approve",
+        "approval.totp_grace_period_secs",
+        "registry.cache_ttl_secs",
+        "log_level",
+    ] {
+        assert!(
+            !non_writable.contains(path),
+            "`{path}` is writable and must stay editable in the dashboard"
+        );
+    }
+
+    // Cross-check the verdict against the write endpoint for one of each, so the emitted set cannot drift from the rule it is supposed to mirror.
+    let (status, _) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "approval.require_approval", "value": []}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the path reported as non-writable must actually be refused"
+    );
+    let (status, _) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "approval.auto_approve", "value": false}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the path reported as writable must actually be accepted"
     );
 }

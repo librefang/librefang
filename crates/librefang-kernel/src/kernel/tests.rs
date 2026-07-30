@@ -3972,6 +3972,54 @@ fn atomic_write_no_partial_state_under_concurrency() {
     );
 }
 
+/// A hash-only config leaves the MCP bridge with no bearer to send.
+///
+/// Not a bug to fix inside `build_mcp_bridge_cfg` — a verifier cannot yield the secret it verifies, and this leg *transmits* the credential — but it is the posture `api_key_hash`'s own documentation and `librefang hash-api-key` both recommend, and on that posture every CLI-driver tool call 401s against the daemon's own middleware.
+/// Pinning the shape keeps the accompanying `WARN` and the documented `vault:` / env workarounds honest about what actually happens.
+#[test]
+fn mcp_bridge_omits_the_bearer_when_only_a_hash_is_configured() {
+    if std::env::var(API_KEY_ENV).is_ok_and(|v| !v.trim().is_empty()) {
+        // The environment already supplies a transmittable key — one of the two documented fixes — so there is no keyless path left to assert.
+        return;
+    }
+    let cfg = KernelConfig {
+        api_key: String::new(),
+        api_key_hash: "$sha256$0000000000000000000000000000000000000000000000000000000000000000"
+            .to_string(),
+        ..KernelConfig::default()
+    };
+
+    let bridge = build_mcp_bridge_cfg(&cfg);
+
+    assert_eq!(
+        bridge.api_key, None,
+        "a hash is a verifier, so the bridge has nothing to transmit"
+    );
+}
+
+/// Keeping a transmittable `api_key` beside the hash is the documented fix, so it must actually reach the bridge — the hash must not shadow it.
+#[test]
+fn mcp_bridge_sends_the_plaintext_key_when_a_hash_is_also_set() {
+    if std::env::var(API_KEY_ENV).is_ok_and(|v| !v.trim().is_empty()) {
+        // Env wins by design; asserting the config value would fail for the right reason and prove nothing.
+        return;
+    }
+    let cfg = KernelConfig {
+        api_key: "plaintext-master-key".to_string(),
+        api_key_hash: "$sha256$0000000000000000000000000000000000000000000000000000000000000000"
+            .to_string(),
+        ..KernelConfig::default()
+    };
+
+    let bridge = build_mcp_bridge_cfg(&cfg);
+
+    assert_eq!(
+        bridge.api_key.as_deref(),
+        Some("plaintext-master-key"),
+        "a configured hash must not suppress the transmittable key beside it"
+    );
+}
+
 /// Regression: hand `[[settings]]` must survive a daemon restart (issue
 /// #3143, originally guarded by the boot TOML drift loop).
 ///

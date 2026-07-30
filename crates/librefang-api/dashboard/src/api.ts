@@ -692,6 +692,24 @@ export interface ScheduleItem {
    * (possibly empty) on round-trip.
    */
   delivery_targets?: CronDeliveryTarget[];
+  /**
+   * Primary output destination, in addition to any `delivery_targets`.
+   * Settable on create and patchable on update.
+   */
+  delivery?: CronDeliverySpec;
+  /**
+   * Peer/user id the fire runs under; `null` when unset. Settable on create
+   * only — `PUT /api/schedules/{id}` rejects a *change* with a 400 (the
+   * scheduler cannot patch it), though echoing the stored value back is a
+   * no-op so a read-modify-write round trip still works.
+   */
+  peer_id?: string | null;
+  /**
+   * Whether every fire shares one persistent session or gets an isolated
+   * one. `null` when unset — the job then follows the agent's own default.
+   * Same create-only write contract as `peer_id`.
+   */
+  session_mode?: "persistent" | "new" | null;
 }
 
 export interface TriggerItem {
@@ -840,6 +858,14 @@ export interface SessionDetailResponse {
   label?: string | null;
   messages?: AgentSessionMessage[];
   created_at?: string;
+  model_override?: string | null;
+  active?: boolean;
+  /** Aggregated from `usage_events`; `0` for a session with no metered calls. */
+  total_tokens?: number;
+  /** Aggregated from `usage_events`; `0` for a session with no metered calls. */
+  cost_usd?: number;
+  /** First-to-last stamped message span; `null` below two stamped messages. */
+  duration_ms?: number | null;
 }
 
 export interface MemoryItem {
@@ -3015,6 +3041,13 @@ export interface ConfigSectionDescriptor {
 export interface ConfigSchemaRoot extends JsonSchema {
   "x-sections"?: ConfigSectionDescriptor[];
   "x-ui-options"?: Record<string, UiFieldOptions>;
+  /**
+   * Dotted paths `POST /api/config/set` rejects with 403.
+   *
+   * The server sends the resolved verdict, not the allowlists: writability is decided by an exact-path list, section prefixes, a depth-2-only rule and a secret-suffix scrub, and re-deriving that here would make the SPA a third place to keep in sync.
+   * A path absent from this array is treated as writable, so an enumeration gap degrades to the previous behaviour.
+   */
+  "x-non-writable"?: string[];
 }
 
 export async function getConfigSchema(): Promise<ConfigSchemaRoot> {

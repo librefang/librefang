@@ -411,7 +411,20 @@ pub(crate) fn render_verbose_section(
 
     // --- Auth mode ----------------------------------------------------------
     let mut auth_bits: Vec<String> = Vec::new();
-    if !cfg.api_key.trim().is_empty() {
+    // Either form of the master credential counts (#6613) — reporting only on
+    // `api_key` tells an operator who migrated to `api_key_hash` that their
+    // bearer-gated daemon has no auth at all. A `vault:NAME` value needs no
+    // special case: it is a non-empty `api_key`, so it already reads as
+    // configured, and resolving it here would mean unlocking the vault to
+    // answer a yes/no question.
+    //
+    // A key supplied only through `LIBREFANG_API_KEY` is still reported as no
+    // auth, and deliberately so: `cfg` here is parsed from `config.toml` on
+    // disk, and this process is the operator's shell, not the daemon. Reading
+    // our own environment would answer "does *my* shell have the variable",
+    // which is a different question and would print a confident wrong answer
+    // whenever the daemon runs under a different unit, container, or user.
+    if !cfg.api_key.trim().is_empty() || !cfg.api_key_hash.trim().is_empty() {
         auth_bits.push(i18n::t("auth-api-key"));
     }
     // Dashboard auth / user keys live under [auth] in config. Detect by
