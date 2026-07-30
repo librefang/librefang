@@ -294,7 +294,7 @@
     "tags": "标签",
     "mode": "模式",
     "create_agent": "创建智能体",
-    "from_form": "可视化",
+    "from_form": "从表单",
     "from_template": "从模板",
     "from_toml": "从 TOML",
     "template_name": "模板名称",
