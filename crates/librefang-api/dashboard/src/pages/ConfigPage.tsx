@@ -24,6 +24,8 @@ import {
   useSetConfigValue,
   useReloadConfig,
 } from "../lib/mutations/config";
+import { copyToClipboard } from "../lib/clipboard";
+import { useUIStore } from "../lib/store";
 import { TomlViewer } from "../components/TomlViewer";
 import { StringMapEditor } from "../components/config/StringMapEditor";
 import { StructListEditor } from "../components/config/StructListEditor";
@@ -343,16 +345,29 @@ function FieldTypeBadge({ type }: { type: string }) {
 /* ------------------------------------------------------------------ */
 
 function CopyPathButton({ path }: { path: string }) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // `copyToClipboard` resolves to `false` instead of rejecting, so the flag
+  // must be gated on the result: a dashboard served over plain HTTP on a LAN
+  // address has no `navigator.clipboard` at all, and showing the check mark
+  // regardless would report a copy that never happened. The failure needs a
+  // toast rather than a silent return, or a total failure reproduces the
+  // reported symptom exactly — no clipboard write, no error, no feedback —
+  // and matches what the other five converted call sites do.
   const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(path).then(() => {
+    void copyToClipboard(path).then(ok => {
+      if (!ok) {
+        addToast(t("common.copy_failed", "Copy failed"), "error");
+        return;
+      }
       setCopied(true);
       if (timerRef.current) clearTimeout(timerRef.current);
       timerRef.current = setTimeout(() => setCopied(false), 1500);
     });
-  }, [path]);
+  }, [path, addToast, t]);
 
   useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
 

@@ -1,0 +1,4 @@
+Surface `approval.trusted_senders` on `GET /api/config` and render it as a read-only card on the Approvals page.
+A sender on that list skips the approval prompt for every tool the risk classifier does not rank high, so it is the approval-bypass roster — and it appeared on no surface at all, leaving an operator no way to audit who holds the waiver short of shell access to read `config.toml`.
+It stays out of the config write allowlist for the reason it needed exposing in the first place: adding yourself to an approval-bypass list over HTTP is precisely the escalation the approval gate exists to prevent, so holding an API key must not be enough to do it.
+The card sits above the pending queue because it explains the requests that never arrive, and an empty list is presented as the reassuring state it is — every sender goes through the gate (#6611) (@houko)
