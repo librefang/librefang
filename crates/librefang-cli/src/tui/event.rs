@@ -13,6 +13,7 @@ use std::sync::{mpsc, Arc, OnceLock};
 use std::time::Duration;
 
 use super::screens::{
+    agents::PromptEntry,
     audit::AuditEntry,
     dashboard::AuditRow,
     extensions::{ExtensionHealthInfo, ExtensionInfo},
@@ -234,6 +235,11 @@ pub enum AppEvent {
     ChatModelsForPicker(Vec<super::screens::chat::ModelEntry>),
     /// Agent list loaded for the /agents chat command.
     ChatAgentListLoaded(Vec<String>),
+
+    /// Prompts library loaded for the prompt picker.
+    PromptsLoaded(Vec<PromptEntry>),
+    /// Router profiles loaded for model routing config.
+    RouterProfilesLoaded(Vec<String>),
 }
 
 /// Spawn the crossterm polling + tick thread. Returns sender + receiver.
@@ -1339,6 +1345,77 @@ pub fn spawn_update_agent_mcp_servers(
                     }
                 }
             }
+        }
+    });
+}
+
+/// Fetch the fleet-wide prompts library (`GET /api/prompts/overview`).
+pub fn spawn_fetch_prompts(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client
+                .get(format!("{base_url}/api/prompts/overview"))
+                .send()
+            {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let items = body.get("items").and_then(|v| v.as_array());
+                    let prompts: Vec<PromptEntry> = items
+                        .map(|arr| {
+                            arr.iter()
+                                .map(|item| PromptEntry {
+                                    agent_name: item["agent_name"]
+                                        .as_str()
+                                        .unwrap_or("?")
+                                        .to_string(),
+                                    content: item["live_system_prompt"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = tx.send(AppEvent::PromptsLoaded(prompts));
+                    return;
+                }
+            }
+            let _ = tx.send(AppEvent::PromptsLoaded(Vec::new()));
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::PromptsLoaded(Vec::new()));
+        }
+    });
+}
+
+/// Fetch available router profile names.
+pub fn spawn_fetch_router_profiles(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client
+                .get(format!("{base_url}/api/model-router/profiles"))
+                .send()
+            {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let profiles: Vec<String> = body
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = tx.send(AppEvent::RouterProfilesLoaded(profiles));
+                    return;
+                }
+            }
+            // If endpoint doesn't exist, return empty list
+            let _ = tx.send(AppEvent::RouterProfilesLoaded(Vec::new()));
+        }
+        BackendRef::InProcess(_kernel) => {
+            // Router profiles not exposed via kernel API in-process yet
+            let _ = tx.send(AppEvent::RouterProfilesLoaded(Vec::new()));
         }
     });
 }
