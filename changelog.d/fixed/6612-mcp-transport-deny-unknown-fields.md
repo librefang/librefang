@@ -15,4 +15,4 @@ The runtime checks `value` before `value_env`, so it then sent an empty header a
 `value` and `value_env` now carry `skip_serializing_if`, the same fix already documented as load-bearing on the entry's own `template_id` and `oauth` fields for the identical reason.
 A header that carries *both* a static `value` and a `value_env` lost the static one on every read-modify-write, which the merge above initially reproduced rather than fixed: the read route redacts `value` and emits `value_env`, and the merge treated that returned `value_env` as "nothing to restore here".
 Since the runtime resolves `value` first, the header silently stopped sending the operator's static credential and started resolving the variable instead — a `200` with nothing logged and a different request on the wire.
-The merge now keys the decision on `value` alone, so the presence of a `value_env` beside it no longer suppresses the restore (#6612) (@nevgenov)
+The merge now keys the decision on `value` alone, so the presence of a `value_env` beside it no longer suppresses the restore (#6666) (@houko)
