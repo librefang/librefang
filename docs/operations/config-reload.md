@@ -194,7 +194,7 @@ classified differently — the row note spells out which is which.
 | `a2a` | H | Agent-to-Agent protocol config. |
 | `skills` | H | Skills config (bundled + user-installed) — reloads registry. |
 | `plugins` | R | Plugin registry config. |
-| `registry` | R | Registry sync config (cache TTL, mirror, host, `auto_sync`). `auto_sync` is the exception the R classification understates: the 24 h catalog task re-reads the config each tick, so flipping it off stops the next automatic refresh without a restart — but boot's own sync pass has already run by then, so a restart is still what makes the whole section's behaviour match the file. |
+| `registry` | R/N | Registry sync config. `cache_ttl_secs` / `registry_mirror` / `registry_host` are **R**: they are read when the checkout is set up. `auto_sync` is **N**: the 24 h catalog task calls `config_snapshot()` at the top of each tick and passes the value into `sync_catalog_to`, so flipping it off freezes `~/.librefang/registry/` from the next tick on, with no restart. Splitting the section this way is what makes that true — while the whole section was classified R, a registry-only reload produced neither a hot action nor a noop change, so `should_store_config` discarded the new config and the task kept reading the old value until the daemon restarted. Boot's own sync pass has of course already run by reload time, so `auto_sync = false` written *before* a start is still what prevents the boot-time fast-forward. |
 | `hands` | N | Hands marketplace SSRF allowlist (`registry_allowed_hosts`) — read live by the install handler per request. |
 | `bindings` | R | Agent bindings for multi-account routing. |
 
