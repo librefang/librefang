@@ -1469,6 +1469,238 @@ admin_role = "admin"
     }
 
     // ---------------------------------------------------------------
+    // #6612 — the parent `McpServerConfigEntry` carried `deny_unknown_fields` but `McpTransportEntry` one level down did not, so an unsupported key inside `[mcp_servers.transport]` was accepted and dropped while the identical typo on the parent failed the load.
+    // These tests pin the guard on the enum and on the two HttpCompat structs below it, and pin the happy path for all four transport variants so the guard cannot regress a working config.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn mcp_transport_rejects_unknown_key_in_transport_table_6612() {
+        // The reporter's exact shape: a valid stdio transport plus a nested `env` table.
+        // The env-passing mechanism that does exist is the parent's `env: Vec<String>` name list, so this table was silently discarded and the subprocess ran on its script's hardcoded fallback defaults.
+        let toml_src = r#"
+            [[mcp_servers]]
+            name = "local-thing"
+            timeout_secs = 30
+
+            [mcp_servers.transport]
+            command = "/usr/bin/python3"
+            args = ["/opt/mcp/server.py"]
+            type = "stdio"
+
+            [mcp_servers.transport.env]
+            MY_API_KEY = "secret"
+            MY_API_URL = "https://example.invalid"
+        "#;
+        let err = toml::from_str::<KernelConfig>(toml_src).expect_err(
+            "an unsupported table under [mcp_servers.transport] must be rejected, not dropped",
+        );
+        let msg = err.to_string();
+        // Match the serde diagnostic, not the bare key name.
+        // `toml`'s Display echoes the offending span of the input, so a `contains("env")` assertion would also be satisfied by the source text and would keep passing if the guard were removed.
+        assert!(
+            msg.contains("unknown field `env`"),
+            "error must name the offending key so the operator can find it, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn mcp_transport_rejects_unknown_scalar_on_url_variants_6612() {
+        // `deny_unknown_fields` on an internally-tagged enum is applied per variant, so the non-stdio variants need their own coverage — a guard that only bound the first variant would still pass the test above.
+        for (variant, url_key) in [("sse", "url"), ("http", "url")] {
+            let toml_src = format!(
+                r#"
+                [[mcp_servers]]
+                name = "remote"
+                transport = {{ type = "{variant}", {url_key} = "https://example.invalid/mcp", timout_secs = 30 }}
+                "#
+            );
+            let err = toml::from_str::<KernelConfig>(&toml_src).unwrap_err();
+            assert!(
+                err.to_string().contains("unknown field `timout_secs`"),
+                "{variant} transport must reject an unknown key, got: {err}",
+            );
+        }
+    }
+
+    #[test]
+    fn http_compat_transport_rejects_keys_outside_its_own_field_set_6612() {
+        // The `HttpCompat` variant's own field set is `{base_url, headers, tools}`, and the two tests below it only reach the nested structs — a guard that bound every variant except this one would still pass all of them.
+        // `command` is the interesting case rather than a nonsense word: it is a real field of the *stdio* variant, so before the guard an operator who changed `type` from `stdio` to `http_compat` and left the old key behind got it silently dropped, with no hint that the line was now inert.
+        let stale_stdio_key = r#"
+            [[mcp_servers]]
+            name = "compat"
+
+            [mcp_servers.transport]
+            type = "http_compat"
+            base_url = "https://example.invalid"
+            command = "/usr/bin/mcp"
+        "#;
+        let err = toml::from_str::<KernelConfig>(stale_stdio_key)
+            .expect_err("a field belonging to a different variant must be rejected, not dropped");
+        assert!(
+            err.to_string().contains("unknown field `command`"),
+            "error must name the stale key, got: {err}",
+        );
+
+        // A misspelled `base_url` is the failure that hurts most: `base_url` is the one required field, so the entry cannot fall back to a default and the error has to name the key rather than reporting a missing field the operator believes they wrote.
+        let misspelled_required = r#"
+            [[mcp_servers]]
+            name = "compat"
+
+            [mcp_servers.transport]
+            type = "http_compat"
+            base_urls = "https://example.invalid"
+        "#;
+        let err = toml::from_str::<KernelConfig>(misspelled_required)
+            .expect_err("a misspelled base_url must be rejected");
+        assert!(
+            err.to_string().contains("unknown field `base_urls`"),
+            "error must name the misspelled key rather than only reporting `base_url` missing, got: {err}",
+        );
+    }
+
+    #[test]
+    fn mcp_transport_rejects_unknown_key_in_http_compat_headers_and_tools_6612() {
+        // `[[mcp_servers.transport.headers]]` and `[[mcp_servers.transport.tools]]` are arrays of tables nested inside an array of tables.
+        // Every field on both structs except `name` / `path` has a `#[serde(default)]`, so an unguarded typo leaves the entry wired to a default rather than the operator's intent.
+        let header_typo = r#"
+            [[mcp_servers]]
+            name = "compat"
+
+            [mcp_servers.transport]
+            type = "http_compat"
+            base_url = "https://example.invalid"
+
+            [[mcp_servers.transport.headers]]
+            name = "Authorization"
+            value_from_env = "TOKEN"
+        "#;
+        let err = toml::from_str::<KernelConfig>(header_typo)
+            .expect_err("a misspelled header field must be rejected");
+        assert!(
+            err.to_string().contains("unknown field `value_from_env`"),
+            "error must name the offending header key, got: {err}",
+        );
+
+        let tool_typo = r#"
+            [[mcp_servers]]
+            name = "compat"
+
+            [mcp_servers.transport]
+            type = "http_compat"
+            base_url = "https://example.invalid"
+
+            [[mcp_servers.transport.tools]]
+            name = "forecast"
+            path = "/forecast"
+            responce_mode = "text"
+        "#;
+        let err = toml::from_str::<KernelConfig>(tool_typo)
+            .expect_err("a misspelled tool field must be rejected");
+        assert!(
+            err.to_string().contains("unknown field `responce_mode`"),
+            "error must name the offending tool key, got: {err}",
+        );
+    }
+
+    #[test]
+    fn every_valid_mcp_transport_variant_still_round_trips_6612() {
+        // Drift sentinel for the guard: all four variants must still parse, and the HttpCompat nested arrays must actually carry their entries.
+        // Asserting only `transport.is_some()` would pass even if `headers` / `tools` silently fell back to their `#[serde(default)]` empty vectors.
+        let cfg: KernelConfig = toml::from_str(
+            r#"
+            [[mcp_servers]]
+            name = "stdio-server"
+            transport = { type = "stdio", command = "/usr/bin/mcp", args = ["--flag"] }
+
+            [[mcp_servers]]
+            name = "sse-server"
+            transport = { type = "sse", url = "https://example.invalid/sse" }
+
+            [[mcp_servers]]
+            name = "http-server"
+            transport = { type = "http", url = "https://example.invalid/mcp" }
+
+            [[mcp_servers]]
+            name = "compat-server"
+
+            [mcp_servers.transport]
+            type = "http_compat"
+            base_url = "https://example.invalid"
+
+            [[mcp_servers.transport.headers]]
+            name = "Authorization"
+            value_env = "COMPAT_TOKEN"
+
+            [[mcp_servers.transport.tools]]
+            name = "forecast"
+            path = "/forecast/{city}"
+            method = "get"
+            request_mode = "query"
+            response_mode = "text"
+
+            # `input_schema` is a free-form `serde_json::Value`, so the guard must not reach into it — a JSON Schema is operator-authored content with arbitrary keys, not a struct with a known field set.
+            [mcp_servers.transport.tools.input_schema]
+            type = "object"
+
+            [mcp_servers.transport.tools.input_schema.properties.city]
+            type = "string"
+            description = "City to forecast"
+            "#,
+        )
+        .expect("every valid transport variant must still parse under deny_unknown_fields");
+        assert_eq!(cfg.mcp_servers.len(), 4);
+
+        match &cfg.mcp_servers[0].transport {
+            Some(McpTransportEntry::Stdio { command, args }) => {
+                assert_eq!(command, "/usr/bin/mcp");
+                assert_eq!(args, &["--flag"]);
+            }
+            other => panic!("expected stdio transport, got {other:?}"),
+        }
+        match &cfg.mcp_servers[1].transport {
+            Some(McpTransportEntry::Sse { url }) => {
+                assert_eq!(url, "https://example.invalid/sse");
+            }
+            other => panic!("expected sse transport, got {other:?}"),
+        }
+        match &cfg.mcp_servers[2].transport {
+            Some(McpTransportEntry::Http { url }) => {
+                assert_eq!(url, "https://example.invalid/mcp");
+            }
+            other => panic!("expected http transport, got {other:?}"),
+        }
+        match &cfg.mcp_servers[3].transport {
+            Some(McpTransportEntry::HttpCompat {
+                base_url,
+                headers,
+                tools,
+            }) => {
+                assert_eq!(base_url, "https://example.invalid");
+                assert_eq!(headers.len(), 1, "nested header array must survive");
+                assert_eq!(headers[0].name, "Authorization");
+                assert_eq!(headers[0].value_env.as_deref(), Some("COMPAT_TOKEN"));
+                assert_eq!(tools.len(), 1, "nested tool array must survive");
+                assert_eq!(tools[0].path, "/forecast/{city}");
+                assert!(matches!(tools[0].method, HttpCompatMethod::Get));
+                assert!(matches!(
+                    tools[0].request_mode,
+                    HttpCompatRequestMode::Query
+                ));
+                assert!(matches!(
+                    tools[0].response_mode,
+                    HttpCompatResponseMode::Text
+                ));
+                assert_eq!(
+                    tools[0].input_schema["properties"]["city"]["description"], "City to forecast",
+                    "free-form input_schema content must pass through untouched",
+                );
+            }
+            other => panic!("expected http_compat transport, got {other:?}"),
+        }
+    }
+
+    // ---------------------------------------------------------------
     // #5476 — `[agents.<name>.<override_key>]` blocks in config.toml
     // are silently ignored because `KernelConfig` has no `agents`
     // field. The detector lists each (agent, key) pair so the kernel

@@ -6209,17 +6209,28 @@ pub enum HttpCompatResponseMode {
 }
 
 /// Header injection config for the built-in HTTP compatibility transport.
+//
+// `deny_unknown_fields` for the same reason as [`McpServerConfigEntry`] and [`McpTransportEntry`]: this struct is only ever reached through `[[mcp_servers.transport.headers]]`, which the `detect_unknown_nested_fields` walker cannot descend into because every hop is an array of tables.
+// Without the attribute a typo such as `value_from_env` deserialises into a header with neither `value` nor `value_env` set, and the transport sends the header unset instead of reporting the mistake (#6612).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HttpCompatHeaderConfig {
     pub name: String,
-    #[serde(default)]
+    // `skip_serializing_if` is load-bearing here for the same reason it is on [`McpServerConfigEntry::template_id`] and `oauth`, and the consequence is worse than theirs (#6612).
+    // `upsert_mcp_server_config` writes the `File` store by going serde_json → `json_to_toml_value` → TOML, and TOML has no null: that converter maps `Value::Null` to an *empty string* rather than dropping the key, so an absent `Option` is written as `value = ""` and reloads as `Some("")` instead of `None`.
+    // `apply_http_compat_headers` tests `value` *before* `value_env`, so an env-sourced header that survived a config write would send an empty header and never resolve its variable — a silent credential failure with no error anywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_env: Option<String>,
 }
 
 /// Declarative tool mapping for the built-in HTTP compatibility transport.
+//
+// `deny_unknown_fields` for the same reason as [`HttpCompatHeaderConfig`] — `[[mcp_servers.transport.tools]]` is an array of tables nested inside another array of tables, so serde is the only layer that can see a typo here.
+// Every field except `name` and `path` has a `#[serde(default)]`, which means a misspelled `responce_mode` would otherwise leave the tool silently wired to the default JSON response mode (#6612).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HttpCompatToolConfig {
     pub name: String,
     #[serde(default)]
@@ -6236,8 +6247,18 @@ pub struct HttpCompatToolConfig {
 }
 
 /// Transport configuration for an MCP server.
+//
+// `deny_unknown_fields` mirrors the guard on the parent [`McpServerConfigEntry`] (#6612).
+// Without it a misspelled or unsupported key inside `[mcp_servers.transport]` was accepted and dropped: an operator who wrote a `[mcp_servers.transport.env]` table — plausible, but not the mechanism, which is the parent's `env: Vec<String>` name list — got a server that looked configured and ran on its own hardcoded fallbacks, with the failure deferred to the next credential rotation.
+// The `detect_unknown_nested_fields` walker cannot reach here (it bails on array-of-table paths such as `mcp_servers`, the same limitation that motivated the parent's guard in #5130), so serde is the only layer that sees the key at all.
+//
+// The attribute applies per variant on an internally-tagged enum: serde buffers the content and each variant rejects fields outside its own set, so the discriminating `type` key itself is still accepted.
+// That behaviour is not obvious from the attribute alone — `deny_unknown_fields` is documented as unsupported on *adjacently*- and *untagged*-enum containers — so it is pinned by `mcp_transport_rejects_unknown_key_in_transport_table_6612` rather than left to the reader to assume.
+//
+// Guarding the enum makes `GET /api/mcp/servers/{name}` → `PUT` load-bearing rather than merely conventional: any key the read route synthesises into the `transport` object that is not a real field now fails the write.
+// `serialize_mcp_transport` in `librefang-api` is therefore a faithful representation of the stored variant, not a display summary — see the comment on that function.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum McpTransportEntry {
     /// Subprocess with JSON-RPC over stdin/stdout.
     Stdio {
