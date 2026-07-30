@@ -409,12 +409,8 @@ jobs:
         run: cross build --release --target aarch64-unknown-linux-musl --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
 
   # ── git-side hook corpus tests ─────────────────────────────────────────────────
-  # `scripts/hooks/*` run inside git, so nothing in the Rust or dashboard test
-  # suites covers them, and their corpus tests under `scripts/tests/` existed
-  # without ever being wired into CI — the same gap #3400 closed for the
-  # changelog validator's own unit tests, one directory over. A regression in
-  # the attribution predicates could therefore only be caught by running these
-  # by hand, which is exactly what nobody does before pushing a hook edit.
+  # `scripts/hooks/*` run inside git, so nothing in the Rust or dashboard test suites covers them, and their corpus tests under `scripts/tests/` existed without ever being wired into CI — the same gap #3400 closed for the changelog validator's own unit tests, one directory over.
+  # A regression in the attribution predicates could therefore only be caught by running these by hand, which is exactly what nobody does before pushing a hook edit.
   githook-tests:
     name: Git Hook Corpus Tests
     runs-on: ubuntu-latest
@@ -426,8 +422,8 @@ jobs:
       # Staged-path handling: filenames with spaces must still be checked.
       - name: pre-commit space-in-filename handling
         run: bash scripts/tests/pre-commit-spaces.sh
-      # The openapi baseline refresh must work on a box with sha256sum but no
-      # shasum. Self-skips when sha256sum is absent, so it is safe anywhere.
+      # The openapi baseline refresh must work on a box with sha256sum but no shasum.
+      # Self-skips when sha256sum is absent, so it is safe anywhere.
       - name: pre-commit sha256sum fallback
         run: bash scripts/tests/pre-commit-sha-fallback.sh
 

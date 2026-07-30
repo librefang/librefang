@@ -29,14 +29,12 @@ run() {
   local msg="$1"
   local file="$tmpdir/msg"
   printf '%s\n' "$msg" > "$file"
-  # A human author identity is forced for the message corpus so those cases
-  # test the message regex alone, independent of whoever runs the script.
+  # A human author identity is forced for the message corpus so those cases test the message regex alone, independent of whoever runs the script.
   GIT_AUTHOR_NAME="Test Human" GIT_AUTHOR_EMAIL="human@example.com" \
     "$HOOK" "$file" >/dev/null 2>&1
 }
 
-# Run the hook against a clean message with a given author identity, to
-# exercise the author check rather than the message regex.
+# Run the hook against a clean message with a given author identity, to exercise the author check rather than the message regex.
 run_as() {
   local name="$1" email="$2"
   local file="$tmpdir/msg"
@@ -85,10 +83,8 @@ for ok in "${ACCEPT_CORPUS[@]}"; do
   fi
 done
 
-# Author-identity corpus. The message is clean in every one of these, so a
-# rejection can only come from the author check — which is the point: a commit
-# authored as Claude carries no attribution string in its message and still
-# lands "Claude <noreply@anthropic.com>" in `git log` and `git blame`.
+# Author-identity corpus.
+# The message is clean in every one of these, so a rejection can only come from the author check — which is the point: a commit authored as Claude carries no attribution string in its message and still lands "Claude <noreply@anthropic.com>" in `git log` and `git blame`.
 REJECT_AUTHORS=(
   "Claude|noreply@anthropic.com"
   "Claude|someone@example.com"
@@ -98,10 +94,7 @@ REJECT_AUTHORS=(
   "Claude Opus 5|dev@example.com"
   "Anthropic|dev@example.com"
   "Evan Hu|noreply@anthropic.com"
-  # Version-then-family naming, which Anthropic has also shipped
-  # ("Claude 3.5 Sonnet", "Claude 3 Opus"), squashes to "claude35sonnet" /
-  # "claude3opus" — a family-word-anchored-to-end pattern is needed to catch
-  # this alongside the family-then-version form above.
+  # Version-then-family naming, which Anthropic has also shipped ("Claude 3.5 Sonnet", "Claude 3 Opus"), squashes to "claude35sonnet" / "claude3opus" — a family-word-anchored-to-end pattern is needed to catch this alongside the family-then-version form above.
   "Claude 3.5 Sonnet|dev@example.com"
   "Claude 3 Opus|dev@example.com"
   "claude-3-5-sonnet|dev@example.com"
@@ -114,9 +107,7 @@ for entry in "${REJECT_AUTHORS[@]}"; do
   fi
 done
 
-# Names that merely start with the same letters, and humans who really do have
-# an anthropic.com address, must still be able to commit — the check is on the
-# whole name and on the bot mailbox, not on substrings or on the domain.
+# Names that merely start with the same letters, and humans who really do have an anthropic.com address, must still be able to commit — the check is on the whole name and on the bot mailbox, not on substrings or on the domain.
 ACCEPT_AUTHORS=(
   "Evan Hu|e-hu@unext.jp"
   "Claudia Schiffer|claudia@example.com"
