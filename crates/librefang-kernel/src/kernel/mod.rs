@@ -351,6 +351,28 @@ fn build_mcp_bridge_cfg(cfg: &KernelConfig) -> librefang_llm_driver::McpBridgeCo
         Ok(key) if !key.trim().is_empty() => key.trim().to_string(),
         _ => resolve_vault_prefixed(cfg.api_key.trim(), &cfg.home_dir),
     };
+    // A hash-only config is the one posture that resolves to nothing here while
+    // the daemon still enforces auth, and it is the posture `api_key_hash`'s own
+    // documentation and `librefang hash-api-key` both recommend ("put the hash
+    // here and leave `api_key` unset"). `api_key_hash` cannot be substituted: a
+    // verifier does not yield the secret it verifies, and this leg *transmits*
+    // the credential. So the bridge goes out with no `Authorization` header and
+    // the daemon's own middleware answers 401 — precisely because #6613 made it
+    // treat a hash as configured auth.
+    //
+    // Nothing downstream can explain that: the driver reports a failed tool
+    // call, not a missing kernel-side credential. Say it here, where the empty
+    // result is produced, and name the two fixes that keep the secret out of
+    // `config.toml` while staying transmittable.
+    if api_key.is_empty() && !cfg.api_key_hash.trim().is_empty() {
+        warn!(
+            "[mcp bridge] no transmittable api_key: `api_key_hash` is set but `api_key` \
+             and ${API_KEY_ENV} are empty. CLI-based drivers (claude-code) call this \
+             daemon's own /mcp endpoint and will get 401 on every tool call, because a \
+             hash verifies a key rather than yielding one. Set `api_key = \
+             \"vault:NAME\"` or ${API_KEY_ENV} — the hash stays in use for inbound auth."
+        );
+    }
     librefang_llm_driver::McpBridgeConfig {
         base_url: base,
         api_key: (!api_key.is_empty()).then_some(api_key),

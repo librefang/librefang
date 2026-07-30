@@ -1124,6 +1124,13 @@ pub(crate) fn cmd_hash_api_key(key: Option<String>, generate: bool) {
     );
     println!();
     println!("{}", i18n::t("auth-api-key-remove-plaintext-hint"));
+    // "Remove the plaintext line" is wrong for anyone running a CLI-based
+    // driver: those drivers are clients of this daemon's own /mcp endpoint, and
+    // a hash cannot be presented as a bearer token, so a hash-only config makes
+    // every driver tool call 401. Printed unconditionally rather than gated on
+    // the running config, because this command is normally run *before* the
+    // daemon is configured — and often on a different machine entirely.
+    println!("{}", i18n::t("auth-api-key-cli-driver-caveat"));
 }
 
 #[cfg(all(test, unix))]

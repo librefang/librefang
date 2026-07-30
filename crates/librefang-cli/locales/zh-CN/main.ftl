@@ -2063,6 +2063,7 @@ auth-api-key-empty = API 密钥不能为空。
 auth-api-key-generated = 新的 API 密钥（请交给客户端使用——仅显示一次）：
 auth-api-key-config-entry =   api_key_hash = "{ $hash }"
 auth-api-key-remove-plaintext-hint = 然后删除明文 `api_key` 行。客户端仍然发送密钥本身，只是守护进程保存的副本发生了变化。
+auth-api-key-cli-driver-caveat = 例外：如果使用基于 CLI 的驱动（claude-code），请保留一份可发送的副本 —— `api_key = "vault:NAME"` 或 LIBREFANG_API_KEY 环境变量。这类驱动会调用守护进程自身的 /mcp 端点，而哈希无法作为 bearer 令牌发送，两者都不配置时每次工具调用都会返回 401。
 # Agent command specific keys
 agent-spawn-id-label =   ID：  { $id }
 agent-spawn-name-label =   名称：{ $name }

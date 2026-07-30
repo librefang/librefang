@@ -1134,6 +1134,7 @@ auth-api-key-empty = API 키는 비어 있을 수 없습니다.
 auth-api-key-generated = 새 API 키 (클라이언트에 전달하십시오 — 한 번만 표시됩니다):
 auth-api-key-config-entry =   api_key_hash = "{ $hash }"
 auth-api-key-remove-plaintext-hint = 그런 다음 평문 `api_key` 줄을 제거하십시오. 클라이언트는 계속 같은 키를 전송하며, 데몬이 저장하는 사본만 바뀝니다.
+auth-api-key-cli-driver-caveat = 예외: CLI 기반 드라이버(claude-code)를 사용한다면 전송 가능한 사본을 남겨 두십시오 — `api_key = "vault:NAME"` 또는 LIBREFANG_API_KEY 변수입니다. 이런 드라이버는 데몬 자신의 /mcp 엔드포인트를 호출하며, 해시는 bearer 토큰으로 전송할 수 없으므로 둘 다 없으면 모든 도구 호출이 401을 받습니다.
 
 # Agent command specific keys
 agent-spawn-id-label =   ID:   { $id }

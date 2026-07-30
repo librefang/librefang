@@ -1148,6 +1148,7 @@ auth-api-key-empty = Ключ API не може бути порожнім.
 auth-api-key-generated = Новий ключ API (передайте його своїм клієнтам — він показується лише один раз):
 auth-api-key-config-entry =   api_key_hash = "{ $hash }"
 auth-api-key-remove-plaintext-hint = Потім видаліть рядок `api_key` із відкритим текстом. Клієнти й далі надсилають сам ключ; змінюється лише копія, яку зберігає демон.
+auth-api-key-cli-driver-caveat = Виняток: якщо ви використовуєте драйвер на основі CLI (claude-code), залиште копію, яку можна надіслати — `api_key = "vault:NAME"` або змінну LIBREFANG_API_KEY. Такі драйвери звертаються до власної точки /mcp демона, а хеш не можна надіслати як bearer-токен, тож без жодного з них кожен виклик інструмента отримує 401.
 
 # Agent command specific keys
 agent-spawn-id-label =   ID:   { $id }

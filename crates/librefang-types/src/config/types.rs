@@ -3353,6 +3353,12 @@ pub struct KernelConfig {
     /// Copy the value into `api_key_hash`, remove `api_key`, delete the hint file.
     /// Clients keep sending the same key — only the daemon's stored copy changes.
     /// The hash itself is never logged — it is the verifier, so anyone reading the log stream could paste it into their own config and authenticate.
+    ///
+    /// **A hash alone is not enough if you run a CLI-based driver** (`claude-code`, and any other driver that reaches the daemon's own `/mcp` endpoint).
+    /// Those drivers are clients of this daemon, so they need the key itself, and a hash cannot yield it: the daemon would have to reverse its own verifier.
+    /// With `api_key` unset and no `LIBREFANG_API_KEY`, the MCP bridge goes out with no `Authorization` header and the daemon's own middleware answers 401 — precisely because the hash *is* honoured as configured auth.
+    /// Keep a transmittable copy for that case: `api_key = "vault:master_api_key"` or `LIBREFANG_API_KEY`, either of which keeps the secret out of `config.toml` while leaving the bridge able to authenticate.
+    /// The kernel logs a `WARN` naming this at every driver rebuild when the bridge ends up keyless while a hash is set, so it fails loudly rather than as an unexplained 401 on every tool call.
     #[serde(default)]
     pub api_key_hash: String,
     /// Controls whether the dashboard read-endpoint allowlist (agents,
