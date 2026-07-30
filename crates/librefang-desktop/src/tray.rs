@@ -344,7 +344,7 @@ mod platform_tray {
         app_handle: tauri::AppHandle,
     }
 
-    fn rgba_to_argb(mut rgba: Vec<u8>) -> Vec<u8> {
+    pub(super) fn rgba_to_argb(mut rgba: Vec<u8>) -> Vec<u8> {
         for pixel in rgba.chunks_exact_mut(4) {
             pixel.rotate_right(1); // convert RGBA to ARGB
         }
@@ -542,7 +542,9 @@ mod platform_tray {
                         let delay = backoff.next_delay(consecutive_failures);
                         // Only log warning for the first 3 consecutive attempts to avoid spamming system logs.
                         if consecutive_failures <= 3 {
-                            warn!("Failed to spawn Linux system tray: {e}. Retrying in {delay:?}...");
+                            warn!(
+                                "Failed to spawn Linux system tray: {e}. Retrying in {delay:?}..."
+                            );
                         }
                         tokio::time::sleep(delay).await;
                     }

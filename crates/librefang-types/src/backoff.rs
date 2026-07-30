@@ -96,7 +96,11 @@ mod tests {
 
     #[test]
     fn test_linear_backoff() {
-        let strategy = LinearBackoff::new(Duration::from_secs(10), Duration::from_secs(5), Duration::from_secs(25));
+        let strategy = LinearBackoff::new(
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+            Duration::from_secs(25),
+        );
         assert_eq!(strategy.next_delay(0), Duration::from_secs(0));
         assert_eq!(strategy.next_delay(1), Duration::from_secs(10));
         assert_eq!(strategy.next_delay(2), Duration::from_secs(15));
@@ -107,7 +111,8 @@ mod tests {
 
     #[test]
     fn test_exponential_backoff() {
-        let strategy = ExponentialBackoff::new(Duration::from_secs(2), 2.0, Duration::from_secs(10));
+        let strategy =
+            ExponentialBackoff::new(Duration::from_secs(2), 2.0, Duration::from_secs(10));
         assert_eq!(strategy.next_delay(0), Duration::from_secs(0));
         assert_eq!(strategy.next_delay(1), Duration::from_secs(2));
         assert_eq!(strategy.next_delay(2), Duration::from_secs(4));
