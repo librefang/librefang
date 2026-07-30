@@ -203,15 +203,10 @@ mod tests {
 
     /// `refresh_from_upstream = false` must gate the *fetch*, not the rebuild.
     ///
-    /// An operator sets `[registry] auto_sync = false` to stop the daemon
-    /// fast-forwarding `~/.librefang/registry/` over their local edits. If that
-    /// also skipped the catalog rebuild they would silently lose every model in
-    /// the catalog, which is a much worse outcome than the clobbering they were
-    /// avoiding — so this asserts the providers already on disk still load.
+    /// An operator sets `[registry] auto_sync = false` to stop the daemon fast-forwarding `~/.librefang/registry/` over their local edits.
+    /// If that also skipped the catalog rebuild they would silently lose every model in the catalog, which is a much worse outcome than the clobbering they were avoiding — so this asserts the providers already on disk still load.
     ///
-    /// It also proves the call makes no network attempt: the temp dir is not a
-    /// git repo and has no `.sync_marker`, so a non-gated run would try a git
-    /// clone and then an HTTP download of the real registry.
+    /// It also proves the call makes no network attempt: the temp dir is not a git repo and has no `.sync_marker`, so a non-gated run would try a git clone and then an HTTP download of the real registry.
     #[tokio::test]
     async fn frozen_registry_still_rebuilds_the_catalog_from_disk() {
         let tmp = tempfile::tempdir().expect("tempdir");
