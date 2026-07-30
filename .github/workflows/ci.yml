@@ -1093,6 +1093,7 @@ jobs:
       - quality
       - skills-wasm-sdk
       - rust-telegram-sidecar
+      - githook-tests
       - changelog-attribution
       - changelog-attribution-full
       - openapi-drift

@@ -53,8 +53,15 @@ if [ -n "$author_ident" ]; then
   # pinned to the bot mailbox so an Anthropic employee committing under their
   # own anthropic.com address is not either. A contributor whose entire display
   # name is the bare word "Claude" is collateral, and can add a surname.
+  #
+  # Model-name identities are matched with "claude" anywhere before the family
+  # name, not just immediately before it: Anthropic has shipped both a
+  # family-then-version form ("Claude Opus 5" -> claudeopus5) and a
+  # version-then-family form ("Claude 3.5 Sonnet" / "claude-3-5-sonnet" ->
+  # claude35sonnet). Anchoring the family word to the end of the string rather
+  # than requiring it right after "claude" catches both.
   case "$squashed_name" in
-    claude | claudecode | claudeai | anthropic | claudeopus* | claudesonnet* | claudehaiku*)
+    claude | claudecode | claudeai | anthropic | claude*opus* | claude*sonnet* | claude*haiku*)
       bad_author="name \"$author_name\""
       ;;
   esac

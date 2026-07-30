@@ -98,6 +98,13 @@ REJECT_AUTHORS=(
   "Claude Opus 5|dev@example.com"
   "Anthropic|dev@example.com"
   "Evan Hu|noreply@anthropic.com"
+  # Version-then-family naming, which Anthropic has also shipped
+  # ("Claude 3.5 Sonnet", "Claude 3 Opus"), squashes to "claude35sonnet" /
+  # "claude3opus" — a family-word-anchored-to-end pattern is needed to catch
+  # this alongside the family-then-version form above.
+  "Claude 3.5 Sonnet|dev@example.com"
+  "Claude 3 Opus|dev@example.com"
+  "claude-3-5-sonnet|dev@example.com"
 )
 
 for entry in "${REJECT_AUTHORS[@]}"; do
