@@ -1741,7 +1741,10 @@ mod tests {
         let (ws_url, _seen) = spawn_mock_cdp(MockCdp::EnableFails).await;
         let http = MockServer::start().await;
 
-        Mock::given(method("GET"))
+        // `http_discover_target` (#6619) tries PUT first; this mock must
+        // match that or every request 404s against wiremock's unmatched-route
+        // default before the attach logic under test ever runs.
+        Mock::given(method("PUT"))
             .and(path("/json/new"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": "TAB-9",
