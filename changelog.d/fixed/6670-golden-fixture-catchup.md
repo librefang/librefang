@@ -1,0 +1,3 @@
+Regenerate the `KernelConfig` schema golden fixture, which `main` had drifted past.
+#6664 re-enabled `kernel_config_schema_matches_golden_fixture` against a fixture generated from its own base, and #6661, #6666 and #6667 each merged a schema-visible change afterwards — `[registry] auto_sync`, `additionalProperties: false` on the MCP transport structs, and the `api_key` / `api_key_hash` documentation — so the guard went red on `main` the moment the last of them landed, while every one of those PRs was green on its own branch.
+The fixture is generated from the code, so the only change here is the fixture catching up; no schema was touched (#6670) (@houko)

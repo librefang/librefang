@@ -33,7 +33,12 @@
       }
     },
     "api_key": {
-      "description": "API authentication key. When set, all API endpoints (except /api/health) require a `Authorization: Bearer <key>` header. If empty, the API is unauthenticated (local development only).",
+      "description": "API authentication key. When set, all API endpoints (except /api/health) require a `Authorization: Bearer <key>` header. If empty (and no `api_key_hash` is set), the API is unauthenticated (local development only).\n\nThe value is resolved by the API layer in three steps, the same order the dashboard credentials use: 1. The `LIBREFANG_API_KEY` environment variable, when set to a non-empty value, wins over whatever this field holds. 2. A `vault:KEY_NAME` prefix reads `KEY_NAME` out of the encrypted vault (`$LIBREFANG_HOME/vault.enc`). Example: `api_key = \"vault:master_api_key\"`, then run `librefang vault set master_api_key`. 3. Anything else is the literal bearer token.\n\nSteps 1 and 2 keep the working secret out of `config.toml` entirely, which matters because the daemon rewrites that file and cannot read it from a read-only Kubernetes Secret mount. Resolution happens per auth snapshot rather than once at boot, so an env-sourced or vault-sourced key survives `POST /api/config/reload` — a reload re-reads `config.toml` from disk and would otherwise clobber the boot-time override.\n\nPrefer [`KernelConfig::api_key_hash`] when the daemon only needs to *verify* the key rather than transmit it — run `librefang hash-api-key` to produce the value. The two can be combined, and a plaintext value here is verified with a constant-time comparison.",
+      "default": "",
+      "type": "string"
+    },
+    "api_key_hash": {
+      "description": "Hash of the API authentication key, so the master credential does not have to sit in cleartext on disk.\n\nWhen set, a presented bearer token is verified against this hash after the constant-time comparison against `api_key` misses.\n\n**Generate it with `librefang hash-api-key`** — `--generate` mints a fresh 256-bit key and prints it beside its hash, or omit the flag to hash a key you already have. Put the hash here, give the key to your clients, and leave `api_key` unset.\n\nThe recommended form is `$sha256$…` (what `hash-api-key` produces). `$argon2id$…` is also accepted, dispatched by prefix exactly as the per-user `users[].api_key_hash` column is, so a hand-written value keeps working.\n\nThe default is SHA-256 rather than Argon2id on purpose, and it is the reverse of the advice for [`KernelConfig::dashboard_pass_hash`]. A dashboard password is human-chosen and low-entropy, so a memory-hard KDF is what makes an offline dictionary attack uneconomic. A master API key is a machine-generated bearer token: there is no dictionary to enumerate, so the KDF buys nothing against an offline attacker and charges its cost to every request instead. That cost is ~50–100 ms of CPU per verify by construction, and with `api_key` unset *every* presented token reaches it — including every wrong one, from an unauthenticated caller, on paths with no login-attempt limiter. So an `$argon2id$` value here is verified on a blocking thread rather than inline, which keeps the async runtime responsive but does not make the CPU cost go away. If you want a short human-memorable master key, `$argon2id$` is the right trade; otherwise use a generated key and the cheap verifier.\n\nExisting plaintext deployments keep working and are upgraded transparently: the first request that authenticates against a plaintext-only `api_key` writes a `$sha256$` hash of it to `$LIBREFANG_HOME/api-key-hash.upgrade-hint` (mode 0600) and logs a pointer to the file. Copy the value into `api_key_hash`, remove `api_key`, delete the hint file. Clients keep sending the same key — only the daemon's stored copy changes. The hash itself is never logged — it is the verifier, so anyone reading the log stream could paste it into their own config and authenticate.",
       "default": "",
       "type": "string"
     },
@@ -1136,7 +1141,8 @@
       "default": {
         "cache_ttl_secs": 86400,
         "registry_mirror": "",
-        "registry_host": null
+        "registry_host": null,
+        "auto_sync": true
       },
       "allOf": [
         {
@@ -3924,20 +3930,19 @@
           "type": "string"
         },
         "value": {
-          "default": null,
           "type": [
             "string",
             "null"
           ]
         },
         "value_env": {
-          "default": null,
           "type": [
             "string",
             "null"
           ]
         }
-      }
+      },
+      "additionalProperties": false
     },
     "HttpCompatMethod": {
       "description": "HTTP request method for the built-in HTTP compatibility transport.",
@@ -4014,7 +4019,8 @@
             }
           ]
         }
-      }
+      },
+      "additionalProperties": false
     },
     "InboxConfig": {
       "description": "File-based input inbox configuration.\n\nWhen enabled, the kernel polls a directory for text files and dispatches their contents as messages to agents.  Files are moved to a `processed/` subdirectory after delivery.",
@@ -4470,7 +4476,8 @@
                 "stdio"
               ]
             }
-          }
+          },
+          "additionalProperties": false
         },
         {
           "description": "HTTP Server-Sent Events.",
@@ -4489,7 +4496,8 @@
             "url": {
               "type": "string"
             }
-          }
+          },
+          "additionalProperties": false
         },
         {
           "description": "Streamable HTTP transport (MCP 2025-03-26+).",
@@ -4508,7 +4516,8 @@
             "url": {
               "type": "string"
             }
-          }
+          },
+          "additionalProperties": false
         },
         {
           "description": "Built-in compatibility adapter for plain HTTP/JSON tool backends.",
@@ -4541,7 +4550,8 @@
                 "http_compat"
               ]
             }
-          }
+          },
+          "additionalProperties": false
         }
       ]
     },
@@ -5828,6 +5838,11 @@
       "description": "Registry sync configuration.\n\nConfigure in config.toml: ```toml [registry] cache_ttl_secs = 86400 # Optional: proxy/mirror prefix for users behind the GFW. # All GitHub URLs are prefixed with this value, e.g. #   registry_mirror = \"https://ghproxy.cn\" # turns \"https://github.com/...\" into \"https://ghproxy.cn/https://github.com/...\" registry_mirror = \"\" # Optional: full base URL of the forge that hosts the registry repo. # Default unset = GitHub. Set to consume a Codeberg-hosted registry, e.g. #   registry_host = \"https://codeberg.org\" ```",
       "type": "object",
       "properties": {
+        "auto_sync": {
+          "description": "Whether the daemon refreshes `~/.librefang/registry/` from upstream on its own (default: `true`).\n\nThat checkout is a git clone the sync fast-forwards with `git reset --hard origin/main`, so every local modification under it is destroyed — including the ones `PUT /api/hands/{id}/manifest` writes, which land in `registry/hands/<id>/HAND.toml` for a hand that shipped with the registry. Set to `false` to freeze the checkout: boot skips its `sync_registry` pass and the periodic catalog task skips the network refresh while still rebuilding the model catalog from what is already on disk.\n\nOnly *automatic* refreshes are gated. `librefang init` and `POST /api/catalog/update` are explicit operator actions and still fetch, so freezing the registry does not strand an operator who wants an update. `POST /api/hands/reload` never fetched from upstream in the first place — it only reloads hand definitions already on disk into memory — so it is unaffected either way.\n\nEquivalent to setting `LIBREFANG_REGISTRY_OFFLINE=1`, except it is scoped to the automatic paths rather than every fetch in the process tree, and it survives in `config.toml` rather than in whatever launched the daemon.",
+          "default": true,
+          "type": "boolean"
+        },
         "cache_ttl_secs": {
           "description": "Cache TTL for registry sync in seconds (default: 86400 = 24 hours). The registry is re-downloaded when the local cache is older than this.",
           "default": 86400,
