@@ -208,6 +208,74 @@ pub struct ResolvedSettings {
     pub env_vars: Vec<String>,
 }
 
+/// Render one stored setting value as the string the schema compares against.
+///
+/// `HandSetting.default` and `HandSettingOption.value` are declared as TOML strings, so the whole resolver works on `&str`.
+/// Stored values, though, come from a `serde_json::Value` map that any API client can post — the dashboard sends strings, but `true` and `100` are equally valid JSON for a toggle or a numeric text field.
+/// A plain `as_str()` returns `None` for those and the setting silently reverts to its schema default, which is the same user-visible failure as not saving at all.
+/// Coerce the scalar forms; arrays / objects / null have no meaningful scalar rendering and still fall through to the default.
+fn setting_value_as_str(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// The value a setting actually resolves to, after coercion and schema validation.
+///
+/// This is the single definition of "what is this setting set to" — [`resolve_settings`] renders the prompt from it, and the HTTP layer reports it as `effective_values` so no other surface has to re-derive the rules and drift (#6636).
+///
+/// A stored value is honoured only when it coerces to a scalar **and**, for a `Select`, names a declared option.
+/// Anything else falls back to `setting.default`, which the hand author wrote and which a `Select` default is expected to match.
+/// Dropping that second condition is what let `{"trading_mode": true}` render the line `- Trading Mode: true (true)` for the LLM and, because no option matched, silently drop that option's `provider_env` from the subprocess env allowlist.
+pub fn effective_setting_value(
+    setting: &HandSetting,
+    config: &HashMap<String, serde_json::Value>,
+) -> String {
+    let Some(stored) = config.get(&setting.key).and_then(setting_value_as_str) else {
+        return setting.default.clone();
+    };
+    if setting.setting_type == HandSettingType::Select
+        && !setting.options.is_empty()
+        && !setting.options.iter().any(|o| o.value == stored)
+    {
+        return setting.default.clone();
+    }
+    stored
+}
+
+/// Every setting's effective value, keyed by `setting.key`.
+///
+/// `BTreeMap` because this is reported over HTTP and rendered by the CLI; a stable order keeps both outputs diffable.
+pub fn effective_setting_values(
+    settings: &[HandSetting],
+    config: &HashMap<String, serde_json::Value>,
+) -> std::collections::BTreeMap<String, String> {
+    settings
+        .iter()
+        .map(|s| (s.key.clone(), effective_setting_value(s, config)))
+        .collect()
+}
+
+/// Saved config keys that the schema does not declare.
+///
+/// `update_config` accepts any key, so a typo (`tradingmode` for `trading_mode`) is stored permanently and merged into every later save while affecting nothing.
+/// Reporting the strays is what lets an operator notice the setting they thought they changed is inert (#6636).
+pub fn undeclared_setting_keys(
+    settings: &[HandSetting],
+    config: &HashMap<String, serde_json::Value>,
+) -> Vec<String> {
+    let mut stray: Vec<String> = config
+        .keys()
+        .filter(|k| !settings.iter().any(|s| &&s.key == k))
+        .cloned()
+        .collect();
+    stray.sort();
+    stray
+}
+
 /// Resolve user config values against a hand's settings schema.
 ///
 /// For each setting, looks up the user's choice in `config` (falling back to
@@ -222,10 +290,8 @@ pub fn resolve_settings(
     let mut env_vars: Vec<String> = Vec::new();
 
     for setting in settings {
-        let chosen_value = config
-            .get(&setting.key)
-            .and_then(|v| v.as_str())
-            .unwrap_or(&setting.default);
+        let chosen = effective_setting_value(setting, config);
+        let chosen_value: &str = &chosen;
 
         match setting.setting_type {
             HandSettingType::Select => {
@@ -1764,6 +1830,174 @@ metrics = []
         let resolved = resolve_settings(&settings, &config);
         assert!(resolved.prompt_block.contains("Enabled"));
         assert!(resolved.prompt_block.contains("large-v3"));
+    }
+
+    /// Stored values arrive as arbitrary JSON.
+    /// A non-string scalar used to fall out of `as_str()` as `None` and silently revert the setting to its schema default — the same user-visible symptom as not saving at all (#6636).
+    /// The dashboard stringifies, but the HTTP API accepts any client.
+    #[test]
+    fn resolve_settings_coerces_non_string_scalars() {
+        let settings = vec![
+            HandSetting {
+                key: "approval_mode".to_string(),
+                label: "Approval".to_string(),
+                description: String::new(),
+                setting_type: HandSettingType::Toggle,
+                default: "true".to_string(),
+                options: vec![],
+                env_var: None,
+            },
+            HandSetting {
+                key: "initial_capital".to_string(),
+                label: "Initial Capital".to_string(),
+                description: String::new(),
+                setting_type: HandSettingType::Text,
+                default: "10000".to_string(),
+                options: vec![],
+                env_var: None,
+            },
+        ];
+
+        let mut config = HashMap::new();
+        config.insert("approval_mode".to_string(), serde_json::json!(false));
+        config.insert("initial_capital".to_string(), serde_json::json!(100));
+        let resolved = resolve_settings(&settings, &config);
+        assert!(
+            resolved.prompt_block.contains("- Approval: Disabled"),
+            "JSON `false` must read as the toggle's off state, not fall back \
+             to the `true` default; got: {}",
+            resolved.prompt_block
+        );
+        assert!(
+            resolved.prompt_block.contains("- Initial Capital: 100"),
+            "JSON number must render verbatim; got: {}",
+            resolved.prompt_block
+        );
+        assert!(
+            !resolved.prompt_block.contains("10000"),
+            "the schema default must not survive an explicit numeric value; got: {}",
+            resolved.prompt_block
+        );
+    }
+
+    /// A coerced scalar that names no declared option must not reach the prompt or the env allowlist.
+    ///
+    /// The old `as_str()` guard made this unreachable by accident: a non-string always fell back to `setting.default`, which for a `Select` matches a declared option by construction.
+    /// Coercion alone would have removed that guarantee, rendering `- Trading Mode: true (true)` for the LLM and dropping the matched option's `provider_env`, which `update_hand_rendered_prompt` then removes from the live agent's passthrough the instant the save returns 200.
+    #[test]
+    fn resolve_settings_rejects_a_select_value_that_matches_no_option() {
+        let settings = vec![HandSetting {
+            key: "trading_mode".to_string(),
+            label: "Trading Mode".to_string(),
+            description: String::new(),
+            setting_type: HandSettingType::Select,
+            default: "paper".to_string(),
+            options: vec![
+                HandSettingOption {
+                    value: "paper".to_string(),
+                    label: "Paper Trading".to_string(),
+                    provider_env: None,
+                    binary: None,
+                },
+                HandSettingOption {
+                    value: "live".to_string(),
+                    label: "Live Trading".to_string(),
+                    provider_env: Some("BROKER_ACCOUNT_ID".to_string()),
+                    binary: None,
+                },
+            ],
+            env_var: None,
+        }];
+
+        for bogus in [
+            serde_json::json!(true),
+            serde_json::json!(3),
+            serde_json::json!("LIVE"),
+        ] {
+            let mut config = HashMap::new();
+            config.insert("trading_mode".to_string(), bogus.clone());
+            let resolved = resolve_settings(&settings, &config);
+            assert!(
+                resolved
+                    .prompt_block
+                    .contains("- Trading Mode: Paper Trading (paper)"),
+                "{bogus} names no option, so the schema default must render; got: {}",
+                resolved.prompt_block
+            );
+            assert_eq!(
+                effective_setting_value(&settings[0], &config),
+                "paper",
+                "{bogus} must resolve to the schema default"
+            );
+        }
+
+        // A value that does name an option still wins, and still contributes its env var.
+        let mut config = HashMap::new();
+        config.insert("trading_mode".to_string(), serde_json::json!("live"));
+        let resolved = resolve_settings(&settings, &config);
+        assert!(resolved
+            .prompt_block
+            .contains("- Trading Mode: Live Trading (live)"));
+        assert_eq!(resolved.env_vars, vec!["BROKER_ACCOUNT_ID".to_string()]);
+    }
+
+    /// An open-ended `Select` — one declaring no options — keeps accepting any coerced scalar.
+    #[test]
+    fn resolve_settings_keeps_free_form_select_without_options() {
+        let setting = HandSetting {
+            key: "region".to_string(),
+            label: "Region".to_string(),
+            description: String::new(),
+            setting_type: HandSettingType::Select,
+            default: "eu".to_string(),
+            options: vec![],
+            env_var: None,
+        };
+        let mut config = HashMap::new();
+        config.insert("region".to_string(), serde_json::json!("us"));
+        assert_eq!(effective_setting_value(&setting, &config), "us");
+    }
+
+    #[test]
+    fn undeclared_keys_are_reported_sorted() {
+        let settings = vec![HandSetting {
+            key: "trading_mode".to_string(),
+            label: "Trading Mode".to_string(),
+            description: String::new(),
+            setting_type: HandSettingType::Text,
+            default: "paper".to_string(),
+            options: vec![],
+            env_var: None,
+        }];
+        let mut config = HashMap::new();
+        config.insert("trading_mode".to_string(), serde_json::json!("live"));
+        config.insert("tradingmode".to_string(), serde_json::json!("live"));
+        config.insert("aaa_typo".to_string(), serde_json::json!(1));
+
+        assert_eq!(
+            undeclared_setting_keys(&settings, &config),
+            vec!["aaa_typo".to_string(), "tradingmode".to_string()],
+            "declared keys are excluded and strays come back sorted"
+        );
+    }
+
+    /// Non-scalar JSON has no meaningful rendering against a schema whose `default` and option `value`s are strings, so it still falls back.
+    #[test]
+    fn resolve_settings_falls_back_for_non_scalar_json() {
+        let settings = vec![HandSetting {
+            key: "watchlist".to_string(),
+            label: "Watchlist".to_string(),
+            description: String::new(),
+            setting_type: HandSettingType::Text,
+            default: "SPY".to_string(),
+            options: vec![],
+            env_var: None,
+        }];
+
+        let mut config = HashMap::new();
+        config.insert("watchlist".to_string(), serde_json::json!(["BTC", "ETH"]));
+        let resolved = resolve_settings(&settings, &config);
+        assert!(resolved.prompt_block.contains("- Watchlist: SPY"));
     }
 
     #[test]

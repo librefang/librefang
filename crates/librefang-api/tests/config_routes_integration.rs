@@ -328,6 +328,84 @@ async fn get_config_exposes_non_writable_external_auth_fields() {
     }
 }
 
+/// #6636 observation (e): the approval section's non-writable fields must still read back.
+///
+/// The `approval` section declares no explicit `fields` list, so `ConfigPage` renders a control for every `ApprovalPolicy` field the derived schema knows about, and seven of the fourteen were absent from the response builder.
+/// `cache_approvals_per_session` is the one an operator noticed: it defaults to `true`, so the dashboard showed it off even when `config.toml` said `true`, and there was no way to tell whether per-session approval caching was actually on.
+///
+/// Every asserted value is set to the non-default here, so a response builder emitting a hardcoded literal cannot pass.
+/// The read side is additive: none of these becomes writable, which is the point — an Owner-role caller with a leaked API key must not be able to relax approval policy over HTTP.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_config_exposes_non_writable_approval_fields() {
+    let h = boot_router_with_config(API_KEY, |config| {
+        config.approval.cache_approvals_per_session = false;
+        config.approval.audit_retention_days = 7;
+        config.approval.trusted_senders = vec!["operator-1".to_string()];
+        config.approval.totp_tools = vec!["shell_exec".to_string()];
+    })
+    .await;
+
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+
+    assert_eq!(
+        dig(&json, "approval.cache_approvals_per_session").and_then(|v| v.as_bool()),
+        Some(false),
+        "GET /api/config must report the configured value of `cache_approvals_per_session` \
+         (#6636); body: {json}"
+    );
+    assert_eq!(
+        dig(&json, "approval.audit_retention_days").and_then(|v| v.as_u64()),
+        Some(7),
+        "`approval.audit_retention_days` must round-trip; body: {json}"
+    );
+    assert_eq!(
+        dig(&json, "approval.trusted_senders").and_then(|v| v.as_array()),
+        Some(&vec![serde_json::json!("operator-1")]),
+        "`approval.trusted_senders` must round-trip; body: {json}"
+    );
+    assert_eq!(
+        dig(&json, "approval.totp_tools").and_then(|v| v.as_array()),
+        Some(&vec![serde_json::json!("shell_exec")]),
+        "`approval.totp_tools` must round-trip; body: {json}"
+    );
+    // Present even when empty / at their default, so the dashboard can bind an input to the key.
+    for path in ["approval.channel_rules", "approval.routing"] {
+        assert!(
+            dig(&json, path).is_some_and(|v| v.is_array()),
+            "`{path}` must be present as an array; body: {json}"
+        );
+    }
+    assert_eq!(
+        dig(&json, "approval.timeout_fallback").and_then(|v| v.as_str()),
+        Some("deny"),
+        "`approval.timeout_fallback` must use the serde encoding, not `Debug`; body: {json}"
+    );
+
+    // Newly readable, still closed to writes.
+    for path in [
+        "approval.cache_approvals_per_session",
+        "approval.trusted_senders",
+        "approval.audit_retention_days",
+    ] {
+        let (status, _) = send(
+            h.app.clone(),
+            auth_post_json(
+                "/api/config/set",
+                serde_json::json!({"path": path, "value": true}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "`{path}` became readable in #6636 but MUST stay non-writable — approval policy is not \
+             adjustable over HTTP"
+        );
+    }
+}
+
 /// #6596: enum-valued config fields were rendered with `format!("{:?}", …)`, which emits the Rust variant name (`"Allowlist"`, `"DuckDuckGo"`).
 /// The write path, `config.toml`, and the schema's `select` options all use serde's rename form, so the dashboard dropdown matched none of its own options.
 /// Asserting the absence of upper-case characters catches any new field that reintroduces `Debug` formatting, not just the seven that were fixed.

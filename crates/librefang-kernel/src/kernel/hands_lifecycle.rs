@@ -134,38 +134,28 @@ impl LibreFangKernel {
             // (e.g., `AlreadyActive` → 409 Conflict).
             .map_err(KernelError::from)?;
 
-        // Pre-compute shared overrides from hand definition. The system-prompt
-        // tail is materialized later (after per-role manifest cloning) via
-        // `apply_settings_block_to_manifest` — keep this block aligned with the
-        // env-var allowlist only.
-        // SECURITY: the passthrough list is assembled entirely from
-        // attacker-controllable HAND.toml `[[requires]]` / settings names, and
-        // is later materialized into the child's env from the daemon's LIVE
-        // environment. Filter every candidate through the shared secret
-        // blocklist so a marketplace hand cannot exfiltrate daemon secrets
-        // (`LIBREFANG_VAULT_KEY`, `ANTHROPIC_API_KEY`, …) by naming them here.
-        // `sandbox_command` re-checks defensively at spawn time.
-        let resolved_settings_env: Vec<String> =
-            librefang_hands::resolve_settings(&def.settings, &instance.config).env_vars;
-        let mut allowed_env: Vec<String> = resolved_settings_env
-            .into_iter()
-            .filter(|v| !librefang_runtime::subprocess_sandbox::is_blocked_env_var(v))
-            .collect();
-        for req in &def.requires {
-            match req.requirement_type {
-                librefang_hands::RequirementType::ApiKey
-                | librefang_hands::RequirementType::EnvVar
-                    if !req.check_value.is_empty()
-                        && !allowed_env.contains(&req.check_value)
-                        && !librefang_runtime::subprocess_sandbox::is_blocked_env_var(
-                            &req.check_value,
-                        ) =>
-                {
-                    allowed_env.push(req.check_value.clone());
-                }
-                _ => {}
-            }
-        }
+        // Serialize the rest of activation against `update_hand_config` and the runtime-override paths: from here on we read this instance's config and write the live `AgentRegistry` entries it owns, and a settings save interleaving with the spawn loop would commit new values and then have them overwritten by the prompt this pass renders from its own snapshot.
+        // Taken after `activate_with_id` because the instance id is only known once the instance exists.
+        let lock = self.hand_instance_lock(instance.instance_id);
+        let _instance_guard = lock.lock().unwrap_or_else(|e| {
+            warn!(
+                instance = %instance.instance_id,
+                "hand_instance_lock poisoned, recovering: {e}"
+            );
+            e.into_inner()
+        });
+
+        // Re-read under the lock: a save that committed between `activate_with_id` and the lock acquisition is in the registry but not in the snapshot above, and rendering from the stale copy is exactly the #6636 symptom.
+        let instance = self
+            .skills
+            .hand_registry
+            .get_instance(instance.instance_id)
+            .unwrap_or(instance);
+
+        // Pre-compute shared overrides from hand definition.
+        // The system-prompt tail is materialized later (after per-role manifest cloning) via `rerender_hand_prompt_tails` — keep this block aligned with the env-var allowlist only.
+        // `resolve_hand_allowed_env` carries the security rationale for the blocklist filter and is shared with `update_hand_config` so the two paths cannot drift.
+        let allowed_env = resolve_hand_allowed_env(&def, &instance.config);
 
         let is_multi_agent = def.is_multi_agent();
         let coordinator_role = def.coordinator().map(|(role, _)| role.to_string());
@@ -408,15 +398,6 @@ impl LibreFangKernel {
                 manifest.profile = Some(ToolProfile::Custom);
             }
 
-            // Inject settings into system prompt. Shared with the boot-time
-            // TOML drift loop in `new_with_config` so both paths render the
-            // tail identically — the drift loop overwrites the DB blob with
-            // the bare disk TOML, which never carries the runtime-materialized
-            // tail, and would otherwise silently strip configured values from
-            // the prompt on every restart.
-            let _ =
-                apply_settings_block_to_manifest(&mut manifest, &def.settings, &instance.config);
-
             if let Some(runtime_override) = runtime_override {
                 if let Some(provider) = runtime_override.provider {
                     manifest.model.provider = provider;
@@ -441,23 +422,12 @@ impl LibreFangKernel {
                 }
             }
 
-            // Inject allowed env vars
-            if !allowed_env.is_empty() {
-                manifest.metadata.insert(
-                    "hand_allowed_env".to_string(),
-                    serde_json::to_value(&allowed_env).unwrap_or_default(),
-                );
-            }
-
-            // Inject `## Reference Knowledge` and `## Your Team` blocks via
-            // the shared helpers. Both are also called from the boot-time
-            // TOML drift loop in `new_with_config` so the two paths render
-            // identically — the drift loop overwrites the DB blob with the
-            // bare disk TOML, which never carries either rendered tail, and
-            // would otherwise silently strip skill discoverability and peer
-            // awareness from the prompt on every restart.
-            apply_skill_reference_block_to_manifest(&mut manifest, role, &def);
-            apply_team_block_to_manifest(&mut manifest, role, &def);
+            // Render the whole prompt — base plus the settings, reference-knowledge and team tails — through the canonical helper.
+            // The boot-time TOML drift loop and the settings-save path call the same function, so all three agree on content and ordering; the drift loop overwrites the DB blob with the bare disk TOML, which carries none of the tails, and without an identical re-render there the agent would silently lose its configured values, skill discoverability and peer awareness on every restart.
+            //
+            // `allowed_env` was resolved once above from the same (definition, config) pair, so the returned value is identical per role; it is discarded rather than shadowing the outer binding to keep that obvious.
+            let _ = rerender_hand_prompt_tails(&mut manifest, role, &def, &instance.config);
+            set_hand_allowed_env(&mut manifest, &allowed_env);
 
             // Hand workspace: workspaces/<hand-id>/
             // Agent workspace nested under hand: workspaces/hands/<hand-id>/<role>/
@@ -687,6 +657,16 @@ impl LibreFangKernel {
 
     /// Deactivate a hand: kill agent and remove instance.
     pub fn deactivate_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
+        // Serialize against `update_hand_config` and the runtime-override paths: this tears down the very `AgentRegistry` entries a concurrent settings save is rewriting, and the save would otherwise leave a freshly rendered prompt on an agent that is being killed.
+        let lock = self.hand_instance_lock(instance_id);
+        let guard = lock.lock().unwrap_or_else(|e| {
+            warn!(
+                instance = %instance_id,
+                "hand_instance_lock poisoned, recovering: {e}"
+            );
+            e.into_inner()
+        });
+
         let instance = self
             .skills.hand_registry
             .deactivate(instance_id)
@@ -741,9 +721,11 @@ impl LibreFangKernel {
             }
         }
 
-        // Drop the per-instance runtime-override mutex so reactivating
-        // with a fresh `instance_id` doesn't leak entries here.
-        self.agents.hand_runtime_override_locks.remove(&instance_id);
+        // Release before dropping the map entry: holding a mutex while deleting the entry that publishes it lets the next caller mint a fresh mutex and run concurrently with this call's tail, which is the opposite of what the lock is for.
+        drop(guard);
+
+        // Drop the per-instance mutex so reactivating with a fresh `instance_id` doesn't leak entries here.
+        self.agents.hand_instance_locks.remove(&instance_id);
 
         // Persist hand state so it survives restarts
         self.persist_hand_state();
@@ -785,15 +767,219 @@ impl LibreFangKernel {
             .map_err(KernelError::from)
     }
 
-    /// Per-instance serialization lock for runtime-override mutations.
-    /// See the field comment on `hand_runtime_override_locks` for the
-    /// race this guards against.
-    fn hand_runtime_override_lock(&self, instance_id: uuid::Uuid) -> Arc<std::sync::Mutex<()>> {
+    /// Per-instance serialization lock for mutations that span the `HandInstance` and the live `AgentRegistry` entries it owns.
+    /// See the field comment on `hand_instance_locks` for the race this guards against.
+    fn hand_instance_lock(&self, instance_id: uuid::Uuid) -> Arc<std::sync::Mutex<()>> {
         self.agents
-            .hand_runtime_override_locks
+            .hand_instance_locks
             .entry(instance_id)
             .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
             .clone()
+    }
+
+    /// Merge a `[[settings]]` delta into a hand instance's config **and** push the result into the live agents' system prompts (#6636).
+    ///
+    /// Writing the instance config alone is not enough: settings only reach an LLM as the rendered `## User Configuration` tail on each role's `model.system_prompt`, and that tail is materialized at activation.
+    /// Before this method existed, `PUT /api/hands/{id}/settings` updated the registry and persisted `hand_state.json`, so the new values took effect on the *next daemon restart* — boot replays every persisted hand through `activate_hand_with_id` — while a running agent kept answering from the HAND.toml defaults, with no error to explain why.
+    /// For a hand like the Trading Hand, whose prompt branches on `trading_mode` and `approval_mode`, that gap is safety-relevant.
+    ///
+    /// **Takes a delta, not a full map.** Callers pass only the keys they are changing and the merge happens here, under the lock.
+    /// A caller that read the config, merged, and passed the whole map would have its read-modify-write straddle the lock, so two concurrent saves would each write their own snapshot and the later one would silently revert the earlier — now visibly, because the revert reaches the LLM immediately.
+    ///
+    /// Rollback is all-or-nothing across both halves.
+    /// Each role's previous prompt and env allowlist are snapshotted before it is rewritten, so a failure part-way through the loop restores the roles already touched as well as the config; otherwise the persisted file would say `paper` while a live agent ran on `live`, which is the exact disagreement this method exists to prevent.
+    /// Every rollback step logs on failure rather than discarding its `Result` — a rollback that itself fails is the one case an operator most needs to see.
+    ///
+    /// No SQLite write: hand agents are skipped by the boot restore loop (`if entry.is_hand { continue; }`) and rebuilt from `hand_state.json` plus HAND.toml instead, so the persisted agent blob is never read back for them.
+    /// Same reason the runtime-override path doesn't save either.
+    ///
+    /// Returns the updated instance so HTTP callers can echo the merged config back.
+    pub fn update_hand_config(
+        &self,
+        instance_id: uuid::Uuid,
+        delta: std::collections::HashMap<String, serde_json::Value>,
+    ) -> KernelResult<librefang_hands::HandInstance> {
+        // Existence is checked before the lock is minted: `hand_instance_lock`
+        // inserts on miss, so locking first would let any caller with an arbitrary
+        // UUID grow `hand_instance_locks` with an entry nothing ever removes.
+        // The window this opens is harmless — the authoritative re-read below runs
+        // under the lock and returns `InstanceNotFound` if the instance vanished.
+        if self
+            .skills
+            .hand_registry
+            .get_instance(instance_id)
+            .is_none()
+        {
+            return Err(KernelError::from(
+                librefang_hands::HandError::InstanceNotFound(instance_id),
+            ));
+        }
+
+        let lock = self.hand_instance_lock(instance_id);
+        let _guard = lock.lock().unwrap_or_else(|e| {
+            warn!(
+                instance = %instance_id,
+                "hand_instance_lock poisoned, recovering: {e}"
+            );
+            e.into_inner()
+        });
+
+        // Authoritative read: this is both the merge base and the rollback snapshot.
+        let previous = self
+            .skills
+            .hand_registry
+            .get_instance(instance_id)
+            .ok_or_else(|| {
+                KernelError::from(librefang_hands::HandError::InstanceNotFound(instance_id))
+            })?;
+
+        let mut merged = previous.config.clone();
+        merged.extend(delta);
+
+        self.skills
+            .hand_registry
+            .update_config(instance_id, merged)
+            .map_err(KernelError::from)?;
+
+        if let Err(err) = self.persist_hand_state_result() {
+            self.restore_hand_config(instance_id, previous.config, false);
+            return Err(err);
+        }
+
+        let instance = self
+            .skills
+            .hand_registry
+            .get_instance(instance_id)
+            .ok_or_else(|| {
+                KernelError::from(librefang_hands::HandError::InstanceNotFound(instance_id))
+            })?;
+
+        // A hand whose definition is no longer loaded (uninstalled from disk
+        // while an instance lingers) has nothing to render against. The
+        // config is already saved and persisted; report success rather than
+        // failing a write that did land.
+        let Some(def) = self.skills.hand_registry.get_definition(&instance.hand_id) else {
+            warn!(
+                hand = %instance.hand_id,
+                instance = %instance_id,
+                "Hand definition not loaded — saved settings will render on next activation"
+            );
+            return Ok(instance);
+        };
+
+        let allowed_env = resolve_hand_allowed_env(&def, &instance.config);
+
+        // (agent_id, prompt, allowed_env) as they were before this pass, so a
+        // mid-loop failure can put every already-rewritten role back.
+        let mut rewritten: Vec<(AgentId, String, Vec<String>)> = Vec::new();
+
+        for (role, agent_id) in &instance.agent_ids {
+            // A role recorded on the instance but absent from the current
+            // definition (HAND.toml renamed a role and `POST /api/hands/reload`
+            // ran without respawning) cannot be rendered: the team helper would
+            // advertise peers under names that no longer exist and the skill
+            // helper would substitute the hand-shared playbook for the role's own.
+            // Skip loudly, as `clear_hand_agent_runtime_override` does.
+            if !def.agents.contains_key(role) {
+                warn!(
+                    hand = %instance.hand_id,
+                    role = %role,
+                    agent = %agent_id,
+                    "Hand definition has no entry for role; skipping prompt re-render \
+                     (re-activate the hand to resynchronise its agents)"
+                );
+                continue;
+            }
+
+            let Some(entry) = self.agents.registry.get(*agent_id) else {
+                // Role recorded on the instance but no live agent — e.g. the
+                // hand is paused, or a spawn failed. The next activation
+                // renders from the config we just persisted.
+                continue;
+            };
+            let previous_prompt = entry.manifest.model.system_prompt.clone();
+            let previous_env: Vec<String> = entry
+                .manifest
+                .metadata
+                .get("hand_allowed_env")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+
+            let mut manifest = entry.manifest.clone();
+            rerender_hand_prompt_tails(&mut manifest, role, &def, &instance.config);
+            match self.agents.registry.update_hand_rendered_prompt(
+                *agent_id,
+                manifest.model.system_prompt,
+                allowed_env.clone(),
+            ) {
+                Ok(()) => rewritten.push((*agent_id, previous_prompt, previous_env)),
+                Err(e) => {
+                    // Put the roles already rewritten in this pass back before
+                    // reverting the config, so neither half is left on the new
+                    // values.
+                    for (done_id, prompt, env) in rewritten {
+                        if let Err(restore_err) = self
+                            .agents
+                            .registry
+                            .update_hand_rendered_prompt(done_id, prompt, env)
+                        {
+                            warn!(
+                                agent = %done_id,
+                                error = %restore_err,
+                                "Failed to restore hand agent prompt after a partial settings \
+                                 re-render; this agent is running on settings the persisted \
+                                 config does not reflect until the hand is re-activated"
+                            );
+                        }
+                    }
+                    self.restore_hand_config(instance_id, previous.config, true);
+                    return Err(KernelError::LibreFang(e));
+                }
+            }
+        }
+
+        info!(
+            hand = %instance.hand_id,
+            instance = %instance_id,
+            roles = instance.agent_ids.len(),
+            rewritten = rewritten.len(),
+            "Hand settings saved and re-rendered into live agent prompts"
+        );
+        Ok(instance)
+    }
+
+    /// Put a hand instance's config back after a failed [`Self::update_hand_config`], logging rather than discarding either step's error.
+    ///
+    /// `repersist` is false on the persist-failure path — the write that just failed is the reason we are here, and retrying it would only produce a second identical error; the in-memory revert alone restores agreement with whatever is on disk.
+    fn restore_hand_config(
+        &self,
+        instance_id: uuid::Uuid,
+        previous: std::collections::HashMap<String, serde_json::Value>,
+        repersist: bool,
+    ) {
+        if let Err(e) = self
+            .skills
+            .hand_registry
+            .update_config(instance_id, previous)
+        {
+            warn!(
+                instance = %instance_id,
+                error = %e,
+                "Failed to roll back hand settings; the in-memory config keeps values the \
+                 save did not fully apply"
+            );
+            return;
+        }
+        if repersist {
+            if let Err(e) = self.persist_hand_state_result() {
+                warn!(
+                    instance = %instance_id,
+                    error = %e,
+                    "Rolled back hand settings in memory but could not re-persist \
+                     hand_state.json; a restart will replay the values the save did not apply"
+                );
+            }
+        }
     }
 
     fn apply_hand_agent_runtime_override_to_registry(
@@ -895,11 +1081,11 @@ impl LibreFangKernel {
         // this outer guard, two concurrent PATCHes can interleave their
         // `apply_hand_agent_runtime_override_to_registry` calls and leave
         // the live AgentRegistry inconsistent with `hand_state.json`.
-        let lock = self.hand_runtime_override_lock(instance.instance_id);
+        let lock = self.hand_instance_lock(instance.instance_id);
         let _guard = lock.lock().unwrap_or_else(|e| {
             warn!(
                 instance = %instance.instance_id,
-                "hand_runtime_override_lock poisoned, recovering: {e}"
+                "hand_instance_lock poisoned, recovering: {e}"
             );
             e.into_inner()
         });
@@ -998,11 +1184,11 @@ impl LibreFangKernel {
         // See the matching block in `update_hand_agent_runtime_override`:
         // serialize per instance so PATCH and DELETE on the same hand
         // can't interleave their AgentRegistry writes.
-        let lock = self.hand_runtime_override_lock(instance.instance_id);
+        let lock = self.hand_instance_lock(instance.instance_id);
         let _guard = lock.lock().unwrap_or_else(|e| {
             warn!(
                 instance = %instance.instance_id,
-                "hand_runtime_override_lock poisoned, recovering: {e}"
+                "hand_instance_lock poisoned, recovering: {e}"
             );
             e.into_inner()
         });

@@ -2191,57 +2191,14 @@ impl LibreFangKernel {
                                                     .hand_registry
                                                     .get_definition(&hand_id)
                                                 {
-                                                    if !def.settings.is_empty() {
-                                                        let empty =
-                                                            std::collections::HashMap::new();
-                                                        let cfg_for_settings =
-                                                            persisted_hand_configs
-                                                                .get(&hand_id)
-                                                                .unwrap_or(&empty);
-                                                        // Capture the returned env-var allowlist
-                                                        // and re-inject it into
-                                                        // metadata["hand_allowed_env"] — mirroring
-                                                        // the activation path in
-                                                        // `activate_hand_with_id`. Discarding it
-                                                        // here meant hand-injected env passthrough
-                                                        // silently disappeared on every restart
-                                                        // until a manual re-activation (#5137).
-                                                        let allowed_env =
-                                                            apply_settings_block_to_manifest(
-                                                                &mut entry.manifest,
-                                                                &def.settings,
-                                                                cfg_for_settings,
-                                                            );
-                                                        if !allowed_env.is_empty() {
-                                                            entry.manifest.metadata.insert(
-                                                                "hand_allowed_env".to_string(),
-                                                                serde_json::to_value(&allowed_env)
-                                                                    .unwrap_or_default(),
-                                                            );
-                                                        }
-                                                    }
-
-                                                    // Re-render `## Reference Knowledge` and
-                                                    // `## Your Team` tails — like the settings
-                                                    // tail above, the bare disk TOML never
-                                                    // carries them, so without re-rendering
-                                                    // here the agent silently loses skill
-                                                    // discoverability and peer awareness on
-                                                    // every restart. Helpers are
-                                                    // unconditionally idempotent: empty skill
-                                                    // content / single-agent hand / no peers
-                                                    // all collapse to a strip-only call that
-                                                    // also clears any stale tail left over
-                                                    // from when the hand previously had
-                                                    // those.
+                                                    // Re-render the whole prompt through the canonical helper — the same one activation and the settings-save path use, so the three cannot disagree about content or ordering.
+                                                    // The bare disk TOML carries none of the rendered tails, so without this the agent silently loses its configured values, skill discoverability and peer awareness on every restart.
                                                     //
-                                                    // Recover the agent's role from the
-                                                    // `hand_role:<role>` tag stamped at
-                                                    // activation. Skip silently when the tag
-                                                    // is missing — the agent isn't
-                                                    // hand-derived in a way we recognise, and
-                                                    // the activation path will re-stamp the
-                                                    // tags on the next `hand activate`.
+                                                    // The env passthrough allowlist is re-derived from the same (definition, config) pair.
+                                                    // Discarding it here meant hand-injected env passthrough silently disappeared on every restart until a manual re-activation (#5137); deriving it from the settings alone dropped every `[[requires]]`-declared name, which is the same disappearance one layer down.
+                                                    //
+                                                    // Recover the agent's role from the `hand_role:<role>` tag stamped at activation.
+                                                    // Skip when the tag is missing — the agent isn't hand-derived in a way we recognise, and the activation path will re-stamp the tags on the next `hand activate`.
                                                     let role_opt = entry
                                                         .manifest
                                                         .tags
@@ -2249,29 +2206,31 @@ impl LibreFangKernel {
                                                         .find_map(|t| t.strip_prefix("hand_role:"))
                                                         .map(|s| s.to_string());
                                                     if let Some(role) = role_opt {
-                                                        apply_skill_reference_block_to_manifest(
+                                                        let empty =
+                                                            std::collections::HashMap::new();
+                                                        let cfg_for_settings =
+                                                            persisted_hand_configs
+                                                                .get(&hand_id)
+                                                                .unwrap_or(&empty);
+                                                        let allowed_env =
+                                                            rerender_hand_prompt_tails(
+                                                                &mut entry.manifest,
+                                                                &role,
+                                                                &def,
+                                                                cfg_for_settings,
+                                                            );
+                                                        set_hand_allowed_env(
                                                             &mut entry.manifest,
-                                                            &role,
-                                                            &def,
-                                                        );
-                                                        apply_team_block_to_manifest(
-                                                            &mut entry.manifest,
-                                                            &role,
-                                                            &def,
+                                                            &allowed_env,
                                                         );
                                                     } else {
-                                                        // Hand membership is known (we're inside
-                                                        // the `hand:<id>` branch) but the role tag
-                                                        // wasn't stamped — this agent will boot
-                                                        // without skill discoverability or peer
-                                                        // awareness until somebody re-runs
-                                                        // `hand activate`. Log so the silent
-                                                        // degradation is at least greppable.
+                                                        // Hand membership is known (we're inside the `hand:<id>` branch) but the role tag wasn't stamped — this agent will boot without its rendered tails until somebody re-runs `hand activate`.
+                                                        // Log so the silent degradation is at least greppable.
                                                         debug!(
                                                             agent = %name,
                                                             hand = %hand_id,
                                                             "hand_role:<role> tag missing on \
-                                                             hand-derived agent; skipping skill/team \
+                                                             hand-derived agent; skipping prompt \
                                                              tail re-render until next hand activate"
                                                         );
                                                     }

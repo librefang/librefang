@@ -653,6 +653,9 @@ hand-no-active-instance = '{ $id }'에 대한 활성 핸드 인스턴스를 찾�
 hand-info-not-found = 핸드를 찾을 수 없음: { $error }
 hand-no-settings = 핸드 '{ $id }'에 구성 가능한 설정이 없습니다.
 hand-settings-title = '{ $id }'의 설정
+hand-setting-default-marker = (기본값)
+hand-setting-value-ignored = 저장된 값 "{ $value }"은(는) 이 설정에 유효하지 않아 무시되었습니다
+hand-settings-unknown-keys = 이 핸드가 선언하지 않아 무시된 저장 키: { $keys }
 hand-set-setting-success = 핸드 '{ $id }'에 { $key }={ $value }을(를) 설정함.
 hand-reloaded-summary = 핸드 다시 불러옴: { $added }개 추가됨, { $updated }개 업데이트됨, 총 { $total }개.
 label-chat-with = 다음과 채팅

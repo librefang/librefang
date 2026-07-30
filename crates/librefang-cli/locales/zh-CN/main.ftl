@@ -1610,6 +1610,9 @@ hand-no-active-instance = 未找到 `{ $id }` 的活动 Hand 实例。
 hand-info-not-found = 未找到 Hand：{ $error }
 hand-no-settings = Hand `{ $id }` 没有可配置设置。
 hand-settings-title = `{ $id }` 的设置
+hand-setting-default-marker = （默认）
+hand-setting-value-ignored = 已保存的值 "{ $value }" 对该设置无效，已忽略
+hand-settings-unknown-keys = 该 Hand 未声明、已被忽略的已保存键：{ $keys }
 hand-set-setting-success = 已为 Hand `{ $id }` 设置 { $key }={ $value }。
 hand-reloaded-summary = Hands 已重新加载：新增 { $added }，更新 { $updated }，总计 { $total }。
 label-chat-with = 聊天对象

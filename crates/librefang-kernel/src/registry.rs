@@ -648,6 +648,33 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Re-materialize a hand agent's rendered system prompt together with its `hand_allowed_env` metadata, in a single entry mutation.
+    ///
+    /// Both derive from the same hand instance config, so writing them apart would leave a window where the prompt advertises a setting whose env var the subprocess sandbox still refuses to pass through.
+    ///
+    /// An empty `allowed_env` **removes** the metadata key rather than storing an empty list: a setting change that drops the last `provider_env` must narrow the passthrough, not leave the previous list in place.
+    pub fn update_hand_rendered_prompt(
+        &self,
+        id: AgentId,
+        new_prompt: String,
+        allowed_env: Vec<String>,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.system_prompt = new_prompt;
+            if allowed_env.is_empty() {
+                entry.manifest.metadata.remove("hand_allowed_env");
+            } else {
+                entry.manifest.metadata.insert(
+                    "hand_allowed_env".to_string(),
+                    serde_json::to_value(&allowed_env).unwrap_or_default(),
+                );
+            }
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
     /// Update an agent's name (also updates the name index).
     pub fn update_name(&self, id: AgentId, new_name: String) -> LibreFangResult<()> {
         // #4980 nit: reject renames into the reserved `_operator:`

@@ -653,6 +653,9 @@ hand-no-active-instance = No active hand instance found for '{ $id }'.
 hand-info-not-found = Hand not found: { $error }
 hand-no-settings = Hand '{ $id }' has no configurable settings.
 hand-settings-title = Settings for '{ $id }'
+hand-setting-default-marker = (default)
+hand-setting-value-ignored = saved value "{ $value }" is not valid for this setting and was ignored
+hand-settings-unknown-keys = Saved keys not declared by this hand and ignored: { $keys }
 hand-set-setting-success = Set { $key }={ $value } for hand '{ $id }'.
 hand-reloaded-summary = Reloaded hands: { $added } added, { $updated } updated, { $total } total.
 label-chat-with = Chat with

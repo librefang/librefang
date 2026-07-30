@@ -444,23 +444,102 @@ pub(crate) fn cmd_hand_settings(id: &str) {
         ));
         std::process::exit(1);
     }
-    if let Some(config) = body.get("config").and_then(|c| c.as_object()) {
-        if config.is_empty() {
-            ui::step(&i18n::t_args("hand-no-settings", &[("id", id)]));
-        } else {
-            ui::section(&i18n::t_args("hand-settings-title", &[("id", id)]));
-            for (k, v) in config {
-                println!("  {}: {}", k.bold(), v);
+    // `GET /api/hands/{id}/settings` answers with `{hand_id, settings,
+    // current_values, effective_values, unknown_values}` — there is no `config`
+    // key, so the old lookup always fell through to "no settings" no matter how
+    // the hand was configured.
+    //
+    // Render from `effective_values`, not `current_values`: the two differ
+    // whenever a stored value is non-scalar or, for a Select, names no declared
+    // option, and the resolver falls back to the schema default in those cases.
+    // Printing the stored value would confidently report a setting the agent is
+    // not using. The daemon computes the effective value with the same function
+    // that renders the prompt, so there is nothing here to drift out of sync.
+    let schema = body
+        .get("settings")
+        .and_then(|s| s.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let saved = body.get("current_values").and_then(|c| c.as_object());
+    let effective = body.get("effective_values").and_then(|c| c.as_object());
+
+    if schema.is_empty() {
+        ui::step(&i18n::t_args("hand-no-settings", &[("id", id)]));
+    } else {
+        ui::section(&i18n::t_args("hand-settings-title", &[("id", id)]));
+        for setting in &schema {
+            let Some(key) = setting.get("key").and_then(|k| k.as_str()) else {
+                continue;
+            };
+            let value = effective
+                .and_then(|e| e.get(key))
+                .map(render_setting_value)
+                .or_else(|| setting.get("default").map(render_setting_value))
+                .unwrap_or_default();
+
+            // "(default)" means the effective value came from the schema, either
+            // because nothing is stored or because what is stored was rejected.
+            let stored = saved.and_then(|s| s.get(key));
+            let on_default = match stored {
+                None => true,
+                Some(v) => render_setting_value(v) != value,
+            };
+            if on_default {
+                println!(
+                    "  {}: {} {}",
+                    key.bold(),
+                    value,
+                    i18n::t("hand-setting-default-marker").dimmed()
+                );
+                // A stored value that lost to the default was silently discarded;
+                // say so rather than letting the operator assume it took effect.
+                if let Some(v) = stored {
+                    println!(
+                        "      {}",
+                        i18n::t_args(
+                            "hand-setting-value-ignored",
+                            &[("value", &render_setting_value(v))]
+                        )
+                        .dimmed()
+                    );
+                }
+            } else {
+                println!("  {}: {}", key.bold(), value);
             }
         }
-    } else {
-        ui::step(&i18n::t_args("hand-no-settings", &[("id", id)]));
+    }
+
+    // Stored keys the schema does not declare. `update_config` accepts any key,
+    // so `hand set <typo> <value>` is persisted, merged into every later save,
+    // and affects nothing — invisible unless it is reported here.
+    let unknown: Vec<&str> = body
+        .get("unknown_values")
+        .and_then(|u| u.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if !unknown.is_empty() {
+        ui::check_warn(&i18n::t_args(
+            "hand-settings-unknown-keys",
+            &[("keys", &unknown.join(", "))],
+        ));
+    }
+}
+
+/// Print a setting value without JSON quoting for the common string case.
+fn render_setting_value(value: &serde_json::Value) -> String {
+    match value.as_str() {
+        Some(s) => s.to_string(),
+        None => value.to_string(),
     }
 }
 
 pub(crate) fn cmd_hand_set(id: &str, key: &str, value: &str) {
     let base = require_daemon("hand set");
     let client = daemon_client();
+    // The handler deserializes the body as a flat `{key: value}` map and
+    // merges it over the saved config. Wrapping it in `{"config": …}` — as
+    // this command used to — stored a literal `config` key holding the whole
+    // object and never touched the setting the user named.
     let mut config = serde_json::Map::new();
     config.insert(
         key.to_string(),
@@ -469,7 +548,7 @@ pub(crate) fn cmd_hand_set(id: &str, key: &str, value: &str) {
     let body = daemon_json(
         client
             .put(format!("{base}/api/hands/{id}/settings"))
-            .json(&serde_json::json!({ "config": config }))
+            .json(&serde_json::Value::Object(config))
             .send(),
     );
     if body.get("error").is_some() {

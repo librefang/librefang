@@ -410,6 +410,375 @@ default = "15"
 }
 
 // ---------------------------------------------------------------------------
+// PUT /api/hands/{hand_id}/settings — saved values reach the live prompts
+// ---------------------------------------------------------------------------
+
+/// Regression test for #6636: saving settings must re-render the `## User Configuration` tail on every live agent of the hand.
+///
+/// Before the fix, the handler wrote the instance config and persisted `hand_state.json` but never touched the agents, so a running agent kept answering from the HAND.toml defaults until the daemon restarted — boot replays hands through `activate_hand_with_id`, which does re-render.
+/// The hand here is multi-agent and ships skill content so the test also pins the tail-ordering hazard: re-rendering the settings block on a prompt that already carries `## Reference Knowledge` and `## Your Team` must not truncate them away.
+#[tokio::test(flavor = "multi_thread")]
+async fn update_hand_settings_rerenders_live_agent_prompts() {
+    let h = boot_router_open().await;
+
+    let toml = r#"
+id = "settings-prompt-test"
+name = "Settings Prompt Test"
+description = "Multi-agent hand with settings for prompt-render coverage."
+category = "data"
+
+[[settings]]
+key = "trading_mode"
+label = "Trading Mode"
+setting_type = "select"
+default = "paper"
+
+[[settings.options]]
+value = "paper"
+label = "Paper Trading"
+
+[[settings.options]]
+value = "live"
+label = "Live Trading"
+provider_env = "BROKER_ACCOUNT_ID"
+
+[[settings]]
+key = "initial_capital"
+label = "Initial Capital"
+setting_type = "text"
+default = "10000"
+
+[agents.lead]
+name = "settings-prompt-lead"
+description = "coordinator"
+module = "builtin:chat"
+coordinator = true
+
+[agents.lead.model]
+provider = "openai"
+model = "gpt-4o-mini"
+system_prompt = "BASE LEAD PROMPT"
+
+[agents.worker]
+name = "settings-prompt-worker"
+description = "executes trades"
+module = "builtin:chat"
+
+[agents.worker.model]
+provider = "openai"
+model = "gpt-4o-mini"
+system_prompt = "BASE WORKER PROMPT"
+"#;
+    let (status, body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/install",
+        Some(serde_json::json!({
+            "toml_content": toml,
+            "skill_content": "TRADING PLAYBOOK",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "install body: {body}");
+
+    // Activate on the schema defaults, exactly as the dashboard's
+    // activation modal does when the user changes nothing.
+    let instance = h
+        ._state
+        .kernel
+        .activate_hand("settings-prompt-test", std::collections::HashMap::new())
+        .expect("activate hand");
+    let lead_id = *instance
+        .agent_ids
+        .get("lead")
+        .expect("lead role must have spawned an agent");
+
+    let prompt_of = |id| {
+        h._state
+            .kernel
+            .agent_registry()
+            .get(id)
+            .expect("agent must be in the registry")
+            .manifest
+            .model
+            .system_prompt
+    };
+    let allowed_env_of = |id| -> Option<Vec<String>> {
+        h._state
+            .kernel
+            .agent_registry()
+            .get(id)
+            .expect("agent must be in the registry")
+            .manifest
+            .metadata
+            .get("hand_allowed_env")
+            .map(|v| serde_json::from_value(v.clone()).expect("allowlist is a string array"))
+    };
+
+    let before = prompt_of(lead_id);
+    assert!(
+        before.contains("Paper Trading") && before.contains("10000"),
+        "activation must render the schema defaults; got: {before}"
+    );
+
+    let (status, body) = json_request(
+        &h.app,
+        Method::PUT,
+        "/api/hands/settings-prompt-test/settings",
+        Some(serde_json::json!({
+            "trading_mode": "live",
+            "initial_capital": "100",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update body: {body}");
+
+    // Assertions that are identical for both roles buy no per-role coverage, so
+    // each role also gets the two that are not: its own author-written base
+    // prompt, and a team roster naming the *other* role. A re-render that
+    // crossed the roles would pass everything else in this loop.
+    let expected_per_role = [
+        ("lead", "BASE LEAD PROMPT", "- **worker**:", "- **lead**:"),
+        (
+            "worker",
+            "BASE WORKER PROMPT",
+            "- **lead**:",
+            "- **worker**:",
+        ),
+    ];
+    for (role, agent_id) in &instance.agent_ids {
+        let after = prompt_of(*agent_id);
+        assert!(
+            after.contains("Live Trading"),
+            "[{role}] saved value must reach the live system prompt; got: {after}"
+        );
+        assert!(
+            after.contains("- Initial Capital: 100"),
+            "[{role}] saved text value must reach the live system prompt; got: {after}"
+        );
+        assert!(
+            !after.contains("Paper Trading"),
+            "[{role}] HAND.toml default must be gone from the prompt; got: {after}"
+        );
+        assert!(
+            !after.contains("Initial Capital: 10000"),
+            "[{role}] HAND.toml default must be gone from the prompt; got: {after}"
+        );
+        assert!(
+            after.contains("## Reference Knowledge\n\nTRADING PLAYBOOK"),
+            "[{role}] skill tail must survive the settings re-render; got: {after}"
+        );
+        assert_eq!(
+            after.matches("## User Configuration").count(),
+            1,
+            "[{role}] exactly one settings block must be present; got: {after}"
+        );
+
+        let (_, base, peer, own) = expected_per_role
+            .iter()
+            .find(|(r, ..)| r == role)
+            .unwrap_or_else(|| panic!("unexpected role {role}"));
+        assert!(
+            after.starts_with(&format!("{base}\n\n---\n\n")),
+            "[{role}] must keep its own author-written base prompt; got: {after}"
+        );
+        assert!(
+            after.contains(peer),
+            "[{role}] team tail must name its peer; got: {after}"
+        );
+        assert!(
+            !after.contains(own),
+            "[{role}] must not appear in its own team roster; got: {after}"
+        );
+    }
+
+    // The `live` option declares `provider_env`, so the save widened the env
+    // passthrough on every live agent.
+    for (role, agent_id) in &instance.agent_ids {
+        let env = allowed_env_of(*agent_id);
+        assert_eq!(
+            env,
+            Some(vec!["BROKER_ACCOUNT_ID".to_string()]),
+            "[{role}] the selected option's provider_env must reach the live agent"
+        );
+    }
+
+    // Switching back to the option that declares none must *narrow* it again —
+    // the metadata key is removed rather than left holding the wider list, or the
+    // agent's subprocess keeps a credential the current settings do not grant.
+    let (status, body) = json_request(
+        &h.app,
+        Method::PUT,
+        "/api/hands/settings-prompt-test/settings",
+        Some(serde_json::json!({"trading_mode": "paper"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update body: {body}");
+    for (role, agent_id) in &instance.agent_ids {
+        assert_eq!(
+            allowed_env_of(*agent_id),
+            None,
+            "[{role}] hand_allowed_env must be removed once no option grants one"
+        );
+    }
+
+    // Restore `live` for the remaining assertions below.
+    let (status, _) = json_request(
+        &h.app,
+        Method::PUT,
+        "/api/hands/settings-prompt-test/settings",
+        Some(serde_json::json!({"trading_mode": "live"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // And the values are readable back through the GET side.
+    let (status, body) = get_json(&h.app, "/api/hands/settings-prompt-test/settings").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["current_values"]["trading_mode"].as_str(),
+        Some("live")
+    );
+    assert_eq!(
+        body["current_values"]["initial_capital"].as_str(),
+        Some("100")
+    );
+}
+
+/// A role recorded on the instance but missing from the reloaded definition must be skipped, not rendered against the wrong role's data.
+///
+/// `POST /api/hands/reload` swaps the definition without respawning, so after a role rename the instance still carries the old `agent_ids` key.
+/// Rendering that role anyway makes the team helper advertise peers under names that no longer exist and makes the skill helper substitute the hand-shared playbook for the role's own — silently, in the prompt the agent then acts on.
+/// `clear_hand_agent_runtime_override` already guards the same way.
+#[tokio::test(flavor = "multi_thread")]
+async fn update_hand_settings_skips_roles_absent_from_the_reloaded_definition() {
+    let h = boot_router_open().await;
+
+    let base_toml = |lead_role: &str| {
+        format!(
+            r#"
+id = "role-drift-test"
+name = "Role Drift Test"
+description = "Renamed-role coverage."
+category = "data"
+
+[[settings]]
+key = "region"
+label = "Region"
+setting_type = "text"
+default = "eu"
+
+[agents.{lead_role}]
+name = "role-drift-lead"
+description = "coordinator"
+module = "builtin:chat"
+coordinator = true
+
+[agents.{lead_role}.model]
+provider = "openai"
+model = "gpt-4o-mini"
+system_prompt = "BASE LEAD PROMPT"
+
+[agents.worker]
+name = "role-drift-worker"
+description = "executes tasks"
+module = "builtin:chat"
+
+[agents.worker.model]
+provider = "openai"
+model = "gpt-4o-mini"
+system_prompt = "BASE WORKER PROMPT"
+"#
+        )
+    };
+
+    let (status, body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/install",
+        Some(serde_json::json!({
+            "toml_content": base_toml("lead"),
+            "skill_content": "PLAYBOOK",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "install body: {body}");
+
+    let instance = h
+        ._state
+        .kernel
+        .activate_hand("role-drift-test", std::collections::HashMap::new())
+        .expect("activate hand");
+    let worker_id = *instance.agent_ids.get("worker").expect("worker spawned");
+
+    let prompt_of = |id| {
+        h._state
+            .kernel
+            .agent_registry()
+            .get(id)
+            .expect("agent must be in the registry")
+            .manifest
+            .model
+            .system_prompt
+    };
+    let before = prompt_of(worker_id);
+    assert!(
+        before.contains("- **lead**:"),
+        "worker's team tail names the lead before the rename; got: {before}"
+    );
+
+    // Rename `lead` to `executor` on disk and reload — the instance keeps its
+    // `agent_ids = {lead, worker}` because reload does not respawn.
+    let (status, body) = json_request(
+        &h.app,
+        Method::PUT,
+        "/api/hands/role-drift-test/manifest",
+        Some(serde_json::json!({"toml_content": base_toml("executor")})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "manifest body: {body}");
+    let (status, _) = json_request(&h.app, Method::POST, "/api/hands/reload", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = json_request(
+        &h.app,
+        Method::PUT,
+        "/api/hands/role-drift-test/settings",
+        Some(serde_json::json!({"region": "us"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update body: {body}");
+    assert_eq!(
+        body["config"]["region"].as_str(),
+        Some("us"),
+        "the config write still lands even when a role cannot be rendered: {body}"
+    );
+
+    // `worker` is still in the definition, so it re-renders with the new value —
+    // and its team tail now names `executor`, which is correct for the current
+    // definition.
+    let worker_after = prompt_of(worker_id);
+    assert!(
+        worker_after.contains("- Region: us"),
+        "the surviving role must pick up the saved value; got: {worker_after}"
+    );
+
+    // The dropped `lead` role has no entry in the reloaded definition, so its
+    // agent must be left exactly as it was rather than rendered against
+    // `worker`'s data.
+    let lead_id = *instance.agent_ids.get("lead").expect("lead spawned");
+    let lead_after = prompt_of(lead_id);
+    assert!(
+        lead_after.starts_with("BASE LEAD PROMPT"),
+        "the dropped role must keep its own base prompt; got: {lead_after}"
+    );
+    assert!(
+        !lead_after.contains("- Region: us"),
+        "a role the definition no longer declares must be skipped, not re-rendered; got: {lead_after}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // POST /api/hands/install — input validation
 // ---------------------------------------------------------------------------
 
