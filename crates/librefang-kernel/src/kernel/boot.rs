@@ -1035,7 +1035,7 @@ impl LibreFangKernel {
         // Sync registry: downloads if cache is stale, pre-installs providers/agents/integrations.
         // Skips download if cache is fresh; skips copy if files already exist.
         // `[registry] auto_sync = false` freezes `~/.librefang/registry/`: the sync fast-forwards that checkout with `git reset --hard origin/main`, which destroys every local modification under it — including the ones `PUT /api/hands/{id}/manifest` writes for a registry-shipped hand.
-        // Explicit operator actions (`librefang init`, `POST /api/catalog/update`, `POST /api/hands/reload`) still sync.
+        // Explicit operator actions (`librefang init`, `POST /api/catalog/update`) still fetch; `POST /api/hands/reload` only reloads whatever is already on disk and never fetched from upstream, so it is unaffected either way.
         if config.registry.auto_sync {
             librefang_runtime::registry_sync::sync_registry(
                 &config.home_dir,
@@ -1046,7 +1046,7 @@ impl LibreFangKernel {
         } else {
             info!(
                 "[registry] auto_sync = false — skipping the boot registry sync; \
-                 run `librefang hand reload` or POST /api/catalog/update to refresh on demand"
+                 run POST /api/catalog/update to refresh on demand"
             );
         }
 

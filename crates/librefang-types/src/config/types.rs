@@ -5571,7 +5571,8 @@ pub struct RegistryConfig {
     /// That checkout is a git clone the sync fast-forwards with `git reset --hard origin/main`, so every local modification under it is destroyed — including the ones `PUT /api/hands/{id}/manifest` writes, which land in `registry/hands/<id>/HAND.toml` for a hand that shipped with the registry.
     /// Set to `false` to freeze the checkout: boot skips its `sync_registry` pass and the periodic catalog task skips the network refresh while still rebuilding the model catalog from what is already on disk.
     ///
-    /// Only *automatic* refreshes are gated. `librefang init`, `POST /api/catalog/update`, and `POST /api/hands/reload` are explicit operator actions and still sync, so freezing the registry does not strand an operator who wants an update.
+    /// Only *automatic* refreshes are gated. `librefang init` and `POST /api/catalog/update` are explicit operator actions and still fetch, so freezing the registry does not strand an operator who wants an update.
+    /// `POST /api/hands/reload` never fetched from upstream in the first place — it only reloads hand definitions already on disk into memory — so it is unaffected either way.
     ///
     /// Equivalent to setting `LIBREFANG_REGISTRY_OFFLINE=1`, except it is scoped to the automatic paths rather than every fetch in the process tree, and it survives in `config.toml` rather than in whatever launched the daemon.
     #[serde(default = "default_true")]
