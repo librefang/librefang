@@ -51,9 +51,12 @@ pub struct KernelAdapter {
 
 impl KernelAdapter {
     pub fn new(kernel: Arc<LibreFangKernel>) -> Self {
-        // `kernel_handle()` panics if `set_self_handle` hasn't run, but
-        // `LibreFangKernel::boot` wires that up before returning, so by
-        // here it's safe.
+        // `kernel_handle()` is an `.expect`, and `LibreFangKernel::boot` does
+        // **not** populate `self_handle` — it returns a bare kernel, and every
+        // caller wraps it in an `Arc` and calls `set_self_handle` itself.
+        // Constructing an adapter over a kernel that skipped that step aborts
+        // the process here, which is what the CLI's in-process ACP backend did
+        // until `acp.rs` was fixed to call it.
         let kernel_handle = kernel.kernel_handle();
         Self {
             kernel,

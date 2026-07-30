@@ -60,6 +60,16 @@ impl LibreFangKernel {
     }
 
     /// Boot the kernel with configuration from the given path.
+    ///
+    /// Returns a bare `LibreFangKernel`. **Wrapping it in an `Arc` and calling
+    /// [`Self::set_self_handle`] on that `Arc` is the caller's job** — booting
+    /// does not populate the `self_handle` slot, and [`Self::kernel_handle`] is
+    /// an `.expect` that aborts the process when the slot is empty. Every path
+    /// that dispatches an agent turn resolves that handle, so a surface which
+    /// skips the call works for read-only operations and dies the moment it
+    /// sends a message. Both CLI in-process backends did exactly that until
+    /// #6651; the call is idempotent, so make it unconditionally right after
+    /// the `Arc` wrap.
     pub fn boot(config_path: Option<&Path>) -> KernelResult<Self> {
         let config = load_config(config_path)
             .map_err(|e| crate::error::KernelError::LibreFang(LibreFangError::Config(e)))?;
@@ -74,6 +84,10 @@ impl LibreFangKernel {
     /// `main()`. Mutating env from here would be UB: this function is
     /// reached from inside a tokio runtime, and `std::env::set_var` is
     /// unsound once other threads exist (Rust 1.80+).
+    ///
+    /// Carries the same post-boot obligation as [`Self::boot`]: wrap the
+    /// returned kernel in an `Arc` and call [`Self::set_self_handle`] on it
+    /// before anything can dispatch an agent turn.
     pub fn boot_with_config(mut config: KernelConfig) -> KernelResult<Self> {
         use librefang_types::config::KernelMode;
 

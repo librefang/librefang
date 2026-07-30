@@ -1,0 +1,7 @@
+Call `set_self_handle` in the CLI's in-process ACP and MCP backends, which boot a kernel of their own and previously aborted the process the moment they needed a kernel handle.
+`LibreFangKernel::boot` returns a bare kernel and leaves the `self_handle` slot empty — filling it is the caller's job, discharged by seven other production sites but not by these two.
+ACP failed at startup: `KernelAdapter::new` reads `kernel_handle()` as its first action, and that accessor is an `.expect`, so `librefang acp` aborted before serving a request.
+MCP failed later and less visibly, on the first `librefang_agent_*` tool call, because `send_message` resolves the same handle to plumb kernel tools into the agent turn.
+A comment on `KernelAdapter::new` asserting that `boot` wires the handle up before returning is corrected — that claim is what made both omissions look deliberate, and `boot.rs` contains no such call.
+Three tests in `crates/librefang-kernel/tests/self_handle_bootstrap_test.rs` pin the kernel-side contract from both directions, including the idempotence that makes a defensive call safe for any future surface that boots its own kernel, and a source-scanning guard in `librefang-cli` asserts the call sites themselves so deleting either line fails rather than silently restoring the abort.
+Found while triaging the unrelated concern reported in #6651, which does not reproduce on `main` (#6686) (@houko)

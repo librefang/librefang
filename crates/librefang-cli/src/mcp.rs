@@ -184,8 +184,19 @@ fn create_backend(config: Option<std::path::PathBuf>) -> McpBackend {
     let kernel = Arc::new(kernel);
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
 
-    // Spawn approval expiry sweep task on the runtime
     rt.block_on(async {
+        // `boot` leaves `self_handle` empty — filling it is the caller's job,
+        // as in `server.rs` and `desktop/src/server.rs`. `send_message` (the
+        // path behind every `librefang_agent_*` MCP tool) calls
+        // `self.kernel_handle()`, which is an `.expect`, so without this the
+        // in-process backend aborts on the first tool invocation.
+        //
+        // Registering the `AgentLoopEnd` hooks from inside the runtime also
+        // matters: `set_self_handle` spawns its orphan-temp-file sweep with
+        // `tokio::spawn` when a runtime is current, and falls back to running
+        // it inline when none is.
+        kernel.clone().set_self_handle();
+        // Spawn approval expiry sweep task on the runtime
         kernel.clone().spawn_approval_sweep_task();
     });
 

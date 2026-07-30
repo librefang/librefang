@@ -77,6 +77,13 @@ pub fn run_acp_server(config: Option<PathBuf>, agent: Option<String>) {
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
     let exit_code = rt.block_on(async {
+        // `boot` leaves `self_handle` empty — it is the caller's job to fill it
+        // once the kernel is in an `Arc`, the same way `server.rs` and
+        // `desktop/src/server.rs` do. `KernelAdapter::new` below reads
+        // `kernel_handle()` immediately, and that accessor is an `.expect`, so
+        // without this the in-process ACP backend aborts before serving a
+        // single request.
+        kernel.clone().set_self_handle();
         kernel.clone().spawn_approval_sweep_task();
 
         let agent_name = agent.as_deref().unwrap_or(DEFAULT_AGENT_NAME);
