@@ -2208,13 +2208,8 @@ pub async fn run_daemon(
         bg_tasks.push(tokio::spawn(async move {
             loop {
                 let cfg = kernel.config_snapshot();
-                // This task is what actually clobbered operator edits under
-                // `~/.librefang/registry/`: it passes a hard-coded TTL of `0` into
-                // `refresh_registry_checkout`, so `should_refresh` is true for any
-                // marker older than a second and `git reset --hard origin/main` runs
-                // on the first tick and every 24 h after. Boot's own `sync_registry`
-                // pass honours `cache_ttl_secs` (86400 by default) and usually skips,
-                // so gating boot alone would have changed nothing.
+                // This task is what actually clobbered operator edits under `~/.librefang/registry/`: it passes a hard-coded TTL of `0` into `refresh_registry_checkout`, so `should_refresh` is true for any marker older than a second and `git reset --hard origin/main` runs on the first tick and every 24 h after.
+                // Boot's own `sync_registry` pass honours `cache_ttl_secs` (86400 by default) and usually skips, so gating boot alone would have changed nothing.
                 match librefang_kernel::catalog_sync::sync_catalog_to(
                     kernel.home_dir(),
                     &cfg.registry.registry_mirror,

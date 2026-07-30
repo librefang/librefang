@@ -45,7 +45,8 @@ struct ProviderCatalogFile {
 ///
 /// `registry_host` is forwarded to `registry_sync` (full base URL of the forge hosting the registry; `None` = GitHub).
 ///
-/// `refresh_from_upstream` is `[registry] auto_sync`. It gates the network refresh only — see the call site below for why the catalog rebuild is deliberately not gated with it.
+/// `refresh_from_upstream` is `[registry] auto_sync`.
+/// It gates the network refresh only — see the call site below for why the catalog rebuild is deliberately not gated with it.
 /// The periodic task passes the configured value; `POST /api/catalog/update` passes `true`, because clicking Update is an explicit request to fetch.
 pub async fn sync_catalog_to(
     home_dir: &std::path::Path,
@@ -69,10 +70,8 @@ pub async fn sync_catalog_to(
     // working tree. It's blocking (git subprocess), so hop to a
     // blocking task to keep the runtime responsive.
     //
-    // `refresh_from_upstream = false` (`[registry] auto_sync = false`) skips only
-    // the network half. The catalog is still rebuilt from `registry/providers/`
-    // below, so an operator who froze the checkout keeps a working catalog
-    // instead of an empty one.
+    // `refresh_from_upstream = false` (`[registry] auto_sync = false`) skips only the network half.
+    // The catalog is still rebuilt from `registry/providers/` below, so an operator who froze the checkout keeps a working catalog instead of an empty one.
     if refresh_from_upstream {
         let home = home_dir.to_path_buf();
         let mirror = registry_mirror.to_string();
