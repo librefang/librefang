@@ -1991,18 +1991,12 @@ mod tests {
 
     /// Extract every mutating route registered in `routes::plugins::router()`.
     ///
-    /// Shared by the classification guard and by
-    /// `plugin_route_extraction_is_line_ending_agnostic`, which is what makes
-    /// the CRLF case provable without a Windows runner.
+    /// Shared by the classification guard and by `plugin_route_extraction_is_line_ending_agnostic`, which is what makes the CRLF case provable without a Windows runner.
     ///
-    /// Line endings are normalised first. `include_str!` yields the file's
-    /// bytes verbatim and a Windows checkout stores CRLF, so the `"\n}\n"`
-    /// body terminator matched nothing there — the guard panicked on `.expect`
-    /// and the Windows shard was the only lane that went red.
+    /// Line endings are normalised first.
+    /// `include_str!` yields the file's bytes verbatim and a Windows checkout stores CRLF, so the `"\n}\n"` body terminator matched nothing there — the guard panicked on `.expect` and the Windows shard was the only lane that went red.
     ///
-    /// Returns an empty vec rather than panicking when the shape is
-    /// unrecognisable: the caller asserts on the count, which produces a
-    /// message naming what it did parse instead of an opaque `expect`.
+    /// Returns an empty vec rather than panicking when the shape is unrecognisable: the caller asserts on the count, which produces a message naming what it did parse instead of an opaque `expect`.
     fn extract_mutating_plugin_routes(src: &str) -> Vec<(axum::http::Method, String)> {
         let src = src.replace("\r\n", "\n");
         let Some(body_start) = src.find("pub fn router()") else {
@@ -2016,8 +2010,7 @@ mod tests {
 
         let mut out = Vec::new();
         // Each `.route(` chunk holds one path literal and its method calls.
-        // Formatting splits these across lines, so operate per chunk rather
-        // than per line.
+        // Formatting splits these across lines, so operate per chunk rather than per line.
         for chunk in body.split(".route(").skip(1) {
             let Some(path_start) = chunk.find('"') else {
                 continue;
@@ -2030,8 +2023,7 @@ mod tests {
             if !route_path.starts_with("/plugins") {
                 continue; // context-engine reads live in the same router
             }
-            // Only the method calls for THIS route: `split` already stopped at
-            // the next `.route(` boundary.
+            // Only the method calls for THIS route: `split` already stopped at the next `.route(` boundary.
             let methods_src = &after[path_len..];
 
             for (name, method) in [
@@ -2040,8 +2032,7 @@ mod tests {
                 ("patch", axum::http::Method::PATCH),
                 ("delete", axum::http::Method::DELETE),
             ] {
-                // `axum::routing::post(h)` for the first method on a route,
-                // `.delete(h)` for one chained onto it.
+                // `axum::routing::post(h)` for the first method on a route, `.delete(h)` for one chained onto it.
                 if methods_src.contains(&format!("routing::{name}("))
                     || methods_src.contains(&format!(".{name}("))
                 {
@@ -2054,9 +2045,7 @@ mod tests {
 
     /// Regression for the Windows-only failure of the guard below.
     ///
-    /// The bug was invisible on Linux and macOS because a checkout there stores
-    /// LF, so a platform-independent test has to supply the CRLF form itself
-    /// rather than rely on the host's line endings (refs #5716).
+    /// The bug was invisible on Linux and macOS because a checkout there stores LF, so a platform-independent test has to supply the CRLF form itself rather than rely on the host's line endings (refs #5716).
     #[test]
     fn plugin_route_extraction_is_line_ending_agnostic() {
         const PLUGINS_SRC: &str = include_str!("routes/plugins.rs");
@@ -2116,13 +2105,8 @@ mod tests {
             "DELETE /plugins/{name}/state",
         ];
 
-        // `include_str!` yields the file's bytes verbatim, and a Windows
-        // checkout stores CRLF, so `find("\n}\n")` matched nothing there and
-        // this test panicked on `.expect` — green on Linux and macOS, red on
-        // the Windows shard only. Normalise once so every literal below is
-        // line-ending agnostic; `extract_mutating_plugin_routes` is the shared
-        // implementation so the CRLF case is provable without a Windows runner
-        // (see `plugin_route_extraction_is_line_ending_agnostic`).
+        // `include_str!` yields the file's bytes verbatim, and a Windows checkout stores CRLF, so `find("\n}\n")` matched nothing there and this test panicked on `.expect` — green on Linux and macOS, red on the Windows shard only.
+        // Normalise once so every literal below is line-ending agnostic; `extract_mutating_plugin_routes` is the shared implementation so the CRLF case is provable without a Windows runner (see `plugin_route_extraction_is_line_ending_agnostic`).
         let routes = extract_mutating_plugin_routes(PLUGINS_SRC);
 
         let mut unclassified = Vec::new();
