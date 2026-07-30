@@ -16,6 +16,7 @@ impl kernel_handle::ApiAuth for LibreFangKernel {
         let cfg = self.config.load();
         kernel_handle::ApiAuthSnapshot {
             api_key: cfg.api_key.clone(),
+            api_key_hash: cfg.api_key_hash.clone(),
             dashboard: kernel_handle::DashboardRawConfig {
                 user: cfg.dashboard_user.clone(),
                 pass: cfg.dashboard_pass.clone(),

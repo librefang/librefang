@@ -17,9 +17,13 @@ use super::*;
     )
 )]
 pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let scfg = state.kernel.config_ref();
-    let api_key_empty = scfg.api_key.is_empty();
-    drop(scfg);
+    // Ask the live master-credential handle — the same one the auth middleware
+    // verifies against (#6613). Reading `api_key` alone reported
+    // `localhost_only` for a hash-only or env-sourced deployment that is in
+    // fact fully bearer-gated; re-resolving the field from a config snapshot
+    // would report correctly but unlock the vault per request for a
+    // `vault:NAME` value, to answer a yes/no question the handle already holds.
+    let api_key_empty = !state.master_key.is_configured().await;
     let auth_mode = if api_key_empty {
         "localhost_only"
     } else {

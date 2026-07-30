@@ -1140,6 +1140,11 @@ auth-pool-key-requests = запитів={ $count }
 auth-pool-key-item =     - [{ $label }] { $key_display }  priority={ $pri }{ $reqs_str }  status={ $status }
 auth-hash-add-config-hint = Додайте до config.toml:
 auth-hash-config-entry =   dashboard_pass_hash = "{ $hash }"
+auth-enter-api-key-prompt = Введіть ключ API:
+auth-api-key-empty = Ключ API не може бути порожнім.
+auth-api-key-generated = Новий ключ API (передайте його своїм клієнтам — він показується лише один раз):
+auth-api-key-config-entry =   api_key_hash = "{ $hash }"
+auth-api-key-remove-plaintext-hint = Потім видаліть рядок `api_key` із відкритим текстом. Клієнти й далі надсилають сам ключ; змінюється лише копія, яку зберігає демон.
 
 # Agent command specific keys
 agent-spawn-id-label =   ID:   { $id }

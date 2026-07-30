@@ -950,6 +950,18 @@ pub async fn config_reload(
     );
     match state.kernel.reload_config().await {
         Ok(plan) => {
+            // `api_key` / `api_key_hash` are classified as read-live in
+            // `build_reload_plan`, which is true for the WS and terminal
+            // upgrade paths (they call `valid_api_tokens(&auth_snapshot())`
+            // per connection) but was never true for the HTTP middleware:
+            // `api_key_lock` was written only at boot and on a dashboard
+            // credential change, so a reloaded master key kept authenticating
+            // with the old value until the daemon restarted. Push the fresh
+            // snapshot into both live handles here (#6613).
+            let snap = state.kernel.auth_snapshot();
+            crate::server::refresh_master_credential(&snap, &state.api_key_lock, &state.master_key)
+                .await;
+
             // If channel config changed, the kernel already cleared the adapter
             // registry — but we also need to stop the old BridgeManager and
             // restart adapters from the new config.

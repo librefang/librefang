@@ -1126,6 +1126,11 @@ auth-pool-key-requests = requests={ $count }
 auth-pool-key-item =     - [{ $label }] { $key_display }  priority={ $pri }{ $reqs_str }  status={ $status }
 auth-hash-add-config-hint = config.toml에 추가하십시오:
 auth-hash-config-entry =   dashboard_pass_hash = "{ $hash }"
+auth-enter-api-key-prompt = API 키를 입력하십시오:
+auth-api-key-empty = API 키는 비어 있을 수 없습니다.
+auth-api-key-generated = 새 API 키 (클라이언트에 전달하십시오 — 한 번만 표시됩니다):
+auth-api-key-config-entry =   api_key_hash = "{ $hash }"
+auth-api-key-remove-plaintext-hint = 그런 다음 평문 `api_key` 줄을 제거하십시오. 클라이언트는 계속 같은 키를 전송하며, 데몬이 저장하는 사본만 바뀝니다.
 
 # Agent command specific keys
 agent-spawn-id-label =   ID:   { $id }

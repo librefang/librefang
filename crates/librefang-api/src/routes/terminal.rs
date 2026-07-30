@@ -339,13 +339,31 @@ pub(super) async fn authorize_terminal_request(
     }
 
     // Warn if terminal is enabled without any authentication configured.
-    // Single snapshot so all three derived flags come from the same hot-reload
-    // generation (#3744 review #2).
+    // Single snapshot for the user-key and dashboard flags, so they come from
+    // the same hot-reload generation (#3744 review #2). The master credential
+    // is read from the live handles instead — those are written from one
+    // snapshot by `refresh_master_credential`, so this is still a coherent
+    // view, not a mix of generations.
     let auth_snap = librefang_kernel::kernel_handle::ApiAuth::auth_snapshot(state.kernel.as_ref());
-    let valid_tokens = crate::server::valid_api_tokens(&auth_snap);
+    // Master credential from the live handles rather than re-resolved from the
+    // snapshot (#6613) — see `server::master_auth_required` for why: a
+    // `vault:NAME` `api_key` would otherwise cost a keyring read plus an AEAD
+    // file decrypt on every terminal upgrade, twice, before any credential has
+    // been presented.
+    let master_tokens = state.api_key_lock.read().await.clone();
+    let master_hash = state.master_key.hash().await;
     let user_api_keys = crate::server::configured_user_api_keys(&auth_snap);
     let dashboard_auth = crate::server::has_dashboard_credentials(&auth_snap);
-    let auth_configured = !valid_tokens.is_empty() || !user_api_keys.is_empty() || dashboard_auth;
+    // NOT `!valid_tokens.is_empty()` (#6613): a master key configured only as
+    // `api_key_hash` produces an empty token list, which would drive
+    // `decide_auth` past its reject branch into `LocalBypass` — unauthenticated
+    // shell access on a daemon the operator believes is bearer-gated.
+    let auth_configured = crate::server::master_auth_required(
+        &master_tokens,
+        &master_hash,
+        &user_api_keys,
+        dashboard_auth,
+    );
     if !auth_configured {
         if cfg.terminal.allow_remote && cfg.terminal.allow_unauthenticated_remote {
             tracing::error!(
@@ -375,12 +393,12 @@ pub(super) async fn authorize_terminal_request(
     // (cookies). Explicit Bearer tokens cannot be forged cross-origin, so
     // authenticated requests bypass origin checks entirely.
     let token_status = if let Some(token_str) = provided_token.as_deref() {
-        let api_auth = {
-            use subtle::ConstantTimeEq;
-            valid_tokens.iter().any(|key| {
-                token_str.len() == key.len() && token_str.as_bytes().ct_eq(key.as_bytes()).into()
-            })
-        };
+        let plaintext_auth = crate::server::matches_master_token(&master_tokens, token_str);
+        // Master `api_key_hash` fallback (#6613), tried only after the
+        // constant-time plaintext pass misses — and the only match a hash-only
+        // daemon can ever make, since its plaintext composite is empty.
+        let api_auth =
+            plaintext_auth || crate::server::master_hash_matches(&master_hash, token_str).await;
         let session_auth = {
             let mut sessions = state.active_sessions.write().await;
             sessions.retain(|_, st| {
@@ -1869,5 +1887,157 @@ mod auth_policy_matrix_tests {
                 reason: "invalid_token"
             }
         ));
+    }
+}
+
+/// `authorize_terminal_request` against a hash-only master credential (#6613).
+///
+/// The module above tests `decide_auth` in isolation, which is the *pure* half.
+/// These tests drive the real authorizer, because the bypass #6613 fixed lived
+/// in the argument it passes: `auth_configured` was derived as
+/// `!valid_api_tokens(..).is_empty()`, an `api_key_hash`-only daemon lists no
+/// plaintext token, so the authorizer handed `decide_auth` `false` and got back
+/// `LocalBypass` — unauthenticated shell access on a daemon the operator
+/// believes is bearer-gated. A `decide_auth` test cannot catch that; only one
+/// that exercises the derivation can.
+#[cfg(test)]
+mod hash_only_terminal_auth_tests {
+    use super::*;
+    use axum::http::HeaderMap;
+    use librefang_kernel::MemorySubsystemApi;
+    use librefang_types::config::KernelConfig;
+
+    const MASTER_KEY: &str = "hash-only-master-key";
+
+    /// Build an `AppState` for a daemon whose master credential exists **only**
+    /// as `api_key_hash`, in both places that matters: `KernelConfig` (what
+    /// `auth_snapshot()` reports) and the live `master_key` handle (what the
+    /// authorizer reads). Production keeps the two in step via
+    /// `server::refresh_master_credential`; a fixture that set one and not the
+    /// other would let the handler see an unconfigured daemon and pass for the
+    /// wrong reason.
+    fn hash_only_state() -> (Arc<AppState>, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("terminal-hash-only");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let hash = crate::password_hash::hash_device_token(MASTER_KEY);
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            api_key: String::new(),
+            api_key_hash: hash.clone(),
+            ..KernelConfig::default()
+        };
+        let kernel = Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).unwrap());
+        let master_key = Arc::new(crate::middleware::MasterKeyState::new(home_dir.clone()));
+        master_key.set_blocking(String::new(), hash);
+
+        let idempotency_store: Arc<
+            dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync,
+        > = Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
+            kernel.substrate_ref().pool(),
+        ));
+        let passkey_store: Arc<dyn librefang_memory::passkey_store::PasskeyStore + Send + Sync> =
+            Arc::new(librefang_memory::passkey_store::SqlitePasskeyStore::new(
+                kernel.substrate_ref().pool(),
+            ));
+        let state = Arc::new(AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            readiness_requires_embedding: false,
+            bridge_manager: arc_swap::ArcSwap::new(Arc::new(None)),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_kernel::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(
+                home_dir.join("data").join("webhooks.json"),
+            ),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            media_drivers: librefang_kernel::media::MediaDriverCache::new(),
+            webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+            // Empty, which is the whole point: a hash carries no plaintext.
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            master_key,
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            config_write_lock: tokio::sync::Mutex::new(()),
+            pending_a2a_agents: dashmap::DashMap::new(),
+            auth_login_limiter: Arc::new(crate::rate_limiter::AuthLoginLimiter::new()),
+            gcra_limiter: crate::rate_limiter::create_rate_limiter(0),
+            trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
+            trust_forwarded_for: false,
+            idempotency_store,
+            passkey_store,
+            passkey_engine: None,
+        });
+        (state, tmp)
+    }
+
+    /// A **loopback** peer with no proxy headers, which is what makes these
+    /// assertions attributable. Loopback is the origin `decide_auth` treats as
+    /// trusted when it believes no auth is configured, so it is exactly where
+    /// the pre-fix `LocalBypass` was reachable; a remote peer would be rejected
+    /// on the remote-policy rules no matter what the credential derivation said,
+    /// and the test would pass with the fix reverted.
+    fn loopback() -> SocketAddr {
+        "127.0.0.1:54321".parse().unwrap()
+    }
+
+    fn bearer(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        headers
+    }
+
+    async fn authorize(headers: HeaderMap) -> Result<AuthMethod, axum::http::StatusCode> {
+        let (state, _tmp) = hash_only_state();
+        let uri: axum::http::Uri = "/api/terminal/ws".parse().unwrap();
+        let result = authorize_terminal_request(&headers, &uri, loopback(), &state).await;
+        state.kernel.shutdown();
+        result.map_err(|resp| resp.status())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hash_only_master_key_authenticates_the_matching_bearer() {
+        assert_eq!(
+            authorize(bearer(MASTER_KEY)).await,
+            Ok(AuthMethod::ApiKey),
+            "the key behind api_key_hash must authenticate a terminal upgrade \
+             even though api_key is empty"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hash_only_master_key_rejects_a_wrong_bearer() {
+        assert_eq!(
+            authorize(bearer("wrong-key")).await,
+            Err(axum::http::StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hash_only_master_key_rejects_a_missing_bearer_from_loopback() {
+        // The case with teeth. Pre-fix this returned `Ok(LocalBypass)` — a
+        // shell, unauthenticated, on a daemon the operator deliberately put an
+        // `api_key_hash` on.
+        assert_eq!(
+            authorize(HeaderMap::new()).await,
+            Err(axum::http::StatusCode::UNAUTHORIZED),
+            "a hash-gated daemon must not fall back to the loopback shell bypass"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hash_only_master_key_rejects_an_empty_bearer() {
+        // `api_key_lock` holds "" on a hash-only daemon. Were the empty
+        // candidate not filtered out of the composite, a constant-time compare
+        // of two empty slices would authenticate `Authorization: Bearer `.
+        assert_eq!(
+            authorize(bearer("")).await,
+            Err(axum::http::StatusCode::UNAUTHORIZED)
+        );
     }
 }

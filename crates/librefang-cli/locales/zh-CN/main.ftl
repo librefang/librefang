@@ -2055,6 +2055,11 @@ auth-pool-key-requests = requests={ $count }
 auth-pool-key-item =     - [{ $label }] { $key_display }  priority={ $pri }{ $reqs_str }  status={ $status }
 auth-hash-add-config-hint = 添加到 config.toml：
 auth-hash-config-entry =   dashboard_pass_hash = "{ $hash }"
+auth-enter-api-key-prompt = 输入 API 密钥：
+auth-api-key-empty = API 密钥不能为空。
+auth-api-key-generated = 新的 API 密钥（请交给客户端使用——仅显示一次）：
+auth-api-key-config-entry =   api_key_hash = "{ $hash }"
+auth-api-key-remove-plaintext-hint = 然后删除明文 `api_key` 行。客户端仍然发送密钥本身，只是守护进程保存的副本发生了变化。
 # Agent command specific keys
 agent-spawn-id-label =   ID：  { $id }
 agent-spawn-name-label =   名称：{ $name }

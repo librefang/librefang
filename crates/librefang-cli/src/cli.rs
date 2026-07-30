@@ -462,6 +462,19 @@ pub(crate) enum Commands {
         #[arg(long)]
         password: Option<String>,
     },
+    /// Generate the api_key_hash verifier for the master API key.
+    #[command(
+        name = "hash-api-key",
+        long_about = "Generate the api_key_hash value for the master API key, so config.toml holds a verifier instead of the key itself.\n\nUses SHA-256, not Argon2id: the master key is a machine-generated bearer token verified on every request, where a memory-hard KDF costs ~50-100ms per request and buys nothing against an offline attacker who has no dictionary to try. Argon2id is the right choice for the human-chosen dashboard password -- see `hash-password` for that.\n\nWith --generate, a fresh 256-bit key is produced for you and printed alongside its hash; give the key to your clients and keep only the hash on the daemon.\n\nExamples:\n  librefang hash-api-key --generate            # New random key + its hash\n  librefang hash-api-key                       # Interactive prompt for an existing key\n  librefang hash-api-key --key 'existing-key'  # Inline (less secure, visible in shell history)"
+    )]
+    HashApiKey {
+        /// API key to hash (omit for interactive prompt).
+        #[arg(long, conflicts_with = "generate")]
+        key: Option<String>,
+        /// Generate a fresh 256-bit random key and print it with its hash.
+        #[arg(long)]
+        generate: bool,
+    },
 }
 
 #[derive(Subcommand)]

@@ -63,7 +63,7 @@ impl LibreFangKernel {
         // non-loopback bind that turns into an open daemon. Refusing the
         // override leaves whatever `config.toml` says, so the #3572 bind
         // guard still gets the truth.
-        match resolve_api_key_override(std::env::var("LIBREFANG_API_KEY").ok().as_deref()) {
+        match resolve_api_key_override(std::env::var(super::API_KEY_ENV).ok().as_deref()) {
             ApiKeyOverride::Use(key) => config.api_key = key,
             ApiKeyOverride::IgnoredEmpty => warn!(
                 "LIBREFANG_API_KEY is set but empty — ignoring it and keeping the \

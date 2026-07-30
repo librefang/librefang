@@ -190,6 +190,12 @@ pub struct AppState {
     /// Shared api_key_lock from the auth middleware — updated on password/api_key change
     /// so the new credentials take effect immediately without restart.
     pub api_key_lock: Arc<tokio::sync::RwLock<String>>,
+    /// Shared master-credential state from the auth middleware (#6613): the
+    /// resolved plaintext `api_key` and its `api_key_hash`. Same Arc the
+    /// middleware verifies against, so a config reload or credential change
+    /// takes effect on the next request. Always refreshed together with
+    /// `api_key_lock` via `crate::server::refresh_master_credential`.
+    pub master_key: Arc<crate::middleware::MasterKeyState>,
     /// Shared per-user API key snapshot — same Arc the auth middleware
     /// reads from, so swapping the inner Vec via `rotate_user_key` (or any
     /// future user-mutation endpoint) makes the change visible to the very

@@ -1126,6 +1126,11 @@ auth-pool-key-requests = requests={ $count }
 auth-pool-key-item =     - [{ $label }] { $key_display }  priority={ $pri }{ $reqs_str }  status={ $status }
 auth-hash-add-config-hint = Add to config.toml:
 auth-hash-config-entry =   dashboard_pass_hash = "{ $hash }"
+auth-enter-api-key-prompt = Enter API key:
+auth-api-key-empty = API key cannot be empty.
+auth-api-key-generated = New API key (give this to your clients — it is shown only once):
+auth-api-key-config-entry =   api_key_hash = "{ $hash }"
+auth-api-key-remove-plaintext-hint = Then remove the plaintext `api_key` line. Clients keep sending the key itself; only the daemon's stored copy changes.
 
 # Agent command specific keys
 agent-spawn-id-label =   ID:   { $id }

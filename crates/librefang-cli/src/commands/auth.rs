@@ -1071,6 +1071,61 @@ pub(crate) fn cmd_hash_password(password: Option<String>) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// hash-api-key command (#6613)
+// ---------------------------------------------------------------------------
+
+/// Produce the `api_key_hash` value for the master API key, so `config.toml` can
+/// hold a verifier instead of the key itself.
+///
+/// Deliberately a sibling of `hash-password` rather than a flag on it, for two
+/// reasons. The hash format differs — `$sha256$` here versus Argon2id there,
+/// because the master key is a machine-generated bearer verified on every
+/// request while `dashboard_pass` is a human-chosen password (the reasoning
+/// lives on `middleware::MasterKeyState`). And the input flow differs:
+/// `hash-password` prompts twice and compares, which is right for a password
+/// someone is inventing and wrong for a key they are pasting.
+pub(crate) fn cmd_hash_api_key(key: Option<String>, generate: bool) {
+    let (key, generated) = if generate {
+        (librefang_api::password_hash::generate_bearer_token(), true)
+    } else {
+        match key {
+            Some(k) if !k.trim().is_empty() => (k.trim().to_string(), false),
+            Some(_) => {
+                ui::error(&i18n::t("auth-api-key-empty"));
+                std::process::exit(1);
+            }
+            None => {
+                let entered = prompt_input(&i18n::t("auth-enter-api-key-prompt"));
+                if entered.trim().is_empty() {
+                    ui::error(&i18n::t("auth-api-key-empty"));
+                    std::process::exit(1);
+                }
+                (entered.trim().to_string(), false)
+            }
+        }
+    };
+
+    let hash = librefang_api::password_hash::hash_device_token(&key);
+
+    // Print the plaintext only for a key we just minted — the operator has no
+    // other copy of it. An existing key they typed in is already in their
+    // possession and echoing it back would only widen its exposure.
+    if generated {
+        println!();
+        println!("{}", i18n::t("auth-api-key-generated"));
+        println!("  {key}");
+    }
+    println!();
+    println!("{}", i18n::t("auth-hash-add-config-hint"));
+    println!(
+        "{}",
+        i18n::t_args("auth-api-key-config-entry", &[("hash", &hash)])
+    );
+    println!();
+    println!("{}", i18n::t("auth-api-key-remove-plaintext-hint"));
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

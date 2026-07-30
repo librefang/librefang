@@ -25,6 +25,121 @@ use tracing::{debug, error, info, warn, Instrument};
 
 use librefang_telemetry::metrics;
 
+/// The master API credential (#6613), as the auth middleware needs to see it.
+///
+/// Separate from `api_key_lock` because that lock holds a `\n`-joined list of literal strings to compare against, and the two members here do not fit that shape: a hash is verified rather than compared, and the transparent upgrade has to know which of the listed tokens is the master key rather than a derived dashboard session token — hashing the latter would write an upgrade hint for a credential the operator never configured.
+///
+/// Both string members are `RwLock` so `POST /api/config/reload` and the dashboard credential-change endpoint can swap them live, mirroring `api_key_lock`.
+/// Write them through [`crate::server::refresh_master_credential`] so the composite lock and this struct can never disagree about what the master key is.
+///
+/// # Why the master key is hashed with SHA-256 and `dashboard_pass` with Argon2id
+///
+/// Both are credentials, both are verified rather than transmitted by the daemon, and they still want different hashes — do not "fix" one to match the other.
+/// `dashboard_pass` is a human-chosen password: its entropy is low enough that an offline attacker who steals the hash can enumerate a dictionary, and a memory-hard KDF is precisely what makes that enumeration uneconomic.
+/// The master `api_key` is a machine-generated bearer token, so there is no dictionary to enumerate; a slow KDF buys nothing against an offline attacker and charges the cost to every request instead.
+///
+/// That cost is not theoretical.
+/// Argon2id verify is ~50–100 ms of CPU by construction, `api_key_hash` sits on the bearer path, and on a hash-only deployment *every* presented token reaches it — including every wrong one, from an unauthenticated caller, on a route with no login-attempt limiter.
+/// A single connection replaying a garbage `Authorization` header would then consume a core continuously.
+/// A fast constant-time hash over a high-entropy secret is the standard bearer-token construction, and it is already the one this codebase reached for: `password_hash::hash_device_token` hashes paired-device bearers with `$sha256$` and its doc comment makes the same argument for the same reason.
+///
+/// So the transparent upgrade writes `$sha256$`, `librefang hash-api-key` produces `$sha256$`, and the field docs on [`librefang_types::config::KernelConfig::api_key_hash`] recommend `$sha256$`.
+/// `$argon2id$` stays *accepted* — an operator who deliberately uses a short human-memorable master key is better served by the KDF, and a hand-written or pre-#6613 value must keep working — but it is verified on a blocking thread, never inline, so the choice can never stall the async runtime.
+/// See `crate::server::master_hash_matches` for that dispatch and [`crate::password_hash::is_cheap_to_verify`] for the predicate it keys on.
+#[derive(Default)]
+pub struct MasterKeyState {
+    /// Resolved plaintext master key: `LIBREFANG_API_KEY`, else `vault:KEY`, else the literal `api_key`.
+    /// Empty when the operator configured only a hash.
+    /// Also present inside the `api_key_lock` composite, which is what the request path actually matches against; the copy here exists solely to identify a successful match as "the master key" for the upgrade.
+    plaintext: tokio::sync::RwLock<String>,
+    /// `KernelConfig.api_key_hash` — `$sha256$…` (recommended) or `$argon2id$…`, empty when the operator still keeps the master key as plaintext.
+    hash: tokio::sync::RwLock<String>,
+    /// Daemon home directory, where the transparent-upgrade hint file is written.
+    /// `None` in test harnesses that build an `AuthState` without a daemon home; the hint is then skipped rather than landing in the process CWD.
+    home_dir: Option<std::path::PathBuf>,
+    /// Set once, the first time a plaintext-only master key authenticates, so the hint file is written at most once per process instead of on every authenticated request.
+    upgrade_hint_started: std::sync::atomic::AtomicBool,
+}
+
+impl MasterKeyState {
+    /// Build for a daemon rooted at `home_dir`, with credentials filled in by
+    /// [`crate::server::refresh_master_credential`].
+    pub fn new(home_dir: std::path::PathBuf) -> Self {
+        Self {
+            home_dir: Some(home_dir),
+            ..Self::default()
+        }
+    }
+
+    /// Current `api_key_hash`, already trimmed by the writer.
+    pub async fn hash(&self) -> String {
+        self.hash.read().await.clone()
+    }
+
+    /// Is a master credential configured, in either form?
+    ///
+    /// The live-handle counterpart of `server::MasterCredential::is_configured`, for a caller that has this struct rather than a config snapshot.
+    /// Asks both members directly instead of testing `api_key_lock` for emptiness: that composite also carries the derived dashboard session token, so a non-empty composite does not by itself mean a *master* credential exists, and an empty one does not mean none does — a hash-only daemon lists no plaintext at all.
+    /// Getting that backwards is the #6613 bug in miniature.
+    pub async fn is_configured(&self) -> bool {
+        !self.plaintext.read().await.trim().is_empty() || !self.hash.read().await.trim().is_empty()
+    }
+
+    /// Replace both members after boot, a config reload, or a credential
+    /// change. Taken together under one call so a reader can never observe a
+    /// new plaintext beside a stale hash.
+    pub async fn set(&self, plaintext: String, hash: String) {
+        let mut plaintext_guard = self.plaintext.write().await;
+        let mut hash_guard = self.hash.write().await;
+        *plaintext_guard = plaintext;
+        *hash_guard = hash;
+    }
+
+    /// Same as [`set`](Self::set) for a caller that holds no runtime — a
+    /// synchronous test-harness builder configuring state before any request
+    /// can observe it. Panics if either lock is held, which under that
+    /// contract means the harness handed the state out too early.
+    pub fn set_blocking(&self, plaintext: String, hash: String) {
+        let mut plaintext_guard = self
+            .plaintext
+            .try_write()
+            .expect("master key plaintext lock should be uncontended during setup");
+        let mut hash_guard = self
+            .hash
+            .try_write()
+            .expect("master key hash lock should be uncontended during setup");
+        *plaintext_guard = plaintext;
+        *hash_guard = hash;
+    }
+
+    /// Constant-time test for "this presented token is the master plaintext
+    /// key". Returns `false` when no plaintext key is configured, so a
+    /// hash-only deployment never treats an empty string as a match.
+    async fn is_master_plaintext(&self, token: &str) -> bool {
+        use subtle::ConstantTimeEq;
+        let configured = self.plaintext.read().await;
+        if configured.is_empty() {
+            return false;
+        }
+        configured.len() == token.len() && token.as_bytes().ct_eq(configured.as_bytes()).into()
+    }
+
+    /// Claim the one-shot upgrade-hint slot. Returns the home directory to
+    /// write into on the single call that wins the race, `None` afterwards.
+    fn claim_upgrade_hint(&self) -> Option<std::path::PathBuf> {
+        let home_dir = self.home_dir.as_ref()?;
+        self.upgrade_hint_started
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+            .then(|| home_dir.clone())
+    }
+}
+
 /// Shared state for the auth middleware.
 ///
 /// Combines the static API key(s) with the active session store so the
@@ -34,6 +149,10 @@ use librefang_telemetry::metrics;
 pub struct AuthState {
     /// Composite key string: multiple valid tokens separated by `\n`.
     pub api_key_lock: Arc<tokio::sync::RwLock<String>>,
+    /// Hashed form of the master `api_key` plus its transparent-upgrade
+    /// bookkeeping (#6613). Shared with `AppState` so a config reload can
+    /// swap the hash without a daemon restart.
+    pub master_key: Arc<MasterKeyState>,
     /// Active sessions issued by dashboard login, keyed by token string.
     pub active_sessions:
         Arc<tokio::sync::RwLock<HashMap<String, crate::password_hash::SessionToken>>>,
@@ -473,6 +592,53 @@ fn extract_request_token(request: &Request<Body>) -> Option<String> {
                 .and_then(|p| p.strip_prefix("bearer."))
                 .map(str::to_string)
         })
+}
+
+/// File name of the transparent-upgrade hint, relative to the daemon home.
+/// Named here so the writer and its test agree on one string.
+pub(crate) const API_KEY_HINT_FILE: &str = "api-key-hash.upgrade-hint";
+
+/// Offer the operator an `api_key_hash` for a master key that is still stored as plaintext (#6613).
+///
+/// Mirrors the `dashboard_pass` → `dashboard_pass_hash` path in `server.rs::dashboard_login`, including its central decision: the hash is written to a 0600 file and never logged, because the hash *is* the verifier — anyone who could read it out of the log stream could paste it into their own `config.toml` and authenticate.
+///
+/// Two differences from the dashboard path.
+/// The hash is `$sha256$`, not Argon2id, because the master key is a machine-generated bearer rather than a human-chosen password and the resulting value is verified on every request — see the KDF section on [`MasterKeyState`] for the full argument.
+/// And `claim_upgrade_hint` gates the whole thing to once per process, because API auth runs on every request while a dashboard login is rare, so the filesystem write must not repeat.
+///
+/// Returns the `spawn_blocking` handle so a test can await the write instead of polling for the file.
+/// Production callers drop it: the hint is advisory, nothing downstream waits on it, and a failure is already reported through the `warn!` below.
+/// `spawn_blocking` is for the *write* (temp file, fsync, rename), not for the hash — `hash_device_token` is a single SHA-256 and costs nothing.
+#[must_use = "await the handle in tests; production callers should discard it explicitly"]
+fn write_api_key_upgrade_hint(
+    auth_state: &AuthState,
+    plaintext_key: &str,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let home_dir = auth_state.master_key.claim_upgrade_hint()?;
+    let hash = crate::password_hash::hash_device_token(plaintext_key);
+    Some(tokio::task::spawn_blocking(move || {
+        let hint_path = home_dir.join(API_KEY_HINT_FILE);
+        match crate::server::write_upgrade_hint(&hint_path, &hash, "api_key_hash", "api_key") {
+            Ok(()) => info!(
+                path = %hint_path.display(),
+                "Master api_key authenticated as plaintext. An upgrade hash has been written to \
+                 the file above (mode 0600). Persist it as `api_key_hash = \"<value>\"` in \
+                 config.toml, remove `api_key`, then delete the hint file. Clients keep sending \
+                 the same key — only the daemon's stored copy changes. The hash is unsalted \
+                 SHA-256, which is the right verifier for a high-entropy generated key but not \
+                 for a short memorable one: if your key is guessable, rotate it first with \
+                 `librefang hash-api-key --generate` and use that hash instead."
+            ),
+            Err(e) => warn!(
+                path = %hint_path.display(),
+                error = %e,
+                "Master api_key authenticated as plaintext but the upgrade-hint file could not \
+                 be written. The hash is NOT logged — it is the verifier, and anyone with log \
+                 access could authenticate with it. Fix the filesystem error and restart to \
+                 regenerate."
+            ),
+        }
+    }))
 }
 
 /// Request ID header name (standard).
@@ -1307,6 +1473,12 @@ pub async fn auth(
     next: Next,
 ) -> Response<Body> {
     let api_key = auth_state.api_key_lock.read().await.clone();
+    // Hashed master key (#6613). Snapshotted alongside `api_key` because a
+    // hash-only deployment leaves `api_key_lock` empty yet is fully
+    // authenticated — every "is auth configured" test below must consider
+    // both, or an `api_key_hash`-only config falls through to the
+    // fail-closed branch's loopback-Owner bypass.
+    let master_key_hash = auth_state.master_key.hash().await;
     // Snapshot the per-user API key list once per request — `user_api_keys`
     // is now an `Arc<RwLock<Vec<…>>>` so the rotate-key endpoint can swap
     // entries live. The snapshot is cheap (small Vec of role records, no
@@ -1489,6 +1661,7 @@ pub async fn auth(
     // (see the 401 handler below). When no auth is configured the shell
     // stays public so the out-of-the-box dev experience still works.
     let auth_configured = !api_key.trim().is_empty()
+        || !master_key_hash.is_empty()
         || !user_api_keys.is_empty()
         || auth_state.dashboard_auth_enabled;
     // The inline login page (`login_page.html`) only speaks username/password,
@@ -1551,7 +1724,11 @@ pub async fn auth(
     // Loopback already short-circuits above for the single-user dev UX, so
     // reaching this branch means the caller is on the LAN/WAN.
     let api_key = api_key.trim();
-    if api_key.is_empty() && user_api_keys.is_empty() && !auth_state.dashboard_auth_enabled {
+    if api_key.is_empty()
+        && master_key_hash.is_empty()
+        && user_api_keys.is_empty()
+        && !auth_state.dashboard_auth_enabled
+    {
         // Re-check ConnectInfo defensively — if it is missing for any reason
         // we MUST treat the origin as non-loopback (fail closed, never open).
         let is_loopback = request
@@ -1644,19 +1821,29 @@ pub async fn auth(
         None
     };
 
-    // Split composite key (supports multiple valid tokens separated by \n).
-    let valid_keys: Vec<&str> = api_key.split('\n').filter(|k| !k.is_empty()).collect();
-
-    // Helper: constant-time check against any valid key
-    let matches_any = |token: &str| -> bool {
-        use subtle::ConstantTimeEq;
-        valid_keys
-            .iter()
-            .any(|key| key.len() == token.len() && token.as_bytes().ct_eq(key.as_bytes()).into())
-    };
-
     // SECURITY: Use constant-time comparison to prevent timing attacks.
-    let header_auth = api_token.map(&matches_any);
+    // `matches_master_token` splits the `\n`-joined composite and filters
+    // empty candidates; the WS and terminal upgrade paths call the same
+    // function so all three surfaces agree on what "matches the master
+    // credential" means.
+    let mut header_auth =
+        api_token.map(|token| crate::server::matches_master_token(api_key, token));
+
+    // Master-key hash (#6613). Only reached when the constant-time comparison
+    // above missed, so a plaintext-configured deployment does no hash work.
+    // With `api_key` empty and only `api_key_hash` set there is nothing to
+    // match, so every authenticated request takes this path — which is why
+    // `master_hash_matches` verifies the recommended `$sha256$` form inline
+    // and pushes the ~50–100 ms `$argon2id$` form onto a blocking thread
+    // rather than stalling this worker. See the KDF section on
+    // `MasterKeyState`.
+    if header_auth == Some(false) && !master_key_hash.is_empty() {
+        if let Some(token_str) = api_token {
+            if crate::server::master_hash_matches(&master_key_hash, token_str).await {
+                header_auth = Some(true);
+            }
+        }
+    }
 
     // SECURITY: ?token= query-string auth is deliberately NOT checked here.
     // Query parameters are written to server access logs, retained in browser
@@ -1686,6 +1873,23 @@ pub async fn auth(
     // returns None and the fail-open Owner-default ACL applies (matching
     // the documented "master credential" contract).
     if header_auth == Some(true) {
+        // Transparent upgrade (#6613), mirroring `dashboard_pass` →
+        // `dashboard_pass_hash`: when the master key authenticated as
+        // plaintext and no `api_key_hash` is configured yet, derive one and
+        // leave it in a 0600 hint file for the operator to paste into
+        // config.toml. Gated on the token actually being the master key so a
+        // dashboard session token — also carried in `api_key_lock` — never
+        // gets hashed into an api_key upgrade hint.
+        if master_key_hash.is_empty() {
+            if let Some(token_str) = api_token {
+                if auth_state.master_key.is_master_plaintext(token_str).await {
+                    // Handle discarded on purpose: the hint is advisory, the
+                    // request must not wait on a filesystem write, and a
+                    // failure already surfaces as a `warn!` from inside.
+                    drop(write_api_key_upgrade_hint(&auth_state, token_str));
+                }
+            }
+        }
         request.extensions_mut().insert(AuthenticatedApiUser {
             name: "root".to_string(),
             role: UserRole::Owner,
@@ -1855,6 +2059,345 @@ mod tests {
     use axum::routing::get;
     use axum::Router;
     use tower::ServiceExt;
+
+    /// Build an `AuthState` for a daemon whose master key exists only as
+    /// `api_key_hash` — `api_key_lock` stays empty because a hash carries no
+    /// plaintext to compare against (#6613).
+    ///
+    /// `$sha256$` keeps `verify_password` on its cheap prefix-dispatch branch
+    /// so these tests do not pay the ~100 ms Argon2id derivation.
+    fn hash_only_auth_state(key: &str) -> AuthState {
+        let master_key = MasterKeyState::default();
+        master_key.set_blocking(String::new(), crate::password_hash::hash_device_token(key));
+        AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            master_key: Arc::new(master_key),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            require_auth_for_reads: false,
+            allow_no_auth: false,
+            audit_log: None,
+        }
+    }
+
+    fn hash_only_app(key: &str) -> Router {
+        Router::new()
+            .route("/api/private", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                hash_only_auth_state(key),
+                auth,
+            ))
+    }
+
+    /// Issue a request carrying a **loopback** `ConnectInfo`.
+    ///
+    /// Injecting it is load-bearing, not incidental. The fail-closed branch
+    /// reads `ConnectInfo` and treats its absence as non-loopback, so a request
+    /// built without one is rejected on the missing-origin rule no matter what
+    /// the auth configuration says — a test written that way passes even with
+    /// the fix reverted and proves nothing. Presenting a loopback peer is what
+    /// makes the unauthenticated-Owner bypass reachable, so the 401 below is
+    /// attributable to `auth_configured` and nothing else.
+    async fn get_private(app: Router, bearer: Option<&str>) -> StatusCode {
+        let mut req = Request::builder().uri("/api/private");
+        if let Some(token) = bearer {
+            req = req.header("authorization", format!("Bearer {token}"));
+        }
+        let mut req = req.body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                12345,
+            ))));
+        app.oneshot(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn hash_only_master_key_authenticates_the_matching_bearer() {
+        assert_eq!(
+            get_private(hash_only_app("s3cret-key"), Some("s3cret-key")).await,
+            StatusCode::OK,
+            "the key behind api_key_hash must authenticate even with api_key empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn hash_only_master_key_rejects_a_wrong_bearer() {
+        assert_eq!(
+            get_private(hash_only_app("s3cret-key"), Some("wrong-key")).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn hash_only_master_key_rejects_a_missing_bearer_from_loopback() {
+        // The load-bearing case, and the one that motivated #6613's
+        // `|| !master_key_hash.is_empty()` clauses. `api_key_lock` is empty on
+        // a hash-only daemon, so without them `auth_configured` is false and
+        // the request reaches the fail-closed branch — which, for a loopback
+        // peer, hands out a full unauthenticated Owner session rather than
+        // rejecting. Loopback is exactly the origin an operator considers
+        // trusted for a *dev* daemon and decidedly not for one they deliberately
+        // put an `api_key_hash` on.
+        assert_eq!(
+            get_private(hash_only_app("s3cret-key"), None).await,
+            StatusCode::UNAUTHORIZED,
+            "a hash-gated daemon must not fall back to the loopback Owner bypass"
+        );
+    }
+
+    #[tokio::test]
+    async fn hash_only_master_key_rejects_an_empty_bearer() {
+        // `api_key_lock` holds "" and the composite splits on '\n'. Were the
+        // empty candidate not filtered out, `ct_eq` over two empty slices
+        // would authenticate `Authorization: Bearer ` as Owner.
+        assert_eq!(
+            get_private(hash_only_app("s3cret-key"), Some("")).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    // ── Transparent api_key → api_key_hash upgrade (#6613) ────────────────
+    //
+    // Suggestion #1 of the issue, and the half an operator never asks for
+    // explicitly: a plaintext deployment keeps working and is *offered* a hash
+    // on first authentication. Everything about the offer is a contract with
+    // whoever reads the hint file next, so all of it is pinned here — the path,
+    // the mode, the two field names in the body, the once-per-process gate, and
+    // the credential that must NOT trigger it.
+
+    /// `AuthState` for a plaintext-configured daemon rooted at `home_dir`, the
+    /// posture the upgrade fires from: `api_key` set, `api_key_hash` empty.
+    fn plaintext_auth_state(key: &str, home_dir: &std::path::Path) -> AuthState {
+        let master_key = MasterKeyState::new(home_dir.to_path_buf());
+        master_key.set_blocking(key.to_string(), String::new());
+        AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(key.to_string())),
+            master_key: Arc::new(master_key),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            require_auth_for_reads: false,
+            allow_no_auth: false,
+            audit_log: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn upgrade_hint_names_both_config_fields_and_verifies_the_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = plaintext_auth_state("plain-master-key", tmp.path());
+
+        write_api_key_upgrade_hint(&state, "plain-master-key")
+            .expect("first call must claim the hint slot")
+            .await
+            .expect("hint writer must not panic");
+
+        let hint_path = tmp.path().join(API_KEY_HINT_FILE);
+        let body = std::fs::read_to_string(&hint_path).expect("hint file must exist");
+        // Both field names, each as the whole backticked token the instructions
+        // render — asserting on the bare substring `api_key` would be satisfied
+        // by `api_key_hash` alone and would not notice the removal step going
+        // missing, which is the half that leaves the plaintext key on disk.
+        assert!(
+            body.contains("`api_key_hash = "),
+            "the operator has to be told which field to set: {body}"
+        );
+        assert!(
+            body.contains("`api_key`"),
+            "and which plaintext field to remove: {body}"
+        );
+
+        // The payload is a verifier for the key that authenticated, not merely
+        // a plausible-looking string — pasting it into config.toml has to keep
+        // the same clients working, which is the whole promise of a
+        // *transparent* upgrade.
+        let hash = body
+            .lines()
+            .find(|line| line.starts_with('$'))
+            .expect("hint body must carry a PHC-style hash line");
+        assert!(crate::password_hash::verify_password(
+            "plain-master-key",
+            hash
+        ));
+        assert!(!crate::password_hash::verify_password("other-key", hash));
+    }
+
+    /// The upgrade emits `$sha256$`, not Argon2id.
+    ///
+    /// Not a stylistic preference: `api_key_hash` is verified on the bearer path
+    /// and, once the operator removes `api_key`, on *every* request including
+    /// every wrong one from an unauthenticated caller. An Argon2id verify is
+    /// ~50–100 ms of CPU by design, so writing that format here would hand the
+    /// operator a remote CPU-exhaustion vector as the reward for following our
+    /// own migration advice. See the KDF section on `MasterKeyState`.
+    #[tokio::test]
+    async fn upgrade_hint_writes_the_cheap_to_verify_hash_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = plaintext_auth_state("plain-master-key", tmp.path());
+        write_api_key_upgrade_hint(&state, "plain-master-key")
+            .expect("claim")
+            .await
+            .expect("write");
+
+        let body = std::fs::read_to_string(tmp.path().join(API_KEY_HINT_FILE)).unwrap();
+        let hash = body.lines().find(|line| line.starts_with('$')).unwrap();
+        assert!(
+            crate::password_hash::is_cheap_to_verify(hash),
+            "the format we hand the operator must not put a KDF on the auth hot \
+             path: {hash}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn upgrade_hint_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state = plaintext_auth_state("plain-master-key", tmp.path());
+        write_api_key_upgrade_hint(&state, "plain-master-key")
+            .expect("claim")
+            .await
+            .expect("write");
+
+        let hint_path = tmp.path().join(API_KEY_HINT_FILE);
+        let mode = std::fs::metadata(&hint_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the hint holds a verifier — anyone who can read it can paste it \
+             into their own config.toml and authenticate"
+        );
+    }
+
+    #[tokio::test]
+    async fn upgrade_hint_is_written_at_most_once_per_process() {
+        // API auth runs on every request. Without the one-shot gate a busy
+        // daemon would rewrite this file thousands of times a minute.
+        let tmp = tempfile::tempdir().unwrap();
+        let state = plaintext_auth_state("plain-master-key", tmp.path());
+        write_api_key_upgrade_hint(&state, "plain-master-key")
+            .expect("first call claims the slot")
+            .await
+            .expect("write");
+        assert!(
+            write_api_key_upgrade_hint(&state, "plain-master-key").is_none(),
+            "the second call must not claim the slot again"
+        );
+    }
+
+    #[tokio::test]
+    async fn upgrade_hint_is_skipped_without_a_daemon_home() {
+        // `MasterKeyState::default()` has no home (test harnesses that build an
+        // AuthState directly). Skipping beats writing the daemon's master-key
+        // verifier into whatever the process CWD happens to be.
+        let state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("plain-master-key".to_string())),
+            master_key: Default::default(),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            require_auth_for_reads: false,
+            allow_no_auth: false,
+            audit_log: None,
+        };
+        assert!(write_api_key_upgrade_hint(&state, "plain-master-key").is_none());
+    }
+
+    /// A dashboard session token also rides in the `api_key_lock` composite, so
+    /// "this token authenticated" is not the same question as "this token is the
+    /// master key". Hashing a session token into an `api_key_hash` hint would
+    /// tell the operator to configure a master credential they never chose — and
+    /// one that expires. `is_master_plaintext` is the gate that separates them.
+    #[tokio::test]
+    async fn a_dashboard_session_token_is_not_the_master_plaintext_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = plaintext_auth_state("plain-master-key", tmp.path());
+        assert!(
+            state
+                .master_key
+                .is_master_plaintext("plain-master-key")
+                .await
+        );
+        assert!(!state.master_key.is_master_plaintext("session-token").await);
+    }
+
+    /// A hash-only daemon has no plaintext to identify, so nothing can match —
+    /// including the empty string a bare `Authorization: Bearer ` produces.
+    #[tokio::test]
+    async fn hash_only_daemon_never_reports_a_master_plaintext_match() {
+        let state = hash_only_auth_state("s3cret-key");
+        assert!(!state.master_key.is_master_plaintext("").await);
+        assert!(!state.master_key.is_master_plaintext("s3cret-key").await);
+    }
+
+    /// End-to-end through `auth`: a plaintext-configured daemon that
+    /// authenticates a request leaves the hint behind without the caller having
+    /// asked for anything. This is what "transparent" means, and it is the path
+    /// an existing deployment actually takes on upgrade.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn authenticating_with_a_plaintext_master_key_leaves_an_upgrade_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = plaintext_auth_state("plain-master-key", tmp.path());
+        let app = Router::new()
+            .route("/api/private", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(state, auth));
+
+        assert_eq!(
+            get_private(app, Some("plain-master-key")).await,
+            StatusCode::OK
+        );
+
+        // The write is spawned so the request never waits on the filesystem;
+        // poll for the file rather than assuming a fixed delay is enough.
+        let hint_path = tmp.path().join(API_KEY_HINT_FILE);
+        for _ in 0..100 {
+            if hint_path.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let body = std::fs::read_to_string(&hint_path)
+            .expect("authenticating with a plaintext master key must leave a hint");
+        assert!(body.contains("api_key_hash"));
+    }
+
+    /// The other side: once `api_key_hash` is configured, the migration is done
+    /// and no hint should appear. Without this the daemon would keep re-offering
+    /// an upgrade the operator already performed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hash_configured_daemon_writes_no_upgrade_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let master_key = MasterKeyState::new(tmp.path().to_path_buf());
+        master_key.set_blocking(
+            "plain-master-key".to_string(),
+            crate::password_hash::hash_device_token("plain-master-key"),
+        );
+        let state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("plain-master-key".to_string())),
+            master_key: Arc::new(master_key),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            require_auth_for_reads: false,
+            allow_no_auth: false,
+            audit_log: None,
+        };
+        let app = Router::new()
+            .route("/api/private", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(state, auth));
+
+        assert_eq!(
+            get_private(app, Some("plain-master-key")).await,
+            StatusCode::OK
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !tmp.path().join(API_KEY_HINT_FILE).exists(),
+            "an already-migrated daemon must not re-offer the upgrade"
+        );
+    }
 
     #[test]
     fn test_request_id_header_constant() {
@@ -2623,6 +3166,7 @@ mod tests {
     async fn test_api_version_header_is_added_to_unauthorized_responses() {
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -2653,6 +3197,7 @@ mod tests {
     async fn test_user_api_key_can_post_agent_messages() {
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
@@ -2691,6 +3236,7 @@ mod tests {
     async fn test_user_api_key_cannot_spawn_agents() {
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
@@ -2729,6 +3275,7 @@ mod tests {
     async fn test_viewer_api_key_cannot_post_anything() {
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
@@ -2767,6 +3314,7 @@ mod tests {
     async fn test_viewer_api_key_can_get() {
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
@@ -2804,6 +3352,7 @@ mod tests {
         // the path normalization strips the slash before the ACL check.
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
@@ -2852,6 +3401,7 @@ mod tests {
     async fn test_root_path_is_public_even_with_api_key_set() {
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("somekey".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![])),
@@ -2885,6 +3435,7 @@ mod tests {
     async fn test_forbidden_response_has_json_content_type() {
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
@@ -2927,6 +3478,7 @@ mod tests {
     async fn test_require_auth_for_reads_blocks_unauthenticated_get() {
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -2962,6 +3514,7 @@ mod tests {
     async fn test_require_auth_for_reads_allows_authenticated_get() {
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -2994,6 +3547,7 @@ mod tests {
     async fn test_require_auth_for_reads_keeps_health_public() {
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -3025,6 +3579,7 @@ mod tests {
     async fn test_require_auth_for_reads_off_preserves_public_get() {
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -3060,6 +3615,7 @@ mod tests {
     async fn test_auto_dream_status_get_is_dashboard_read_public() {
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -3098,6 +3654,7 @@ mod tests {
         // always-public set.
         let auth_state_off = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -3145,6 +3702,7 @@ mod tests {
         // Flag ON: contract unchanged.
         let auth_state_on = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -3176,6 +3734,7 @@ mod tests {
     async fn test_require_auth_for_reads_blocks_api_status() {
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -3212,6 +3771,7 @@ mod tests {
     async fn test_require_auth_for_reads_engages_with_user_api_keys_only() {
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
@@ -3267,6 +3827,7 @@ mod tests {
     async fn test_require_auth_for_reads_is_noop_without_any_auth() {
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -3309,6 +3870,7 @@ mod tests {
     fn no_auth_state() -> AuthState {
         AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -3321,6 +3883,7 @@ mod tests {
     fn with_key_state(key: &str) -> AuthState {
         AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(key.to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -3613,6 +4176,7 @@ mod tests {
         // auth proxy). /api/logs/stream MUST still require auth.
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -3652,6 +4216,7 @@ mod tests {
     async fn logs_stream_allows_authenticated_caller() {
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -3697,6 +4262,7 @@ mod tests {
         // is the scenario where the bug was exploitable.
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -3748,6 +4314,7 @@ mod tests {
         // default scenario the audit flagged.
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -3989,6 +4556,7 @@ mod tests {
 
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: true,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),

@@ -114,12 +114,13 @@ fn api_v1_routes(webhook_body_limit: usize) -> Router<Arc<AppState>> {
         )
 }
 
-/// Resolve a dashboard credential from: 1) env var, 2) vault:KEY syntax, 3) literal value.
-fn resolve_dashboard_credential(
-    config_value: &str,
-    env_var: &str,
-    home_dir: &std::path::Path,
-) -> String {
+/// Resolve a daemon credential from: 1) env var, 2) vault:KEY syntax, 3) literal value.
+///
+/// Named for the dashboard until #6613, when the master `api_key` was routed
+/// through the same three steps. The mechanism was never dashboard-specific —
+/// it is the project's answer to "how does an operator keep a working secret
+/// out of `config.toml`" — so the name now matches the role.
+fn resolve_credential(config_value: &str, env_var: &str, home_dir: &std::path::Path) -> String {
     // 1. Environment variable takes priority
     if let Ok(val) = std::env::var(env_var) {
         if !val.trim().is_empty() {
@@ -141,7 +142,7 @@ fn resolve_dashboard_credential(
                 tracing::warn!("Vault key '{vault_key}' not found in vault");
             }
             Err(e) => {
-                tracing::warn!("Could not unlock vault for dashboard credential: {e}");
+                tracing::warn!("Could not unlock vault for credential '{env_var}': {e}");
             }
         }
         return String::new();
@@ -151,6 +152,54 @@ fn resolve_dashboard_credential(
     config_value.to_string()
 }
 
+/// Env var that overrides `KernelConfig.api_key`. Also read at boot by
+/// `librefang_kernel::kernel::boot` so the #3572 bind-safety guard and the
+/// outbound MCP bridge see the same value; resolving it here as well is what
+/// makes an env-sourced key survive `POST /api/config/reload`, which re-reads
+/// `config.toml` from disk and would otherwise clobber the boot-time override.
+pub(crate) const API_KEY_ENV: &str = "LIBREFANG_API_KEY";
+
+/// The master API credential for one auth snapshot, after env / vault
+/// resolution.
+///
+/// Both halves may be present. `plaintext` is what a client transmits and what
+/// the constant-time comparison in the middleware matches against; `hash` is a
+/// verifier that never needs to be recoverable, so it is the form an operator
+/// should prefer on disk.
+pub(crate) struct MasterCredential {
+    /// Resolved plaintext key: `LIBREFANG_API_KEY`, else `vault:KEY`, else the
+    /// literal `api_key`. Empty when the key is configured only as a hash.
+    pub plaintext: String,
+    /// `api_key_hash` from config (`$sha256$…` recommended, `$argon2id$…`
+    /// accepted). Empty when the operator has not migrated off plaintext.
+    /// Needs no resolution — a hash is a verifier, not a secret to fetch from
+    /// somewhere else.
+    pub hash: String,
+}
+
+impl MasterCredential {
+    /// True when *some* master credential is configured. Every "is auth
+    /// configured?" decision must go through this rather than testing
+    /// `api_key` for emptiness: a hash-only or env-only deployment has a fully
+    /// armed bearer gate but an empty `api_key` field, and reading that field
+    /// directly concludes "open daemon" — which downgrades the #3572 bind
+    /// guard, the `require_auth_for_reads` derivation, and the middleware's
+    /// fail-closed branch all at once.
+    pub fn is_configured(&self) -> bool {
+        !self.plaintext.trim().is_empty() || !self.hash.trim().is_empty()
+    }
+}
+
+/// Resolve the master API credential for a snapshot.
+pub(crate) fn master_credential(snap: &ApiAuthSnapshot) -> MasterCredential {
+    MasterCredential {
+        plaintext: resolve_credential(&snap.api_key, API_KEY_ENV, &snap.home_dir)
+            .trim()
+            .to_string(),
+        hash: snap.api_key_hash.trim().to_string(),
+    }
+}
+
 #[allow(deprecated)]
 pub(crate) fn dashboard_session_token(snap: &ApiAuthSnapshot) -> Option<String> {
     let DashboardRawConfig {
@@ -158,8 +207,8 @@ pub(crate) fn dashboard_session_token(snap: &ApiAuthSnapshot) -> Option<String> 
         pass,
         pass_hash,
     } = &snap.dashboard;
-    let username = resolve_dashboard_credential(user, "LIBREFANG_DASHBOARD_USER", &snap.home_dir);
-    let password = resolve_dashboard_credential(pass, "LIBREFANG_DASHBOARD_PASS", &snap.home_dir);
+    let username = resolve_credential(user, "LIBREFANG_DASHBOARD_USER", &snap.home_dir);
+    let password = resolve_credential(pass, "LIBREFANG_DASHBOARD_PASS", &snap.home_dir);
 
     crate::password_hash::derive_dashboard_session_token(
         username.trim(),
@@ -168,19 +217,88 @@ pub(crate) fn dashboard_session_token(snap: &ApiAuthSnapshot) -> Option<String> 
     )
 }
 
+/// Plaintext bearer tokens the middleware compares presented credentials
+/// against, in constant time.
+///
+/// Empty does NOT mean "auth is open" since #6613 — an `api_key_hash`-only
+/// deployment has no plaintext to list here but is fully authenticated. Ask
+/// [`master_credential`] / [`MasterCredential::is_configured`] whether auth is
+/// configured; this function only answers "which literal strings match".
 pub(crate) fn valid_api_tokens(snap: &ApiAuthSnapshot) -> Vec<String> {
     let mut tokens = Vec::new();
-    let explicit_api_key = snap.api_key.trim();
-    if explicit_api_key.is_empty() {
-        // No api_key configured — API is open, no auth required.
+    let master = master_credential(snap);
+    if !master.is_configured() {
+        // No master credential at all — the API is open, no auth required.
         // Dashboard login is handled separately by session cookie checks.
         return tokens;
     }
-    tokens.push(explicit_api_key.to_string());
+    if !master.plaintext.is_empty() {
+        tokens.push(master.plaintext);
+    }
     if let Some(token) = dashboard_session_token(snap) {
         tokens.push(token);
     }
     tokens
+}
+
+/// Does this daemon require a credential on the WebSocket / terminal upgrade paths?
+///
+/// Extracted in #6613 because both call sites derived it as `!valid_api_tokens(..).is_empty() || …`, and that first term stopped being a proxy for "a master credential exists" the moment `api_key_hash` became a way to configure one: a hash-only daemon lists no plaintext token, so the expression concluded "no auth configured" and handed out the unauthenticated-loopback bypass on a daemon that is in fact bearer-gated.
+/// One function, two callers, so the next auth surface cannot re-derive it wrongly.
+///
+/// Takes the **live handles** — `api_key_lock` and [`middleware::MasterKeyState::hash`], the same two the HTTP auth middleware reads — rather than an [`ApiAuthSnapshot`].
+/// Resolving the credential from a snapshot re-runs the env / `vault:` indirection on every connection, and for a `vault:NAME` value that means constructing a `CredentialVault`, reading the OS keyring, and AEAD-decrypting the vault file, on a path reachable before any credential has been presented.
+/// The handles hold the already-resolved value and are rewritten from one snapshot by [`refresh_master_credential`] at boot, on `POST /api/config/reload`, on a config-file change, and on a dashboard credential change — so they track the same reload generation without the per-connection cost.
+///
+/// `master_tokens` is the `\n`-joined composite, so it may also carry the derived dashboard session token; either member being non-empty means a master credential exists, which is exactly the question.
+pub(crate) fn master_auth_required(
+    master_tokens: &str,
+    master_hash: &str,
+    user_api_keys: &[middleware::ApiUserAuth],
+    dashboard_auth: bool,
+) -> bool {
+    !master_tokens.trim().is_empty()
+        || !master_hash.trim().is_empty()
+        || !user_api_keys.is_empty()
+        || dashboard_auth
+}
+
+/// Constant-time match of a presented token against the `\n`-joined composite in `api_key_lock`.
+///
+/// One copy of the split-and-compare the HTTP middleware, the WS upgrade, and the terminal upgrade each used to spell out inline.
+/// Empty candidates are filtered out, so a composite that holds `""` (a daemon with no plaintext master key) cannot authenticate an `Authorization: Bearer ` header with an empty token.
+pub(crate) fn matches_master_token(master_tokens: &str, token: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    master_tokens
+        .split('\n')
+        .filter(|candidate| !candidate.is_empty())
+        .any(|candidate| {
+            candidate.len() == token.len() && token.as_bytes().ct_eq(candidate.as_bytes()).into()
+        })
+}
+
+/// Verify a presented token against the master `api_key_hash`, without ever blocking the async runtime.
+///
+/// The hash counterpart to the constant-time plaintext comparison: callers try their literal-token list first and fall back here, so a plaintext-configured deployment does no hash work at all.
+/// An empty `hash` is always a miss, so a deployment that configured no hash cannot authenticate an empty token.
+///
+/// The recommended `$sha256$` form (see the KDF section on [`middleware::MasterKeyState`]) verifies inline: it is one SHA-256 over the presented token, and dispatching it to a blocking thread would cost more than the work itself.
+/// An `$argon2id$` hash is moved to `spawn_blocking`, because Argon2id verify is ~50–100 ms of CPU by design and this function runs on a request path — a hash-only deployment reaches it for every bearer, so an inline call would stall a tokio worker per request and let an unauthenticated caller pin a core with a garbage `Authorization` header.
+/// [`crate::password_hash::is_cheap_to_verify`] makes the choice from the stored hash itself, so it cannot disagree with what `verify_password` will do.
+///
+/// A `spawn_blocking` join failure (runtime shutting down, or the thread panicked) is a miss rather than a match: an auth check that cannot complete must fail closed.
+pub(crate) async fn master_hash_matches(hash: &str, token: &str) -> bool {
+    if hash.is_empty() {
+        return false;
+    }
+    if crate::password_hash::is_cheap_to_verify(hash) {
+        return crate::password_hash::verify_password(token, hash);
+    }
+    let hash = hash.to_string();
+    let token = token.to_string();
+    tokio::task::spawn_blocking(move || crate::password_hash::verify_password(&token, &hash))
+        .await
+        .unwrap_or(false)
 }
 
 pub(crate) fn has_dashboard_credentials(snap: &ApiAuthSnapshot) -> bool {
@@ -189,9 +307,42 @@ pub(crate) fn has_dashboard_credentials(snap: &ApiAuthSnapshot) -> bool {
         pass,
         pass_hash,
     } = &snap.dashboard;
-    let username = resolve_dashboard_credential(user, "LIBREFANG_DASHBOARD_USER", &snap.home_dir);
-    let password = resolve_dashboard_credential(pass, "LIBREFANG_DASHBOARD_PASS", &snap.home_dir);
+    let username = resolve_credential(user, "LIBREFANG_DASHBOARD_USER", &snap.home_dir);
+    let password = resolve_credential(pass, "LIBREFANG_DASHBOARD_PASS", &snap.home_dir);
     !username.trim().is_empty() && (!pass_hash.trim().is_empty() || !password.trim().is_empty())
+}
+
+/// Push a fresh auth snapshot into the two live auth handles the middleware
+/// reads on every request: the `\n`-joined token list and the master
+/// credential (#6613).
+///
+/// Both must move together. They are derived from one `ApiAuthSnapshot`, and a
+/// caller that refreshed only the token list would leave the middleware
+/// verifying against a stale `api_key_hash` — or, after an operator migrated
+/// from plaintext to a hash, re-offering an upgrade hint for a key that no
+/// longer exists.
+///
+/// Call after anything that can change the effective master credential:
+/// `POST /api/config/reload`, the config-file watcher, and the dashboard
+/// credential-change endpoint (which alters the derived session token that
+/// rides in the same list).
+///
+/// This is the *only* place the env / `vault:` indirection is re-run, which makes it the boundary for one operational fact worth stating plainly: rotating a `vault:NAME` master key with `librefang vault set` writes `vault.enc`, not `config.toml`, so nothing here notices until the operator calls `POST /api/config/reload`.
+/// That matches the posture the HTTP middleware has always had — `api_key_lock` was likewise resolved once and swapped on reload — and since #6613 the WS and terminal upgrade paths agree with it instead of re-resolving per connection.
+/// A reload suffices; a daemon restart is not needed.
+pub(crate) async fn refresh_master_credential(
+    snap: &ApiAuthSnapshot,
+    api_key_lock: &tokio::sync::RwLock<String>,
+    master_key: &middleware::MasterKeyState,
+) {
+    let master = master_credential(snap);
+    let tokens = valid_api_tokens(snap).join("\n");
+    // Token list first: it is the cheaper check in the middleware and the one
+    // an unchanged deployment relies on, so a reader racing this refresh sees
+    // the new plaintext before the new hash rather than a window where neither
+    // authenticates.
+    *api_key_lock.write().await = tokens;
+    master_key.set(master.plaintext, master.hash).await;
 }
 
 pub(crate) fn configured_user_api_keys(snap: &ApiAuthSnapshot) -> Vec<middleware::ApiUserAuth> {
@@ -233,11 +384,18 @@ pub(crate) fn paired_device_user_keys(snap: &ApiAuthSnapshot) -> Vec<middleware:
 }
 
 /// Returns `true` when at least one form of authentication is configured for
-/// the daemon: an explicit `api_key`, any `[[users]]` entry with an
-/// `api_key_hash`, any paired device, or dashboard credentials. Used at boot
-/// (#3572) to decide whether a non-loopback bind is safe.
+/// the daemon: a master credential (`api_key` literal / env / vault, or
+/// `api_key_hash`), any `[[users]]` entry with an `api_key_hash`, any paired
+/// device, or dashboard credentials. Used at boot (#3572) to decide whether a
+/// non-loopback bind is safe.
+///
+/// Reads the snapshot, unlike the per-request surfaces that read the live
+/// handles: this runs in `run_daemon` *before* `build_router`, so the handles do
+/// not exist yet, and resolving the vault once at boot is not a hot path.
+/// Keeping it on the snapshot is also what makes the boot refusal honest — it is
+/// answering "what did the operator configure", not "what is currently loaded".
 fn any_auth_configured(snap: &ApiAuthSnapshot) -> bool {
-    let api_key_set = !snap.api_key.trim().is_empty();
+    let api_key_set = master_credential(snap).is_configured();
     let users_have_keys = snap.config_users.iter().any(|u| {
         u.api_key_hash
             .as_deref()
@@ -288,13 +446,21 @@ pub(crate) fn evaluate_bind_auth_safety(
     if allow_no_auth {
         return BindAuthCheck::OkWithExplicitOptIn;
     }
+    // Every accepted form must appear here. `any_auth_configured` counts a
+    // master `api_key` (literal, `LIBREFANG_API_KEY`, or `vault:NAME`), a
+    // master `api_key_hash`, dashboard credentials, a `[[users]]` entry with an
+    // `api_key_hash`, and any paired device — an operator who configured one of
+    // the forms this message omitted would be told to do something they had
+    // already done (#6613).
     BindAuthCheck::Refuse {
         reason: format!(
             "Refusing to start: api_listen = {bind} is a non-loopback bind but no \
-             authentication is configured. Set `api_key` in config.toml, configure \
-             dashboard credentials (`dashboard_user`/`dashboard_pass`), or define a \
-             `[[users]]` entry with `api_key_hash`. To bind on a loopback address, \
-             set api_listen = \"127.0.0.1:4545\". To run intentionally open (NOT \
+             authentication is configured. Configure any one of: `api_key` in \
+             config.toml (or the `LIBREFANG_API_KEY` environment variable, or \
+             `api_key = \"vault:NAME\"`), `api_key_hash` in config.toml, dashboard \
+             credentials (`dashboard_user`/`dashboard_pass`), a `[[users]]` entry with \
+             `api_key_hash`, or a paired device. To bind on a loopback address, set \
+             api_listen = \"127.0.0.1:4545\". To run intentionally open (NOT \
              RECOMMENDED — exposes shell-exec, vault, and LLM keys), set \
              LIBREFANG_ALLOW_NO_AUTH=1 in the environment."
         ),
@@ -424,13 +590,13 @@ pub(crate) async fn dashboard_login(
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
     let cfg = state.kernel.config_snapshot();
-    let cfg_user = resolve_dashboard_credential(
+    let cfg_user = resolve_credential(
         &cfg.dashboard_user,
         "LIBREFANG_DASHBOARD_USER",
         &cfg.home_dir,
     );
     let cfg_user = cfg_user.trim().to_string();
-    let cfg_pass = resolve_dashboard_credential(
+    let cfg_pass = resolve_credential(
         &cfg.dashboard_pass,
         "LIBREFANG_DASHBOARD_PASS",
         &cfg.home_dir,
@@ -481,7 +647,8 @@ pub(crate) async fn dashboard_login(
             // — the verifier value never enters the log stream.
             if let Some(ref hash) = upgrade_hash {
                 let hint_path = cfg.home_dir.join("dashboard-pass-hash.upgrade-hint");
-                match write_upgrade_hint(&hint_path, hash) {
+                match write_upgrade_hint(&hint_path, hash, "dashboard_pass_hash", "dashboard_pass")
+                {
                     Ok(()) => {
                         tracing::info!(
                             path = %hint_path.display(),
@@ -766,25 +933,26 @@ pub(crate) async fn mint_dashboard_session(
 pub(crate) async fn dashboard_auth_check(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
 ) -> axum::response::Json<serde_json::Value> {
-    let cfg = state.kernel.config_ref();
-    let du = resolve_dashboard_credential(
-        &cfg.dashboard_user,
-        "LIBREFANG_DASHBOARD_USER",
-        &cfg.home_dir,
-    );
-    let dp = resolve_dashboard_credential(
-        &cfg.dashboard_pass,
-        "LIBREFANG_DASHBOARD_PASS",
-        &cfg.home_dir,
-    );
-    let has_pass_hash = !cfg.dashboard_pass_hash.trim().is_empty();
-    let has_credentials = !du.trim().is_empty() && (has_pass_hash || !dp.trim().is_empty());
-    let has_api_key = !cfg.api_key.trim().is_empty();
-    let has_user_api_keys = cfg.users.iter().any(|user| {
-        user.api_key_hash
-            .as_deref()
-            .is_some_and(|hash| !hash.trim().is_empty())
-    });
+    // Derive from what the middleware actually enforces, not from
+    // `config_ref()` — this endpoint tells the SPA which login form to render,
+    // so disagreeing with the enforcer means rendering the wrong one.
+    //
+    // Two changes from the original open-coded form (#6613). The master
+    // credential comes from the live handle rather than a re-resolution of
+    // `cfg.api_key`: reading that field directly reported mode `none` /
+    // `credentials` for a hash-only or env-sourced deployment and hid the
+    // API-key entry field the operator needs, and re-resolving it here would
+    // unlock the vault on an endpoint that is in the unauthenticated
+    // allowlist (`is_public` in `middleware.rs`) — an anonymous caller could
+    // drive a keyring read plus an AEAD file decrypt per request. And the
+    // dashboard half now calls `has_dashboard_credentials`, which is the same
+    // logic it was open-coding; that helper does still resolve, but only the
+    // dashboard credentials, exactly as `dashboard_login` on the same public
+    // surface always has.
+    let snap = librefang_kernel::kernel_handle::ApiAuth::auth_snapshot(state.kernel.as_ref());
+    let has_credentials = has_dashboard_credentials(&snap);
+    let has_api_key = state.master_key.is_configured().await;
+    let has_user_api_keys = !configured_user_api_keys(&snap).is_empty();
     let mode = if has_credentials && (has_api_key || has_user_api_keys) {
         "hybrid"
     } else if has_credentials {
@@ -910,13 +1078,13 @@ pub(crate) async fn change_password(
 ) -> axum::response::Response {
     let cfg = state.kernel.config_snapshot();
 
-    let cfg_user = resolve_dashboard_credential(
+    let cfg_user = resolve_credential(
         &cfg.dashboard_user,
         "LIBREFANG_DASHBOARD_USER",
         &cfg.home_dir,
     );
     let cfg_user = cfg_user.trim().to_string();
-    let cfg_pass = resolve_dashboard_credential(
+    let cfg_pass = resolve_credential(
         &cfg.dashboard_pass,
         "LIBREFANG_DASHBOARD_PASS",
         &cfg.home_dir,
@@ -1079,10 +1247,12 @@ pub(crate) async fn change_password(
         tracing::warn!("Config reload after credential change failed: {e}");
     }
 
-    // Update api_key_lock so the derived static token reflects new credentials immediately
+    // Update the live auth handles so the derived static token reflects the
+    // new credentials immediately. The master key is untouched by a dashboard
+    // password change, but it rides in the same composite token list, so both
+    // handles are refreshed from one snapshot rather than only the list.
     let snap = state.kernel.auth_snapshot();
-    let new_api_key = valid_api_tokens(&snap).join("\n");
-    *state.api_key_lock.write().await = new_api_key;
+    refresh_master_credential(&snap, &state.api_key_lock, &state.master_key).await;
 
     // Invalidate all existing sessions to force re-login
     state.active_sessions.write().await.clear();
@@ -1280,11 +1450,21 @@ fn save_sessions(
 /// then `rename` into place — the destination is owner-only for its entire
 /// lifetime. On non-unix the temp+rename atomicity is preserved without the
 /// mode bit (same as `save_sessions`).
-fn write_upgrade_hint(hint_path: &std::path::Path, hash: &str) -> std::io::Result<()> {
+///
+/// `hash_field` / `plaintext_field` name the two `config.toml` keys the
+/// operator has to edit. Parameterized in #6613 so the master `api_key` reuses
+/// this exact write path instead of growing a near-copy that could drift on
+/// the mode bit.
+pub(crate) fn write_upgrade_hint(
+    hint_path: &std::path::Path,
+    hash: &str,
+    hash_field: &str,
+    plaintext_field: &str,
+) -> std::io::Result<()> {
     let body = format!(
-        "# Generated by librefang on legacy-plaintext dashboard login.\n\
-         # Set this value in config.toml as `dashboard_pass_hash = \"…\"`,\n\
-         # then remove the plaintext `dashboard_pass` field, then DELETE this file.\n\
+        "# Generated by librefang on legacy-plaintext authentication.\n\
+         # Set this value in config.toml as `{hash_field} = \"…\"`,\n\
+         # then remove the plaintext `{plaintext_field}` field, then DELETE this file.\n\
          # File mode is 0600 — readable only to the daemon UID.\n\
          {hash}\n"
     );
@@ -1361,8 +1541,13 @@ pub async fn build_router(
     // Snapshot once so api_key, dashboard creds, user keys, and device keys all
     // come from the same hot-reload generation (#3744 review #2).
     let auth_snap = kernel.auth_snapshot();
-    let api_key = valid_api_tokens(&auth_snap).join("\n");
-    let api_key_lock = Arc::new(tokio::sync::RwLock::new(api_key));
+    let api_key_lock = Arc::new(tokio::sync::RwLock::new(String::new()));
+    // Master credential (#6613) shares the same Arc with AppState and AuthState
+    // for the same reason api_key_lock does — a config reload swaps it in place.
+    let master_key = Arc::new(middleware::MasterKeyState::new(
+        kernel.home_dir().to_path_buf(),
+    ));
+    refresh_master_credential(&auth_snap, &api_key_lock, &master_key).await;
     // Per-user API key snapshot is wrapped in a `RwLock` so the rotate-key
     // endpoint (`POST /api/users/{name}/rotate-key`) can swap entries live —
     // both AppState (mutator) and AuthState (reader) share the same Arc, so
@@ -1415,7 +1600,7 @@ pub async fn build_router(
     let passkey_engine: Option<Arc<crate::passkey::PasskeyEngine>> = {
         let cfg = kernel.config_ref();
         if cfg.passkey_enabled {
-            let principal = resolve_dashboard_credential(
+            let principal = resolve_credential(
                 &cfg.dashboard_user,
                 "LIBREFANG_DASHBOARD_USER",
                 kernel.home_dir(),
@@ -1470,6 +1655,7 @@ pub async fn build_router(
         ),
         active_sessions: active_sessions.clone(),
         api_key_lock: api_key_lock.clone(),
+        master_key: master_key.clone(),
         user_api_keys: user_api_keys_lock.clone(),
         media_drivers: librefang_kernel::media::MediaDriverCache::new_with_urls(
             kernel.config_ref().provider_urls.clone(),
@@ -1536,7 +1722,7 @@ pub async fn build_router(
     // the same config generation (#3744 review #2).
     let snap = state.kernel.auth_snapshot();
     let dashboard_auth_enabled = has_dashboard_credentials(&snap);
-    let api_key_set = !snap.api_key.trim().is_empty();
+    let api_key_set = master_credential(&snap).is_configured();
     let any_auth = api_key_set || user_api_keys_initial_len > 0 || dashboard_auth_enabled;
 
     // Resolve the effective value of `require_auth_for_reads`.
@@ -1653,6 +1839,7 @@ pub async fn build_router(
 
     let auth_state = middleware::AuthState {
         api_key_lock: api_key_lock.clone(),
+        master_key: master_key.clone(),
         active_sessions: active_sessions.clone(),
         dashboard_auth_enabled,
         user_api_keys: state.user_api_keys.clone(),
@@ -2124,6 +2311,13 @@ pub async fn run_daemon(
                             } else {
                                 tracing::debug!("Config hot-reload: no actionable changes");
                             }
+                            // Same live-handle refresh the `POST /api/config/reload`
+                            // handler performs (#6613) — an operator editing
+                            // config.toml directly must not need a restart before an
+                            // edited `api_key` / `api_key_hash` reaches the HTTP
+                            // middleware.
+                            let snap = k.auth_snapshot();
+                            refresh_master_credential(&snap, &st.api_key_lock, &st.master_key).await;
                             // Restart channel bridge if channel config changed
                             if plan.hot_actions.contains(
                                 &HotAction::ReloadChannels,
@@ -2768,6 +2962,198 @@ mod layer_order_tests {
     }
 }
 
+/// #6613: a master key configured only as `api_key_hash` is a fully armed
+/// bearer gate that lists **no** plaintext token. Every "is auth configured?"
+/// derivation therefore has to go through [`master_credential`] /
+/// [`master_auth_required`]; the natural-looking `!valid_api_tokens(..).is_empty()`
+/// answers a different question and reports such a daemon as open.
+#[cfg(test)]
+mod master_credential_tests {
+    use super::*;
+
+    /// `$sha256$` rather than Argon2id: `verify_password` dispatches on the
+    /// prefix, and the cheap branch keeps these tests off the ~100 ms KDF.
+    fn hash_only_snapshot(key: &str) -> ApiAuthSnapshot {
+        ApiAuthSnapshot {
+            api_key: String::new(),
+            api_key_hash: crate::password_hash::hash_device_token(key),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn hash_only_master_key_lists_no_plaintext_token() {
+        // Pins the trap the rest of this module exists to guard: the token
+        // list is empty precisely when the daemon IS authenticated.
+        let snap = hash_only_snapshot("secret-key");
+        assert!(
+            valid_api_tokens(&snap).is_empty(),
+            "a hash carries no plaintext to compare against"
+        );
+    }
+
+    #[test]
+    fn hash_only_master_key_counts_as_configured() {
+        let snap = hash_only_snapshot("secret-key");
+        let master = master_credential(&snap);
+        assert!(
+            master.is_configured(),
+            "api_key_hash alone must count as a configured master credential"
+        );
+        // And the handles a refresh derives from that snapshot say the same
+        // thing to the WS / terminal upgrade paths.
+        assert!(
+            master_auth_required(&master.plaintext, &master.hash, &[], false),
+            "WS / terminal upgrades must demand a credential on a hash-only daemon"
+        );
+    }
+
+    #[test]
+    fn no_credential_at_all_is_not_configured() {
+        // The other side of the branch — without this, `master_auth_required`
+        // returning `true` unconditionally would pass the test above.
+        let snap = ApiAuthSnapshot::default();
+        let master = master_credential(&snap);
+        assert!(!master.is_configured());
+        assert!(
+            !master_auth_required(&master.plaintext, &master.hash, &[], false),
+            "an unconfigured daemon must keep its open-loopback dev UX"
+        );
+    }
+
+    #[tokio::test]
+    async fn master_hash_matches_only_the_right_token() {
+        let snap = hash_only_snapshot("secret-key");
+        let hash = master_credential(&snap).hash;
+        assert!(master_hash_matches(&hash, "secret-key").await);
+        assert!(!master_hash_matches(&hash, "wrong-key").await);
+        assert!(
+            !master_hash_matches(&hash, "").await,
+            "an empty bearer must never authenticate"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_hash_never_matches() {
+        // Guards the plaintext-only deployment: with no hash configured, the
+        // fallback must reject everything rather than wave through the empty
+        // string that an `Authorization: Bearer ` header would produce.
+        assert!(!master_hash_matches("", "").await);
+        assert!(!master_hash_matches("", "anything").await);
+    }
+
+    /// An `$argon2id$` master hash stays *accepted* — a hand-written or
+    /// pre-#6613 value must keep working even though `$sha256$` is what the
+    /// upgrade path and `librefang hash-api-key` now produce.
+    ///
+    /// `flavor = "multi_thread"` is load-bearing: this hash takes the
+    /// `spawn_blocking` branch, and a current-thread runtime would deadlock if
+    /// the implementation ever awaited the join handle while holding the only
+    /// worker. Passing here proves the expensive path is genuinely off the
+    /// async worker.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn argon2id_master_hash_still_verifies_off_the_async_worker() {
+        let hash = crate::password_hash::hash_password("legacy-master-key").expect("hash");
+        assert!(
+            !crate::password_hash::is_cheap_to_verify(&hash),
+            "an Argon2id hash must take the spawn_blocking branch"
+        );
+        assert!(master_hash_matches(&hash, "legacy-master-key").await);
+        assert!(!master_hash_matches(&hash, "wrong-key").await);
+    }
+
+    #[test]
+    fn matches_master_token_handles_the_composite_and_rejects_empty() {
+        // The `\n`-joined composite carries the master key plus any derived
+        // dashboard session token, and a daemon with no plaintext master key
+        // stores "" — which must not authenticate the empty token an
+        // `Authorization: Bearer ` header produces.
+        let composite = "master-key\nsession-token";
+        assert!(matches_master_token(composite, "master-key"));
+        assert!(matches_master_token(composite, "session-token"));
+        assert!(!matches_master_token(composite, "other"));
+        assert!(!matches_master_token(composite, ""));
+        assert!(!matches_master_token("", ""));
+    }
+
+    #[test]
+    fn master_auth_required_agrees_with_master_credential_is_configured() {
+        // The WS / terminal paths ask this against the live handles while the
+        // boot-time bind guard asks `MasterCredential::is_configured` against
+        // config. The two must not disagree, or one surface gates a daemon the
+        // other treats as open.
+        let hash = crate::password_hash::hash_device_token("secret-key");
+        assert!(master_auth_required("", &hash, &[], false));
+        assert!(master_auth_required("plain-key", "", &[], false));
+        assert!(master_auth_required("", "", &[], true));
+        assert!(
+            !master_auth_required("", "", &[], false),
+            "no credential in either handle must keep the open-loopback dev UX"
+        );
+        assert!(
+            !master_auth_required("  ", "  ", &[], false),
+            "whitespace-only handles are not a configured credential"
+        );
+    }
+
+    /// The reload regression #6613 fixed: `api_key_lock` was written only at
+    /// boot and on a dashboard credential change, so a master key edited in
+    /// `config.toml` kept authenticating with the old value until restart.
+    /// Both live handles must now be rebuilt from whatever snapshot is passed.
+    ///
+    /// Deliberately exercised by swapping snapshots rather than by setting
+    /// `LIBREFANG_API_KEY`: `std::env::set_var` is unsound once other threads
+    /// exist (Rust 1.80+), which is why `boot.rs` factored
+    /// `resolve_api_key_override` into a pure function instead. The property
+    /// under test — resolution happens per snapshot, not once at boot — is the
+    /// same one that makes an env-sourced key survive a reload.
+    #[tokio::test]
+    async fn refresh_master_credential_replaces_both_handles() {
+        let api_key_lock = tokio::sync::RwLock::new(String::new());
+        let master_key = middleware::MasterKeyState::default();
+
+        let plaintext_snap = ApiAuthSnapshot {
+            api_key: "old-key".to_string(),
+            ..Default::default()
+        };
+        refresh_master_credential(&plaintext_snap, &api_key_lock, &master_key).await;
+        assert_eq!(*api_key_lock.read().await, "old-key");
+        assert!(master_key.hash().await.is_empty());
+
+        // Operator migrates to a hash and drops the plaintext.
+        let migrated = hash_only_snapshot("new-key");
+        refresh_master_credential(&migrated, &api_key_lock, &master_key).await;
+        assert_eq!(
+            *api_key_lock.read().await,
+            "",
+            "the retired plaintext key must stop authenticating on reload"
+        );
+        assert!(
+            master_hash_matches(&master_key.hash().await, "new-key").await,
+            "the reloaded api_key_hash must reach the middleware without a restart"
+        );
+    }
+
+    #[test]
+    fn plaintext_master_key_still_lists_its_token() {
+        // Regression guard for the migration: routing `api_key` through
+        // `master_credential` must not drop the existing plaintext contract.
+        let snap = ApiAuthSnapshot {
+            api_key: "plain-key".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(valid_api_tokens(&snap), vec!["plain-key".to_string()]);
+        let master = master_credential(&snap);
+        assert!(master.is_configured());
+        assert!(master_auth_required(
+            &master.plaintext,
+            &master.hash,
+            &[],
+            false
+        ));
+    }
+}
+
 #[cfg(test)]
 mod observability_tests {
     use super::*;
@@ -2923,7 +3309,7 @@ mod observability_tests {
         let tmp = tempfile::tempdir().unwrap();
         let hint_path = tmp.path().join("dashboard-pass-hash.upgrade-hint");
         let hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aGFzaGhhc2hoYXNoaGFzaA";
-        write_upgrade_hint(&hint_path, hash).unwrap();
+        write_upgrade_hint(&hint_path, hash, "dashboard_pass_hash", "dashboard_pass").unwrap();
         let mode = std::fs::metadata(&hint_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(
             mode, 0o600,
@@ -3488,6 +3874,35 @@ mod evaluate_bind_auth_safety_tests {
     fn wildcard_v6_without_auth_refuses() {
         let r = evaluate_bind_auth_safety(&addr("[::]:4545"), false, false);
         assert!(matches!(r, BindAuthCheck::Refuse { .. }));
+    }
+
+    /// The refusal is the only instruction an operator gets, and it drifted
+    /// once already: it kept listing only `api_key`, dashboard credentials, and
+    /// `[[users]].api_key_hash` after `any_auth_configured` had grown to accept
+    /// a master `api_key_hash`, a `LIBREFANG_API_KEY`-sourced key, and paired
+    /// devices — so someone who had configured auth the new way was told to do
+    /// what they had already done (#6613). Pin every accepted form.
+    #[test]
+    fn refusal_names_every_form_of_auth_that_would_satisfy_it() {
+        let BindAuthCheck::Refuse { reason } =
+            evaluate_bind_auth_safety(&addr("0.0.0.0:4545"), false, false)
+        else {
+            panic!("a non-loopback bind with no auth must refuse");
+        };
+        for form in [
+            "api_key",
+            "LIBREFANG_API_KEY",
+            "vault:",
+            "api_key_hash",
+            "dashboard_user",
+            "[[users]]",
+            "paired device",
+        ] {
+            assert!(
+                reason.contains(form),
+                "refusal omits the {form:?} form that any_auth_configured accepts: {reason}"
+            );
+        }
     }
 
     #[test]

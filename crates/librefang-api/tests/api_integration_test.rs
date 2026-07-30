@@ -1953,6 +1953,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
 
     let api_key_state = middleware::AuthState {
         api_key_lock: state.api_key_lock.clone(),
+        master_key: state.master_key.clone(),
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
         user_api_keys: state.user_api_keys.clone(),
@@ -3340,6 +3341,7 @@ async fn start_test_server_with_rbac_users(
 
     let api_key_state = middleware::AuthState {
         api_key_lock: state.api_key_lock.clone(),
+        master_key: state.master_key.clone(),
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
         user_api_keys: state.user_api_keys.clone(),
@@ -3595,6 +3597,7 @@ async fn start_test_server_with_full_user_configs(
 
     let api_key_state = middleware::AuthState {
         api_key_lock: state.api_key_lock.clone(),
+        master_key: state.master_key.clone(),
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
         user_api_keys: state.user_api_keys.clone(),

@@ -3318,8 +3318,43 @@ pub struct KernelConfig {
     pub channels: ChannelsConfig,
     /// API authentication key. When set, all API endpoints (except /api/health)
     /// require a `Authorization: Bearer <key>` header.
-    /// If empty, the API is unauthenticated (local development only).
+    /// If empty (and no `api_key_hash` is set), the API is unauthenticated (local development only).
+    ///
+    /// The value is resolved by the API layer in three steps, the same order the dashboard credentials use:
+    /// 1. The `LIBREFANG_API_KEY` environment variable, when set to a non-empty value, wins over whatever this field holds.
+    /// 2. A `vault:KEY_NAME` prefix reads `KEY_NAME` out of the encrypted vault (`$LIBREFANG_HOME/vault.enc`).
+    ///    Example: `api_key = "vault:master_api_key"`, then run `librefang vault set master_api_key`.
+    /// 3. Anything else is the literal bearer token.
+    ///
+    /// Steps 1 and 2 keep the working secret out of `config.toml` entirely, which matters because the daemon rewrites that file and cannot read it from a read-only Kubernetes Secret mount.
+    /// Resolution happens per auth snapshot rather than once at boot, so an env-sourced or vault-sourced key survives `POST /api/config/reload` — a reload re-reads `config.toml` from disk and would otherwise clobber the boot-time override.
+    ///
+    /// Prefer [`KernelConfig::api_key_hash`] when the daemon only needs to *verify* the key rather than transmit it — run `librefang hash-api-key` to produce the value.
+    /// The two can be combined, and a plaintext value here is verified with a constant-time comparison.
     pub api_key: String,
+    /// Hash of the API authentication key, so the master credential does not have to sit in cleartext on disk.
+    ///
+    /// When set, a presented bearer token is verified against this hash after the constant-time comparison against `api_key` misses.
+    ///
+    /// **Generate it with `librefang hash-api-key`** — `--generate` mints a fresh 256-bit key and prints it beside its hash, or omit the flag to hash a key you already have.
+    /// Put the hash here, give the key to your clients, and leave `api_key` unset.
+    ///
+    /// The recommended form is `$sha256$…` (what `hash-api-key` produces).
+    /// `$argon2id$…` is also accepted, dispatched by prefix exactly as the per-user `users[].api_key_hash` column is, so a hand-written value keeps working.
+    ///
+    /// The default is SHA-256 rather than Argon2id on purpose, and it is the reverse of the advice for [`KernelConfig::dashboard_pass_hash`].
+    /// A dashboard password is human-chosen and low-entropy, so a memory-hard KDF is what makes an offline dictionary attack uneconomic.
+    /// A master API key is a machine-generated bearer token: there is no dictionary to enumerate, so the KDF buys nothing against an offline attacker and charges its cost to every request instead.
+    /// That cost is ~50–100 ms of CPU per verify by construction, and with `api_key` unset *every* presented token reaches it — including every wrong one, from an unauthenticated caller, on paths with no login-attempt limiter.
+    /// So an `$argon2id$` value here is verified on a blocking thread rather than inline, which keeps the async runtime responsive but does not make the CPU cost go away.
+    /// If you want a short human-memorable master key, `$argon2id$` is the right trade; otherwise use a generated key and the cheap verifier.
+    ///
+    /// Existing plaintext deployments keep working and are upgraded transparently: the first request that authenticates against a plaintext-only `api_key` writes a `$sha256$` hash of it to `$LIBREFANG_HOME/api-key-hash.upgrade-hint` (mode 0600) and logs a pointer to the file.
+    /// Copy the value into `api_key_hash`, remove `api_key`, delete the hint file.
+    /// Clients keep sending the same key — only the daemon's stored copy changes.
+    /// The hash itself is never logged — it is the verifier, so anyone reading the log stream could paste it into their own config and authenticate.
+    #[serde(default)]
+    pub api_key_hash: String,
     /// Controls whether the dashboard read-endpoint allowlist (agents,
     /// config, budget, sessions, approvals, hands, skills, workflows, …)
     /// requires a bearer token.
@@ -6388,6 +6423,7 @@ impl Default for KernelConfig {
             network: NetworkConfig::default(),
             channels: ChannelsConfig::default(),
             api_key: String::new(),
+            api_key_hash: String::new(),
             require_auth_for_reads: None,
             external_auth_proxy: false,
             trusted_manifest_signers: Vec::new(),
@@ -6575,6 +6611,16 @@ impl std::fmt::Debug for KernelConfig {
             .field(
                 "api_key",
                 &if self.api_key.is_empty() {
+                    "<empty>"
+                } else {
+                    "<redacted>"
+                },
+            )
+            // The PHC string is the verifier: anyone who reads it can paste it into
+            // their own config.toml and authenticate. Redact it like the plaintext.
+            .field(
+                "api_key_hash",
+                &if self.api_key_hash.is_empty() {
                     "<empty>"
                 } else {
                     "<redacted>"

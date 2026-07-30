@@ -49,6 +49,15 @@ respawn (or restart the daemon) — an in-place activate/status flip
 silently keeps the old cap. See
 [`../architecture/trigger-dispatch-concurrency.md`](../architecture/trigger-dispatch-concurrency.md).
 
+### Gotcha: rotating a `vault:` credential needs a reload, because the vault file is not watched
+
+`api_key`, `dashboard_user`, and `dashboard_pass` accept a `vault:NAME` value, resolved out of `vault.enc`.
+The config-file watcher polls `config.toml`'s mtime, and `librefang vault set NAME` writes `vault.enc` — so rotating the secret behind a `vault:` reference changes nothing the watcher can see.
+Call `POST /api/config/reload` after the rotation; that is where the env / `vault:` indirection is re-run and the result pushed into the live auth handles (`server.rs::refresh_master_credential`).
+A daemon restart is not required.
+
+This is also true of `LIBREFANG_API_KEY` and the `LIBREFANG_DASHBOARD_*` variables, for the stronger reason that a process cannot observe an edit to its own environment at all: those need a restart of the daemon (or of the container / unit that sets them).
+
 ### Conditional: `log_level`
 
 `log_level` is **HotReload** only when the embedding binary installed a
@@ -86,7 +95,8 @@ classified differently — the row note spells out which is which.
 
 | Field | Class | Meaning |
 |---|---|---|
-| `api_key` | N | API bearer key (effective immediately via config swap). |
+| `api_key` | N | API bearer key, resolved from `LIBREFANG_API_KEY` / `vault:KEY` / the literal value (effective immediately via config swap). |
+| `api_key_hash` | N | Hash of the API bearer key, `$sha256$…` (recommended, from `librefang hash-api-key`) or `$argon2id$…` (effective immediately via config swap). |
 | `dashboard_user` | H | Dashboard login username (config swap suffices). |
 | `dashboard_pass` | H | Dashboard login password. |
 | `dashboard_pass_hash` | H | Argon2id hash of the dashboard password. |
