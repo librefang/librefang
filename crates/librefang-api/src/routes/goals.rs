@@ -49,14 +49,9 @@ fn goals_shared_agent_id() -> AgentId {
 /// Goals are stored as a single JSON array in shared KV memory and returned
 /// in one page — `offset=0` and `limit=None` always.
 ///
-/// A substrate read failure is a 500, not an empty page (#6654). Returning
-/// `200 {"items": [], "total": 0}` is indistinguishable on the wire from a
-/// daemon that genuinely has no goals, so a corrupt blob or an unreachable
-/// SQLite file rendered as "you have no goals" — and the dashboard then drew
-/// its template-picker empty state over live data it had simply failed to
-/// read. `Ok(_)` (key absent, or present but not an array) stays a 200 empty
-/// page: that is the real not-yet-created shape, and the goal writers only
-/// ever store an array.
+/// A substrate read failure is a 500, not an empty page (#6654).
+/// Returning `200 {"items": [], "total": 0}` is indistinguishable on the wire from a daemon that genuinely has no goals, so a corrupt blob or an unreachable SQLite file rendered as "you have no goals" — and the dashboard then drew its template-picker empty state over live data it had simply failed to read.
+/// `Ok(_)` (key absent, or present but not an array) stays a 200 empty page: that is the real not-yet-created shape, and the goal writers only ever store an array.
 pub async fn list_goals(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agent_id = goals_shared_agent_id();
     let items: Vec<serde_json::Value> = match state
@@ -109,13 +104,9 @@ pub async fn get_goal(
 
 /// GET /api/goals/{id}/children — Get all direct children of a goal.
 ///
-/// Mirrors [`list_goals`] on the failure path (#6653): a substrate read
-/// failure is a scrubbed 500. The previous shape was a 200 carrying both an
-/// empty `children` array *and* a raw `format!("{e}")` — the worst of both,
-/// since a client checking the status code saw success while the body leaked
-/// the SQLite path and error chain to any caller. `internal_scrub` logs the
-/// full error at `error!` and returns the generic message, matching
-/// [`get_goal`] directly above.
+/// Mirrors [`list_goals`] on the failure path (#6653): a substrate read failure is a scrubbed 500.
+/// The previous shape was a 200 carrying both an empty `children` array *and* a raw `format!("{e}")` — the worst of both, since a client checking the status code saw success while the body leaked the SQLite path and error chain to any caller.
+/// `internal_scrub` logs the full error at `error!` and returns the generic message, matching [`get_goal`] directly above.
 pub async fn get_goal_children(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -184,11 +175,8 @@ pub async fn start_goal_run(
         Err(_) => return ApiErrorResponse::bad_request("Invalid goal id").into_json_tuple(),
     };
 
-    // Same swallow as #6654/#6653 on a start rather than a read: the old
-    // catch-all `_ => Vec::new()` folded a substrate failure into the empty
-    // array, so an unreadable store answered `404 Goal '<id>' not found` for a
-    // goal that exists — sending the operator to re-create it instead of to the
-    // host. Only a genuinely absent / non-array key is an empty list.
+    // Same swallow as #6654/#6653 on a start rather than a read: the old catch-all `_ => Vec::new()` folded a substrate failure into the empty array, so an unreadable store answered `404 Goal '<id>' not found` for a goal that exists — sending the operator to re-create it instead of to the host.
+    // Only a genuinely absent / non-array key is an empty list.
     let arr = match state
         .kernel
         .memory_substrate()
@@ -235,13 +223,10 @@ pub async fn start_goal_run(
 
     // Flip the goal to in_progress so the dashboard reflects the active run.
     //
-    // The `Result` is deliberately not fatal — unlike the read above, this
-    // write is cosmetic. The run is started by `start_goal_run` below
-    // regardless, and its live phase is served from the runner's own state by
-    // `GET /api/goals/{id}/run`, so a failure here costs a stale `status`
-    // field on the goal document, not a lost run. Failing the request would
-    // report "could not start" for a run that did start. It is logged rather
-    // than discarded so the stale status has an explanation in the daemon log.
+    // The `Result` is deliberately not fatal — unlike the read above, this write is cosmetic.
+    // The run is started by `start_goal_run` below regardless, and its live phase is served from the runner's own state by `GET /api/goals/{id}/run`, so a failure here costs a stale `status` field on the goal document, not a lost run.
+    // Failing the request would report "could not start" for a run that did start.
+    // It is logged rather than discarded so the stale status has an explanation in the daemon log.
     if let Err(e) = state.kernel.memory_substrate().structured_modify(
         goals_shared_agent_id(),
         GOALS_KEY,

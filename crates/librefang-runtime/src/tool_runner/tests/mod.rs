@@ -887,9 +887,7 @@ impl AgentControl for DispatchCapture {
             "async_tracked:session={}",
             caller_session_id.unwrap_or("none")
         ));
-        // Mirror the kernel's own discrimination (#6650): a caller session is
-        // what makes tracking possible, so its absence yields `Inline` here
-        // exactly as it does in the real impl.
+        // Mirror the kernel's own discrimination (#6650): a caller session is what makes tracking possible, so its absence yields `Inline` here exactly as it does in the real impl.
         Ok(match caller_session_id {
             Some(_) => librefang_kernel_handle::AsyncSendOutcome::Tracked("task-fake-1234".into()),
             None => {
@@ -1217,19 +1215,11 @@ async fn agent_send_async_routes_to_tracked_path_and_returns_task_id() {
     );
 }
 
-/// An untrackable `async: true` call returns the callee's reply as the tool
-/// result, NOT a `task_id` payload telling the model to wait (#6650).
+/// An untrackable `async: true` call returns the callee's reply as the tool result, NOT a `task_id` payload telling the model to wait (#6650).
 ///
-/// The kernel falls back to a blocking send when it cannot parse a caller
-/// session, which is every `agent_send` issued over the MCP HTTP bridge
-/// (`routes/network.rs`) or the REST `/api/tools/{name}` bridge
-/// (`routes/tools_sessions.rs`) — both pass `session_id: None` by
-/// construction. Before the `AsyncSendOutcome` split, the fallback's response
-/// body came back through the same `Ok(String)` slot as a task id, so the tool
-/// emitted `{"task_id": "<the entire reply text>", "status": "delegated"}` and
-/// instructed the model to end its turn and wait for a completion event that
-/// no registered task would ever produce. The answer was in hand and thrown
-/// away.
+/// The kernel falls back to a blocking send when it cannot parse a caller session, which is every `agent_send` issued over the MCP HTTP bridge (`routes/network.rs`) or the REST `/api/tools/{name}` bridge (`routes/tools_sessions.rs`) — both pass `session_id: None` by construction.
+/// Before the `AsyncSendOutcome` split, the fallback's response body came back through the same `Ok(String)` slot as a task id, so the tool emitted `{"task_id": "<the entire reply text>", "status": "delegated"}` and instructed the model to end its turn and wait for a completion event that no registered task would ever produce.
+/// The answer was in hand and thrown away.
 #[tokio::test]
 async fn agent_send_async_without_session_returns_the_reply_not_a_fake_task_id_6650() {
     let cap = Arc::new(DispatchCapture::default());

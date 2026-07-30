@@ -17,27 +17,19 @@ pub struct AgentInfo {
 
 /// What [`AgentControl::send_to_agent_async_tracked`] actually did (#6650).
 ///
-/// The method has two legitimate outcomes and they mean opposite things to the
-/// caller, so they must not share one `String` slot. Before this enum both
-/// returned a bare `Ok(String)`: a task id on the tracked path, the callee's
-/// full response body on the fallback. The single production caller
-/// (`tool_agent_send`) could not tell them apart, so it labelled the response
-/// body `task_id` and told the model *"Delegation started asynchronously; the
-/// target's reply will be delivered to this session when it completes. Do not
-/// wait"* — for a reply that had already arrived and would never be delivered
-/// again, because no task was ever registered.
+/// The method has two legitimate outcomes and they mean opposite things to the caller, so they must not share one `String` slot.
+/// Before this enum both returned a bare `Ok(String)`: a task id on the tracked path, the callee's full response body on the fallback.
+/// The single production caller (`tool_agent_send`) could not tell them apart, so it labelled the response body `task_id` and told the model *"Delegation started asynchronously; the target's reply will be delivered to this session when it completes. Do not wait"* — for a reply that had already arrived and would never be delivered again, because no task was ever registered.
 ///
-/// The fallback itself is correct and stays: with no parseable caller session
-/// there is nowhere to deliver a completion event, and a blocking send at
-/// least gets the caller its answer. Only the conflation was the bug.
+/// The fallback itself is correct and stays: with no parseable caller session there is nowhere to deliver a completion event, and a blocking send at least gets the caller its answer.
+/// Only the conflation was the bug.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AsyncSendOutcome {
-    /// Registered on the async-task tracker. The payload is the task id; the
-    /// callee's reply arrives later as a `TaskCompletionEvent`.
+    /// Registered on the async-task tracker.
+    /// The payload is the task id; the callee's reply arrives later as a `TaskCompletionEvent`.
     Tracked(String),
-    /// Fell back to a blocking send — no task was registered and no completion
-    /// event will ever arrive. The payload is the callee's response body,
-    /// already complete.
+    /// Fell back to a blocking send — no task was registered and no completion event will ever arrive.
+    /// The payload is the callee's response body, already complete.
     Inline(String),
 }
 
@@ -143,16 +135,10 @@ pub trait AgentControl: Send + Sync {
     /// delivered to; `conversation_key` optionally pins the callee session
     /// (see [`send_to_agent_with_key`](Self::send_to_agent_with_key)).
     ///
-    /// Returns an [`AsyncSendOutcome`] rather than a bare string because the
-    /// method has two outcomes that mean opposite things (#6650): a task id
-    /// the caller should stop waiting on, or an already-complete response body
-    /// delivered inline when tracking was not possible. Callers must branch on
-    /// the variant — never render the payload as a task id unconditionally.
+    /// Returns an [`AsyncSendOutcome`] rather than a bare string because the method has two outcomes that mean opposite things (#6650): a task id the caller should stop waiting on, or an already-complete response body delivered inline when tracking was not possible.
+    /// Callers must branch on the variant — never render the payload as a task id unconditionally.
     ///
-    /// Defaults to the blocking [`send_to_agent_as`](Self::send_to_agent_as)
-    /// for handles that don't support the tracker (mocks/tests), returning
-    /// [`AsyncSendOutcome::Inline`] because there is no tracker to register
-    /// against.
+    /// Defaults to the blocking [`send_to_agent_as`](Self::send_to_agent_as) for handles that don't support the tracker (mocks/tests), returning [`AsyncSendOutcome::Inline`] because there is no tracker to register against.
     async fn send_to_agent_async_tracked(
         &self,
         agent_id: &str,

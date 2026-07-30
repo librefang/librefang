@@ -172,11 +172,8 @@ describe("GoalsPage", () => {
     expect(screen.getByText("goals.use_template")).toBeInTheDocument();
   });
 
-  // #6654: a failed load and an empty daemon are different things. The server
-  // now answers a goals storage failure with a 500 rather than an empty page,
-  // but the page had no error branch — the query yielded no goals and the
-  // template picker rendered over data that had failed to load, telling the
-  // operator to start from scratch.
+  // #6654: a failed load and an empty daemon are different things.
+  // The server now answers a goals storage failure with a 500 rather than an empty page, but the page had no error branch — the query yielded no goals and the template picker rendered over data that had failed to load, telling the operator to start from scratch.
   it("renders the error state, not the template picker, when the goals query fails", () => {
     useGoalsMock.mockReturnValue(
       makeQuery<GoalItem[] | undefined>(undefined, { isError: true }),

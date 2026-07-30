@@ -124,13 +124,8 @@ pub(super) async fn tool_agent_send(
             )
             .await
             .map_err(ToolError::upstream)?;
-        // Branch on what the kernel actually did (#6650). The tracked and
-        // fallback outcomes used to arrive as an indistinguishable `String`,
-        // so the fallback's *response body* was rendered as `task_id` under a
-        // note telling the model to stop and wait for a completion event that
-        // would never fire — the answer it already held. Surfaces that pass no
-        // session (the MCP HTTP bridge, the REST `/api/tools/{name}` bridge)
-        // hit that path on every `async: true` call.
+        // Branch on what the kernel actually did (#6650). The tracked and fallback outcomes used to arrive as an indistinguishable `String`, so the fallback's *response body* was rendered as `task_id` under a note telling the model to stop and wait for a completion event that would never fire — the answer it already held.
+        // Surfaces that pass no session (the MCP HTTP bridge, the REST `/api/tools/{name}` bridge) hit that path on every `async: true` call.
         return Ok(match outcome {
             AsyncSendOutcome::Tracked(task_id) => serde_json::json!({
                 "task_id": task_id,
@@ -140,9 +135,8 @@ pub(super) async fn tool_agent_send(
                          continue or end your turn.",
             })
             .to_string(),
-            // No session to deliver a completion event to, so the kernel ran
-            // the delegation inline. Hand back the reply exactly as the
-            // blocking path below does — same shape, same expectations.
+            // No session to deliver a completion event to, so the kernel ran the delegation inline.
+            // Hand back the reply exactly as the blocking path below does — same shape, same expectations.
             AsyncSendOutcome::Inline(response) => response,
         });
     }

@@ -72,18 +72,11 @@ async fn create_goal(h: &Harness, payload: serde_json::Value) -> serde_json::Val
 
 /// Make every `structured_get(goals_agent, __librefang_goals)` fail (#6654).
 ///
-/// Overwrites the goals row's blob with bytes that are valid UTF-8 but not
-/// JSON, writing directly through the connection pool so the store's own
-/// `set` (which serializes a `serde_json::Value`) cannot normalize them. That
-/// is the shape a manual SQL edit, a partial write, or upstream serde drift
-/// leaves behind, and it makes `StructuredStore::get` return
-/// `Err(LibreFangError::Serialization)` at the `serde_json::from_slice` step —
-/// the arm every route in this file treated as "no goals".
+/// Overwrites the goals row's blob with bytes that are valid UTF-8 but not JSON, writing directly through the connection pool so the store's own `set` (which serializes a `serde_json::Value`) cannot normalize them.
+/// That is the shape a manual SQL edit, a partial write, or upstream serde drift leaves behind, and it makes `StructuredStore::get` return `Err(LibreFangError::Serialization)` at the `serde_json::from_slice` step — the arm every route in this file treated as "no goals".
 ///
-/// The row must already exist: the seeding path is `create_goal`, so the
-/// caller is corrupting a store that demonstrably held real goals a moment
-/// ago. That is what makes the assertions meaningful — a 200 empty page here
-/// is data loss reported as success, not an honest empty daemon.
+/// The row must already exist: the seeding path is `create_goal`, so the caller is corrupting a store that demonstrably held real goals a moment ago.
+/// That is what makes the assertions meaningful — a 200 empty page here is data loss reported as success, not an honest empty daemon.
 fn corrupt_goals_blob(h: &Harness) {
     let pool = h._state.kernel.memory_substrate().pool();
     let conn = pool.get().expect("pool connection");
@@ -497,11 +490,8 @@ async fn goals_children_unknown_parent_returns_empty_list() {
 // ---------------------------------------------------------------------------
 // Storage-failure surfacing (#6653, #6654)
 //
-// Every read in this module used to fold `Err(_)` from the substrate into the
-// same empty value it returns for "nothing stored yet", so a corrupt or
-// unreadable store was reported to the operator as an empty daemon. These
-// pin the distinction: absent key → 200 empty (already covered above),
-// substrate failure → scrubbed 500.
+// Every read in this module used to fold `Err(_)` from the substrate into the same empty value it returns for "nothing stored yet", so a corrupt or unreadable store was reported to the operator as an empty daemon.
+// These pin the distinction: absent key → 200 empty (already covered above), substrate failure → scrubbed 500.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
@@ -553,9 +543,8 @@ async fn goals_children_returns_scrubbed_500_on_storage_failure_6653() {
         "Internal server error",
         "{body:?}"
     );
-    // Leak guard: the pre-fix body carried a raw `format!("{e}")` under an
-    // `error` key on a 200. Nothing from the underlying error chain may reach
-    // the client anywhere in the response.
+    // Leak guard: the pre-fix body carried a raw `format!("{e}")` under an `error` key on a 200.
+    // Nothing from the underlying error chain may reach the client anywhere in the response.
     let whole = body.to_string().to_lowercase();
     for needle in [
         "serialization",
@@ -577,9 +566,7 @@ async fn goals_children_returns_scrubbed_500_on_storage_failure_6653() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn goal_run_start_returns_500_not_404_on_storage_failure() {
-    // Sibling of #6653/#6654 found in the same file: `start_goal_run`'s
-    // catch-all `_ => Vec::new()` turned an unreadable store into "Goal not
-    // found", telling the operator to re-create a goal that exists.
+    // Sibling of #6653/#6654 found in the same file: `start_goal_run`'s catch-all `_ => Vec::new()` turned an unreadable store into "Goal not found", telling the operator to re-create a goal that exists.
     let h = boot().await;
     let goal = create_goal(
         &h,
