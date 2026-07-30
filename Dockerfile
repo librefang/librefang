@@ -114,8 +114,17 @@ ENV LIBREFANG_HOME=/data
 # axum server. The shell form is required so ${PORT:-4545} expands at
 # runtime — Railway/Render/Fly inject $PORT and the entrypoint rewrites
 # api_listen accordingly (see deploy/docker-entrypoint.sh).
+#
+# Probes `/api/ready`, not `/api/health` (#6633). Docker's healthcheck does
+# not restart an unhealthy container — its consumer is Compose's
+# `depends_on: condition: service_healthy` gate, which is readiness
+# semantics: "may dependents start talking to it yet?". `/api/health`
+# answers the liveness question and returns 200 even while its body reports
+# `status: degraded`, so it can never fail this check and the gate was
+# effectively unconditional. Kubernetes ignores HEALTHCHECK entirely and
+# uses the probes declared in deploy/kubernetes/.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
-  CMD curl -fsS http://127.0.0.1:${PORT:-4545}/api/health || exit 1
+  CMD curl -fsS http://127.0.0.1:${PORT:-4545}/api/ready || exit 1
 # docker-entrypoint.sh uses gosu to exec as the librefang user, so we
 # keep the entrypoint itself running as root to allow bind-mount chown
 # and data-dir initialisation before privilege drop.

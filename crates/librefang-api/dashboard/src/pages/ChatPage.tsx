@@ -195,6 +195,7 @@ function useWebSocket(
   useEffect(() => { onAuthErrorRef.current = onAuthError; }, [onAuthError]);
 
   useEffect(() => {
+    const pendingCommands = pendingCommandsRef.current;
     if (!agentId) {
       setWsConnected(false);
       setAriaAnnouncement("");
@@ -335,9 +336,9 @@ function useWebSocket(
       // command listener still pending would be orphaned, so abort
       // them here too — abort() detaches the listener via the
       // AbortSignal we registered with addEventListener.
-      if (pendingCommandsRef.current.size > 0) {
-        const pending = Array.from(pendingCommandsRef.current);
-        pendingCommandsRef.current.clear();
+      if (pendingCommands.size > 0) {
+        const pending = Array.from(pendingCommands);
+        pendingCommands.clear();
         for (const ctrl of pending) ctrl.abort();
       }
       const ws = wsRef.current;
@@ -353,7 +354,7 @@ function useWebSocket(
         wsRef.current = null;
       }
     };
-  }, [agentId, sessionId]);
+  }, [agentId, sessionId, setAriaAnnouncement]);
 
   return { ws: wsRef, wsConnected, onDropRef, pendingCommandsRef, ariaAnnouncement, ariaNonce };
 }
@@ -667,7 +668,7 @@ function useChatMessages(
     // after setSessionVersion, but the effect doesn't re-run on that render —
     // so the previous session's messages stay on screen until a second click
     // bumps sessionVersion again (issue #4295, Bug A).
-  }, [agentId, sessionId, sessionVersion]);
+  }, [agentId, onClearError, queryClient, sessionId, sessionVersion, setAgentLoading, t]);
 
   const clearHistory = useCallback(async () => {
     if (!agentId) {
@@ -1245,7 +1246,7 @@ function useChatMessages(
 
     // HTTP fallback — direct, no fake streaming
     await sendViaHttp();
-  }, [agentId, agents, wsConnected, ws, deepThinking, showThinkingProcess, finishTurnIfCurrent, clearHistory, scheduleStreamingFlush, flushStreamingContent, scheduleThinkingFlush, flushThinkingContent]);
+  }, [addSkillOutput, agentId, agents, clearHistory, deepThinking, finishTurnIfCurrent, flushStreamingContent, flushThinkingContent, onAutoPinSession, onDropRef, onModelSwitch, onNewSession, pendingCommandsRef, queryClient, scheduleStreamingFlush, scheduleThinkingFlush, sendAgentMessageMutation, sessionId, setAgentLoading, showThinkingProcess, t, updateAgentMessages, ws, wsConnected]);
 
   // Abort an in-flight agent run. Hits the backend stop endpoint (which aborts
   // the tokio task on the kernel side) and optimistically finalizes any
@@ -1299,9 +1300,21 @@ interface MessageBubbleProps {
 const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
+  const isSystem = message.role === "system";
   const [thinkingExpanded, setThinkingExpanded] = useState(() => !(message.thinkingCollapsed ?? false));
 
-  if (message.role === "system") {
+  // Hooks must run for every message role. System messages skip the expensive
+  // math plugin load while preserving a stable hook order.
+  const displayContent = useMemo(() => {
+    if (isUser || isSystem) return message.content;
+    return message.content
+      .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "")
+      .replace(/<\/?tool_calls?>/g, "")
+      .trim();
+  }, [isSystem, isUser, message.content]);
+  const mathPlugins = useMathPlugins(isSystem ? "" : displayContent);
+
+  if (isSystem) {
     const isMultiLine = message.content.includes("\n");
     if (isMultiLine) {
       return (
@@ -1322,20 +1335,6 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
       </div>
     );
   }
-
-  // Strip <tool_call>...</tool_call> XML blocks and orphaned closing tags from LLM output
-  const displayContent = useMemo(() => {
-    if (isUser) return message.content;
-    return message.content
-      .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "")
-      .replace(/<\/?tool_calls?>/g, "")
-      .trim();
-  }, [message.content, isUser]);
-
-  // Lazy-load remark-math / rehype-katex / katex CSS only when this message
-  // actually contains math delimiters. Saves ~280 KB of KaTeX from the
-  // initial bundle on math-free chats (#3381).
-  const mathPlugins = useMathPlugins(displayContent);
 
   return (
     <motion.div className={`flex ${isUser ? "justify-end" : "justify-start"}`} variants={messageIn} initial="initial" animate="animate">
@@ -2422,7 +2421,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     return () => document.removeEventListener("mousedown", handler);
   }, [modelOpen]);
 
-  const models = modelsQuery.data?.models ?? [];
+  const models = useMemo(() => modelsQuery.data?.models ?? [], [modelsQuery.data?.models]);
   const modelLoading = modelsQuery.isLoading || modelsQuery.isFetching;
   const modelFetchError = modelsQuery.error ? t("chat.unable_to_load_models") : null;
   const visibleModels = useMemo(() => filterVisible(models, hiddenSet), [models, hiddenSet]);
@@ -3019,11 +3018,12 @@ export function ChatPage() {
     }
   }, [ttsConfigRaw, ttsProvider]);
   const tts = useTtsManager(ttsSpeechConfig);
+  const stopTts = tts.stop;
 
   // Stop TTS when agent changes
   useEffect(() => {
-    tts.stop();
-  }, [selectedAgentId, tts.stop]);
+    stopTts();
+  }, [selectedAgentId, stopTts]);
 
   const [showHandAgents, setShowHandAgents] = useState<boolean>(() => {
     return safeStorageGet("librefang.chat.show_hand_agents") === "1";
@@ -3106,12 +3106,20 @@ export function ChatPage() {
     void queryClient.invalidateQueries({ queryKey: agentKeys.sessions(selectedAgentId) });
   }, [selectedAgentId, navigate, queryClient]);
 
+  const refetchAgents = agentsQuery.refetch;
+  const handleModelSwitch = useCallback(() => {
+    void refetchAgents();
+  }, [refetchAgents]);
+  const handleChatError = useCallback((message: string) => {
+    addToast(message, "error");
+  }, [addToast]);
+
   const { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement, ariaNonce, compactedSummary, isCompacting } = useChatMessages(
     selectedAgentId || null,
     agents,
     sessionVersion,
-    () => void agentsQuery.refetch(),
-    (message) => addToast(message, "error"),
+    handleModelSwitch,
+    handleChatError,
     urlSessionId,
     handleBackendNewSession,
     handleAutoPinSession,

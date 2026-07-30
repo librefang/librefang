@@ -14,12 +14,12 @@ describe("parseCsvText", () => {
   });
 
   it("strips a leading UTF-8 BOM", () => {
-    // The BOM ("﻿") used to bleed into the first header cell.
-    const out = parseCsvText("﻿name,role\nalice,admin\n");
+    // The BOM used to bleed into the first header cell.
+    const out = parseCsvText("\uFEFFname,role\nalice,admin\n");
     expect(out.records[0]).toEqual(["name", "role"]);
     // Sanity: only ONE BOM is stripped — a stray one mid-stream stays.
-    const out2 = parseCsvText("name,role\n﻿alice,admin\n");
-    expect(out2.records[1][0]).toBe("﻿alice");
+    const out2 = parseCsvText("name,role\n\uFEFFalice,admin\n");
+    expect(out2.records[1][0]).toBe("\uFEFFalice");
   });
 
   it("preserves embedded newlines inside quoted fields", () => {
@@ -82,7 +82,7 @@ describe("parseUsersCsv", () => {
   });
 
   it("imports a BOM-prefixed file (regression: import used to fail)", () => {
-    const csv = "﻿name,role,telegram\nalice,admin,123\n";
+    const csv = "\uFEFFname,role,telegram\nalice,admin,123\n";
     const out = parseUsersCsv(csv, ROLES);
     expect(out.errors).toEqual([]);
     expect(out.rows).toHaveLength(1);

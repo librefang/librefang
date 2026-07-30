@@ -1242,6 +1242,47 @@ function Docs({ t }: SectionProps) {
   )
 }
 
+// ─── Official partner ───
+function EveryApiPartner({ t }: SectionProps) {
+  const partner = t.partner
+  if (!partner) return null
+
+  return (
+    <section className="px-6 pb-24" aria-labelledby="everyapi-partner-title">
+      <FadeIn>
+        <div className="max-w-6xl mx-auto overflow-hidden border border-cyan-500/20 bg-cyan-500/5 p-7 md:p-10 relative">
+          <div className="absolute inset-y-0 right-0 w-1/3 bg-cyan-500/5 blur-3xl pointer-events-none" />
+          <div className="relative grid gap-8 md:grid-cols-[1fr_auto] md:items-center">
+            <div>
+              <div className="text-xs font-mono text-cyan-600 dark:text-cyan-400 uppercase tracking-widest mb-3">
+                {partner.eyebrow}
+              </div>
+              <h2 id="everyapi-partner-title" className="text-3xl md:text-4xl font-black text-slate-900 dark:text-white tracking-tight mb-3">
+                {partner.title}
+              </h2>
+              <p className="max-w-2xl text-gray-600 dark:text-gray-400 leading-relaxed">{partner.desc}</p>
+              <div className="mt-5 flex flex-wrap items-center gap-2 font-mono text-xs">
+                <span className="border border-black/10 dark:border-white/10 bg-surface-100 px-3 py-1.5 text-gray-600 dark:text-gray-300">LibreFang · {partner.capabilityRuntime}</span>
+                <span className="text-cyan-500">×</span>
+                <span className="border border-black/10 dark:border-white/10 bg-surface-100 px-3 py-1.5 text-gray-600 dark:text-gray-300">EveryAPI · {partner.capabilityGateway}</span>
+              </div>
+            </div>
+            <a
+              href="https://everyapi.ai/integrations/librefang?utm_source=librefang_website&utm_medium=partner&utm_campaign=librefang_everyapi"
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => trackEvent('click', 'partner_everyapi')}
+              className="inline-flex items-center justify-center gap-2 border border-cyan-500/30 px-5 py-3 text-sm font-bold text-cyan-600 dark:text-cyan-400 transition-colors hover:bg-cyan-500/10"
+            >
+              {partner.cta} <ExternalLink className="w-4 h-4" />
+            </a>
+          </div>
+        </div>
+      </FadeIn>
+    </section>
+  )
+}
+
 // ─── Footer ───
 function Footer({ t }: SectionProps) {
   const common = t.common!
@@ -1255,6 +1296,7 @@ function Footer({ t }: SectionProps) {
         </div>
         <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-xs text-gray-500 dark:text-gray-600 font-medium">
           <a href="https://docs.librefang.ai" target="_blank" rel="noopener noreferrer" className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">{t.footer.docs}</a>
+          <a href="https://everyapi.ai/integrations/librefang?utm_source=librefang_footer&utm_medium=partner&utm_campaign=librefang_everyapi" target="_blank" rel="noopener noreferrer" className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">{t.footer.everyapi ?? 'EveryAPI partner'}</a>
           <a href="https://github.com/librefang/librefang" target="_blank" rel="noopener noreferrer" className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">GitHub</a>
           <a href="https://github.com/librefang/librefang/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">{t.footer.license}</a>
           <a href="/changelog/" className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">{t.footer.changelog}</a>
@@ -1603,6 +1645,7 @@ export default function App() {
       <Install t={t} />
       <Downloads t={t} />
       <Docs t={t} />
+      <EveryApiPartner t={t} />
       <FAQ t={t} />
       <GitHubStats t={t} />
       <Footer t={t} />

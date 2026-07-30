@@ -3972,6 +3972,54 @@ fn atomic_write_no_partial_state_under_concurrency() {
     );
 }
 
+/// A hash-only config leaves the MCP bridge with no bearer to send.
+///
+/// Not a bug to fix inside `build_mcp_bridge_cfg` — a verifier cannot yield the secret it verifies, and this leg *transmits* the credential — but it is the posture `api_key_hash`'s own documentation and `librefang hash-api-key` both recommend, and on that posture every CLI-driver tool call 401s against the daemon's own middleware.
+/// Pinning the shape keeps the accompanying `WARN` and the documented `vault:` / env workarounds honest about what actually happens.
+#[test]
+fn mcp_bridge_omits_the_bearer_when_only_a_hash_is_configured() {
+    if std::env::var(API_KEY_ENV).is_ok_and(|v| !v.trim().is_empty()) {
+        // The environment already supplies a transmittable key — one of the two documented fixes — so there is no keyless path left to assert.
+        return;
+    }
+    let cfg = KernelConfig {
+        api_key: String::new(),
+        api_key_hash: "$sha256$0000000000000000000000000000000000000000000000000000000000000000"
+            .to_string(),
+        ..KernelConfig::default()
+    };
+
+    let bridge = build_mcp_bridge_cfg(&cfg);
+
+    assert_eq!(
+        bridge.api_key, None,
+        "a hash is a verifier, so the bridge has nothing to transmit"
+    );
+}
+
+/// Keeping a transmittable `api_key` beside the hash is the documented fix, so it must actually reach the bridge — the hash must not shadow it.
+#[test]
+fn mcp_bridge_sends_the_plaintext_key_when_a_hash_is_also_set() {
+    if std::env::var(API_KEY_ENV).is_ok_and(|v| !v.trim().is_empty()) {
+        // Env wins by design; asserting the config value would fail for the right reason and prove nothing.
+        return;
+    }
+    let cfg = KernelConfig {
+        api_key: "plaintext-master-key".to_string(),
+        api_key_hash: "$sha256$0000000000000000000000000000000000000000000000000000000000000000"
+            .to_string(),
+        ..KernelConfig::default()
+    };
+
+    let bridge = build_mcp_bridge_cfg(&cfg);
+
+    assert_eq!(
+        bridge.api_key.as_deref(),
+        Some("plaintext-master-key"),
+        "a configured hash must not suppress the transmittable key beside it"
+    );
+}
+
 /// Regression: hand `[[settings]]` must survive a daemon restart (issue
 /// #3143, originally guarded by the boot TOML drift loop).
 ///
@@ -4120,6 +4168,86 @@ system_prompt = "BASE PROMPT"
     assert!(
         prompt.contains("STT"),
         "rendered settings line must be present; got: {prompt}"
+    );
+
+    kernel.shutdown();
+}
+
+/// `[registry] auto_sync = false` must make boot leave the checkout alone.
+///
+/// This is the restart-survival half of the claim: the config round-trip and the catalog-task path are covered elsewhere, but the gate that actually decides whether `sync_registry` runs lives in `boot_with_config`, and nothing exercised it.
+/// No `.sync_marker` is written, which is the state `should_refresh` answers `true` for unconditionally — so a boot that ignored `auto_sync` would fast-forward the checkout with `git reset --hard origin/main` and destroy the local edit.
+///
+/// The load-bearing assertion is the absent fan-out file, not the surviving `HAND.toml`.
+/// `sync_registry` ends with `fanout_registry_content`, which copies `registry/providers/*.toml` into `<home>/providers/` and needs no network to do it — so the probe file appears if and only if the gate stopped honouring `auto_sync`, whether or not the machine can reach the mirror.
+/// Asserting only on the checkout's contents would pass vacuously on an offline runner, where the fetch fails and leaves the files alone by accident.
+///
+/// Only the frozen direction is asserted: the `auto_sync = true` path reaches the network, which a unit test must not depend on.
+#[test]
+fn boot_with_auto_sync_disabled_leaves_the_registry_checkout_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let hand_dir = home_dir.join("registry").join("hands").join("frozenhand");
+    std::fs::create_dir_all(&hand_dir).unwrap();
+    let local_edit = r#"
+id = "frozenhand"
+version = "1.0.0"
+name = "Operator Edited Hand"
+description = "local edit that must survive boot"
+category = "other"
+
+[agent]
+name = "frozen-agent"
+description = "test agent"
+system_prompt = "Test"
+"#;
+    std::fs::write(hand_dir.join("HAND.toml"), local_edit).unwrap();
+
+    // Network-independent probe: `fanout_registry_content` copies `registry/providers/*.toml` into `<home>/providers/`, and it runs on every `sync_registry` call regardless of whether the fetch succeeded.
+    let probe = home_dir.join("registry").join("providers");
+    std::fs::create_dir_all(&probe).unwrap();
+    std::fs::write(probe.join("zzz-frozen-probe.toml"), "name = \"probe\"\n").unwrap();
+
+    // Deliberately no `.sync_marker`: `should_refresh` returns true when the marker is absent, so the boot sync would run if the gate were not honoured.
+    // Sibling boot tests pre-touch the marker precisely to avoid that; this one must not.
+    assert!(
+        !home_dir.join("registry").join(".sync_marker").exists(),
+        "pre-check: the refresh must be due, or the assertions below prove nothing"
+    );
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.registry.auto_sync = false;
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    assert!(
+        !home_dir
+            .join("providers")
+            .join("zzz-frozen-probe.toml")
+            .exists(),
+        "boot ran the registry sync despite auto_sync = false — its fan-out copied \
+         the probe provider into the home dir"
+    );
+    // On a networked runner the sync replaces the whole checkout, so this is the assertion that fires there — and it reads without unwrapping, because the file being gone is precisely the regression being reported.
+    assert_eq!(
+        std::fs::read_to_string(hand_dir.join("HAND.toml")).unwrap_or_default(),
+        local_edit,
+        "boot fast-forwarded the registry checkout despite auto_sync = false — the \
+         operator's local edit is gone"
+    );
+    assert!(
+        kernel
+            .skills
+            .hand_registry
+            .get_definition("frozenhand")
+            .is_some(),
+        "the surviving hand must still be loaded from the frozen checkout"
     );
 
     kernel.shutdown();

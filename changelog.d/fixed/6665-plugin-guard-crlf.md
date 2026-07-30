@@ -1,0 +1,2 @@
+Fixed the `#6631` plugin route-classification guard panicking on a Windows checkout, where `include_str!` reflects `routes/plugins.rs` back with CRLF line endings and the guard's `\n}\n` terminator search matched nothing.
+Route extraction now normalises CRLF to LF before parsing and is factored into a shared helper covered by its own regression test that builds the CRLF fixture directly, so the platform-divergent case is provable without a Windows runner (#6665) (@houko)

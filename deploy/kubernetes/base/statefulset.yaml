@@ -1,0 +1,202 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: librefang
+  labels:
+    app.kubernetes.io/name: librefang
+    app.kubernetes.io/component: daemon
+spec:
+  # replicas MUST remain 1. `run_daemon` holds an exclusive flock on
+  # /data/daemon.lock, so a second pod against the same volume cannot boot at
+  # all; and even with separate volumes, cron / trigger dispatch / session
+  # ownership / budget enforcement / the audit hash chain are all
+  # process-local. Multi-replica support is an unimplemented architecture
+  # question tracked in the RFC — see docs/architecture/multi-replica-rfc.md.
+  replicas: 1
+  serviceName: librefang-headless
+  # A StatefulSet updates its single pod by terminating it before creating the
+  # replacement, so two daemons never contend for the ReadWriteOnce volume.
+  # A Deployment would need `strategy: Recreate` for the same guarantee — the
+  # default RollingUpdate briefly runs both, and the new pod would fail to
+  # attach the RWO PVC (or, on a driver that permits it, fail the flock).
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: librefang
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: librefang
+        app.kubernetes.io/component: daemon
+    spec:
+      # Pod Security Standard `restricted` (#6632). The image declares no
+      # USER directive because its entrypoint needs root under plain Docker
+      # to chown a bind mount; pinning the uid here takes that path away and
+      # the entrypoint detects the drop and skips both the chown and gosu.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        # fsGroup is what makes a *fresh* PVC writable by an unprivileged
+        # process: the kubelet chgrp's the volume to this gid at mount time.
+        # Without it the entrypoint exits non-zero with an actionable message
+        # rather than letting SQLite fail later on EACCES.
+        fsGroup: 1001
+        # Recursive relabelling of a large /data on every start is expensive;
+        # OnRootMismatch skips it once the top-level ownership already matches.
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      # SQLite WAL checkpoint on shutdown plus any in-flight agent turn. The
+      # daemon stops accepting new work as soon as it gets SIGTERM; this
+      # window is for finishing what it already started, so a turn mid-LLM-call
+      # is not killed with its tool results unpersisted.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: librefang
+          image: ghcr.io/librefang/librefang:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            # readOnlyRootFilesystem is deliberately NOT set. `restricted`
+            # does not require it, and the daemon writes outside /data: the
+            # python3 venv it provisions for MCP servers, plugin dependency
+            # installs, and $TMPDIR scratch for media conversion.
+          ports:
+            - name: http
+              containerPort: 4545
+              protocol: TCP
+          env:
+            # The container's loopback is unreachable from the kubelet and
+            # from other pods, so the daemon must bind the wildcard address.
+            # A non-loopback bind refuses to start unless authentication is
+            # configured — see the Secret references below (#3572).
+            - name: LIBREFANG_LISTEN
+              value: "0.0.0.0:4545"
+            - name: LIBREFANG_HOME
+              value: /data
+            - name: LIBREFANG_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: librefang-auth
+                  key: api-key
+            # Must base64-decode to exactly 32 bytes:
+            #   kubectl create secret generic librefang-auth \
+            #     --from-literal=vault-key="$(openssl rand -base64 32)" ...
+            - name: LIBREFANG_VAULT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: librefang-auth
+                  key: vault-key
+            - name: LIBREFANG_DASHBOARD_USER
+              valueFrom:
+                secretKeyRef:
+                  name: librefang-auth
+                  key: dashboard-user
+            - name: LIBREFANG_DASHBOARD_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: librefang-auth
+                  key: dashboard-pass
+            # OAuth/OIDC state-token HMAC key — base64 decoding to exactly 32
+            # bytes, same shape as LIBREFANG_VAULT_KEY.
+            #
+            # Marked optional because it only matters with external auth: with
+            # `[external_auth] enabled = false` an absent value means each boot
+            # derives a random per-process key, which invalidates any external
+            # login already in flight across a pod replacement. With external
+            # auth ON the daemon refuses to boot without it, so the Secret key
+            # becomes mandatory in practice — see boot.rs's
+            # `validate_state_secret_env`.
+            - name: LIBREFANG_STATE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: librefang-auth
+                  key: state-secret
+                  optional: true
+            # Provider credentials. All optional — the daemon boots without
+            # them and reports the missing provider when an agent first needs
+            # it, so a cluster running only local models needs no entries.
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: librefang-providers
+                  key: anthropic-api-key
+                  optional: true
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: librefang-providers
+                  key: openai-api-key
+                  optional: true
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: librefang-providers
+                  key: groq-api-key
+                  optional: true
+          # Three probes, two contracts (#6633).
+          #
+          # startupProbe gates the other two while first boot runs
+          # `librefang init` (writes config.toml, seeds the agent registry).
+          # 5s x 24 = up to 120s before the pod is declared failed, which is
+          # generous for a cold PVC on slow storage.
+          startupProbe:
+            httpGet:
+              path: /api/ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 24
+          # Liveness asks "is the process wedged?" and must NOT fail for a
+          # dependency outage — /api/health returns 200 whenever the HTTP
+          # server can answer, which is exactly the signal that avoids
+          # restart-looping a pod through a recoverable storage incident.
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 4
+          # Readiness asks "can it accept work?" and returns 503 when a
+          # required dependency is down, removing the pod from Service
+          # endpoints without killing it.
+          readinessProbe:
+            httpGet:
+              path: /api/ready
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Starting values, not tuned recommendations — the honest floor for
+          # a daemon that runs an axum server, a SQLite substrate, and the
+          # agent supervisor. Memory scales with concurrent agent turns and
+          # history size; watch actual usage before trusting these. No CPU
+          # limit: throttling the reactor during an LLM stream shows up as
+          # latency, not as a clean failure.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        # ReadWriteOnce, not ReadWriteMany: SQLite WAL + the flock on
+        # daemon.lock depend on POSIX locking semantics that shared
+        # network filesystems frequently do not provide correctly.
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi

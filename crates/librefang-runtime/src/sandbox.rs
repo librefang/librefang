@@ -330,6 +330,38 @@ fn make_engine_config() -> Config {
     let mut config = Config::new();
     config.consume_fuel(true);
     config.epoch_interruption(true);
+    // macOS: handle guest traps through POSIX signals rather than Mach
+    // exception ports.
+    //
+    // Wasmtime defaults to Mach ports on macOS, which parks a dedicated
+    // handler thread in a blocking `mach_msg` receive using the
+    // `MACH_RCV_INTERRUPT` flag. That flag asks the kernel to return
+    // `MACH_RCV_INTERRUPTED` (0x10004005) instead of restarting the call when a
+    // signal is delivered to that thread — and wasmtime treats any status other
+    // than "port closed" as fatal, printing `mach_msg failed with ...` and
+    // calling `libc::abort()` (see `runtime::vm::sys::unix::machports`).
+    //
+    // The daemon delivers such signals constantly: SIGCHLD from MCP stdio
+    // servers, sidecar channel processes, exec-tool subprocesses, and provider
+    // CLI probes. The kernel may deliver a process-directed signal to any
+    // thread that has it unblocked, including wasmtime's handler thread. So on
+    // macOS, any child process exiting while the WASM sandbox is live could
+    // abort the whole daemon — no panic, no unwind, no log beyond that one
+    // line. It reproduced as a hard SIGABRT partway through
+    // `cargo test -p librefang-kernel --lib`, which spawns subprocesses across
+    // hundreds of parallel tests; the crash reports all pointed at
+    // `machports::handler_thread`.
+    //
+    // POSIX signal handling has none of that coupling: the handler is installed
+    // per-process, is inherited across `fork()`, and needs no thread parked in a
+    // syscall that a signal can break. Mach ports exist to coexist with foreign
+    // Mach-port-based crash reporters (breakpad and friends), and nothing in the
+    // dependency tree uses one, so the trade is one-sided here. Guest traps are
+    // still caught correctly — both paths are first-class in wasmtime.
+    //
+    // The setter is a no-op on non-macOS targets, so it is called
+    // unconditionally rather than behind a `cfg`.
+    config.macos_use_mach_ports(false);
     config
 }
 

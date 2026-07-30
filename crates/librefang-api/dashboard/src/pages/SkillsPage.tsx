@@ -1600,7 +1600,7 @@ export function SkillsPage() {
   // ── Queries ──────────────────────────────────────────────────────────────
 
   const skillsQuery = useSkills();
-  const installedSkills = skillsQuery.data ?? [];
+  const installedSkills = useMemo(() => skillsQuery.data ?? [], [skillsQuery.data]);
 
   const keyword = selectedCategory
     ? (CATEGORIES.find((c) => c.id === selectedCategory)?.keyword ?? "")

@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
-# git commit-msg hook: reject commit messages containing Claude / Anthropic
-# attribution. CLAUDE.md (global + project) forbids these in this repo.
+# git commit-msg hook: reject Claude / Anthropic attribution, in the commit message and in the commit's own author identity.
+# CLAUDE.md (global + project) forbids both in this repo.
 #
 # This is the second layer behind .claude/hooks/guard-bash-safety.sh — that
 # hook can only see -m / --message values on the command line. Heredoc-based
 # messages (`git commit -F-`) and editor-driven messages bypass it. This
 # git-side hook catches them all.
 #
-# To enable: from repo root, run once
-#     git config core.hooksPath .githooks
-# (or run scripts/install-githooks.sh)
+# To enable: from repo root, run `just setup` (or `cargo xtask setup`), which sets `git config core.hooksPath scripts/hooks` once per clone.
 
 set -eu
 
@@ -21,4 +19,56 @@ attribution (Co-Authored-By / "Generated with Claude" / 🤖 Claude Code).
 CLAUDE.md (global + project) forbids these. Edit the message and retry.
 EOF
   exit 1
+fi
+
+# Author identity, which the message check above structurally cannot see: a commit made with GIT_AUTHOR_NAME=Claude carries a perfectly clean message and still shows up as `Claude <noreply@anthropic.com>` in `git log`, `git blame`, and the GitHub commit list.
+# That is the same attribution the message rule exists to keep out of the history, arriving through a field nobody reads while reviewing a diff.
+#
+# `git var` is asked rather than `git config user.*` so the environment overrides (GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL) are covered too — those are exactly how an agent harness sets the identity for a single commit.
+# An empty result means git has no identity configured, in which case the commit is about to fail on its own and this hook has nothing to add.
+author_ident="$(git var GIT_AUTHOR_IDENT 2>/dev/null || true)"
+if [ -n "$author_ident" ]; then
+  author_name="${author_ident%% <*}"
+  author_email="${author_ident#*<}"
+  author_email="${author_email%%>*}"
+  lower_name="$(printf '%s' "$author_name" | tr '[:upper:]' '[:lower:]')"
+  lower_email="$(printf '%s' "$author_email" | tr '[:upper:]' '[:lower:]')"
+
+  bad_author=""
+  # Separators are dropped before matching so "Claude Code", "Claude-Code", "claude_code" and "ClaudeCode" are one case rather than four — the same zero-or-more-spaces lesson the message regex already learned.
+  squashed_name="$(printf '%s' "$lower_name" | tr -cd '[:alnum:]')"
+  # Matched as whole names rather than substrings: a contributor called Claudia, Claudio, or Claude Dubois must not be blocked, and the address test is pinned to the bot mailbox so an Anthropic employee committing under their own anthropic.com address is not either.
+  # A contributor whose entire display name is the bare word "Claude" is collateral, and can add a surname.
+  #
+  # Model-name identities are matched with "claude" anywhere before the family name, not just immediately before it: Anthropic has shipped both a family-then-version form ("Claude Opus 5" -> claudeopus5) and a version-then-family form ("Claude 3.5 Sonnet" / "claude-3-5-sonnet" -> claude35sonnet).
+  # Anchoring the family word to the end of the string rather than requiring it right after "claude" catches both.
+  case "$squashed_name" in
+    claude | claudecode | claudeai | anthropic | claude*opus* | claude*sonnet* | claude*haiku*)
+      bad_author="name \"$author_name\""
+      ;;
+  esac
+  case "$lower_email" in
+    noreply@anthropic.com | claude@anthropic.com)
+      bad_author="address <$author_email>"
+      ;;
+  esac
+
+  if [ -n "$bad_author" ]; then
+    cat >&2 <<EOF
+[commit-msg] Refusing commit — the author $bad_author attributes this commit
+to Claude / Anthropic. CLAUDE.md forbids AI attribution anywhere in the repo's
+history, and the message check above cannot catch it: the message can be
+spotless while \`git log --format=%an\` says Claude.
+
+Commit under a human identity instead:
+    git -c user.name='Your Name' -c user.email='you@example.com' commit …
+or set it for the clone once:
+    git config user.name 'Your Name' && git config user.email 'you@example.com'
+
+Already committed? Rewrite the author before pushing:
+    git commit --amend --no-edit --reset-author
+    git rebase <base> --exec 'git commit --amend --no-edit --reset-author'
+EOF
+    exit 1
+  fi
 fi

@@ -2312,3 +2312,156 @@ fn load_overrides_keeps_existing_on_parse_failure() {
         "a malformed overrides.json must not silently drop existing overrides (#5137)"
     );
 }
+#[test]
+fn managed_everyapi_registration_is_auto_detected_and_builtin() {
+    let mut catalog = ModelCatalog::default();
+    assert!(catalog.ensure_managed_everyapi("https://api-cn.everyapi.ai/v1"));
+    let provider = catalog.get_provider("everyapi").unwrap();
+    assert_eq!(provider.base_url, "https://api-cn.everyapi.ai/v1");
+    assert_eq!(provider.auth_status, AuthStatus::AutoDetected);
+    assert!(!provider.is_custom);
+    assert!(provider.cli_managed);
+}
+
+#[test]
+fn managed_everyapi_registration_honors_suppression() {
+    let mut catalog = ModelCatalog::default();
+    catalog.suppress_provider("everyapi");
+    assert!(!catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1"));
+    assert!(catalog.get_provider("everyapi").is_none());
+}
+
+#[test]
+fn explicit_url_converts_managed_everyapi_to_custom() {
+    let mut catalog = ModelCatalog::default();
+    assert!(catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1"));
+    assert!(catalog.set_provider_url("everyapi", "https://relay.example/v1"));
+    let provider = catalog.get_provider("everyapi").unwrap();
+    assert_eq!(provider.base_url, "https://relay.example/v1");
+    assert_eq!(provider.auth_status, AuthStatus::Configured);
+    assert!(provider.is_custom);
+    assert!(
+        !provider.cli_managed,
+        "a user-set URL takes the entry out of CLI management"
+    );
+}
+
+#[test]
+fn explicit_everyapi_registration_survives_without_a_registry_entry() {
+    let mut catalog = ModelCatalog::default();
+    assert!(catalog.ensure_explicit_everyapi("https://relay.example/v1/", "MY_EVERYAPI_KEY", true));
+    let provider = catalog.get_provider("everyapi").unwrap();
+    assert_eq!(provider.base_url, "https://relay.example/v1");
+    assert_eq!(provider.api_key_env, "MY_EVERYAPI_KEY");
+    assert_eq!(provider.auth_status, AuthStatus::Configured);
+    assert!(provider.is_custom);
+    assert!(!provider.cli_managed);
+}
+
+/// Provenance must survive a CLI login that predates the explicit config, and the explicit side must win.
+/// Reading `!is_custom` as "CLI-managed" instead let the credential process keep rewriting `base_url` afterwards.
+#[test]
+fn explicit_registration_takes_the_entry_back_from_cli_management() {
+    let mut catalog = ModelCatalog::default();
+    assert!(catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1"));
+    assert!(catalog.get_provider("everyapi").unwrap().cli_managed);
+
+    assert!(catalog.ensure_explicit_everyapi("https://relay.example/v1", "MY_EVERYAPI_KEY", true));
+    let provider = catalog.get_provider("everyapi").unwrap();
+    assert!(!provider.cli_managed);
+    assert_eq!(provider.base_url, "https://relay.example/v1");
+
+    // And the credential process can no longer reclaim it.
+    assert!(!catalog.ensure_managed_everyapi("https://api-cn.everyapi.ai/v1"));
+    assert_eq!(
+        catalog.get_provider("everyapi").unwrap().base_url,
+        "https://relay.example/v1"
+    );
+}
+
+/// Installing a provider file at runtime — the registry install route behind the dashboard's "Connect EveryAPI gateway" action — is an explicit configuration, so it takes the entry back without waiting for the next boot to reclassify it.
+#[test]
+fn a_provider_file_merge_clears_cli_management() {
+    let mut catalog = ModelCatalog::default();
+    assert!(catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1"));
+
+    catalog.merge_catalog_file(librefang_types::model_catalog::ModelCatalogFile {
+        provider: Some(librefang_types::model_catalog::ProviderCatalogToml {
+            id: "everyapi".to_string(),
+            display_name: "EveryAPI".to_string(),
+            api_key_env: "MY_EVERYAPI_KEY".to_string(),
+            base_url: "https://relay.self-hosted.example/v1".to_string(),
+            key_required: true,
+            signup_url: None,
+            regions: std::collections::HashMap::new(),
+            media_capabilities: Vec::new(),
+        }),
+        models: Vec::new(),
+    });
+
+    let provider = catalog.get_provider("everyapi").unwrap();
+    assert!(!provider.cli_managed);
+    assert_eq!(provider.api_key_env, "MY_EVERYAPI_KEY");
+    assert_eq!(provider.base_url, "https://relay.self-hosted.example/v1");
+}
+
+/// A payload that leaves `api_key_env` empty keeps the previous env var, but it still overwrites `base_url` — so it must take the entry back too.
+/// Tying the hand-off to the `api_key_env` branch instead would leave the endpoint the file just set exposed to the next credential refresh.
+#[test]
+fn a_provider_file_merge_without_a_key_env_still_clears_cli_management() {
+    let mut catalog = ModelCatalog::default();
+    assert!(catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1"));
+
+    catalog.merge_catalog_file(librefang_types::model_catalog::ModelCatalogFile {
+        provider: Some(librefang_types::model_catalog::ProviderCatalogToml {
+            id: "everyapi".to_string(),
+            display_name: "EveryAPI".to_string(),
+            api_key_env: String::new(),
+            base_url: "https://relay.self-hosted.example/v1".to_string(),
+            key_required: true,
+            signup_url: None,
+            regions: std::collections::HashMap::new(),
+            media_capabilities: Vec::new(),
+        }),
+        models: Vec::new(),
+    });
+
+    let provider = catalog.get_provider("everyapi").unwrap();
+    assert!(!provider.cli_managed);
+    assert_eq!(
+        provider.api_key_env, "EVERYAPI_API_KEY",
+        "an empty payload field must not erase the previous env var"
+    );
+    assert_eq!(provider.base_url, "https://relay.self-hosted.example/v1");
+}
+
+/// `detect_auth` must leave a CLI-managed entry alone: no env var describes its credentials, so probing `api_key_env` could only promote it on the strength of an unrelated key and route its refresh down the explicit-key branch.
+///
+/// `EVERYAPI_API_KEY` is set here precisely because that is the env var `ensure_managed_everyapi` records — a stray value in the daemon's environment must not be mistaken for the CLI login's credentials.
+/// Nothing else in this crate reads the variable, so setting it cannot skew a concurrent test.
+#[test]
+fn detect_auth_does_not_promote_a_cli_managed_entry_from_a_stray_env_key() {
+    let previous = std::env::var("EVERYAPI_API_KEY").ok();
+    unsafe { std::env::set_var("EVERYAPI_API_KEY", "stray-key-not-the-cli-login") };
+
+    let mut catalog = ModelCatalog::default();
+    assert!(catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1"));
+    // The API refresh path demotes the entry when the credential process becomes unreachable; an unrelated re-detection pass must not undo that.
+    catalog.set_provider_auth_status("everyapi", AuthStatus::Missing);
+    catalog.detect_auth();
+    let provider = catalog.get_provider("everyapi").unwrap();
+
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("EVERYAPI_API_KEY", value),
+            None => std::env::remove_var("EVERYAPI_API_KEY"),
+        }
+    }
+
+    assert_eq!(
+        provider.auth_status,
+        AuthStatus::Missing,
+        "the credential process owns this entry's status, not the environment"
+    );
+    assert!(provider.cli_managed);
+}

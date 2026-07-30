@@ -28,25 +28,18 @@ class MemoryStorage implements Storage {
   }
 }
 
-function ensureStorage(name: "localStorage" | "sessionStorage") {
-  try {
-    const storage = globalThis[name];
-    if (storage) {
-      storage.getItem("__vitest_storage_probe__");
-      return;
-    }
-  } catch {
-    // jsdom may expose a throwing Storage object for opaque origins.
-  }
-
+function installTestStorage(name: "localStorage" | "sessionStorage") {
+  // Install deterministic storage without reading Node's experimental global
+  // getter. Node 25 warns on that read unless --localstorage-file is set,
+  // while jsdom may expose a throwing Storage for opaque origins.
   Object.defineProperty(globalThis, name, {
     configurable: true,
     value: new MemoryStorage(),
   });
 }
 
-ensureStorage("localStorage");
-ensureStorage("sessionStorage");
+installTestStorage("localStorage");
+installTestStorage("sessionStorage");
 
 // cmdk uses ResizeObserver internally; jsdom doesn't provide it
 global.ResizeObserver = class ResizeObserver {

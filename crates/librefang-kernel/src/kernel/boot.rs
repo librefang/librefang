@@ -15,6 +15,40 @@ use super::*;
 use crate::MeteringSubsystemApi;
 use librefang_types::error::LibreFangError;
 
+fn select_everyapi_default_model(
+    catalog: &librefang_runtime::model_catalog::ModelCatalog,
+    available_ids: &[String],
+) -> Option<String> {
+    use librefang_types::model_catalog::{Modality, ModelTier};
+    use std::collections::HashSet;
+
+    let available: HashSet<String> = available_ids
+        .iter()
+        .map(|id| id.trim().to_ascii_lowercase())
+        .filter(|id| !id.is_empty())
+        .collect();
+    [
+        ModelTier::Smart,
+        ModelTier::Balanced,
+        ModelTier::Frontier,
+        ModelTier::Fast,
+    ]
+    .into_iter()
+    .flat_map(|tier| catalog.models_by_tier(tier))
+    .find(|model| {
+        model.modality == Modality::Text && available.contains(&model.id.to_ascii_lowercase())
+    })
+    .map(|model| model.id.clone())
+    .or_else(|| {
+        available_ids
+            .iter()
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
+            .min_by_key(|id| id.to_ascii_lowercase())
+            .map(str::to_string)
+    })
+}
+
 impl LibreFangKernel {
     /// Per-session stream-event hub (multi-client SSE attach).
     ///
@@ -46,6 +80,32 @@ impl LibreFangKernel {
         // Env var overrides — useful for Docker where config.toml is baked in.
         if let Ok(listen) = std::env::var("LIBREFANG_LISTEN") {
             config.api_listen = listen;
+        }
+        // `LIBREFANG_API_KEY` is the only way a Kubernetes Secret can supply
+        // the API bearer token (#6635). `config.toml` lives inside the
+        // daemon's own writable data dir (`$LIBREFANG_HOME/config.toml`), so
+        // it cannot be mounted from a Secret — the daemon rewrites it. Every
+        // other credential the deployment needs already has an env path
+        // (`LIBREFANG_VAULT_KEY`, `LIBREFANG_DASHBOARD_USER` /
+        // `LIBREFANG_DASHBOARD_PASS`, provider `*_API_KEY` vars); without
+        // this one, a manifest satisfying `api_key` had to bake the literal
+        // into the image or shell it into config.toml at boot.
+        //
+        // An empty or whitespace-only value is ignored rather than treated as
+        // "clear the key": a Secret key that exists but is unset would
+        // otherwise silently disarm bearer authentication, and on a
+        // non-loopback bind that turns into an open daemon. Refusing the
+        // override leaves whatever `config.toml` says, so the #3572 bind
+        // guard still gets the truth.
+        match resolve_api_key_override(std::env::var(super::API_KEY_ENV).ok().as_deref()) {
+            ApiKeyOverride::Use(key) => config.api_key = key,
+            ApiKeyOverride::IgnoredEmpty => warn!(
+                "LIBREFANG_API_KEY is set but empty — ignoring it and keeping the \
+                 api_key from config.toml. An empty value cannot be distinguished \
+                 from a misconfigured Secret, and silently clearing the key would \
+                 open the API on a non-loopback bind."
+            ),
+            ApiKeyOverride::Absent => {}
         }
 
         // Clamp configuration bounds to prevent zero-value or unbounded misconfigs
@@ -370,6 +430,67 @@ impl LibreFangKernel {
             .is_ok()
         }
 
+        let (everyapi_suppressed, early_everyapi_provider) = {
+            let mut catalog = librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
+            catalog.load_suppressed(
+                &config
+                    .home_dir
+                    .join("data")
+                    .join("suppressed_providers.json"),
+            );
+            (
+                catalog.is_suppressed("everyapi"),
+                catalog.get_provider("everyapi").cloned(),
+            )
+        };
+        let everyapi_explicit = config.provider_urls.contains_key("everyapi")
+            || config.provider_api_keys.contains_key("everyapi")
+            || config.auth_profiles.contains_key("everyapi")
+            || (config.default_model.provider == "everyapi"
+                && (config.default_model.base_url.is_some()
+                    || !config.default_model.api_key_env.trim().is_empty()))
+            || std::env::var("EVERYAPI_API_KEY").is_ok_and(|key| !key.trim().is_empty())
+            || config
+                .home_dir
+                .join("providers")
+                .join("everyapi.toml")
+                .exists();
+        let everyapi_credential = if everyapi_suppressed || everyapi_explicit {
+            None
+        } else {
+            crate::everyapi_credentials::resolve(false).ok()
+        };
+        let everyapi_explicit_key_available = if config.default_model.provider == "everyapi"
+            && !config.default_model.api_key_env.trim().is_empty()
+        {
+            std::env::var(&config.default_model.api_key_env).is_ok_and(|key| !key.trim().is_empty())
+        } else if let Some(env_var) = config.provider_api_keys.get("everyapi") {
+            std::env::var(env_var).is_ok_and(|key| !key.trim().is_empty())
+        } else if let Some(profile) = config
+            .auth_profiles
+            .get("everyapi")
+            .and_then(|profiles| profiles.iter().min_by_key(|profile| profile.priority))
+        {
+            std::env::var(&profile.api_key_env).is_ok_and(|key| !key.trim().is_empty())
+        } else if let Some(provider) = early_everyapi_provider.as_ref() {
+            std::env::var(&provider.api_key_env).is_ok_and(|key| !key.trim().is_empty())
+        } else {
+            std::env::var("EVERYAPI_API_KEY").is_ok_and(|key| !key.trim().is_empty())
+        };
+        if config.default_model.provider == "everyapi"
+            && everyapi_explicit_key_available
+            && config.default_model.base_url.is_none()
+            && !config.provider_urls.contains_key("everyapi")
+        {
+            config.default_model.base_url = Some(
+                early_everyapi_provider
+                    .as_ref()
+                    .map(|provider| provider.base_url.clone())
+                    .filter(|url| !url.trim().is_empty())
+                    .unwrap_or_else(|| "https://api.everyapi.ai/v1".to_string()),
+            );
+        }
+
         // Resolve "auto" provider: scan environment for the first available API key.
         if config.default_model.provider == "auto" || config.default_model.provider.is_empty() {
             if let Some((provider, model_hint, env_var)) = drivers::detect_available_provider() {
@@ -396,6 +517,47 @@ impl LibreFangKernel {
                 config.default_model.provider = provider.to_string();
                 config.default_model.model = model;
                 config.default_model.api_key_env = env_var.to_string();
+            } else if !everyapi_suppressed
+                && (everyapi_explicit_key_available || everyapi_credential.is_some())
+            {
+                let catalog = librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
+                let model = everyapi_credential
+                    .as_ref()
+                    .and_then(|_| crate::everyapi_credentials::resolve_available_models().ok())
+                    .and_then(|available| select_everyapi_default_model(&catalog, &available))
+                    .unwrap_or_else(|| {
+                        warn!(
+                            "EveryAPI account model catalog unavailable or has no curated text model; \
+                             falling back to the built-in default"
+                        );
+                        "claude-sonnet-5".to_string()
+                    });
+                let auth_source = if everyapi_explicit_key_available {
+                    "EveryAPI API key"
+                } else {
+                    "EveryAPI CLI login"
+                };
+                info!(
+                    provider = "everyapi",
+                    model = %model,
+                    auth_source,
+                    "Auto-detected default provider"
+                );
+                config.default_model.provider = "everyapi".to_string();
+                config.default_model.model = model;
+                config.default_model.api_key_env = String::new();
+                if everyapi_explicit_key_available
+                    && config.default_model.base_url.is_none()
+                    && !config.provider_urls.contains_key("everyapi")
+                {
+                    config.default_model.base_url = Some(
+                        early_everyapi_provider
+                            .as_ref()
+                            .map(|provider| provider.base_url.clone())
+                            .filter(|url| !url.trim().is_empty())
+                            .unwrap_or_else(|| "https://api.everyapi.ai/v1".to_string()),
+                    );
+                }
             } else if is_ollama_reachable() {
                 // Ollama is running locally — use the catalog's default model, not a hardcoded one.
                 let model = librefang_runtime::model_catalog::ModelCatalog::default()
@@ -478,7 +640,26 @@ impl LibreFangKernel {
         };
         // Primary driver failure is non-fatal: the dashboard should remain accessible
         // even if the LLM provider is misconfigured. Users can fix config via dashboard.
-        let primary_result = drivers::create_driver(&driver_config);
+        let managed_everyapi_default = config.default_model.provider == "everyapi"
+            && default_api_key.is_none()
+            && !everyapi_suppressed
+            && !everyapi_explicit
+            && everyapi_credential.is_some();
+        let primary_result = if everyapi_suppressed && config.default_model.provider == "everyapi" {
+            Err(LlmError::MissingApiKey(
+                "EveryAPI provider is suppressed".to_string(),
+            ))
+        } else if managed_everyapi_default {
+            Ok(
+                Arc::new(crate::everyapi_driver::ManagedEveryApiDriver::new_gated(
+                    driver_config.clone(),
+                    Arc::new(drivers::DriverCache::new()),
+                    config.home_dir.clone(),
+                )) as Arc<dyn LlmDriver>,
+            )
+        } else {
+            drivers::create_driver(&driver_config)
+        };
         let mut driver_chain: Vec<Arc<dyn LlmDriver>> = Vec::new();
 
         let rotation_specs = collect_rotation_key_specs(
@@ -688,6 +869,10 @@ impl LibreFangKernel {
             );
         }
         for fb in &config.fallback_providers {
+            if everyapi_suppressed && fb.provider == "everyapi" {
+                warn!("EveryAPI fallback provider is suppressed; skipping slot");
+                continue;
+            }
             // Governance allowlist (issue #6459): never add a disallowed provider
             // to the boot default_driver fallback chain. This driver seeds
             // aux.primary and the CLI-profile / init-failure primary shortcuts, so
@@ -849,12 +1034,21 @@ impl LibreFangKernel {
         // Auto-sync registry content on first boot or after upgrade when
         // Sync registry: downloads if cache is stale, pre-installs providers/agents/integrations.
         // Skips download if cache is fresh; skips copy if files already exist.
-        librefang_runtime::registry_sync::sync_registry(
-            &config.home_dir,
-            config.registry.cache_ttl_secs,
-            &config.registry.registry_mirror,
-            config.registry.registry_host.as_deref(),
-        );
+        // `[registry] auto_sync = false` freezes `~/.librefang/registry/`: the sync fast-forwards that checkout with `git reset --hard origin/main`, which destroys every local modification under it — including the ones `PUT /api/hands/{id}/manifest` writes for a registry-shipped hand.
+        // Explicit operator actions (`librefang init`, `POST /api/catalog/update`) still fetch; `POST /api/hands/reload` only reloads whatever is already on disk and never fetched from upstream, so it is unaffected either way.
+        if config.registry.auto_sync {
+            librefang_runtime::registry_sync::sync_registry(
+                &config.home_dir,
+                config.registry.cache_ttl_secs,
+                &config.registry.registry_mirror,
+                config.registry.registry_host.as_deref(),
+            );
+        } else {
+            info!(
+                "[registry] auto_sync = false — skipping the boot registry sync; \
+                 run POST /api/catalog/update to refresh on demand"
+            );
+        }
 
         // One-shot: reclaim the duplicate registry checkout that older
         // librefang versions maintained under `~/.librefang/cache/registry/`.
@@ -899,6 +1093,76 @@ impl LibreFangKernel {
                 "applied {} provider URL override(s)",
                 config.provider_urls.len()
             );
+        }
+        let everyapi_explicit = everyapi_explicit
+            || config.provider_urls.contains_key("everyapi")
+            || config.provider_api_keys.contains_key("everyapi")
+            || config.auth_profiles.contains_key("everyapi")
+            || std::env::var("EVERYAPI_API_KEY").is_ok_and(|key| !key.trim().is_empty());
+        if !everyapi_suppressed && everyapi_explicit {
+            let base_url = config
+                .default_model
+                .base_url
+                .clone()
+                .filter(|_| config.default_model.provider == "everyapi")
+                .or_else(|| config.provider_urls.get("everyapi").cloned())
+                .or_else(|| {
+                    model_catalog
+                        .get_provider("everyapi")
+                        .filter(|provider| provider.is_custom)
+                        .map(|provider| provider.base_url.clone())
+                })
+                .unwrap_or_else(|| "https://api.everyapi.ai/v1".to_string());
+            let api_key_env = if config.default_model.provider == "everyapi"
+                && !config.default_model.api_key_env.trim().is_empty()
+            {
+                config.default_model.api_key_env.clone()
+            } else if let Some(env_var) = config.provider_api_keys.get("everyapi") {
+                env_var.clone()
+            } else if let Some(profile) = config
+                .auth_profiles
+                .get("everyapi")
+                .and_then(|profiles| profiles.iter().min_by_key(|profile| profile.priority))
+            {
+                profile.api_key_env.clone()
+            } else if let Some(provider) = model_catalog
+                .get_provider("everyapi")
+                .filter(|provider| provider.is_custom)
+            {
+                provider.api_key_env.clone()
+            } else {
+                "EVERYAPI_API_KEY".to_string()
+            };
+            let credential_present =
+                std::env::var(&api_key_env).is_ok_and(|key| !key.trim().is_empty());
+            model_catalog.ensure_explicit_everyapi(&base_url, &api_key_env, credential_present);
+        } else if !everyapi_suppressed {
+            match everyapi_credential
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(|| crate::everyapi_credentials::resolve(false))
+            {
+                Ok(credential) => {
+                    if model_catalog.ensure_managed_everyapi(&credential.base_url) {
+                        info!(
+                            base_url = %credential.base_url,
+                            "Auto-detected EveryAPI managed provider"
+                        );
+                    }
+                }
+                Err(
+                    crate::everyapi_credentials::CredentialError::NotLoggedIn
+                    | crate::everyapi_credentials::CredentialError::NoRelayKey,
+                ) => {
+                    if model_catalog.ensure_managed_everyapi("https://api.everyapi.ai/v1") {
+                        model_catalog.set_provider_auth_status(
+                            "everyapi",
+                            librefang_types::model_catalog::AuthStatus::Missing,
+                        );
+                    }
+                }
+                Err(_) => {}
+            }
         }
         if !config.provider_proxy_urls.is_empty() {
             model_catalog.apply_proxy_url_overrides(&config.provider_proxy_urls);
@@ -1936,57 +2200,14 @@ impl LibreFangKernel {
                                                     .hand_registry
                                                     .get_definition(&hand_id)
                                                 {
-                                                    if !def.settings.is_empty() {
-                                                        let empty =
-                                                            std::collections::HashMap::new();
-                                                        let cfg_for_settings =
-                                                            persisted_hand_configs
-                                                                .get(&hand_id)
-                                                                .unwrap_or(&empty);
-                                                        // Capture the returned env-var allowlist
-                                                        // and re-inject it into
-                                                        // metadata["hand_allowed_env"] — mirroring
-                                                        // the activation path in
-                                                        // `activate_hand_with_id`. Discarding it
-                                                        // here meant hand-injected env passthrough
-                                                        // silently disappeared on every restart
-                                                        // until a manual re-activation (#5137).
-                                                        let allowed_env =
-                                                            apply_settings_block_to_manifest(
-                                                                &mut entry.manifest,
-                                                                &def.settings,
-                                                                cfg_for_settings,
-                                                            );
-                                                        if !allowed_env.is_empty() {
-                                                            entry.manifest.metadata.insert(
-                                                                "hand_allowed_env".to_string(),
-                                                                serde_json::to_value(&allowed_env)
-                                                                    .unwrap_or_default(),
-                                                            );
-                                                        }
-                                                    }
-
-                                                    // Re-render `## Reference Knowledge` and
-                                                    // `## Your Team` tails — like the settings
-                                                    // tail above, the bare disk TOML never
-                                                    // carries them, so without re-rendering
-                                                    // here the agent silently loses skill
-                                                    // discoverability and peer awareness on
-                                                    // every restart. Helpers are
-                                                    // unconditionally idempotent: empty skill
-                                                    // content / single-agent hand / no peers
-                                                    // all collapse to a strip-only call that
-                                                    // also clears any stale tail left over
-                                                    // from when the hand previously had
-                                                    // those.
+                                                    // Re-render the whole prompt through the canonical helper — the same one activation and the settings-save path use, so the three cannot disagree about content or ordering.
+                                                    // The bare disk TOML carries none of the rendered tails, so without this the agent silently loses its configured values, skill discoverability and peer awareness on every restart.
                                                     //
-                                                    // Recover the agent's role from the
-                                                    // `hand_role:<role>` tag stamped at
-                                                    // activation. Skip silently when the tag
-                                                    // is missing — the agent isn't
-                                                    // hand-derived in a way we recognise, and
-                                                    // the activation path will re-stamp the
-                                                    // tags on the next `hand activate`.
+                                                    // The env passthrough allowlist is re-derived from the same (definition, config) pair.
+                                                    // Discarding it here meant hand-injected env passthrough silently disappeared on every restart until a manual re-activation (#5137); deriving it from the settings alone dropped every `[[requires]]`-declared name, which is the same disappearance one layer down.
+                                                    //
+                                                    // Recover the agent's role from the `hand_role:<role>` tag stamped at activation.
+                                                    // Skip when the tag is missing — the agent isn't hand-derived in a way we recognise, and the activation path will re-stamp the tags on the next `hand activate`.
                                                     let role_opt = entry
                                                         .manifest
                                                         .tags
@@ -1994,29 +2215,31 @@ impl LibreFangKernel {
                                                         .find_map(|t| t.strip_prefix("hand_role:"))
                                                         .map(|s| s.to_string());
                                                     if let Some(role) = role_opt {
-                                                        apply_skill_reference_block_to_manifest(
+                                                        let empty =
+                                                            std::collections::HashMap::new();
+                                                        let cfg_for_settings =
+                                                            persisted_hand_configs
+                                                                .get(&hand_id)
+                                                                .unwrap_or(&empty);
+                                                        let allowed_env =
+                                                            rerender_hand_prompt_tails(
+                                                                &mut entry.manifest,
+                                                                &role,
+                                                                &def,
+                                                                cfg_for_settings,
+                                                            );
+                                                        set_hand_allowed_env(
                                                             &mut entry.manifest,
-                                                            &role,
-                                                            &def,
-                                                        );
-                                                        apply_team_block_to_manifest(
-                                                            &mut entry.manifest,
-                                                            &role,
-                                                            &def,
+                                                            &allowed_env,
                                                         );
                                                     } else {
-                                                        // Hand membership is known (we're inside
-                                                        // the `hand:<id>` branch) but the role tag
-                                                        // wasn't stamped — this agent will boot
-                                                        // without skill discoverability or peer
-                                                        // awareness until somebody re-runs
-                                                        // `hand activate`. Log so the silent
-                                                        // degradation is at least greppable.
+                                                        // Hand membership is known (we're inside the `hand:<id>` branch) but the role tag wasn't stamped — this agent will boot without its rendered tails until somebody re-runs `hand activate`.
+                                                        // Log so the silent degradation is at least greppable.
                                                         debug!(
                                                             agent = %name,
                                                             hand = %hand_id,
                                                             "hand_role:<role> tag missing on \
-                                                             hand-derived agent; skipping skill/team \
+                                                             hand-derived agent; skipping prompt \
                                                              tail re-render until next hand activate"
                                                         );
                                                     }
@@ -2684,6 +2907,37 @@ system_prompt = "You are a helpful assistant."
     }
 }
 
+/// What the `LIBREFANG_API_KEY` env var asks `boot_with_config` to do.
+#[derive(Debug, PartialEq, Eq)]
+enum ApiKeyOverride {
+    /// Env unset — leave `config.toml`'s `api_key` alone.
+    Absent,
+    /// Env set to a usable value — replace `config.toml`'s `api_key` with it.
+    Use(String),
+    /// Env set but empty or whitespace-only. Treated as `Absent` plus a
+    /// warning, deliberately NOT as "clear the api_key": a Kubernetes Secret
+    /// key that exists but holds nothing is indistinguishable from this, and
+    /// clearing the key disarms bearer auth — which on a non-loopback bind
+    /// means an open daemon. Keeping `config.toml`'s value also keeps the
+    /// #3572 bind guard's inputs honest.
+    IgnoredEmpty,
+}
+
+/// Pure decision for the `LIBREFANG_API_KEY` override — `None` means env
+/// unset.
+///
+/// Separated from the env read for the same reason as
+/// `validate_state_secret_value` below: it makes the accept/reject envelope
+/// testable without mutating process-global env, which would force the suite
+/// serial and is unsound once other threads exist (Rust 1.80+).
+fn resolve_api_key_override(raw: Option<&str>) -> ApiKeyOverride {
+    match raw {
+        None => ApiKeyOverride::Absent,
+        Some(value) if value.trim().is_empty() => ApiKeyOverride::IgnoredEmpty,
+        Some(value) => ApiKeyOverride::Use(value.trim().to_string()),
+    }
+}
+
 /// Pure validator for the `LIBREFANG_STATE_SECRET` shape — `None`
 /// means env unset; otherwise the raw env value is checked for base64
 /// decodability and a 32-byte payload.
@@ -3090,6 +3344,54 @@ mod extraction_model_tests {
 }
 
 #[cfg(test)]
+mod api_key_env_override {
+    //! `LIBREFANG_API_KEY` is the only path by which a Kubernetes Secret can
+    //! supply the API bearer token (#6635), because `config.toml` lives in the
+    //! daemon's own writable data dir and is rewritten at boot. The pure
+    //! resolver is pinned here so the security-relevant edge — an env var that
+    //! exists but is empty — cannot regress into "clear the key".
+    use super::{resolve_api_key_override, ApiKeyOverride};
+
+    #[test]
+    fn unset_env_leaves_config_alone() {
+        assert_eq!(resolve_api_key_override(None), ApiKeyOverride::Absent);
+    }
+
+    #[test]
+    fn a_real_value_overrides_config() {
+        assert_eq!(
+            resolve_api_key_override(Some("s3cret-token")),
+            ApiKeyOverride::Use("s3cret-token".to_string())
+        );
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed() {
+        // A Secret created with `--from-file` carries the file's trailing
+        // newline; a token with a stray \n would never match a bearer header.
+        assert_eq!(
+            resolve_api_key_override(Some("  s3cret-token\n")),
+            ApiKeyOverride::Use("s3cret-token".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_value_is_ignored_not_treated_as_clearing_the_key() {
+        // The security-relevant case. An empty Secret value must not disarm
+        // bearer authentication — on a non-loopback bind that is an open
+        // daemon, and the #3572 boot guard would see a cleared api_key and
+        // conclude no auth is configured.
+        for empty in ["", " ", "\n", "\t  \n"] {
+            assert_eq!(
+                resolve_api_key_override(Some(empty)),
+                ApiKeyOverride::IgnoredEmpty,
+                "empty value {empty:?} must be ignored, never applied"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod state_secret_validation {
     //! Regression guards for the `state-secret-default-random` audit
     //! item. `Kernel::open` refuses to boot when
@@ -3158,6 +3460,54 @@ mod state_secret_validation {
         assert!(
             err.starts_with("the wrong length") || err.starts_with("not base64"),
             "expected length-or-decode rejection on empty string; got {err:?}",
+        );
+    }
+}
+
+#[cfg(test)]
+mod everyapi_default_model_selection {
+    use super::select_everyapi_default_model;
+    use librefang_runtime::model_catalog::ModelCatalog;
+    use librefang_types::model_catalog::{ModelCatalogEntry, ModelTier};
+
+    fn catalog() -> ModelCatalog {
+        let model = |id: &str, tier| ModelCatalogEntry {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            provider: "anthropic".to_string(),
+            tier,
+            context_window: 200_000,
+            max_output_tokens: 16_384,
+            ..ModelCatalogEntry::default()
+        };
+        ModelCatalog::from_entries(
+            vec![
+                model("claude-opus-5", ModelTier::Frontier),
+                model("claude-sonnet-5", ModelTier::Smart),
+            ],
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn selects_a_curated_model_the_account_can_reach() {
+        let catalog = catalog();
+        let available = vec!["claude-opus-5".to_string(), "claude-sonnet-5".to_string()];
+
+        assert_eq!(
+            select_everyapi_default_model(&catalog, &available).as_deref(),
+            Some("claude-sonnet-5")
+        );
+    }
+
+    #[test]
+    fn selects_an_unknown_model_after_the_cli_proves_it_is_chat_capable() {
+        let catalog = catalog();
+        let available = vec!["future-chat-model".to_string()];
+
+        assert_eq!(
+            select_everyapi_default_model(&catalog, &available).as_deref(),
+            Some("future-chat-model")
         );
     }
 }

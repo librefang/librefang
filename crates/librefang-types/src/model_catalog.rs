@@ -503,6 +503,14 @@ pub struct ProviderInfo {
     /// re-create their TOML on the next boot anyway.
     #[serde(default)]
     pub is_custom: bool,
+    /// True when this entry's credentials come from an external CLI's credential process rather than from a declared env var — currently only EveryAPI, registered by [`ModelCatalog::ensure_managed_everyapi`].
+    ///
+    /// Deliberately separate from [`Self::is_custom`], which answers a different question ("may the dashboard delete this?") and is unreliable as a proxy for this one: the catalog loader falls back to `is_custom = false` for *every* provider when `registry/providers/` is missing or unreadable, so a provider file — an explicit, env-var-credentialled configuration — is routinely non-custom.
+    /// Reading `!is_custom` as "CLI-managed" therefore misclassifies an explicitly configured gateway and hands its endpoint to whatever account the CLI happens to be logged into.
+    ///
+    /// Any explicit configuration clears the flag: a provider file, an `ensure_explicit_everyapi` registration, or a user-set base URL.
+    #[serde(default)]
+    pub cli_managed: bool,
     /// Per-provider proxy URL override. When set, API calls to this provider
     /// are routed through this proxy instead of the global proxy config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -524,6 +532,7 @@ impl Default for ProviderInfo {
             media_capabilities: Vec::new(),
             available_models: Vec::new(),
             is_custom: false,
+            cli_managed: false,
             proxy_url: None,
         }
     }
@@ -580,6 +589,8 @@ impl From<ProviderCatalogToml> for ProviderInfo {
             // Populated by the runtime catalog loader (classifies based on
             // whether the file is also present in registry/providers/).
             is_custom: false,
+            // A provider file declares its own `api_key_env`, so it is an explicit configuration and never CLI-managed.
+            cli_managed: false,
             proxy_url: None,
         }
     }
@@ -892,6 +903,7 @@ output_cost_per_m = 8.0
             media_capabilities: Vec::new(),
             available_models: Vec::new(),
             is_custom: false,
+            cli_managed: false,
             proxy_url: None,
         };
         let json = serde_json::to_string(&info).unwrap();
@@ -1110,6 +1122,7 @@ aliases = []
             media_capabilities: Vec::new(),
             available_models: Vec::new(),
             is_custom: false,
+            cli_managed: false,
             proxy_url: None,
         };
 

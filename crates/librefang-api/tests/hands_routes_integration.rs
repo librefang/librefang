@@ -410,6 +410,375 @@ default = "15"
 }
 
 // ---------------------------------------------------------------------------
+// PUT /api/hands/{hand_id}/settings — saved values reach the live prompts
+// ---------------------------------------------------------------------------
+
+/// Regression test for #6636: saving settings must re-render the `## User Configuration` tail on every live agent of the hand.
+///
+/// Before the fix, the handler wrote the instance config and persisted `hand_state.json` but never touched the agents, so a running agent kept answering from the HAND.toml defaults until the daemon restarted — boot replays hands through `activate_hand_with_id`, which does re-render.
+/// The hand here is multi-agent and ships skill content so the test also pins the tail-ordering hazard: re-rendering the settings block on a prompt that already carries `## Reference Knowledge` and `## Your Team` must not truncate them away.
+#[tokio::test(flavor = "multi_thread")]
+async fn update_hand_settings_rerenders_live_agent_prompts() {
+    let h = boot_router_open().await;
+
+    let toml = r#"
+id = "settings-prompt-test"
+name = "Settings Prompt Test"
+description = "Multi-agent hand with settings for prompt-render coverage."
+category = "data"
+
+[[settings]]
+key = "trading_mode"
+label = "Trading Mode"
+setting_type = "select"
+default = "paper"
+
+[[settings.options]]
+value = "paper"
+label = "Paper Trading"
+
+[[settings.options]]
+value = "live"
+label = "Live Trading"
+provider_env = "BROKER_ACCOUNT_ID"
+
+[[settings]]
+key = "initial_capital"
+label = "Initial Capital"
+setting_type = "text"
+default = "10000"
+
+[agents.lead]
+name = "settings-prompt-lead"
+description = "coordinator"
+module = "builtin:chat"
+coordinator = true
+
+[agents.lead.model]
+provider = "openai"
+model = "gpt-4o-mini"
+system_prompt = "BASE LEAD PROMPT"
+
+[agents.worker]
+name = "settings-prompt-worker"
+description = "executes trades"
+module = "builtin:chat"
+
+[agents.worker.model]
+provider = "openai"
+model = "gpt-4o-mini"
+system_prompt = "BASE WORKER PROMPT"
+"#;
+    let (status, body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/install",
+        Some(serde_json::json!({
+            "toml_content": toml,
+            "skill_content": "TRADING PLAYBOOK",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "install body: {body}");
+
+    // Activate on the schema defaults, exactly as the dashboard's
+    // activation modal does when the user changes nothing.
+    let instance = h
+        ._state
+        .kernel
+        .activate_hand("settings-prompt-test", std::collections::HashMap::new())
+        .expect("activate hand");
+    let lead_id = *instance
+        .agent_ids
+        .get("lead")
+        .expect("lead role must have spawned an agent");
+
+    let prompt_of = |id| {
+        h._state
+            .kernel
+            .agent_registry()
+            .get(id)
+            .expect("agent must be in the registry")
+            .manifest
+            .model
+            .system_prompt
+    };
+    let allowed_env_of = |id| -> Option<Vec<String>> {
+        h._state
+            .kernel
+            .agent_registry()
+            .get(id)
+            .expect("agent must be in the registry")
+            .manifest
+            .metadata
+            .get("hand_allowed_env")
+            .map(|v| serde_json::from_value(v.clone()).expect("allowlist is a string array"))
+    };
+
+    let before = prompt_of(lead_id);
+    assert!(
+        before.contains("Paper Trading") && before.contains("10000"),
+        "activation must render the schema defaults; got: {before}"
+    );
+
+    let (status, body) = json_request(
+        &h.app,
+        Method::PUT,
+        "/api/hands/settings-prompt-test/settings",
+        Some(serde_json::json!({
+            "trading_mode": "live",
+            "initial_capital": "100",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update body: {body}");
+
+    // Assertions that are identical for both roles buy no per-role coverage, so
+    // each role also gets the two that are not: its own author-written base
+    // prompt, and a team roster naming the *other* role. A re-render that
+    // crossed the roles would pass everything else in this loop.
+    let expected_per_role = [
+        ("lead", "BASE LEAD PROMPT", "- **worker**:", "- **lead**:"),
+        (
+            "worker",
+            "BASE WORKER PROMPT",
+            "- **lead**:",
+            "- **worker**:",
+        ),
+    ];
+    for (role, agent_id) in &instance.agent_ids {
+        let after = prompt_of(*agent_id);
+        assert!(
+            after.contains("Live Trading"),
+            "[{role}] saved value must reach the live system prompt; got: {after}"
+        );
+        assert!(
+            after.contains("- Initial Capital: 100"),
+            "[{role}] saved text value must reach the live system prompt; got: {after}"
+        );
+        assert!(
+            !after.contains("Paper Trading"),
+            "[{role}] HAND.toml default must be gone from the prompt; got: {after}"
+        );
+        assert!(
+            !after.contains("Initial Capital: 10000"),
+            "[{role}] HAND.toml default must be gone from the prompt; got: {after}"
+        );
+        assert!(
+            after.contains("## Reference Knowledge\n\nTRADING PLAYBOOK"),
+            "[{role}] skill tail must survive the settings re-render; got: {after}"
+        );
+        assert_eq!(
+            after.matches("## User Configuration").count(),
+            1,
+            "[{role}] exactly one settings block must be present; got: {after}"
+        );
+
+        let (_, base, peer, own) = expected_per_role
+            .iter()
+            .find(|(r, ..)| r == role)
+            .unwrap_or_else(|| panic!("unexpected role {role}"));
+        assert!(
+            after.starts_with(&format!("{base}\n\n---\n\n")),
+            "[{role}] must keep its own author-written base prompt; got: {after}"
+        );
+        assert!(
+            after.contains(peer),
+            "[{role}] team tail must name its peer; got: {after}"
+        );
+        assert!(
+            !after.contains(own),
+            "[{role}] must not appear in its own team roster; got: {after}"
+        );
+    }
+
+    // The `live` option declares `provider_env`, so the save widened the env
+    // passthrough on every live agent.
+    for (role, agent_id) in &instance.agent_ids {
+        let env = allowed_env_of(*agent_id);
+        assert_eq!(
+            env,
+            Some(vec!["BROKER_ACCOUNT_ID".to_string()]),
+            "[{role}] the selected option's provider_env must reach the live agent"
+        );
+    }
+
+    // Switching back to the option that declares none must *narrow* it again —
+    // the metadata key is removed rather than left holding the wider list, or the
+    // agent's subprocess keeps a credential the current settings do not grant.
+    let (status, body) = json_request(
+        &h.app,
+        Method::PUT,
+        "/api/hands/settings-prompt-test/settings",
+        Some(serde_json::json!({"trading_mode": "paper"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update body: {body}");
+    for (role, agent_id) in &instance.agent_ids {
+        assert_eq!(
+            allowed_env_of(*agent_id),
+            None,
+            "[{role}] hand_allowed_env must be removed once no option grants one"
+        );
+    }
+
+    // Restore `live` for the remaining assertions below.
+    let (status, _) = json_request(
+        &h.app,
+        Method::PUT,
+        "/api/hands/settings-prompt-test/settings",
+        Some(serde_json::json!({"trading_mode": "live"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // And the values are readable back through the GET side.
+    let (status, body) = get_json(&h.app, "/api/hands/settings-prompt-test/settings").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["current_values"]["trading_mode"].as_str(),
+        Some("live")
+    );
+    assert_eq!(
+        body["current_values"]["initial_capital"].as_str(),
+        Some("100")
+    );
+}
+
+/// A role recorded on the instance but missing from the reloaded definition must be skipped, not rendered against the wrong role's data.
+///
+/// `POST /api/hands/reload` swaps the definition without respawning, so after a role rename the instance still carries the old `agent_ids` key.
+/// Rendering that role anyway makes the team helper advertise peers under names that no longer exist and makes the skill helper substitute the hand-shared playbook for the role's own — silently, in the prompt the agent then acts on.
+/// `clear_hand_agent_runtime_override` already guards the same way.
+#[tokio::test(flavor = "multi_thread")]
+async fn update_hand_settings_skips_roles_absent_from_the_reloaded_definition() {
+    let h = boot_router_open().await;
+
+    let base_toml = |lead_role: &str| {
+        format!(
+            r#"
+id = "role-drift-test"
+name = "Role Drift Test"
+description = "Renamed-role coverage."
+category = "data"
+
+[[settings]]
+key = "region"
+label = "Region"
+setting_type = "text"
+default = "eu"
+
+[agents.{lead_role}]
+name = "role-drift-lead"
+description = "coordinator"
+module = "builtin:chat"
+coordinator = true
+
+[agents.{lead_role}.model]
+provider = "openai"
+model = "gpt-4o-mini"
+system_prompt = "BASE LEAD PROMPT"
+
+[agents.worker]
+name = "role-drift-worker"
+description = "executes tasks"
+module = "builtin:chat"
+
+[agents.worker.model]
+provider = "openai"
+model = "gpt-4o-mini"
+system_prompt = "BASE WORKER PROMPT"
+"#
+        )
+    };
+
+    let (status, body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/install",
+        Some(serde_json::json!({
+            "toml_content": base_toml("lead"),
+            "skill_content": "PLAYBOOK",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "install body: {body}");
+
+    let instance = h
+        ._state
+        .kernel
+        .activate_hand("role-drift-test", std::collections::HashMap::new())
+        .expect("activate hand");
+    let worker_id = *instance.agent_ids.get("worker").expect("worker spawned");
+
+    let prompt_of = |id| {
+        h._state
+            .kernel
+            .agent_registry()
+            .get(id)
+            .expect("agent must be in the registry")
+            .manifest
+            .model
+            .system_prompt
+    };
+    let before = prompt_of(worker_id);
+    assert!(
+        before.contains("- **lead**:"),
+        "worker's team tail names the lead before the rename; got: {before}"
+    );
+
+    // Rename `lead` to `executor` on disk and reload — the instance keeps its
+    // `agent_ids = {lead, worker}` because reload does not respawn.
+    let (status, body) = json_request(
+        &h.app,
+        Method::PUT,
+        "/api/hands/role-drift-test/manifest",
+        Some(serde_json::json!({"toml_content": base_toml("executor")})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "manifest body: {body}");
+    let (status, _) = json_request(&h.app, Method::POST, "/api/hands/reload", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = json_request(
+        &h.app,
+        Method::PUT,
+        "/api/hands/role-drift-test/settings",
+        Some(serde_json::json!({"region": "us"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update body: {body}");
+    assert_eq!(
+        body["config"]["region"].as_str(),
+        Some("us"),
+        "the config write still lands even when a role cannot be rendered: {body}"
+    );
+
+    // `worker` is still in the definition, so it re-renders with the new value —
+    // and its team tail now names `executor`, which is correct for the current
+    // definition.
+    let worker_after = prompt_of(worker_id);
+    assert!(
+        worker_after.contains("- Region: us"),
+        "the surviving role must pick up the saved value; got: {worker_after}"
+    );
+
+    // The dropped `lead` role has no entry in the reloaded definition, so its
+    // agent must be left exactly as it was rather than rendered against
+    // `worker`'s data.
+    let lead_id = *instance.agent_ids.get("lead").expect("lead spawned");
+    let lead_after = prompt_of(lead_id);
+    assert!(
+        lead_after.starts_with("BASE LEAD PROMPT"),
+        "the dropped role must keep its own base prompt; got: {lead_after}"
+    );
+    assert!(
+        !lead_after.contains("- Region: us"),
+        "a role the definition no longer declares must be skipped, not re-rendered; got: {lead_after}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // POST /api/hands/install — input validation
 // ---------------------------------------------------------------------------
 
@@ -1464,6 +1833,94 @@ async fn update_hand_manifest_valid_toml_persists_and_reads_back() {
     assert_eq!(
         def["name"].as_str(),
         Some("Manifest Edit Renamed"),
+        "the reloaded definition must reflect the edit: {def}"
+    );
+}
+
+/// Seed a hand into the registry checkout (`<home>/registry/hands/<id>/`) — the layout the shared librefang-registry tarball produces and the sync fast-forwards with `git reset --hard origin/main` — then reload so the daemon picks it up.
+/// This is the "built-in hand" shape that `POST /api/hands/install` cannot produce.
+async fn seed_registry_hand(h: &Harness, id: &str, description: &str, skill: &str) -> String {
+    let toml = manifest_edit_toml(id, "Registry Hand", description);
+    let dir = h._tmp.path().join("registry").join("hands").join(id);
+    std::fs::create_dir_all(&dir).expect("create registry hand dir");
+    std::fs::write(dir.join("HAND.toml"), &toml).expect("write registry HAND.toml");
+    std::fs::write(dir.join("SKILL.md"), skill).expect("write registry SKILL.md");
+
+    let (status, body) = json_request(&h.app, Method::POST, "/api/hands/reload", None).await;
+    assert_eq!(status, StatusCode::OK, "reload after seeding: {body}");
+    toml
+}
+
+/// Editing a registry-shipped hand writes an operator override that the editor reads back — the end-to-end half of the #6636 follow-up.
+///
+/// The write used to land in `registry/hands/<id>/HAND.toml`, inside the checkout the registry sync hard-resets, so the supported way to customise a built-in hand erased itself.
+/// This asserts the three properties that make the override durable rather than merely written: the edit lands in `<home>/hands/<id>/`, the checkout is left byte-identical to upstream, and `GET /manifest` returns the override instead of upstream's copy — without which the dashboard editor would show a stale manifest and silently revert the customisation on the next save.
+#[tokio::test(flavor = "multi_thread")]
+async fn editing_a_registry_hand_writes_an_override_the_editor_reads_back() {
+    let h = boot_router_open().await;
+    let id = "manifest-edit-registry";
+    let upstream = seed_registry_hand(&h, id, "Upstream description.", "# Upstream skill\n").await;
+
+    let registry_manifest = h
+        ._tmp
+        .path()
+        .join("registry")
+        .join("hands")
+        .join(id)
+        .join("HAND.toml");
+    let override_dir = h._tmp.path().join("hands").join(id);
+
+    let (status, text) = get_manifest_text(&h, id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        text.contains("Upstream description."),
+        "pre-check: the editor must start from upstream's manifest, got:\n{text}"
+    );
+
+    let edited = manifest_edit_toml(id, "Registry Hand", "Operator description.");
+    let (status, body) = json_request(
+        &h.app,
+        Method::PUT,
+        &format!("/api/hands/{id}/manifest"),
+        Some(serde_json::json!({ "toml_content": edited })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "valid edit must 200: {body}");
+    assert_eq!(
+        body["description"].as_str(),
+        Some("Operator description."),
+        "response must carry the reloaded definition: {body}"
+    );
+
+    assert!(
+        override_dir.join("HAND.toml").exists(),
+        "the edit must land in the override directory, not the registry checkout"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&registry_manifest).expect("read registry HAND.toml"),
+        upstream,
+        "the registry checkout must be left exactly as upstream wrote it"
+    );
+    assert_eq!(
+        std::fs::read_to_string(override_dir.join("SKILL.md")).expect("read override SKILL.md"),
+        "# Upstream skill\n",
+        "the shadowed SKILL.md must travel with the override — the override directory \
+         is the only one scanned for this id, so a manifest-only override would strip \
+         the content that becomes the agents' system prompts"
+    );
+
+    let (status, text) = get_manifest_text(&h, id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        text.contains("Operator description.") && !text.contains("Upstream description."),
+        "GET /manifest must return the override, not upstream's copy, got:\n{text}"
+    );
+
+    let (status, def) = get_json(&h.app, &format!("/api/hands/{id}")).await;
+    assert_eq!(status, StatusCode::OK, "{def}");
+    assert_eq!(
+        def["description"].as_str(),
+        Some("Operator description."),
         "the reloaded definition must reflect the edit: {def}"
     );
 }

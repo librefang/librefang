@@ -394,14 +394,28 @@ fn redacted_config_json(
         },
     );
 
+    // The `approval` section declares no explicit `fields` list in `ui_sections_overlay`, so the dashboard renders a control for every `ApprovalPolicy` field the derived schema knows about — and seven of the fourteen were absent here, rendering blank and reading back as their JSON zero value.
+    // `cache_approvals_per_session` was the visible one: it defaults to `true`, so an operator who left it alone still saw the box unchecked and had no way to tell whether per-session caching was on (#6636 observation (e)).
+    // None of the seven is writable, which is why `every_writable_config_leaf_is_readable` never saw them; `approval_policy_fields_are_all_readable` is the guard for this direction.
+    // Nothing added here is secret-bearing: `trusted_senders`, `channel_rules`, and `routing` hold operator-chosen user ids, channel names, tool globs, and notification recipients — the same class as the `external_auth` fields exposed in #6605, and credentials never live in `ApprovalPolicy`.
+    // Of those seven, `trusted_senders` is the one with teeth: it is an approval-*bypass* list, so a sender on it skips the prompt for every tool `classify_risk` ranks below `High` (see `ApprovalManager::requires_approval_with_context_for`), which is why the Approvals page renders it as its own card rather than leaving it to the generic config form (#6611).
+    // Read-only on purpose — it stays out of `WRITABLE_EXACT_PATHS` so an Owner-role caller holding a leaked API key cannot add themselves to it over HTTP, which is also why the `writable ⊆ readable` guard never noticed while it was missing from this response.
     set!("approval", {
         "require_approval": config.approval.require_approval,
         "timeout_secs": config.approval.timeout_secs,
         "auto_approve_autonomous": config.approval.auto_approve_autonomous,
         "auto_approve": config.approval.auto_approve,
+        "trusted_senders": config.approval.trusted_senders,
+        "channel_rules": serde_json::to_value(&config.approval.channel_rules).unwrap_or(serde_json::json!([])),
+        // Serde encoding, not `Debug` — see `enum_valued_fields_use_the_serde_encoding_not_debug`.
+        "timeout_fallback": serde_json::to_value(&config.approval.timeout_fallback).unwrap_or(serde_json::json!("deny")),
+        "routing": serde_json::to_value(&config.approval.routing).unwrap_or(serde_json::json!([])),
         "second_factor": serde_json::to_value(config.approval.second_factor).unwrap_or(serde_json::json!("none")),
         "totp_issuer": config.approval.totp_issuer,
         "totp_grace_period_secs": config.approval.totp_grace_period_secs,
+        "totp_tools": config.approval.totp_tools,
+        "audit_retention_days": config.approval.audit_retention_days,
+        "cache_approvals_per_session": config.approval.cache_approvals_per_session,
     });
 
     // `ExecSecurityMode` is `rename_all = "lowercase"` — the schema's select offers `deny | allowlist | full`, so `Debug`'s `"Allowlist"` never matched an option.
@@ -790,6 +804,7 @@ fn redacted_config_json(
         "cache_ttl_secs": config.registry.cache_ttl_secs,
         "registry_mirror": config.registry.registry_mirror,
         "registry_host": config.registry.registry_host,
+        "auto_sync": config.registry.auto_sync,
     });
 
     // ── privacy ──
@@ -950,6 +965,18 @@ pub async fn config_reload(
     );
     match state.kernel.reload_config().await {
         Ok(plan) => {
+            // `api_key` / `api_key_hash` are classified as read-live in
+            // `build_reload_plan`, which is true for the WS and terminal
+            // upgrade paths (they call `valid_api_tokens(&auth_snapshot())`
+            // per connection) but was never true for the HTTP middleware:
+            // `api_key_lock` was written only at boot and on a dashboard
+            // credential change, so a reloaded master key kept authenticating
+            // with the old value until the daemon restarted. Push the fresh
+            // snapshot into both live handles here (#6613).
+            let snap = state.kernel.auth_snapshot();
+            crate::server::refresh_master_credential(&snap, &state.api_key_lock, &state.master_key)
+                .await;
+
             // If channel config changed, the kernel already cleared the adapter
             // registry — but we also need to stop the old BridgeManager and
             // restart adapters from the new config.
@@ -1112,16 +1139,74 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
         serde_json::to_value(schemars::schema_for!(librefang_types::config::KernelConfig))
             .unwrap_or_else(|_| serde_json::json!({}));
 
-    // Attach the UI overlay: sections + option/range hints.
+    // Attach the UI overlay: sections + option/range hints + read-only paths.
+    let non_writable = non_writable_schema_paths(&root);
     if let Some(obj) = root.as_object_mut() {
         obj.insert("x-sections".into(), ui_sections_overlay());
         obj.insert(
             "x-ui-options".into(),
             ui_options_overlay(provider_options, model_options),
         );
+        obj.insert("x-non-writable".into(), serde_json::json!(non_writable));
     }
 
     Json(root)
+}
+
+/// Every schema path `POST /api/config/set` would reject, so the dashboard can render those fields read-only instead of offering an edit that 403s (#6636 observation (d)).
+///
+/// The server sends the resolved verdict rather than the allowlists themselves.
+/// `is_writable_config_path` is not a lookup — it layers an exact-path list, section prefixes, a depth-2-only rule for some of those prefixes, and a suffix scrub for secret-bearing and privilege-bearing key names.
+/// Re-implementing that in TypeScript would make the SPA a third place to keep in sync with the two Rust lists, and it would drift silently: the UI would grey out the wrong fields while the write path kept its own opinion.
+///
+/// The oracle is the schema, not a serialized config, for the same reason `every_writable_allowlist_entry_has_a_backing_config_field` chose it: `config/types.rs` carries dozens of `#[serde(skip_serializing_if = …)]` attributes, so a value walk cannot see a field whose predicate holds for its default.
+///
+/// Depth mirrors what the allowlist accepts — root leaves and one nested level.
+/// A path absent from this set is treated as writable by the dashboard, which is exactly today's behaviour, so an enumeration gap degrades to the status quo rather than to a field the operator cannot edit.
+fn non_writable_schema_paths(root: &serde_json::Value) -> Vec<String> {
+    /// Name of the definition a property `$ref`s, directly or through `allOf` / `anyOf`.
+    fn referenced_definition(prop: &serde_json::Value) -> Option<&str> {
+        if let Some(r) = prop.get("$ref").and_then(|v| v.as_str()) {
+            return r.rsplit('/').next();
+        }
+        for combinator in ["allOf", "anyOf", "oneOf"] {
+            if let Some(entries) = prop.get(combinator).and_then(|v| v.as_array()) {
+                for entry in entries {
+                    if let Some(r) = entry.get("$ref").and_then(|v| v.as_str()) {
+                        return r.rsplit('/').next();
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    let definitions = root.get("definitions").and_then(|v| v.as_object());
+    let Some(properties) = root.get("properties").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+
+    let mut paths = Vec::new();
+    for (section, prop) in properties {
+        if !super::is_writable_config_path(section) {
+            paths.push(section.clone());
+        }
+        let Some(nested) = referenced_definition(prop)
+            .and_then(|name| definitions?.get(name))
+            .and_then(|d| d.get("properties"))
+            .and_then(|v| v.as_object())
+        else {
+            continue;
+        };
+        for field in nested.keys() {
+            let path = format!("{section}.{field}");
+            if !super::is_writable_config_path(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths.sort();
+    paths
 }
 
 // ---------------------------------------------------------------------------
@@ -1654,6 +1739,79 @@ mod config_read_write_parity_tests {
                  (#6605); got {provider:#?}"
             );
         }
+    }
+
+    /// #6636 observation (e): every `ApprovalPolicy` field must be readable.
+    ///
+    /// The `approval` section declares no explicit `fields` list in `ui_sections_overlay`, so `ConfigPage` renders a control for whatever the derived schema says the struct has — but the response builder enumerated seven of fourteen fields by hand, and the rest rendered blank and read back as their JSON zero value.
+    /// `cache_approvals_per_session` made it visible: it defaults to `true`, so the dashboard showed it off for every operator who had never touched it, including one whose `config.toml` said `true`.
+    /// Only three approval paths are writable, so `every_writable_config_leaf_is_readable` covers three of fourteen and is blind to the rest by construction.
+    ///
+    /// The oracle is the serialized struct rather than a restated list, so a field added to `ApprovalPolicy` later fails here instead of quietly joining the gap.
+    /// The fixture sets non-default values so a response builder that emits the key with a hardcoded literal cannot pass.
+    #[test]
+    fn approval_policy_fields_are_all_readable() {
+        use librefang_types::approval::{ChannelToolRule, NotificationTarget};
+
+        let mut config = config_with_optional_sections_populated();
+        config.approval.cache_approvals_per_session = false;
+        config.approval.audit_retention_days = 7;
+        config.approval.trusted_senders = vec!["operator-1".into()];
+        config.approval.totp_tools = vec!["shell_exec".into()];
+        config.approval.timeout_fallback = librefang_types::approval::TimeoutFallback::Escalate {
+            extra_timeout_secs: 45,
+        };
+        config.approval.channel_rules = vec![ChannelToolRule {
+            channel: "telegram".into(),
+            allowed_tools: vec!["file_read".into()],
+            denied_tools: vec!["shell_exec".into()],
+        }];
+        config.approval.routing = vec![librefang_types::approval::ApprovalRoutingRule {
+            tool_pattern: "shell_*".into(),
+            route_to: vec![NotificationTarget {
+                channel_type: "telegram".into(),
+                recipient: "12345".into(),
+                thread_id: None,
+            }],
+        }];
+
+        let payload = super::redacted_config_json(&config, &BudgetConfig::default());
+        let serialized =
+            serde_json::to_value(&config.approval).expect("ApprovalPolicy derives Serialize");
+        let expected = serialized
+            .as_object()
+            .expect("ApprovalPolicy serializes to an object");
+
+        // Sanity floor: a refactor that empties the oracle would make the loop below pass vacuously.
+        assert!(
+            expected.len() >= 14,
+            "the ApprovalPolicy oracle enumerated only {} fields — the walk is broken, not the config",
+            expected.len()
+        );
+
+        let mut missing: Vec<&String> = Vec::new();
+        let mut mismatched: Vec<String> = Vec::new();
+        for (key, want) in expected {
+            match lookup(&payload, &format!("approval.{key}")) {
+                None => missing.push(key),
+                Some(got) if got != want => {
+                    mismatched.push(format!("approval.{key}: want {want}, got {got}"))
+                }
+                Some(_) => {}
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "GET /api/config omits these ApprovalPolicy fields, so the dashboard renders each one \
+             blank and reads it back as its zero value (#6636). Add them to `redacted_config_json`: \
+             {missing:#?}"
+        );
+        assert!(
+            mismatched.is_empty(),
+            "these ApprovalPolicy fields are emitted but do not carry the configured value: \
+             {mismatched:#?}"
+        );
     }
 
     /// One fully-populated provider.

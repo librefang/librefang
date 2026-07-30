@@ -349,7 +349,10 @@ export function AnalyticsPage() {
     [usageByModelQuery.data],
   );
   const daily = dailyQuery.data ?? null;
-  const modelPerformance = modelPerformanceQuery.data ?? [];
+  const modelPerformance = useMemo(
+    () => modelPerformanceQuery.data ?? [],
+    [modelPerformanceQuery.data],
+  );
 
   const agentChartData = useMemo(() => usageByAgent.map(u => ({ name: u.name || u.agent_id?.slice(0, 8), cost: u.cost ?? 0 })), [usageByAgent]);
   const modelChartData = useMemo(() => usageByModel.map(m => ({ name: m.model?.slice(0, 20), cost: m.total_cost_usd ?? 0 })), [usageByModel]);

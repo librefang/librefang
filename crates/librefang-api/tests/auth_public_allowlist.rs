@@ -228,6 +228,9 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/logo.png", Expect::AlwaysPublic),
     re("/.well-known/agent.json", Expect::AlwaysPublic),
     re("/api/health", Expect::AlwaysPublic),
+    // #6633: readiness probe. Public for the same reason `/api/health` is —
+    // the kubelet that issues a `readinessProbe` carries no credential.
+    re("/api/ready", Expect::AlwaysPublic),
     re("/api/version", Expect::AlwaysPublic),
     re("/api/versions", Expect::AlwaysPublic),
     re("/api/auth/callback", Expect::AlwaysPublic),

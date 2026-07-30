@@ -4112,7 +4112,7 @@
           "auth"
         ],
         "summary": "POST /api/auth/refresh — Exchange a refresh token for a new access token.",
-        "description": "When the access token expires, clients can call this endpoint with the\nrefresh token received during login instead of forcing a full re-authorization.\nIf the request body omits `refresh_token`, the server looks up the token store\nfor a previously stored refresh token (from the OAuth callback).",
+        "description": "When the access token expires, clients call this instead of forcing a full re-authorization, presenting either:\n\n* `refresh_token` — the one `/api/auth/callback` returned to it, which is the preferred path, or\n* `access_token` — also returned by that callback, identifying the stored session whose server-side refresh token should be used, for a client that kept only this half.\n\nThere is no third path.\nA blank string in either field counts as absent, so it reaches neither the store nor the provider.\nThe endpoint used to fall back to scanning the token store for any entry matching a `provider` hint, or for literally any entry with a refresh token, and it is reachable by any Admin — so a caller could refresh a *different* local user's upstream session and be handed their credentials, with every scope that token carried.\nBoth fallbacks are gone (#6629); a request that proves nothing gets a 400.",
         "operationId": "auth_refresh",
         "requestBody": {
           "content": {
@@ -10233,6 +10233,38 @@
         }
       }
     },
+    "/api/ready": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/ready — Readiness probe (public, no auth required).",
+        "description": "Distinct from `/api/health` on purpose. `/api/health` answers \"is this\nprocess alive?\" and always returns 200 while the HTTP server can respond,\nso a Kubernetes `livenessProbe` pointed at it never restarts a pod over a\nrecoverable storage or provider incident. This endpoint answers \"can this\nprocess accept work?\" and returns 503 when a dependency required to do so\nis unavailable, which is what removes the pod from Service endpoints\nwithout killing it.\n\nThe body is deliberately minimal — check names and a coarse status only.\nIt carries no version, hostname, provider id, model name, path, or error\ntext, because an unauthenticated caller reaches it; detailed diagnostics\nremain behind `GET /api/health/detail`.",
+        "operationId": "ready",
+        "responses": {
+          "200": {
+            "description": "All required dependencies are ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A required dependency is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/restore": {
       "post": {
         "tags": [
@@ -14377,6 +14409,13 @@
         "type": "object",
         "description": "Request body for the refresh token endpoint.",
         "properties": {
+          "access_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The access token this caller received from its own login callback, proving which stored session it owns (#6629).\n\n**Prefer `refresh_token` when the client still has it.**\n`/api/auth/callback` returns both values — see the `SECURITY` note on `CallbackResponse::refresh_token`, which hands the refresh token to the client deliberately — so this field is a convenience for a client that kept only the access token it authenticates with, not the only credential a legitimate caller can present.\nPresenting it resolves the matching entry without letting the caller name someone else's session: the value is high-entropy, issued by the identity provider, and never disclosed by any read route.\n\nThe trade this accepts: an access token travels on every request as a `Bearer` header, so it is the more exposed of the two credentials, and exchanging one for a refresh token extends a leaked short-lived credential past its own lifetime.\nIt is bounded by the store's 24 h TTL and does not widen what a holder of that access token can already do while it is live, which is why the path is offered at all — but a client that holds its refresh token should send that instead.\n\nAn expired access token still matches — entries live in the store for 24 h regardless of the access token's own lifetime, which is exactly the state a caller is in when it needs to refresh."
+          },
           "provider": {
             "type": [
               "string",
@@ -14389,7 +14428,7 @@
               "string",
               "null"
             ],
-            "description": "The refresh token obtained from the initial login callback.\nIf omitted, the server looks up a stored refresh token from the token store."
+            "description": "The refresh token obtained from the initial login callback.\n\nWhen omitted, `access_token` must be supplied instead — the server no longer searches the token store for \"some\" stored session (#6629)."
           }
         }
       },

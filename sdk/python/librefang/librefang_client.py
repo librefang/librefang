@@ -1188,6 +1188,9 @@ class _SystemResource(_Resource):
     def queue_status(self):
         return self._c._request("GET", "/api/queue/status")
 
+    def ready(self):
+        return self._c._request("GET", "/api/ready")
+
     def restore_backup(self, **data):
         return self._c._request("POST", "/api/restore", data)
 

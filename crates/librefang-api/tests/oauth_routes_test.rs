@@ -621,3 +621,38 @@ async fn refresh_without_token_or_provider_hint_returns_4xx() {
         "expected 4xx for empty refresh request, got {status} body={body:?}"
     );
 }
+
+/// #6629: the two store-scanning fallbacks are gone, so an unproven request is a 400 — pinned exactly, not as "some 4xx".
+///
+/// Each body below used to succeed at *selecting a session*: `{provider}` hit `find_by_provider` (an arbitrary entry for that provider) and `{}` hit `find_any_with_refresh` (literally the first entry in the map with a refresh token).
+/// Either would refresh a different local user's upstream session and hand the caller their access and rotated refresh tokens.
+///
+/// 400 rather than 502 is also the assertion that no outbound call fired: the provider's `token_url` is `example.invalid`, so a handler that reached the network would surface 502 (or hang).
+#[tokio::test(flavor = "multi_thread")]
+async fn refresh_without_a_proven_credential_returns_400() {
+    let h = boot_with_external_auth(enabled_with_one_provider()).await;
+
+    for (label, body) in [
+        ("nothing at all", serde_json::json!({})),
+        (
+            "a provider hint only — the old `find_by_provider` fallback",
+            serde_json::json!({"provider": "test"}),
+        ),
+        (
+            "an access token no stored session was issued",
+            serde_json::json!({"access_token": "not-a-token-any-session-holds"}),
+        ),
+        (
+            "blank strings, which prove exactly as much as omitting the fields",
+            serde_json::json!({"refresh_token": "", "access_token": "   "}),
+        ),
+    ] {
+        let (status, resp) = send(&h, Method::POST, "/api/auth/refresh", Some(body), None).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "refresh with {label} must be rejected with 400 (a 502 would mean \
+             the handler dialled the provider anyway): body={resp:?}"
+        );
+    }
+}

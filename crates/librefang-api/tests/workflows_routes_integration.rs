@@ -1388,3 +1388,568 @@ async fn workflow_input_schema_oversize_is_truncated() {
         schema.len(),
     );
 }
+
+// =============================================================================
+// /api/schedules ↔ /api/cron/jobs field parity  (#6611)
+// =============================================================================
+//
+// The two routes are deliberate alternate views over the same `CronJob` store: `/api/cron/jobs` serializes the struct whole, `/api/schedules` renders a flattened presentation.
+// The flattened view had fallen behind on `peer_id` (which selects the `SenderContext.user_id` a fire runs under), `session_mode` (persistent-shared vs isolated-per-fire), and `delivery` (the primary output destination, still read at fire time alongside `delivery_targets`).
+//
+// `CronJob::session_mode` carries `skip_serializing_if = "Option::is_none"`, so an unset value is absent from the cron view rather than null — which is why the schedules view emits an explicit null instead, matching how it already renders `tz` / `last_run` / `next_run`.
+
+/// Seed a cron job carrying every field the schedules view used to drop.
+async fn seed_cron_job_with_routing_fields(h: &Harness) -> String {
+    use chrono::Utc;
+    use librefang_types::agent::{AgentId, SessionMode};
+    use librefang_types::scheduler::{CronAction, CronDelivery, CronJob, CronJobId, CronSchedule};
+
+    let job = CronJob {
+        id: CronJobId::new(),
+        agent_id: AgentId::new(),
+        name: "routing-fixture".to_string(),
+        enabled: true,
+        schedule: CronSchedule::Cron {
+            expr: "0 9 * * 1-5".to_string(),
+            tz: Some("UTC".to_string()),
+        },
+        action: CronAction::SystemEvent {
+            text: "ping".to_string(),
+        },
+        delivery: CronDelivery::LastChannel,
+        delivery_targets: Vec::new(),
+        peer_id: Some("peer-42".to_string()),
+        session_mode: Some(SessionMode::New),
+        created_at: Utc::now(),
+        last_run: None,
+        next_run: None,
+    };
+    h._state
+        .kernel
+        .cron()
+        .add_job(job, false)
+        .expect("seed cron add_job")
+        .0
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schedules_view_carries_the_same_routing_fields_as_cron_jobs() {
+    let h = boot().await;
+    let id = seed_cron_job_with_routing_fields(&h).await;
+
+    let (status, schedules) = get(&h, "/api/schedules").await;
+    assert_eq!(status, StatusCode::OK, "{schedules:?}");
+    let schedule = schedules["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .find(|s| s["id"].as_str() == Some(id.as_str()))
+        .expect("seeded job must appear in /api/schedules");
+
+    let (status, cron) = get(&h, "/api/cron/jobs").await;
+    assert_eq!(status, StatusCode::OK, "{cron:?}");
+    let job = cron["jobs"]
+        .as_array()
+        .expect("jobs array")
+        .iter()
+        .find(|j| j["id"].as_str() == Some(id.as_str()))
+        .expect("seeded job must appear in /api/cron/jobs");
+
+    for field in ["peer_id", "session_mode", "delivery"] {
+        assert_eq!(
+            schedule[field], job[field],
+            "`{field}` must agree between /api/schedules and /api/cron/jobs: \
+             schedule={schedule:?} job={job:?}"
+        );
+    }
+    assert_eq!(
+        schedule["peer_id"].as_str(),
+        Some("peer-42"),
+        "{schedule:?}"
+    );
+    assert_eq!(
+        schedule["session_mode"].as_str(),
+        Some("new"),
+        "{schedule:?}"
+    );
+    assert_eq!(
+        schedule["delivery"]["kind"].as_str(),
+        Some("last_channel"),
+        "{schedule:?}"
+    );
+}
+
+/// `GET /api/schedules/{id}` carries the routing fields in its own right.
+///
+/// An earlier version of this test asserted only `detail == list row`. Both
+/// sides render through `cron_job_to_schedule_json`, so dropping the fields
+/// from the helper dropped them from both sides equally and the equality still
+/// held — the test passed against the unfixed code. The values are therefore
+/// pinned here directly, and the cross-view equality is kept as a second,
+/// weaker assertion about which helper the detail route uses.
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_detail_carries_the_same_routing_fields_as_the_list_row() {
+    let h = boot().await;
+    let id = seed_cron_job_with_routing_fields(&h).await;
+
+    let (status, detail) = get(&h, &format!("/api/schedules/{id}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail:?}");
+    assert_eq!(detail["peer_id"].as_str(), Some("peer-42"), "{detail:?}");
+    assert_eq!(detail["session_mode"].as_str(), Some("new"), "{detail:?}");
+    assert_eq!(
+        detail["delivery"]["kind"].as_str(),
+        Some("last_channel"),
+        "{detail:?}"
+    );
+
+    let (_, schedules) = get(&h, "/api/schedules").await;
+    let row = schedules["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .find(|s| s["id"].as_str() == Some(id.as_str()))
+        .expect("seeded job must appear in /api/schedules");
+
+    assert_eq!(
+        &detail, row,
+        "detail and list row render the same job through the same helper"
+    );
+}
+
+/// A job that leaves `peer_id` / `session_mode` unset still carries both keys,
+/// as explicit nulls. The reporter could not confirm the `session_mode` half of
+/// this defect precisely because the cron view omits the key when unset, so a
+/// stable key set is what makes "not configured" readable from the response.
+#[tokio::test(flavor = "multi_thread")]
+async fn schedules_view_renders_unset_routing_fields_as_null() {
+    let h = boot().await;
+    let id = seed_cron_job(&h).await;
+
+    let (status, detail) = get(&h, &format!("/api/schedules/{id}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail:?}");
+    assert!(
+        detail.get("peer_id").is_some() && detail["peer_id"].is_null(),
+        "peer_id must be present-and-null, not absent: {detail:?}"
+    );
+    assert!(
+        detail.get("session_mode").is_some() && detail["session_mode"].is_null(),
+        "session_mode must be present-and-null, not absent: {detail:?}"
+    );
+    assert_eq!(
+        detail["delivery"]["kind"].as_str(),
+        Some("none"),
+        "{detail:?}"
+    );
+}
+
+// =============================================================================
+// POST/PUT /api/schedules — the write half of the routing fields  (#6611)
+// =============================================================================
+
+/// Create a workflow and return its id, so a schedule can be posted without a
+/// registered agent (`create_schedule` accepts `workflow_id` *or* `agent_id`,
+/// and this harness has no agent registry entries).
+async fn seed_workflow(h: &Harness) -> String {
+    let (status, body) = json_request(
+        h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "schedule-target",
+            "steps": [{
+                "name": "s1",
+                "agent_id": uuid::Uuid::new_v4().to_string(),
+                "prompt": "hi",
+            }],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    body["workflow_id"]
+        .as_str()
+        .expect("workflow_id present")
+        .to_string()
+}
+
+/// `POST /api/schedules` persists `peer_id`, `session_mode`, and `delivery`.
+///
+/// All three used to be unsettable through this route: `peer_id` was hardcoded
+/// to `None`, `delivery` to `CronDelivery::None`, and `session_mode` was parsed
+/// with a `.ok()` that swallowed a misspelling into `None`. A caller had to
+/// reach for `/api/cron/jobs` instead, on a route pair that is otherwise two
+/// views of one store. The assertion reads the job back out of the scheduler
+/// rather than trusting the create response, so an echo of the request body
+/// cannot pass.
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_create_persists_peer_id_session_mode_and_delivery() {
+    let h = boot().await;
+    let workflow_id = seed_workflow(&h).await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/schedules",
+        Some(serde_json::json!({
+            "name": "routing-write",
+            "cron": "0 9 * * 1-5",
+            "workflow_id": workflow_id,
+            "peer_id": "peer-42",
+            "session_mode": "new",
+            "delivery": {"kind": "channel", "channel": "telegram", "to": "12345"},
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+
+    // The response renders through the same helper the read half covers.
+    assert_eq!(body["peer_id"].as_str(), Some("peer-42"), "{body:?}");
+    assert_eq!(body["session_mode"].as_str(), Some("new"), "{body:?}");
+    assert_eq!(
+        body["delivery"]["kind"].as_str(),
+        Some("channel"),
+        "{body:?}"
+    );
+
+    // Stored state is what actually decides how the job fires.
+    let id = body["id"].as_str().expect("id present");
+    let job_id =
+        librefang_types::scheduler::CronJobId(uuid::Uuid::parse_str(id).expect("id is a uuid"));
+    let job = h
+        ._state
+        .kernel
+        .cron()
+        .get_job(job_id)
+        .expect("created job must be in the scheduler");
+    assert_eq!(job.peer_id.as_deref(), Some("peer-42"));
+    assert_eq!(
+        job.session_mode,
+        Some(librefang_types::agent::SessionMode::New)
+    );
+    match &job.delivery {
+        librefang_types::scheduler::CronDelivery::Channel { channel, to } => {
+            assert_eq!(channel, "telegram");
+            assert_eq!(to, "12345");
+        }
+        other => panic!("delivery must be the posted channel variant, got {other:?}"),
+    }
+}
+
+/// Omitting the three fields keeps the historical defaults: no peer, no
+/// session-mode override, and fire-and-forget delivery. `cron_create` (the
+/// kernel-side tool path) defaults `delivery` to `LastChannel` instead, so this
+/// pins that making the field settable did not import that default and start
+/// delivering output an existing client never asked for.
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_create_without_routing_fields_keeps_historical_defaults() {
+    let h = boot().await;
+    let workflow_id = seed_workflow(&h).await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/schedules",
+        Some(serde_json::json!({
+            "name": "routing-defaults",
+            "cron": "0 9 * * 1-5",
+            "workflow_id": workflow_id,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    assert!(body["peer_id"].is_null(), "{body:?}");
+    assert!(body["session_mode"].is_null(), "{body:?}");
+    assert_eq!(body["delivery"]["kind"].as_str(), Some("none"), "{body:?}");
+}
+
+/// A malformed value on any of the three is a 400, not a silent drop and not a
+/// 500. The `session_mode` case is the regression: `.ok()` used to turn a typo
+/// into `None`, so a caller asking for per-fire isolation got the shared
+/// persistent session and a `201`.
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_create_rejects_malformed_routing_fields() {
+    let h = boot().await;
+    let workflow_id = seed_workflow(&h).await;
+
+    for (field, value, needle) in [
+        (
+            "session_mode",
+            serde_json::json!("persistant"),
+            "session_mode",
+        ),
+        ("peer_id", serde_json::json!(""), "peer_id"),
+        ("peer_id", serde_json::json!(7), "peer_id"),
+        (
+            "delivery",
+            serde_json::json!({"kind": "channel", "channel": "telegram"}),
+            "delivery",
+        ),
+    ] {
+        let mut req = serde_json::json!({
+            "name": "routing-bad",
+            "cron": "0 9 * * 1-5",
+            "workflow_id": workflow_id,
+        });
+        req[field] = value.clone();
+        let (status, body) = json_request(&h, Method::POST, "/api/schedules", Some(req)).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "`{field}` = {value} must be a 400: {body:?}"
+        );
+        let message = body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or_default();
+        assert!(
+            message.contains(needle),
+            "error must name the offending field `{needle}`: {body:?}"
+        );
+    }
+}
+
+/// An SSRF-blocked `delivery` webhook is a 400 as well. Before `delivery`
+/// became settable this branch was unreachable from this route; once it is
+/// settable, `add_job` rejects the host via `LibreFangError::InvalidInput`,
+/// which `internal_scrub` alone would have reported as a 500 with the reason
+/// scrubbed out — the caller could not tell a refused host from a server
+/// fault. Mirrors the same split already present in `update_schedule` (#4732).
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_create_rejects_ssrf_delivery_webhook_with_400() {
+    let h = boot().await;
+    let workflow_id = seed_workflow(&h).await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/schedules",
+        Some(serde_json::json!({
+            "name": "routing-ssrf",
+            "cron": "0 9 * * 1-5",
+            "workflow_id": workflow_id,
+            "delivery": {"kind": "webhook", "url": "http://169.254.169.254/latest/meta-data/"},
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    let (_, list) = get(&h, "/api/schedules").await;
+    assert!(
+        list["items"].as_array().expect("items array").is_empty(),
+        "a rejected create must not leave a job behind: {list:?}"
+    );
+}
+
+/// `PUT /api/schedules/{id}` patches `delivery`.
+///
+/// The kernel's `update_job` has always supported the field; this route just
+/// never put it in the `updates` map, so the schedules view could show a
+/// `delivery` it had no way to change.
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_update_patches_delivery() {
+    let h = boot().await;
+    let id = seed_cron_job(&h).await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/schedules/{id}"),
+        Some(serde_json::json!({
+            "delivery": {"kind": "channel", "channel": "slack", "to": "C123"},
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let (_, detail) = get(&h, &format!("/api/schedules/{id}")).await;
+    assert_eq!(
+        detail["delivery"]["kind"].as_str(),
+        Some("channel"),
+        "{detail:?}"
+    );
+    assert_eq!(detail["delivery"]["channel"].as_str(), Some("slack"));
+    assert_eq!(detail["delivery"]["to"].as_str(), Some("C123"));
+}
+
+/// A malformed `delivery` on update is a 400, not the catch-all 404. The
+/// kernel reports a serde failure as `LibreFangError::Internal`, which this
+/// route's fall-through arm renders as "Schedule not found" — a status that
+/// sends the caller looking for a missing id instead of at their payload.
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_update_rejects_malformed_delivery_with_400() {
+    let h = boot().await;
+    let id = seed_cron_job(&h).await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/schedules/{id}"),
+        Some(serde_json::json!({"delivery": {"kind": "channel", "channel": "slack"}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    let (_, detail) = get(&h, &format!("/api/schedules/{id}")).await;
+    assert_eq!(
+        detail["delivery"]["kind"].as_str(),
+        Some("none"),
+        "rejected patch must leave delivery untouched: {detail:?}"
+    );
+}
+
+/// Omitting `delivery` leaves the stored value alone — the same
+/// null-vs-omitted contract `delivery_targets` documents.
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_update_without_delivery_preserves_it() {
+    let h = boot().await;
+    let id = seed_cron_job_with_routing_fields(&h).await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/schedules/{id}"),
+        Some(serde_json::json!({"name": "renamed"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let (_, detail) = get(&h, &format!("/api/schedules/{id}")).await;
+    assert_eq!(detail["name"].as_str(), Some("renamed"), "{detail:?}");
+    assert_eq!(
+        detail["delivery"]["kind"].as_str(),
+        Some("last_channel"),
+        "{detail:?}"
+    );
+}
+
+/// An attempt to *change* `peer_id` or `session_mode` on an existing schedule
+/// is refused with a 400 that says why, instead of returning 200 for a patch
+/// that never applied. `CronScheduler::update_job` has no branch for either
+/// field, so accepting the request would reproduce the reported defect from
+/// the other direction: the caller is told their change landed when the stored
+/// job is untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_update_refuses_to_change_peer_id_or_session_mode() {
+    let h = boot().await;
+    let id = seed_cron_job(&h).await;
+
+    for (field, value) in [
+        ("peer_id", serde_json::json!("peer-99")),
+        ("session_mode", serde_json::json!("new")),
+    ] {
+        let (status, body) = json_request(
+            &h,
+            Method::PUT,
+            &format!("/api/schedules/{id}"),
+            Some(serde_json::json!({field: value})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "changing `{field}` must not report success: {body:?}"
+        );
+        let message = body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or_default();
+        assert!(
+            message.contains(field),
+            "error must name `{field}`: {body:?}"
+        );
+    }
+
+    let (_, detail) = get(&h, &format!("/api/schedules/{id}")).await;
+    assert!(detail["peer_id"].is_null(), "{detail:?}");
+    assert!(detail["session_mode"].is_null(), "{detail:?}");
+}
+
+/// Spelling out the default `session_mode` is a no-op, not a change.
+///
+/// A stored `None` and a requested `"persistent"` resolve identically —
+/// `cron_fire_session_override` only diverges on `New` — so comparing the raw
+/// `Option`s would refuse a caller who merely wrote the default out longhand.
+/// The stored value is `None` far more often than `Some(Persistent)`, which
+/// makes this the likely shape of a hand-written round trip.
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_update_treats_explicit_persistent_as_no_change_against_unset() {
+    let h = boot().await;
+    let id = seed_cron_job(&h).await;
+
+    // Precondition: the seeded job leaves `session_mode` unset.
+    let (_, before) = get(&h, &format!("/api/schedules/{id}")).await;
+    assert!(before["session_mode"].is_null(), "{before:?}");
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/schedules/{id}"),
+        Some(serde_json::json!({"name": "spelled-out", "session_mode": "persistent"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "`persistent` against an unset value is the same effective mode: {body:?}"
+    );
+
+    let (_, detail) = get(&h, &format!("/api/schedules/{id}")).await;
+    assert_eq!(detail["name"].as_str(), Some("spelled-out"), "{detail:?}");
+
+    // `new` really is a change, so it is still refused.
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/schedules/{id}"),
+        Some(serde_json::json!({"session_mode": "new"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+}
+
+/// The unknown-id case still answers 404, not the field-level 400.
+///
+/// The "cannot be changed" comparison reads the stored job first, so it has to
+/// skip the check when there is no stored job — otherwise every `peer_id` sent
+/// to a nonexistent schedule would report a field problem and send the caller
+/// looking at their payload instead of at the id.
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_update_unknown_id_with_peer_id_returns_404_not_400() {
+    let h = boot().await;
+    let unknown = uuid::Uuid::new_v4();
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/schedules/{unknown}"),
+        Some(serde_json::json!({"peer_id": "peer-99", "session_mode": "new"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+}
+
+/// Echoing the stored values back is a no-op, not a rejection: the read half
+/// of #6611 puts both fields in every GET response, so a client that does
+/// GET → mutate one field → PUT sends them unchanged and must not be blocked.
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_update_accepts_unchanged_peer_id_and_session_mode() {
+    let h = boot().await;
+    let id = seed_cron_job_with_routing_fields(&h).await;
+
+    let (_, before) = get(&h, &format!("/api/schedules/{id}")).await;
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/schedules/{id}"),
+        Some(serde_json::json!({
+            "name": "echoed-back",
+            "peer_id": before["peer_id"].clone(),
+            "session_mode": before["session_mode"].clone(),
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let (_, detail) = get(&h, &format!("/api/schedules/{id}")).await;
+    assert_eq!(detail["name"].as_str(), Some("echoed-back"), "{detail:?}");
+    assert_eq!(detail["peer_id"], before["peer_id"]);
+    assert_eq!(detail["session_mode"], before["session_mode"]);
+}

@@ -328,6 +328,131 @@ async fn get_config_exposes_non_writable_external_auth_fields() {
     }
 }
 
+/// #6636 observation (e): the approval section's non-writable fields must still read back.
+///
+/// The `approval` section declares no explicit `fields` list, so `ConfigPage` renders a control for every `ApprovalPolicy` field the derived schema knows about, and seven of the fourteen were absent from the response builder.
+/// `cache_approvals_per_session` is the one an operator noticed: it defaults to `true`, so the dashboard showed it off even when `config.toml` said `true`, and there was no way to tell whether per-session approval caching was actually on.
+///
+/// Every asserted value is set to the non-default here, so a response builder emitting a hardcoded literal cannot pass.
+/// The read side is additive: none of these becomes writable, which is the point — an Owner-role caller with a leaked API key must not be able to relax approval policy over HTTP.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_config_exposes_non_writable_approval_fields() {
+    let h = boot_router_with_config(API_KEY, |config| {
+        config.approval.cache_approvals_per_session = false;
+        config.approval.audit_retention_days = 7;
+        config.approval.trusted_senders = vec!["operator-1".to_string()];
+        config.approval.totp_tools = vec!["shell_exec".to_string()];
+    })
+    .await;
+
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+
+    assert_eq!(
+        dig(&json, "approval.cache_approvals_per_session").and_then(|v| v.as_bool()),
+        Some(false),
+        "GET /api/config must report the configured value of `cache_approvals_per_session` \
+         (#6636); body: {json}"
+    );
+    assert_eq!(
+        dig(&json, "approval.audit_retention_days").and_then(|v| v.as_u64()),
+        Some(7),
+        "`approval.audit_retention_days` must round-trip; body: {json}"
+    );
+    assert_eq!(
+        dig(&json, "approval.trusted_senders").and_then(|v| v.as_array()),
+        Some(&vec![serde_json::json!("operator-1")]),
+        "`approval.trusted_senders` must round-trip; body: {json}"
+    );
+    assert_eq!(
+        dig(&json, "approval.totp_tools").and_then(|v| v.as_array()),
+        Some(&vec![serde_json::json!("shell_exec")]),
+        "`approval.totp_tools` must round-trip; body: {json}"
+    );
+    // Present even when empty / at their default, so the dashboard can bind an input to the key.
+    for path in ["approval.channel_rules", "approval.routing"] {
+        assert!(
+            dig(&json, path).is_some_and(|v| v.is_array()),
+            "`{path}` must be present as an array; body: {json}"
+        );
+    }
+    assert_eq!(
+        dig(&json, "approval.timeout_fallback").and_then(|v| v.as_str()),
+        Some("deny"),
+        "`approval.timeout_fallback` must use the serde encoding, not `Debug`; body: {json}"
+    );
+
+    // Newly readable, still closed to writes.
+    for path in [
+        "approval.cache_approvals_per_session",
+        "approval.trusted_senders",
+        "approval.audit_retention_days",
+    ] {
+        let (status, _) = send(
+            h.app.clone(),
+            auth_post_json(
+                "/api/config/set",
+                serde_json::json!({"path": path, "value": true}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "`{path}` became readable in #6636 but MUST stay non-writable — approval policy is not \
+             adjustable over HTTP"
+        );
+    }
+}
+
+/// `[registry] auto_sync` must round-trip through both halves of the config surface.
+///
+/// It is the operator's only durable way to stop the daemon fast-forwarding `~/.librefang/registry/` with `git reset --hard origin/main`, which destroys local modifications under that checkout — including the ones `PUT /api/hands/{id}/manifest` writes for a hand that shipped with the registry (#6636 observation (a)).
+/// A knob that reads back as its default would leave an operator unable to confirm the freeze took, which is the same class of gap #6605 and #6618 closed elsewhere in this file.
+#[tokio::test(flavor = "multi_thread")]
+async fn registry_auto_sync_round_trips_through_get_and_set() {
+    let h = boot_router_with_config(API_KEY, |config| {
+        // Non-default, so a hardcoded literal in the response builder cannot pass.
+        config.registry.auto_sync = false;
+    })
+    .await;
+
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        dig(&json, "registry.auto_sync").and_then(|v| v.as_bool()),
+        Some(false),
+        "GET /api/config must report the configured value; body: {json}"
+    );
+
+    // Writable too — `registry.` is a writable section prefix, and an operator who
+    // froze the registry from the dashboard has to be able to unfreeze it there.
+    let (status, _) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "registry.auto_sync", "value": true}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "registry.auto_sync must be writable"
+    );
+
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        dig(&json, "registry.auto_sync").and_then(|v| v.as_bool()),
+        Some(true),
+        "the write must be readable back; body: {json}"
+    );
+}
+
 /// #6596: enum-valued config fields were rendered with `format!("{:?}", …)`, which emits the Rust variant name (`"Allowlist"`, `"DuckDuckGo"`).
 /// The write path, `config.toml`, and the schema's `select` options all use serde's rename form, so the dashboard dropdown matched none of its own options.
 /// Asserting the absence of upper-case characters catches any new field that reintroduces `Debug` formatting, not just the seven that were fixed.
@@ -1324,5 +1449,405 @@ restart_initial_backoff_ms = \"eighty-eighty\"
         !lower.contains("auth") && !lower.contains("bot token") && !lower.contains("unauthorized"),
         "boot error must not be misclassified as an auth failure (the \
          pre-#5186 downstream symptom); got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/ready (#6633)
+//
+// `/api/health` and `/api/ready` answer two different questions and must not
+// be conflated: liveness ("is the process responsive?") never fails over a
+// recoverable dependency outage, readiness ("can it accept work?") does. The
+// tests below pin both halves of that contract over the real router, plus the
+// public reachability a kubelet-issued probe depends on.
+// ---------------------------------------------------------------------------
+
+/// An env var name no environment sets. Pointing `embedding_api_key_env` at it
+/// makes the Cohere embedding driver fail construction with `MissingApiKey`
+/// deterministically, without the test mutating process-global environment
+/// state that parallel tests share.
+const ABSENT_EMBEDDING_KEY_ENV: &str = "LIBREFANG_TEST_ABSENT_EMBEDDING_KEY_6633";
+
+/// Extract one named entry from the `checks` array of a health/ready payload.
+fn ready_check<'a>(body: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    body.get("checks")
+        .and_then(|c| c.as_array())
+        .and_then(|checks| {
+            checks
+                .iter()
+                .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))
+        })
+        .unwrap_or_else(|| panic!("no '{name}' check in payload: {body}"))
+}
+
+/// The probe must be reachable with no credential — a kubelet holds none, and
+/// a 401 would pin the pod out of Service endpoints permanently. The harness
+/// boots with `api_key` set, so this also proves the route is in the
+/// `is_public` allowlist rather than merely unauthenticated by accident.
+#[tokio::test(flavor = "multi_thread")]
+async fn ready_is_public_and_reports_ready_on_a_healthy_kernel() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(h.app.clone(), anon_get("/api/ready")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(json.get("status").and_then(|s| s.as_str()), Some("ready"));
+
+    let database = ready_check(&json, "database");
+    assert_eq!(database.get("status").and_then(|s| s.as_str()), Some("ok"));
+    assert_eq!(
+        database.get("required").and_then(|r| r.as_bool()),
+        Some(true)
+    );
+
+    // No `embedding_provider` is configured in the default harness, so boot
+    // takes the auto-detect path. Whether a driver materialises depends on
+    // the ambient environment of the machine running the test — the point of
+    // the contract is that it must not decide readiness either way.
+    let embedding = ready_check(&json, "embedding");
+    assert_eq!(
+        embedding.get("required").and_then(|r| r.as_bool()),
+        Some(false),
+        "an unpinned embedding provider is an optional enhancement, not a \
+         readiness requirement: {json}"
+    );
+}
+
+/// The readiness payload reaches unauthenticated callers, so it must not carry
+/// the reconnaissance surface that keeps `/api/health/detail` behind auth.
+#[tokio::test(flavor = "multi_thread")]
+async fn ready_payload_withholds_diagnostics_from_anonymous_callers() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(h.app.clone(), anon_get("/api/ready")).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    let object = json.as_object().expect("payload is an object");
+    // Sorted, because `serde_json::Map` preserves insertion order here and the
+    // assertion is about which keys exist, not the order they serialize in.
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec!["checks", "status"],
+        "the readiness payload is deliberately minimal — adding a top-level \
+         field means auditing it for disclosure first: {json}"
+    );
+
+    // Guard the specific values that made `/api/health/detail` auth-only.
+    let rendered = String::from_utf8_lossy(&body);
+    for leak in [
+        env!("CARGO_PKG_VERSION"),
+        "uptime",
+        "panic",
+        "restart",
+        "agent_count",
+        "provider",
+        "model",
+        "budget",
+    ] {
+        assert!(
+            !rendered.contains(leak),
+            "readiness payload must not disclose '{leak}': {rendered}"
+        );
+    }
+}
+
+/// When the operator pins a specific embedding provider and the daemon cannot
+/// construct it, the deployment is not serving the memory semantics that were
+/// asked for: readiness fails. Liveness must be unaffected in the same boot —
+/// that separation is the whole reason `/api/ready` exists rather than
+/// `/api/health` returning 503.
+#[tokio::test(flavor = "multi_thread")]
+async fn ready_fails_but_health_stays_200_when_a_pinned_embedding_driver_is_missing() {
+    let h = boot_router_with_config(API_KEY, |config| {
+        config.memory.fts_only = Some(false);
+        config.memory.embedding_provider = Some("cohere".to_string());
+        config.memory.embedding_api_key_env = Some(ABSENT_EMBEDDING_KEY_ENV.to_string());
+    })
+    .await;
+
+    let (status, body) = send(h.app.clone(), anon_get("/api/ready")).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a pinned-but-unavailable embedding provider must fail readiness; \
+         body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        json.get("status").and_then(|s| s.as_str()),
+        Some("not_ready")
+    );
+    let embedding = ready_check(&json, "embedding");
+    assert_eq!(
+        embedding.get("required").and_then(|r| r.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        embedding.get("status").and_then(|s| s.as_str()),
+        Some("error")
+    );
+    // The database is fine; only the pinned dependency failed.
+    assert_eq!(
+        ready_check(&json, "database")
+            .get("status")
+            .and_then(|s| s.as_str()),
+        Some("ok")
+    );
+
+    let (health_status, health_body) = send(h.app.clone(), anon_get("/api/health")).await;
+    assert_eq!(
+        health_status,
+        StatusCode::OK,
+        "liveness must not fail for a readiness-only outage — a 503 here \
+         would make Kubernetes restart-loop the pod; body: {}",
+        String::from_utf8_lossy(&health_body)
+    );
+}
+
+/// `fts_only` switches vector search off, so boot never builds an embedding
+/// driver at all. A leftover `embedding_provider` in the same config must not
+/// then be read as an unmet requirement — the mode wins.
+#[tokio::test(flavor = "multi_thread")]
+async fn ready_ignores_a_stale_embedding_provider_in_fts_only_mode() {
+    let h = boot_router_with_config(API_KEY, |config| {
+        config.memory.fts_only = Some(true);
+        config.memory.embedding_provider = Some("cohere".to_string());
+        config.memory.embedding_api_key_env = Some(ABSENT_EMBEDDING_KEY_ENV.to_string());
+    })
+    .await;
+
+    let (status, body) = send(h.app.clone(), anon_get("/api/ready")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "fts_only is a supported mode, not a degraded one; body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(json.get("status").and_then(|s| s.as_str()), Some("ready"));
+    let embedding = ready_check(&json, "embedding");
+    assert_eq!(
+        embedding.get("required").and_then(|r| r.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        embedding.get("status").and_then(|s| s.as_str()),
+        Some("skipped")
+    );
+}
+
+/// `"auto"` is the documented way to say "probe the environment, fall back to
+/// text search" — an explicit statement that no particular provider is
+/// promised. It must behave like an unset provider, not like a pin.
+#[tokio::test(flavor = "multi_thread")]
+async fn ready_treats_auto_embedding_provider_as_optional() {
+    let h = boot_router_with_config(API_KEY, |config| {
+        config.memory.fts_only = Some(false);
+        config.memory.embedding_provider = Some("auto".to_string());
+        config.memory.embedding_api_key_env = Some(ABSENT_EMBEDDING_KEY_ENV.to_string());
+    })
+    .await;
+
+    let (status, body) = send(h.app.clone(), anon_get("/api/ready")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an 'auto' provider promises nothing specific, so its absence cannot \
+         fail readiness; body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        ready_check(&json, "embedding")
+            .get("required")
+            .and_then(|r| r.as_bool()),
+        Some(false)
+    );
+}
+
+/// Readiness must answer for the process that is running, not for whatever
+/// `config.toml` says right now.
+///
+/// `POST /api/config/reload` swaps the entire live `KernelConfig` whenever the
+/// plan carries any hot action, and a `[memory]` change is classified
+/// `restart_required` — the embedding driver is built once at boot and never
+/// rebuilt. So an operator edit that adds `memory.embedding_provider`
+/// alongside any hot-reloadable field would, if the probe read the requirement
+/// from `config_ref()`, introduce a requirement against a driver that can
+/// never appear. Readiness would sit at 503 forever while the daemon served
+/// traffic perfectly well, and Kubernetes would hold the pod out of Service
+/// endpoints with no path back except a manual restart: a config-file edit
+/// turned into an outage.
+///
+/// `AppState::readiness_requires_embedding` snapshots the requirement at boot
+/// to keep both halves of the comparison from the same point in time.
+#[tokio::test(flavor = "multi_thread")]
+async fn ready_ignores_an_embedding_provider_introduced_by_a_later_config_reload() {
+    let h = boot_router_with_api_key(API_KEY).await;
+
+    // Baseline: nothing pinned at boot, so readiness does not depend on an
+    // embedding driver.
+    let (status, body) = send(h.app.clone(), anon_get("/api/ready")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        ready_check(&json, "embedding")
+            .get("required")
+            .and_then(|r| r.as_bool()),
+        Some(false),
+        "precondition: the harness pins no provider at boot"
+    );
+
+    // Land a config.toml that pins an unsatisfiable embedding provider AND
+    // touches a hot-reloadable field. The second part matters: `should_store_config`
+    // only swaps the live config when the plan carries a hot action or a
+    // no-op change, so a memory-only edit would not swap at all and the test
+    // would pass for the wrong reason.
+    let on_disk = format!(
+        "log_level = \"debug\"\n\
+         max_history_messages = 42\n\
+         [memory]\n\
+         fts_only = false\n\
+         embedding_provider = \"cohere\"\n\
+         embedding_api_key_env = \"{ABSENT_EMBEDDING_KEY_ENV}\"\n"
+    );
+    std::fs::write(h.home.join("config.toml"), on_disk).expect("write config.toml");
+
+    let reload = Request::builder()
+        .method(Method::POST)
+        .uri("/api/config/reload")
+        .header(header::AUTHORIZATION, format!("Bearer {API_KEY}"))
+        .body(Body::empty())
+        .unwrap();
+    let (reload_status, reload_body) = send(h.app.clone(), reload).await;
+    assert_eq!(
+        reload_status,
+        StatusCode::OK,
+        "reload should succeed (partially): {}",
+        String::from_utf8_lossy(&reload_body)
+    );
+    let reload_json: serde_json::Value =
+        serde_json::from_slice(&reload_body).expect("reload body is JSON");
+    // Sanity-check that this edit really is the restart-required shape the
+    // regression depends on. If a future reload-plan change made `[memory]`
+    // hot-reloadable, this assertion fails loudly and the snapshot rationale
+    // above needs revisiting — rather than the test silently going vacuous.
+    assert_eq!(
+        reload_json
+            .get("restart_required")
+            .and_then(|r| r.as_bool()),
+        Some(true),
+        "a [memory] edit must still be restart_required for this regression to \
+         be meaningful: {reload_json}"
+    );
+
+    let (status, body) = send(h.app.clone(), anon_get("/api/ready")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a config reload must not be able to fail readiness for a driver the \
+         running process was never asked to build; body: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        ready_check(&json, "embedding")
+            .get("required")
+            .and_then(|r| r.as_bool()),
+        Some(false),
+        "the requirement is a boot-time property: {json}"
+    );
+}
+
+/// `GET /api/config/schema` must tell the dashboard which paths the write endpoint refuses.
+///
+/// Without it the SPA rendered an editable control for a deliberately non-writable field, the operator changed it, and the save came back 403 with no explanation — reported as "the per-field save appears to succeed, config.toml is unchanged" (#6636 observation (d)).
+///
+/// The server sends the resolved verdict rather than the allowlists, because writability is decided by an exact-path list, section prefixes, a depth-2-only rule and a secret-suffix scrub; re-deriving that in TypeScript would make the SPA a third place to keep in sync.
+/// This test is the guard that the emitted set agrees with the write path itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_schema_reports_the_paths_the_write_endpoint_refuses() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(h.app.clone(), auth_get("/api/config/schema")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+
+    let non_writable: std::collections::HashSet<&str> = json
+        .get("x-non-writable")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    // Sanity floor: an empty or near-empty set would make every assertion below vacuous and would silently restore the old always-editable rendering.
+    assert!(
+        non_writable.len() > 20,
+        "x-non-writable enumerated only {} paths — the schema walk is broken",
+        non_writable.len()
+    );
+
+    // Deliberately non-writable, and the two the issue named.
+    for path in [
+        "approval.require_approval",
+        "approval.second_factor",
+        "external_auth.require_email_verified",
+    ] {
+        assert!(
+            non_writable.contains(path),
+            "`{path}` is refused by POST /api/config/set, so the dashboard must be told to \
+             render it read-only; got {} entries",
+            non_writable.len()
+        );
+    }
+
+    // Writable paths must NOT be listed, or the dashboard would grey out fields the operator can legitimately change.
+    for path in [
+        "approval.auto_approve",
+        "approval.totp_grace_period_secs",
+        "registry.cache_ttl_secs",
+        "log_level",
+    ] {
+        assert!(
+            !non_writable.contains(path),
+            "`{path}` is writable and must stay editable in the dashboard"
+        );
+    }
+
+    // Cross-check the verdict against the write endpoint for one of each, so the emitted set cannot drift from the rule it is supposed to mirror.
+    let (status, _) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "approval.require_approval", "value": []}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the path reported as non-writable must actually be refused"
+    );
+    let (status, _) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "approval.auto_approve", "value": false}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the path reported as writable must actually be accepted"
     );
 }

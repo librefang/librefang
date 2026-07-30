@@ -65,7 +65,7 @@ export function MediaPage() {
 
   const providersQuery = useMediaProviders();
 
-  const providers = providersQuery.data ?? [];
+  const providers = useMemo(() => providersQuery.data ?? [], [providersQuery.data]);
   const configuredProviders = useMemo(() => providers.filter((p) => p.configured), [providers]);
 
   const imageProviders = useMemo(

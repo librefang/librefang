@@ -183,30 +183,40 @@ export function RuntimePage() {
       { label: t("runtime.failed_count"), value: taskStatus.failed ?? 0, color: taskStatus.failed ? "text-error" : "text-text-dim" },
     ] : [];
 
+  const refetchSnapshot = snapshotQuery.refetch;
+  const refetchQueue = queueQuery.refetch;
+  const refetchHealthDetail = healthDetailQuery.refetch;
+  const refetchSecurity = securityQuery.refetch;
+  const refetchAudit = auditQuery.refetch;
+  const refetchAuditVerify = auditVerifyQuery.refetch;
+  const refetchBackups = backupsQuery.refetch;
+  const refetchTaskStatus = taskStatusQuery.refetch;
+  const refetchTaskList = taskListQuery.refetch;
+
   const refreshAll = useCallback(() => {
-    for (const q of [
-      snapshotQuery,
-      queueQuery,
-      healthDetailQuery,
-      securityQuery,
-      auditQuery,
-      auditVerifyQuery,
-      backupsQuery,
-      taskStatusQuery,
-      taskListQuery,
+    for (const refetch of [
+      refetchSnapshot,
+      refetchQueue,
+      refetchHealthDetail,
+      refetchSecurity,
+      refetchAudit,
+      refetchAuditVerify,
+      refetchBackups,
+      refetchTaskStatus,
+      refetchTaskList,
     ]) {
-      q.refetch();
+      void refetch();
     }
   }, [
-    snapshotQuery.refetch,
-    queueQuery.refetch,
-    healthDetailQuery.refetch,
-    securityQuery.refetch,
-    auditQuery.refetch,
-    auditVerifyQuery.refetch,
-    backupsQuery.refetch,
-    taskStatusQuery.refetch,
-    taskListQuery.refetch,
+    refetchAudit,
+    refetchAuditVerify,
+    refetchBackups,
+    refetchHealthDetail,
+    refetchQueue,
+    refetchSecurity,
+    refetchSnapshot,
+    refetchTaskList,
+    refetchTaskStatus,
   ]);
 
   return (

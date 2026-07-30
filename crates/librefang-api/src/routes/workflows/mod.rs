@@ -694,6 +694,13 @@ fn cron_job_to_schedule_json(job: &librefang_types::scheduler::CronJob) -> serde
     // the schedule view without a second GET on the raw cron-job endpoint.
     let delivery_targets = serde_json::to_value(&job.delivery_targets)
         .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
+    // `/api/cron/jobs` serializes the whole `CronJob`, so it carries `delivery`, `peer_id`, and `session_mode`; this view is the alternate presentation of the same store and had fallen behind on all three (#6611).
+    // `peer_id` selects the `SenderContext.user_id` the fire runs under, so peer-keyed memory resolves; `session_mode` decides whether every fire shares one persistent session or gets an isolated one; `delivery` is the primary output destination and is still read at fire time (`kernel::cron_tick` clones it alongside `delivery_targets`, which fan out in addition to it rather than replacing it).
+    let delivery =
+        serde_json::to_value(&job.delivery).unwrap_or_else(|_| serde_json::json!({"kind": "none"}));
+    // `CronJob::session_mode` carries `skip_serializing_if = "Option::is_none"`, which is why an unset value is simply absent from `/api/cron/jobs` rather than null.
+    // This view emits an explicit `null` instead, matching how it already treats `tz`, `last_run`, and `next_run`: a read surface with a stable key set lets a client distinguish "not configured" from "the server is too old to report it".
+    let session_mode = serde_json::to_value(job.session_mode).unwrap_or(serde_json::Value::Null);
     serde_json::json!({
         "id": job.id.to_string(),
         "name": job.name,
@@ -706,7 +713,10 @@ fn cron_job_to_schedule_json(job: &librefang_types::scheduler::CronJob) -> serde
         "created_at": job.created_at.to_rfc3339(),
         "last_run": job.last_run.map(|t| t.to_rfc3339()),
         "next_run": job.next_run.map(|t| t.to_rfc3339()),
+        "delivery": delivery,
         "delivery_targets": delivery_targets,
+        "peer_id": job.peer_id,
+        "session_mode": session_mode,
     })
 }
 

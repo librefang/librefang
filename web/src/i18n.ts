@@ -97,6 +97,14 @@ export interface Translation {
     categories: { title: string; desc: string }[]
     viewAll: string
   }
+  partner?: {
+    eyebrow: string
+    title: string
+    desc: string
+    capabilityRuntime: string
+    capabilityGateway: string
+    cta: string
+  }
   githubStats?: {
     label: string
     title: string
@@ -308,7 +316,7 @@ export interface Translation {
     releaseTypes: Record<'stable' | 'rc' | 'beta', string>
     changeTypes: Record<'feature' | 'fix' | 'breaking' | 'performance' | 'other', string>
   }
-  footer: { docs: string; license: string; privacy: string; changelog: string }
+  footer: { docs: string; license: string; privacy: string; changelog: string; everyapi?: string }
 }
 
 export const languages: Language[] = [
@@ -1264,7 +1272,15 @@ export const rawTranslations: Record<string, Translation> = {
         other: 'Other',
       },
     },
-    footer: { docs: 'Docs', license: 'License', privacy: 'Privacy', changelog: 'Changelog' },
+    partner: {
+      eyebrow: 'Official integration partner',
+      title: 'LibreFang × EveryAPI',
+      desc: 'LibreFang runs the agents. EveryAPI connects them to a managed model gateway, live catalog, pricing, and account tools.',
+      capabilityRuntime: 'Agent OS',
+      capabilityGateway: 'Unified AI infrastructure',
+      cta: 'Explore the integration',
+    },
+    footer: { docs: 'Docs', license: 'License', privacy: 'Privacy', changelog: 'Changelog', everyapi: 'EveryAPI partner' },
   },
 
   zh: {
@@ -1746,7 +1762,15 @@ export const rawTranslations: Record<string, Translation> = {
         other: '其他',
       },
     },
-    footer: { docs: '文档', license: '许可证', privacy: '隐私', changelog: '更新日志' },
+    partner: {
+      eyebrow: '官方集成伙伴',
+      title: 'LibreFang × EveryAPI',
+      desc: 'LibreFang 负责运行 Agent；EveryAPI 提供托管模型网关、实时目录、价格与账户工具。',
+      capabilityRuntime: 'Agent OS',
+      capabilityGateway: '统一 AI 基础设施',
+      cta: '查看联合集成',
+    },
+    footer: { docs: '文档', license: '许可证', privacy: '隐私', changelog: '更新日志', everyapi: 'EveryAPI 合作伙伴' },
   },
 
   'zh-TW': {

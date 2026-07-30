@@ -879,14 +879,21 @@ impl AgentControl for DispatchCapture {
         caller_session_id: Option<&str>,
         _conversation_key: Option<&str>,
         _chat_id: Option<&str>,
-    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+    ) -> Result<librefang_kernel_handle::AsyncSendOutcome, librefang_kernel_handle::KernelOpError>
+    {
         // Record that the async path was taken and echo back whether a caller
         // session was threaded through (the tool must forward it).
         self.calls.lock().unwrap().push(format!(
             "async_tracked:session={}",
             caller_session_id.unwrap_or("none")
         ));
-        Ok("task-fake-1234".into())
+        // Mirror the kernel's own discrimination (#6650): a caller session is what makes tracking possible, so its absence yields `Inline` here exactly as it does in the real impl.
+        Ok(match caller_session_id {
+            Some(_) => librefang_kernel_handle::AsyncSendOutcome::Tracked("task-fake-1234".into()),
+            None => {
+                librefang_kernel_handle::AsyncSendOutcome::Inline("inline-fallback-response".into())
+            }
+        })
     }
 
     fn list_agents(&self) -> Vec<AgentInfo> {
@@ -1205,6 +1212,48 @@ async fn agent_send_async_routes_to_tracked_path_and_returns_task_id() {
         &[format!("async_tracked:session={}", session.0)],
         "async=true must hit the tracker path and forward the caller session, \
          not the blocking send_to_agent_as"
+    );
+}
+
+/// An untrackable `async: true` call returns the callee's reply as the tool result, NOT a `task_id` payload telling the model to wait (#6650).
+///
+/// The kernel falls back to a blocking send when it cannot parse a caller session, which is every `agent_send` issued over the MCP HTTP bridge (`routes/network.rs`) or the REST `/api/tools/{name}` bridge (`routes/tools_sessions.rs`) — both pass `session_id: None` by construction.
+/// Before the `AsyncSendOutcome` split, the fallback's response body came back through the same `Ok(String)` slot as a task id, so the tool emitted `{"task_id": "<the entire reply text>", "status": "delegated"}` and instructed the model to end its turn and wait for a completion event that no registered task would ever produce.
+/// The answer was in hand and thrown away.
+#[tokio::test]
+async fn agent_send_async_without_session_returns_the_reply_not_a_fake_task_id_6650() {
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    let input = serde_json::json!({
+        "agent_id": "target",
+        "message": "do a long research task",
+        "async": true,
+    });
+
+    // Known caller, no session — the shape both HTTP bridges produce.
+    let out =
+        super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None, None)
+            .await
+            .unwrap();
+
+    assert_eq!(
+        out, "inline-fallback-response",
+        "an untrackable async delegation must return the callee's reply verbatim"
+    );
+    // Specifically: the misleading delegated-payload shape must be gone.
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+        assert!(
+            v.get("task_id").is_none() && v.get("status").is_none(),
+            "no task was registered, so no task_id / delegated status may be reported: {v:?}"
+        );
+    }
+
+    let calls = cap.calls.lock().unwrap();
+    assert_eq!(
+        &*calls,
+        &["async_tracked:session=none".to_string()],
+        "the tool must still route through the tracked entry point — the kernel \
+         owns the fallback decision, not the tool"
     );
 }
 

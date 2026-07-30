@@ -294,6 +294,11 @@ pub fn build_reload_plan_with_caps(
             .push("api_key changed (effective immediately via config swap)".to_string());
     }
 
+    if old.api_key_hash != new.api_key_hash {
+        plan.noop_changes
+            .push("api_key_hash changed (effective immediately via config swap)".to_string());
+    }
+
     if old.dashboard_user != new.dashboard_user
         || old.dashboard_pass != new.dashboard_pass
         || old.dashboard_pass_hash != new.dashboard_pass_hash
@@ -700,7 +705,14 @@ pub fn build_reload_plan_with_caps(
         );
         restart_if_changed(field_changed(&old.heartbeat, &new.heartbeat), "heartbeat");
         restart_if_changed(field_changed(&old.plugins, &new.plugins), "plugins");
-        restart_if_changed(field_changed(&old.registry, &new.registry), "registry");
+        // `registry` minus `auto_sync`: the mirror / host / TTL are read once when the checkout is set up, but `auto_sync` is re-read from the config snapshot on every tick of the 24 h catalog task, so it belongs in the NOOP block below.
+        // Classifying the whole section as restart-required made the documented "flip it off and the next automatic refresh stops" impossible: `should_store_config` swaps the config only when there is a hot action or a noop change, so a registry-only reload was recorded as restart-required and then discarded, leaving the task reading the old value until the daemon actually restarted.
+        let registry_except_auto_sync_changed = {
+            let mut old_rest = old.registry.clone();
+            old_rest.auto_sync = new.registry.auto_sync;
+            field_changed(&old_rest, &new.registry)
+        };
+        restart_if_changed(registry_except_auto_sync_changed, "registry");
         restart_if_changed(
             field_changed(&old.rate_limit, &new.rate_limit),
             "rate_limit",
@@ -837,6 +849,12 @@ pub fn build_reload_plan_with_caps(
         // live from `config_snapshot()` on every request, so a swap is effective
         // on the next install with no explicit reapply action.
         noop_if_changed(field_changed(&old.hands, &new.hands), "hands");
+        // The 24 h catalog task calls `kernel.config_snapshot()` at the top of each tick and passes `registry.auto_sync` into `sync_catalog_to` (server.rs), so freezing the checkout takes effect on the next tick.
+        // This is the one field of `registry` that is not captured at setup time — the rest of the section stays restart-required above.
+        noop_if_changed(
+            old.registry.auto_sync != new.registry.auto_sync,
+            "registry.auto_sync",
+        );
         noop_if_changed(field_changed(&old.links, &new.links), "links");
         noop_if_changed(field_changed(&old.privacy, &new.privacy), "privacy");
         noop_if_changed(field_changed(&old.pairing, &new.pairing), "pairing");
@@ -937,6 +955,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         // -- hand-tuned branches at the top of build_reload_plan --
         "api_listen",
         "api_key",
+        "api_key_hash",
         "dashboard_user",
         "dashboard_pass",
         "dashboard_pass_hash",
@@ -1280,6 +1299,76 @@ mod tests {
             .restart_reasons
             .iter()
             .any(|r| r.contains("memory config")));
+    }
+
+    /// Flipping `[registry] auto_sync` must reach the running catalog task.
+    ///
+    /// The task re-reads `config_snapshot()` each tick, but a plan that records only `restart_required` never gets stored: `should_store_config` swaps the config only when there is a hot action or a noop change.
+    /// Classifying the whole `registry` section as restart-required therefore made the documented "flip it off and the next automatic refresh stops" impossible — the reload reported restart-required and then threw the new value away.
+    #[test]
+    fn registry_auto_sync_is_read_live_and_reaches_the_config_store() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.registry.auto_sync = !a.registry.auto_sync;
+        let plan = build_reload_plan(&a, &b);
+
+        assert!(
+            !plan.restart_required,
+            "auto_sync is re-read per catalog tick; restart_reasons: {:?}",
+            plan.restart_reasons
+        );
+        assert!(
+            plan.noop_changes
+                .iter()
+                .any(|r| r.contains("registry.auto_sync")),
+            "auto_sync must be recorded as a live-read change: {:?}",
+            plan.noop_changes
+        );
+        for mode in [ReloadMode::Hot, ReloadMode::Hybrid] {
+            assert!(
+                should_store_config(mode, &plan),
+                "the reloaded config must be stored in {mode:?} mode, or the running \
+                 task keeps reading the old auto_sync"
+            );
+        }
+    }
+
+    /// The rest of the `registry` section stays restart-required — it is read when the checkout is set up, so a bare config swap would silently no-op.
+    #[test]
+    fn registry_fields_other_than_auto_sync_still_require_restart() {
+        for (label, mutate) in [
+            (
+                "cache_ttl_secs",
+                Box::new(|c: &mut KernelConfig| c.registry.cache_ttl_secs = 1)
+                    as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+            (
+                "registry_mirror",
+                Box::new(|c: &mut KernelConfig| {
+                    c.registry.registry_mirror = "https://example.invalid/mirror".to_string()
+                }),
+            ),
+            (
+                "registry_host",
+                Box::new(|c: &mut KernelConfig| {
+                    c.registry.registry_host = Some("example.invalid".to_string())
+                }),
+            ),
+        ] {
+            let a = default_cfg();
+            let mut b = default_cfg();
+            mutate(&mut b);
+            let plan = build_reload_plan(&a, &b);
+            assert!(
+                plan.restart_required,
+                "`registry.{label}` must still require a restart"
+            );
+            assert!(
+                plan.restart_reasons.iter().any(|r| r.contains("registry")),
+                "`registry.{label}` must name the section in its reason: {:?}",
+                plan.restart_reasons
+            );
+        }
     }
 
     #[test]

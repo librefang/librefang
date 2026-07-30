@@ -94,7 +94,7 @@ jobs:
           targets: ${{ matrix.platform.rust_target }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
-          node-version: 20
+          node-version: 24
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: desktop-${{ matrix.platform.rust_target }}-${{ inputs.tag }}

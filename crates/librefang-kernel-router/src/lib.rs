@@ -245,7 +245,12 @@ fn load_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
     let mut seen = std::collections::HashSet::new();
     let mut candidates = Vec::new();
 
-    let dirs = [home_dir.join("registry").join("hands")];
+    // Same precedence as `librefang_hands::registry::scan_hands_dir`: an operator override in `<home>/hands/` shadows the registry checkout.
+    // If routing read only the checkout it would resolve against upstream's definition while the hands registry served the edited one, so a renamed or re-scoped hand would route by rules nobody could see in the UI.
+    let dirs = [
+        librefang_hands::registry::hand_override_dir(home_dir),
+        home_dir.join("registry").join("hands"),
+    ];
 
     // Pass the agents registry alongside HAND.toml parsing so hands that
     // declare `base = "<template>"` for their agents can resolve the
@@ -274,13 +279,15 @@ fn load_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
                 .and_then(|n| n.to_str())
                 .unwrap_or_default()
                 .to_string();
-            if !seen.insert(name.clone()) {
+            if seen.contains(&name) {
                 continue;
             }
             let hand_toml = hand_dir.join("HAND.toml");
             let Ok(toml_content) = fs::read_to_string(&hand_toml) else {
                 continue;
             };
+            // Claim the id only once a manifest was actually read, mirroring `scan_hands_dir`: a directory with no readable `HAND.toml` must not shadow the same id in the registry checkout, or a half-written override would drop the hand from routing entirely.
+            seen.insert(name.clone());
             // Surface parse failures at WARN — the previous `let Ok else
             // continue` swallowed the error and the hand was silently
             // dropped from routing, hiding misconfigured HAND.toml files

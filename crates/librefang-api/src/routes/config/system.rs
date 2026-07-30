@@ -245,6 +245,115 @@ pub async fn version() -> impl IntoResponse {
     }))
 }
 
+/// Probe the SQLite memory substrate with the cheapest possible read.
+///
+/// Shared by `/api/health`, `/api/health/detail`, and `/api/ready` so all
+/// three agree on what "the database is reachable" means. `structured_get`
+/// on a well-known sentinel key hits the connection pool and the schema
+/// without depending on any row existing — a missing key is `Ok(None)`,
+/// only a genuine connection / schema failure is `Err`.
+fn database_probe_ok(state: &Arc<AppState>) -> bool {
+    let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+    ]));
+    state
+        .kernel
+        .memory_substrate()
+        .structured_get(shared_id, "__health_check__")
+        .is_ok()
+}
+
+/// Is a working embedding driver a *requirement* for this deployment, or an
+/// optional enhancement?
+///
+/// It is a requirement only when the operator pinned a specific embedding
+/// provider while leaving vector search enabled: that combination states an
+/// intent the daemon failed to satisfy, so serving traffic would silently
+/// degrade memory recall. In every other shape the absence of a driver is
+/// the documented, supported fallback and must not fail readiness:
+///
+/// * `fts_only = true` — vector search is switched off; `boot.rs` never
+///   constructs a driver at all.
+/// * `embedding_provider` unset or `"auto"` — boot probes provider API-key
+///   env vars and falls back to local Ollama, then to FTS. Nothing was
+///   promised, so nothing is broken.
+///
+/// Callers must evaluate this against the config the process **booted** with
+/// and cache the answer in `AppState::readiness_requires_embedding`, not read
+/// it live per request. See that field's documentation for why.
+pub(crate) fn embedding_is_required(config: &librefang_types::config::KernelConfig) -> bool {
+    if config.memory.fts_only.unwrap_or(false) {
+        return false;
+    }
+    config
+        .memory
+        .embedding_provider
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|provider| !provider.is_empty() && !provider.eq_ignore_ascii_case("auto"))
+}
+
+/// GET /api/ready — Readiness probe (public, no auth required).
+///
+/// Distinct from `/api/health` on purpose. `/api/health` answers "is this
+/// process alive?" and always returns 200 while the HTTP server can respond,
+/// so a Kubernetes `livenessProbe` pointed at it never restarts a pod over a
+/// recoverable storage or provider incident. This endpoint answers "can this
+/// process accept work?" and returns 503 when a dependency required to do so
+/// is unavailable, which is what removes the pod from Service endpoints
+/// without killing it.
+///
+/// The body is deliberately minimal — check names and a coarse status only.
+/// It carries no version, hostname, provider id, model name, path, or error
+/// text, because an unauthenticated caller reaches it; detailed diagnostics
+/// remain behind `GET /api/health/detail`.
+#[utoipa::path(
+    get,
+    path = "/api/ready",
+    tag = "system",
+    responses(
+        (status = 200, description = "All required dependencies are ready", body = crate::types::JsonObject),
+        (status = 503, description = "A required dependency is unavailable", body = crate::types::JsonObject)
+    )
+)]
+pub async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let db_ok = database_probe_ok(&state);
+
+    // Boot-time snapshot, not `config_ref()`: the requirement and the driver
+    // must be read from the same point in time, or a `POST /api/config/reload`
+    // that adds `memory.embedding_provider` pins readiness at 503 against a
+    // driver that a `restart_required` change will never rebuild. See
+    // `AppState::readiness_requires_embedding`.
+    let embedding_required = state.readiness_requires_embedding;
+    let embedding_present = state.kernel.embedding().is_some();
+    let embedding_status = match (embedding_required, embedding_present) {
+        (true, true) => "ok",
+        (true, false) => "error",
+        // Not required: report whether one happens to be available so the
+        // payload stays useful for humans, without gating readiness on it.
+        (false, true) => "ok",
+        (false, false) => "skipped",
+    };
+
+    let is_ready = db_ok && !(embedding_required && !embedding_present);
+    let code = if is_ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        code,
+        Json(serde_json::json!({
+            "status": if is_ready { "ready" } else { "not_ready" },
+            "checks": [
+                { "name": "database", "status": if db_ok { "ok" } else { "error" }, "required": true },
+                { "name": "embedding", "status": embedding_status, "required": embedding_required },
+            ],
+        })),
+    )
+}
+
 /// GET /api/health — Minimal liveness probe (public, no auth required).
 /// Returns only status and version to prevent information leakage.
 /// Use GET /api/health/detail for full diagnostics (requires auth).
@@ -257,15 +366,7 @@ pub async fn version() -> impl IntoResponse {
     )
 )]
 pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Check database connectivity
-    let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-    ]));
-    let db_ok = state
-        .kernel
-        .memory_substrate()
-        .structured_get(shared_id, "__health_check__")
-        .is_ok();
+    let db_ok = database_probe_ok(&state);
 
     let status = if db_ok { "ok" } else { "degraded" };
 
@@ -294,14 +395,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let health = state.kernel.supervisor_ref().health();
 
-    let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-    ]));
-    let db_ok = state
-        .kernel
-        .memory_substrate()
-        .structured_get(shared_id, "__health_check__")
-        .is_ok();
+    let db_ok = database_probe_ok(&state);
 
     let hcfg = state.kernel.config_ref();
     let config_warnings = hcfg.validate();

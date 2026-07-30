@@ -4,6 +4,7 @@ import { Copy, Download, Loader2, Pencil } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { Modal } from "./ui/Modal";
 import { useUIStore } from "../lib/store";
+import { copyToClipboard } from "../lib/clipboard";
 import { tabContent } from "../lib/motion";
 
 interface TomlViewerProps {
@@ -100,13 +101,13 @@ export function TomlViewer({
     }
   }, [onSave, draft]);
 
+  // Branch on the helper's boolean rather than wrapping it in try/catch: it swallows its own failures and reports them through the return value, so a catch block would make the "copy failed" toast unreachable.
   const onCopy = useCallback(async () => {
     const text = editing ? draft : body;
     if (!text) return;
-    try {
-      await navigator.clipboard.writeText(text);
+    if (await copyToClipboard(text)) {
       addToast(t("toml_viewer.copied"), "success");
-    } catch {
+    } else {
       addToast(t("toml_viewer.copy_failed"), "error");
     }
   }, [editing, draft, body, t, addToast]);

@@ -218,6 +218,24 @@ cd librefang/deploy
 docker compose up -d
 ```
 
+**Kubernetes**
+
+Kustomize manifests for a single stateful replica, satisfying the `restricted` Pod Security Standard:
+
+```bash
+git clone https://github.com/librefang/librefang.git
+cd librefang
+kubectl create namespace librefang
+kubectl -n librefang create secret generic librefang-auth \
+  --from-literal=api-key="$(openssl rand -hex 32)" \
+  --from-literal=vault-key="$(openssl rand -base64 32)" \
+  --from-literal=dashboard-user=admin \
+  --from-literal=dashboard-pass="$(openssl rand -hex 24)"
+kubectl -n librefang apply -k deploy/kubernetes/base
+```
+
+`replicas` must stay at 1 — see [deploy/kubernetes/README.md](https://github.com/librefang/librefang/tree/main/deploy/kubernetes) for the support boundary, volume-ownership requirements, and probe contracts.
+
 **Verify Installation**
 
 ```bash

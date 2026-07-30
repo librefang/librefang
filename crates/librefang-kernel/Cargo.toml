@@ -81,6 +81,7 @@ proptest = "1"
 tracing-subscriber = { workspace = true }
 librefang-testing = { path = "../librefang-testing" }
 librefang-kernel-handle = { path = "../librefang-kernel-handle" }
+wiremock = "0.6"
 
 [lints]
 workspace = true

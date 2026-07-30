@@ -24,6 +24,7 @@ use crate::types;
         // ── System / Health ──
         routes::health,
         routes::health_detail,
+        routes::ready,
         routes::status,
         routes::version,
         routes::api_versions,

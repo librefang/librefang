@@ -3,8 +3,8 @@
 // Hardened against two real-world failure modes the previous hand-rolled
 // `split('\n').split(',')` parser hit:
 //
-//   1. UTF-8 BOM (`﻿`) prefix on files exported from Excel — without
-//      stripping it, the first header column becomes "﻿name" and the
+//   1. UTF-8 BOM prefix on files exported from Excel — without stripping it,
+//      the first header column contains a hidden marker before "name" and the
 //      `header.includes("name")` check fails, rejecting the whole import.
 //
 //   2. Quoted fields with embedded newlines (RFC-4180 §2.6: "Fields

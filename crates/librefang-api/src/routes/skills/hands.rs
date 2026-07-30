@@ -350,11 +350,15 @@ pub async fn get_hand_manifest(
     };
 
     let home = state.kernel.home_dir();
-    // Two install layouts that scan_hands_dir actually walks
-    // (librefang-hands/src/registry.rs:165). Anything else is a
-    // codebase inconsistency that wouldn't make it into the registry,
-    // so the gate above would already 404 it before we get here.
+    // The three layouts scan_hands_dir walks, in its precedence order (`librefang_hands::registry::scan_hands_dir`).
+    // Anything else is a codebase inconsistency that wouldn't make it into the registry, so the gate above would already 404 it before we get here.
+    //
+    // The operator override has to come first for the same reason the scan reads it first: it is what the daemon loads.
+    // Returning upstream's copy instead would show a stale manifest in the editor, and saving it back would silently revert the operator's customisation.
     let candidates = [
+        librefang_hands::registry::hand_override_dir(home)
+            .join(&hand_id)
+            .join("HAND.toml"),
         home.join("registry")
             .join("hands")
             .join(&hand_id)
@@ -1146,15 +1150,29 @@ pub async fn get_hand_settings(
         }
     };
 
-    // Find active instance config values (if any)
+    // `active_instance` (not a `list_instances` scan): several instances can share
+    // a `hand_id`, and a DashMap iteration order that varies per process would let
+    // this read and the write below resolve different ones (#6636).
     let instance_config: std::collections::HashMap<String, serde_json::Value> = state
         .kernel
         .hands()
-        .list_instances()
-        .iter()
-        .find(|i| i.hand_id == hand_id)
-        .map(|i| i.config.clone())
+        .active_instance(&hand_id)
+        .map(|i| i.config)
         .unwrap_or_default();
+
+    // `current_values` is what is stored; `effective_values` is what the resolver
+    // will actually use, which differs whenever a stored value is non-scalar or,
+    // for a Select, names no declared option. Reporting only the former is what
+    // let `librefang hand settings` print a value the agent was not using.
+    // `unknown_values` surfaces stored keys the schema does not declare — a typo
+    // is accepted silently by `update_config` and would otherwise be invisible.
+    let (effective_values, unknown_values) = match state.kernel.hands().get_definition(&hand_id) {
+        Some(def) => (
+            librefang_hands::effective_setting_values(&def.settings, &instance_config),
+            librefang_hands::undeclared_setting_keys(&def.settings, &instance_config),
+        ),
+        None => (Default::default(), Vec::new()),
+    };
 
     (
         StatusCode::OK,
@@ -1162,6 +1180,8 @@ pub async fn get_hand_settings(
             "hand_id": hand_id,
             "settings": settings_status,
             "current_values": instance_config,
+            "effective_values": effective_values,
+            "unknown_values": unknown_values,
         })),
     )
 }
@@ -1182,41 +1202,50 @@ pub async fn get_hand_settings(
 pub async fn update_hand_settings(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
-    Json(config): Json<std::collections::HashMap<String, serde_json::Value>>,
+    Json(delta): Json<std::collections::HashMap<String, serde_json::Value>>,
 ) -> impl IntoResponse {
-    let instance = state
-        .kernel
-        .hands()
-        .list_instances()
-        .into_iter()
-        .find(|i| i.hand_id == hand_id);
-
-    match instance {
-        Some(inst) => {
-            let id = inst.instance_id;
-            // Merge over existing config so untouched keys keep their saved values.
-            let mut merged = inst.config;
-            merged.extend(config);
-            match state.kernel.hands().update_config(id, merged.clone()) {
-                Ok(()) => {
-                    state.kernel.persist_hand_state();
-                    (
-                        StatusCode::OK,
-                        Json(serde_json::json!({
-                            "status": "ok",
-                            "hand_id": hand_id,
-                            "instance_id": id,
-                            "config": merged,
-                        })),
-                    )
-                }
-                Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
-            }
-        }
-        None => ApiErrorResponse::not_found(format!(
+    // `active_instance`, not a `list_instances` scan — see the note in
+    // `get_hand_settings`. The two must resolve the same instance or a save lands
+    // on agents the operator was never looking at.
+    let Some(instance) = state.kernel.hands().active_instance(&hand_id) else {
+        return ApiErrorResponse::not_found(format!(
             "No active instance for hand: {hand_id}. Activate the hand first."
         ))
+        .into_json_tuple();
+    };
+    let id = instance.instance_id;
+
+    // The body is a *delta*. `update_hand_config` merges it onto the saved config
+    // under the per-instance lock; merging here would put the read-modify-write
+    // outside that lock, so two concurrent saves would each write their own
+    // snapshot and the later one would silently revert the earlier.
+    //
+    // It is also what re-renders the `## User Configuration` prompt tail on the
+    // hand's live agents — the only way a saved setting reaches an LLM before the
+    // next daemon restart (#6636).
+    match state.kernel.update_hand_config(id, delta) {
+        Ok(updated) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ok",
+                "hand_id": hand_id,
+                "instance_id": id,
+                "config": updated.config,
+            })),
+        ),
+        // The instance was resolved a moment ago, so a `HandError::InstanceNotFound`
+        // here means it was deactivated concurrently — 404, not 400. Everything else
+        // reachable from this call is infrastructure (the `hand_state.json` write, an
+        // agent-registry write), which is a 500: answering 400 tells the operator
+        // their input was invalid and sends them to retype a valid setting instead of
+        // looking at the host.
+        Err(librefang_kernel::error::KernelError::Hand(
+            librefang_hands::HandError::InstanceNotFound(_),
+        )) => ApiErrorResponse::not_found(format!(
+            "Hand instance {id} was deactivated while saving settings"
+        ))
         .into_json_tuple(),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }
 

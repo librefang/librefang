@@ -456,12 +456,8 @@ fn grade_everyapi_wiring(state: &EveryApiState) -> AuditResult {
         );
     }
 
-    // Credentials exist but nothing routes to them. Deliberately Info, not
-    // Warn: having the EveryAPI CLI installed without wiring LibreFang to it
-    // is a legitimate state, and `doctor` should not paint it yellow every
-    // run. The remediation command therefore lives in the summary — the
-    // human path only renders `hint` for Warn/Error (see
-    // `commands/doctor_cmd.rs`).
+    // No provider file is required for CLI-managed credentials. Kernel boot
+    // registers EveryAPI in memory and resolves the current key per request.
     if state.credentials_usable {
         return AuditResult::info(NAME, i18n::t("doctor-everyapi-not-connected"));
     }
@@ -1098,18 +1094,15 @@ mod tests {
         assert!(r.summary.contains("relay_key"));
     }
 
-    /// The actionable case.
-    /// Info (not Warn) on purpose — see the comment in `grade_everyapi_wiring`.
-    /// Because the human path only renders `hint` for Warn/Error, the remediation command MUST be in the summary; this assertion is what stops someone from silently moving it to `hint`.
     #[test]
-    fn everyapi_credentials_without_provider_entry_names_connect_command_in_summary() {
+    fn everyapi_credentials_without_provider_entry_report_auto_detection() {
         let r = grade_everyapi_wiring(&EveryApiState {
             cli_on_path: true,
             credentials_usable: true,
             ..state()
         });
         assert_eq!(r.severity, Severity::Info);
-        assert!(r.summary.contains("librefang models connect everyapi"));
+        assert!(r.summary.contains("auto-detect"));
     }
 
     #[test]

@@ -1,0 +1,282 @@
+name: Kubernetes
+
+# Validates the single-replica deployment baseline under deploy/kubernetes/
+# (#6635) and the restricted-Pod-Security rootless path it depends on (#6632).
+#
+# Two jobs with deliberately different triggers:
+#
+#   render — static assertions over the rendered manifests. Seconds, no
+#            cluster, so it runs on every PR that touches the deployment
+#            surface. This is what catches a `replicas` bump, a probe pointed
+#            at the wrong contract, or a credential inlined into the manifest.
+#
+#   kind   — builds the image and actually boots it in a throwaway cluster with
+#            `pod-security.kubernetes.io/enforce=restricted`, then kills the pod
+#            and proves /data survived. ~40 min because of the Rust release
+#            build, so it follows docker-build.yml's precedent and runs on
+#            push-to-main plus manual dispatch rather than on every PR push.
+on:
+  pull_request:
+    paths:
+      - 'deploy/kubernetes/**'
+      - 'deploy/docker-entrypoint.sh'
+      - 'scripts/check-k8s-manifests.py'
+      - '.github/workflows/kubernetes.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/kubernetes/**'
+      - 'deploy/docker-entrypoint.sh'
+      - 'Dockerfile'
+      - 'scripts/check-k8s-manifests.py'
+      - '.github/workflows/kubernetes.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  render:
+    name: render + validate manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install PyYAML
+        run: python3 -m pip install --user pyyaml
+
+      # `kubectl kustomize` rather than a standalone kustomize binary: it is
+      # preinstalled on the runner and is what the README tells operators to
+      # use (`kubectl apply -k`), so CI validates the same renderer they run.
+      - name: Render base kustomization
+        run: |
+          set -euo pipefail
+          kubectl kustomize deploy/kubernetes/base > rendered-base.yaml
+          echo "--- rendered ---"
+          cat rendered-base.yaml
+
+      - name: Validate rendered manifests
+        run: python3 scripts/check-k8s-manifests.py rendered-base.yaml
+
+      # Server-side dry-run against the real API-server schema, catching typos
+      # in field names that a YAML-shape validator cannot see. `--validate=true`
+      # needs a cluster, so this is the one check that borrows kind's API server
+      # without needing a booted daemon.
+      - name: Create throwaway cluster for schema validation
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          cluster_name: librefang-schema
+
+      - name: Server-side dry-run apply
+        run: |
+          set -euo pipefail
+          kubectl create namespace librefang
+          # The Secrets the StatefulSet references are created out of band, so
+          # a dry-run apply is the correct scope here — it validates schema and
+          # admission, not runtime resolution of secretKeyRefs.
+          kubectl -n librefang apply --dry-run=server -f rendered-base.yaml
+
+      - name: Accepted by an API server enforcing restricted Pod Security
+        run: |
+          set -euo pipefail
+          # Positive control for #6632: with `enforce=restricted` the API server
+          # itself rejects any pod template that violates the standard. If this
+          # apply succeeds, the securityContext really does satisfy restricted —
+          # not just our own checklist of it.
+          kubectl create namespace psa-restricted
+          kubectl label namespace psa-restricted \
+            pod-security.kubernetes.io/enforce=restricted \
+            pod-security.kubernetes.io/enforce-version=latest
+          kubectl -n psa-restricted apply --dry-run=server -f rendered-base.yaml
+
+  kind:
+    name: boot in kind (restricted PSS)
+    # Skip on PRs — the Rust release build dominates the runtime. The push-to-main
+    # run is the gate; use workflow_dispatch when a PR needs it pre-merge.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CLUSTER: librefang-ci
+      NS: librefang
+      IMAGE: librefang:ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      # Shares docker-build.yml's cache scope: same Dockerfile, same layers, so
+      # a warm cache from that workflow makes this build a fraction of cold cost.
+      - name: Build image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha,scope=docker-build
+          cache-to: type=gha,mode=max,scope=docker-build
+
+      - name: Create cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          cluster_name: librefang-ci
+
+      - name: Load image into cluster
+        run: kind load docker-image "$IMAGE" --name "$CLUSTER"
+
+      - name: Namespace with restricted Pod Security enforced
+        run: |
+          set -euo pipefail
+          kubectl create namespace "$NS"
+          # Enforced, not just warned: a violating pod template is rejected at
+          # admission, so a regression in the securityContext fails this job
+          # instead of quietly running privileged.
+          kubectl label namespace "$NS" \
+            pod-security.kubernetes.io/enforce=restricted \
+            pod-security.kubernetes.io/enforce-version=latest
+
+      - name: Create credentials
+        run: |
+          set -euo pipefail
+          # Throwaway values for a throwaway cluster. vault-key must
+          # base64-decode to exactly 32 bytes.
+          kubectl -n "$NS" create secret generic librefang-auth \
+            --from-literal=api-key="$(openssl rand -hex 32)" \
+            --from-literal=vault-key="$(openssl rand -base64 32)" \
+            --from-literal=dashboard-user=ci \
+            --from-literal=dashboard-pass="$(openssl rand -hex 24)"
+
+      - name: Apply via an overlay pinning the locally built image
+        run: |
+          set -euo pipefail
+          # Exercises the composition path a real operator uses — an overlay on
+          # top of base that retargets the image — rather than mutating the
+          # committed base in place.
+          #
+          # The overlay must live INSIDE the repo tree and reference the base by
+          # a relative path. Kustomize refuses an absolute path as a resource
+          # root ("new root ... cannot be absolute") and `kubectl apply -k`
+          # exposes no `--load-restrictor` to relax it, so an overlay in /tmp
+          # pointing at $GITHUB_WORKSPACE cannot load. Generated rather than
+          # committed: it is CI-only and pins a local image tag.
+          mkdir -p deploy/kubernetes/ci-overlay
+          cat > deploy/kubernetes/ci-overlay/kustomization.yaml <<EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          namespace: ${NS}
+          resources:
+            - ../base
+          images:
+            - name: ghcr.io/librefang/librefang
+              newName: librefang
+              newTag: ci
+          EOF
+          kubectl apply -k deploy/kubernetes/ci-overlay
+
+      - name: Wait for rollout
+        run: |
+          set -euo pipefail
+          # 5 min: first boot runs `librefang init` (writes config.toml, seeds
+          # the agent registry) before the startupProbe can pass.
+          kubectl -n "$NS" rollout status statefulset/librefang --timeout=300s
+
+      - name: Assert the daemon really runs unprivileged as 1001
+        run: |
+          set -euo pipefail
+          uid="$(kubectl -n "$NS" exec statefulset/librefang -- id -u | tr -d '\r')"
+          gid="$(kubectl -n "$NS" exec statefulset/librefang -- id -g | tr -d '\r')"
+          echo "container runs as ${uid}:${gid}"
+          [ "$uid" = "1001" ] || { echo "::error::expected uid 1001, got $uid"; exit 1; }
+          [ "$gid" = "1001" ] || { echo "::error::expected gid 1001, got $gid"; exit 1; }
+          # The data dir must be writable by that identity — this is the
+          # fsGroup contract, and the check the rootless entrypoint branch
+          # performs at startup.
+          kubectl -n "$NS" exec statefulset/librefang -- \
+            sh -c 'test -w /data || { echo "/data not writable"; exit 1; }'
+
+      - name: Probe both health contracts through the Service
+        run: |
+          set -euo pipefail
+          kubectl -n "$NS" port-forward svc/librefang 4545:4545 &
+          pf=$!
+          trap 'kill $pf 2>/dev/null || true' EXIT
+          for _ in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:4545/api/ready >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          echo "--- /api/ready ---"
+          curl -fsS http://127.0.0.1:4545/api/ready
+          echo
+          echo "--- /api/health ---"
+          curl -fsS http://127.0.0.1:4545/api/health
+          echo
+          # A pod that passed its readinessProbe must be in the Service's
+          # endpoint set; an empty list means the probe and the Service
+          # selector disagree.
+          endpoints="$(kubectl -n "$NS" get endpoints librefang -o jsonpath='{.subsets[*].addresses[*].ip}')"
+          echo "endpoints: ${endpoints:-<none>}"
+          [ -n "$endpoints" ] || { echo "::error::Service has no ready endpoints"; exit 1; }
+
+      - name: Pod replacement preserves /data, and never runs two daemons
+        run: |
+          set -euo pipefail
+          kubectl -n "$NS" exec statefulset/librefang -- \
+            sh -c 'printf persisted > /data/ci-sentinel'
+          # config.toml is written by first boot; capture its inode so we can
+          # tell "the volume came back" from "init re-ran on a fresh volume".
+          before="$(kubectl -n "$NS" exec statefulset/librefang -- stat -c '%i' /data/config.toml | tr -d '\r')"
+
+          rm -f /tmp/rollout-done /tmp/too-many
+          kubectl -n "$NS" delete pod librefang-0 --wait=false
+
+          # A StatefulSet terminates before it re-creates, so at no point may
+          # two daemons be Running against the one ReadWriteOnce volume. Sample
+          # continuously for the whole replacement rather than checking once
+          # after the fact, which would miss the overlap entirely.
+          (
+            while [ ! -f /tmp/rollout-done ]; do
+              running="$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=librefang \
+                --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+              if [ "${running:-0}" -gt 1 ]; then
+                kubectl -n "$NS" get pods -o wide
+                echo "$running" > /tmp/too-many
+                break
+              fi
+              sleep 1
+            done
+          ) &
+          watcher=$!
+
+          kubectl -n "$NS" rollout status statefulset/librefang --timeout=300s
+          touch /tmp/rollout-done
+          wait "$watcher" || true
+          if [ -f /tmp/too-many ]; then
+            echo "::error::$(cat /tmp/too-many) daemons Running simultaneously against one RWO volume"
+            exit 1
+          fi
+
+          sentinel="$(kubectl -n "$NS" exec statefulset/librefang -- cat /data/ci-sentinel | tr -d '\r')"
+          [ "$sentinel" = "persisted" ] || {
+            echo "::error::/data did not survive pod replacement (read '$sentinel')"; exit 1; }
+          after="$(kubectl -n "$NS" exec statefulset/librefang -- stat -c '%i' /data/config.toml | tr -d '\r')"
+          # One line on purpose.
+          # A backslash continuation here put the next line at column 0, which ends the `run: |` block scalar and made the whole workflow file fail to parse — no job ever started.
+          [ "$before" = "$after" ] || {
+            echo "::error::config.toml was recreated ($before -> $after) — the pod came up on a fresh volume instead of reattaching the PVC"; exit 1; }
+          echo "✓ /data survived pod replacement (config.toml inode $after unchanged)"
+
+      - name: Diagnostics (always)
+        if: always()
+        run: |
+          kubectl -n "$NS" get pods -o wide || true
+          kubectl -n "$NS" describe statefulset/librefang || true
+          kubectl -n "$NS" describe pod librefang-0 || true
+          kubectl -n "$NS" logs statefulset/librefang --tail=200 || true
+          kubectl -n "$NS" get events --sort-by=.lastTimestamp || true
