@@ -184,9 +184,7 @@ describe("ApprovalsPage", () => {
     vi.clearAllMocks();
     setMutationDefaults();
     setTotpEnforced(false);
-    // The trusted-senders card reads the full config on the Pending tab;
-    // default to an empty approval section so unrelated cases render it as
-    // the "nobody bypasses the gate" state.
+    // The trusted-senders card reads the full config on the Pending tab; default to an empty approval section so unrelated cases render it as the "nobody bypasses the gate" state.
     setFullConfig({ approval: { trusted_senders: [] } });
     // Audit hook is only consumed when the History tab is active; default to
     // an empty page so any incidental render does not blow up.
@@ -505,9 +503,7 @@ describe("ApprovalsPage", () => {
     });
 
     it("ignores a malformed approval section instead of crashing the page", () => {
-      // `GET /api/config` is untyped on the wire, so a section of the wrong
-      // shape must degrade to "nothing configured" rather than throw and take
-      // the whole approvals queue down with it.
+      // `GET /api/config` is untyped on the wire, so a section of the wrong shape must degrade to "nothing configured" rather than throw and take the whole approvals queue down with it.
       setApprovalsList([]);
       setFullConfig({ approval: { trusted_senders: "operator-1" } });
       renderPage();

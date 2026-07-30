@@ -474,21 +474,11 @@ pub async fn get_session(
             // liveness bit (#4290) so single-session fetches don't lie
             // about idle state either.
             let active = state.kernel.running_session_ids().contains(&session.id);
-            // The list endpoint computes `cost_usd` / `total_tokens` from a
-            // `usage_events` join, `duration_ms` from the message timestamps,
-            // and falls back to a snippet of the first user message when the
-            // `label` column is empty. This handler hand-built its object and
-            // carried none of that, so the same session reported different
-            // values depending on which endpoint you asked (#6611). Both now
-            // go through the same substrate helpers rather than a second copy
-            // of the derivation — a copy is what let the two views diverge in
-            // the first place.
+            // The list endpoint computes `cost_usd` / `total_tokens` from a `usage_events` join, `duration_ms` from the message timestamps, and falls back to a snippet of the first user message when the `label` column is empty.
+            // This handler hand-built its object and carried none of that, so the same session reported different values depending on which endpoint you asked (#6611).
+            // Both now go through the same substrate helpers rather than a second copy of the derivation — a copy is what let the two views diverge in the first place.
             //
-            // A failed aggregate is surfaced as a 500 rather than coerced to
-            // zero: reporting `cost_usd: 0` for a session that actually spent
-            // money is the same silent-wrong-value failure this issue is
-            // about, and the session load immediately above already 500s on
-            // its own error.
+            // A failed aggregate is surfaced as a 500 rather than coerced to zero: reporting `cost_usd: 0` for a session that actually spent money is the same silent-wrong-value failure this issue is about, and the session load immediately above already 500s on its own error.
             let usage = match state
                 .kernel
                 .memory_substrate()

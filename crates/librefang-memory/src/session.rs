@@ -14,12 +14,8 @@ use r2d2_sqlite::SqliteConnectionManager;
 /// Returns `None` if the session has no user message yet, so callers can
 /// keep the field nullable for fully empty sessions.
 ///
-/// Public because `GET /api/sessions/{id}` has to resolve the label the same
-/// way `list_sessions_paginated` does (#6611); the detail route returned the
-/// bare column and so reported `null` for a session the list showed a snippet
-/// for. `list_agent_sessions` deliberately does *not* apply this fallback —
-/// it skips the message blob entirely to keep the chat picker O(N), and its
-/// doc comment records that trade-off.
+/// Public because `GET /api/sessions/{id}` has to resolve the label the same way `list_sessions_paginated` does (#6611); the detail route returned the bare column and so reported `null` for a session the list showed a snippet for.
+/// `list_agent_sessions` deliberately does *not* apply this fallback — it skips the message blob entirely to keep the chat picker O(N), and its doc comment records that trade-off.
 pub fn derive_session_label(messages: &[Message]) -> Option<String> {
     const MAX_LEN: usize = 60;
     let first_user = messages.iter().find(|m| m.role == Role::User)?;
@@ -57,22 +53,14 @@ pub fn derive_session_label(messages: &[Message]) -> Option<String> {
 
 /// Wall-clock span between the first and last message that carries a timestamp.
 ///
-/// `None` when fewer than two stamped messages exist — an empty session, a
-/// single-turn session, or a session written before `Message::timestamp` was
-/// populated. Messages without a timestamp are skipped rather than treated as
-/// "now", so a pre-timestamp session does not report a span anchored to the
-/// moment it was read.
+/// `None` when fewer than two stamped messages exist — an empty session, a single-turn session, or a session written before `Message::timestamp` was populated.
+/// Messages without a timestamp are skipped rather than treated as "now", so a pre-timestamp session does not report a span anchored to the moment it was read.
 ///
-/// Shared by the session list query and the single-session detail lookup so the
-/// two views cannot drift (#6611): the detail endpoint previously omitted the
-/// field entirely, and re-deriving it there would have re-created the same
-/// class of divergence one refactor later.
+/// Shared by the session list query and the single-session detail lookup so the two views cannot drift (#6611): the detail endpoint previously omitted the field entirely, and re-deriving it there would have re-created the same class of divergence one refactor later.
 pub fn session_duration_ms(messages: &[Message]) -> Option<i64> {
     let mut stamps = messages.iter().filter_map(|m| m.timestamp);
     let first = stamps.next();
-    // `next_back()` on the same iterator rather than `last()`: the adapter is a
-    // `DoubleEndedIterator` (`Vec::iter` + `filter_map`), so walking from the
-    // tail finds the latest stamped message without scanning the remainder.
+    // `next_back()` on the same iterator rather than `last()`: the adapter is a `DoubleEndedIterator` (`Vec::iter` + `filter_map`), so walking from the tail finds the latest stamped message without scanning the remainder.
     // `clippy::double_ended_iterator_last` enforces this.
     let last = stamps.next_back().or(first);
     match (first, last) {
@@ -83,10 +71,7 @@ pub fn session_duration_ms(messages: &[Message]) -> Option<i64> {
 
 /// Per-session cost and token totals aggregated from `usage_events`.
 ///
-/// Both fields are the `COALESCE`d sums, so a session with no metered events
-/// reports `0.0` / `0` rather than null — callers distinguish "ran but cost
-/// nothing" from "no metering data" via the message count, matching what the
-/// list query's `LEFT JOIN` has always produced.
+/// Both fields are the `COALESCE`d sums, so a session with no metered events reports `0.0` / `0` rather than null — callers distinguish "ran but cost nothing" from "no metering data" via the message count, matching what the list query's `LEFT JOIN` has always produced.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SessionUsageTotals {
     /// Sum of `usage_events.cost_usd` for the session.
@@ -1121,12 +1106,8 @@ impl SessionStore {
 
     /// Cost and token totals for one session, aggregated from `usage_events`.
     ///
-    /// This is the single-session form of the `LEFT JOIN` inside
-    /// [`SessionStore::list_sessions_paginated`], so the detail endpoint reports
-    /// the same numbers the list row shows for the same id (#6611). Events
-    /// written before schema v30 carry `session_id IS NULL` and contribute
-    /// nothing, which is why a pre-v30 session reports zeros rather than the
-    /// owning agent's lifetime spend.
+    /// This is the single-session form of the `LEFT JOIN` inside [`SessionStore::list_sessions_paginated`], so the detail endpoint reports the same numbers the list row shows for the same id (#6611).
+    /// Events written before schema v30 carry `session_id IS NULL` and contribute nothing, which is why a pre-v30 session reports zeros rather than the owning agent's lifetime spend.
     pub fn session_usage_totals(
         &self,
         session_id: SessionId,

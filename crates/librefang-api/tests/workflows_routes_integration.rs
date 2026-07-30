@@ -1393,17 +1393,10 @@ async fn workflow_input_schema_oversize_is_truncated() {
 // /api/schedules ↔ /api/cron/jobs field parity  (#6611)
 // =============================================================================
 //
-// The two routes are deliberate alternate views over the same `CronJob` store:
-// `/api/cron/jobs` serializes the struct whole, `/api/schedules` renders a
-// flattened presentation. The flattened view had fallen behind on `peer_id`
-// (which selects the `SenderContext.user_id` a fire runs under), `session_mode`
-// (persistent-shared vs isolated-per-fire), and `delivery` (the primary output
-// destination, still read at fire time alongside `delivery_targets`).
+// The two routes are deliberate alternate views over the same `CronJob` store: `/api/cron/jobs` serializes the struct whole, `/api/schedules` renders a flattened presentation.
+// The flattened view had fallen behind on `peer_id` (which selects the `SenderContext.user_id` a fire runs under), `session_mode` (persistent-shared vs isolated-per-fire), and `delivery` (the primary output destination, still read at fire time alongside `delivery_targets`).
 //
-// `CronJob::session_mode` carries `skip_serializing_if = "Option::is_none"`, so
-// an unset value is absent from the cron view rather than null — which is why
-// the schedules view emits an explicit null instead, matching how it already
-// renders `tz` / `last_run` / `next_run`.
+// `CronJob::session_mode` carries `skip_serializing_if = "Option::is_none"`, so an unset value is absent from the cron view rather than null — which is why the schedules view emits an explicit null instead, matching how it already renders `tz` / `last_run` / `next_run`.
 
 /// Seed a cron job carrying every field the schedules view used to drop.
 async fn seed_cron_job_with_routing_fields(h: &Harness) -> String {

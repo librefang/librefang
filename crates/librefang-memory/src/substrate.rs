@@ -506,8 +506,7 @@ impl MemorySubstrate {
         self.sessions.list_sessions_paginated(limit, offset)
     }
 
-    /// Cost / token totals for one session — the single-session form of the
-    /// aggregate the paginated listing computes per row (#6611).
+    /// Cost / token totals for one session — the single-session form of the aggregate the paginated listing computes per row (#6611).
     pub fn session_usage_totals(
         &self,
         session_id: SessionId,

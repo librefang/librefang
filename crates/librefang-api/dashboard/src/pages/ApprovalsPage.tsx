@@ -985,8 +985,8 @@ export function ApprovalsPage() {
 
       {/* Body */}
       <div className="flex-1 overflow-y-auto p-4 lg:p-5">
-        {/* Who currently bypasses this queue. Sits above the queue itself
-            because it explains requests that never arrive. */}
+        {/* Who currently bypasses this queue.
+            Sits above the queue itself because it explains requests that never arrive. */}
         {activeTab === "pending" && <TrustedSendersCard />}
         {activeTab === "history" ? (
           <HistoryTab />
