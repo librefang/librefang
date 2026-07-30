@@ -1,0 +1,5 @@
+Report every `[approval]` field on `GET /api/config`, not the seven of fourteen the response builder happened to enumerate.
+  The approval section declares no explicit field list, so the dashboard renders a control for whatever the derived schema says `ApprovalPolicy` has, and the missing seven rendered blank and read back as their JSON zero value.
+  `cache_approvals_per_session` is the one an operator noticed: it defaults to `true`, so the box showed unchecked even against a `config.toml` that said `true`, leaving no way to confirm whether per-session approval caching was on.
+  `trusted_senders`, `channel_rules`, `timeout_fallback`, `routing`, `totp_tools`, and `audit_retention_days` had the same gap.
+  All seven stay non-writable — approval policy is deliberately not adjustable over HTTP, so an Owner-role caller with a leaked API key cannot relax it — which is exactly why the existing `writable ⊆ readable` guard was blind to them, and the new check uses the serialized struct as its oracle so a field added later fails a test instead of quietly joining the gap (#6637) (@houko)
