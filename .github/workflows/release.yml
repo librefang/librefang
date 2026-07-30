@@ -552,17 +552,11 @@ jobs:
           cd ../../..
           shasum -a 256 librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
       - name: Package debug symbols
-        # A SEPARATE asset, deliberately not added to the tarball above: every
-        # user downloads that one, and only someone symbolizing a crash report
-        # needs this. `strip = "symbols"` keeps the shipped binary unchanged
-        # either way — the profile emits the debug info beside it rather than
-        # into it.
+        # A SEPARATE asset, deliberately not added to the tarball above: every user downloads that one, and only someone symbolizing a crash report needs this.
+        # `strip = "symbols"` keeps the shipped binary unchanged either way — the profile emits the debug info beside it rather than into it.
         #
-        # Without this the profile change is inert for released builds: #6659
-        # stalled precisely because no shipped build and no CI artifact carried
-        # symbols, and a crash report's offsets cannot be mapped onto a later
-        # rebuild. `atos -o <dSYM>/Contents/Resources/DWARF/librefang -l <base>`
-        # resolves them once this exists.
+        # Without this the profile change is inert for released builds: #6659 stalled precisely because no shipped build and no CI artifact carried symbols, and a crash report's offsets cannot be mapped onto a later rebuild.
+        # `atos -o <dSYM>/Contents/Resources/DWARF/librefang -l <base>` resolves them once this exists.
         run: |
           DSYM="target/${{ matrix.target }}/release/librefang.dSYM"
           if [ ! -d "$DSYM" ]; then
@@ -577,11 +571,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="$RELEASE_TAG"
-          # `librefang-<target>.*` alone would not match the debug-symbols
-          # asset: its name continues with `-debug-symbols` where that glob
-          # requires the `.` immediately after the target. Listing both
-          # patterns keeps the symbols from being silently dropped, which is
-          # the whole point of producing them (#6659).
+          # `librefang-<target>.*` alone would not match the debug-symbols asset: its name continues with `-debug-symbols` where that glob requires the `.` immediately after the target.
+          # Listing both patterns keeps the symbols from being silently dropped, which is the whole point of producing them (#6659).
           for attempt in $(seq 1 5); do
             if gh release upload "$TAG" \
                  librefang-${{ matrix.target }}.* \
@@ -661,15 +652,11 @@ jobs:
           cd ../../..
           sha256sum librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
       - name: Package debug symbols
-        # `split-debuginfo = "packed"` emits a `.dwp` here rather than the
-        # `.dSYM` bundle the macOS job gets. Same purpose (#6659): a separate
-        # asset so a crash report can be symbolized, never folded into the
-        # tarball every user downloads.
+        # `split-debuginfo = "packed"` emits a `.dwp` here rather than the `.dSYM` bundle the macOS job gets.
+        # Same purpose (#6659): a separate asset so a crash report can be symbolized, never folded into the tarball every user downloads.
         #
         # A missing `.dwp` warns rather than fails, unlike the macOS job.
-        # These targets are cross-compiled and split-debuginfo support varies
-        # by linker, so an absent split file must not take a release down over
-        # a diagnostic aid — the warning surfaces it without blocking publish.
+        # These targets are cross-compiled and split-debuginfo support varies by linker, so an absent split file must not take a release down over a diagnostic aid — the warning surfaces it without blocking publish.
         run: |
           DWP="target/${{ matrix.target }}/release/librefang.dwp"
           if [ ! -f "$DWP" ]; then
@@ -684,10 +671,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="$RELEASE_TAG"
-          # Globbed separately and only when present: the symbols asset is
-          # optional on this job (see the warning branch above), and passing a
-          # non-matching literal to `gh release upload` fails the whole call,
-          # which would take the binaries down with it.
+          # Globbed separately and only when present: the symbols asset is optional on this job (see the warning branch above), and passing a non-matching literal to `gh release upload` fails the whole call, which would take the binaries down with it.
           SYMS=""
           if [ -f "librefang-${{ matrix.target }}-debug-symbols.tar.gz" ]; then
             SYMS="librefang-${{ matrix.target }}-debug-symbols.tar.gz librefang-${{ matrix.target }}-debug-symbols.tar.gz.sha256"
