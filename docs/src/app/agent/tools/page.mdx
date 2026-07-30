@@ -198,8 +198,8 @@ Tool calls into provider-specific media APIs. Per-tool capability grants require
 | `image_generate(prompt, size?, style?)` | Generate an image (OpenAI / Replicate / Vertex). |
 | `image_analyze(image, question)` | Vision Q&A on an existing image. |
 | `media_describe(image_or_video)` | Caption / describe an existing media asset. |
-| `media_transcribe(audio)` | Speech-to-text on an audio file. |
-| `speech_to_text(audio)` | Alias of `media_transcribe`. |
+| `media_transcribe(audio_or_video, language?, prompt?)` | Speech-to-text on an audio file, or a video container's audio track (extracted server-side). Rejects unrecognised file extensions. |
+| `speech_to_text(audio_or_video, language?, prompt?)` | Same providers and video-container support as `media_transcribe`; falls back to a permissive best-guess MIME type instead of rejecting an unrecognised extension. |
 | `text_to_speech(text, voice?)` | TTS synthesis. |
 | `music_generate(prompt, lyrics?)` | Music generation (Suno / Replicate). |
 | `video_generate(prompt, duration_secs?)` | Submit a video-generation task; returns `task_id`. |

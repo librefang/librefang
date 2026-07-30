@@ -447,7 +447,12 @@ pub async fn transcribe_audio(
         size_bytes: body.len() as u64,
     };
 
-    match state.kernel.media().transcribe_audio(&attachment).await {
+    match state
+        .kernel
+        .media()
+        .transcribe_audio(&attachment, None, None)
+        .await
+    {
         Ok(result) => {
             // Clean up temp file
             let _ = tokio::fs::remove_file(&file_path).await;

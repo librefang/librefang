@@ -99,11 +99,31 @@ impl BrowserResponse {
 
 // ── CDP connection ─────────────────────────────────────────────────────────
 
+/// Build one CDP wire message.
+///
+/// `params` is always emitted, even when empty — some CDP servers (Lightpanda) reject commands that omit the key.
+/// `sessionId` is added only when the command targets an attached session.
+fn build_cdp_message(
+    id: u64,
+    method: &str,
+    params: serde_json::Value,
+    session_id: Option<&str>,
+) -> serde_json::Value {
+    let mut msg = serde_json::json!({ "id": id, "method": method, "params": params });
+    if let Some(sid) = session_id {
+        msg["sessionId"] = serde_json::Value::String(sid.to_string());
+    }
+    msg
+}
+
 /// Low-level Chrome DevTools Protocol connection over WebSocket.
 struct CdpConnection {
     write: Arc<Mutex<SplitSink<WsStream, WsMessage>>>,
     pending: Arc<DashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>,
     next_id: AtomicU64,
+    /// Flattened CDP session, set when we attached to a target over this connection.
+    /// While present, every command carries `sessionId` so the browser routes it to that target instead of the browser itself.
+    session_id: Option<String>,
     _reader_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -134,6 +154,7 @@ impl CdpConnection {
             write,
             pending,
             next_id: AtomicU64::new(1),
+            session_id: None,
             _reader_handle: reader_handle,
         })
     }
@@ -177,19 +198,51 @@ impl CdpConnection {
             // Events (method field, no id) are ignored for now.
             // Future: handle Fetch.requestPaused for CDP-level SSRF.
         }
+
+        // The socket is gone, so nothing will ever answer the commands still waiting on it.
+        // Left alone they sit until `CDP_COMMAND_TIMEOUT_SECS` elapses and then report a timeout, which reads as "the browser is slow" rather than "the connection died" — and costs 30s per in-flight command to say the wrong thing.
+        let waiting: Vec<u64> = pending.iter().map(|e| *e.key()).collect();
+        for id in waiting {
+            if let Some((_, sender)) = pending.remove(&id) {
+                let _ = sender.send(Err("CDP connection closed".to_string()));
+            }
+        }
     }
 
     /// Send a CDP command and wait for the response.
+    ///
+    /// Routed to the attached target when a flattened session exists.
     async fn send(
         &self,
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
+        self.dispatch(method, params, self.session_id.as_deref())
+            .await
+    }
+
+    /// Send a CDP command to the browser itself, bypassing any attached session.
+    /// Needed for `Target.*`, which the browser handles and a page session does not.
+    async fn send_browser(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        self.dispatch(method, params, None).await
+    }
+
+    /// Frame, send, and await one CDP command.
+    async fn dispatch(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        session_id: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.insert(id, tx);
 
-        let msg = serde_json::json!({ "id": id, "method": method, "params": params });
+        let msg = build_cdp_message(id, method, params, session_id);
         self.write
             .lock()
             .await
@@ -302,9 +355,12 @@ struct BrowserSession {
     #[allow(dead_code)]
     last_active: Instant,
     _user_data_dir: Option<TempDir>,
-    /// Target ID of a tab created via `/json/new` during attach mode.
-    /// `None` for local-launch sessions or direct WS attach.
+    /// Target ID of the tab created during attach mode.
+    /// `None` for local-launch sessions.
     attached_target_id: Option<String>,
+    /// Whether that tab was created over CDP (`Target.createTarget`) instead of HTTP discovery.
+    /// Decides how it gets closed — a `ws://` endpoint has no `/json/close` route to call.
+    target_created_over_cdp: bool,
 }
 
 impl BrowserSession {
@@ -402,6 +458,7 @@ impl BrowserSession {
             last_active: Instant::now(),
             _user_data_dir: Some(user_data_dir),
             attached_target_id: None,
+            target_created_over_cdp: false,
         })
     }
 
@@ -410,13 +467,17 @@ impl BrowserSession {
     /// Accepted formats for `cdp_endpoint`:
     /// - `http[s]://host:port` — HTTP discovery; `/json/new` creates a fresh tab (PUT, falling back to GET on a 405) and returns its WebSocket URL.
     ///   The created target ID is stored for cleanup when the session ends.
-    /// - `ws[s]://…` — Direct WebSocket attach (assumes page-level endpoint).
+    /// - `ws[s]://…` — Direct WebSocket attach.
+    ///   Works with both page-level endpoints and browser-level ones: on a browser-level endpoint we create a target and attach to it over CDP (see below).
     ///
     /// `auth_token` is sent as `Authorization: Bearer <token>` on the WS upgrade,
     /// for CDP proxies that require authentication (e.g. Browserless).
     async fn attach(cdp_endpoint: &str, auth_token: Option<&str>) -> Result<Self, String> {
         let page_ws: String;
         let mut target_id: Option<String> = None;
+        // Only the ws:// path may land on a browser-level endpoint; HTTP discovery always hands back a page.
+        let mut needs_target_handshake = false;
+        let mut cdp_created_target = false;
 
         let lower = cdp_endpoint.to_lowercase();
         if lower.starts_with("http://") || lower.starts_with("https://") {
@@ -426,6 +487,7 @@ impl BrowserSession {
             debug!(ws = %page_ws, "Attached via HTTP discovery (/json/new)");
         } else if lower.starts_with("ws://") || lower.starts_with("wss://") {
             page_ws = cdp_endpoint.to_string();
+            needs_target_handshake = true;
             debug!(ws = %page_ws, "Attaching to CDP WebSocket directly");
         } else {
             return Err(format!(
@@ -433,17 +495,76 @@ impl BrowserSession {
             ));
         }
 
-        let cdp = Self::connect_with_auth(&page_ws, auth_token).await?;
+        let mut cdp = Self::connect_with_auth(&page_ws, auth_token).await?;
 
-        // Enable required domains (same as launch). Abort on failure so the
-        // caller gets a clear error rather than a later opaque nav/eval
-        // failure (#5137).
-        cdp.send("Page.enable", serde_json::json!({}))
-            .await
-            .map_err(|e| format!("CDP Page.enable failed: {e}"))?;
-        cdp.send("Runtime.enable", serde_json::json!({}))
-            .await
-            .map_err(|e| format!("CDP Runtime.enable failed: {e}"))?;
+        // A `ws://` endpoint may be page-level or browser-level, and the two need different setup.
+        // Ask the endpoint which it is: `Target.getTargetInfo` reports `type: "page"` on a page-level connection and `type: "browser"` on a browser-level one.
+        // Verified against Chrome 148 (both shapes) and Lightpanda, which reports `browser`.
+        //
+        // Reading the answer off the protocol rather than inferring it from a failed command matters for what happens when something goes wrong.
+        // A transient error — a busy target, a proxy hiccup, a timeout — is not evidence about the shape of the endpoint, and treating it as such on a page-level connection would create a second blank tab and move the session onto it, which is the exact regression this handshake is meant to avoid.
+        // Anything other than a definite `browser` therefore stays on the page-level path, so an endpoint that does not implement `Target.getTargetInfo` keeps behaving exactly as it did before this handshake existed.
+        //
+        // Asking costs one command that was not sent before, and a strict server is free to answer an unknown method by dropping the socket rather than returning a JSON-RPC error.
+        // The reply says nothing about which of the two happened, so the failure path reconnects unconditionally before continuing: on a live socket that is one redundant connect, and on a dropped one it is the difference between the page-level fallback working and `attach()` failing where it used to succeed.
+        if needs_target_handshake {
+            let endpoint_kind = match cdp
+                .send_browser("Target.getTargetInfo", serde_json::json!({}))
+                .await
+            {
+                Ok(info) => info["targetInfo"]["type"]
+                    .as_str()
+                    .unwrap_or("page")
+                    .to_string(),
+                Err(e) => {
+                    debug!(error = %e, "Target.getTargetInfo failed; reconnecting and treating endpoint as page-level");
+                    cdp = Self::connect_with_auth(&page_ws, auth_token).await?;
+                    "page".to_string()
+                }
+            };
+
+            if endpoint_kind == "browser" {
+                debug!("Endpoint reports type=browser; creating a target to attach to");
+                let created = cdp
+                    .send_browser(
+                        "Target.createTarget",
+                        serde_json::json!({ "url": "about:blank" }),
+                    )
+                    .await
+                    .map_err(|e| format!("CDP Target.createTarget failed: {e}"))?;
+                let tid = created["targetId"]
+                    .as_str()
+                    .ok_or("Target.createTarget returned no targetId")?
+                    .to_string();
+
+                // The target now exists on the remote browser and no `BrowserSession` tracks it yet, so every failure from here on has to close it before propagating.
+                // Otherwise a partial handshake abandons a blank tab that nothing will ever reap — on a long-lived remote endpoint it accumulates one per failed attach.
+                match Self::attach_to_target(&mut cdp, &tid).await {
+                    Ok(()) => {
+                        target_id = Some(tid);
+                        cdp_created_target = true;
+                    }
+                    Err(e) => {
+                        Self::close_target_best_effort(&cdp, &tid).await;
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        // Enable required domains (same as launch).
+        // Abort on failure so the caller gets a clear error rather than a later opaque nav/eval failure (#5137).
+        if let Err(e) = Self::enable_domains(&cdp).await {
+            // Both creation paths leave a tab behind that no `BrowserSession` will ever track, so both have to close it — they just need different routes.
+            match (cdp_created_target, target_id.as_deref()) {
+                (true, Some(tid)) => Self::close_target_best_effort(&cdp, tid).await,
+                (false, Some(tid)) => {
+                    Self::close_http_target_best_effort(cdp_endpoint, tid, None).await
+                }
+                _ => {}
+            }
+            return Err(e);
+        }
 
         Ok(Self {
             process: None,
@@ -451,7 +572,76 @@ impl BrowserSession {
             last_active: Instant::now(),
             _user_data_dir: None,
             attached_target_id: target_id,
+            target_created_over_cdp: cdp_created_target,
         })
+    }
+
+    /// Close a tab obtained through HTTP discovery, ignoring failures.
+    ///
+    /// The CDP-created path uses `Target.closeTarget`, which a `ws://` endpoint understands; a tab from `/json/new` is owned by the HTTP side and is closed the way `close_session` closes it.
+    /// Shared between the failed-attach cleanup path here and `close_session`'s normal teardown, which both close the same kind of tab through the same route and previously duplicated this match.
+    async fn close_http_target_best_effort(cdp_endpoint: &str, tid: &str, agent_id: Option<&str>) {
+        let base = cdp_endpoint.trim_end_matches('/');
+        let close_url = format!("{base}/json/close/{tid}");
+        let agent_id = agent_id.unwrap_or("");
+        match crate::http_client::new_client()
+            .get(&close_url)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                debug!(agent_id, target = %tid, "Closed HTTP-discovered tab");
+            }
+            Ok(resp) => {
+                warn!(agent_id, target = %tid, status = %resp.status(), "Closing HTTP-discovered tab returned non-2xx; tab may leak");
+            }
+            Err(e) => {
+                warn!(agent_id, target = %tid, error = %e, "Failed to close HTTP-discovered tab; tab may leak");
+            }
+        }
+    }
+
+    /// Attach to an already-created target in flattened mode and record the session on `cdp`.
+    ///
+    /// Split out of `attach()` so its caller can close the target on any failure here.
+    async fn attach_to_target(cdp: &mut CdpConnection, tid: &str) -> Result<(), String> {
+        let attached = cdp
+            .send_browser(
+                "Target.attachToTarget",
+                serde_json::json!({ "targetId": tid, "flatten": true }),
+            )
+            .await
+            .map_err(|e| format!("CDP Target.attachToTarget failed: {e}"))?;
+        let sid = attached["sessionId"]
+            .as_str()
+            .ok_or("Target.attachToTarget returned no sessionId")?
+            .to_string();
+        debug!(target = %tid, session = %sid, "Attached to CDP target");
+        cdp.session_id = Some(sid);
+        Ok(())
+    }
+
+    /// Enable the CDP domains every session needs.
+    async fn enable_domains(cdp: &CdpConnection) -> Result<(), String> {
+        cdp.send("Page.enable", serde_json::json!({}))
+            .await
+            .map_err(|e| format!("CDP Page.enable failed: {e}"))?;
+        cdp.send("Runtime.enable", serde_json::json!({}))
+            .await
+            .map_err(|e| format!("CDP Runtime.enable failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Close a target we created, logging rather than failing when the close itself fails.
+    ///
+    /// Used on setup paths that are already returning an error, where the original failure is the one worth surfacing.
+    async fn close_target_best_effort(cdp: &CdpConnection, tid: &str) {
+        if let Err(e) = cdp
+            .send_browser("Target.closeTarget", serde_json::json!({ "targetId": tid }))
+            .await
+        {
+            warn!(target = %tid, error = %e, "Failed to close CDP target after a failed attach; tab may leak");
+        }
     }
 
     /// Connect with an optional bearer auth token (for CDP proxies like Browserless).
@@ -1024,37 +1214,36 @@ impl BrowserManager {
             // For attach mode: close the tab we created before dropping the session.
             {
                 let guard = session.lock().await;
-                if let Some(ref target_id) = guard.attached_target_id {
-                    let cdp_endpoint = self.config.cdp_endpoint.as_deref().unwrap_or("");
-                    let base = cdp_endpoint.trim_end_matches('/');
-                    let close_url = format!("{base}/json/close/{target_id}");
-                    match crate::http_client::new_client()
-                        .get(&close_url)
-                        .send()
+                if let (Some(target_id), true) = (
+                    guard.attached_target_id.as_ref(),
+                    guard.target_created_over_cdp,
+                ) {
+                    // Created over CDP — close it the same way.
+                    // A ws:// endpoint has no /json/close route to call.
+                    match guard
+                        .cdp
+                        .send_browser(
+                            "Target.closeTarget",
+                            serde_json::json!({ "targetId": target_id }),
+                        )
                         .await
                     {
-                        Ok(resp) if resp.status().is_success() => {
-                            debug!(agent_id, target_id, "Closed remote CDP tab");
-                        }
-                        Ok(resp) => {
-                            // Tab-leak accumulates on remote Chrome — don't
-                            // log a success that didn't happen (#5137).
-                            warn!(
-                                agent_id,
-                                target_id,
-                                status = %resp.status(),
-                                "Remote CDP tab close returned non-2xx; tab may leak"
-                            );
-                        }
-                        Err(e) => {
-                            warn!(
-                                agent_id,
-                                target_id,
-                                error = %e,
-                                "Failed to close remote CDP tab; tab may leak"
-                            );
-                        }
+                        Ok(_) => debug!(agent_id, target_id, "Closed CDP target"),
+                        Err(e) => warn!(
+                            agent_id,
+                            target_id,
+                            error = %e,
+                            "Failed to close CDP target; tab may leak"
+                        ),
                     }
+                } else if let Some(ref target_id) = guard.attached_target_id {
+                    let cdp_endpoint = self.config.cdp_endpoint.as_deref().unwrap_or("");
+                    BrowserSession::close_http_target_best_effort(
+                        cdp_endpoint,
+                        target_id,
+                        Some(agent_id),
+                    )
+                    .await;
                 }
             }
             drop(session);
@@ -1349,6 +1538,306 @@ mod tests {
         let err = BrowserResponse::err("bad");
         assert!(!err.success);
         assert_eq!(err.error.unwrap(), "bad");
+    }
+
+    #[test]
+    fn test_cdp_message_without_session_has_no_session_id() {
+        let msg = build_cdp_message(7, "Runtime.enable", serde_json::json!({}), None);
+        assert_eq!(msg["id"], 7);
+        assert_eq!(msg["method"], "Runtime.enable");
+        assert!(
+            msg.get("sessionId").is_none(),
+            "browser-level commands must not carry sessionId"
+        );
+    }
+
+    #[test]
+    fn test_cdp_message_with_session_is_routed_to_target() {
+        let msg = build_cdp_message(8, "Page.enable", serde_json::json!({}), Some("SID-1"));
+        assert_eq!(msg["sessionId"], "SID-1");
+    }
+
+    #[test]
+    fn test_cdp_message_always_emits_params() {
+        // Lightpanda rejects commands that omit `params` entirely.
+        let msg = build_cdp_message(9, "Page.enable", serde_json::json!({}), None);
+        assert!(msg.get("params").is_some());
+        assert!(msg["params"].is_object());
+
+        let with_params = build_cdp_message(
+            10,
+            "Page.navigate",
+            serde_json::json!({ "url": "about:blank" }),
+            None,
+        );
+        assert_eq!(with_params["params"]["url"], "about:blank");
+    }
+
+    // ── attach() against a scripted CDP server ─────────────────────────
+
+    /// Which shape of CDP server the mock should imitate.
+    #[derive(Clone, Copy)]
+    enum MockCdp {
+        /// A page-level endpoint: `Target.getTargetInfo` reports `type: "page"`.
+        PageLevel,
+        /// A browser-level endpoint: `Target.getTargetInfo` reports `type: "browser"`.
+        BrowserLevel,
+        /// A browser-level endpoint whose `Target.attachToTarget` fails after the target was created.
+        AttachFails,
+        /// An endpoint that does not implement `Target.getTargetInfo` at all.
+        NoTargetDomain,
+        /// A strict endpoint that drops the socket instead of answering an unknown method.
+        DropsSocketOnProbe,
+        /// A page-level endpoint whose `Page.enable` fails, after the tab already exists.
+        EnableFails,
+        /// A browser-level endpoint whose handshake succeeds and whose `Page.enable` then fails.
+        BrowserLevelEnableFails,
+    }
+
+    fn mock_reply(kind: MockCdp, req: &serde_json::Value) -> serde_json::Value {
+        let id = req["id"].as_u64().unwrap();
+        let method = req["method"].as_str().unwrap();
+        let has_session = req.get("sessionId").is_some();
+        let err = |msg: &str| serde_json::json!({ "id": id, "error": { "message": msg } });
+        let ok = |result: serde_json::Value| serde_json::json!({ "id": id, "result": result });
+
+        match (kind, method) {
+            (MockCdp::NoTargetDomain, "Target.getTargetInfo") => {
+                err("'Target.getTargetInfo' wasn't found")
+            }
+            (MockCdp::EnableFails | MockCdp::BrowserLevelEnableFails, "Page.enable") => {
+                err("Target closed")
+            }
+            (
+                MockCdp::PageLevel | MockCdp::DropsSocketOnProbe | MockCdp::EnableFails,
+                "Target.getTargetInfo",
+            ) => ok(serde_json::json!({ "targetInfo": { "type": "page", "targetId": "P-1" } })),
+            (_, "Target.getTargetInfo") => {
+                ok(serde_json::json!({ "targetInfo": { "type": "browser", "targetId": "B-1" } }))
+            }
+            // A browser-level endpoint has no page yet, so session-less page commands fail.
+            // `AttachFails` never reaches here: its `Target.attachToTarget` arm below fails first, and `attach()` returns before sending `Runtime.enable`.
+            (MockCdp::BrowserLevel, "Runtime.enable") if !has_session => {
+                err("'Runtime.enable' wasn't found")
+            }
+            (_, "Target.createTarget") => ok(serde_json::json!({ "targetId": "T-1" })),
+            (MockCdp::AttachFails, "Target.attachToTarget") => err("TargetAlreadyLoaded"),
+            (_, "Target.attachToTarget") => ok(serde_json::json!({ "sessionId": "S-1" })),
+            _ => ok(serde_json::json!({})),
+        }
+    }
+
+    /// Serve one scripted CDP connection, recording every method it receives.
+    async fn spawn_mock_cdp(kind: MockCdp) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+
+        // Serve every connection, not just the first: the page-level fallback reconnects, and a mock that accepted once would fail that reconnect for reasons unrelated to the test.
+        tokio::spawn(async move {
+            let connections = Arc::new(AtomicU64::new(0));
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let nth = connections.fetch_add(1, Ordering::SeqCst);
+                let recorder = Arc::clone(&recorder);
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                        return;
+                    };
+                    while let Some(Ok(msg)) = ws.next().await {
+                        let text = match msg {
+                            WsMessage::Text(t) => t.to_string(),
+                            WsMessage::Close(_) => break,
+                            _ => continue,
+                        };
+                        let req: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        let method = req["method"].as_str().unwrap().to_string();
+                        recorder.lock().await.push(method.clone());
+
+                        // Hang up mid-request on the first connection, the way a strict server rejecting an unknown method would.
+                        if matches!(kind, MockCdp::DropsSocketOnProbe)
+                            && nth == 0
+                            && method == "Target.getTargetInfo"
+                        {
+                            return;
+                        }
+
+                        let reply = mock_reply(kind, &req);
+                        if ws
+                            .send(WsMessage::Text(reply.to_string().into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        (format!("ws://127.0.0.1:{port}/"), seen)
+    }
+
+    /// A page-level endpoint must behave exactly as it did before the handshake existed.
+    #[tokio::test]
+    async fn test_attach_page_level_skips_handshake() {
+        let (url, seen) = spawn_mock_cdp(MockCdp::PageLevel).await;
+        let session = match BrowserSession::attach(&url, None).await {
+            Ok(s) => s,
+            Err(e) => panic!("attach should succeed on a page-level endpoint: {e}"),
+        };
+
+        assert!(session.attached_target_id.is_none());
+        assert!(!session.target_created_over_cdp);
+        let methods = seen.lock().await.clone();
+        assert!(
+            methods.contains(&"Target.getTargetInfo".to_string()),
+            "the endpoint kind must be read off the protocol, saw: {methods:?}"
+        );
+        assert!(
+            !methods.contains(&"Target.createTarget".to_string()),
+            "no second tab may be opened on a page-level endpoint, saw: {methods:?}"
+        );
+    }
+
+    /// A browser-level endpoint gets a target created and attached, and the session records it for teardown.
+    #[tokio::test]
+    async fn test_attach_browser_level_creates_and_attaches_target() {
+        let (url, seen) = spawn_mock_cdp(MockCdp::BrowserLevel).await;
+        let session = match BrowserSession::attach(&url, None).await {
+            Ok(s) => s,
+            Err(e) => panic!("attach should succeed on a browser-level endpoint: {e}"),
+        };
+
+        assert_eq!(session.attached_target_id.as_deref(), Some("T-1"));
+        assert!(session.target_created_over_cdp);
+        assert_eq!(session.cdp.session_id.as_deref(), Some("S-1"));
+        let methods = seen.lock().await.clone();
+        assert!(methods.contains(&"Target.createTarget".to_string()));
+        assert!(methods.contains(&"Target.attachToTarget".to_string()));
+    }
+
+    /// An endpoint without the `Target` domain keeps the pre-handshake behaviour instead of failing.
+    #[tokio::test]
+    async fn test_attach_without_target_domain_stays_page_level() {
+        let (url, seen) = spawn_mock_cdp(MockCdp::NoTargetDomain).await;
+        let session = match BrowserSession::attach(&url, None).await {
+            Ok(s) => s,
+            Err(e) => panic!("attach should fall back to page-level behaviour: {e}"),
+        };
+
+        assert!(session.attached_target_id.is_none());
+        assert!(!session.target_created_over_cdp);
+        let methods = seen.lock().await.clone();
+        assert!(
+            !methods.contains(&"Target.createTarget".to_string()),
+            "an unknown endpoint kind must not create a target, saw: {methods:?}"
+        );
+    }
+
+    /// A server that hangs up on the probe must not leave the caller worse off than not probing.
+    #[tokio::test]
+    async fn test_attach_survives_endpoint_that_drops_socket_on_probe() {
+        let (url, seen) = spawn_mock_cdp(MockCdp::DropsSocketOnProbe).await;
+        let session = match BrowserSession::attach(&url, None).await {
+            Ok(s) => s,
+            Err(e) => panic!("attach must reconnect and fall back to page-level: {e}"),
+        };
+
+        assert!(session.attached_target_id.is_none());
+        assert!(!session.target_created_over_cdp);
+        let methods = seen.lock().await.clone();
+        assert!(
+            methods.iter().any(|m| m == "Page.enable"),
+            "the page-level path must still run after the reconnect, saw: {methods:?}"
+        );
+        assert!(
+            !methods.contains(&"Target.createTarget".to_string()),
+            "a dropped probe is not evidence of a browser-level endpoint, saw: {methods:?}"
+        );
+    }
+
+    /// A tab from `/json/new` must be closed too when the attach fails after discovery.
+    #[tokio::test]
+    async fn test_attach_closes_http_discovered_tab_when_enable_fails() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let (ws_url, _seen) = spawn_mock_cdp(MockCdp::EnableFails).await;
+        let http = MockServer::start().await;
+
+        // `http_discover_target` (#6619) tries PUT first; this mock must
+        // match that or every request 404s against wiremock's unmatched-route
+        // default before the attach logic under test ever runs.
+        Mock::given(method("PUT"))
+            .and(path("/json/new"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "TAB-9",
+                "webSocketDebuggerUrl": ws_url,
+            })))
+            .expect(1)
+            .mount(&http)
+            .await;
+        // The assertion is this mock's expectation: without the cleanup nothing requests it, and `MockServer` fails the test on drop.
+        Mock::given(method("GET"))
+            .and(path("/json/close/TAB-9"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("Target is closing"))
+            .expect(1)
+            .mount(&http)
+            .await;
+
+        let err = match BrowserSession::attach(&http.uri(), None).await {
+            Ok(_) => panic!("Page.enable failure must fail the attach"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("Target closed"),
+            "the original failure must survive the cleanup, got: {err}"
+        );
+    }
+
+    /// A target that survived the handshake must still be closed when enabling domains fails.
+    #[tokio::test]
+    async fn test_attach_closes_created_target_when_enable_fails() {
+        let (url, seen) = spawn_mock_cdp(MockCdp::BrowserLevelEnableFails).await;
+        let err = match BrowserSession::attach(&url, None).await {
+            Ok(_) => panic!("Page.enable failure must fail the attach"),
+            Err(e) => e,
+        };
+
+        assert!(
+            err.contains("Target closed"),
+            "the original failure must survive the cleanup, got: {err}"
+        );
+        let methods = seen.lock().await.clone();
+        assert!(
+            methods.contains(&"Target.attachToTarget".to_string()),
+            "the handshake must have completed before the failure, saw: {methods:?}"
+        );
+        assert!(
+            methods.contains(&"Target.closeTarget".to_string()),
+            "a target that outlived its failed attach is a leaked tab, saw: {methods:?}"
+        );
+    }
+
+    /// A handshake that fails after `Target.createTarget` must not abandon the target it just created.
+    #[tokio::test]
+    async fn test_attach_closes_target_when_handshake_fails() {
+        let (url, seen) = spawn_mock_cdp(MockCdp::AttachFails).await;
+        let err = match BrowserSession::attach(&url, None).await {
+            Ok(_) => panic!("attach must fail when Target.attachToTarget is rejected"),
+            Err(e) => e,
+        };
+
+        assert!(err.contains("attachToTarget"), "unexpected error: {err}");
+        let methods = seen.lock().await.clone();
+        assert!(
+            methods.contains(&"Target.closeTarget".to_string()),
+            "the created target must be closed before propagating, saw: {methods:?}"
+        );
     }
 
     /// Chrome 111+ serves `/json/new` on PUT only, answering GET with 405.

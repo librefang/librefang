@@ -198,8 +198,8 @@ agent 不能硬删除已调度的任务:`schedule_delete` / `cron_cancel` 只会
 | `image_generate(prompt, size?, style?)` | 文生图(OpenAI / Replicate / Vertex)。 |
 | `image_analyze(image, question)` | 对已有图像做 vision Q&A。 |
 | `media_describe(image_or_video)` | 给已有媒体素材生成 caption / 描述。 |
-| `media_transcribe(audio)` | 音频转文本。 |
-| `speech_to_text(audio)` | `media_transcribe` 的别名。 |
+| `media_transcribe(audio_or_video, language?, prompt?)` | 音频转文本；也接受视频容器,服务端会提取其中的音轨。无法识别的扩展名会被拒绝。 |
+| `speech_to_text(audio_or_video, language?, prompt?)` | 支持的提供商和视频容器与 `media_transcribe` 相同;遇到无法识别的扩展名时不拒绝,而是退回一个宽松的猜测 MIME 类型。 |
 | `text_to_speech(text, voice?)` | TTS 合成。 |
 | `music_generate(prompt, lyrics?)` | 音乐生成(Suno / Replicate)。 |
 | `video_generate(prompt, duration_secs?)` | 提交视频生成任务,返回 `task_id`。 |
