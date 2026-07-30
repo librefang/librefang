@@ -2042,6 +2042,17 @@ tui-agents-detail-all-servers = [All servers]
 tui-agents-detail-none = [None]
 tui-agents-default-desc = A custom { $name } agent
 tui-agents-default-prompt = You are { $name }, a helpful agent.
+tui-agents-title-custom-model-routing = Custom — Model Routing
+tui-agents-title-edit-routing = Edit Model Routing
+tui-agents-title-prompt-picker = Prompt Library
+tui-agents-prompt-routing =   Model Routing Configuration:
+tui-agents-prompt-select-prompt =   Select a prompt from the library:
+tui-agents-hints-routing-flexible =   [↑↓] Navigate profiles  [Tab] Toggle profile  [Space] Toggle mode  [h/l] Budget  [Enter] Create  [Esc] Back
+tui-agents-hints-routing-fixed =   [Space] Toggle Flexible mode  [Enter] Create  [Esc] Back
+tui-agents-hints-prompt-picker =   [↑↓] Navigate  [Enter] Select prompt  [Esc] Back
+tui-agents-hints-input-prompt =     [Enter] Next  [Tab] Browse prompts library  [Esc] Back
+tui-agents-label-no-prompts = (no prompts available)
+tui-agents-detail-routing =   Routing:
 
 # --- Workflows screen ---
 tui-workflows-title-screen = Workflows

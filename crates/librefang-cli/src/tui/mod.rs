@@ -368,6 +368,19 @@ impl App {
                     crate::i18n::t_args("tui-mod-agent-mcp-updated", &[("id", &id)]);
                 self.agents.sub = agents::AgentSubScreen::AgentDetail;
             }
+            AppEvent::PromptsLoaded(prompts) => {
+                self.agents.prompt_list = prompts;
+                self.agents.prompt_list_state.select(Some(0));
+                self.agents.sub = agents::AgentSubScreen::PromptPicker;
+            }
+            AppEvent::RouterProfilesLoaded(profiles) => {
+                self.agents.available_router_profiles = profiles.clone();
+                if self.agents.router_profiles.is_empty() && !profiles.is_empty() {
+                    self.agents.router_profiles =
+                        profiles.iter().map(|n| (n.clone(), true)).collect();
+                }
+                self.agents.router_profile_cursor = 0;
+            }
             AppEvent::FetchError(err) => {
                 // Route to the active tab's status message
                 match self.active_tab {
@@ -1463,6 +1476,16 @@ impl App {
             agents::AgentAction::FetchAgentMcpServers(id) => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_fetch_agent_mcp_servers(backend, id, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::LoadPrompts => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_prompts(backend, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::LoadRouterProfiles => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_router_profiles(backend, self.event_tx.clone());
                 }
             }
         }
