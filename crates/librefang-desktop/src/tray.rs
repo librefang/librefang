@@ -344,6 +344,13 @@ mod platform_tray {
         app_handle: tauri::AppHandle,
     }
 
+    fn rgba_to_argb(mut rgba: Vec<u8>) -> Vec<u8> {
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.rotate_right(1); // convert RGBA to ARGB
+        }
+        rgba
+    }
+
     impl Tray for LibreFangLinuxTray {
         fn id(&self) -> String {
             "librefang".into()
@@ -382,10 +389,7 @@ mod platform_tray {
                         .expect("Failed to decode tray icon PNG");
                 let width = tauri_image.width();
                 let height = tauri_image.height();
-                let mut rgba_data = tauri_image.rgba().to_vec();
-                for pixel in rgba_data.chunks_exact_mut(4) {
-                    pixel.rotate_right(1); // convert RGBA to ARGB
-                }
+                let rgba_data = rgba_to_argb(tauri_image.rgba().to_vec());
                 vec![ksni::Icon {
                     width: width as i32,
                     height: height as i32,
@@ -506,16 +510,21 @@ mod platform_tray {
             app_handle: app.handle().clone(),
         };
         tauri::async_runtime::spawn(async move {
-            let start_time = std::time::Instant::now();
-            let mut connected_once = false;
-            let mut logged_error = false;
+            use librefang_types::backoff::{BackoffStrategy, ExponentialBackoff};
+
+            let backoff = ExponentialBackoff::new(
+                std::time::Duration::from_secs(10),
+                2.0,
+                std::time::Duration::from_secs(300),
+            );
             let mut consecutive_failures = 0;
 
             loop {
+                // We use `assume_sni_available(true)` so that `ksni` registers and publishes the tray service immediately even if no StatusNotifierWatcher is running on the bus yet (e.g. at boot).
+                // This avoids startup errors and allows the tray to automatically become visible as soon as the desktop panel starts.
                 match tray.clone().assume_sni_available(true).spawn().await {
                     Ok(handle) => {
                         info!("Linux system tray successfully spawned.");
-                        connected_once = true;
                         consecutive_failures = 0;
                         // Periodically call handle.update() to diff properties and emit D-Bus update signals (e.g. NewTitle / NewTooltip).
                         // Without this heartbeat loop, properties like Uptime and Agents count (which are rendered inside menu()) will never update dynamically, remaining stale until a manual user activation query.
@@ -530,30 +539,14 @@ mod platform_tray {
                     }
                     Err(e) => {
                         consecutive_failures += 1;
-                        if !connected_once {
-                            let elapsed = start_time.elapsed();
-                            if elapsed > std::time::Duration::from_secs(60) {
-                                if !logged_error {
-                                    warn!("D-Bus session bus is not available after 60 seconds; system tray will be disabled.");
-                                    logged_error = true;
-                                }
-                                // Back off aggressively (retry once every 5 minutes) without spamming logs
-                                let sleep_secs = 300;
-                                tokio::time::sleep(std::time::Duration::from_secs(sleep_secs))
-                                    .await;
-                                continue;
-                            }
+                        let delay = backoff.next_delay(consecutive_failures);
+                        // Only log warning for the first 3 consecutive attempts to avoid spamming system logs.
+                        if consecutive_failures <= 3 {
+                            warn!("Failed to spawn Linux system tray: {e}. Retrying in {delay:?}...");
                         }
-
-                        // Default error logging (only for the first few failures at startup, or if it has connected before)
-                        if connected_once || consecutive_failures <= 3 {
-                            warn!(
-                                "Failed to spawn Linux system tray: {e}. Retrying in 10 seconds..."
-                            );
-                        }
+                        tokio::time::sleep(delay).await;
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             }
         });
         Ok(())
@@ -561,3 +554,15 @@ mod platform_tray {
 }
 
 pub use platform_tray::setup_tray;
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::platform_tray::rgba_to_argb;
+
+    #[test]
+    fn test_rgba_to_argb() {
+        let rgba = vec![0xFF, 0x00, 0x00, 0xFF]; // Opaque Red (RGBA)
+        let argb = rgba_to_argb(rgba);
+        assert_eq!(argb, vec![0xFF, 0xFF, 0x00, 0x00]); // Opaque Red (ARGB)
+    }
+}
