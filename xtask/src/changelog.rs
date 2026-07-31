@@ -1699,12 +1699,17 @@ mod tests {
     /// releases — and it is the file assembly actually runs against. Mirrors the
     /// intent of `ci::tests::real_repo_tree_is_green`. Only the temp copy is
     /// written; the repo's file is read-only here.
+    ///
+    /// Reads through `repo_changelog_with_populated_unreleased` so the fold is
+    /// exercised against real prose on a release branch too, where the file's
+    /// own `[Unreleased]` has just been drained. The subsection assertion is a
+    /// delta rather than an equality because the fold legitimately creates
+    /// `### Changed` when the section does not already have one — asserting the
+    /// mid-cycle count outright is what failed on the v2026.7.31 release PR
+    /// (#6688).
     #[test]
     fn folds_into_the_repos_own_changelog() {
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("xtask/ has a parent directory");
-        let real = fs::read_to_string(repo.join("CHANGELOG.md")).unwrap();
+        let real = repo_changelog_with_populated_unreleased();
         let t = make_tree(&real);
         fragment(
             &t,
@@ -1720,18 +1725,32 @@ mod tests {
             awk_extract(&out, "Unreleased").contains("- Probe bullet. (#9999) (@houko)"),
             "probe did not land inside [Unreleased]"
         );
-        // Nothing structural moved: `### Changed` already exists in
-        // `[Unreleased]`, so no heading was created and none was displaced.
-        assert_eq!(out.matches("## [Unreleased]").count(), 1);
+        // Column 0 only. `matches()` counts substrings, so a bullet that quotes
+        // the heading in its prose — the #6628 entry does, on an indented
+        // continuation line — inflates this to the number of such references.
+        assert_eq!(
+            out.lines()
+                .filter(|l| l.starts_with(UNRELEASED_HEADING))
+                .count(),
+            1
+        );
         assert_eq!(
             out.lines().filter(|l| l.starts_with("## [")).count(),
             real.lines().filter(|l| l.starts_with("## [")).count(),
             "release heading count changed"
         );
+
+        // `### Changed` is created when `[Unreleased]` is empty (release
+        // branch) and reused when it is not (mid-cycle). Either way the fold
+        // must not displace or invent any *other* subsection.
+        let unreleased_had_changed = awk_extract(&real, "Unreleased")
+            .lines()
+            .any(|l| l.trim() == "### Changed");
+        let expected_delta = usize::from(!unreleased_had_changed);
         assert_eq!(
             out.lines().filter(|l| l.starts_with("### ")).count(),
-            real.lines().filter(|l| l.starts_with("### ")).count(),
-            "subsection heading count changed"
+            real.lines().filter(|l| l.starts_with("### ")).count() + expected_delta,
+            "subsection heading count changed by more than the one `### Changed` the fold may add"
         );
     }
 
@@ -2173,6 +2192,47 @@ mod tests {
         );
     }
 
+    /// The repo's own `CHANGELOG.md`, with a populated `## [Unreleased]`.
+    ///
+    /// Mid-cycle that is the file verbatim. On a `chore/bump-version-*` branch
+    /// `cargo xtask release` has already drained `[Unreleased]` into the dated
+    /// section it just cut, so the file's own `[Unreleased]` is empty and a test
+    /// that needs real hand-written prose to chew on would assert nothing. The
+    /// prose is not gone though — it is sitting in the newest dated section, so
+    /// move it back to reconstitute the pre-release shape.
+    ///
+    /// This keeps the real-file coverage on release branches instead of skipping
+    /// it there, which is what the v2026.7.31 release PR (#6688) exposed: both
+    /// real-file tests failed on the release commit, blocking the release PR on a
+    /// state the release flow itself creates.
+    fn repo_changelog_with_populated_unreleased() -> String {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask/ has a parent directory");
+        let real = fs::read_to_string(repo.join("CHANGELOG.md")).unwrap();
+
+        if !drain_unreleased(&real).bullets.is_empty() {
+            return real;
+        }
+
+        // Find the newest dated section and hoist its body into `[Unreleased]`.
+        let dated = real
+            .lines()
+            .find(|l| l.starts_with("## [") && !l.starts_with(UNRELEASED_HEADING))
+            .expect("a drained CHANGELOG still has at least one dated release");
+        let version = dated
+            .trim_start_matches("## [")
+            .split(']')
+            .next()
+            .expect("a `## [` heading always has a closing bracket");
+        let body = awk_extract(&real, version);
+
+        let (head, tail) = real
+            .split_once(UNRELEASED_HEADING)
+            .expect("the file always carries an [Unreleased] heading");
+        format!("{head}{UNRELEASED_HEADING}\n\n{}{tail}", body.trim_end())
+    }
+
     /// Drain the repo's OWN `CHANGELOG.md`.
     ///
     /// The fixtures above are a dozen lines; the real section is 160 hand-written
@@ -2184,10 +2244,7 @@ mod tests {
     /// here, never touched.
     #[test]
     fn drains_the_repos_own_unreleased_section_without_tripping_the_guard() {
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("xtask/ has a parent directory");
-        let real = fs::read_to_string(repo.join("CHANGELOG.md")).unwrap();
+        let real = repo_changelog_with_populated_unreleased();
         let drained = drain_unreleased(&real);
 
         assert!(
@@ -2248,7 +2305,15 @@ mod tests {
             slice_lines.contains(&"- Generated from a PR title (#1) (@houko)"),
             "the generated list did not survive alongside the curated prose"
         );
-        assert!(!slice.contains("## ["), "the slice ran past its boundary");
+        // Column 0 only, matching the `awk` extractor's `/^## \[/` boundary. A
+        // substring test reads a bullet that *quotes* a heading — the #6628
+        // entry says "appended its bullet to the single `## [Unreleased]`
+        // section" on an indented continuation line — as an overrun, failing on
+        // prose the extractor handles correctly.
+        assert!(
+            !slice_lines.iter().any(|l| l.starts_with("## [")),
+            "the slice ran past its boundary"
+        );
         assert_eq!(
             first_section_heading(&out),
             "## [Unreleased]",
