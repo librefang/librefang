@@ -335,18 +335,11 @@ jobs:
           # Write to file for multiline output
           echo "$CHANGES" > /tmp/changelog.md
 
-          # The release API rejects a body over 125,000 characters with
-          # HTTP 422 "body is too long", which would fail this job after the
-          # tag is already pushed — the worst point in the pipeline to stop.
-          # A release that folds ~60 PRs of prose (v2026.7.31's section was
-          # 208 KB) clears that ceiling on its own, before the install block
-          # below adds its share. Cut to a line boundary with room to spare,
-          # and close a fence the kept prefix left open so the install
-          # section does not render inside a code block.
+          # The release API rejects a body over 125,000 characters with HTTP 422 "body is too long", which would fail this job after the tag is already pushed — the worst point in the pipeline to stop.
+          # A release that folds ~60 PRs of prose (v2026.7.31's section was 208 KB) clears that ceiling on its own, before the install block below adds its share.
+          # Cut to a line boundary with room to spare, and close a fence the kept prefix left open so the install section does not render inside a code block.
           #
-          # Done in python rather than `head -c` because the cut has to land
-          # on a character boundary: these entries are full of em dashes and
-          # arrows, and slicing one in half yields invalid UTF-8.
+          # Done in python rather than `head -c` because the cut has to land on a character boundary: these entries are full of em dashes and arrows, and slicing one in half yields invalid UTF-8.
           python3 - <<'TRUNC'
           import pathlib
           MAX = 100_000
@@ -438,12 +431,9 @@ jobs:
           fi
 
       # Published so the desktop matrix can address the release by id.
-      # tauri-action's `tagName` path calls getOrCreateRelease, which PATCHes
-      # an already-published release with whatever `releaseBody` holds — and
-      # we pass none, so it overwrites the notes above with an empty string.
-      # That is why v2026.7.21 and v2026.7.27 shipped with a blank body. Its
-      # `releaseId` path skips getOrCreateRelease entirely and only uploads
-      # assets, so handing it the id keeps the notes intact.
+      # tauri-action's `tagName` path calls getOrCreateRelease, which PATCHes an already-published release with whatever `releaseBody` holds — and we pass none, so it overwrites the notes above with an empty string.
+      # That is why v2026.7.21 and v2026.7.27 shipped with a blank body.
+      # Its `releaseId` path skips getOrCreateRelease entirely and only uploads assets, so handing it the id keeps the notes intact.
       - name: Publish release id
         id: release_id
         env:

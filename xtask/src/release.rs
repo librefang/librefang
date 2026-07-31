@@ -121,11 +121,8 @@ const RELEASE_STAGED_PATHS: &[&str] = &[
     "sdk/go/librefang.go",
     "packages/whatsapp-gateway/package.json",
     "crates/librefang-desktop/tauri.conf.json",
-    // The release run calls `cargo xtask schema-check gen` just before
-    // committing, so any schema surface the version bump touched leaves a
-    // rewritten baseline behind. Staging `openapi.json` without its baseline
-    // is what left v2026.7.31's `xtask/baselines/openapi.sha256` uncommitted
-    // in the working tree — the exact drift the regen step exists to prevent.
+    // The release run calls `cargo xtask schema-check gen` just before committing, so any schema surface the version bump touched leaves a rewritten baseline behind.
+    // Staging `openapi.json` without its baseline is what left v2026.7.31's `xtask/baselines/openapi.sha256` uncommitted in the working tree — the exact drift the regen step exists to prevent.
     "xtask/baselines",
     changelog::FRAGMENT_DIR,
 ];
@@ -281,23 +278,16 @@ fn extract_changelog_section(content: &str, heading: &str) -> String {
     }
 }
 
-/// GitHub rejects a pull-request body longer than 65,536 characters with
-/// `GraphQL: Body is too long`. We cut well under it so the truncation
-/// notice, the trailing full-diff link, and any future prefix all fit
-/// without recomputing the margin.
+/// GitHub rejects a pull-request body longer than 65,536 characters with `GraphQL: Body is too long`.
+/// We cut well under it so the truncation notice, the trailing full-diff link, and any future prefix all fit without recomputing the margin.
 const MAX_PR_BODY_CHARS: usize = 60_000;
 
 /// Clamp a PR body to what GitHub will accept, truncating the *tail*.
 ///
-/// Everything load-bearing lives in the prefix: `tag_on_merge` in
-/// `release.yml` reads the `<!-- release-tag:vX.Y.Z -->` marker, which
-/// `build_release_pr_body` writes at position 0, and the changelog's
-/// Highlights section leads the body. So a prefix-preserving cut keeps the
-/// release machinery working and drops only the least-important bullets.
+/// Everything load-bearing lives in the prefix: `tag_on_merge` in `release.yml` reads the `<!-- release-tag:vX.Y.Z -->` marker, which `build_release_pr_body` writes at position 0, and the changelog's Highlights section leads the body.
+/// So a prefix-preserving cut keeps the release machinery working and drops only the least-important bullets.
 ///
-/// The cut lands on a line boundary, and a fence that was opened but not
-/// closed by the kept prefix gets one appended — otherwise the truncation
-/// notice and the full-diff link would render inside a code block.
+/// The cut lands on a line boundary, and a fence that was opened but not closed by the kept prefix gets one appended — otherwise the truncation notice and the full-diff link would render inside a code block.
 fn truncate_pr_body(body: &str, max_chars: usize) -> String {
     if body.chars().count() <= max_chars {
         return body.to_string();
@@ -306,9 +296,7 @@ fn truncate_pr_body(body: &str, max_chars: usize) -> String {
     const NOTICE: &str = "\n\n_Changelog truncated — GitHub caps a PR body at 65,536 characters. \
                           The full section is in [CHANGELOG.md](https://github.com/librefang/librefang/blob/main/CHANGELOG.md)._";
 
-    // Reserve room for the notice, then cut on a char boundary (byte
-    // slicing would panic mid-codepoint on the non-ASCII em dashes these
-    // changelog entries are full of).
+    // Reserve room for the notice, then cut on a char boundary (byte slicing would panic mid-codepoint on the non-ASCII em dashes these changelog entries are full of).
     let budget = max_chars.saturating_sub(NOTICE.chars().count());
     let mut kept: String = body.chars().take(budget).collect();
 
@@ -317,8 +305,7 @@ fn truncate_pr_body(body: &str, max_chars: usize) -> String {
         kept.truncate(nl);
     }
 
-    // An odd number of fence lines means the kept prefix opened a block it
-    // never closed.
+    // An odd number of fence lines means the kept prefix opened a block it never closed.
     let fences = kept
         .lines()
         .filter(|l| l.trim_start().starts_with("```"))
@@ -331,9 +318,7 @@ fn truncate_pr_body(body: &str, max_chars: usize) -> String {
     kept
 }
 
-/// Assemble the release PR body: the `release-tag` marker the auto-tag
-/// workflow greps for, this version's changelog section, and a compare
-/// link against the previous tag.
+/// Assemble the release PR body: the `release-tag` marker the auto-tag workflow greps for, this version's changelog section, and a compare link against the previous tag.
 fn build_release_pr_body(
     tag: &str,
     changelog_section: &str,
@@ -1092,10 +1077,7 @@ pip install librefang-sdk
             let pr_body =
                 build_release_pr_body(&tag, &section, prev_tag.as_deref(), MAX_PR_BODY_CHARS);
 
-            // Pass the body through a file rather than an argv entry: a
-            // release body runs to tens of kilobytes, which is a large
-            // fraction of the platform `ARG_MAX`, and markdown in argv has
-            // to survive whatever quoting the shell layer applies.
+            // Pass the body through a file rather than an argv entry: a release body runs to tens of kilobytes, which is a large fraction of the platform `ARG_MAX`, and markdown in argv has to survive whatever quoting the shell layer applies.
             let body_file = std::env::temp_dir().join(format!("librefang-release-pr-{}.md", tag));
             fs::write(&body_file, &pr_body)?;
 
@@ -1377,11 +1359,8 @@ mod tests {
         );
     }
 
-    /// `schema-check gen` runs during the release, so a version bump that
-    /// moves a schema surface rewrites its baseline. Staging the surface
-    /// without the baseline is what left v2026.7.31's `openapi.sha256`
-    /// uncommitted, which would fail `schema-check check` on every PR that
-    /// followed it onto main.
+    /// `schema-check gen` runs during the release, so a version bump that moves a schema surface rewrites its baseline.
+    /// Staging the surface without the baseline is what left v2026.7.31's `openapi.sha256` uncommitted, which would fail `schema-check check` on every PR that followed it onto main.
     #[test]
     fn release_staging_includes_the_schema_baselines() {
         assert!(
@@ -1400,9 +1379,7 @@ mod tests {
         assert_eq!(truncate_pr_body(body, MAX_PR_BODY_CHARS), body);
     }
 
-    /// The `release-tag` marker sits at position 0 and `tag_on_merge` in
-    /// `release.yml` greps for it, so truncation has to keep the prefix —
-    /// a tail-preserving cut would silently stop tagging releases.
+    /// The `release-tag` marker sits at position 0 and `tag_on_merge` in `release.yml` greps for it, so truncation has to keep the prefix — a tail-preserving cut would silently stop tagging releases.
     #[test]
     fn truncated_pr_body_fits_and_keeps_the_release_tag_marker() {
         let section = body_of(20_000);
@@ -1417,8 +1394,7 @@ mod tests {
         );
     }
 
-    /// An unbalanced fence would swallow the truncation notice and the
-    /// compare link into a code block.
+    /// An unbalanced fence would swallow the truncation notice and the compare link into a code block.
     #[test]
     fn truncation_closes_a_fence_the_kept_prefix_left_open() {
         let mut section = String::from("- intro\n\n```toml\n");
@@ -1432,8 +1408,7 @@ mod tests {
         assert_eq!(fences % 2, 0, "unbalanced code fence");
     }
 
-    /// The notice is written as a continued string literal; a stray
-    /// indent there would render as a markdown code block.
+    /// The notice is written as a continued string literal; a stray indent there would render as a markdown code block.
     #[test]
     fn truncation_notice_is_a_single_unindented_line() {
         let body = build_release_pr_body("v1.0.0", &body_of(20_000), None, MAX_PR_BODY_CHARS);
@@ -1445,8 +1420,7 @@ mod tests {
         assert!(notice.contains("characters. The full section is in"));
     }
 
-    /// Changelog entries are full of em dashes, so a byte-wise cut would
-    /// panic on a char boundary or emit invalid UTF-8.
+    /// Changelog entries are full of em dashes, so a byte-wise cut would panic on a char boundary or emit invalid UTF-8.
     #[test]
     fn truncation_cuts_on_char_boundaries() {
         let section: String = (0..20_000)

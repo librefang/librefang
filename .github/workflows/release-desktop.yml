@@ -183,11 +183,8 @@ jobs:
             esac
           done
 
-      # tauri-action's `tagName` path runs getOrCreateRelease, which PATCHes
-      # an existing published release with whatever `releaseBody` holds — and
-      # this workflow passes none, so it would blank the notes of the release
-      # being rebuilt. Its `releaseId` path only uploads assets, so resolve
-      # the id here and address the release by it.
+      # tauri-action's `tagName` path runs getOrCreateRelease, which PATCHes an existing published release with whatever `releaseBody` holds — and this workflow passes none, so it would blank the notes of the release being rebuilt.
+      # Its `releaseId` path only uploads assets, so resolve the id here and address the release by it.
       - name: Resolve release id
         id: release_id
         shell: bash
