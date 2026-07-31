@@ -1,0 +1,7 @@
+Fix `Sign Release Artifacts` failing every release since #6677, which shipped debug symbols as their own assets without updating the sibling-count guard that assumed one `.sha256` per platform target.
+The guard exists to catch matrix drift in either direction and is deliberately an equality, so the four new `librefang-<target>-debug-symbols.tar.gz.sha256` files read as four extra platforms: v2026.7.31, the first release cut after #6677 landed, failed with `expected exactly 12 .sha256 siblings, got 16` after every artifact had already been built and published.
+The two kinds of sibling are now counted separately, because only one of them is one-per-matrix-target.
+Platform binaries keep the strict `= 12` equality that makes a dropped or added target stop the release loudly.
+Debug symbols get a `2..4` range instead, matching how they are produced: `cli_mac` fails outright when its `.dSYM` is missing, so both macOS targets are guaranteed, while the cross-compiled `cli_linux` targets only warn when the `.dwp` is absent — a count below 2 means the macOS hard-failure path did not hold and is worth stopping for, and a count of 2 or 3 emits a warning rather than taking a release down over a diagnostic aid.
+The manifest itself is unchanged: the download loop and `ls *.sha256` still read the full asset list, so every hash including the debug-symbols ones stays in `SHA256SUMS` and under the cosign signature.
+(#6691) (@houko)
