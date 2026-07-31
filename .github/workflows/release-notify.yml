@@ -188,15 +188,9 @@ jobs:
             CHANGES="See [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for details."
           fi
 
-          # `head -20` bounds the line count but not the length: a changelog
-          # bullet in this repo routinely runs past 1,800 characters, so 20 of
-          # them clear Discord's 2,000-character `content` cap on their own and
-          # the webhook answers 400 `Must be 2000 or fewer in length`
-          # (v2026.7.31's first 20 lines are 2,755 characters). The header,
-          # the five build-status lines, and the footer below cost a fixed
-          # ~466, leaving ~1,534; 1400 keeps a margin for a longer tag or an
-          # extra status line. Cut on a character boundary, since these
-          # entries are full of em dashes and arrows.
+          # `head -20` bounds the line count but not the length: a changelog bullet in this repo routinely runs past 1,800 characters, so 20 of them clear Discord's 2,000-character `content` cap on their own and the webhook answers 400 `Must be 2000 or fewer in length` (v2026.7.31's first 20 lines are 2,755 characters).
+          # The header, the five build-status lines, and the footer below cost a fixed ~466, leaving ~1,534; 1400 keeps a margin for a longer tag or an extra status line.
+          # Cut on a character boundary, since these entries are full of em dashes and arrows.
           CHANGES=$(CHANGES="$CHANGES" python3 -c "
           import os
           t = os.environ['CHANGES']
