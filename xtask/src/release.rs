@@ -121,6 +121,12 @@ const RELEASE_STAGED_PATHS: &[&str] = &[
     "sdk/go/librefang.go",
     "packages/whatsapp-gateway/package.json",
     "crates/librefang-desktop/tauri.conf.json",
+    // The release run calls `cargo xtask schema-check gen` just before
+    // committing, so any schema surface the version bump touched leaves a
+    // rewritten baseline behind. Staging `openapi.json` without its baseline
+    // is what left v2026.7.31's `xtask/baselines/openapi.sha256` uncommitted
+    // in the working tree — the exact drift the regen step exists to prevent.
+    "xtask/baselines",
     changelog::FRAGMENT_DIR,
 ];
 
@@ -273,6 +279,80 @@ fn extract_changelog_section(content: &str, heading: &str) -> String {
         }
         None => String::new(),
     }
+}
+
+/// GitHub rejects a pull-request body longer than 65,536 characters with
+/// `GraphQL: Body is too long`. We cut well under it so the truncation
+/// notice, the trailing full-diff link, and any future prefix all fit
+/// without recomputing the margin.
+const MAX_PR_BODY_CHARS: usize = 60_000;
+
+/// Clamp a PR body to what GitHub will accept, truncating the *tail*.
+///
+/// Everything load-bearing lives in the prefix: `tag_on_merge` in
+/// `release.yml` reads the `<!-- release-tag:vX.Y.Z -->` marker, which
+/// `build_release_pr_body` writes at position 0, and the changelog's
+/// Highlights section leads the body. So a prefix-preserving cut keeps the
+/// release machinery working and drops only the least-important bullets.
+///
+/// The cut lands on a line boundary, and a fence that was opened but not
+/// closed by the kept prefix gets one appended — otherwise the truncation
+/// notice and the full-diff link would render inside a code block.
+fn truncate_pr_body(body: &str, max_chars: usize) -> String {
+    if body.chars().count() <= max_chars {
+        return body.to_string();
+    }
+
+    const NOTICE: &str = "\n\n_Changelog truncated — GitHub caps a PR body at 65,536 characters. \
+                          The full section is in [CHANGELOG.md](https://github.com/librefang/librefang/blob/main/CHANGELOG.md)._";
+
+    // Reserve room for the notice, then cut on a char boundary (byte
+    // slicing would panic mid-codepoint on the non-ASCII em dashes these
+    // changelog entries are full of).
+    let budget = max_chars.saturating_sub(NOTICE.chars().count());
+    let mut kept: String = body.chars().take(budget).collect();
+
+    // Back up to the last complete line so we never publish half a bullet.
+    if let Some(nl) = kept.rfind('\n') {
+        kept.truncate(nl);
+    }
+
+    // An odd number of fence lines means the kept prefix opened a block it
+    // never closed.
+    let fences = kept
+        .lines()
+        .filter(|l| l.trim_start().starts_with("```"))
+        .count();
+    if fences % 2 == 1 {
+        kept.push_str("\n```");
+    }
+
+    kept.push_str(NOTICE);
+    kept
+}
+
+/// Assemble the release PR body: the `release-tag` marker the auto-tag
+/// workflow greps for, this version's changelog section, and a compare
+/// link against the previous tag.
+fn build_release_pr_body(
+    tag: &str,
+    changelog_section: &str,
+    prev_tag: Option<&str>,
+    max_chars: usize,
+) -> String {
+    let mut body = format!("<!-- release-tag:{} -->\n## Release {}", tag, tag);
+    if !changelog_section.is_empty() {
+        body.push_str("\n\n");
+        body.push_str(changelog_section);
+    }
+    let mut body = truncate_pr_body(&body, max_chars);
+    if let Some(pt) = prev_tag {
+        body.push_str(&format!(
+            "\n\n---\n**Full diff:** https://github.com/librefang/librefang/compare/{}...{}",
+            pt, tag
+        ));
+    }
+    body
 }
 
 /// Dispatch the existing release run for the latest tag with
@@ -1001,23 +1081,23 @@ pip install librefang-sdk
 
             // Build PR body with changelog content
             // <!-- release-tag:vX.Y.Z --> marker is used by the auto-tag workflow
-            let mut pr_body = format!("<!-- release-tag:{} -->\n## Release {}", tag, tag);
             let changelog_path = root.join("CHANGELOG.md");
-            if changelog_path.exists() {
+            let section = if changelog_path.exists() {
                 let cl_content = fs::read_to_string(&changelog_path).unwrap_or_default();
                 let heading = format!("## [{}]", changelog_version);
-                let section = extract_changelog_section(&cl_content, &heading);
-                if !section.is_empty() {
-                    pr_body.push_str("\n\n");
-                    pr_body.push_str(&section);
-                }
-            }
-            if let Some(ref pt) = prev_tag {
-                pr_body.push_str(&format!(
-                    "\n\n---\n**Full diff:** https://github.com/librefang/librefang/compare/{}...{}",
-                    pt, tag
-                ));
-            }
+                extract_changelog_section(&cl_content, &heading)
+            } else {
+                String::new()
+            };
+            let pr_body =
+                build_release_pr_body(&tag, &section, prev_tag.as_deref(), MAX_PR_BODY_CHARS);
+
+            // Pass the body through a file rather than an argv entry: a
+            // release body runs to tens of kilobytes, which is a large
+            // fraction of the platform `ARG_MAX`, and markdown in argv has
+            // to survive whatever quoting the shell layer applies.
+            let body_file = std::env::temp_dir().join(format!("librefang-release-pr-{}.md", tag));
+            fs::write(&body_file, &pr_body)?;
 
             let pr_output = Command::new("gh")
                 .args([
@@ -1027,8 +1107,8 @@ pip install librefang-sdk
                     "librefang/librefang",
                     "--title",
                     &format!("release: {}", tag),
-                    "--body",
-                    &pr_body,
+                    "--body-file",
+                    &body_file.display().to_string(),
                     "--base",
                     "main",
                     "--head",
@@ -1036,6 +1116,7 @@ pip install librefang-sdk
                 ])
                 .current_dir(&root)
                 .output()?;
+            let _ = fs::remove_file(&body_file);
 
             if pr_output.status.success() {
                 let pr_url = String::from_utf8_lossy(&pr_output.stdout)
@@ -1294,6 +1375,86 @@ mod tests {
             !staged.contains("changelog.d/fixed/.gitkeep"),
             ".gitkeep must be untouched, or the section directory stops being tracked:\n{staged}"
         );
+    }
+
+    /// `schema-check gen` runs during the release, so a version bump that
+    /// moves a schema surface rewrites its baseline. Staging the surface
+    /// without the baseline is what left v2026.7.31's `openapi.sha256`
+    /// uncommitted, which would fail `schema-check check` on every PR that
+    /// followed it onto main.
+    #[test]
+    fn release_staging_includes_the_schema_baselines() {
+        assert!(
+            RELEASE_STAGED_PATHS.contains(&"xtask/baselines"),
+            "the schema baselines must ship in the release commit alongside openapi.json"
+        );
+    }
+
+    fn body_of(len: usize) -> String {
+        (0..len).map(|i| format!("- bullet {i}\n")).collect()
+    }
+
+    #[test]
+    fn short_pr_body_is_returned_unchanged() {
+        let body = "<!-- release-tag:v1.0.0 -->\n## Release v1.0.0\n\n- one bullet";
+        assert_eq!(truncate_pr_body(body, MAX_PR_BODY_CHARS), body);
+    }
+
+    /// The `release-tag` marker sits at position 0 and `tag_on_merge` in
+    /// `release.yml` greps for it, so truncation has to keep the prefix —
+    /// a tail-preserving cut would silently stop tagging releases.
+    #[test]
+    fn truncated_pr_body_fits_and_keeps_the_release_tag_marker() {
+        let section = body_of(20_000);
+        let body = build_release_pr_body("v1.0.0", &section, Some("v0.9.0"), MAX_PR_BODY_CHARS);
+
+        assert!(body.chars().count() < 65_536, "still over GitHub's cap");
+        assert!(body.starts_with("<!-- release-tag:v1.0.0 -->"));
+        assert!(body.contains("_Changelog truncated"));
+        assert!(
+            body.ends_with("compare/v0.9.0...v1.0.0"),
+            "the compare link is appended after truncation, so it always survives"
+        );
+    }
+
+    /// An unbalanced fence would swallow the truncation notice and the
+    /// compare link into a code block.
+    #[test]
+    fn truncation_closes_a_fence_the_kept_prefix_left_open() {
+        let mut section = String::from("- intro\n\n```toml\n");
+        section.push_str(&body_of(20_000));
+        let body = build_release_pr_body("v1.0.0", &section, None, MAX_PR_BODY_CHARS);
+
+        let fences = body
+            .lines()
+            .filter(|l| l.trim_start().starts_with("```"))
+            .count();
+        assert_eq!(fences % 2, 0, "unbalanced code fence");
+    }
+
+    /// The notice is written as a continued string literal; a stray
+    /// indent there would render as a markdown code block.
+    #[test]
+    fn truncation_notice_is_a_single_unindented_line() {
+        let body = build_release_pr_body("v1.0.0", &body_of(20_000), None, MAX_PR_BODY_CHARS);
+        let notice = body
+            .lines()
+            .find(|l| l.contains("_Changelog truncated"))
+            .expect("truncated body must carry the notice");
+        assert!(!notice.starts_with(' '), "indented notice: {notice:?}");
+        assert!(notice.contains("characters. The full section is in"));
+    }
+
+    /// Changelog entries are full of em dashes, so a byte-wise cut would
+    /// panic on a char boundary or emit invalid UTF-8.
+    #[test]
+    fn truncation_cuts_on_char_boundaries() {
+        let section: String = (0..20_000)
+            .map(|i| format!("- entry {i} — note\n"))
+            .collect();
+        let body = build_release_pr_body("v1.0.0", &section, None, MAX_PR_BODY_CHARS);
+        assert!(body.chars().count() <= MAX_PR_BODY_CHARS);
+        assert!(body.contains('—'), "the em dashes should still be intact");
     }
 
     /// Reproduces the closure in `run()` so the generator's output format

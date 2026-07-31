@@ -183,6 +183,26 @@ jobs:
             esac
           done
 
+      # tauri-action's `tagName` path runs getOrCreateRelease, which PATCHes
+      # an existing published release with whatever `releaseBody` holds — and
+      # this workflow passes none, so it would blank the notes of the release
+      # being rebuilt. Its `releaseId` path only uploads assets, so resolve
+      # the id here and address the release by it.
+      - name: Resolve release id
+        id: release_id
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          ID=$(gh release view "$TAG" --json databaseId --jq '.databaseId')
+          if [ -z "$ID" ] || [ "$ID" = "null" ]; then
+            echo "::error::could not resolve release id for $TAG"
+            exit 1
+          fi
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+          echo "Release $TAG has id $ID"
+
       - name: Build and bundle Tauri desktop app
         if: runner.os != 'macOS' || env.APPLE_SIGNING_IDENTITY == ''
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
@@ -191,10 +211,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ inputs.tag }}
-          releaseName: "${{ inputs.tag }}"
-          releaseDraft: false
-          prerelease: false
+          # id, not tag — see the `release_id` step above.
+          releaseId: ${{ steps.release_id.outputs.id }}
           uploadUpdaterJson: true
           projectPath: crates/librefang-desktop
           args: ${{ matrix.platform.args }}
@@ -211,10 +229,8 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.MAC_NOTARIZE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.MAC_NOTARIZE_TEAM_ID }}
         with:
-          tagName: ${{ inputs.tag }}
-          releaseName: "${{ inputs.tag }}"
-          releaseDraft: false
-          prerelease: false
+          # id, not tag — see the `release_id` step above.
+          releaseId: ${{ steps.release_id.outputs.id }}
           uploadUpdaterJson: true
           projectPath: crates/librefang-desktop
           args: ${{ matrix.platform.args }}
