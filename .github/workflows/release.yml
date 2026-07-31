@@ -1146,11 +1146,8 @@ jobs:
             exit 1
           fi
 
-          # The list holds two kinds of sibling, and only one of them is
-          # one-per-matrix-target. Count them separately, or the debug-symbols
-          # assets #6677 added inflate the platform total and fail the release
-          # — which is exactly what happened on v2026.7.31 (expected 12, got
-          # 16), the first release cut after that PR landed.
+          # The list holds two kinds of sibling, and only one of them is one-per-matrix-target.
+          # Count them separately, or the debug-symbols assets #6677 added inflate the platform total and fail the release — which is exactly what happened on v2026.7.31 (expected 12, got 16), the first release cut after that PR landed.
           grep -v -- '-debug-symbols\.tar\.gz\.sha256$' asset-list.txt > platform-list.txt || true
           grep -- '-debug-symbols\.tar\.gz\.sha256$' asset-list.txt > symbol-list.txt || true
 
@@ -1180,14 +1177,9 @@ jobs:
             exit 1
           fi
 
-          # Debug symbols (#6677) are a diagnostic aid, not a platform target,
-          # so they get a range rather than an equality. `cli_mac` fails when
-          # its .dSYM is missing, so both macOS targets are guaranteed; the
-          # `cli_linux` targets are cross-compiled and only warn when the .dwp
-          # is absent, so 2 of the 4 are best-effort. A count outside 2..4 means
-          # the macOS hard-failure path did not hold, which is worth stopping
-          # for; a count of 2 or 3 only means Linux split-debuginfo did not
-          # materialize, which must not take a release down over a diagnostic.
+          # Debug symbols (#6677) are a diagnostic aid, not a platform target, so they get a range rather than an equality.
+          # `cli_mac` fails when its .dSYM is missing, so both macOS targets are guaranteed; the `cli_linux` targets are cross-compiled and only warn when the .dwp is absent, so 2 of the 4 are best-effort.
+          # A count outside 2..4 means the macOS hard-failure path did not hold, which is worth stopping for; a count of 2 or 3 only means Linux split-debuginfo did not materialize, which must not take a release down over a diagnostic.
           SYMBOLS=$(wc -l < symbol-list.txt | tr -d ' ')
           if [ "$SYMBOLS" -lt 2 ] || [ "$SYMBOLS" -gt 4 ]; then
             echo "::error::expected 2-4 debug-symbols .sha256 siblings (2 macOS guaranteed + up to 2 best-effort Linux), got $SYMBOLS"
