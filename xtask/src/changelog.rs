@@ -1700,13 +1700,8 @@ mod tests {
     /// intent of `ci::tests::real_repo_tree_is_green`. Only the temp copy is
     /// written; the repo's file is read-only here.
     ///
-    /// Reads through `repo_changelog_with_populated_unreleased` so the fold is
-    /// exercised against real prose on a release branch too, where the file's
-    /// own `[Unreleased]` has just been drained. The subsection assertion is a
-    /// delta rather than an equality because the fold legitimately creates
-    /// `### Changed` when the section does not already have one — asserting the
-    /// mid-cycle count outright is what failed on the v2026.7.31 release PR
-    /// (#6688).
+    /// Reads through `repo_changelog_with_populated_unreleased` so the fold is exercised against real prose on a release branch too, where the file's own `[Unreleased]` has just been drained.
+    /// The subsection assertion is a delta rather than an equality because the fold legitimately creates `### Changed` when the section does not already have one — asserting the mid-cycle count outright is what failed on the v2026.7.31 release PR (#6688).
     #[test]
     fn folds_into_the_repos_own_changelog() {
         let real = repo_changelog_with_populated_unreleased();
@@ -2194,17 +2189,11 @@ mod tests {
 
     /// The repo's own `CHANGELOG.md`, with a populated `## [Unreleased]`.
     ///
-    /// Mid-cycle that is the file verbatim. On a `chore/bump-version-*` branch
-    /// `cargo xtask release` has already drained `[Unreleased]` into the dated
-    /// section it just cut, so the file's own `[Unreleased]` is empty and a test
-    /// that needs real hand-written prose to chew on would assert nothing. The
-    /// prose is not gone though — it is sitting in the newest dated section, so
-    /// move it back to reconstitute the pre-release shape.
+    /// Mid-cycle that is the file verbatim.
+    /// On a `chore/bump-version-*` branch `cargo xtask release` has already drained `[Unreleased]` into the dated section it just cut, so the file's own `[Unreleased]` is empty and a test that needs real hand-written prose to chew on would assert nothing.
+    /// The prose is not gone though — it is sitting in the newest dated section, so move it back to reconstitute the pre-release shape.
     ///
-    /// This keeps the real-file coverage on release branches instead of skipping
-    /// it there, which is what the v2026.7.31 release PR (#6688) exposed: both
-    /// real-file tests failed on the release commit, blocking the release PR on a
-    /// state the release flow itself creates.
+    /// This keeps the real-file coverage on release branches instead of skipping it there, which is what the v2026.7.31 release PR (#6688) exposed: both real-file tests failed on the release commit, blocking the release PR on a state the release flow itself creates.
     fn repo_changelog_with_populated_unreleased() -> String {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
