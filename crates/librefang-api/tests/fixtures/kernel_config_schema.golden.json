@@ -190,7 +190,8 @@
         "max_sessions": 5,
         "chromium_path": null,
         "cdp_endpoint": null,
-        "cdp_auth_token_env": null
+        "cdp_auth_token_env": null,
+        "max_content_chars": 50000
       },
       "allOf": [
         {
@@ -2239,6 +2240,13 @@
           "default": 300,
           "type": "integer",
           "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_content_chars": {
+          "description": "Maximum characters of extracted page content returned by `browser_navigate` / `browser_read_page`, before the truncation marker.\n\nThis is a real ceiling on what reaches the model: the script cuts the content short enough that appending `... (truncated, N chars total)` still lands within the limit, so an operator can size this against a context window without accounting for the marker separately.\n\nThe default of 50,000 characters is roughly 12–15k tokens, which suits a 200k-context model and is actively hostile to a 32k local one — the reason this is a knob rather than a compile-time constant (#6624). A mainstream Wikipedia article overruns it.",
+          "default": 50000,
+          "type": "integer",
+          "format": "uint",
           "minimum": 0.0
         },
         "max_sessions": {

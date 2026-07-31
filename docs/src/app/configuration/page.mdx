@@ -1511,6 +1511,7 @@ max_sessions = 5
 | `idle_timeout_secs` | u64 | `300` | Auto-close browser session after this many seconds of inactivity. |
 | `max_sessions` | usize | `5` | Maximum concurrent browser sessions. |
 | `chromium_path` | string or null | `null` | Path to the Chromium/Chrome binary. Auto-detected if null. |
+| `max_content_chars` | usize | `50000` | Maximum characters of extracted page content returned by `browser_navigate` / `browser_read_page`. A real ceiling: the truncation marker is counted against it, so content plus marker never exceeds this value. Roughly 4 characters per token, so the default is about 12–15k tokens — comfortable against a 200k-context model, hostile against a 32k local one. |
 
 ---
 

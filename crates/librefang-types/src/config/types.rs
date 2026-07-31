@@ -855,6 +855,18 @@ pub struct BrowserConfig {
     /// value at connect time and never logs it.
     #[serde(default)]
     pub cdp_auth_token_env: Option<String>,
+    /// Maximum characters of extracted page content returned by `browser_navigate` / `browser_read_page`, before the truncation marker.
+    ///
+    /// This is a real ceiling on what reaches the model: the script cuts the content short enough that appending `... (truncated, N chars total)` still lands within the limit, so an operator can size this against a context window without accounting for the marker separately.
+    ///
+    /// The default of 50,000 characters is roughly 12–15k tokens, which suits a 200k-context model and is actively hostile to a 32k local one — the reason this is a knob rather than a compile-time constant (#6624).
+    /// A mainstream Wikipedia article overruns it.
+    #[serde(default = "default_max_content_chars")]
+    pub max_content_chars: usize,
+}
+
+fn default_max_content_chars() -> usize {
+    50_000
 }
 
 impl Default for BrowserConfig {
@@ -870,6 +882,7 @@ impl Default for BrowserConfig {
             chromium_path: None,
             cdp_endpoint: None,
             cdp_auth_token_env: None,
+            max_content_chars: default_max_content_chars(),
         }
     }
 }

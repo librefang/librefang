@@ -338,6 +338,7 @@ fn redacted_config_json(
         "chromium_path": config.browser.chromium_path,
         "cdp_endpoint": config.browser.cdp_endpoint,
         "cdp_auth_token_env": config.browser.cdp_auth_token_env,
+        "max_content_chars": config.browser.max_content_chars,
     });
 
     set!("extensions", {

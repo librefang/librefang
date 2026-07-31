@@ -1503,6 +1503,7 @@ max_sessions = 5
 | `idle_timeout_secs` | u64 | `300` | 浏览器会话闲置超过此秒数后自动关闭。 |
 | `max_sessions` | usize | `5` | 最大并发浏览器会话数。 |
 | `chromium_path` | string 或 null | `null` | Chromium/Chrome 二进制文件路径。为 null 时自动检测。 |
+| `max_content_chars` | usize | `50000` | `browser_navigate` / `browser_read_page` 返回的页面内容字符数上限。这是真实上限：截断标记也计入其中，内容加标记不会超过该值。约每 4 个字符 1 个 token，因此默认值约为 12–15k token —— 对 200k 上下文的模型绰绰有余，对 32k 的本地模型则明显偏大。 |
 
 ---
 

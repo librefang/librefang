@@ -17,7 +17,7 @@ use librefang_types::config::BrowserConfig;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::io::AsyncBufReadExt;
@@ -34,8 +34,6 @@ const CDP_CONNECT_TIMEOUT_SECS: u64 = 15;
 const CDP_COMMAND_TIMEOUT_SECS: u64 = 30;
 const PAGE_LOAD_POLL_INTERVAL_MS: u64 = 200;
 const PAGE_LOAD_MAX_POLLS: u32 = 150; // 30 seconds
-/// Cap on the extracted page text handed back to the model.
-const MAX_CONTENT_CHARS: usize = 50_000;
 const BROWSER_ENV_ALLOWLIST: &[&str] = &[
     "PATH",
     "HOME",
@@ -729,14 +727,19 @@ impl BrowserSession {
     }
 
     /// Execute a browser command via CDP.
-    async fn execute(&mut self, cmd: BrowserCommand) -> BrowserResponse {
+    /// `max_content_chars` is passed per call rather than copied onto the session at construction: the value only ever reaches the extraction script, and a session lives across many commands, so caching it here would add a second freeze layer on top of the one `BrowserManager` already has.
+    ///
+    /// That outer freeze is why `[browser]` is classified restart-required in `config_reload.rs` — `BrowserManager` captures `BrowserConfig` by value at boot with no rebuild path, so this knob follows the same rule as `max_sessions` and `cdp_endpoint` and takes effect on daemon restart.
+    async fn execute(&mut self, cmd: BrowserCommand, max_content_chars: usize) -> BrowserResponse {
         self.last_active = Instant::now();
         match cmd {
-            BrowserCommand::Navigate { url } => self.cmd_navigate(&url).await,
-            BrowserCommand::Click { selector } => self.cmd_click(&selector).await,
+            BrowserCommand::Navigate { url } => self.cmd_navigate(&url, max_content_chars).await,
+            BrowserCommand::Click { selector } => {
+                self.cmd_click(&selector, max_content_chars).await
+            }
             BrowserCommand::Type { selector, text } => self.cmd_type(&selector, &text).await,
             BrowserCommand::Screenshot => self.cmd_screenshot().await,
-            BrowserCommand::ReadPage => self.cmd_read_page().await,
+            BrowserCommand::ReadPage => self.cmd_read_page(max_content_chars).await,
             BrowserCommand::Close => BrowserResponse::ok(serde_json::json!({"closed": true})),
             BrowserCommand::Scroll { direction, amount } => {
                 self.cmd_scroll(&direction, amount).await
@@ -746,13 +749,13 @@ impl BrowserSession {
                 timeout_ms,
             } => self.cmd_wait(&selector, timeout_ms).await,
             BrowserCommand::RunJs { expression } => self.cmd_run_js(&expression).await,
-            BrowserCommand::Back => self.cmd_back().await,
+            BrowserCommand::Back => self.cmd_back(max_content_chars).await,
         }
     }
 
     // ── Command implementations ────────────────────────────────────────
 
-    async fn cmd_navigate(&self, url: &str) -> BrowserResponse {
+    async fn cmd_navigate(&self, url: &str, max_content_chars: usize) -> BrowserResponse {
         let result = self
             .cdp
             .send("Page.navigate", serde_json::json!({ "url": url }))
@@ -765,13 +768,13 @@ impl BrowserSession {
         // Wait for page load
         self.wait_for_load().await;
 
-        match self.page_info().await {
+        match self.page_info(max_content_chars).await {
             Ok(info) => BrowserResponse::ok(info),
             Err(e) => BrowserResponse::err(format!("Navigate succeeded but page info failed: {e}")),
         }
     }
 
-    async fn cmd_click(&self, selector: &str) -> BrowserResponse {
+    async fn cmd_click(&self, selector: &str, max_content_chars: usize) -> BrowserResponse {
         let sel_json = serde_json::to_string(selector).unwrap_or_default();
         let js = format!(
             r#"(() => {{
@@ -808,7 +811,7 @@ impl BrowserSession {
                 // Wait briefly for any navigation triggered by click
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 self.wait_for_load().await;
-                match self.page_info().await {
+                match self.page_info(max_content_chars).await {
                     Ok(info) => BrowserResponse::ok(info),
                     Err(_) => BrowserResponse::ok(parsed),
                 }
@@ -876,8 +879,12 @@ impl BrowserSession {
         }
     }
 
-    async fn cmd_read_page(&self) -> BrowserResponse {
-        match self.cdp.run_js(&EXTRACT_CONTENT_JS).await {
+    async fn cmd_read_page(&self, max_content_chars: usize) -> BrowserResponse {
+        match self
+            .cdp
+            .run_js(&extract_content_js(max_content_chars))
+            .await
+        {
             Ok(val) => {
                 let parsed: serde_json::Value = val
                     .as_str()
@@ -939,12 +946,12 @@ impl BrowserSession {
         }
     }
 
-    async fn cmd_back(&self) -> BrowserResponse {
+    async fn cmd_back(&self, max_content_chars: usize) -> BrowserResponse {
         match self.cdp.run_js("history.back(); 'ok'").await {
             Ok(_) => {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 self.wait_for_load().await;
-                match self.page_info().await {
+                match self.page_info(max_content_chars).await {
                     Ok(info) => BrowserResponse::ok(info),
                     Err(e) => {
                         BrowserResponse::err(format!("Back succeeded but page info failed: {e}"))
@@ -971,7 +978,7 @@ impl BrowserSession {
     }
 
     /// Get current page title, URL, and readable content.
-    async fn page_info(&self) -> Result<serde_json::Value, String> {
+    async fn page_info(&self, max_content_chars: usize) -> Result<serde_json::Value, String> {
         let info = self
             .cdp
             .run_js("JSON.stringify({title: document.title, url: location.href})")
@@ -983,7 +990,7 @@ impl BrowserSession {
 
         let content_val = self
             .cdp
-            .run_js(&EXTRACT_CONTENT_JS)
+            .run_js(&extract_content_js(max_content_chars))
             .await
             .unwrap_or_default();
         let content_obj: serde_json::Value = content_val
@@ -1197,7 +1204,7 @@ impl BrowserManager {
     ) -> Result<BrowserResponse, String> {
         let session = self.get_or_create(agent_id).await?;
         let mut guard = session.lock().await;
-        let resp = guard.execute(cmd).await;
+        let resp = guard.execute(cmd, self.config.max_content_chars).await;
 
         if !resp.success {
             if let Some(ref err) = resp.error {
@@ -1338,14 +1345,24 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
     walk(root);
 
     let content = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-    if (content.length > __MAX_CONTENT_CHARS__) content = content.substring(0, __MAX_CONTENT_CHARS__) + '\n... (truncated)';
+    const cap = __MAX_CONTENT_CHARS__;
+    if (content.length > cap) {
+        // The marker is part of what the model receives, so it counts against the cap: cut far enough back that content + marker lands within `cap`, and the operator's number is a real ceiling on what reaches the context.
+        // The marker's own length varies with the total it prints, so it is measured rather than approximated by a reserved constant.
+        const total = content.length;
+        const marker = '\n... (truncated, ' + total + ' chars total)';
+        content = content.substring(0, Math.max(0, cap - marker.length)) + marker;
+    }
     return JSON.stringify({title, url, content});
 })()"#;
 
-/// Page-extraction script with the cap substituted in, built once.
-pub(crate) static EXTRACT_CONTENT_JS: LazyLock<String> = LazyLock::new(|| {
-    EXTRACT_CONTENT_JS_TEMPLATE.replace("__MAX_CONTENT_CHARS__", &MAX_CONTENT_CHARS.to_string())
-});
+/// Build the page-extraction script for a given cap.
+///
+/// Deliberately *not* a `LazyLock`: the cap is operator-configurable, so a process-wide singleton would serve whichever value the first extraction happened to observe to every later one — including sessions belonging to a differently-configured manager, and any future build that rebuilds the manager on reload.
+/// The work is a `str::replace` over a ~2 KB template on a path that then makes a CDP WebSocket round trip, so there is nothing here worth caching around.
+pub(crate) fn extract_content_js(max_content_chars: usize) -> String {
+    EXTRACT_CONTENT_JS_TEMPLATE.replace("__MAX_CONTENT_CHARS__", &max_content_chars.to_string())
+}
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
@@ -1509,24 +1526,104 @@ mod tests {
         );
     }
 
-    /// The cap the model sees must be the one the constant declares.
+    /// The cap the model sees must be the one the caller asked for.
     ///
-    /// The script used to hard-code `50000` while `MAX_CONTENT_CHARS` sat unused, so changing the constant changed nothing.
+    /// The script used to hard-code `50000` while `MAX_CONTENT_CHARS` sat unused, so changing the constant changed nothing (#6623).
+    /// Now the value is operator-configurable, so the same drift would silently ignore `[browser] max_content_chars` instead (#6624).
     #[test]
     fn test_extract_content_js_uses_max_content_chars() {
+        let script = extract_content_js(12_345);
         assert!(
-            !EXTRACT_CONTENT_JS.contains("__MAX_CONTENT_CHARS__"),
+            !script.contains("__MAX_CONTENT_CHARS__"),
             "placeholder must be substituted before the script is sent"
         );
         assert!(
-            EXTRACT_CONTENT_JS.contains(&MAX_CONTENT_CHARS.to_string()),
-            "the script must truncate at MAX_CONTENT_CHARS"
+            script.contains("12345"),
+            "the script must truncate at the cap it was built with"
         );
         // Guards against the placeholder being dropped from the template entirely, which would leave the two silently independent again.
         assert!(
             EXTRACT_CONTENT_JS_TEMPLATE.contains("__MAX_CONTENT_CHARS__"),
             "the template must keep the placeholder"
         );
+    }
+
+    /// A different cap must produce a different script.
+    ///
+    /// The previous `LazyLock` would have passed the test above and still served the first-seen value forever; this is the assertion that fails if anyone reintroduces process-wide caching over a config-dependent value.
+    #[test]
+    fn test_extract_content_js_varies_with_cap() {
+        assert_ne!(
+            extract_content_js(1_000),
+            extract_content_js(50_000),
+            "the script must be rebuilt per cap, not cached process-wide"
+        );
+        assert!(extract_content_js(1_000).contains("1000"));
+        assert!(extract_content_js(50_000).contains("50000"));
+    }
+
+    /// The truncation marker counts against the cap rather than overshooting it.
+    ///
+    /// Ported from the JS the script runs, because the extraction itself needs a live browser: an operator sizing `max_content_chars` to a context window gets a real ceiling, and the marker reports the pre-truncation length so the model can tell how much it is missing rather than only that something was lost (#6624).
+    #[test]
+    fn test_truncation_marker_fits_inside_the_cap() {
+        fn truncate(content: &str, cap: usize) -> String {
+            if content.chars().count() <= cap {
+                return content.to_string();
+            }
+            let total = content.chars().count();
+            let marker = format!("\n... (truncated, {total} chars total)");
+            let keep = cap.saturating_sub(marker.chars().count());
+            let head: String = content.chars().take(keep).collect();
+            format!("{head}{marker}")
+        }
+
+        for cap in [200usize, 1_000, 50_000] {
+            let content = "x".repeat(cap * 2);
+            let out = truncate(&content, cap);
+            assert!(
+                out.chars().count() <= cap,
+                "cap {cap}: output is {} chars, which exceeds the cap",
+                out.chars().count()
+            );
+            assert!(
+                out.contains(&format!("{} chars total", cap * 2)),
+                "cap {cap}: the marker must report the pre-truncation length"
+            );
+        }
+
+        // Under the cap, nothing is appended at all.
+        let short = "hello";
+        assert_eq!(truncate(short, 50_000), short);
+
+        // A cap smaller than the marker degrades to marker-only rather than panicking or going negative.
+        let out = truncate(&"x".repeat(100), 5);
+        assert!(out.contains("100 chars total"));
+    }
+
+    #[test]
+    fn test_browser_config_max_content_chars_default() {
+        assert_eq!(
+            BrowserConfig::default().max_content_chars,
+            50_000,
+            "the default must stay at the historical compile-time cap so existing installs see no change"
+        );
+    }
+
+    /// The field must be `#[serde(default)]`-backed: an existing `config.toml` with a `[browser]` table that predates this field must still parse.
+    #[test]
+    fn test_browser_config_omitting_max_content_chars_uses_default() {
+        let toml = r#"
+            enabled = true
+            headless = true
+            viewport_width = 1280
+            viewport_height = 720
+            timeout_secs = 30
+            idle_timeout_secs = 300
+            max_sessions = 5
+        "#;
+        let config: BrowserConfig = toml::from_str(toml).expect("pre-#6624 [browser] table parses");
+        assert_eq!(config.max_content_chars, 50_000);
     }
 
     #[test]

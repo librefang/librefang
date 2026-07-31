@@ -526,6 +526,9 @@ pub fn ui_options_overlay(
         "/browser/timeout_secs": {"min": 5, "max": 300, "step": 1},
         "/browser/idle_timeout_secs": {"min": 0, "max": 3600, "step": 1},
         "/browser/max_sessions": {"min": 1, "max": 20, "step": 1},
+        // Floor is the truncation marker's own length rounded up — below it every page reduces to the marker and no content survives.
+        // Ceiling is ~250k tokens at ~4 chars/token, past the largest context window any provider currently offers.
+        "/browser/max_content_chars": {"min": 1_000, "max": 1_000_000, "step": 1_000},
 
         // ── network ──
         "/network/max_peers": {"min": 1, "max": 1000, "step": 1},
