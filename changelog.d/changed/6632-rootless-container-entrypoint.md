@@ -1,4 +1,0 @@
-`deploy/docker-entrypoint.sh` now detects whether it started as root and adapts, so the published image satisfies Kubernetes `restricted` Pod Security without a second rootless tag to maintain.
-Under Docker it still starts as root, chowns a bind-mounted `/data`, and drops to uid 1001 through `gosu` — unchanged, so existing Compose deployments keep working.
-Under a pod that pins `runAsUser: 1001` it skips both the chown and `gosu` (neither is possible unprivileged) and verifies `/data` is writable up front, failing with a message that names the `fsGroup` requirement instead of letting SQLite die later on an opaque `EACCES`.
-The image `HEALTHCHECK` now probes `/api/ready` rather than `/api/health`: its consumer is Compose's `depends_on: service_healthy` gate, which is readiness semantics, and `/api/health` can never fail that check (#6632) (#6638) (@houko)

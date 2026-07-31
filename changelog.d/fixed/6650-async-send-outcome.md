@@ -1,6 +1,0 @@
-Stop reporting an untrackable `agent_send` as a delegation, which handed the model the answer in a field named `task_id` and told it to wait for a callback that would never fire.
-`send_to_agent_async_tracked` has two legitimate outcomes and they meant opposite things: a task id on the tracked path, the callee's whole response body when no parseable caller session made tracking possible.
-Both arrived through one undiscriminated `Result<String, _>`, so the tool that consumes it labelled the response body `task_id`, set `status: "delegated"`, and instructed the model to end its turn and wait — for a reply it was already holding, and which no registered task would ever deliver again.
-The blocking fallback itself is correct and stays; with nowhere to route a completion event, an inline answer beats an orphaned delegation.
-It now returns an `AsyncSendOutcome` the caller must branch on, so a tracked delegation still renders its task id and an inline one returns the reply exactly as the blocking path does.
-The path is reached in production by the MCP HTTP bridge and the REST tool bridge, both of which pass no session by construction, and its log moves from `debug!` to `warn!` with the caller fields attached — an operator whose agents lose async delegation should not have to raise the log level to find out (#6662) (@houko)

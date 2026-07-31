@@ -1,6 +1,0 @@
-Thread the `language` and `prompt` parameters from `media_transcribe` / `speech_to_text` through to the multipart form Whisper-compatible providers actually receive, instead of reading and discarding them.
-`language` was advertised in both tools' schema and silently dropped, so the provider always fell back to auto-detection regardless of what the caller asked for — a misdetected language does not error, it returns fluent, plausible, wrong text.
-`prompt` is genuinely additive: it supplies domain vocabulary and proper nouns the model would otherwise transcribe as phonetic near-misses, and improves punctuation and casing on long recordings.
-Both follow the precedent `tool_text_to_speech` already used for `language`: the per-call value wins, and `[media] audio_language` / `audio_prompt` are the new operator-configured fallback for calls that omit either field.
-Only the whisper-protocol provider arms (Groq, OpenAI, MiniMax, Fireworks, Together, SiliconFlow, and any `[media.custom_stt]` self-hosted endpoint) receive these — Gemini and ElevenLabs are separate provider contracts with no equivalent parameter.
-An install that sets neither field sees a byte-identical request to before either parameter existed (#6678, #6683) (@houko)

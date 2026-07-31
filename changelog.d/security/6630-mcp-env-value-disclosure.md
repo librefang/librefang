@@ -1,4 +1,0 @@
-Stop `GET /api/mcp/servers` and its `{name}` detail sibling from serializing MCP environment values.
-The `env` list is documented as variable names to pass through, but the supported representation also accepts an inline `KEY=VALUE`, so an operator could put a live credential there and any reader got it back verbatim.
-The report describes a Viewer-role caller; it is worse than that — the list route sits in `PUBLIC_ROUTES_DASHBOARD_READS`, so with `require_auth_for_reads` left at its default an unauthenticated caller could read those values too.
-Both routes now return variable names only, and the write path merges a submitted bare name against what is stored: redacting the read side alone would have been a data-loss bug worse than the disclosure, because the dashboard hydrates its edit form from the list response and submits every field back on save, which would have wiped the very credentials the caller was never shown (#6630) (#6639) (@houko)

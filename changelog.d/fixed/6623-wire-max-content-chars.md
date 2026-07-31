@@ -1,4 +1,0 @@
-Substitute `MAX_CONTENT_CHARS` into the page-extraction script instead of leaving the cap hard-coded in the JavaScript, so the constant that documents the limit is the one that enforces it.
-`MAX_CONTENT_CHARS` was declared, marked `#[allow(dead_code)]`, and read by nothing; the script truncated at a literal `50000` written twice inside the JS string.
-Editing the constant to change how much page text reaches the model therefore did nothing at all, and the `#[allow]` suppressed the one warning that would have said so.
-The script is now a template with a `__MAX_CONTENT_CHARS__` placeholder substituted once through a `LazyLock`, and a test asserts both that the placeholder is gone from the built script and that it is still present in the template — the second half is what keeps the two from silently drifting apart again (#6623) (@nevgenov)

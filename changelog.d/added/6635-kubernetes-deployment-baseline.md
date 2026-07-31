@@ -1,3 +1,0 @@
-Add an officially supported single-replica Kubernetes deployment under `deploy/kubernetes/`, as Kustomize manifests plus operator documentation.
-The repository previously shipped Docker Compose only, leaving every operator to invent their own StatefulSet — and to rediscover on their own that SQLite WAL on shared storage and `replicas: 2` both corrupt state.
-`scripts/check-k8s-manifests.py` asserts the properties that fail silently when they regress (`replicas: 1`, the liveness/readiness split, `ReadWriteOnce`, credentials from Secrets rather than literals), and a new CI workflow boots the manifests in kind under enforced `restricted` Pod Security and proves `/data` survives pod replacement (#6635) (#6638) (@houko)

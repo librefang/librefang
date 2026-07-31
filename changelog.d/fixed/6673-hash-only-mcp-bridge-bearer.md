@@ -1,5 +1,0 @@
-Warn instead of silently failing when `api_key_hash` is set with no transmittable key, which is the posture the hash-only documentation itself recommends.
-`build_mcp_bridge_cfg` sends the master key to the daemon's own `/mcp` endpoint on behalf of CLI-based drivers, and a hash cannot stand in for it — a verifier does not yield the secret it verifies.
-So a daemon configured the way the `api_key_hash` doc, the upgrade hint, and `librefang hash-api-key` all advise — hash set, plaintext removed — built the bridge with no bearer, and its own middleware answered 401 on every driver tool call, precisely because #6613 made a hash count as configured auth.
-Nothing reported it: the driver surfaced a failed tool call, and the "nothing transmittable configured" case fell through to an empty string with no log line anywhere on the path.
-The field doc and the CLI hint now name the exception and the two workarounds that keep the secret out of `config.toml` — `api_key = "vault:NAME"` or `LIBREFANG_API_KEY` — and the kernel logs a `WARN` naming the same at every driver rebuild (#6673) (@houko)

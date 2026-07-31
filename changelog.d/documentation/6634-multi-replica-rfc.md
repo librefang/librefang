@@ -1,3 +1,0 @@
-Add `docs/architecture/multi-replica-rfc.md`, which enumerates every singleton subsystem that blocks running more than one daemon replica and proposes a four-phase path through them.
-Replacing SQLite is necessary and nowhere near sufficient: 24 named background workers, the in-process session locks, the audit hash chain, and the in-memory cost-reservation ledger each break in a different way under a second replica, and the document assigns a coordination mechanism to each rather than leaving "HA" as an open aspiration.
-The storage and coordination decisions are explicitly marked as needing maintainer approval before any implementation starts (#6634) (#6638) (@houko)

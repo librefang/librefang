@@ -1,5 +1,0 @@
-Report a goals storage failure as a 500 instead of an empty page, a leaked error string, or a missing goal.
-`GET /api/goals` folded a substrate read error into the same empty array it returns when nothing has been created yet, so a corrupt blob or an unreadable SQLite file reached the operator as `200 {"items": [], "total": 0}` — indistinguishable on the wire from a daemon with no goals, and the dashboard drew its template-picker empty state over live data it had simply failed to read.
-`GET /api/goals/{id}/children` was worse in both directions at once: a 200 carrying an empty list *and* a raw `format!("{e}")`, so a client checking the status saw success while the body handed out the SQLite path and error chain.
-`POST /api/goals/{id}/start` had the same swallow on a write path — its catch-all `_ => Vec::new()` turned an unreadable store into `404 Goal not found`, sending the operator to re-create a goal that exists.
-All three now log the full error and return the scrubbed 500 envelope that `GET /api/goals/{id}` next to them already used; an absent or non-array key stays a 200 empty result, because that is the genuine not-yet-created shape (#6662) (@houko)
