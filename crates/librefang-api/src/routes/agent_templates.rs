@@ -312,3 +312,250 @@ pub async fn get_agent_template_toml(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Agent type CRUD endpoints
+// ---------------------------------------------------------------------------
+//
+// Agent types are the named templates consumed by the ephemeral-worker spawn
+// path (`EphemeralSpawnRequest.agent_type`). They live as `<name>.toml`
+// manifests under `~/.librefang/templates/` — the same directory the kernel
+// reads in `resolve_ephemeral_manifest`. These endpoints let the dashboard
+// manage that directory; the read-only `/templates` endpoints above serve a
+// different source (per-agent workspace manifests).
+
+/// Directory holding agent-type manifests (`~/.librefang/templates/`).
+fn agent_types_dir() -> std::path::PathBuf {
+    super::system::librefang_home().join("templates")
+}
+
+/// Routes for the agent-type CRUD domain, merged from `server.rs`.
+pub fn agent_types_router() -> axum::Router<Arc<AppState>> {
+    axum::Router::new()
+        .route(
+            "/agent-types",
+            axum::routing::get(list_agent_types).post(create_agent_type),
+        )
+        .route(
+            "/agent-types/{name}",
+            axum::routing::get(get_agent_type)
+                .put(update_agent_type)
+                .delete(delete_agent_type),
+        )
+}
+
+/// GET /api/agent-types — List all agent types in the templates directory.
+#[utoipa::path(get, path = "/api/agent-types", tag = "system", operation_id = "list_agent_types", responses((status = 200, description = "List agent types", body = crate::types::JsonObject)))]
+pub async fn list_agent_types() -> impl IntoResponse {
+    let dir = agent_types_dir();
+    let mut types = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let name = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let description = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|content| toml::from_str::<AgentManifest>(&content).ok())
+                .map(|m| m.description)
+                .unwrap_or_default();
+
+            types.push(serde_json::json!({
+                "name": name,
+                "description": description,
+                "source": "user",
+            }));
+        }
+    }
+
+    // Deterministic ordering — `read_dir` yields entries in filesystem order.
+    types.sort_by(|a, b| {
+        a["name"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(b["name"].as_str().unwrap_or_default())
+    });
+
+    let total = types.len();
+    Json(serde_json::json!({
+        "items": types,
+        "total": total,
+    }))
+}
+
+/// Flatten a manifest into the JSON shape the dashboard expects.
+fn manifest_to_agent_type(name: &str, m: &AgentManifest) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "description": m.description,
+        "system_prompt": m.model.system_prompt,
+        "provider": m.model.provider,
+        "model": m.model.model,
+        "tools": m.capabilities.tools,
+        "skills": serde_json::Value::Array(vec![]),
+    })
+}
+
+/// Build a minimal `agent.toml` from the dashboard's JSON shape.
+fn agent_type_json_to_toml(v: &serde_json::Value) -> String {
+    let name = v["name"].as_str().unwrap_or("unnamed");
+    let desc = v["description"].as_str().unwrap_or("");
+    let prompt = v["system_prompt"]
+        .as_str()
+        .unwrap_or("You are a helpful AI agent.");
+    let provider = v["provider"].as_str().unwrap_or("default");
+    let model = v["model"].as_str().unwrap_or("default");
+    let tools: Vec<&str> = v["tools"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|t| t.as_str()).collect())
+        .unwrap_or_default();
+
+    let tools_toml: Vec<String> = tools.iter().map(|t| format!("\"{}\"", t)).collect();
+    format!(
+        "name = \"{name}\"\ndescription = \"{desc}\"\n\n[model]\nprovider = \"{provider}\"\nmodel = \"{model}\"\nsystem_prompt = \"{prompt}\"\n\n[capabilities]\ntools = [{tools}]\n",
+        name = name, desc = desc, provider = provider, model = model,
+        prompt = prompt, tools = tools_toml.join(", "),
+    )
+}
+
+/// GET /api/agent-types/:name — Get one agent type's parsed manifest.
+#[utoipa::path(get, path = "/api/agent-types/{name}", tag = "system", operation_id = "get_agent_type", params(("name" = String, Path, description = "Agent type name")), responses((status = 200, description = "Agent type details", body = crate::types::JsonObject)))]
+pub async fn get_agent_type(
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    if validate_template_name(&name).is_err() {
+        return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
+    }
+    let path = agent_types_dir().join(format!("{name}.toml"));
+    if !path.exists() {
+        return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
+    }
+
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match toml::from_str::<AgentManifest>(&content) {
+            Ok(manifest) => (
+                StatusCode::OK,
+                Json(manifest_to_agent_type(&name, &manifest)),
+            ),
+            Err(e) => {
+                tracing::warn!("Invalid agent-type manifest for '{name}': {e}");
+                ApiErrorResponse::internal(t.t("api-error-template-invalid-manifest"))
+                    .into_json_tuple()
+            }
+        },
+        Err(e) => {
+            tracing::warn!("Failed to read agent-type '{name}': {e}");
+            ApiErrorResponse::internal(t.t("api-error-template-read-failed")).into_json_tuple()
+        }
+    }
+}
+
+/// POST /api/agent-types — Create a new agent type from JSON.
+#[utoipa::path(post, path = "/api/agent-types", tag = "system", operation_id = "create_agent_type", request_body = crate::types::JsonObject, responses((status = 201, description = "Agent type created", body = crate::types::JsonObject), (status = 400, description = "Invalid input"), (status = 409, description = "Agent type already exists")))]
+pub async fn create_agent_type(
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+
+    let name = match body["name"].as_str() {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => {
+            return ApiErrorResponse::bad_request("name is required").into_json_tuple();
+        }
+    };
+    if validate_template_name(&name).is_err() {
+        return ApiErrorResponse::bad_request("invalid agent type name").into_json_tuple();
+    }
+
+    let toml_content = agent_type_json_to_toml(&body);
+
+    let dir = agent_types_dir();
+    let path = dir.join(format!("{name}.toml"));
+    if path.exists() {
+        return ApiErrorResponse::conflict(format!("Agent type '{name}' already exists"))
+            .into_json_tuple();
+    }
+
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!("Failed to create templates dir: {e}");
+        return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
+    }
+    if let Err(e) = std::fs::write(&path, &toml_content) {
+        tracing::warn!("Failed to write agent-type '{name}': {e}");
+        return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
+    }
+
+    let manifest: AgentManifest = toml::from_str(&toml_content).unwrap_or_default();
+    (
+        StatusCode::CREATED,
+        Json(manifest_to_agent_type(&name, &manifest)),
+    )
+}
+
+/// PUT /api/agent-types/:name — Update an existing agent type from JSON.
+#[utoipa::path(put, path = "/api/agent-types/{name}", tag = "system", operation_id = "update_agent_type", params(("name" = String, Path, description = "Agent type name")), request_body = crate::types::JsonObject, responses((status = 200, description = "Agent type updated", body = crate::types::JsonObject), (status = 400, description = "Invalid input"), (status = 404, description = "Agent type not found")))]
+pub async fn update_agent_type(
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    if validate_template_name(&name).is_err() {
+        return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
+    }
+
+    let toml_content = agent_type_json_to_toml(&body);
+
+    let path = agent_types_dir().join(format!("{name}.toml"));
+    if !path.exists() {
+        return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
+    }
+
+    if let Err(e) = std::fs::write(&path, &toml_content) {
+        tracing::warn!("Failed to write agent-type '{name}': {e}");
+        return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
+    }
+
+    let manifest: AgentManifest = toml::from_str(&toml_content).unwrap_or_default();
+    (
+        StatusCode::OK,
+        Json(manifest_to_agent_type(&name, &manifest)),
+    )
+}
+
+/// DELETE /api/agent-types/:name — Delete an agent type file.
+#[utoipa::path(delete, path = "/api/agent-types/{name}", tag = "system", operation_id = "delete_agent_type", params(("name" = String, Path, description = "Agent type name")), responses((status = 200, description = "Agent type deleted", body = crate::types::JsonObject), (status = 404, description = "Agent type not found")))]
+pub async fn delete_agent_type(
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    if validate_template_name(&name).is_err() {
+        return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
+    }
+
+    let path = agent_types_dir().join(format!("{name}.toml"));
+    if !path.exists() {
+        return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
+    }
+
+    if let Err(e) = std::fs::remove_file(&path) {
+        tracing::warn!("Failed to delete agent-type '{name}': {e}");
+        return ApiErrorResponse::internal(t.t("api-error-internal")).into_json_tuple();
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "name": name, "deleted": true })),
+    )
+}

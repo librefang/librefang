@@ -59,6 +59,7 @@ function lazyWithReload<T extends ComponentType<any>>(
 // Lazy-loaded pages — each becomes a separate chunk
 const OverviewPage = lazyWithReload(() => import("./pages/OverviewPage").then(m => ({ default: m.OverviewPage })));
 const AgentsPage = lazyWithReload(() => import("./pages/AgentsPage").then(m => ({ default: m.AgentsPage })));
+const AgentTypesPage = lazyWithReload(() => import("./pages/AgentTypesPage").then(m => ({ default: m.AgentTypesPage })));
 const AnalyticsPage = lazyWithReload(() => import("./pages/AnalyticsPage").then(m => ({ default: m.AnalyticsPage })));
 const CanvasPage = lazyWithReload(() => import("./pages/CanvasPage").then(m => ({ default: m.CanvasPage })));
 const ApprovalsPage = lazyWithReload(() => import("./pages/ApprovalsPage").then(m => ({ default: m.ApprovalsPage })));
@@ -146,6 +147,12 @@ const agentsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/agents",
   component: () => <LazyRouteBoundary><AgentsPage /></LazyRouteBoundary>
+});
+
+const agentTypesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/agent-types",
+  component: () => <LazyRouteBoundary><AgentTypesPage /></LazyRouteBoundary>
 });
 
 const sessionsRoute = createRoute({
@@ -412,6 +419,7 @@ const routeTree = rootRoute.addChildren([
   overviewRoute,
   canvasRoute,
   agentsRoute,
+  agentTypesRoute,
   sessionsRoute,
   providersRoute,
   channelsRoute,

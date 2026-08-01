@@ -17,6 +17,7 @@
     "tasks": "任务",
     "goals": "目标",
     "agents": "智能体",
+    "agent_types": "智能体类型",
     "users": "用户",
     "providers": "供应商",
     "channels": "通道",
@@ -273,6 +274,30 @@
       "no_peers": "暂无节点"
     },
     "setup_failed": "快速初始化失败"
+  },
+  "agentTypes": {
+    "title": "智能体类型",
+    "create": "创建类型",
+    "edit": "编辑类型",
+    "delete": "删除类型",
+    "quickRun": "快速运行",
+    "name": "名称",
+    "description": "描述",
+    "systemPrompt": "系统提示词",
+    "provider": "提供商",
+    "model": "模型",
+    "tools": "工具",
+    "skills": "技能",
+    "message": "消息",
+    "result": "结果",
+    "noTypes": "尚未定义智能体类型",
+    "confirmDelete": "删除此智能体类型？",
+    "runSuccess": "任务完成",
+    "createSuccess": "智能体类型已创建",
+    "ephemeral": "临时",
+    "iterations": "迭代次数",
+    "latency": "延迟",
+    "cost": "成本"
   },
   "agents": {
     "title": "智能体",

@@ -428,6 +428,44 @@ impl kernel_handle::AgentControl for LibreFangKernel {
         kernel_handle::AgentControl::spawn_agent(self, manifest_toml, parent_id).await
     }
 
+    async fn spawn_ephemeral(
+        &self,
+        request: librefang_types::agent::EphemeralSpawnRequest,
+        parent_id: Option<&str>,
+    ) -> Result<String, kernel_handle::KernelOpError> {
+        let parent = parent_id.and_then(|pid| pid.parse::<AgentId>().ok());
+        let result = self
+            .spawn_ephemeral_worker(request, parent)
+            .await
+            .map_err(|e| format!("Ephemeral spawn failed: {e}"))?;
+        Ok(result.response)
+    }
+
+    async fn spawn_ephemeral_detailed(
+        &self,
+        request: librefang_types::agent::EphemeralSpawnRequest,
+        parent_id: Option<&str>,
+    ) -> Result<librefang_types::agent::EphemeralSpawnResult, kernel_handle::KernelOpError> {
+        let parent = parent_id.and_then(|pid| pid.parse::<AgentId>().ok());
+        // Preserve the typed `LibreFangError` (e.g. `QuotaExceeded`) across the
+        // trait boundary so the API layer can map it to the right status code,
+        // rather than stringifying it into a generic error.
+        let result = self
+            .spawn_ephemeral_worker(request, parent)
+            .await
+            .map_err(|e| match e {
+                crate::error::KernelError::LibreFang(inner) => inner,
+                other => librefang_types::error::LibreFangError::Internal(format!(
+                    "Ephemeral spawn failed: {other}"
+                )),
+            })?;
+        Ok(librefang_types::agent::EphemeralSpawnResult {
+            response: result.response,
+            cost_usd: result.cost_usd,
+            iterations: result.iterations,
+        })
+    }
+
     fn register_async_task(
         &self,
         agent_id: AgentId,

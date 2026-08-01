@@ -17,6 +17,7 @@
     "tasks": "작업",
     "goals": "목표",
     "agents": "에이전트",
+    "agent_types": "에이전트 유형",
     "users": "사용자",
     "providers": "공급자",
     "channels": "채널",
@@ -273,6 +274,30 @@
       "no_peers": "피어 없음"
     },
     "setup_failed": "빠른 초기화 실패"
+  },
+  "agentTypes": {
+    "title": "에이전트 유형",
+    "create": "유형 생성",
+    "edit": "유형 편집",
+    "delete": "유형 삭제",
+    "quickRun": "빠른 실행",
+    "name": "이름",
+    "description": "설명",
+    "systemPrompt": "시스템 프롬프트",
+    "provider": "제공자",
+    "model": "모델",
+    "tools": "도구",
+    "skills": "스킬",
+    "message": "메시지",
+    "result": "결과",
+    "noTypes": "아직 정의된 에이전트 유형이 없습니다",
+    "confirmDelete": "이 에이전트 유형을 삭제하시겠습니까?",
+    "runSuccess": "작업 완료",
+    "createSuccess": "에이전트 유형이 생성되었습니다",
+    "ephemeral": "임시",
+    "iterations": "반복 횟수",
+    "latency": "지연 시간",
+    "cost": "비용"
   },
   "agents": {
     "title": "에이전트",
