@@ -345,6 +345,8 @@ pub(super) async fn tool_agent_spawn(
         })
         .unwrap_or_default();
 
+    let ephemeral = input["ephemeral"].as_bool().unwrap_or(false);
+    let task_description = input["task"].as_str().unwrap_or(system_prompt);
     let profile = input["profile"].as_str();
     let model_provider = input["model_override"]
         .get("provider")
@@ -386,6 +388,24 @@ pub(super) async fn tool_agent_spawn(
         .spawn_agent_checked(&manifest_toml, parent_id, &parent_caps)
         .await
         .map_err(ToolError::upstream)?;
+
+    if ephemeral {
+        // Send the task as a user message, wait for response, kill agent.
+        // No workspace persistence, no session reuse — like Claude Code.
+        let response = kh
+            .send_to_agent(&id.to_string(), task_description)
+            .await
+            .map_err(ToolError::upstream)?;
+        let _ = kh.kill_agent(&id.to_string());
+        return Ok(serde_json::json!({
+            "agent_id": id.to_string(),
+            "agent_name": agent_name,
+            "response": response,
+            "status": "completed_and_killed"
+        })
+        .to_string());
+    }
+
     Ok(format!(
         "Agent spawned successfully.\n  ID: {id}\n  Name: {agent_name}"
     ))

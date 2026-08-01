@@ -379,6 +379,10 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                                 "model": { "type": "string" },
                                 "context_window": { "type": "integer" }
                             }
+                        },
+                        "ephemeral": {
+                            "type": "boolean",
+                            "description": "When true, the spawned agent runs a single turn and is killed immediately after — no workspace persistence, no session reuse. Mirrors Claude Code disposable workers. Default false (persistent agent)."
                         }
                     },
                     "required": ["name", "system_prompt"]
