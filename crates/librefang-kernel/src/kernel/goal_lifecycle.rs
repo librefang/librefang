@@ -150,10 +150,7 @@ impl LibreFangKernel {
                 if let Some(ref model_name) = eval_model {
                     // Use the configured evaluator model via one-shot LLM call.
                     match k.one_shot_llm_call(model_name, &prompt).await {
-                        Ok(response) => {
-                            let upper = response.to_ascii_uppercase();
-                            Ok(upper.contains("YES") && !upper.contains("NO"))
-                        }
+                        Ok(response) => Ok(evaluator_reply_is_yes(&response)),
                         Err(e) => Err(e),
                     }
                 } else {
@@ -169,10 +166,7 @@ impl LibreFangKernel {
                         .send_message_with_sender_context(agent_id, &prompt, &sender)
                         .await
                     {
-                        Ok(r) => {
-                            let upper = r.response.to_ascii_uppercase();
-                            Ok(upper.contains("YES") && !upper.contains("NO"))
-                        }
+                        Ok(r) => Ok(evaluator_reply_is_yes(&r.response)),
                         Err(e) => Err(e.to_string()),
                     }
                 }
@@ -274,5 +268,91 @@ impl LibreFangKernel {
         stale_timeout: std::time::Duration,
     ) -> Vec<(GoalId, AgentId)> {
         self.workflows.goal_runner.recover_stale_runs(stale_timeout)
+    }
+
+    /// Load a persisted [`Goal`] by id from the shared goal store, if present.
+    ///
+    /// The autonomous-run config (`loop_engineering`, `verify_agent_id`,
+    /// `evaluator_model`) lives on the `Goal`, not on the persisted run row, so
+    /// auto-resume after a restart reads it back from here rather than
+    /// defaulting to a plain loop.
+    pub fn goal_by_id(&self, goal_id: GoalId) -> Option<librefang_types::goal::Goal> {
+        let arr = self
+            .substrate_ref()
+            .structured_get(
+                librefang_types::goal::goals_storage_agent_id(),
+                librefang_types::goal::GOALS_STORAGE_KEY,
+            )
+            .ok()
+            .flatten()?;
+        let serde_json::Value::Array(arr) = arr else {
+            return None;
+        };
+        let target = goal_id.to_string();
+        arr.into_iter()
+            .find(|g| g.get("id").and_then(|v| v.as_str()) == Some(target.as_str()))
+            .and_then(|g| serde_json::from_value(g).ok())
+    }
+}
+
+/// Parse an evaluator's free-text reply into a goal-achieved verdict.
+///
+/// The evaluator is prompted to answer "YES"/"NO", but models routinely wrap
+/// the verdict in prose. Substring matching is wrong: "NOTHING left to do"
+/// contains "NO", "ANNOUNCE" contains "NO", so `contains("NO")` misclassifies
+/// them. Tokenize on non-alphabetic characters and look for a standalone
+/// `YES`/`NO` word instead — achieved only when a `YES` token is present and no
+/// `NO` token is.
+fn evaluator_reply_is_yes(reply: &str) -> bool {
+    let mut saw_yes = false;
+    let mut saw_no = false;
+    for token in reply.split(|c: char| !c.is_ascii_alphabetic()) {
+        match token.to_ascii_uppercase().as_str() {
+            "YES" => saw_yes = true,
+            "NO" => saw_no = true,
+            _ => {}
+        }
+    }
+    saw_yes && !saw_no
+}
+
+#[cfg(test)]
+mod evaluator_parse_tests {
+    use super::evaluator_reply_is_yes;
+
+    #[test]
+    fn plain_verdicts() {
+        assert!(evaluator_reply_is_yes("YES"));
+        assert!(evaluator_reply_is_yes("yes"));
+        assert!(!evaluator_reply_is_yes("NO"));
+        assert!(!evaluator_reply_is_yes("no"));
+    }
+
+    #[test]
+    fn verdict_wrapped_in_prose() {
+        assert!(evaluator_reply_is_yes("YES, the goal is fully achieved."));
+        assert!(!evaluator_reply_is_yes("NO, more work is needed."));
+        assert!(evaluator_reply_is_yes("The answer is: yes."));
+    }
+
+    #[test]
+    fn words_containing_no_do_not_count_as_no() {
+        // These all contain the substring "NO" but no standalone NO token.
+        assert!(evaluator_reply_is_yes(
+            "YES. There is nothing more to do; the agent cannot improve it."
+        ));
+        assert!(evaluator_reply_is_yes("YES — ready to announce."));
+    }
+
+    #[test]
+    fn no_token_wins_over_yes() {
+        // Conservative: an explicit NO anywhere blocks completion.
+        assert!(!evaluator_reply_is_yes("Yes and no — NO, not done."));
+    }
+
+    #[test]
+    fn no_verdict_defaults_to_not_achieved() {
+        assert!(!evaluator_reply_is_yes("I am not sure."));
+        assert!(!evaluator_reply_is_yes(""));
     }
 }

@@ -2884,15 +2884,29 @@ system_prompt = "You are a helpful assistant."
                         "Auto-resuming stale goal runs after daemon restart"
                     );
                     for (goal_id, agent_id) in stale_runs {
+                        // Recover the run's autonomous config from the persisted
+                        // goal so the resumed loop keeps loop-engineering, the
+                        // verifier, and the evaluator model it started with —
+                        // hardcoding the defaults here silently downgrades a
+                        // loop-engineering run to a plain loop across a restart.
+                        // (`verify_max_retries` is not persisted on the goal; the
+                        // runner clamps None up to its minimum.)
+                        let goal = kernel.goal_by_id(goal_id);
+                        let loop_engineering =
+                            goal.as_ref().map(|g| g.loop_engineering).unwrap_or(false);
+                        let verify_agent_id = goal.as_ref().and_then(|g| g.verify_agent_id);
+                        let evaluator_model = goal.as_ref().and_then(|g| g.evaluator_model.clone());
                         // Use None for max_iterations to get the default.
                         // The runner will load the goal from the store and
                         // resume from the last persisted progress.
                         kernel.goal_run_start(
-                            goal_id, agent_id, None,  // max_iterations
-                            false, // loop_engineering
-                            None,  // verify_agent_id
-                            None,  // verify_max_retries
-                            None,  // evaluator_model
+                            goal_id,
+                            agent_id,
+                            None, // max_iterations
+                            loop_engineering,
+                            verify_agent_id,
+                            None, // verify_max_retries
+                            evaluator_model,
                         );
                     }
                 }
