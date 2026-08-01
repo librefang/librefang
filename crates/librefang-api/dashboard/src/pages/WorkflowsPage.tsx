@@ -40,6 +40,7 @@ import {
   useDryRunWorkflow,
   useDeleteWorkflow,
   useInstantiateTemplate,
+  useRerunWorkflowRun,
 } from "../lib/mutations/workflows";
 import { useCreateSchedule } from "../lib/mutations/schedules";
 import { useUIStore } from "../lib/store";
@@ -430,6 +431,7 @@ export function WorkflowsPage() {
   const dryRunMutation = useDryRunWorkflow();
   const deleteMutation = useDeleteWorkflow();
   const instantiateMutation = useInstantiateTemplate();
+  const rerunMutation = useRerunWorkflowRun();
   const createScheduleMutation = useCreateSchedule();
 
   const workflows = useMemo(() =>
@@ -640,27 +642,13 @@ export function WorkflowsPage() {
     }
   };
 
-  // Re-run a previous workflow run with its original params pre-filled.
-  const handleRerun = (runInputStr?: string) => {
-    if (!runInputStr) return;
-    paramTouchedRef.current = false; // allow auto-populate to act
-    try {
-      const parsed = JSON.parse(runInputStr);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        const values: Record<string, string> = {};
-        for (const p of detectedParams) {
-          if (parsed[p.name] !== undefined) values[p.name] = String(parsed[p.name]);
-        }
-        setParamValues(values);
-        if (typeof parsed.input === "string") setRunInput(parsed.input);
-      }
-    } catch {
-      // Plain text input.
-      setRunInput(runInputStr);
-      setParamValues({});
-    }
-    // Scroll to the Run button.
-    document.getElementById("workflow-run-section")?.scrollIntoView({ behavior: "smooth" });
+  // Re-run a previous workflow run: the backend replays the stored input
+  // faithfully, so we only pass the run id (and the workflow id for cache
+  // invalidation). The freshly-queued run shows up via the invalidated run
+  // list.
+  const handleRerun = (runId: string | undefined, workflowId: string) => {
+    if (!runId || !workflowId || rerunMutation.isPending) return;
+    rerunMutation.mutate({ runId, workflowId });
   };
 
 
@@ -1317,14 +1305,22 @@ export function WorkflowsPage() {
                       })();
                       return (
                         <div key={runId}>
-                          <button
-                            className={`w-full flex items-center gap-3 p-2.5 rounded-xl border text-left transition-colors ${
+                          <div
+                            role="button"
+                            tabIndex={0}
+                            className={`w-full flex items-center gap-3 p-2.5 rounded-xl border text-left transition-colors cursor-pointer ${
                               isSelected
                                 ? "border-brand bg-brand/5"
                                 : "border-border-subtle bg-main hover:bg-surface"
                             }`}
                             onClick={() => {
                               setSelectedRunId(isSelected ? null : (runId ?? null));
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                setSelectedRunId(isSelected ? null : (runId ?? null));
+                              }
                             }}>
                             <div className={`w-2 h-2 rounded-full shrink-0 ${
                               state === "completed" ? "bg-success" :
@@ -1353,11 +1349,12 @@ export function WorkflowsPage() {
                             )}
                             {/* Re-run button */}
                             <button
-                              className="p-1 rounded-lg hover:bg-surface text-text-dim/40 hover:text-brand transition-colors shrink-0"
+                              className="p-1 rounded-lg hover:bg-surface text-text-dim/40 hover:text-brand transition-colors shrink-0 disabled:opacity-40"
                               title={t("workflows.rerun_hint", { defaultValue: "Re-run with these parameters" })}
+                              disabled={rerunMutation.isPending}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                handleRerun(run.input);
+                                handleRerun(runId, selectedWorkflowId);
                               }}
                             >
                               <Play className="w-3 h-3" />
@@ -1368,7 +1365,7 @@ export function WorkflowsPage() {
                               state === "paused" ? "bg-warning/10 text-warning" :
                               "bg-main text-text-dim"
                             }`}>{state ?? "unknown"}</span>
-                          </button>
+                          </div>
                           {/* Inline run detail — execution timeline */}
                           {isSelected && runDetailQuery.data && (() => {
                             const rd = runDetailQuery.data;

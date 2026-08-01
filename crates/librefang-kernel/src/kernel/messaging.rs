@@ -2468,6 +2468,13 @@ impl LibreFangKernel {
                 if dm.base_url.is_some() && manifest.model.base_url.is_none() {
                     manifest.model.base_url.clone_from(&dm.base_url);
                 }
+                for (key, value) in &dm.extra_params {
+                    manifest
+                        .model
+                        .extra_params
+                        .entry(key.clone())
+                        .or_insert(value.clone());
+                }
             }
         }
 
@@ -2780,21 +2787,11 @@ impl LibreFangKernel {
                     serde_json::Value::String(ctx.channel.clone()),
                 );
             }
-            // Approval-flow group-chat support: stamp the raw chat_id
-            // alongside sender_channel + sender_user_id so the
-            // runtime's tool dispatch can thread it into
-            // `DeferredToolExecution.chat_id` for the bridge's
-            // approval listener to route `[Approve] [Deny]` keyboards
-            // back to the originating conversation (group or DM)
-            // instead of always to the human's DM with the bot.
-            if let Some(ref cid) = ctx.chat_id {
-                if !cid.is_empty() {
-                    manifest.metadata.insert(
-                        "sender_chat_id".to_string(),
-                        serde_json::Value::String(cid.clone()),
-                    );
-                }
-            }
+            // sender_chat_id is already stamped earlier in this function (right
+            // after default-model resolution) so it is present before any
+            // downstream manifest read; the approval-flow group-chat routing
+            // (threading it into `DeferredToolExecution.chat_id`) relies on that
+            // single stamp.
             // #6443: stamp the bot account / tenant the turn arrived on so the
             // runtime can reject a cross-account (cross-tenant) `channel_send`.
             // Empty account ids are dropped — an empty stamp would disable the

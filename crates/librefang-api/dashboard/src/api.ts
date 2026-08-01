@@ -1745,6 +1745,8 @@ export interface ModelItem {
   };
   aliases?: string[];
   available?: boolean;
+  // "cli_config" marks a live-detected CLI model (not deletable); absent for catalog models.
+  source?: string;
 }
 
 export async function listModels(params?: { provider?: string; tier?: string; available?: boolean }): Promise<{ models: ModelItem[]; total: number; available: number }> {
@@ -2453,7 +2455,7 @@ export async function runWorkflow(
 
 /** Re-run a previous workflow run with the same input parameters. */
 export async function rerunWorkflowRun(runId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/workflows/runs/${encodeURIComponent(runId)}/rerun`, {}, DEFAULT_POST_TIMEOUT_MS);
+  return post<ApiActionResponse>(`/api/workflows/runs/${encodeURIComponent(runId)}/rerun`, {}, LONG_RUNNING_TIMEOUT_MS); // multi-step LLM run
 }
 
 export async function deleteWorkflow(workflowId: string): Promise<ApiActionResponse> {

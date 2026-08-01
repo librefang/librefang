@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 47;
+const SCHEMA_VERSION: u32 = 48;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -229,6 +229,9 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // which is backward compatible with every existing row and a no-op for
     // single-user agents.
     run_step!(47, migrate_v47);
+    // v48: persist workflow_runs.total_steps so a run recovered after a
+    // daemon restart reports real progress instead of "step X of 0".
+    run_step!(48, migrate_v48);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -877,6 +880,28 @@ fn migrate_v47(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (47, datetime('now'), 'Add peer_id to entities and relations for per-user isolation (#6494)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 48: persist `workflow_runs.total_steps`.
+///
+/// The workflow_runs table (v37) never stored the run's step count, so
+/// `row_to_workflow_run` hardcoded `total_steps: 0` on reload — a run
+/// recovered after a daemon restart reported "step X of 0" in the API and
+/// dashboard. Store the actual value so progress survives a restart.
+/// `column_exists` keeps the ADD COLUMN idempotent.
+fn migrate_v48(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "workflow_runs", "total_steps") {
+        conn.execute(
+            "ALTER TABLE workflow_runs ADD COLUMN total_steps INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (48, datetime('now'), 'Persist workflow_runs.total_steps so run progress survives restart')",
         [],
     )?;
     Ok(())

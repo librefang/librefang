@@ -33,6 +33,7 @@ pub struct WorkflowRunRow {
     pub paused_variables: Option<String>,
     pub paused_current_input: Option<String>,
     pub step_results: String,
+    pub total_steps: i64,
     pub started_at: String,
     pub completed_at: Option<String>,
     pub created_at: String,
@@ -81,12 +82,12 @@ impl WorkflowStore {
                 id, workflow_id, workflow_name, state, input, output, error,
                 resume_token, pause_reason, paused_at, paused_step_index,
                 paused_variables, paused_current_input,
-                step_results, started_at, completed_at
+                step_results, total_steps, started_at, completed_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                 ?8, ?9, ?10, ?11,
                 ?12, ?13,
-                ?14, ?15, ?16
+                ?14, ?15, ?16, ?17
             ) ON CONFLICT(id) DO UPDATE SET
                 state = excluded.state,
                 input = excluded.input,
@@ -99,6 +100,7 @@ impl WorkflowStore {
                 paused_variables = excluded.paused_variables,
                 paused_current_input = excluded.paused_current_input,
                 step_results = excluded.step_results,
+                total_steps = excluded.total_steps,
                 completed_at = excluded.completed_at",
             rusqlite::params![
                 row.id,
@@ -115,6 +117,7 @@ impl WorkflowStore {
                 row.paused_variables,
                 row.paused_current_input,
                 row.step_results,
+                row.total_steps,
                 row.started_at,
                 row.completed_at,
             ],
@@ -131,7 +134,7 @@ impl WorkflowStore {
                 "SELECT id, workflow_id, workflow_name, state, input, output, error,
                         resume_token, pause_reason, paused_at, paused_step_index,
                         paused_variables, paused_current_input,
-                        step_results, started_at, completed_at, created_at
+                        step_results, total_steps, started_at, completed_at, created_at
                  FROM workflow_runs WHERE id = ?1",
             )
             .map_err(|e| {
@@ -159,7 +162,7 @@ impl WorkflowStore {
                 "SELECT id, workflow_id, workflow_name, state, input, output, error,
                         resume_token, pause_reason, paused_at, paused_step_index,
                         paused_variables, paused_current_input,
-                        step_results, started_at, completed_at, created_at
+                        step_results, total_steps, started_at, completed_at, created_at
                  FROM workflow_runs WHERE state = ?1 ORDER BY started_at DESC"
                     .to_string(),
                 vec![Box::new(state.to_string()) as Box<dyn rusqlite::types::ToSql>],
@@ -168,7 +171,7 @@ impl WorkflowStore {
                 "SELECT id, workflow_id, workflow_name, state, input, output, error,
                         resume_token, pause_reason, paused_at, paused_step_index,
                         paused_variables, paused_current_input,
-                        step_results, started_at, completed_at, created_at
+                        step_results, total_steps, started_at, completed_at, created_at
                  FROM workflow_runs ORDER BY started_at DESC"
                     .to_string(),
                 vec![],
@@ -235,17 +238,18 @@ impl WorkflowStore {
                     id, workflow_id, workflow_name, state, input, output, error,
                     resume_token, pause_reason, paused_at, paused_step_index,
                     paused_variables, paused_current_input,
-                    step_results, started_at, completed_at, created_at
+                    step_results, total_steps, started_at, completed_at, created_at
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                     ?8, ?9, ?10, ?11,
                     ?12, ?13,
-                    ?14, ?15, ?16, ?17
+                    ?14, ?15, ?16, ?17, ?18
                 ) ON CONFLICT(id) DO UPDATE SET
                     state = excluded.state,
                     output = excluded.output,
                     error = excluded.error,
                     step_results = excluded.step_results,
+                    total_steps = excluded.total_steps,
                     completed_at = excluded.completed_at",
                 rusqlite::params![
                     row.id,
@@ -262,6 +266,7 @@ impl WorkflowStore {
                     row.paused_variables,
                     row.paused_current_input,
                     row.step_results,
+                    row.total_steps,
                     row.started_at,
                     row.completed_at,
                     row.created_at,
@@ -311,9 +316,10 @@ fn row_from_sqlite(row: &rusqlite::Row<'_>) -> Result<WorkflowRunRow, rusqlite::
         paused_variables: row.get(11)?,
         paused_current_input: row.get(12)?,
         step_results: row.get(13)?,
-        started_at: row.get(14)?,
-        completed_at: row.get(15)?,
-        created_at: row.get(16)?,
+        total_steps: row.get(14)?,
+        started_at: row.get(15)?,
+        completed_at: row.get(16)?,
+        created_at: row.get(17)?,
     })
 }
 
@@ -346,6 +352,7 @@ mod tests {
             paused_variables: None,
             paused_current_input: None,
             step_results: "[]".to_string(),
+            total_steps: 0,
             started_at: "2026-05-06T00:00:00Z".to_string(),
             completed_at: None,
             created_at: "2026-05-06T00:00:00Z".to_string(),
