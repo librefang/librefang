@@ -175,6 +175,7 @@ pub(super) async fn tool_agent_send(
 }
 
 /// Build agent manifest TOML from parsed parameters.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_agent_manifest_toml(
     name: &str,
     system_prompt: &str,

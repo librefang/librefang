@@ -795,6 +795,9 @@ fn test_agent_spawn_manifest_all_cases() {
         vec!["file_read".to_string(), "file_write".to_string()],
         vec![],
         false,
+        None,
+        None,
+        None,
     )
     .unwrap();
     assert!(toml.contains("tools = [\"file_read\", \"file_write\"]"));
@@ -807,6 +810,9 @@ fn test_agent_spawn_manifest_all_cases() {
         vec!["web_fetch".to_string()],
         vec![],
         true,
+        None,
+        None,
+        None,
     )
     .unwrap();
     assert!(toml.contains("web_fetch"));
@@ -819,6 +825,9 @@ fn test_agent_spawn_manifest_all_cases() {
         vec!["git".to_string()],
         vec!["uv *".to_string()],
         false,
+        None,
+        None,
+        None,
     )
     .unwrap();
     assert!(toml.contains("shell = [\"uv *\"]"));
@@ -831,6 +840,9 @@ fn test_agent_spawn_manifest_all_cases() {
         vec!["shell_exec".to_string(), "git".to_string()],
         vec!["uv *".to_string(), "cargo *".to_string()],
         false,
+        None,
+        None,
+        None,
     )
     .unwrap();
     assert!(toml.contains("shell = [\"uv *\", \"cargo *\"]"));
@@ -845,6 +857,9 @@ fn test_agent_spawn_manifest_all_cases() {
         vec![],
         vec![],
         false,
+        None,
+        None,
+        None,
     )
     .unwrap();
     assert!(toml.contains("agent-with\"quotes"));
@@ -856,6 +871,9 @@ fn test_agent_spawn_manifest_all_cases() {
         vec!["web_fetch".to_string(), "git".to_string()],
         vec!["ls *".to_string()],
         true,
+        None,
+        None,
+        None,
     )
     .unwrap();
     assert!(toml.contains("web_fetch"));
