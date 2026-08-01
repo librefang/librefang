@@ -1462,7 +1462,12 @@ function CanvasPageInner() {
         const defaultAgent = availableAgents.find(a => a.state === "Running") || availableAgents[0];
         // Determine output language instruction based on UI language
         const lang = t("_lang", { defaultValue: "en" });
-        const langSuffix = lang === "zh" ? "\n\nIMPORTANT: You MUST respond entirely in Chinese (中文)." : "";
+        const langSuffix =
+          lang === "zh"
+            ? "\n\nIMPORTANT: You MUST respond entirely in Chinese (中文)."
+            : lang === "pl"
+              ? "\n\nIMPORTANT: You MUST respond entirely in Polish (Polski)."
+              : "";
         const newNodes = templateNodes.map((n, idx) => {
           const nd = n.data;
           const nodeType = nd?.nodeType;

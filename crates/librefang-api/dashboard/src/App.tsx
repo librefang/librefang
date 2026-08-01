@@ -551,7 +551,7 @@ type UserMenuPanelProps = {
   theme: "dark" | "light";
   language: string;
   onToggleTheme: () => void;
-  onSwitchLanguage: (lang: "en" | "zh" | "uk" | "ko") => void;
+  onSwitchLanguage: (lang: "en" | "zh" | "uk" | "ko" | "pl") => void;
   onOpenChangePassword: () => void;
   onOpenShortcuts: () => void;
   onLogout: () => void | Promise<void>;
@@ -645,6 +645,7 @@ function UserMenuPanel({
             { id: "ko", label: "한국어",     sub: "ko-KR" },
             { id: "uk", label: "Українська", sub: "uk-UA" },
             { id: "zh", label: "简体中文",   sub: "zh-CN" },
+            { id: "pl", label: "Polski",     sub: "pl-PL" },
           ] as const).map((opt) => {
             const active = opt.id === language;
             return (
@@ -727,7 +728,7 @@ type SidebarUserBlockProps = {
   onOpenShortcuts: () => void;
   onLogout: () => void | Promise<void>;
   onToggleTheme: () => void;
-  onSwitchLanguage: (lang: "en" | "zh" | "uk" | "ko") => void;
+  onSwitchLanguage: (lang: "en" | "zh" | "uk" | "ko" | "pl") => void;
   theme: "dark" | "light";
   language: string;
   t: ReturnType<typeof useTranslation>["t"];
