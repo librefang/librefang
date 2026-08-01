@@ -281,6 +281,9 @@ impl LlmDriver for GeminiCliDriver {
     fn is_coding_agent(&self) -> bool {
         true
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Check if the Gemini CLI is available.

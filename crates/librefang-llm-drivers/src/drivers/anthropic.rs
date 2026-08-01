@@ -1101,6 +1101,9 @@ impl LlmDriver for AnthropicDriver {
     fn family(&self) -> LlmFamily {
         LlmFamily::Anthropic
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Ensure a `serde_json::Value` is an object.  The Anthropic API requires the

@@ -520,6 +520,9 @@ impl LlmDriver for FallbackChain {
             code: None,
         }))
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -671,6 +674,9 @@ mod tests {
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
             Ok(ok_response(self.0))
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     struct CreditExhaustedDriver;
@@ -683,6 +689,9 @@ mod tests {
                 message: "Insufficient credits in your account".to_string(),
                 code: None,
             })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 
@@ -697,6 +706,9 @@ mod tests {
                 code: None,
             })
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     struct ContextTooLongDriver;
@@ -709,6 +721,9 @@ mod tests {
                 message: "Context length exceeded".to_string(),
                 code: None,
             })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 
@@ -724,6 +739,9 @@ mod tests {
                 retry_after_ms: 1, // 1 ms so tests don't stall
                 message: None,
             })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 
@@ -781,6 +799,9 @@ mod tests {
                 retry_after_ms: 3_600_000,
                 message: None,
             })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 
@@ -863,6 +884,9 @@ mod tests {
                 req: CompletionRequest,
             ) -> Result<CompletionResponse, LlmError> {
                 Ok(ok_response(&req.model))
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
             }
         }
 
@@ -1068,6 +1092,9 @@ mod tests {
                 self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Err(LlmError::Overloaded { retry_after_ms: 1 })
             }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
         }
 
         let driver = Arc::new(OverloadedDriver {
@@ -1109,6 +1136,9 @@ mod tests {
                     "invalid api key".to_string(),
                 ))
             }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
         }
 
         let chain = FallbackChain::new(vec![
@@ -1134,6 +1164,9 @@ mod tests {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(ok_response(self.label))
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     /// Driver that always rate-limits with a server-supplied retry hint,
@@ -1152,6 +1185,9 @@ mod tests {
                 retry_after_ms: self.retry_after_ms,
                 message: None,
             })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 
@@ -1270,6 +1306,9 @@ mod tests {
                 _req: CompletionRequest,
             ) -> Result<CompletionResponse, LlmError> {
                 Err(LlmError::AuthenticationFailed("bad key".to_string()))
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
             }
         }
 
@@ -1412,6 +1451,9 @@ mod tests {
                     message: "internal server error".to_string(),
                     code: None,
                 })
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
             }
         }
 

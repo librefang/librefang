@@ -67,6 +67,9 @@ impl LlmDriver for FakeDriver {
             actual_model: None,
         })
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// A driver that always returns an LLM error.
@@ -76,6 +79,9 @@ struct FailingDriver;
 impl LlmDriver for FailingDriver {
     async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         Err(LlmError::Http("connection refused".to_string()))
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

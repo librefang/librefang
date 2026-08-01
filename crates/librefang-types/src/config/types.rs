@@ -1257,6 +1257,332 @@ pub struct LlmConfig {
     pub auxiliary: AuxiliaryConfig,
 }
 
+/// Mixture-of-Agents (MoA) routing configuration.
+///
+/// When an agent's `manifest.model.provider == "moa"`, the kernel builds a
+/// composite `MoaDriver` instead of a normal provider driver: N advisor
+/// models independently produce private advice from a flattened, text-only
+/// view of the conversation, then the aggregator model receives that advice
+/// as context and *becomes* the acting model — answering the user, calling
+/// tools, and driving the normal agent loop. The aggregator is the agent,
+/// not a summarizer.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct MoaConfig {
+    /// Preset used when an agent selects `provider = "moa"` without naming
+    /// one. Default: `"default"`.
+    pub default_preset: String,
+    /// Persist per-turn advisor traces to disk for debugging. Default: false.
+    pub save_traces: bool,
+    /// Directory for traces. `None` → `~/.librefang/moa-traces/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_dir: Option<String>,
+    /// Redaction applied to the advisory view before it reaches advisors.
+    pub privacy_filter: MoaPrivacyFilter,
+    /// Named MoA presets, keyed by preset name.
+    pub presets: BTreeMap<String, MoaPreset>,
+}
+
+impl Default for MoaConfig {
+    fn default() -> Self {
+        let mut presets = BTreeMap::new();
+        presets.insert("default".to_string(), MoaPreset::default());
+        Self {
+            default_preset: "default".to_string(),
+            save_traces: false,
+            trace_dir: None,
+            privacy_filter: MoaPrivacyFilter::default(),
+            presets,
+        }
+    }
+}
+
+impl MoaConfig {
+    /// Return a normalized copy safe for the kernel driver-resolution path.
+    ///
+    /// Tolerant by design — a hand-edited or empty `[moa]` section must never
+    /// panic the daemon:
+    /// - injects the built-in default preset when `presets` is empty;
+    /// - drops advisor slots whose provider is `"moa"` (recursion guard);
+    /// - drops slots missing a provider or model;
+    /// - collapses `EveryN { n: 1 }` to `Always`;
+    /// - repairs a dangling `default_preset` pointer.
+    pub fn normalized(&self) -> MoaConfig {
+        let mut out = self.clone();
+        if out.presets.is_empty() {
+            out.presets
+                .insert("default".to_string(), builtin_default_preset());
+        }
+        for preset in out.presets.values_mut() {
+            preset.reference_models.retain(|slot| {
+                slot.provider != "moa"
+                    && !slot.provider.trim().is_empty()
+                    && !slot.model.trim().is_empty()
+            });
+            if let MoaFanout::EveryN { n } = preset.fanout {
+                if n <= 1 {
+                    preset.fanout = MoaFanout::Always;
+                }
+            }
+        }
+        if !out.presets.contains_key(&out.default_preset) {
+            out.default_preset = if out.presets.contains_key("default") {
+                "default".to_string()
+            } else {
+                out.presets
+                    .keys()
+                    .next()
+                    .cloned()
+                    .unwrap_or_else(|| "default".to_string())
+            };
+        }
+        out
+    }
+
+    /// Resolve a preset by name, falling back to the default preset.
+    ///
+    /// Returns `None` only when no presets exist at all. An unknown `name`
+    /// silently coerces to `default_preset` (the strict validator, not this
+    /// resolver, is responsible for rejecting unknown names at write time).
+    pub fn resolve_preset<'a>(&'a self, name: &'a str) -> Option<(&'a str, &'a MoaPreset)> {
+        if let Some(preset) = self.presets.get(name) {
+            return Some((name, preset));
+        }
+        let default = self.default_preset.as_str();
+        self.presets.get(default).map(|preset| (default, preset))
+    }
+}
+
+/// The built-in default preset injected when no presets are configured.
+fn builtin_default_preset() -> MoaPreset {
+    MoaPreset {
+        enabled: true,
+        reference_models: vec![
+            MoaSlot {
+                enabled: true,
+                provider: "openai-codex".to_string(),
+                model: "gpt-5.5".to_string(),
+                api_key_env: None,
+                base_url: None,
+            },
+            MoaSlot {
+                enabled: true,
+                provider: "openrouter".to_string(),
+                model: "deepseek/deepseek-v4-pro".to_string(),
+                api_key_env: None,
+                base_url: None,
+            },
+        ],
+        aggregator: MoaSlot {
+            enabled: true,
+            provider: "openrouter".to_string(),
+            model: "anthropic/claude-opus-4.8".to_string(),
+            api_key_env: None,
+            base_url: None,
+        },
+        ..MoaPreset::default()
+    }
+}
+
+/// A single model slot in a MoA preset — either an advisor or the aggregator.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct MoaSlot {
+    /// Whether this slot participates. Disabled advisor slots are skipped;
+    /// ignored for the aggregator. Default: true.
+    #[serde(default = "default_slot_enabled")]
+    pub enabled: bool,
+    /// Provider name (e.g. `"openrouter"`, `"anthropic"`). Must not be `"moa"`.
+    pub provider: String,
+    /// Model identifier for this provider.
+    pub model: String,
+    /// Optional API key env var override. `None` → resolve via the normal
+    /// provider-key resolution (`provider_api_keys` / convention).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// Optional base URL override for this slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
+/// Serde default for [`MoaSlot::enabled`].
+fn default_slot_enabled() -> bool {
+    true
+}
+
+impl Default for MoaSlot {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider: String::new(),
+            model: String::new(),
+            api_key_env: None,
+            base_url: None,
+        }
+    }
+}
+
+/// A named MoA routing preset.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct MoaPreset {
+    /// Whether this preset is active. Disabled presets are rejected at
+    /// driver resolution. Default: true.
+    pub enabled: bool,
+    /// Advisor model slots. Each independently produces private advice.
+    pub reference_models: Vec<MoaSlot>,
+    /// The acting model. Receives all advice and drives the agent loop.
+    pub aggregator: MoaSlot,
+    /// Temperature for advisor calls. `None` → provider default (0.7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_temperature: Option<f32>,
+    /// Temperature for the aggregator call. `None` → caller's temperature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregator_temperature: Option<f32>,
+    /// Per-advisor timeout in seconds. `None` → 900.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_timeout_secs: Option<u64>,
+    /// How advisor failures are surfaced. Default: Loud.
+    pub degraded_reference_policy: MoaDegradedPolicy,
+    /// Max tokens for advisor responses. `None` → uncapped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_max_tokens: Option<u32>,
+    /// When the advisor fan-out phase runs. Default: UserTurn.
+    pub fanout: MoaFanout,
+}
+
+impl Default for MoaPreset {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            reference_models: Vec::new(),
+            aggregator: MoaSlot::default(),
+            reference_temperature: None,
+            aggregator_temperature: None,
+            reference_timeout_secs: None,
+            degraded_reference_policy: MoaDegradedPolicy::default(),
+            reference_max_tokens: None,
+            fanout: MoaFanout::default(),
+        }
+    }
+}
+
+/// Redaction policy for MoA advisory views and traces.
+///
+/// The fan-out cache always holds RAW text. Redaction is applied at the
+/// emission boundary:
+/// - [`MoaPrivacyFilter::Off`]: no redaction anywhere.
+/// - [`MoaPrivacyFilter::Display`]: redact at UI event emission and trace
+///   persistence; advisors still see raw text.
+/// - [`MoaPrivacyFilter::Full`]: additionally redact advisor text before it is
+///   injected into the aggregator prompt.
+///
+/// Hand-edited config may use a boolean, which coerces via the custom
+/// `Deserialize` impl: `true`/`"true"`/`"on"`/`"yes"`/`"1"` → `Full`,
+/// `false`/unknown → `Off`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MoaPrivacyFilter {
+    /// No redaction.
+    #[default]
+    Off,
+    /// Redact at UI emission and trace persistence.
+    Display,
+    /// Redact advisor text before aggregator injection, plus Display.
+    Full,
+}
+
+impl MoaPrivacyFilter {
+    /// Whether advisor text must be redacted before aggregator injection.
+    pub fn redacts_advisor_text(self) -> bool {
+        matches!(self, MoaPrivacyFilter::Full)
+    }
+
+    /// Whether UI/trace emission must be redacted.
+    pub fn redacts_display(self) -> bool {
+        matches!(self, MoaPrivacyFilter::Display | MoaPrivacyFilter::Full)
+    }
+}
+
+impl<'de> Deserialize<'de> for MoaPrivacyFilter {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, Visitor};
+
+        struct FilterVisitor;
+
+        fn from_str(s: &str) -> MoaPrivacyFilter {
+            match s.trim().to_lowercase().as_str() {
+                "off" | "none" | "false" | "no" | "0" => MoaPrivacyFilter::Off,
+                "display" => MoaPrivacyFilter::Display,
+                "full" | "true" | "on" | "yes" | "1" => MoaPrivacyFilter::Full,
+                _ => MoaPrivacyFilter::Off,
+            }
+        }
+
+        impl<'de> Visitor<'de> for FilterVisitor {
+            type Value = MoaPrivacyFilter;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a privacy filter (\"off\", \"display\", \"full\") or a boolean")
+            }
+
+            fn visit_bool<E>(self, v: bool) -> Result<MoaPrivacyFilter, E>
+            where
+                E: de::Error,
+            {
+                Ok(if v {
+                    MoaPrivacyFilter::Full
+                } else {
+                    MoaPrivacyFilter::Off
+                })
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<MoaPrivacyFilter, E>
+            where
+                E: de::Error,
+            {
+                Ok(from_str(v))
+            }
+        }
+
+        deserializer.deserialize_any(FilterVisitor)
+    }
+}
+
+/// How advisor failures are surfaced to the aggregator.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MoaDegradedPolicy {
+    /// Inject a visible `[advisor <label> failed: <reason>]` marker into the
+    /// aggregator's advice context. Default.
+    #[default]
+    Loud,
+    /// Drop failed advisors without a marker.
+    Silent,
+}
+
+/// When the advisor fan-out phase runs.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MoaFanout {
+    /// Run advisors only on turns that end with a user message. Default.
+    #[default]
+    UserTurn,
+    /// Run advisors on every completion request.
+    Always,
+    /// Run advisors once every `n` completion requests (counter-based).
+    EveryN {
+        /// Run advisors on every `n`-th request. Must be >= 1.
+        n: u32,
+    },
+}
+
 /// Configuration for a self-hosted / custom-URL text-to-speech provider.
 ///
 /// Points TTS at any OpenAI-compatible `/v1/audio/speech` endpoint — e.g. a
@@ -3555,6 +3881,9 @@ pub struct KernelConfig {
     /// configuration. See [`LlmConfig`] / [`AuxiliaryConfig`].
     #[serde(default)]
     pub llm: LlmConfig,
+    /// `[moa]` section — Mixture-of-Agents routing presets. See [`MoaConfig`].
+    #[serde(default)]
+    pub moa: MoaConfig,
     /// Browser automation configuration.
     #[serde(default)]
     pub browser: BrowserConfig,
@@ -6501,6 +6830,7 @@ impl Default for KernelConfig {
             credential_pools: Vec::new(),
             providers: ProvidersConfig::default(),
             llm: LlmConfig::default(),
+            moa: MoaConfig::default(),
             browser: BrowserConfig::default(),
             extensions: ExtensionsConfig::default(),
             skills: SkillsConfig::default(),

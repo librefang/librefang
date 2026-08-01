@@ -476,6 +476,9 @@ impl LlmDriver for FallbackDriver {
             code: None,
         }))
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]
@@ -494,6 +497,9 @@ mod tests {
                 message: "Internal error".to_string(),
                 code: None,
             })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 
@@ -517,6 +523,9 @@ mod tests {
                 actual_provider: None,
                 actual_model: None,
             })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 
@@ -543,6 +552,9 @@ mod tests {
                 message: "dropped mid-stream".to_string(),
                 code: None,
             })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 
@@ -575,6 +587,9 @@ mod tests {
                 actual_provider: None,
                 actual_model: None,
             })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 
@@ -757,6 +772,9 @@ mod tests {
                     message: None,
                 })
             }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
         }
 
         let driver = FallbackDriver::new(vec![
@@ -783,6 +801,9 @@ mod tests {
                     retry_after_ms: 5000,
                     message: None,
                 })
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
             }
         }
 
@@ -862,6 +883,9 @@ mod tests {
                         actual_model: None,
                     })
                 }
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
             }
         }
 
@@ -1045,6 +1069,9 @@ mod tests {
                     code: None,
                 })
             }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
         }
 
         let store = ProviderExhaustionStore::new();
@@ -1100,6 +1127,9 @@ mod tests {
                     retry_after_ms: 1,
                     message: None,
                 })
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
             }
         }
 

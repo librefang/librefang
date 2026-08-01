@@ -195,6 +195,9 @@ impl LlmDriver for PooledDriver {
             }
         }
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]

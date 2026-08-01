@@ -647,6 +647,8 @@ impl LibreFangKernel {
         }
 
         let driver = self.resolve_driver_for_owner(&manifest, owner)?;
+        // MoA metering handle — see `consume_moa_advisor_usage` in llm_drivers.
+        let driver_for_metering = Arc::clone(&driver);
 
         // Resolve the context window: agent.toml override > catalog (#6568).
         // The ephemeral `/btw` session is created empty below, so it carries no
@@ -765,7 +767,7 @@ impl LibreFangKernel {
         // Atomically check quotas and record metering so cost tracking stays
         // accurate (prevents TOCTOU race on concurrent ephemeral requests)
         let model = &manifest.model.model;
-        let cost = MeteringEngine::estimate_cost_with_catalog(
+        let mut cost = MeteringEngine::estimate_cost_with_catalog(
             &self.llm.model_catalog.load(),
             model,
             result.total_usage.input_tokens,
@@ -773,6 +775,13 @@ impl LibreFangKernel {
             result.total_usage.cache_read_input_tokens,
             result.total_usage.cache_creation_input_tokens,
         );
+        // Mixture-of-Agents: fold advisor spend into the turn total (billed at
+        // advisor model rates, so added verbatim). See `execute_llm_agent`.
+        let moa_advisor =
+            crate::kernel::llm_drivers::consume_moa_advisor_usage(driver_for_metering.as_ref());
+        if let Some(ref adv) = moa_advisor {
+            cost += adv.cost_usd;
+        }
         // Ephemeral side-questions have no sender context — no user/channel
         // attribution to record. Per-user budget rollup will skip these.
         // session_id is also None: ephemerals run on a throwaway session
@@ -796,8 +805,10 @@ impl LibreFangKernel {
             // #6134: honour `actual_model` so a driver that resolved its own
             // model (e.g. codex-cli) records the model it actually ran.
             model: result.actual_model.clone().unwrap_or_else(|| model.clone()),
-            input_tokens: result.total_usage.input_tokens,
-            output_tokens: result.total_usage.output_tokens,
+            input_tokens: result.total_usage.input_tokens
+                + moa_advisor.as_ref().map_or(0, |a| a.usage.input_tokens),
+            output_tokens: result.total_usage.output_tokens
+                + moa_advisor.as_ref().map_or(0, |a| a.usage.output_tokens),
             cost_usd: cost,
             tool_calls: result.decision_traces.len() as u32,
             latency_ms,
@@ -3017,6 +3028,26 @@ impl LibreFangKernel {
                         LoopPhase::Streaming => ("streaming".to_string(), None),
                         LoopPhase::Done => ("done".to_string(), None),
                         LoopPhase::Error => ("error".to_string(), None),
+                        LoopPhase::MoaProgress { done, total, label } => (
+                            "moa_progress".to_string(),
+                            Some(format!("{done}/{total} {label}")),
+                        ),
+                        LoopPhase::MoaReference {
+                            index,
+                            count,
+                            label,
+                            ..
+                        } => (
+                            "moa_reference".to_string(),
+                            Some(format!("{}/{} {label}", index + 1, count)),
+                        ),
+                        LoopPhase::MoaAggregating {
+                            aggregator,
+                            ref_count,
+                        } => (
+                            "moa_aggregating".to_string(),
+                            Some(format!("{aggregator} ({ref_count} refs)")),
+                        ),
                     };
                     let event = StreamEvent::PhaseChange {
                         phase: phase_str,
@@ -3047,6 +3078,9 @@ impl LibreFangKernel {
                 .as_ref()
                 .unwrap_or(&kernel_clone.mcp.mcp_connections);
 
+            // MoA metering handle — the driver is moved into the loop below, so
+            // clone a reference to the same instance for post-loop downcast.
+            let driver_for_metering = Arc::clone(&driver);
             let result = run_agent_loop_streaming(
                 &manifest,
                 &message_owned,
@@ -3171,7 +3205,7 @@ impl LibreFangKernel {
                     // Atomically check quotas and persist usage to SQLite
                     // (mirrors non-streaming path — prevents TOCTOU race)
                     let model = &manifest.model.model;
-                    let cost = MeteringEngine::estimate_cost_with_catalog(
+                    let mut cost = MeteringEngine::estimate_cost_with_catalog(
                         &kernel_clone.llm.model_catalog.load(),
                         model,
                         result.total_usage.input_tokens,
@@ -3179,6 +3213,14 @@ impl LibreFangKernel {
                         result.total_usage.cache_read_input_tokens,
                         result.total_usage.cache_creation_input_tokens,
                     );
+                    // Mixture-of-Agents: fold advisor spend into the turn total
+                    // (billed at advisor model rates, so added verbatim).
+                    let moa_advisor = crate::kernel::llm_drivers::consume_moa_advisor_usage(
+                        driver_for_metering.as_ref(),
+                    );
+                    if let Some(ref adv) = moa_advisor {
+                        cost += adv.cost_usd;
+                    }
                     // #4807 review nit 10: honour `actual_provider`
                     // so a chain fail-over bills the slot that did the
                     // work, not the manifest-nominated provider.
@@ -3192,8 +3234,10 @@ impl LibreFangKernel {
                         // #6134: honour `actual_model` so a driver that resolved its own
                         // model (e.g. codex-cli) records the model it actually ran.
                         model: result.actual_model.clone().unwrap_or_else(|| model.clone()),
-                        input_tokens: result.total_usage.input_tokens,
-                        output_tokens: result.total_usage.output_tokens,
+                        input_tokens: result.total_usage.input_tokens
+                            + moa_advisor.as_ref().map_or(0, |a| a.usage.input_tokens),
+                        output_tokens: result.total_usage.output_tokens
+                            + moa_advisor.as_ref().map_or(0, |a| a.usage.output_tokens),
                         cost_usd: cost,
                         tool_calls: result.decision_traces.len() as u32,
                         latency_ms,

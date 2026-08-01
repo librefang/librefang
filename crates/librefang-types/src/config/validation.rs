@@ -755,3 +755,60 @@ impl KernelConfig {
         }
     }
 }
+
+impl KernelConfig {
+    /// Strict structural validation of the `[moa]` section.
+    ///
+    /// Returns a list of human-readable error strings; an empty list means the
+    /// configuration is structurally valid. This is the *strict* validator
+    /// invoked from the API config-write path — boot uses the tolerant
+    /// normalizer instead, so a malformed preset never blocks daemon start.
+    ///
+    /// Rejects:
+    /// - any slot whose `provider` is `"moa"` (recursion guard),
+    /// - any slot missing a `provider` or `model`,
+    /// - an enabled preset with an empty `reference_models` list,
+    /// - an `EveryN` fanout with `n < 1`.
+    pub fn validate_moa(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+
+        if self.moa.default_preset.trim().is_empty() {
+            errors.push("moa.default_preset must not be empty".to_string());
+        }
+
+        for (name, preset) in &self.moa.presets {
+            let ctx = format!("moa.presets.{name}");
+
+            let check_slot = |slot: &MoaSlot, role: &str, errors: &mut Vec<String>| {
+                if slot.provider.trim().is_empty() {
+                    errors.push(format!("{ctx}.{role}: provider must not be empty"));
+                } else if slot.provider == "moa" {
+                    errors.push(format!(
+                        "{ctx}.{role}: provider must not be \"moa\" (recursive MoA is not allowed)"
+                    ));
+                }
+                if slot.model.trim().is_empty() {
+                    errors.push(format!("{ctx}.{role}: model must not be empty"));
+                }
+            };
+
+            if preset.enabled && preset.reference_models.is_empty() {
+                errors.push(format!(
+                    "{ctx}: enabled preset must have at least one reference model"
+                ));
+            }
+            for (i, slot) in preset.reference_models.iter().enumerate() {
+                check_slot(slot, &format!("reference_models[{i}]"), &mut errors);
+            }
+            check_slot(&preset.aggregator, "aggregator", &mut errors);
+
+            if let MoaFanout::EveryN { n } = preset.fanout {
+                if n < 1 {
+                    errors.push(format!("{ctx}.fanout: EveryN requires n >= 1 (got {n})"));
+                }
+            }
+        }
+
+        errors
+    }
+}

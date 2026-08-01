@@ -299,6 +299,9 @@ mod tests {
                 actual_model: None,
             })
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     fn driver(reply: &str) -> Arc<dyn LlmDriver> {
@@ -354,6 +357,9 @@ mod tests {
                 actual_provider: None,
                 actual_model: None,
             })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 

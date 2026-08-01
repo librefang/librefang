@@ -96,11 +96,15 @@ impl AuxClient {
     /// can be initialised for the requested task. Pass the kernel's
     /// already-constructed primary fallback driver so behaviour matches
     /// the pre-aux baseline.
+    ///
+    /// A MoA primary is unwrapped to its aggregator driver: side tasks
+    /// (summarisation, title generation, compression) are not user turns, so
+    /// paying for a full advisor fan-out on each one is pure waste.
     pub fn new(config: Arc<KernelConfig>, primary: Arc<dyn LlmDriver>) -> Self {
         Self {
             config: config.llm.auxiliary.clone(),
             kernel_config: config,
-            primary,
+            primary: unwrap_moa(primary),
             exhaustion_store: None,
             model_catalog: None,
         }
@@ -110,12 +114,13 @@ impl AuxClient {
     /// fallback path inside the context compressor when the surrounding
     /// component was constructed before kernel boot completed.
     ///
-    /// Every task resolves directly to `primary`.
+    /// Every task resolves directly to `primary` (a MoA primary is unwrapped
+    /// to its aggregator, as in [`Self::new`]).
     pub fn with_primary_only(primary: Arc<dyn LlmDriver>) -> Self {
         Self {
             config: AuxiliaryConfig::empty(),
             kernel_config: Arc::new(KernelConfig::default()),
-            primary,
+            primary: unwrap_moa(primary),
             exhaustion_store: None,
             model_catalog: None,
         }
@@ -372,6 +377,21 @@ impl AuxClient {
     }
 }
 
+/// Unwrap a Mixture-of-Agents driver to its aggregator.
+///
+/// Auxiliary tasks are side calls, not user turns: running an advisor fan-out
+/// for a title or a compression pass multiplies their cost by the advisor
+/// count for no benefit. Non-MoA drivers pass through untouched.
+fn unwrap_moa(driver: Arc<dyn LlmDriver>) -> Arc<dyn LlmDriver> {
+    match driver
+        .as_any()
+        .downcast_ref::<crate::moa::driver::MoaDriver>()
+    {
+        Some(moa) => moa.aggregator_driver(),
+        None => driver,
+    }
+}
+
 impl std::fmt::Debug for AuxClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuxClient")
@@ -474,6 +494,10 @@ mod tests {
             _tx: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<CompletionResponse, LlmError> {
             self.complete(req).await
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 

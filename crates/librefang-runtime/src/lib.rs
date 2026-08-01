@@ -71,6 +71,7 @@ pub use librefang_runtime_media::media_understanding;
 #[cfg(not(feature = "media"))]
 #[path = "media_understanding_stub.rs"]
 pub mod media_understanding;
+pub mod moa;
 pub mod model_catalog;
 pub mod model_metadata;
 pub mod parallel_dispatch;

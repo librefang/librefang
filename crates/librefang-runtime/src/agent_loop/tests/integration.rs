@@ -71,6 +71,9 @@ impl LlmDriver for EmptyAfterToolUseDriver {
             })
         }
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Mock driver: iteration 0 emits a tool call, iteration 1 emits text.
@@ -131,6 +134,9 @@ impl LlmDriver for FailThenTextDriver {
             })
         }
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Mock driver: every iteration emits a tool call that will fail (unregistered tool).
@@ -162,6 +168,9 @@ impl LlmDriver for AlwaysFailingToolDriver {
             actual_model: None,
         })
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Mock driver that returns empty text with MaxTokens stop reason,
@@ -183,6 +192,9 @@ impl LlmDriver for EmptyMaxTokensDriver {
             actual_provider: None,
             actual_model: None,
         })
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -207,6 +219,9 @@ impl LlmDriver for NormalDriver {
             actual_provider: None,
             actual_model: None,
         })
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -233,6 +248,9 @@ impl LlmDriver for DirectiveDriver {
             actual_provider: None,
             actual_model: None,
         })
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -332,6 +350,9 @@ impl LlmDriver for NotifyOwnerThenMaxTokensDriver {
             }),
         }
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 struct CascadeLeakTimedOutDriver;
@@ -360,6 +381,9 @@ impl LlmDriver for CascadeLeakTimedOutDriver {
             partial_text_len: 43,
             last_activity: "text_delta".to_string(),
         })
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -997,6 +1021,9 @@ impl LlmDriver for MultiToolCycleDriver {
             })
         }
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Deterministic aux driver for fold summarisation: returns a fixed
@@ -1021,6 +1048,9 @@ impl LlmDriver for FoldSummaryDriver {
             actual_provider: None,
             actual_model: None,
         })
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -1937,6 +1967,9 @@ impl LlmDriver for EmptyThenNormalDriver {
             })
         }
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Mock driver that always returns empty EndTurn (no recovery on retry).
@@ -1958,6 +1991,9 @@ impl LlmDriver for AlwaysEmptyDriver {
             actual_provider: None,
             actual_model: None,
         })
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -2308,6 +2344,9 @@ impl LlmDriver for BatchFileReadDriver {
                 actual_model: None,
             })
         }
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

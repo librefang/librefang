@@ -519,6 +519,12 @@ async fn run_agent_loop_inner(
         });
     }
 
+    // Mixture-of-Agents: relay advisor fan-out progress into the phase callback
+    // (mirrors the streaming inner). No-op for non-MoA drivers or when no phase
+    // callback was supplied. Held for the turn; aborted on drop.
+    let _moa_relay = on_phase
+        .and_then(|cb| crate::moa::spawn_moa_progress_relay(&driver, std::sync::Arc::clone(cb)));
+
     // Gateway-level safety-net compression (#4972). Runs before any prompt
     // build / first LLM call: catches sessions that grew between turns
     // (overnight channel backlog, cron output piling up) and have already

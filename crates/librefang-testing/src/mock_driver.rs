@@ -175,6 +175,9 @@ impl LlmDriver for MockLlmDriver {
     fn is_configured(&self) -> bool {
         true
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// A mock driver that always returns errors, used for testing error handling.
@@ -203,5 +206,8 @@ impl LlmDriver for FailingLlmDriver {
 
     fn is_configured(&self) -> bool {
         false
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }

@@ -300,6 +300,9 @@ mod tests {
                 actual_model: None,
             })
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     #[async_trait::async_trait]
@@ -316,6 +319,9 @@ mod tests {
                 actual_provider: None,
                 actual_model: None,
             })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 

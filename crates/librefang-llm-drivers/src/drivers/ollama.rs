@@ -997,6 +997,9 @@ impl LlmDriver for OllamaDriver {
     fn family(&self) -> LlmFamily {
         LlmFamily::Local
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Map a non-success HTTP response from Ollama (or an Ollama-protocol

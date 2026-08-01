@@ -11022,6 +11022,9 @@ mod try_summarize_trim_tests {
                 actual_model: None,
             })
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     /// Always errors. Forces `compact_messages` through stage-1 → stage-2 →
@@ -11032,6 +11035,9 @@ mod try_summarize_trim_tests {
     impl LlmDriver for AlwaysFailingDriver {
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
             Err(LlmError::Http("connection refused".to_string()))
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 
@@ -13871,6 +13877,9 @@ mod provider_budget_gate_5980 {
                     code: None,
                 })
             }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
         }
         struct OkDriver;
         #[async_trait]
@@ -13890,6 +13899,9 @@ mod provider_budget_gate_5980 {
                     actual_provider: None,
                     actual_model: None,
                 })
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
             }
         }
 

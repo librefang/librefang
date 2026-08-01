@@ -880,6 +880,10 @@ pub fn build_reload_plan_with_caps(
         // (`config_reload_ops.rs`). A bare ArcSwap swap therefore makes an
         // allowlist edit effective on the next turn with no explicit reapply.
         noop_if_changed(field_changed(&old.providers, &new.providers), "providers");
+        // MoA presets are read live from `self.config.load()` by
+        // `resolve_moa_driver` on every `provider = "moa"` turn, so a preset
+        // edit takes effect on the next turn after a config swap — no reapply.
+        noop_if_changed(field_changed(&old.moa, &new.moa), "moa");
         noop_if_changed(old.prompt_caching != new.prompt_caching, "prompt_caching");
         noop_if_changed(
             field_changed(&old.prompt_cache, &new.prompt_cache),
@@ -1081,6 +1085,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "prompt_cache",
         "compaction",
         "providers",
+        "moa",
         "qwen_code_path",
         "cron_session_max_tokens",
         "cron_session_max_messages",

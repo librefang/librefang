@@ -642,20 +642,20 @@ impl LlmDriver for TextToolCallDriver {
         if call == 0 {
             // Simulate Groq/Llama: tool call as text, not in tool_calls field
             Ok(CompletionResponse {
-                content: vec![ContentBlock::Text {
-                    text: r#"Let me search for that. <function=web_search>{"query":"rust async"}</function>"#.to_string(),
-                    provider_metadata: None,
-                }],
-                stop_reason: StopReason::EndTurn,
-                tool_calls: vec![], // BUG: no tool_calls!
-                usage: TokenUsage {
-                    input_tokens: 20,
-                    output_tokens: 15,
-                    ..Default::default()
-                },
-                actual_provider: None,
-                actual_model: None,
-            })
+            content: vec![ContentBlock::Text {
+                text: r#"Let me search for that. <function=web_search>{"query":"rust async"}</function>"#.to_string(),
+                provider_metadata: None,
+            }],
+            stop_reason: StopReason::EndTurn,
+            tool_calls: vec![], // BUG: no tool_calls!
+            usage: TokenUsage {
+                input_tokens: 20,
+                output_tokens: 15,
+                ..Default::default()
+            },
+            actual_provider: None,
+            actual_model: None,
+        })
         } else {
             // After tool result, return normal response
             Ok(CompletionResponse {
@@ -674,6 +674,9 @@ impl LlmDriver for TextToolCallDriver {
                 actual_model: None,
             })
         }
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

@@ -376,6 +376,9 @@ impl LlmDriver for CodexCliDriver {
     fn is_coding_agent(&self) -> bool {
         true
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Check if the Codex CLI is available.

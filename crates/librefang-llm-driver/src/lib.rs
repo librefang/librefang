@@ -610,6 +610,11 @@ pub trait LlmDriver: Send + Sync {
     fn is_coding_agent(&self) -> bool {
         false
     }
+
+    /// Downcast support so consumers (e.g. the kernel's MoA cost-accounting
+    /// and progress paths) can recover a concrete driver type from
+    /// `Arc<dyn LlmDriver>`. Implementors return `self`.
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// Configuration for creating an LLM driver.
@@ -1020,6 +1025,9 @@ mod tests {
             ) -> Result<CompletionResponse, LlmError> {
                 unreachable!("test does not call complete")
             }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
         }
 
         assert_eq!(BareDriver.family(), LlmFamily::Other);
@@ -1036,6 +1044,9 @@ mod tests {
                 _request: CompletionRequest,
             ) -> Result<CompletionResponse, LlmError> {
                 unreachable!("test does not call complete")
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
             }
         }
 
@@ -1070,6 +1081,9 @@ mod tests {
                     actual_provider: None,
                     actual_model: None,
                 })
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
             }
         }
 
@@ -1139,6 +1153,9 @@ mod tests {
                     actual_provider: None,
                     actual_model: None,
                 })
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
             }
         }
 

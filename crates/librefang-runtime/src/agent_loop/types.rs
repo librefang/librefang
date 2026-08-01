@@ -23,6 +23,25 @@ pub enum LoopPhase {
     Done,
     /// Agent encountered an error.
     Error,
+    /// MoA advisor fan-out progress: `done` of `total` advisors complete.
+    MoaProgress {
+        done: usize,
+        total: usize,
+        label: String,
+    },
+    /// One MoA advisor's reference output is ready (`index` of `count`).
+    /// Advisor text is internal reasoning (PII-redacted before the aggregator)
+    /// and is deliberately not broadcast — only the label is surfaced.
+    MoaReference {
+        index: usize,
+        count: usize,
+        label: String,
+    },
+    /// MoA aggregator is about to act on `ref_count` reference outputs.
+    MoaAggregating {
+        aggregator: String,
+        ref_count: usize,
+    },
 }
 
 /// Callback for agent lifecycle phase changes.

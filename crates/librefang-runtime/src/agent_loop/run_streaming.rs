@@ -146,6 +146,12 @@ async fn run_agent_loop_streaming_inner(
         });
     }
 
+    // Mixture-of-Agents: relay advisor fan-out progress into the phase callback
+    // so the dashboard/TUI can render it. No-op for non-MoA drivers. The handle
+    // is held for the turn's lifetime and aborted on drop.
+    let _moa_relay = on_phase
+        .and_then(|cb| crate::moa::spawn_moa_progress_relay(&driver, std::sync::Arc::clone(cb)));
+
     // Gateway-level safety-net compression (#4972). See the matching block
     // in `run_agent_loop` for rationale. Same pure-function entry point.
     if let (Some(cfg), Some(ctx_window)) = (

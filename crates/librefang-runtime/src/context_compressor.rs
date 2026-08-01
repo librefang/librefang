@@ -556,6 +556,9 @@ mod tests {
                 actual_model: None,
             })
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     fn make_messages(n: usize) -> Vec<Message> {

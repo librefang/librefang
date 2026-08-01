@@ -1816,6 +1816,9 @@ mod session_summary_tests {
         fn is_configured(&self) -> bool {
             true
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     #[tokio::test]

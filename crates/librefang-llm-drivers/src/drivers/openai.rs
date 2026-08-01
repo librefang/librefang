@@ -2400,6 +2400,9 @@ impl LlmDriver for OpenAIDriver {
     fn family(&self) -> crate::llm_driver::LlmFamily {
         crate::llm_driver::LlmFamily::OpenAi
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Extract `<think>...</think>` blocks from content text.

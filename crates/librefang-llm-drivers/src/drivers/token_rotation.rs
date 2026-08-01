@@ -404,6 +404,9 @@ impl LlmDriver for TokenRotationDriver {
             code: None,
         }))
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]
@@ -464,6 +467,9 @@ mod tests {
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
             Ok(ok_response(&self.label))
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     struct RateLimitDriver {
@@ -479,6 +485,9 @@ mod tests {
                 message: None,
             })
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     struct CallCountingOkDriver {
@@ -490,6 +499,9 @@ mod tests {
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
             Ok(ok_response("unused"))
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 
@@ -571,6 +583,9 @@ mod tests {
             ) -> Result<CompletionResponse, LlmError> {
                 Err(LlmError::ModelNotFound("no-such-model".to_string()))
             }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
         }
 
         let driver = TokenRotationDriver::new(
@@ -604,6 +619,9 @@ mod tests {
                 Err(LlmError::AuthenticationFailed(
                     "invalid api key".to_string(),
                 ))
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
             }
         }
 
@@ -726,6 +744,9 @@ mod tests {
                     message: None,
                 })
             }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
         }
 
         struct StreamCountingDriver {
@@ -748,6 +769,9 @@ mod tests {
             ) -> Result<CompletionResponse, LlmError> {
                 self.call_count.fetch_add(1, Ordering::SeqCst);
                 Ok(ok_response("key-b"))
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
             }
         }
 

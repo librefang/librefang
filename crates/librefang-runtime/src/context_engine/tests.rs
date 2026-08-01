@@ -655,6 +655,9 @@ async fn test_summary_engine_compact_called_once_on_threshold_cross() {
                 actual_model: None,
             })
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     struct CompactTracker {

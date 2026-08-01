@@ -172,6 +172,9 @@ impl LlmDriver for AiderDriver {
             actual_model: None,
         })
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Check if the Aider CLI is available.

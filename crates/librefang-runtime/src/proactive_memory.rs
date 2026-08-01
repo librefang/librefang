@@ -1043,6 +1043,9 @@ mod tests {
         fn is_configured(&self) -> bool {
             false
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     struct CannedLlmDriver {
@@ -1075,6 +1078,9 @@ mod tests {
         }
         fn is_configured(&self) -> bool {
             true
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 

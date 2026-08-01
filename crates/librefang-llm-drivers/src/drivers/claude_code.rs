@@ -1650,6 +1650,9 @@ impl LlmDriver for ClaudeCodeDriver {
     fn is_coding_agent(&self) -> bool {
         true
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Check if the Claude Code CLI is available.

@@ -521,6 +521,9 @@ mod tests {
                 .await;
             Err(LlmError::Overloaded { retry_after_ms: 0 })
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     /// Regression (#6512 review [2]): once observable content has reached the caller's `tx`, a retryable mid-stream error (Overloaded / RateLimited / transient) must NOT be retried — a retry re-streams a second full response onto the same `tx`, concatenating a duplicate/garbled answer.

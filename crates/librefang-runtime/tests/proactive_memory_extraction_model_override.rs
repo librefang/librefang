@@ -304,6 +304,9 @@ impl librefang_runtime::llm_driver::LlmDriver for SharedRecordingDriver {
     fn is_configured(&self) -> bool {
         true
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 fn sample_messages() -> Vec<serde_json::Value> {

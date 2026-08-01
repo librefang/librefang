@@ -304,6 +304,13 @@ use crate::types;
         routes::usage_by_model_performance,
         routes::usage_daily,
 
+        // ── Mixture-of-Agents (MoA) configuration ──
+        routes::get_moa,
+        routes::put_moa,
+        routes::list_presets,
+        routes::put_preset,
+        routes::delete_preset,
+
         // ── Auto-Dream (background memory consolidation) ──
         routes::auto_dream_status,
         routes::auto_dream_trigger,

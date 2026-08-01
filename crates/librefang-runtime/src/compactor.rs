@@ -1734,6 +1734,9 @@ mod tests {
                     actual_model: None,
                 })
             }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
         }
 
         let session = Session {
@@ -1809,6 +1812,9 @@ mod tests {
                     actual_provider: None,
                     actual_model: None,
                 })
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
             }
         }
 
@@ -1922,6 +1928,9 @@ mod tests {
                     actual_provider: None,
                     actual_model: None,
                 })
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
             }
         }
 
@@ -2061,6 +2070,9 @@ mod tests {
             ) -> Result<CompletionResponse, LlmError> {
                 Err(LlmError::Http("connection refused".to_string()))
             }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
         }
 
         let messages: Vec<Message> = (0..30)
@@ -2143,6 +2155,9 @@ mod tests {
                     actual_provider: None,
                     actual_model: None,
                 })
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
             }
         }
 

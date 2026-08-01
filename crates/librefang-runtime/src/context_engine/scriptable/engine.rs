@@ -1308,6 +1308,9 @@ mod request_llm_summary_tests {
                 actual_model: None,
             })
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     fn driver(text: &str) -> std::sync::Arc<dyn LlmDriver> {

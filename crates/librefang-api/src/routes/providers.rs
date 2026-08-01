@@ -1003,6 +1003,12 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
         providers.push(entry);
     }
 
+    // Surface the virtual Mixture-of-Agents provider in the picker so the
+    // dashboard can select `moa` as a model provider like any other.
+    if let Some(moa_entry) = moa_provider_entry(&state) {
+        providers.push(moa_entry);
+    }
+
     let total = providers.len();
     (
         StatusCode::OK,
@@ -1105,7 +1111,69 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
         providers.push(entry);
     }
 
+    if let Some(moa_entry) = moa_provider_entry(state) {
+        providers.push(moa_entry);
+    }
+
     providers
+}
+
+/// Build the virtual `moa` provider entry for the model picker, or `None`
+/// when no usable default preset exists. The entry advertises a single `moa`
+/// model whose display name reflects the active preset, so the picker can
+/// select it the same way it selects a concrete provider.
+///
+/// "Usable" means the normalized config resolves a default preset that is
+/// enabled and has at least one enabled advisor plus an aggregator — the same
+/// shape the kernel requires at driver resolution. A disabled or empty preset
+/// is hidden rather than shown as a broken selectable.
+fn moa_provider_entry(state: &Arc<AppState>) -> Option<serde_json::Value> {
+    use librefang_types::config::MoaFanout;
+    let cfg = state.kernel.config_ref();
+    let moa = cfg.moa.normalized();
+    let (preset_name, preset) = moa.resolve_preset(&moa.default_preset)?;
+    if !preset.enabled {
+        return None;
+    }
+    let advisors = preset
+        .reference_models
+        .iter()
+        .filter(|slot| slot.enabled)
+        .count();
+    if advisors == 0 || preset.aggregator.model.trim().is_empty() {
+        return None;
+    }
+    let fanout = match preset.fanout {
+        MoaFanout::UserTurn => "user-turn".to_string(),
+        MoaFanout::Always => "always".to_string(),
+        MoaFanout::EveryN { n } => format!("every {n}"),
+    };
+    let display = format!(
+        "Mixture-of-Agents · {} preset · {} advisors · aggregator {} · fanout {}",
+        preset_name, advisors, preset.aggregator.model, fanout,
+    );
+    Some(serde_json::json!({
+        "id": "moa",
+        "display_name": "Mixture-of-Agents",
+        "auth_status": "configured",
+        "model_count": 1,
+        "key_required": false,
+        "api_key_env": null,
+        "base_url": null,
+        "proxy_url": null,
+        "media_capabilities": [],
+        "is_custom": false,
+        "suppressed": false,
+        "is_coding_agent": false,
+        "is_virtual": true,
+        "models": [{
+            "id": "moa",
+            "display_name": display,
+            "provider": "moa",
+            "tier": "virtual",
+            "modality": "text",
+        }],
+    }))
 }
 
 /// GET /api/providers/{name} — Get details for a single provider.

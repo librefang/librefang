@@ -30,7 +30,7 @@ pub struct Message {
 }
 
 /// The role of a message sender in an LLM conversation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     /// System prompt.

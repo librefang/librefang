@@ -340,6 +340,9 @@ impl LlmDriver for CodeWhaleDriver {
     fn is_coding_agent(&self) -> bool {
         true
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Check if the CodeWhale CLI is available (binary on PATH or credentials

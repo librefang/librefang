@@ -1009,6 +1009,9 @@ impl LlmDriver for VertexAiDriver {
     fn family(&self) -> crate::llm_driver::LlmFamily {
         crate::llm_driver::LlmFamily::Google
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]

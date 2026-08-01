@@ -215,6 +215,15 @@ impl LibreFangKernel {
             .into());
         }
 
+        // Mixture-of-Agents: `provider = "moa"` routes the turn through a
+        // named preset (or `[moa].default_preset` when the model field names
+        // no preset). The MoA driver fans out to advisor models and delegates
+        // the acting turn to the preset's aggregator. It is a terminal driver
+        // — no fallback chain is layered on top.
+        if agent_provider == "moa" {
+            return self.resolve_moa_driver(&cfg, &manifest.model.model);
+        }
+
         let has_custom_key = manifest.model.api_key_env.is_some();
         let has_custom_url = manifest.model.base_url.is_some();
         let has_explicit_key = has_custom_key
@@ -549,6 +558,98 @@ impl LibreFangKernel {
 
         Ok(primary)
     }
+
+    /// Resolve a Mixture-of-Agents driver for `provider = "moa"`.
+    ///
+    /// `model_field` optionally names a preset; an empty value (or one that
+    /// does not match) falls back to `[moa].default_preset`. The config is
+    /// normalized first so a hand-edited `[moa]` section can never panic the
+    /// daemon. The aggregator slot is resolved through the same public driver
+    /// factory the advisors use; advisor drivers are built lazily inside the
+    /// MoA driver at fan-out time.
+    fn resolve_moa_driver(
+        &self,
+        cfg: &KernelConfig,
+        model_field: &str,
+    ) -> KernelResult<Arc<dyn LlmDriver>> {
+        use librefang_runtime::moa::driver::MoaDriver;
+        use librefang_runtime::moa::fanout::resolve_slot_driver;
+
+        let moa = cfg.moa.normalized();
+        let requested = if model_field.trim().is_empty() {
+            moa.default_preset.as_str()
+        } else {
+            model_field.trim()
+        };
+        let (preset_name, preset) = moa
+            .resolve_preset(requested)
+            .ok_or_else(|| LibreFangError::Config(format!("unknown MoA preset: {requested}")))?;
+        if !preset.enabled {
+            return Err(
+                LibreFangError::Config(format!("MoA preset '{preset_name}' is disabled")).into(),
+            );
+        }
+
+        // Recursion guard (spec §13, layer 3): the normalizer strips `moa`
+        // advisor slots, but an aggregator pointing back at `moa` would build
+        // a MoA driver whose aggregator is another MoA driver — an unbounded
+        // fan-out tree. Reject at resolution rather than recursing.
+        if preset.aggregator.provider == "moa" {
+            return Err(LibreFangError::Config(format!(
+                "MoA preset '{preset_name}': aggregator provider must not be \"moa\" (recursive MoA)"
+            ))
+            .into());
+        }
+
+        let aggregator_driver = resolve_slot_driver(&preset.aggregator, cfg).ok_or_else(|| {
+            LibreFangError::Config(format!(
+                "MoA aggregator driver init failed for {}/{}",
+                preset.aggregator.provider, preset.aggregator.model
+            ))
+        })?;
+
+        let catalog = self.llm.model_catalog.load();
+        // Kernel-owned progress broadcast: the driver emits fan-out events on a
+        // cache-MISS turn; the agent loop subscribes (via `progress_receiver`)
+        // and relays them as `LoopPhase` updates for the dashboard / TUI.
+        let progress_tx = MoaDriver::progress_channel();
+        let driver = MoaDriver::new(
+            preset_name.to_string(),
+            preset.clone(),
+            Arc::new(cfg.clone()),
+            aggregator_driver,
+            preset.aggregator.clone(),
+            Some((**catalog).clone()),
+            Some(progress_tx),
+        );
+        Ok(Arc::new(driver))
+    }
+}
+
+/// Advisor usage/cost accumulated by a Mixture-of-Agents driver during a turn.
+///
+/// Advisor spend is billed at each advisor's own model rate (pre-computed by
+/// the driver), so the kernel folds the returned `cost_usd` straight into the
+/// turn total rather than re-estimating it against the aggregator's model.
+pub(crate) struct MoaAdvisorUsage {
+    pub usage: librefang_types::message::TokenUsage,
+    pub cost_usd: f64,
+}
+
+/// Pull pending advisor usage/cost off a driver if it is a [`MoaDriver`].
+///
+/// Returns `None` for every non-MoA driver (the common case) and for a MoA
+/// turn that hit the fan-out cache (no advisor calls were made, so nothing was
+/// deposited). Call this once, after the agent loop returns, on the same
+/// driver instance that was handed to the loop — the driver is `Arc`-shared,
+/// so the downcast sees the usage the loop's completions deposited.
+pub(crate) fn consume_moa_advisor_usage(
+    driver: &dyn librefang_runtime::llm_driver::LlmDriver,
+) -> Option<MoaAdvisorUsage> {
+    use librefang_runtime::moa::driver::MoaDriver;
+    let moa = driver.as_any().downcast_ref::<MoaDriver>()?;
+    let (usage, cost_usd) = moa.consume_reference_usage()?;
+    Some(MoaAdvisorUsage { usage, cost_usd })
 }
 
 #[cfg(test)]
@@ -855,6 +956,9 @@ key_required = true
                     actual_provider: None,
                     actual_model: None,
                 })
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
             }
         }
 

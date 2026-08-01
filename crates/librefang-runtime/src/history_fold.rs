@@ -868,6 +868,9 @@ mod tests {
                 actual_model: None,
             })
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     /// Driver that always returns a fixed text body (no call counter).
@@ -888,6 +891,9 @@ mod tests {
                 actual_provider: None,
                 actual_model: None,
             })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 
@@ -924,6 +930,9 @@ mod tests {
                 actual_provider: None,
                 actual_model: None,
             })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 
@@ -985,6 +994,9 @@ mod tests {
                 actual_model: None,
             })
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     /// Driver that always returns an error.
@@ -994,6 +1006,9 @@ mod tests {
     impl LlmDriver for FailDriver {
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
             Err(LlmError::Http("simulated failure".to_string()))
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 
@@ -2348,6 +2363,9 @@ mod tests {
                 actual_provider: None,
                 actual_model: None,
             })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 

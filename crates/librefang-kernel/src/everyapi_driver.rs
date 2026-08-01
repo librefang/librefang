@@ -155,6 +155,9 @@ impl LlmDriver for ManagedEveryApiDriver {
     fn family(&self) -> LlmFamily {
         LlmFamily::OpenAi
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]

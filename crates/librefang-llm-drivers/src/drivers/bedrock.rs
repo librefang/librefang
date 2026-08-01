@@ -914,6 +914,9 @@ impl LlmDriver for BedrockDriver {
         })
     }
     // stream() uses the default wrapper from LlmDriver trait — no override needed
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

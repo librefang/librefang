@@ -1147,6 +1147,9 @@ impl crate::llm_driver::LlmDriver for ChatGptDriver {
     fn family(&self) -> crate::llm_driver::LlmFamily {
         crate::llm_driver::LlmFamily::OpenAi
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Parse a Responses-API `usage` object into a [`TokenUsage`].

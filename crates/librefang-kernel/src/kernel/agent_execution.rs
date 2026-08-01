@@ -1034,6 +1034,11 @@ impl LibreFangKernel {
         }
 
         let driver = self.resolve_driver_for_owner(&manifest, owner)?;
+        // Keep a handle to the same driver instance: a Mixture-of-Agents
+        // driver deposits advisor usage/cost during the loop, and we downcast
+        // this clone after the loop to fold it into metering (the original is
+        // moved into `run_agent_loop` below).
+        let driver_for_metering = Arc::clone(&driver);
 
         // Resolve the context window: agent.toml override > catalog > session
         // (#6568). See `manifest_helpers::resolve_context_window` for why the
@@ -1420,7 +1425,7 @@ impl LibreFangKernel {
         // transaction to prevent the TOCTOU race where concurrent requests
         // both pass the pre-check before either records its spend.
         let model = &manifest.model.model;
-        let cost = MeteringEngine::estimate_cost_with_catalog(
+        let mut cost = MeteringEngine::estimate_cost_with_catalog(
             &self.llm.model_catalog.load(),
             model,
             result.total_usage.input_tokens,
@@ -1428,6 +1433,15 @@ impl LibreFangKernel {
             result.total_usage.cache_read_input_tokens,
             result.total_usage.cache_creation_input_tokens,
         );
+        // Mixture-of-Agents: fold advisor spend into the turn total. Advisor
+        // tokens are billed at their own model rates (pre-computed by the
+        // driver), so `advisor_cost` is added verbatim — re-estimating against
+        // the aggregator's model would misprice them.
+        let moa_advisor =
+            crate::kernel::llm_drivers::consume_moa_advisor_usage(driver_for_metering.as_ref());
+        if let Some(ref adv) = moa_advisor {
+            cost += adv.cost_usd;
+        }
         // RBAC M5: derive user/channel attribution from the inbound sender
         // so per-user budgets and audit events can roll up per call.
         let attribution_user_id: Option<UserId> =
@@ -1455,8 +1469,10 @@ impl LibreFangKernel {
             // model (e.g. codex-cli) records the model it actually ran. Mirrors
             // the streaming path's UsageRecord construction.
             model: result.actual_model.clone().unwrap_or_else(|| model.clone()),
-            input_tokens: result.total_usage.input_tokens,
-            output_tokens: result.total_usage.output_tokens,
+            input_tokens: result.total_usage.input_tokens
+                + moa_advisor.as_ref().map_or(0, |a| a.usage.input_tokens),
+            output_tokens: result.total_usage.output_tokens
+                + moa_advisor.as_ref().map_or(0, |a| a.usage.output_tokens),
             cost_usd: cost,
             tool_calls: result.decision_traces.len() as u32,
             latency_ms,
