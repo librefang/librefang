@@ -251,15 +251,16 @@ pub async fn get_hand(
                     }).collect::<Vec<_>>(),
                     "server_platform": server_platform(),
                     "agent": if let Some(agent_manifest) = def.agent() {
+                        let (prov, mdl) = crate::routes::agents::resolve_effective_model(
+                            &agent_manifest.model.provider,
+                            &agent_manifest.model.model,
+                            &dm,
+                        );
                         serde_json::json!({
                             "name": agent_manifest.name,
                             "description": agent_manifest.description,
-                            "provider": if agent_manifest.model.provider == "default" {
-                                &dm.provider
-                            } else { &agent_manifest.model.provider },
-                            "model": if agent_manifest.model.model == "default" {
-                                &dm.model
-                            } else { &agent_manifest.model.model },
+                            "provider": prov,
+                            "model": mdl,
                         })
                     } else {
                         serde_json::json!(null)
@@ -285,13 +286,18 @@ pub async fn get_hand(
                             })
                             .map(|line| line.trim().trim_start_matches('#').trim())
                             .collect();
+                        let (prov, mdl) = crate::routes::agents::resolve_effective_model(
+                            &a.manifest.model.provider,
+                            &a.manifest.model.model,
+                            dm,
+                        );
                         serde_json::json!({
                             "role": role,
                             "name": resolved_agent_name,
                             "description": resolved_agent_desc,
                             "coordinator": a.coordinator,
-                            "provider": if a.manifest.model.provider == "default" { &dm.provider } else { &a.manifest.model.provider },
-                            "model": if a.manifest.model.model == "default" { &dm.model } else { &a.manifest.model.model },
+                            "provider": prov,
+                            "model": mdl,
                             "steps": steps,
                             // manifest values; per-agent edit endpoints target AgentRegistry/agent.toml, not HAND.toml, so these remain an honest restore-default target.
                             "system_prompt": a.manifest.model.system_prompt,

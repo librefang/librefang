@@ -83,7 +83,11 @@ pub fn slot_label(slot: &MoaSlot) -> String {
 /// Credentials resolve from the slot's `api_key_env` override, then the
 /// config's `provider_api_keys` mapping, then the `{PROVIDER}_API_KEY`
 /// convention. Returns `None` only if the factory rejects the config.
-pub fn resolve_slot_driver(slot: &MoaSlot, config: &KernelConfig) -> Option<Arc<dyn LlmDriver>> {
+pub fn resolve_slot_driver(
+    slot: &MoaSlot,
+    config: &KernelConfig,
+    catalog: Option<&ModelCatalog>,
+) -> Option<Arc<dyn LlmDriver>> {
     let api_key = if let Some(env_var) = slot.api_key_env.as_deref().filter(|s| !s.is_empty()) {
         std::env::var(env_var).ok()
     } else {
@@ -97,7 +101,20 @@ pub fn resolve_slot_driver(slot: &MoaSlot, config: &KernelConfig) -> Option<Arc<
         base_url: slot
             .base_url
             .clone()
-            .or_else(|| config.provider_urls.get(&slot.provider).cloned()),
+            .or_else(|| config.provider_urls.get(&slot.provider).cloned())
+            // Custom providers registered via the dashboard carry their base_url
+            // in the model catalog, not in `[provider_urls]` (which is the
+            // boot-time snapshot). Mirror the kernel's `lookup_provider_url`
+            // fallback so a MoA slot pointing at a runtime-added provider (e.g.
+            // a self-hosted OpenAI-compatible endpoint) resolves the same way a
+            // directly-configured agent model does — otherwise `create_driver`
+            // rejects the slot for lack of a base_url.
+            .or_else(|| {
+                catalog
+                    .and_then(|c| c.get_provider(&slot.provider))
+                    .map(|p| p.base_url.clone())
+                    .filter(|u| !u.is_empty())
+            }),
         proxy_url: config.provider_proxy_urls.get(&slot.provider).cloned(),
         request_timeout_secs: config
             .provider_request_timeout_secs

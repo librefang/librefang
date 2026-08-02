@@ -1018,18 +1018,11 @@ pub async fn get_agent(
             dm_override.as_ref(),
         )
     };
-    let resolved_provider =
-        if entry.manifest.model.provider.is_empty() || entry.manifest.model.provider == "default" {
-            dm.provider.as_str()
-        } else {
-            entry.manifest.model.provider.as_str()
-        };
-    let resolved_model =
-        if entry.manifest.model.model.is_empty() || entry.manifest.model.model == "default" {
-            dm.model.as_str()
-        } else {
-            entry.manifest.model.model.as_str()
-        };
+    let (resolved_provider, resolved_model) = resolve_effective_model(
+        &entry.manifest.model.provider,
+        &entry.manifest.model.model,
+        &dm,
+    );
 
     (
         StatusCode::OK,

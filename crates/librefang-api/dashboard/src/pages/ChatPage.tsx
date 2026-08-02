@@ -12,6 +12,7 @@ import { ApiError, clearAgentHistory } from "../lib/http/client";
 import { useFullConfig } from "../lib/queries/config";
 import { useMediaProviders } from "../lib/queries/media";
 import { useModels } from "../lib/queries/models";
+import { useMoaPresets } from "../lib/queries/moa";
 import { usePendingApprovals } from "../lib/queries/approvals";
 import { agentQueries, useAgents, useAgentSessions } from "../lib/queries/agents";
 import { useSessionStream } from "../lib/queries/sessions";
@@ -2387,6 +2388,11 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
       staleTime: 5 * 60 * 1000,
     },
   );
+  // MoA is a synthetic provider (absent from the model catalog): selecting it
+  // routes the turn through a named preset. Presets load on popover open so the
+  // picker can offer a "moa" provider row alongside real catalog providers.
+  const moaPresetsQuery = useMoaPresets({ enabled: modelOpen });
+  const moaPresets = useMemo(() => moaPresetsQuery.data?.presets ?? [], [moaPresetsQuery.data?.presets]);
 
   // Clear optimistic model once the real modelName catches up
   useEffect(() => {
@@ -2432,10 +2438,15 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     for (const m of visibleModels) {
       map.set(m.provider, (map.get(m.provider) ?? 0) + 1);
     }
-    return Array.from(map.entries())
-      .map(([id, count]) => ({ id, count }))
-      .sort((a, b) => a.id.localeCompare(b.id));
-  }, [visibleModels]);
+    const list = Array.from(map.entries())
+      .map(([id, count]) => ({ id, count }));
+    // MoA is not a catalog provider — surface it as a synthetic row when presets
+    // exist so the picker can route a turn through a named MoA preset.
+    if (moaPresets.length > 0) {
+      list.push({ id: "moa", count: moaPresets.length });
+    }
+    return list.sort((a, b) => a.id.localeCompare(b.id));
+  }, [visibleModels, moaPresets]);
 
   // Models filtered by selected provider, then by search
   const filteredModels = useMemo(() => {
@@ -2456,6 +2467,13 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     const q = modelSearch.toLowerCase();
     return providers.filter(p => p.id.toLowerCase().includes(q));
   }, [providers, modelSearch]);
+
+  // MoA presets filtered by the shared search box.
+  const filteredMoaPresets = useMemo(() => {
+    if (!modelSearch) return moaPresets;
+    const q = modelSearch.toLowerCase();
+    return moaPresets.filter(p => p.name.toLowerCase().includes(q));
+  }, [moaPresets, modelSearch]);
 
   async function handleSelectModel(model: ModelItem) {
     const prev = optimisticModel ?? modelName ?? null;
@@ -2613,8 +2631,41 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                   );
                 })()}
 
+                {/* MoA preset view — "moa" is a synthetic provider selected by preset name */}
+                {!modelFetchError && selectedProvider === "moa" && (
+                  <>
+                    {moaPresetsQuery.isLoading && (
+                      <div className="flex items-center gap-2 px-2.5 py-2 text-xs text-text-dim">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        {t("chat.loading_models")}
+                      </div>
+                    )}
+                    {!moaPresetsQuery.isLoading && filteredMoaPresets.length === 0 && (
+                      <p className="px-2.5 py-2 text-xs text-text-dim">{t("chat.no_models_found")}</p>
+                    )}
+                    {!moaPresetsQuery.isLoading && filteredMoaPresets.map(preset => {
+                      const isActive = modelProvider === "moa" && preset.name === (optimisticModel ?? modelName);
+                      return (
+                        <div
+                          key={`moa/${preset.name}`}
+                          onClick={() => { if (!isActive) handleSelectModel({ id: preset.name, provider: "moa", display_name: preset.name }); }}
+                          className={`flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isActive ? "bg-brand/10 text-brand" : "hover:bg-surface-hover text-text-dim"}`}
+                        >
+                          {isActive && patchPending
+                            ? <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                            : isActive && <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
+                          }
+                          <span className="text-xs font-medium truncate">
+                            {preset.name}{preset.is_default ? ` (${t("chat.default_label", { defaultValue: "default" })})` : ""}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
+
                 {/* Model list view (filtered by selected provider) */}
-                {!modelLoading && !modelFetchError && selectedProvider && (
+                {!modelLoading && !modelFetchError && selectedProvider && selectedProvider !== "moa" && (
                   <>
                     {filteredModels.length === 0 && (
                       <p className="px-2.5 py-2 text-xs text-text-dim">{t("chat.no_models_found")}</p>

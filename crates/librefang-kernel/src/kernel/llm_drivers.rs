@@ -601,14 +601,14 @@ impl LibreFangKernel {
             .into());
         }
 
-        let aggregator_driver = resolve_slot_driver(&preset.aggregator, cfg).ok_or_else(|| {
-            LibreFangError::Config(format!(
-                "MoA aggregator driver init failed for {}/{}",
-                preset.aggregator.provider, preset.aggregator.model
-            ))
-        })?;
-
         let catalog = self.llm.model_catalog.load();
+        let aggregator_driver = resolve_slot_driver(&preset.aggregator, cfg, Some(&catalog))
+            .ok_or_else(|| {
+                LibreFangError::Config(format!(
+                    "MoA aggregator driver init failed for {}/{}",
+                    preset.aggregator.provider, preset.aggregator.model
+                ))
+            })?;
         // Kernel-owned progress broadcast: the driver emits fan-out events on a
         // cache-MISS turn; the agent loop subscribes (via `progress_receiver`)
         // and relays them as `LoopPhase` updates for the dashboard / TUI.

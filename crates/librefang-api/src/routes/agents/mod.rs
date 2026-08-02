@@ -269,6 +269,33 @@ const DEFAULT_AGENT_LIST_LIMIT: usize = 500;
 /// (audit: agent-list-limit-none-unbounded).
 const MAX_AGENT_LIST_LIMIT: usize = 500;
 
+/// Resolve an agent's effective `(provider, model)` for read-back, applying
+/// the global default only where the manifest defers to it.
+///
+/// The provider falls back to the default when it is empty or `"default"`.
+/// The model falls back to the default model **only when the provider also
+/// defers** — a concrete provider's `"default"` model is legitimate. MoA's
+/// default preset is literally named `"default"`, so `moa/default` must
+/// survive read-back instead of being clobbered with the global default model.
+pub(crate) fn resolve_effective_model<'a>(
+    provider: &'a str,
+    model: &'a str,
+    dm: &'a librefang_types::config::DefaultModelConfig,
+) -> (&'a str, &'a str) {
+    let provider_is_default = provider.is_empty() || provider == "default";
+    let eff_provider = if provider_is_default {
+        dm.provider.as_str()
+    } else {
+        provider
+    };
+    let eff_model = if provider_is_default && (model.is_empty() || model == "default") {
+        dm.model.as_str()
+    } else {
+        model
+    };
+    (eff_provider, eff_model)
+}
+
 /// Enrich an `AgentEntry` into a JSON value with catalog data.
 pub(crate) fn enrich_agent_json(
     e: &librefang_types::agent::AgentEntry,
@@ -276,17 +303,8 @@ pub(crate) fn enrich_agent_json(
     catalog: Option<&librefang_kernel::model_catalog::ModelCatalog>,
     bulk_stats: Option<&std::collections::HashMap<String, (u64, f64)>>,
 ) -> serde_json::Value {
-    let provider = if e.manifest.model.provider.is_empty() || e.manifest.model.provider == "default"
-    {
-        dm.provider.as_str()
-    } else {
-        e.manifest.model.provider.as_str()
-    };
-    let model = if e.manifest.model.model.is_empty() || e.manifest.model.model == "default" {
-        dm.model.as_str()
-    } else {
-        e.manifest.model.model.as_str()
-    };
+    let (provider, model) =
+        resolve_effective_model(&e.manifest.model.provider, &e.manifest.model.model, dm);
 
     let (tier, auth_status, supports_thinking) = catalog
         .map(|cat| {
@@ -848,6 +866,57 @@ mod tests {
         // Const sanity in a runtime form so clippy doesn't fold it
         // out: zero cap would silently empty the list.
         assert!(effective_agent_list_limit(Some(10)) >= 10.min(MAX_AGENT_LIST_LIMIT));
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_effective_model — MoA `moa/default` round-trip regression
+    // -----------------------------------------------------------------------
+
+    fn dm(provider: &str, model: &str) -> librefang_types::config::DefaultModelConfig {
+        librefang_types::config::DefaultModelConfig {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolve_effective_model_preserves_concrete_provider_default_model() {
+        // MoA's default preset is literally named "default". An agent pinned to
+        // `moa/default` must read back as `moa/default`, NOT be clobbered with
+        // the global default model — otherwise the dashboard silently rewrites
+        // the agent's model on every save round-trip.
+        let global = dm("anthropic", "claude-opus-4.8");
+        assert_eq!(
+            resolve_effective_model("moa", "default", &global),
+            ("moa", "default"),
+            "concrete provider's `default` model must survive read-back"
+        );
+        // Same for any concrete provider with an explicit model.
+        assert_eq!(
+            resolve_effective_model("openai", "gpt-4o", &global),
+            ("openai", "gpt-4o")
+        );
+    }
+
+    #[test]
+    fn resolve_effective_model_substitutes_when_provider_defers() {
+        let global = dm("anthropic", "claude-opus-4.8");
+        // Empty provider + empty model → both fall back to the global default.
+        assert_eq!(
+            resolve_effective_model("", "", &global),
+            ("anthropic", "claude-opus-4.8")
+        );
+        // "default" provider + "default" model → both fall back.
+        assert_eq!(
+            resolve_effective_model("default", "default", &global),
+            ("anthropic", "claude-opus-4.8")
+        );
+        // "default" provider + concrete model → provider falls back, model kept.
+        assert_eq!(
+            resolve_effective_model("default", "gpt-4o", &global),
+            ("anthropic", "gpt-4o")
+        );
     }
 
     // -----------------------------------------------------------------------

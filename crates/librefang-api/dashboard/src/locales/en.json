@@ -2672,6 +2672,7 @@
     "search_models": "Search models...",
     "loading_models": "Loading…",
     "no_models_found": "No models found.",
+    "default_label": "default",
     "unable_to_load_models": "Unable to load models",
     "model_update_failed": "Failed to update model. Please try again.",
     "retry": "Retry",

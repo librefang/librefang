@@ -164,7 +164,8 @@ impl MoaDriver {
         let advisors: Vec<(MoaSlot, Arc<dyn LlmDriver>)> = advisor_slots
             .iter()
             .filter_map(|slot| {
-                resolve_slot_driver(slot, &self.config).map(|driver| (slot.clone(), driver))
+                resolve_slot_driver(slot, &self.config, self.catalog.as_ref())
+                    .map(|driver| (slot.clone(), driver))
             })
             .collect();
 
