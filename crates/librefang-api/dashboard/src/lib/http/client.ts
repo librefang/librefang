@@ -76,6 +76,8 @@ export {
   // models
   listModels,
   getModelOverrides,
+  // moa
+  getMoaPresets,
   // providers
   listProviders,
   // credential pools (#4965)
@@ -275,6 +277,10 @@ export {
   removeCustomModel,
   updateModelOverrides,
   deleteModelOverrides,
+  // moa
+  putMoaPreset,
+  deleteMoaPreset,
+  putMoaConfig,
   // providers
   testProvider,
   setProviderKey,
@@ -387,6 +393,10 @@ export type {
   AgentKvPair,
   AgentKvResponse,
   ModelOverrides,
+  MoaSlot,
+  MoaPreset,
+  MoaPresetEntry,
+  MoaPresetsResponse,
   MediaImageResult,
   MediaMusicResult,
   MediaProvider,

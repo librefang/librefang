@@ -95,6 +95,11 @@ export const modelKeys = {
     [...modelKeys.all, "overrides", modelKey] as const,
 };
 
+export const moaKeys = {
+  all: ["moa"] as const,
+  presets: () => [...moaKeys.all, "presets"] as const,
+};
+
 export const providerKeys = {
   all: ["providers"] as const,
   lists: () => [...providerKeys.all, "list"] as const,

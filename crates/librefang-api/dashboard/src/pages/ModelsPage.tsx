@@ -19,6 +19,7 @@ import {
   Brain, Tag, Settings,
 } from "lucide-react";
 import { modelKey } from "../lib/hiddenModels";
+import { MoaDrawer } from "../components/moa/MoaDrawer";
 
 // ── Helpers ───────────────────────────────────────────────────────
 
@@ -412,6 +413,7 @@ export function ModelsPage() {
   const pruneHiddenKeys = useUIStore((s) => s.pruneHiddenKeys);
   const [settingsModel, setSettingsModel] = useState<ModelItem | null>(null);
   const [detailModel, setDetailModel] = useState<ModelItem | null>(null);
+  const [showMoa, setShowMoa] = useState(false);
 
   const [form, dispatchForm] = useReducer(addFormReducer, addFormInitial);
 
@@ -560,6 +562,10 @@ export function ModelsPage() {
         actions={
           <div className="flex items-center gap-2">
             {allModels.length > 0 && <Badge variant="brand">{totalAvailable} / {allModels.length} {t("models.available")}</Badge>}
+            <Button variant="secondary" onClick={() => setShowMoa(true)} title="MoA Configuration">
+              <Brain className="w-4 h-4" />
+              <span>MoA</span>
+            </Button>
             <Button variant="primary" onClick={() => setShowAdd(true)} title={t("models.add_model") + " (n)"}>
               <Plus className="w-4 h-4" />
               <span>{t("models.add_model")}</span>
@@ -767,6 +773,8 @@ export function ModelsPage() {
           onError={(msg) => addToast(msg || t("models.overrides_error"), "error")}
         />
       )}
+
+      <MoaDrawer isOpen={showMoa} onClose={() => setShowMoa(false)} />
     </div>
   );
 }

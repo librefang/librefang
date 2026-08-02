@@ -1813,6 +1813,56 @@ export async function deleteModelOverrides(modelKey: string): Promise<ApiActionR
   return del<ApiActionResponse>(`/api/models/overrides/${encodeURIComponent(modelKey)}`);
 }
 
+// ── MoA configuration ──────────────────────────────────────────
+
+export interface MoaSlot {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  api_key_env?: string | null;
+  base_url?: string | null;
+}
+
+export interface MoaPreset {
+  enabled: boolean;
+  reference_models: MoaSlot[];
+  aggregator: MoaSlot;
+  reference_temperature?: number | null;
+  aggregator_temperature?: number | null;
+  reference_timeout_secs?: number | null;
+  degraded_reference_policy: "loud" | "silent";
+  reference_max_tokens?: number | null;
+  fanout: "user_turn" | "always" | { every_n: { n: number } };
+}
+
+export interface MoaPresetEntry {
+  name: string;
+  is_default: boolean;
+  enabled: boolean;
+  preset: MoaPreset;
+}
+
+export interface MoaPresetsResponse {
+  default_preset: string;
+  presets: MoaPresetEntry[];
+}
+
+export async function getMoaPresets(): Promise<MoaPresetsResponse> {
+  return get<MoaPresetsResponse>("/api/moa/presets");
+}
+
+export async function putMoaPreset(name: string, preset: MoaPreset): Promise<{ status: string; name: string }> {
+  return put<{ status: string; name: string }>(`/api/moa/presets/${encodeURIComponent(name)}`, preset);
+}
+
+export async function deleteMoaPreset(name: string): Promise<{ status: string; deleted: string }> {
+  return del<{ status: string; deleted: string }>(`/api/moa/presets/${encodeURIComponent(name)}`);
+}
+
+export async function putMoaConfig(config: { default_preset?: string; privacy_filter?: string; save_traces?: boolean }): Promise<{ status: string }> {
+  return put<{ status: string }>("/api/moa", config);
+}
+
 export async function setProviderKey(providerId: string, key: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/key`, { key });
 }

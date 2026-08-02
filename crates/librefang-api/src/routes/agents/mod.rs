@@ -300,10 +300,15 @@ pub(crate) fn enrich_agent_json(
             let thinking = model_entry
                 .map(|m| cat.effective_capabilities(m).supports_thinking)
                 .unwrap_or(false);
-            let auth = cat
-                .get_provider(provider)
-                .map(|p| p.auth_status.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
+            // MoA is a virtual provider — it delegates to preset slots, each
+            // carrying its own provider credentials. No standalone key needed.
+            let auth = if provider == "moa" {
+                "not_required".to_string()
+            } else {
+                cat.get_provider(provider)
+                    .map(|p| p.auth_status.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            };
             (tier, auth, thinking)
         })
         .unwrap_or(("unknown".to_string(), "unknown".to_string(), false));

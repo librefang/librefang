@@ -48,6 +48,7 @@ import { useAgentKvMemory } from "../lib/queries/memory";
 // the panel and the SchedulerPage (when both mounted) share the same cache.
 import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
+import { useMoaPresets } from "../lib/queries/moa";
 import { useSkills } from "../lib/queries/skills";
 import { useMcpServers } from "../lib/queries/mcp";
 import { AgentManifestForm } from "../components/AgentManifestForm";
@@ -682,10 +683,12 @@ export function AgentsPage() {
   );
   const sessionDetailQuery = useSessionDetails(latestSessionForAgent ?? "");
 
+  const isMoaProvider = modelDraft.provider === "moa";
   const modelsQuery = useModels(
     { provider: modelDraft.provider },
-    { enabled: !!modelDraft.provider.trim() },
+    { enabled: !!modelDraft.provider.trim() && !isMoaProvider },
   );
+  const moaPresetsQuery = useMoaPresets({ enabled: isMoaProvider });
 
   // Separate models query for the create-form's chosen provider. We don't
   // reuse modelsQuery because that one is gated on the inline-edit widget's
@@ -861,12 +864,13 @@ export function AgentsPage() {
   useEffect(() => {
     if (!editingModel) return;
     if (!modelDraft.provider.trim()) return;
+    if (isMoaProvider) return; // MoA uses preset names, not catalog models
     if (modelsQuery.isLoading || modelDraft.model.trim()) return;
     if (visibleModels.length === 1) {
       const only = visibleModels[0].id;
       setModelDraft(d => (d.model ? d : { ...d, model: only }));
     }
-  }, [editingModel, modelDraft.provider, modelDraft.model, modelsQuery.isLoading, visibleModels]);
+  }, [editingModel, modelDraft.provider, modelDraft.model, modelsQuery.isLoading, visibleModels, isMoaProvider]);
 
   const agents = useMemo(() => agentsQuery.data?.agents ?? [], [agentsQuery.data?.agents]);
   const visibleAgents = useMemo(
@@ -2589,21 +2593,27 @@ export function AgentsPage() {
                             value={modelDraft.model}
                             onChange={e => setModelDraft(d => ({ ...d, model: e.target.value }))}
                             className="w-44 px-2 py-1 rounded-md border border-border-subtle bg-surface text-sm font-mono outline-none focus:border-brand text-right"
-                            disabled={modelsQuery.isLoading || !modelDraft.provider.trim()}
+                            disabled={(isMoaProvider ? moaPresetsQuery.isLoading : modelsQuery.isLoading) || !modelDraft.provider.trim()}
                             autoComplete="off"
                             spellCheck={false}
                             placeholder={
                               !modelDraft.provider.trim()
                                 ? t("agents.select_provider_first", { defaultValue: "Select provider first" })
-                                : modelsQuery.isLoading
-                                  ? t("common.loading", { defaultValue: "Loading..." })
-                                  : t("agents.form.model_id_placeholder", { defaultValue: "e.g. gpt-4o" })
+                                : isMoaProvider
+                                  ? "preset name, e.g. default"
+                                  : modelsQuery.isLoading
+                                    ? t("common.loading", { defaultValue: "Loading..." })
+                                    : t("agents.form.model_id_placeholder", { defaultValue: "e.g. gpt-4o" })
                             }
                           />
                           <datalist id="agent-detail-model-options">
-                            {visibleModels.map(m => (
-                              <option key={m.id} value={m.id}>{m.display_name || m.id}</option>
-                            ))}
+                            {isMoaProvider
+                              ? (moaPresetsQuery.data?.presets ?? []).map(p => (
+                                  <option key={p.name} value={p.name}>{p.name}{p.is_default ? " (default)" : ""}</option>
+                                ))
+                              : visibleModels.map(m => (
+                                  <option key={m.id} value={m.id}>{m.display_name || m.id}</option>
+                                ))}
                           </datalist>
                         </DetailRow>
                         <DetailRow label={t("agents.max_tokens")}>
