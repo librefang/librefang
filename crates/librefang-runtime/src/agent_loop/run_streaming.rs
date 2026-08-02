@@ -148,7 +148,8 @@ async fn run_agent_loop_streaming_inner(
 
     // Mixture-of-Agents: relay advisor fan-out progress into the phase callback
     // so the dashboard/TUI can render it. No-op for non-MoA drivers. The handle
-    // is held for the turn's lifetime and aborted on drop.
+    // is held for the turn's lifetime; the spawned task self-terminates once
+    // the progress channel closes (rx.recv() returns RecvError::Closed).
     let _moa_relay = on_phase
         .and_then(|cb| crate::moa::spawn_moa_progress_relay(&driver, std::sync::Arc::clone(cb)));
 

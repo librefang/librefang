@@ -90,17 +90,16 @@ pub async fn put_moa(
         }
     };
 
-    if let Some(problems) = moa_validation_problems(&state, &new_moa) {
-        return validation_error(problems);
-    }
-
-    match persist_moa(&state, &new_moa).await {
-        Ok(reload) => (
+    // `persist_moa` clones `new_moa` into the closure, runs the strict
+    // `validate_moa` under the write lock, and serialises/persists/reloads.
+    let owned = new_moa;
+    match persist_moa(&state, move |_| Ok(owned)).await {
+        Ok((reload, persisted)) => (
             StatusCode::OK,
             Json(serde_json::json!({
                 "status": "ok",
                 "reload": reload,
-                "moa": serde_json::to_value(&new_moa).unwrap_or_default(),
+                "moa": serde_json::to_value(&persisted).unwrap_or_default(),
             })),
         )
             .into_response(),
@@ -163,7 +162,8 @@ pub async fn put_preset(
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
-    if name.trim().is_empty() {
+    let name = name.trim().to_string();
+    if name.is_empty() {
         return ApiErrorResponse::bad_request("preset name must not be empty").into_response();
     }
     let preset: MoaPreset = match serde_json::from_value(body) {
@@ -174,17 +174,19 @@ pub async fn put_preset(
         }
     };
 
-    // Merge into the raw on-disk section so unrelated presets are preserved
-    // and the implicit built-in default stays implicit.
-    let mut new_moa = state.kernel.config_ref().moa.clone();
-    new_moa.presets.insert(name.clone(), preset);
-
-    if let Some(problems) = moa_validation_problems(&state, &new_moa) {
-        return validation_error(problems);
-    }
-
-    match persist_moa(&state, &new_moa).await {
-        Ok(reload) => (
+    // Merge the preset into the live `[moa]` section under the write lock so
+    // unrelated presets are preserved and the implicit built-in default stays
+    // implicit. Validation (`validate_moa`) runs inside `persist_moa` against
+    // the locked snapshot — no read-before-lock window.
+    let preset_name = name.clone();
+    match persist_moa(&state, move |current| {
+        let mut next = current.clone();
+        next.presets.insert(preset_name.clone(), preset.clone());
+        Ok(next)
+    })
+    .await
+    {
+        Ok((reload, _)) => (
             StatusCode::OK,
             Json(serde_json::json!({
                 "status": "ok",
@@ -217,34 +219,40 @@ pub async fn delete_preset(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Response {
-    let mut new_moa = state.kernel.config_ref().moa.clone();
-
-    if new_moa.presets.remove(&name).is_none() {
-        return ApiErrorResponse::not_found(format!("preset '{name}' not found")).into_response();
-    }
-
-    if new_moa.presets.is_empty() {
-        return ApiErrorResponse::conflict(
-            "cannot delete the last MoA preset; at least one must remain",
-        )
-        .into_response();
-    }
-
-    // Reassign the default pointer if we just deleted it.
-    if new_moa.default_preset == name {
-        if let Some(first) = new_moa.presets.keys().next() {
-            new_moa.default_preset = first.clone();
+    // Compute the deletion under the write lock so the 404 (not found) and
+    // 409 (cannot delete the last preset) guards observe the same snapshot
+    // that gets persisted — no read-before-lock window where a concurrent
+    // delete could empty the preset set between the check and the write.
+    let delete_name = name.clone();
+    match persist_moa(&state, move |current| {
+        let mut next = current.clone();
+        if next.presets.remove(&delete_name).is_none() {
+            return Err(PersistMoaError::NotFound(format!(
+                "preset '{delete_name}' not found"
+            )));
         }
-    }
-
-    match persist_moa(&state, &new_moa).await {
-        Ok(reload) => (
+        if next.presets.is_empty() {
+            return Err(PersistMoaError::Conflict(
+                "cannot delete the last MoA preset; at least one must remain".to_string(),
+            ));
+        }
+        // Reassign the default pointer if we just deleted it.
+        if next.default_preset == delete_name {
+            if let Some(first) = next.presets.keys().next() {
+                next.default_preset = first.clone();
+            }
+        }
+        Ok(next)
+    })
+    .await
+    {
+        Ok((reload, persisted)) => (
             StatusCode::OK,
             Json(serde_json::json!({
                 "status": "ok",
                 "reload": reload,
                 "deleted": name,
-                "default_preset": new_moa.default_preset,
+                "default_preset": persisted.default_preset,
             })),
         )
             .into_response(),
@@ -252,11 +260,11 @@ pub async fn delete_preset(
     }
 }
 
-/// Run the strict MoA validator against a candidate config carrying `new_moa`.
-///
-/// Returns `None` when valid, or the problem list. The validator runs against
-/// a full `KernelConfig` clone (live snapshot + the proposed `[moa]`) so the
-/// recursion guard and slot checks see exactly what would be persisted.
+/// Run the strict `validate_moa` against the candidate `[moa]` section in the
+/// context of the live config snapshot. Returns `None` when valid, or the
+/// problem list. The validator sees a full `KernelConfig` clone (live
+/// snapshot + the proposed `[moa]`) so the recursion guard and slot checks
+/// observe exactly what would be persisted.
 fn moa_validation_problems(state: &Arc<AppState>, new_moa: &MoaConfig) -> Option<Vec<String>> {
     let mut candidate = (*state.kernel.config_snapshot()).clone();
     candidate.moa = new_moa.clone();
@@ -283,27 +291,58 @@ fn validation_error(problems: Vec<String>) -> Response {
 
 /// Failure modes for [`persist_moa`], mirroring `PersistBudgetError`.
 ///
-/// `BadRequest` is a validator rejection the operator can fix; `Internal`
-/// covers genuine I/O / kernel failures whose detail is scrubbed from the
-/// response (audit: rusqlite-errors-leak) and kept in the log only.
+/// `Validation` is a strict `validate_moa` rejection carrying the full problem
+/// list (mapped to the structured `validation_error` response so the editor can
+/// point at each offending field); `NotFound` / `Conflict` are the preset
+/// mutation guards (`delete_preset`) that depend on the locked snapshot;
+/// `BadRequest` is a reload-time validator rejection the operator can fix;
+/// `Internal` covers genuine I/O / kernel failures whose detail is scrubbed
+/// from the response (audit: rusqlite-errors-leak) and kept in the log only.
 enum PersistMoaError {
+    Validation(Vec<String>),
+    NotFound(String),
+    Conflict(String),
     BadRequest(String),
     Internal(String),
 }
 
-/// Replace the `[moa]` table in `config.toml` with the serialised form of
-/// `new_moa`, preserving comments and unrelated sections, then call
-/// `reload_config()` so driver resolution picks up the change.
+/// Replace the `[moa]` table in `config.toml` with a serialised form derived
+/// from the current in-memory `[moa]` section via `compute`, preserving
+/// comments and unrelated sections, then call `reload_config()` so driver
+/// resolution picks up the change.
 ///
-/// Mirrors the `persist_budget` pipeline (lock → read → `toml_edit` →
-/// validate → atomic write → reload). A read failure on an existing file
-/// aborts rather than falling back to empty, which would silently drop every
-/// other section on the next write (#3368).
-async fn persist_moa(
+/// `compute` runs UNDER `config_write_lock` against the live snapshot, so the
+/// read-modify-write is atomic: concurrent preset writes cannot overwrite
+/// each other, and guards like "preset not found" / "cannot delete the last
+/// preset" observe the same snapshot the rest of the pipeline persists (no
+/// TOCTOU window between a pre-lock read and the write). `compute` returns
+/// `Err` to short-circuit with a `NotFound` / `Conflict` before any disk I/O.
+/// The strict `validate_moa` runs here, under the lock, so the candidate is
+/// validated against exactly the snapshot it will replace. Mirrors the
+/// `persist_budget` pipeline (lock → read → `toml_edit` → validate → atomic
+/// write → reload). A read failure on an existing file aborts rather than
+/// falling back to empty, which would silently drop every other section on
+/// the next write (#3368).
+async fn persist_moa<F>(
     state: &Arc<AppState>,
-    new_moa: &MoaConfig,
-) -> Result<String, PersistMoaError> {
+    compute: F,
+) -> Result<(String, MoaConfig), PersistMoaError>
+where
+    F: FnOnce(&MoaConfig) -> Result<MoaConfig, PersistMoaError> + Send,
+{
     let _guard = state.config_write_lock.lock().await;
+
+    // Read the current `[moa]` section under the write lock so the closure
+    // and the validator see the same snapshot the rest of the pipeline
+    // persists — no read-before-lock window.
+    let current_moa = state.kernel.config_ref().moa.clone();
+    let new_moa = compute(&current_moa)?;
+
+    // Strict structural validation under the lock: the recursion guard and
+    // slot checks observe exactly what would be persisted.
+    if let Some(problems) = moa_validation_problems(state, &new_moa) {
+        return Err(PersistMoaError::Validation(problems));
+    }
 
     let config_path = state.kernel.home_dir().join("config.toml");
     if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml")
@@ -335,7 +374,7 @@ async fn persist_moa(
     // table. `toml_edit::ser::to_document` handles the nested `presets` map
     // sitting alongside scalar fields without the `ValueAfterTable` reorder
     // hazard the strict `toml` crate rejects.
-    let serialised = toml_edit::ser::to_document(new_moa)
+    let serialised = toml_edit::ser::to_document(&new_moa)
         .map_err(|e| PersistMoaError::Internal(format!("serialize moa: {e}")))?;
     doc.insert("moa", toml_edit::Item::Table(serialised.as_table().clone()));
 
@@ -367,12 +406,15 @@ async fn persist_moa(
         }
     };
 
-    Ok(reload.to_string())
+    Ok((reload.to_string(), new_moa))
 }
 
 /// Map a [`PersistMoaError`] onto an HTTP response, scrubbing internal detail.
 fn persist_error_response(e: PersistMoaError) -> Response {
     match e {
+        PersistMoaError::Validation(problems) => validation_error(problems),
+        PersistMoaError::NotFound(m) => ApiErrorResponse::not_found(m).into_response(),
+        PersistMoaError::Conflict(m) => ApiErrorResponse::conflict(m).into_response(),
         PersistMoaError::BadRequest(m) => ApiErrorResponse::bad_request(m).into_response(),
         PersistMoaError::Internal(m) => {
             tracing::error!(error = %m, "MoA config persist failed");

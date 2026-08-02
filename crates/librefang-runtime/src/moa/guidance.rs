@@ -11,16 +11,12 @@
 //! compression or failover.
 
 use librefang_types::config::MoaDegradedPolicy;
-use librefang_types::message::{Message, MessageContent, Role};
+use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
 
 use super::fanout::AdvisorResult;
 
 /// Prefix that marks a guidance block's header line. Keep stable.
 pub const GUIDANCE_HEADER_PREFIX: &str = "[Mixture-of-Agents private reference guidance";
-
-/// Sentinel prefixes for advisor outcomes that did not produce advice.
-pub const FAILED_SENTINEL_PREFIX: &str = "[failed:";
-pub const SKIPPED_SENTINEL_PREFIX: &str = "[skipped:";
 
 /// Build the guidance block from advisor results.
 ///
@@ -45,7 +41,7 @@ pub fn build_guidance_block(
         };
     }
 
-    let ref_labels: Vec<String> = results.iter().map(|r| r.label.clone()).collect();
+    let ref_labels: Vec<&str> = successes.iter().map(|r| r.label.as_str()).collect();
     let mut block = String::new();
     block.push_str(&format!(
         "{GUIDANCE_HEADER_PREFIX} — preset \"{preset_name}\", aggregator \"{aggregator_label}\", references: {}]\n",
@@ -80,16 +76,26 @@ pub fn build_guidance_block(
 /// Attach a guidance block to the end of a message list (cache-stable).
 ///
 /// If the last message is a user turn with plain text, the block is
-/// string-appended to it; otherwise a new user message is pushed.
+/// string-appended to it; if it is multipart (`Blocks`), the block is appended
+/// as a new text content block; otherwise a new user message is pushed.
 pub fn attach_guidance(messages: &mut Vec<Message>, guidance: &str) {
     if let Some(last) = messages.last_mut() {
         if last.role == Role::User {
-            if let MessageContent::Text(text) = &mut last.content {
-                if !text.is_empty() {
-                    text.push_str("\n\n");
+            match &mut last.content {
+                MessageContent::Text(text) => {
+                    if !text.is_empty() {
+                        text.push_str("\n\n");
+                    }
+                    text.push_str(guidance);
+                    return;
                 }
-                text.push_str(guidance);
-                return;
+                MessageContent::Blocks(blocks) => {
+                    blocks.push(ContentBlock::Text {
+                        text: guidance.to_string(),
+                        provider_metadata: None,
+                    });
+                    return;
+                }
             }
         }
     }

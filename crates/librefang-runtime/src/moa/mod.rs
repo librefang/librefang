@@ -46,7 +46,7 @@ private guidance handed to the aggregator, not shown to the user.";
 /// driver is not a `MoaDriver` or has no progress channel.
 pub fn spawn_moa_progress_relay(
     driver: &std::sync::Arc<dyn librefang_llm_driver::LlmDriver>,
-    on_phase: std::sync::Arc<dyn Fn(crate::agent_loop::LoopPhase) + Send + Sync>,
+    on_phase: crate::agent_loop::PhaseCallback,
 ) -> Option<tokio::task::JoinHandle<()>> {
     use crate::agent_loop::LoopPhase;
     use crate::moa::progress::MoaProgressEvent;
@@ -89,9 +89,14 @@ pub fn spawn_moa_progress_relay(
                         ref_count,
                     });
                 }
-                // `Lagged` skips dropped events; `Closed` ends the relay.
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                Err(_) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        lagged = n,
+                        "MoA progress relay: consumer lagged, {n} event(s) dropped"
+                    );
+                    continue;
+                }
             }
         }
     }))

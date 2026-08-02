@@ -689,6 +689,18 @@ export function AgentsPage() {
     { enabled: !!modelDraft.provider.trim() && !isMoaProvider },
   );
   const moaPresetsQuery = useMoaPresets({ enabled: isMoaProvider });
+  // Model-input placeholder resolved up front (no nested ternary in JSX).
+  // MoA uses preset names; otherwise the catalog flow mirrors the create form.
+  let modelPlaceholder: string;
+  if (!modelDraft.provider.trim()) {
+    modelPlaceholder = t("agents.select_provider_first", { defaultValue: "Select provider first" });
+  } else if (isMoaProvider) {
+    modelPlaceholder = t("agents.form.moa_preset_placeholder", { defaultValue: "preset name, e.g. default" });
+  } else if (modelsQuery.isLoading) {
+    modelPlaceholder = t("common.loading", { defaultValue: "Loading..." });
+  } else {
+    modelPlaceholder = t("agents.form.model_id_placeholder", { defaultValue: "e.g. gpt-4o" });
+  }
 
   // Separate models query for the create-form's chosen provider. We don't
   // reuse modelsQuery because that one is gated on the inline-edit widget's
@@ -2596,20 +2608,12 @@ export function AgentsPage() {
                             disabled={(isMoaProvider ? moaPresetsQuery.isLoading : modelsQuery.isLoading) || !modelDraft.provider.trim()}
                             autoComplete="off"
                             spellCheck={false}
-                            placeholder={
-                              !modelDraft.provider.trim()
-                                ? t("agents.select_provider_first", { defaultValue: "Select provider first" })
-                                : isMoaProvider
-                                  ? "preset name, e.g. default"
-                                  : modelsQuery.isLoading
-                                    ? t("common.loading", { defaultValue: "Loading..." })
-                                    : t("agents.form.model_id_placeholder", { defaultValue: "e.g. gpt-4o" })
-                            }
+                            placeholder={modelPlaceholder}
                           />
                           <datalist id="agent-detail-model-options">
                             {isMoaProvider
                               ? (moaPresetsQuery.data?.presets ?? []).map(p => (
-                                  <option key={p.name} value={p.name}>{p.name}{p.is_default ? " (default)" : ""}</option>
+                                  <option key={p.name} value={p.name}>{p.name}{p.is_default ? ` (${t("chat.default_label", { defaultValue: "default" })})` : ""}</option>
                                 ))
                               : visibleModels.map(m => (
                                   <option key={m.id} value={m.id}>{m.display_name || m.id}</option>

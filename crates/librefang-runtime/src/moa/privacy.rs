@@ -76,11 +76,13 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
 
 /// Redact obvious secrets and PII from `text`.
 pub fn redact_pii(text: &str) -> String {
-    let mut result = text.to_string();
+    let mut result = std::borrow::Cow::Borrowed(text);
     for pattern in PATTERNS.iter() {
-        result = pattern.re.replace_all(&result, REDACTED).to_string();
+        if let std::borrow::Cow::Owned(replaced) = pattern.re.replace_all(&result, REDACTED) {
+            result = std::borrow::Cow::Owned(replaced);
+        }
     }
-    result
+    result.into_owned()
 }
 
 #[cfg(test)]

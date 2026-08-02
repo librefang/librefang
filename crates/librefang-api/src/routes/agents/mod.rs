@@ -273,8 +273,10 @@ const MAX_AGENT_LIST_LIMIT: usize = 500;
 /// the global default only where the manifest defers to it.
 ///
 /// The provider falls back to the default when it is empty or `"default"`.
-/// The model falls back to the default model **only when the provider also
-/// defers** — a concrete provider's `"default"` model is legitimate. MoA's
+/// The model falls back to the default model whenever it is empty — an
+/// empty model string is never a valid resolved model. A literal
+/// `"default"` model is only substituted when the provider *also* defers,
+/// since a concrete provider's `"default"` model is legitimate. MoA's
 /// default preset is literally named `"default"`, so `moa/default` must
 /// survive read-back instead of being clobbered with the global default model.
 pub(crate) fn resolve_effective_model<'a>(
@@ -288,7 +290,7 @@ pub(crate) fn resolve_effective_model<'a>(
     } else {
         provider
     };
-    let eff_model = if provider_is_default && (model.is_empty() || model == "default") {
+    let eff_model = if model.is_empty() || (provider_is_default && model == "default") {
         dm.model.as_str()
     } else {
         model
@@ -916,6 +918,26 @@ mod tests {
         assert_eq!(
             resolve_effective_model("default", "gpt-4o", &global),
             ("anthropic", "gpt-4o")
+        );
+    }
+
+    #[test]
+    fn resolve_effective_model_empty_model_falls_back_to_global_default() {
+        // A concrete provider with an EMPTY model string is never a valid
+        // resolved model — it must fall back to the global default model.
+        // (Previously this returned `("", "")`-equivalent: the empty model
+        // survived because the fallback only fired when the provider *also*
+        // deferred to default.)
+        let global = dm("anthropic", "claude-opus-4.8");
+        assert_eq!(
+            resolve_effective_model("openai", "", &global),
+            ("openai", "claude-opus-4.8"),
+            "concrete provider with empty model must fall back to global default model"
+        );
+        assert_eq!(
+            resolve_effective_model("moa", "", &global),
+            ("moa", "claude-opus-4.8"),
+            "moa provider with empty model must fall back to global default model"
         );
     }
 

@@ -465,6 +465,7 @@
       "name_placeholder": "e.g. my-agent",
       "module_placeholder": "e.g. default",
       "model_id_placeholder": "e.g. gpt-4o",
+      "moa_preset_placeholder": "preset name, e.g. default",
       "temperature_placeholder": "0.7",
       "max_tokens_placeholder": "4096",
       "api_key_env_placeholder": "OPENAI_API_KEY",
@@ -2934,6 +2935,8 @@
   },
   "models": {
     "section": "Infrastructure",
+    "moa": "MoA",
+    "moa_config": "MoA Configuration",
     "title": "Model Catalog",
     "subtitle": "Browse all available LLM models across providers.",
     "search_placeholder": "Search models...",

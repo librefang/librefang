@@ -88,14 +88,18 @@ pub fn resolve_trace_dir(configured: Option<&str>) -> PathBuf {
     if let Some(dir) = configured {
         return PathBuf::from(dir);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".librefang").join("moa-traces")
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".librefang").join("moa-traces")
 }
 
 /// Persist a trace record on a blocking thread. Best-effort.
 pub fn persist_trace(trace_dir: PathBuf, session_id: &str, record: MoaTraceRecord) {
     let file_stem = sanitize_session_id(session_id);
-    tokio::task::spawn_blocking(move || {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        warn!("MoA trace skipped: no active Tokio runtime");
+        return;
+    };
+    handle.spawn_blocking(move || {
         if let Err(e) = write_trace_line(&trace_dir, &file_stem, &record) {
             warn!(error = %e, "MoA trace persistence failed");
         }
@@ -103,7 +107,7 @@ pub fn persist_trace(trace_dir: PathBuf, session_id: &str, record: MoaTraceRecor
 }
 
 fn write_trace_line(
-    trace_dir: &PathBuf,
+    trace_dir: &std::path::Path,
     file_stem: &str,
     record: &MoaTraceRecord,
 ) -> std::io::Result<()> {

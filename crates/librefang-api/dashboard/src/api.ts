@@ -1846,9 +1846,26 @@ export interface MoaPresetsResponse {
   default_preset: string;
   presets: MoaPresetEntry[];
 }
+export type MoaPrivacyFilter = "off" | "display" | "full";
+
+/** Full `MoaConfig` as returned by `GET /api/moa`. `presets` is a name-keyed
+ *  map mirroring the backend `BTreeMap<String, MoaPreset>`. `trace_dir` is
+ *  optional server-side and is preserved across the GET-merge-PUT in
+ *  `putMoaConfig` so a partial patch never silently wipes it. */
+export interface MoaConfig {
+  default_preset: string;
+  save_traces: boolean;
+  privacy_filter: MoaPrivacyFilter;
+  trace_dir?: string | null;
+  presets: Record<string, MoaPreset>;
+}
 
 export async function getMoaPresets(): Promise<MoaPresetsResponse> {
   return get<MoaPresetsResponse>("/api/moa/presets");
+}
+
+export async function getMoaConfig(): Promise<MoaConfig> {
+  return get<MoaConfig>("/api/moa");
 }
 
 export async function putMoaPreset(name: string, preset: MoaPreset): Promise<{ status: string; name: string }> {
@@ -1859,8 +1876,24 @@ export async function deleteMoaPreset(name: string): Promise<{ status: string; d
   return del<{ status: string; deleted: string }>(`/api/moa/presets/${encodeURIComponent(name)}`);
 }
 
-export async function putMoaConfig(config: { default_preset?: string; privacy_filter?: string; save_traces?: boolean }): Promise<{ status: string }> {
-  return put<{ status: string }>("/api/moa", config);
+/** `PUT /api/moa` is a *full replacement*: the backend deserializes a
+ *  complete `MoaConfig` with `#[serde(default)]`, so a partial body lets
+ *  serde default-fill missing `presets` and silently wipes every preset.
+ *  To make a partial patch safe we first `GET` the canonical config, merge
+ *  the patch over it (explicitly preserving `presets` and `trace_dir`), and
+ *  PUT the resulting complete `MoaConfig`. Only the supplied fields move. */
+export async function putMoaConfig(
+  patch: { default_preset?: string; privacy_filter?: MoaPrivacyFilter; save_traces?: boolean },
+): Promise<{ status: string }> {
+  const current = await getMoaConfig();
+  const merged: MoaConfig = {
+    default_preset: patch.default_preset ?? current.default_preset,
+    save_traces: patch.save_traces ?? current.save_traces,
+    privacy_filter: patch.privacy_filter ?? current.privacy_filter,
+    trace_dir: current.trace_dir,
+    presets: current.presets,
+  };
+  return put<{ status: string }>("/api/moa", merged);
 }
 
 export async function setProviderKey(providerId: string, key: string): Promise<ApiActionResponse> {

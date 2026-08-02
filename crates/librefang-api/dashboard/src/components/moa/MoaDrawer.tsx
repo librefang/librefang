@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { useQuery } from "@tanstack/react-query";
 import { Plus, Trash2, Pencil, ArrowLeft, Loader2 } from "lucide-react";
-import type { MoaPreset, MoaSlot } from "../../api";
+import type { MoaPreset, MoaPrivacyFilter, MoaSlot } from "../../api";
+import { getMoaConfig } from "../../api";
 import { useMoaPresets } from "../../lib/queries/moa";
 import { usePutMoaPreset, useDeleteMoaPreset, usePutMoaConfig } from "../../lib/mutations/moa";
 import { useProviders } from "../../lib/queries/providers";
@@ -13,6 +16,18 @@ import { Button } from "../ui/Button";
 import { Badge } from "../ui/Badge";
 import { Select } from "../ui/Select";
 
+// Mirrors `useMoaPresets`'s read shape (see lib/queries/moa.ts): a react-query
+// hook that pulls the full normalized `MoaConfig` from `GET /api/moa`. Enabled
+// only while the drawer is open so an idle tab doesn't hold a subscription.
+function useMoaConfig(isOpen: boolean) {
+  return useQuery({
+    queryKey: ["moa", "config"] as const,
+    queryFn: getMoaConfig,
+    enabled: isOpen,
+    staleTime: 30_000,
+  });
+}
+
 // ── Types ────────────────────────────────────────────────────────
 
 interface MoaDrawerProps {
@@ -23,6 +38,9 @@ interface MoaDrawerProps {
 type FanoutMode = "user_turn" | "always" | "every_n";
 
 interface SlotForm {
+  // Stable client-only id for React keys; survives reorders so mid-list
+  // deletion doesn't re-fire `useModels` in `SlotEditor` (index keys did).
+  id: string;
   enabled: boolean;
   provider: string;
   model: string;
@@ -44,9 +62,8 @@ interface PresetForm {
   fanout_every_n: string;
 }
 
-// ── Helpers ──────────────────────────────────────────────────────
+const emptySlot = (): SlotForm => ({ id: crypto.randomUUID(), enabled: true, provider: "", model: "", api_key_env: "", base_url: "" });
 
-const emptySlot = (): SlotForm => ({ enabled: true, provider: "", model: "", api_key_env: "", base_url: "" });
 
 const emptyPresetForm = (): PresetForm => ({
   name: "",
@@ -64,6 +81,7 @@ const emptyPresetForm = (): PresetForm => ({
 
 function slotToForm(slot: MoaSlot): SlotForm {
   return {
+    id: crypto.randomUUID(),
     enabled: slot.enabled,
     provider: slot.provider,
     model: slot.model,
@@ -83,8 +101,9 @@ function formToSlot(f: SlotForm): MoaSlot {
 }
 
 function presetToForm(name: string, preset: MoaPreset): PresetForm {
-  const fanoutMode: FanoutMode =
-    preset.fanout === "user_turn" ? "user_turn" : preset.fanout === "always" ? "always" : "every_n";
+  let fanoutMode: FanoutMode = "every_n";
+  if (preset.fanout === "user_turn") fanoutMode = "user_turn";
+  else if (preset.fanout === "always") fanoutMode = "always";
   return {
     name,
     enabled: preset.enabled,
@@ -220,6 +239,7 @@ function SlotEditor({
 
 export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
   const addToast = useUIStore((s) => s.addToast);
+  const { t } = useTranslation();
   const presetsQuery = useMoaPresets();
   const providersQuery = useProviders();
   const putPreset = usePutMoaPreset();
@@ -230,6 +250,21 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
   const [view, setView] = useState<"list" | "editor">("list");
   const [form, setForm] = useState<PresetForm>(emptyPresetForm());
   const [editingName, setEditingName] = useState<string | null>(null);
+  // Global config (privacy_filter + save_traces) — hydrated from the server
+  // config endpoint. The presets list endpoint omits these fields, so the
+  // selects/checkbox would otherwise be dead. Local state is seeded from the
+  // query and edited optimistically; `handleConfigChange` PUTs via the safe
+  // getMoaConfig-backed `usePutMoaConfig`.
+  const configQuery = useMoaConfig(isOpen);
+  const [privacyFilter, setPrivacyFilter] = useState<MoaPrivacyFilter>("off");
+  const [saveTraces, setSaveTraces] = useState(false);
+
+  useEffect(() => {
+    if (configQuery.data) {
+      setPrivacyFilter(configQuery.data.privacy_filter);
+      setSaveTraces(configQuery.data.save_traces);
+    }
+  }, [configQuery.data]);
 
   // Reset to list view when drawer closes
   useEffect(() => {
@@ -267,6 +302,11 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
       addToast("Aggregator provider and model are required", "error");
       return;
     }
+    const completeRefs = form.reference_models.filter((s) => s.provider && s.model);
+    if (form.enabled && completeRefs.length === 0) {
+      addToast("At least one reference model with provider and model is required", "error");
+      return;
+    }
     const preset = formToPreset(form);
     putPreset.mutate(
       { name, preset },
@@ -280,14 +320,22 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
     );
   }, [form, putPreset, addToast]);
 
-  const handleDelete = useCallback((name: string) => {
+  // Two-step inline delete confirmation — mirrors AgentSchedulePanel's
+  // `pendingDelete` pattern: first click reveals confirm/cancel affordances,
+  // confirm fires the mutation.
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+
+  const confirmDelete = useCallback((name: string) => {
     deletePreset.mutate(name, {
-      onSuccess: () => addToast(`Preset "${name}" deleted`, "success"),
+      onSuccess: () => {
+        addToast(`Preset "${name}" deleted`, "success");
+        setPendingDelete(null);
+      },
       onError: (err) => addToast(`Delete failed: ${err.message}`, "error"),
     });
   }, [deletePreset, addToast]);
 
-  const handleConfigChange = useCallback((patch: { default_preset?: string; privacy_filter?: string; save_traces?: boolean }) => {
+  const handleConfigChange = useCallback((patch: { default_preset?: string; privacy_filter?: MoaPrivacyFilter; save_traces?: boolean }) => {
     putConfig.mutate(patch, {
       onError: (err) => addToast(`Config update failed: ${err.message}`, "error"),
     });
@@ -324,8 +372,12 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
                 />
                 <Select
                   label="Privacy Filter"
-                  value={presetsQuery.data ? "off" : "off"}
-                  onChange={(e) => handleConfigChange({ privacy_filter: e.target.value })}
+                  value={privacyFilter}
+                  onChange={(e) => {
+                    const next = e.target.value as MoaPrivacyFilter;
+                    setPrivacyFilter(next);
+                    handleConfigChange({ privacy_filter: next });
+                  }}
                   options={[
                     { value: "off", label: "Off" },
                     { value: "display", label: "Display" },
@@ -337,7 +389,11 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
                   <label className="flex items-center gap-2 text-sm cursor-pointer">
                     <input
                       type="checkbox"
-                      onChange={(e) => handleConfigChange({ save_traces: e.target.checked })}
+                      checked={saveTraces}
+                      onChange={(e) => {
+                        setSaveTraces(e.target.checked);
+                        handleConfigChange({ save_traces: e.target.checked });
+                      }}
                       className="rounded border-border-subtle"
                     />
                     <span className="text-text-secondary">Persist advisor traces to disk</span>
@@ -378,15 +434,34 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
                     >
                       <Pencil className="w-4 h-4" />
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDelete(entry.name)}
-                      disabled={deletePreset.isPending}
-                      className="p-1.5 rounded-lg text-text-dim hover:text-error hover:bg-error/5 transition-colors disabled:opacity-50"
-                      title="Delete"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                    {pendingDelete === entry.name ? (
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="danger"
+                          size="sm"
+                          onClick={() => confirmDelete(entry.name)}
+                          disabled={deletePreset.isPending}
+                        >
+                          {t("common.confirm", { defaultValue: "Confirm" })}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setPendingDelete(null)}
+                        >
+                          {t("common.cancel", { defaultValue: "Cancel" })}
+                        </Button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setPendingDelete(entry.name)}
+                        className="p-1.5 rounded-lg text-text-dim hover:text-error hover:bg-error/5 transition-colors"
+                        title="Delete"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}
@@ -459,7 +534,7 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
                 </div>
                 {form.reference_models.map((slot, i) => (
                   <SlotEditor
-                    key={i}
+                    key={slot.id}
                     label={`Advisor ${i + 1}`}
                     slot={slot}
                     providers={providerIds}

@@ -562,9 +562,9 @@ export function ModelsPage() {
         actions={
           <div className="flex items-center gap-2">
             {allModels.length > 0 && <Badge variant="brand">{totalAvailable} / {allModels.length} {t("models.available")}</Badge>}
-            <Button variant="secondary" onClick={() => setShowMoa(true)} title="MoA Configuration">
+            <Button variant="secondary" onClick={() => setShowMoa(true)} title={t("models.moa_config", { defaultValue: "MoA Configuration" })}>
               <Brain className="w-4 h-4" />
-              <span>MoA</span>
+              <span>{t("models.moa", { defaultValue: "MoA" })}</span>
             </Button>
             <Button variant="primary" onClick={() => setShowAdd(true)} title={t("models.add_model") + " (n)"}>
               <Plus className="w-4 h-4" />

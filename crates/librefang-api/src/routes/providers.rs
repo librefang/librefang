@@ -1140,17 +1140,18 @@ fn moa_provider_entry(state: &Arc<AppState>) -> Option<serde_json::Value> {
         .iter()
         .filter(|slot| slot.enabled)
         .count();
-    if advisors == 0 || preset.aggregator.model.trim().is_empty() {
+    let aggregator_model = preset.aggregator.model.trim();
+    if advisors == 0 || aggregator_model.is_empty() {
         return None;
     }
     let fanout = match preset.fanout {
         MoaFanout::UserTurn => "user-turn".to_string(),
         MoaFanout::Always => "always".to_string(),
-        MoaFanout::EveryN { n } => format!("every {n}"),
+        MoaFanout::EveryN { n } => format!("every {n} requests"),
     };
     let display = format!(
         "Mixture-of-Agents · {} preset · {} advisors · aggregator {} · fanout {}",
-        preset_name, advisors, preset.aggregator.model, fanout,
+        preset_name, advisors, aggregator_model, fanout,
     );
     Some(serde_json::json!({
         "id": "moa",

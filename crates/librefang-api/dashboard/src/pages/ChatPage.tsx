@@ -53,6 +53,9 @@ import {
   useUploadAgentFile,
 } from "../lib/mutations/agents";
 
+// Synthetic provider id for MoA — the model picker surfaces MoA presets as a
+// pseudo-provider so a turn can route through a named preset.
+const MOA_PROVIDER_ID = "moa";
 const isAuthUnavailable = (status?: string) =>
   !!status && status !== "configured" && status !== "validated_key" && status !== "configured_cli" && status !== "not_required" && status !== "auto_detected";
 
@@ -2443,7 +2446,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     // MoA is not a catalog provider — surface it as a synthetic row when presets
     // exist so the picker can route a turn through a named MoA preset.
     if (moaPresets.length > 0) {
-      list.push({ id: "moa", count: moaPresets.length });
+      list.push({ id: MOA_PROVIDER_ID, count: moaPresets.length });
     }
     return list.sort((a, b) => a.id.localeCompare(b.id));
   }, [visibleModels, moaPresets]);
@@ -2632,7 +2635,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                 })()}
 
                 {/* MoA preset view — "moa" is a synthetic provider selected by preset name */}
-                {!modelFetchError && selectedProvider === "moa" && (
+                {!modelFetchError && selectedProvider === MOA_PROVIDER_ID && (
                   <>
                     {moaPresetsQuery.isLoading && (
                       <div className="flex items-center gap-2 px-2.5 py-2 text-xs text-text-dim">
@@ -2640,15 +2643,26 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                         {t("chat.loading_models")}
                       </div>
                     )}
-                    {!moaPresetsQuery.isLoading && filteredMoaPresets.length === 0 && (
+                    {moaPresetsQuery.isError && (
+                      <div className="px-2.5 py-2 space-y-1.5">
+                        <p className="text-xs text-error">{t("chat.unable_to_load_models")}</p>
+                        <button
+                          onClick={() => { void moaPresetsQuery.refetch(); }}
+                          className="text-[10px] text-brand hover:underline"
+                        >
+                          {t("chat.retry")}
+                        </button>
+                      </div>
+                    )}
+                    {!moaPresetsQuery.isLoading && !moaPresetsQuery.isError && filteredMoaPresets.length === 0 && (
                       <p className="px-2.5 py-2 text-xs text-text-dim">{t("chat.no_models_found")}</p>
                     )}
-                    {!moaPresetsQuery.isLoading && filteredMoaPresets.map(preset => {
-                      const isActive = modelProvider === "moa" && preset.name === (optimisticModel ?? modelName);
+                    {!moaPresetsQuery.isLoading && !moaPresetsQuery.isError && filteredMoaPresets.map(preset => {
+                      const isActive = modelProvider === MOA_PROVIDER_ID && preset.name === (optimisticModel ?? modelName);
                       return (
                         <div
                           key={`moa/${preset.name}`}
-                          onClick={() => { if (!isActive) handleSelectModel({ id: preset.name, provider: "moa", display_name: preset.name }); }}
+                          onClick={() => { if (!isActive) handleSelectModel({ id: preset.name, provider: MOA_PROVIDER_ID, display_name: preset.name }); }}
                           className={`flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isActive ? "bg-brand/10 text-brand" : "hover:bg-surface-hover text-text-dim"}`}
                         >
                           {isActive && patchPending
@@ -2665,7 +2679,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                 )}
 
                 {/* Model list view (filtered by selected provider) */}
-                {!modelLoading && !modelFetchError && selectedProvider && selectedProvider !== "moa" && (
+                {!modelLoading && !modelFetchError && selectedProvider && selectedProvider !== MOA_PROVIDER_ID && (
                   <>
                     {filteredModels.length === 0 && (
                       <p className="px-2.5 py-2 text-xs text-text-dim">{t("chat.no_models_found")}</p>

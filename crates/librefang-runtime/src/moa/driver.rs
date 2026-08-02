@@ -231,6 +231,14 @@ impl MoaDriver {
             system: request.system.clone(),
             thinking: request.thinking.clone(),
             prompt_caching: request.prompt_caching,
+            cache_ttl: request.cache_ttl,
+            prompt_cache_strategy: request.prompt_cache_strategy,
+            response_format: request.response_format.clone(),
+            timeout_secs: request.timeout_secs,
+            extra_body: request.extra_body.clone(),
+            agent_id: request.agent_id.clone(),
+            session_id: request.session_id.clone(),
+            step_id: request.step_id.clone(),
             ..Default::default()
         })
     }
@@ -246,6 +254,18 @@ impl MoaDriver {
     ) -> Fanout {
         let user_prefix = user_turn_prefix_hash(advisory_view);
         let full_sig = signature(advisory_view);
+
+        // Evict stale per-turn entries on a new user turn. Cache keys for
+        // `Always`/`EveryN` embed `full_sig`, which changes every iteration;
+        // entries from a prior turn are never read again, so clear them to
+        // bound growth.
+        {
+            let cadence = self.cadence.lock();
+            if cadence.last_user_prefix != Some(user_prefix) {
+                drop(cadence);
+                self.cache.lock().clear();
+            }
+        }
 
         let should_run = self.update_cadence(user_prefix);
 
@@ -287,17 +307,21 @@ impl MoaDriver {
 
     /// Update the cadence counter and decide whether advisors run this call.
     fn update_cadence(&self, user_prefix: u64) -> bool {
+        let mut state = self.cadence.lock();
+        // Track the current user turn for ALL cadence variants so the
+        // cache-eviction check in `maybe_run_fanout` can detect a turn
+        // change; `EveryN` additionally uses the prior value below.
+        let prev_prefix = state.last_user_prefix;
+        state.last_user_prefix = Some(user_prefix);
         match self.preset.fanout {
             MoaFanout::UserTurn | MoaFanout::Always => true,
             MoaFanout::EveryN { n } => {
                 let n = n.max(1);
-                let mut state = self.cadence.lock();
-                let counter = if state.last_user_prefix == Some(user_prefix) {
+                let counter = if prev_prefix == Some(user_prefix) {
                     state.counter.saturating_add(1)
                 } else {
                     1
                 };
-                state.last_user_prefix = Some(user_prefix);
                 state.counter = counter;
                 counter == 1 || counter % n == 0
             }

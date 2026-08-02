@@ -240,7 +240,10 @@ pub async fn run_fanout(
     // not re-probed per advisor per iteration.
     let windows: Mutex<HashMap<(String, String), Option<usize>>> = Mutex::new(HashMap::new());
 
+    let full_view_tokens = estimate_tokens(&full_view);
+
     let mut handles = Vec::with_capacity(advisors.len());
+
     for (slot, driver) in advisors {
         let permit = Arc::clone(&semaphore);
         // Each advisor gets a view trimmed to its OWN context window; slots
@@ -248,7 +251,7 @@ pub async fn run_fanout(
         let messages = match resolve_window(&windows, catalog, slot)
             .and_then(|w| context_budget(w, max_tokens))
         {
-            Some(budget) if estimate_tokens(&full_view) > budget => {
+            Some(budget) if full_view_tokens > budget => {
                 Arc::new(trim_to_budget(&full_view, budget))
             }
             _ => Arc::clone(&full_view),
@@ -289,7 +292,17 @@ pub async fn run_fanout(
                 }
                 results.push(result);
             }
-            Err(e) => warn!(error = %e, "MoA advisor task panicked"),
+            Err(e) => {
+                warn!(error = %e, "MoA advisor task panicked");
+                done += 1;
+                if let Some(tx) = progress {
+                    let _ = tx.send(MoaProgressEvent::Progress {
+                        done,
+                        total,
+                        label: "[panicked]".to_string(),
+                    });
+                }
+            }
         }
     }
     results
