@@ -2958,7 +2958,7 @@ impl McpConnection {
                 // than escalate. See #5965.
                 if let Some(c) = caller {
                     if let Some(v) = caller_context_meta_value(c) {
-                        let mut meta = rmcp::model::Meta::new();
+                        let mut meta = rmcp::model::RequestMetaObject::new();
                         meta.insert(CALLER_CONTEXT_META_KEY.to_string(), v);
                         params.meta = Some(meta);
                     }
@@ -2971,7 +2971,7 @@ impl McpConnection {
                         .into_iter()
                         .map(|(k, v)| (k, serde_json::Value::String(v)))
                         .collect();
-                    let meta = params.meta.get_or_insert_with(rmcp::model::Meta::new);
+                    let meta = params.meta.get_or_insert_with(rmcp::model::RequestMetaObject::new);
                     meta.insert(
                         crate::trace_context::TRACE_CONTEXT_META_KEY.to_string(),
                         serde_json::Value::Object(trace_obj),
@@ -6333,7 +6333,7 @@ mod tests {
         let mut params = rmcp::model::CallToolRequestParams::new("some_tool");
         params.arguments = Some(strip_caller_from_arguments(&agent_payload));
         let v = caller_context_meta_value(&kernel_caller).expect("CallerContext must serialise");
-        let mut meta = rmcp::model::Meta::new();
+        let mut meta = rmcp::model::RequestMetaObject::new();
         meta.insert(CALLER_CONTEXT_META_KEY.to_string(), v);
         params.meta = Some(meta);
 
