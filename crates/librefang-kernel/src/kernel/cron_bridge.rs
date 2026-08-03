@@ -14,13 +14,10 @@ use librefang_types::agent::AgentId;
 use super::{KernelCronBridge, LibreFangKernel};
 
 impl LibreFangKernel {
-    /// Deliver the output produced by a cron action through both the legacy
-    /// single-destination setting and the newer multi-target fan-out list.
+    /// Deliver the output produced by a cron action through both the legacy single-destination setting and the newer multi-target fan-out list.
     ///
-    /// Keeping this operation on the kernel gives scheduled fires and manual
-    /// `POST /api/schedules/{id}/run` calls one delivery path. Delivery is
-    /// intentionally best-effort: adapter failures are logged by the helpers
-    /// and do not turn a successfully completed action into a failed action.
+    /// Keeping this operation on the kernel gives scheduled fires and manual `POST /api/schedules/{id}/run` calls one delivery path.
+    /// Delivery is intentionally best-effort: adapter failures are logged by the helpers and do not turn a successfully completed action into a failed action.
     pub async fn deliver_cron_output(
         self: &Arc<Self>,
         agent_id: AgentId,

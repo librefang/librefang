@@ -13,10 +13,8 @@
 //! without spinning up an agent or hitting an external service.
 //!
 //! Out of scope (skipped intentionally):
-//! - LLM-backed `POST /api/workflows/{id}/run` and agent-turn
-//!   `POST /api/schedules/{id}/run` coverage — our test kernel has no model
-//!   credentials. Manual schedule delivery is covered with a deterministic
-//!   zero-step workflow.
+//! - LLM-backed `POST /api/workflows/{id}/run` and agent-turn `POST /api/schedules/{id}/run` coverage — our test kernel has no model credentials.
+//!   Manual schedule delivery is covered with a deterministic zero-step workflow.
 //! - `POST /api/workflows/{id}/dry-run` agent-execution coverage — the
 //!   step-context path walks into agent-registry lookups for agents we
 //!   haven't registered, so `agent_found` is always false here. The
@@ -951,8 +949,7 @@ async fn schedule_manual_run_delivers_workflow_output_to_channel_targets() {
         Arc::new(RecordingChannelAdapter { sent: sent.clone() }),
     );
 
-    // An empty workflow is deterministic: its output is its input, so the
-    // route can be exercised without an LLM provider or live Telegram bot.
+    // An empty workflow is deterministic: its output is its input, so the route can be exercised without an LLM provider or live Telegram bot.
     let (status, body) = json_request(
         &h,
         Method::POST,
@@ -977,7 +974,7 @@ async fn schedule_manual_run_delivers_workflow_output_to_channel_targets() {
         delivery: CronDelivery::None,
         delivery_targets: vec![CronDeliveryTarget::Channel {
             channel_type: "telegram".to_string(),
-            recipient: "115186674".to_string(),
+            recipient: "test-chat-id".to_string(),
             thread_id: None,
             account_id: None,
         }],
@@ -1005,7 +1002,7 @@ async fn schedule_manual_run_delivers_workflow_output_to_channel_targets() {
     assert_eq!(body["output"], "scheduled hello");
     assert_eq!(
         sent.lock().expect("recording adapter lock").as_slice(),
-        ["115186674:scheduled hello"],
+        ["test-chat-id:scheduled hello"],
         "manual schedule run must use the same delivery_targets fan-out as a timed fire"
     );
 }
