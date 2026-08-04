@@ -207,14 +207,9 @@ pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
                             }
                             // Write migrated config back to disk so future loads skip migration.
                             //
-                            // Managed mode owns the file, so the write is skipped rather than
-                            // attempted and warned about. Attempting it against a read-only
-                            // ConfigMap mount fails on every boot, and because the failure is only
-                            // a `warn!` the migration silently re-runs forever with nothing but a
-                            // repeating log line to show for it. The in-memory config is already
-                            // migrated either way, so skipping costs nothing at runtime — what the
-                            // operator loses is the on-disk persistence, and they need to know that
-                            // their manifest is now a schema version behind.
+                            // Managed mode owns the file, so the write is skipped rather than attempted and warned about.
+                            // Attempting it against a read-only ConfigMap mount fails on every boot, and because the failure is only a `warn!` the migration silently re-runs forever with nothing but a repeating log line to show for it.
+                            // The in-memory config is already migrated either way, so skipping costs nothing at runtime — what the operator loses is the on-disk persistence, and they need to know that their manifest is now a schema version behind.
                             if migrated
                                 && file_version < CONFIG_VERSION
                                 && config_mode() == ConfigMode::Managed
@@ -552,14 +547,13 @@ pub const CONFIG_MODE_ENV: &str = "LIBREFANG_CONFIG_MODE";
 
 /// Who owns `config.toml`.
 ///
-/// The mode is read from the process environment, never from the config file itself, so a write
-/// through the API can never unlock the very file it is being refused access to (#6695).
+/// The mode is read from the process environment, never from the config file itself, so a write through the API can never unlock the very file it is being refused access to (#6695).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigMode {
     /// Default. The file is application state: the API may persist to it.
     Mutable,
-    /// The file is owned by the deployment (a Kubernetes ConfigMap, a bind mount, a config
-    /// management system). Every API surface that would persist to it refuses with `423 Locked`.
+    /// The file is owned by the deployment (a Kubernetes ConfigMap, a bind mount, a config management system).
+    /// Every API surface that would persist to it refuses with `423 Locked`.
     Managed,
 }
 
@@ -580,10 +574,8 @@ impl ConfigMode {
 
 /// Resolve the configuration ownership mode from the environment.
 ///
-/// Anything other than a case-insensitive `managed` — including unset, empty, and a typo — resolves
-/// to [`ConfigMode::Mutable`]. Defaulting a typo to the locked mode would brick the dashboard for a
-/// deployment that never asked for it; defaulting it to mutable preserves today's behaviour, which
-/// is the compatibility guarantee the RFC requires.
+/// Anything other than a case-insensitive `managed` — including unset, empty, and a typo — resolves to [`ConfigMode::Mutable`].
+/// Defaulting a typo to the locked mode would brick the dashboard for a deployment that never asked for it; defaulting it to mutable preserves today's behaviour, which is the compatibility guarantee the RFC requires.
 pub fn config_mode() -> ConfigMode {
     match std::env::var(CONFIG_MODE_ENV) {
         Ok(v) if v.trim().eq_ignore_ascii_case("managed") => ConfigMode::Managed,
@@ -595,10 +587,8 @@ pub fn config_mode() -> ConfigMode {
 ///
 /// Priority: `LIBREFANG_CONFIG_PATH` > `LIBREFANG_HOME`/config.toml > `~/.librefang/config.toml`.
 ///
-/// `LIBREFANG_CONFIG_PATH` relocates the file and nothing more. It is independent of
-/// [`config_mode`] on purpose: a Compose deployment may reasonably bind-mount the config directory
-/// somewhere outside `LIBREFANG_HOME` while still editing it from the dashboard, and inferring the
-/// lock from the path would hand that operator a read-only UI they never asked for.
+/// `LIBREFANG_CONFIG_PATH` relocates the file and nothing more.
+/// It is independent of [`config_mode`] on purpose: a Compose deployment may reasonably bind-mount the config directory somewhere outside `LIBREFANG_HOME` while still editing it from the dashboard, and inferring the lock from the path would hand that operator a read-only UI they never asked for.
 pub fn default_config_path() -> PathBuf {
     if let Ok(p) = std::env::var(CONFIG_PATH_ENV) {
         let trimmed = p.trim();
@@ -611,17 +601,15 @@ pub fn default_config_path() -> PathBuf {
 
 /// Provenance of the effective configuration, for the authenticated status endpoint.
 ///
-/// Deliberately carries no secret material: the checksum is over the raw file bytes, which the
-/// caller already has to be authenticated to influence, and the path is a deployment fact an
-/// operator needs in order to know where to make a change.
+/// Deliberately carries no secret material: the checksum is over the raw file bytes, which the caller already has to be authenticated to influence, and the path is a deployment fact an operator needs in order to know where to make a change.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ConfigProvenance {
     /// `"mutable"` or `"managed"`.
     pub mode: &'static str,
     /// Absolute path the effective configuration was loaded from.
     pub source: String,
-    /// Whether the API will accept a write. Equivalent to `mode == "mutable"`, surfaced separately
-    /// so the dashboard branches on a boolean rather than string-matching a mode name.
+    /// Whether the API will accept a write.
+    /// Equivalent to `mode == "mutable"`, surfaced separately so the dashboard branches on a boolean rather than string-matching a mode name.
     pub writable: bool,
     /// `sha256:<hex>` over the config file's bytes, or `None` when the file does not exist.
     pub checksum: Option<String>,

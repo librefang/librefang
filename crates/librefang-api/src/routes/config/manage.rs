@@ -1100,10 +1100,8 @@ pub async fn export_config(State(state): State<Arc<AppState>>) -> impl IntoRespo
 // ---------------------------------------------------------------------------
 /// GET /api/config/status — where the effective configuration came from, and whether it can be written.
 ///
-/// The dashboard branches on `writable` to decide whether to render write controls, rather than
-/// discovering managed mode by attempting a save and reading the `423` back (#6695).
-/// Authenticated like every other `/api/*` route; it exposes a path and a checksum over the file's
-/// bytes, never a value from inside it.
+/// The dashboard branches on `writable` to decide whether to render write controls, rather than discovering managed mode by attempting a save and reading the `423` back (#6695).
+/// Authenticated like every other `/api/*` route; it exposes a path and a checksum over the file's bytes, never a value from inside it.
 #[utoipa::path(
     get,
     path = "/api/config/status",

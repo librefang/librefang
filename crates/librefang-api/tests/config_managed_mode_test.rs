@@ -1,10 +1,8 @@
 //! Integration tests for managed configuration mode (#6695).
 //!
-//! These live in their own test binary on purpose. `LIBREFANG_CONFIG_MODE` is process-global, and
-//! Rust runs the tests inside one binary on parallel threads, so setting it here would be visible
-//! to every other test in the same file — which is exactly how the first version of these tests
-//! broke five unrelated `config_set` cases. A separate binary is a separate process, so the
-//! blast radius stops at this file, and the mutex below serializes the cases within it.
+//! These live in their own test binary on purpose.
+//! `LIBREFANG_CONFIG_MODE` is process-global, and Rust runs the tests inside one binary on parallel threads, so setting it here would be visible to every other test in the same file — which is exactly how the first version of these tests broke five unrelated `config_set` cases.
+//! A separate binary is a separate process, so the blast radius stops at this file, and the mutex below serializes the cases within it.
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
@@ -112,20 +110,17 @@ fn auth_post_json(path: &str, body: serde_json::Value) -> Request<Body> {
 // Managed configuration mode (#6695)
 // ---------------------------------------------------------------------------
 
-/// `LIBREFANG_CONFIG_MODE` is process-global, so the managed-mode cases must not overlap with each
-/// other or with any other test that reads it. They all run under this lock and restore the
-/// previous value before releasing it.
+/// `LIBREFANG_CONFIG_MODE` is process-global, so the managed-mode cases must not overlap with each other or with any other test that reads it.
+/// They all run under this lock and restore the previous value before releasing it.
 fn managed_mode_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-/// Sets `LIBREFANG_CONFIG_MODE=managed` for its lifetime and restores the prior value on drop,
-/// including on panic, so one failing assertion cannot leak the lock into the rest of the suite.
+/// Sets `LIBREFANG_CONFIG_MODE=managed` for its lifetime and restores the prior value on drop, including on panic, so one failing assertion cannot leak the lock into the rest of the suite.
 struct ManagedModeGuard {
     previous: Option<String>,
-    // A tokio mutex rather than `std::sync`: the guard is held across the harness `.await`s, which
-    // a `std::sync::MutexGuard` cannot legally do (clippy's `await_holding_lock`).
+    // A tokio mutex rather than `std::sync`: the guard is held across the harness `.await`s, which a `std::sync::MutexGuard` cannot legally do (clippy's `await_holding_lock`).
     _lock: tokio::sync::MutexGuard<'static, ()>,
 }
 
@@ -191,8 +186,7 @@ async fn config_status_reports_managed_when_locked() {
     assert_eq!(v["writable"], false);
 }
 
-/// The load-bearing case: a write that would be accepted in mutable mode is refused with the one
-/// documented status and the structured body, and the file on disk is untouched.
+/// The load-bearing case: a write that would be accepted in mutable mode is refused with the one documented status and the structured body, and the file on disk is untouched.
 #[tokio::test(flavor = "multi_thread")]
 async fn config_set_is_locked_in_managed_mode_and_leaves_the_file_untouched() {
     let _guard = ManagedModeGuard::set().await;
@@ -202,8 +196,7 @@ async fn config_set_is_locked_in_managed_mode_and_leaves_the_file_untouched() {
     let seed = format!("api_key = \"{API_KEY}\"\n");
     std::fs::write(&config_path, &seed).expect("seed config.toml");
 
-    // `log_level` is allowlisted and round-trips in mutable mode — see
-    // `config_set_writes_allowlisted_path_to_tempdir_toml` — so a refusal here is the mode, not the path.
+    // `log_level` is allowlisted and round-trips in mutable mode — see `config_set_writes_allowlisted_path_to_tempdir_toml` — so a refusal here is the mode, not the path.
     let (status, body) = send(
         h.app.clone(),
         auth_post_json(

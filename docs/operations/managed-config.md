@@ -95,6 +95,13 @@ What the warning tells you is that **your manifest is a schema version behind** 
 
 Stated plainly rather than left to be discovered:
 
-- **Coverage is not yet complete.** The skills routes (`crates/librefang-api/src/routes/skills/mod.rs`), the memory route, and the dashboard-credential change in `server.rs` write `config.toml` without going through the guard. They also do not take `config_write_lock`, so they can already race a `config/set` in mutable mode — a pre-existing bug that predates managed mode.
-- **The lock is whole-config, not field-level.** There is no way to declare "the deployment owns `[external_auth]` but the dashboard may still edit `[channels]`". The existing `WRITABLE_EXACT_PATHS` / `WRITABLE_SECTION_PREFIXES` allowlist is already a field-level model and is already load-bearing for security; layering a second, orthogonal ownership axis over it would produce a matrix where the interesting cases are the corners. Revisit when a deployment actually needs it.
-- **CLI writes are not gated.** `librefang config set` and friends still write the file. An operator running the CLI inside the pod is doing so deliberately; managed mode is about the API and dashboard surface that a user reaches without shell access.
+- **Coverage is not yet complete.**
+  The skills routes (`crates/librefang-api/src/routes/skills/mod.rs`), the memory route, and the dashboard-credential change in `server.rs` write `config.toml` without going through the guard.
+  They also do not take `config_write_lock`, so they can already race a `config/set` in mutable mode — a pre-existing bug that predates managed mode.
+- **The lock is whole-config, not field-level.**
+  There is no way to declare "the deployment owns `[external_auth]` but the dashboard may still edit `[channels]`".
+  The existing `WRITABLE_EXACT_PATHS` / `WRITABLE_SECTION_PREFIXES` allowlist is already a field-level model and is already load-bearing for security; layering a second, orthogonal ownership axis over it would produce a matrix where the interesting cases are the corners.
+  Revisit when a deployment actually needs it.
+- **CLI writes are not gated.**
+  `librefang config set` and friends still write the file.
+  An operator running the CLI inside the pod is doing so deliberately; managed mode is about the API and dashboard surface that a user reaches without shell access.
