@@ -2604,3 +2604,56 @@ async fn keyless_provider_accepts_a_key_and_reports_it_as_present() {
     // observes it.
     librefang_api::secrets_env::remove_env_var_guarded(KEY_ENV).await;
 }
+
+/// #6702 regression: opting a custom provider into model discovery must not
+/// make it *look* unconfigured when its `/models` listing is unreachable.
+///
+/// Before the guard, every probed provider had `auth_status` forced to
+/// `missing` on an unreachable probe. That rule was written when only the four
+/// built-in local ids were probed, where it is correct — they need no key, so
+/// reachability is the whole availability story. Opting a keyed provider in
+/// (#6702) put it on the same path, and a gateway that proxies
+/// `/chat/completions` without serving `/models` is an ordinary shape, so a
+/// working provider with a valid key would report as needing setup purely
+/// because the operator turned discovery on.
+#[tokio::test(flavor = "multi_thread")]
+async fn discovery_opt_in_does_not_mark_a_keyed_provider_unconfigured() {
+    const KEY_ENV: &str = "LIBREFANG_TEST_ACME_GW_6702_API_KEY";
+
+    let h = boot_with_provider(ProviderInfo {
+        id: "acme-gw".to_string(),
+        display_name: "ACME Gateway".to_string(),
+        api_key_env: KEY_ENV.to_string(),
+        // Deliberately closed: stands in for a gateway that proxies
+        // /chat/completions but serves no /models listing.
+        base_url: "http://127.0.0.1:59321/v1".to_string(),
+        key_required: true,
+        auth_status: AuthStatus::Configured,
+        discover_models: true,
+        ..ProviderInfo::default()
+    });
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/providers/acme-gw/key",
+        Some(serde_json::json!({ "key": "gateway-secret" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let (_, body) = json_request(&h, Method::GET, "/api/providers", None).await;
+    let entry = find_provider(&body, "acme-gw");
+    assert_eq!(
+        entry["reachable"].as_bool(),
+        Some(false),
+        "the probe must genuinely have failed, or this test proves nothing; body: {body}"
+    );
+    assert_eq!(
+        entry["auth_status"].as_str(),
+        Some("configured"),
+        "a keyed provider must keep 'configured' when only its /models probe fails; body: {body}"
+    );
+
+    librefang_api::secrets_env::remove_env_var_guarded(KEY_ENV).await;
+}

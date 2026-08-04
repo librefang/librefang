@@ -765,6 +765,15 @@ pub async fn delete_model_overrides(
 
 /// Attach local-provider probe results to a JSON entry and optionally merge
 /// discovered models into the catalog.
+/// Whether a failed probe should downgrade the reported `auth_status` to `missing`.
+///
+/// For a built-in local provider, reachability is the whole availability story: it needs no key, so a daemon that is not answering is the only way it can be unusable, and showing "needs setup" is right.
+/// An opted-in custom provider (#6702) goes through the same probe, but its `/models` listing is a discovery convenience rather than proof that its key works — a gateway that proxies `/chat/completions` without serving `/models` is an ordinary shape, and #6702's own use case.
+/// Downgrading it would report a working, correctly keyed provider as unconfigured purely because the operator turned discovery on, so the probe's `reachable` / `error_message` fields carry that signal instead.
+fn probe_failure_downgrades_auth(provider_id: &str) -> bool {
+    librefang_kernel::provider_health::is_local_provider(provider_id)
+}
+
 fn attach_probe_result(
     entry: &mut serde_json::Value,
     probe: &librefang_kernel::provider_health::ProbeResult,
@@ -1010,12 +1019,12 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             }
         }
 
-        // For local providers, attach the probe result and downgrade
-        // auth_status when the service is not reachable so the dashboard
-        // shows "needs setup" instead of "configured".
+        // Attach the probe result, and for a built-in local provider downgrade
+        // auth_status when the service is not reachable so the dashboard shows
+        // "needs setup" instead of "configured".
         if let Some(probe) = probe_map.remove(&i) {
             attach_probe_result(&mut entry, &probe, &p.id, &*state.kernel);
-            if !probe.reachable {
+            if !probe.reachable && probe_failure_downgrades_auth(&p.id) {
                 entry["auth_status"] = serde_json::json!("missing");
             }
         } else if librefang_kernel::provider_health::is_local_provider(&p.id) {
@@ -1126,7 +1135,7 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
         });
         if let Some(probe) = probe_map.remove(&i) {
             attach_probe_result(&mut entry, &probe, &p.id, &*state.kernel);
-            if !probe.reachable {
+            if !probe.reachable && probe_failure_downgrades_auth(&p.id) {
                 entry["auth_status"] = serde_json::json!("missing");
             }
         } else if librefang_kernel::provider_health::is_local_provider(&p.id) {
@@ -1236,7 +1245,7 @@ pub async fn get_provider(
         .await;
 
         attach_probe_result(&mut entry, &probe, &provider.id, &*state.kernel);
-        if !probe.reachable {
+        if !probe.reachable && probe_failure_downgrades_auth(&provider.id) {
             entry["auth_status"] = serde_json::json!("missing");
         }
     } else if librefang_kernel::provider_health::is_local_provider(&provider.id) {
