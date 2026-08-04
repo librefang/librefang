@@ -383,6 +383,7 @@ async fn test_build_router_serves_dashboard_locales() {
         ("/locales/ja.json", "チャット"),
         ("/locales/uk.json", "Чат"),
         ("/locales/ko.json", "채팅"),
+        ("/locales/pl.json", "Czat"),
     ] {
         let response = harness
             .app

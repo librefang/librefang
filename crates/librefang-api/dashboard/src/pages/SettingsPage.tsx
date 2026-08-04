@@ -104,6 +104,7 @@ export function SettingsPage() {
     { value: "ko" as const, icon: Globe, label: "한국어" },
     { value: "uk" as const, icon: Globe, label: "Українська" },
     { value: "zh" as const, icon: Globe, label: "中文" },
+    { value: "pl" as const, icon: Globe, label: "Polski" },
   ], []);
 
   const navLayoutOptions = useMemo(() => [
