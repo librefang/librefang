@@ -2949,8 +2949,28 @@ jobs:
           fi
           echo "ref=ghcr.io/librefang/librefang@sha256:${files[0]}" >> "$GITHUB_OUTPUT"
           echo "value=sha256:${files[0]}" >> "$GITHUB_OUTPUT"
+      # Paired with `fail-on: off` on the composite action: while the gate is
+      # report-only it must not be able to block a release at all, and that has
+      # to cover scanner *infrastructure* failure too — a cold arm64 database
+      # download, a GHCR hiccup, a Trivy release asset 404. None of those are
+      # true positives about image security, yet every one of them fails this
+      # step, and a failed `docker-scan` job would skip `docker-manifest` and
+      # with it the entire tag promotion. Findings still reach the job summary,
+      # the artifacts, and code scanning either way, and the step is still
+      # marked failed in the run, so an outage stays visible.
+      #
+      # This sits on the step rather than the job on purpose: a step-level
+      # `continue-on-error` unambiguously keeps the job green, whereas the
+      # job-level form interacts with `needs` in a way that is easy to get
+      # wrong.
+      #
+      # ARMING THE GATE IS A TWO-LINE CHANGE, NOT ONE: move `fail-on` off the
+      # `off` default in .github/actions/trivy-image-scan/action.yml AND delete
+      # this `continue-on-error`. Leaving it here would arm the threshold while
+      # keeping the scan unable to block anything.
       - name: Scan the ${{ matrix.platform }} release digest
         id: scan
+        continue-on-error: true
         uses: ./.github/actions/trivy-image-scan
         with:
           image-ref: ${{ steps.digest.outputs.ref }}

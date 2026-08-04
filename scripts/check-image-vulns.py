@@ -19,7 +19,8 @@ That is not `--ignore-unfixed`: the report, the artifacts, and the job summary c
 Only the pass/fail decision is narrowed, because an unfixed CVE gives a maintainer nothing to act on and would make the gate permanently red for reasons outside the project's control.
 
 Detected secrets fail whenever the gate is armed at all, regardless of the severity threshold.
-The image baseline is zero embedded secrets, so there is no backlog to grandfather and no reason to let one through at a lower threshold.
+Issue #6694's Trivy 0.57.0 scan found no embedded secrets in the image, so there is no known backlog to grandfather and no reason to let one through at a lower threshold.
+That measurement predates the pinned 0.72.0 and its newer secret rules, so it is a prior rather than a verified baseline.
 
 Run `--self-test` to execute the embedded fixture corpus, which is what proves the gate actually fails at the configured threshold without needing a live vulnerable image.
 """

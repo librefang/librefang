@@ -47,10 +47,14 @@ inputs:
   #
   # It ships as `off`, which means REPORT-ONLY: the scan runs, the summary and
   # artifacts are published, the SARIF reaches code scanning, and the job never
-  # fails on findings. That is deliberate and it is not "enforced" — as of
-  # 2026-08-01 the runtime image carries 10 critical and 95 high findings
-  # (issue #6694), so an armed gate would turn `main` and every release red on
+  # fails on findings. That is deliberate and it is not "enforced" — issue
+  # #6694 measured 10 critical and 95 high findings in the runtime image on
+  # 2026-08-01, so an armed gate would turn `main` and every release red on
   # the first run and the pipeline would be disabled within the hour.
+  # Those figures come from a local Trivy 0.57.0 run, not from the 0.72.0
+  # pinned below, and nobody has re-measured with the pinned scanner. Treat
+  # them as the order of magnitude that justifies shipping report-only, not as
+  # the number you will see in the first run's summary.
   #
   # A maintainer arms it by moving this default up the ladder once the backlog
   # is remediated:
@@ -58,8 +62,11 @@ inputs:
   #     off  →  critical  →  high
   #
   # Semantics once armed: the job fails when the image has any FIXABLE
-  # vulnerability at or above the threshold, or any embedded secret at all
-  # (baseline is zero, so there is no backlog to grandfather there).
+  # vulnerability at or above the threshold, or any embedded secret at all.
+  # Issue #6694's Trivy 0.57.0 run found no embedded secrets, but the secret
+  # rules changed substantially between 0.57 and 0.72, so that is not a
+  # measured baseline for the pinned scanner — arm `fail-on` on a dry run
+  # first rather than trusting a zero-secret backlog.
   # Restricting the decision to fixable findings is not `--ignore-unfixed`:
   # every finding at every severity, fixed or not, stays in the report, the
   # artifacts, and the job summary. Only the pass/fail decision is narrowed,

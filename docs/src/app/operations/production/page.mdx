@@ -268,12 +268,22 @@ Each scan covers **OS packages** (Debian packages from the `node:*-bookworm-slim
 Neither `--severity` nor `--ignore-unfixed` is passed, so no filter is applied at all and the report contains every finding at every severity, fixed and unfixed alike.
 
 **Enforcement threshold.** The gate ships **report-only** and is *not* currently enforced.
-The runtime image carries a large pre-existing backlog (10 critical and 95 high findings as of 2026-08-01, issue #6694), so an armed gate would fail `main` and every release on its first run.
-The threshold lives in exactly one place — the `fail-on` input of `.github/actions/trivy-image-scan/action.yml` — and neither workflow overrides it, so a maintainer arms both by changing that single default:
+The runtime image carries a large pre-existing backlog — issue #6694 measured 10 critical and 95 high findings on 2026-08-01 — so an armed gate would fail `main` and every release on its first run.
+That measurement used Trivy 0.57.0 rather than the 0.72.0 this pipeline pins, and has not been repeated, so read it as the order of magnitude that justifies report-only rather than as the count the first run will report.
+Arming it is a **two-line change**, and both lines matter.
+The threshold itself lives in one place — the `fail-on` input of `.github/actions/trivy-image-scan/action.yml`, which neither workflow overrides:
 
 ```
 off  →  critical  →  high
 ```
+
+The second line is the `continue-on-error: true` on the scan step of the `docker-scan` job in `.github/workflows/release.yml`.
+While the gate is report-only that flag is what makes report-only *true* on the release path: a scanner outage — a cold arm64 database download, a GHCR hiccup, a Trivy asset 404 — fails the step, and without it a failed `docker-scan` would skip `docker-manifest` and take the whole tag promotion with it.
+None of those failures says anything about image security, so today the scan cannot block a release for any reason, and that is the intended behaviour of a gate that is not enforced.
+The step is still marked failed in the run, so an outage stays visible rather than passing as a clean scan.
+Delete that flag at the same time as you move `fail-on`, or you will arm the threshold while leaving the scan unable to block anything.
+
+The `main` scan in `docker-build.yml` deliberately has no such flag: nothing is gated on it, so a scanner failure there turns the workflow red as a signal and costs nothing.
 
 Once armed, a job fails when the image has any **fixable** vulnerability at or above the threshold, or any embedded secret at all.
 Restricting the decision to fixable findings is not `--ignore-unfixed`: unfixed findings stay in the report, the artifacts, and the job summary, and only the pass/fail decision is narrowed, because an unfixed CVE gives a maintainer nothing to act on.
