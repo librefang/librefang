@@ -1,103 +1,78 @@
 name: Trivy image vulnerability scan
 description: >
-  Scan one already-built container image with Trivy, publish a human-readable
-  job summary, retain the JSON / SARIF / verdict reports as artifacts, and
-  apply the release vulnerability gate. Used by docker-build.yml for the
-  runtime image on main and by release.yml for each native release digest
-  before the multi-arch manifest is published. See #6694.
+  Scan one already-built container image with Trivy, publish a human-readable job summary, retain the JSON / SARIF / verdict reports as artifacts, and apply the release vulnerability gate.
+  Used by docker-build.yml for the runtime image on main and by release.yml for each native release digest before the multi-arch manifest is published.
+  See #6694.
 
 inputs:
   image-ref:
     description: >
-      Image to scan. A local daemon tag (`librefang:ci`) or a registry
-      reference pinned by digest (`ghcr.io/librefang/librefang@sha256:…`).
-      Prefer the digest form so the report names the exact artifact a release
-      tag would be promoted to.
+      Image to scan.
+      A local daemon tag (`librefang:ci`) or a registry reference pinned by digest (`ghcr.io/librefang/librefang@sha256:…`).
+      Prefer the digest form so the report names the exact artifact a release tag would be promoted to.
     required: true
   platform:
     description: Platform label used in the job summary, e.g. `linux/amd64`.
     required: true
   report-slug:
     description: >
-      Slug used for the report file names, the artifact name, and the SARIF
-      code-scanning category. Must be unique across every scan in one workflow
-      run — code scanning overwrites same-category uploads, so a shared slug
-      would silently discard one architecture's results.
+      Slug used for the report file names, the artifact name, and the SARIF code-scanning category.
+      Must be unique across every scan in one workflow run — code scanning overwrites same-category uploads, so a shared slug would silently discard one architecture's results.
     required: true
   report-dir:
     description: >
-      Absolute directory the three reports are written to. The caller supplies
-      it (rather than the action defaulting to a `runner.temp` path) so the
-      SARIF upload step in the workflow can name the file without depending on
-      an output of a step that may have failed the gate.
+      Absolute directory the three reports are written to.
+      The caller supplies it (rather than the action defaulting to a `runner.temp` path) so the SARIF upload step in the workflow can name the file without depending on an output of a step that may have failed the gate.
     required: true
   digest:
     description: >
-      Digest to display in the report. Optional — falls back to the report's
-      own `Metadata.RepoDigests` / `Metadata.ImageID`, which is what a locally
-      loaded image has instead.
+      Digest to display in the report.
+      Optional — falls back to the report's own `Metadata.RepoDigests` / `Metadata.ImageID`, which is what a locally loaded image has instead.
     required: false
     default: ""
 
   # ═══════════════════════════════════════════════════════════════════════════
   # THE ENFORCEMENT THRESHOLD — the single knob for the whole repository.
   #
-  # Neither docker-build.yml nor release.yml passes this input, so this default
-  # governs both workflows and there is exactly one line to change.
+  # Neither docker-build.yml nor release.yml passes this input, so this default governs both workflows and there is exactly one line to change.
   #
-  # It ships as `off`, which means REPORT-ONLY: the scan runs, the summary and
-  # artifacts are published, the SARIF reaches code scanning, and the job never
-  # fails on findings. That is deliberate and it is not "enforced" — issue
-  # #6694 measured 10 critical and 95 high findings in the runtime image on
-  # 2026-08-01, so an armed gate would turn `main` and every release red on
-  # the first run and the pipeline would be disabled within the hour.
-  # Those figures come from a local Trivy 0.57.0 run, not from the 0.72.0
-  # pinned below, and nobody has re-measured with the pinned scanner. Treat
-  # them as the order of magnitude that justifies shipping report-only, not as
-  # the number you will see in the first run's summary.
+  # It ships as `off`, which means REPORT-ONLY: the scan runs, the summary and artifacts are published, the SARIF reaches code scanning, and the job never fails on findings.
+  # That is deliberate and it is not "enforced" — issue #6694 measured 10 critical and 95 high findings in the runtime image on 2026-08-01, so an armed gate would turn `main` and every release red on the first run and the pipeline would be disabled within the hour.
+  # Those figures come from a local Trivy 0.57.0 run, not from the 0.72.0 pinned below, and nobody has re-measured with the pinned scanner.
+  # Treat them as the order of magnitude that justifies shipping report-only, not as the number you will see in the first run's summary.
   #
-  # A maintainer arms it by moving this default up the ladder once the backlog
-  # is remediated:
+  # A maintainer arms it by moving this default up the ladder once the backlog is remediated:
   #
   #     off  →  critical  →  high
   #
-  # Semantics once armed: the job fails when the image has any FIXABLE
-  # vulnerability at or above the threshold, or any embedded secret at all.
-  # Issue #6694's Trivy 0.57.0 run found no embedded secrets, but the secret
-  # rules changed substantially between 0.57 and 0.72, so that is not a
-  # measured baseline for the pinned scanner — arm `fail-on` on a dry run
-  # first rather than trusting a zero-secret backlog.
-  # Restricting the decision to fixable findings is not `--ignore-unfixed`:
-  # every finding at every severity, fixed or not, stays in the report, the
-  # artifacts, and the job summary. Only the pass/fail decision is narrowed,
-  # because an unfixed CVE gives a maintainer nothing to act on.
+  # Semantics once armed: the job fails when the image has any FIXABLE vulnerability at or above the threshold, or any embedded secret at all.
+  # Issue #6694's Trivy 0.57.0 run found no embedded secrets, but the secret rules changed substantially between 0.57 and 0.72, so that is not a measured baseline for the pinned scanner — arm `fail-on` on a dry run first rather than trusting a zero-secret backlog.
+  # Restricting the decision to fixable findings is not `--ignore-unfixed`: every finding at every severity, fixed or not, stays in the report, the artifacts, and the job summary.
+  # Only the pass/fail decision is narrowed, because an unfixed CVE gives a maintainer nothing to act on.
   # ═══════════════════════════════════════════════════════════════════════════
   fail-on:
     description: >
-      Enforcement threshold: `off` (report-only, the default), `critical`,
-      `high`, `medium`, `low`, or `unknown`.
+      Enforcement threshold: `off` (report-only, the default), `critical`, `high`, `medium`, `low`, or `unknown`.
     required: false
     default: "off"
 
   trivy-version:
     description: >
-      Pinned Trivy release, without the leading `v`. Pinned rather than
-      floating for the same reason secret-scan.yml pins gitleaks: the scanner's
-      own behaviour changes between releases, so a floating version turns an
-      unrelated upstream change into a surprise CI failure. Bumping it means
-      re-reading the reports for new noise.
+      Pinned Trivy release, without the leading `v`.
+      Pinned rather than floating for the same reason secret-scan.yml pins gitleaks: the scanner's own behaviour changes between releases, so a floating version turns an unrelated upstream change into a surprise CI failure.
+      Bumping it means re-reading the reports for new noise.
     required: false
     default: "0.72.0"
   scanners:
     description: >
-      Trivy scanners to enable. Secret scanning stays on for the final runtime
-      image per #6694.
+      Trivy scanners to enable.
+      Secret scanning stays on for the final runtime image per #6694.
     required: false
     default: "vuln,secret"
   pkg-types:
     description: >
-      Package classes to scan. `os,library` covers both Debian packages from
-      the bookworm base and the bundled Node.js / Python dependencies.
+      Package classes to scan.
+      `os,library` covers both Debian packages from the bookworm base and the bundled Node.js / Python dependencies.
     required: false
     default: "os,library"
   retention-days:
@@ -108,11 +83,8 @@ inputs:
 runs:
   using: composite
   steps:
-    # Download the pinned release and verify it against the project's own
-    # published checksums before installing, so a tampered or truncated
-    # download cannot slip a different scanner into CI. Same approach as the
-    # gitleaks install in secret-scan.yml, and it avoids taking on a
-    # third-party action as a new pinned dependency.
+    # Download the pinned release and verify it against the project's own published checksums before installing, so a tampered or truncated download cannot slip a different scanner into CI.
+    # Same approach as the gitleaks install in secret-scan.yml, and it avoids taking on a third-party action as a new pinned dependency.
     - name: Install Trivy ${{ inputs.trivy-version }}
       id: install
       shell: bash
@@ -136,20 +108,14 @@ runs:
         trivy --version
         echo "db-date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
-    # Cache the vulnerability database so a rebuild does not re-download ~60 MB
-    # from ghcr.io on every run. Keyed by day so a restored cache is at most
-    # one update stale, and the refresh step below runs regardless.
+    # Cache the vulnerability database so a rebuild does not re-download ~60 MB from ghcr.io on every run.
+    # Keyed by day so a restored cache is at most one update stale, and the refresh step below runs regardless.
     #
-    # Be honest about what this buys on each path. Actions cache entries are
-    # scoped by ref, and a run can only restore from its own ref or from the
-    # default branch. docker-build.yml runs on `main` and both writes and
-    # reads the X64 entry, so it warms. release.yml's docker-scan runs on a
-    # tag: its X64 leg can restore what `main` last wrote, its ARM64 leg has
-    # no writer on `main` at all and always downloads cold, and whatever
-    # either leg saves is scoped to that tag and never read again. So the
-    # release path is only partially covered — which is precisely why the
-    # refresh step below retries and fails loudly rather than assuming the
-    # download will succeed.
+    # Be honest about what this buys on each path.
+    # Actions cache entries are scoped by ref, and a run can only restore from its own ref or from the default branch.
+    # docker-build.yml runs on `main` and both writes and reads the X64 entry, so it warms.
+    # release.yml's docker-scan runs on a tag: its X64 leg can restore what `main` last wrote, its ARM64 leg has no writer on `main` at all and always downloads cold, and whatever either leg saves is scoped to that tag and never read again.
+    # So the release path is only partially covered — which is precisely why the refresh step below retries and fails loudly rather than assuming the download will succeed.
     - name: Cache Trivy vulnerability database
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
@@ -160,13 +126,9 @@ runs:
 
     # SCANNER INFRASTRUCTURE BOUNDARY.
     #
-    # The database refresh is a separate step from the scan on purpose. Trivy's
-    # database is served from a public registry that rate-limits, and a failed
-    # or partial download is the single most likely way a scan produces a
-    # finding-free report that is not a clean image. Refreshing here — and
-    # running the scan itself with --skip-db-update so it cannot silently
-    # proceed on a database that never arrived — means a download failure ends
-    # the job with its own distinct error instead of masquerading as success.
+    # The database refresh is a separate step from the scan on purpose.
+    # Trivy's database is served from a public registry that rate-limits, and a failed or partial download is the single most likely way a scan produces a finding-free report that is not a clean image.
+    # Refreshing here — and running the scan itself with --skip-db-update so it cannot silently proceed on a database that never arrived — means a download failure ends the job with its own distinct error instead of masquerading as success.
     - name: Refresh Trivy vulnerability database
       id: db
       shell: bash
@@ -212,14 +174,10 @@ runs:
       run: |
         set -euo pipefail
         mkdir -p "${REPORT_DIR}"
-        # No --severity: its default is already every level, and spelling the
-        # list out would turn into a suppression the day Trivy adds one. The
-        # absence of the flag is the structurally unfiltered form.
-        # --exit-code 0 keeps Trivy from deciding the verdict — the report must
-        # contain everything and check-image-vulns.py owns pass/fail.
-        # --skip-db-update pairs with the refresh step above so a missing
-        # database fails loudly there rather than producing an empty report
-        # here.
+        # No --severity: its default is already every level, and spelling the list out would turn into a suppression the day Trivy adds one.
+        # The absence of the flag is the structurally unfiltered form.
+        # --exit-code 0 keeps Trivy from deciding the verdict — the report must contain everything and check-image-vulns.py owns pass/fail.
+        # --skip-db-update pairs with the refresh step above so a missing database fails loudly there rather than producing an empty report here.
         trivy image \
           --format json \
           --output "${REPORT_DIR}/${REPORT_SLUG}.json" \
@@ -229,25 +187,17 @@ runs:
           --exit-code 0 \
           --timeout 20m \
           "${IMAGE_REF}"
-        # Convert rather than re-scan: one scan, two encodings, so the SARIF
-        # uploaded to code scanning cannot describe a different run than the
-        # JSON retained as an artifact.
+        # Convert rather than re-scan: one scan, two encodings, so the SARIF uploaded to code scanning cannot describe a different run than the JSON retained as an artifact.
         #
-        # Verified against v0.72.0 source rather than assumed: the SARIF writer
-        # iterates res.Secrets alongside res.Vulnerabilities
-        # (pkg/report/sarif.go), so secret findings survive the conversion, and
-        # convert's own --scanners flag is read only when the output format is
-        # `table` (pkg/commands/convert/run.go), so passing it here would be a
-        # no-op that implied otherwise. Convert's default severity set is all
-        # five levels, so it re-filters nothing either.
+        # Verified against v0.72.0 source rather than assumed: the SARIF writer iterates res.Secrets alongside res.Vulnerabilities (pkg/report/sarif.go), so secret findings survive the conversion, and convert's own --scanners flag is read only when the output format is `table` (pkg/commands/convert/run.go), so passing it here would be a no-op that implied otherwise.
+        # Convert's default severity set is all five levels, so it re-filters nothing either.
         trivy convert \
           --format sarif \
           --output "${REPORT_DIR}/${REPORT_SLUG}.sarif" \
           "${REPORT_DIR}/${REPORT_SLUG}.json"
 
-    # Exit codes are the contract: 0 pass / report-only, 1 gate failure,
-    # 2 scanner infrastructure failure. All three are distinguishable in the
-    # log, and 2 can never be produced by a clean image.
+    # Exit codes are the contract: 0 pass / report-only, 1 gate failure, 2 scanner infrastructure failure.
+    # All three are distinguishable in the log, and 2 can never be produced by a clean image.
     - name: Summarise findings and apply the gate
       shell: bash
       env:
@@ -275,8 +225,7 @@ runs:
           --pkg-types "${PKG_TYPES}" \
           --fail-on "${FAIL_ON}"
 
-    # always() so the reports survive a failed gate — the artifact is how a
-    # maintainer finds out what to fix, which is exactly when the job is red.
+    # always() so the reports survive a failed gate — the artifact is how a maintainer finds out what to fix, which is exactly when the job is red.
     - name: Upload scan reports
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

@@ -427,17 +427,11 @@ jobs:
         run: bash scripts/tests/pre-commit-sha-fallback.sh
 
   # ── Container vulnerability gate self-test ─────────────────────────────────────
-  # `scripts/check-image-vulns.py` decides whether a release digest is allowed to
-  # be promoted to the :latest / :VERSION tags (#6694). Its decision function is
-  # only exercised in CI against whatever the vulnerability database happens to
-  # say that day, so a regression that made the gate permanently green would look
-  # exactly like a clean image. The embedded fixture corpus pins the behaviour
-  # instead: fixable CRITICAL fails at `critical`, an unfixed CRITICAL does not,
-  # a truncated report is an infrastructure failure rather than a pass, and the
-  # report-only default never fails on findings.
+  # `scripts/check-image-vulns.py` decides whether a release digest is allowed to be promoted to the :latest / :VERSION tags (#6694).
+  # Its decision function is only exercised in CI against whatever the vulnerability database happens to say that day, so a regression that made the gate permanently green would look exactly like a clean image.
+  # The embedded fixture corpus pins the behaviour instead: fixable CRITICAL fails at `critical`, an unfixed CRITICAL does not, a truncated report is an infrastructure failure rather than a pass, and the report-only default never fails on findings.
   #
-  # Unconditional and ~5s, matching githook-tests: the script is small, and a
-  # path filter here would be another thing to keep in sync with the gate.
+  # Unconditional and ~5s, matching githook-tests: the script is small, and a path filter here would be another thing to keep in sync with the gate.
   image-vuln-gate:
     name: Image Vulnerability Gate Self-Test
     runs-on: ubuntu-latest

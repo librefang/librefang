@@ -35,23 +35,20 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-# Ascending order of seriousness. Index position is the comparison key, so a
-# threshold of HIGH matches HIGH and CRITICAL and nothing below it.
+# Ascending order of seriousness.
+# Index position is the comparison key, so a threshold of HIGH matches HIGH and CRITICAL and nothing below it.
 SEVERITY_ORDER = ["UNKNOWN", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
-# `off` is the report-only setting and the shipped default. See the `fail-on`
-# input of .github/actions/trivy-image-scan/action.yml for the single place a
-# maintainer flips it.
+# `off` is the report-only setting and the shipped default.
+# See the `fail-on` input of .github/actions/trivy-image-scan/action.yml for the single place a maintainer flips it.
 THRESHOLDS = ["off", "unknown", "low", "medium", "high", "critical"]
 
 EXIT_OK = 0
 EXIT_GATE_FAILED = 1
 EXIT_INFRA_FAILURE = 2
 
-# Trivy marks a vulnerability it has a fix for as `fixed`; `affected`,
-# `will_not_fix`, `fix_deferred`, and `end_of_life` all mean no fix is
-# available. A non-empty FixedVersion is the older, more portable signal and
-# some ecosystems populate it without setting Status, so either one counts.
+# Trivy marks a vulnerability it has a fix for as `fixed`; `affected`, `will_not_fix`, `fix_deferred`, and `end_of_life` all mean no fix is available.
+# A non-empty FixedVersion is the older, more portable signal and some ecosystems populate it without setting Status, so either one counts.
 FIXABLE_STATUSES = {"fixed"}
 
 
@@ -87,10 +84,8 @@ def load_report(path: Path) -> dict[str, Any]:
         raise InfraFailure(f"report file {path} has no Metadata block — the scanner did not finish inspecting the image")
     results = report.get("Results") or []
     if not metadata.get("OS") and not results:
-        # The runtime image is Debian-based (node:*-bookworm-slim), so Trivy
-        # always identifies an OS for it. A report with neither an OS nor a
-        # single result means the vulnerability database was unusable, not
-        # that the image is clean.
+        # The runtime image is Debian-based (node:*-bookworm-slim), so Trivy always identifies an OS for it.
+        # A report with neither an OS nor a single result means the vulnerability database was unusable, not that the image is clean.
         raise InfraFailure(
             f"report file {path} identifies no operating system and contains no results — "
             "treating as a scanner failure rather than a clean image"
@@ -392,11 +387,8 @@ def run(args: argparse.Namespace) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 # Self-test — the controlled fixture corpus that proves the gate fires.
 #
-# Issue #6694 asks for "a vulnerable test image or controlled fixture" that
-# demonstrates the gate fails at the configured threshold. Building a
-# deliberately vulnerable image in CI is slow and its finding set drifts with
-# every database update; a fixture report is deterministic and exercises the
-# exact decision function the workflow calls.
+# Issue #6694 asks for "a vulnerable test image or controlled fixture" that demonstrates the gate fails at the configured threshold.
+# Building a deliberately vulnerable image in CI is slow and its finding set drifts with every database update; a fixture report is deterministic and exercises the exact decision function the workflow calls.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -427,9 +419,7 @@ def _vuln(cve: str, severity: str, fixed: str, status: str = "fixed") -> dict[st
 def _decide(report: dict[str, Any] | str, fail_on: str) -> int:
     """Run the full pipeline against an in-memory fixture and return the exit code.
 
-    stderr is swallowed for the duration: the failure paths emit `::error::`
-    workflow commands, and the runner would turn those into red annotations on
-    a self-test job that is in fact passing.
+    stderr is swallowed for the duration: the failure paths emit `::error::` workflow commands, and the runner would turn those into red annotations on a self-test job that is in fact passing.
     """
     with tempfile.TemporaryDirectory() as tmp:
         report_path = Path(tmp) / "report.json"
@@ -519,9 +509,7 @@ def self_test() -> int:
             failures += 1
             print(f"  FAIL {name} (expected exit {expected}, got {actual})")
 
-    # The unfixed CRITICAL must still be visible in the report even though it
-    # does not gate — that is the difference between "narrow the decision" and
-    # "--ignore-unfixed hides the finding".
+    # The unfixed CRITICAL must still be visible in the report even though it does not gate — that is the difference between "narrow the decision" and "--ignore-unfixed hides the finding".
     vulns, _ = collect_findings(unfixed_critical)
     if len(vulns) != 1 or vulns[0]["fixable"]:
         failures += 1
