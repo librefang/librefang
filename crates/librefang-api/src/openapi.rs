@@ -212,6 +212,7 @@ use crate::types;
         routes::enable_provider,
         routes::test_provider,
         routes::set_provider_url,
+        routes::set_provider_discovery,
         routes::set_default_provider,
         routes::copilot_oauth_start,
         routes::copilot_oauth_poll,

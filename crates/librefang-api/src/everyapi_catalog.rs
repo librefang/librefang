@@ -950,6 +950,7 @@ mod tests {
                 signup_url: None,
                 regions: HashMap::new(),
                 media_capabilities: Vec::new(),
+                discover_models: false,
             }),
             models: vec![text_entry("claude-sonnet-5")],
         });
@@ -995,6 +996,7 @@ mod tests {
                 signup_url: None,
                 regions: HashMap::new(),
                 media_capabilities: Vec::new(),
+                discover_models: false,
             }),
             models: vec![text_entry("claude-sonnet-5")],
         });

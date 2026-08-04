@@ -10031,6 +10031,55 @@
         }
       }
     },
+    "/api/providers/{name}/discovery": {
+      "put": {
+        "tags": [
+          "models"
+        ],
+        "summary": "PUT /api/providers/{name}/discovery — Toggle live model discovery (#6702).",
+        "description": "Body: `{ \"discover_models\": true }`.\n\nModel discovery used to be reachable only through the hard-coded local\nprovider ids, so a custom OpenAI-compatible endpoint registered under its\nown id stayed at `model_count: 0` forever with no UI action to change that.\nFlipping the flag here puts the provider on exactly the same probe path as\na built-in local one: the periodic probe loop, `POST .../test`, and the\nlive-model filter applied to `/api/models`.\n\nThe flag is persisted into the provider's own `providers/{name}.toml`\n`[provider]` table, which is where the catalog reads it back from on the\nnext boot. Registry-managed files are rewritten by the boot-time registry\nsync when their content drifts from the upstream copy, so the flag is\ndurable for the custom providers this endpoint exists to serve and\nintentionally best-effort for built-in ids — whose discovery behaviour is\ndecided by the id branch of the predicate anyway.",
+        "operationId": "set_provider_discovery",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Provider identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Discovery setting updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid provider name or request body"
+          },
+          "404": {
+            "description": "Provider not found"
+          }
+        }
+      }
+    },
     "/api/providers/{name}/enable": {
       "post": {
         "tags": [

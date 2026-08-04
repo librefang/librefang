@@ -27,10 +27,17 @@ on:
       - 'crates/librefang-api/dashboard/package.json'
       - 'crates/librefang-api/dashboard/pnpm-lock.yaml'
       - '.github/workflows/docker-build.yml'
+      # This workflow is the only place the Trivy composite action and its gate script actually execute — the ci.yml lane runs the script's self-test only.
+      # Without these two entries an edit to either would first run on an unrelated future push that happens to touch the Dockerfile, turning `main` red with no link back to the change that broke it.
+      - '.github/actions/trivy-image-scan/**'
+      - 'scripts/check-image-vulns.py'
   workflow_dispatch:
 
 permissions:
   contents: read
+  # Trivy scan results are uploaded to code scanning so the runtime image's CVEs land in the Security tab next to the retained JSON / SARIF artifacts (#6694).
+  # The upload step is guarded and non-fatal, so a fork without code scanning enabled still gets the scan, the summary, and the artifacts.
+  security-events: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -81,3 +88,31 @@ jobs:
       - name: Cleanup
         if: always()
         run: docker rm -f librefang-ci 2>&1 || true
+
+      # ── Vulnerability scan (#6694) ─────────────────────────────────────────
+      # Scans the exact image the smoke test just booted: Debian packages from the bookworm base, the bundled Node.js / Python dependencies, and a secret sweep.
+      # Runs after the boot probe rather than before it because a runtime image that will not start does not need a CVE report — the build failure is the finding.
+      #
+      # REPORT-ONLY.
+      # The single enforcement threshold for the whole repository is the `fail-on` input of .github/actions/trivy-image-scan, which ships as `off`; see the comment on that input for what arming it means and why it is not armed yet.
+      - name: Scan runtime image for vulnerabilities
+        id: scan
+        uses: ./.github/actions/trivy-image-scan
+        with:
+          image-ref: librefang:ci
+          platform: linux/amd64
+          report-slug: main-linux-amd64
+          report-dir: ${{ runner.temp }}/trivy-reports
+
+      - name: Upload SARIF to code scanning
+        # `!cancelled()` so a failed gate still publishes the findings that failed it.
+        # The `conclusion != 'skipped'` guard keeps this quiet when an earlier step failed and no SARIF was ever written, and `continue-on-error` keeps a repository without code scanning enabled from turning a green scan red on the upload alone.
+        if: ${{ !cancelled() && steps.scan.conclusion != 'skipped' && github.repository == 'librefang/librefang' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+        with:
+          sarif_file: ${{ runner.temp }}/trivy-reports/main-linux-amd64.sarif
+          # Distinct per scanned image: code scanning replaces the previous
+          # results for a category, so a shared one would discard everything
+          # but the last upload.
+          category: trivy-main-linux-amd64

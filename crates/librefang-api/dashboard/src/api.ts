@@ -80,6 +80,21 @@ export interface ProviderItem {
    *  otherwise the model's catalog `max_output_tokens`. Absent when the
    *  provider has no usable model or declares no output limit (#6209). */
   max_output_tokens?: number;
+  /** True when this provider takes part in live model discovery: the built-in
+   *  local ids always do, any other provider only once the operator opts in
+   *  via `PUT /api/providers/{id}/discovery` (#6702). */
+  discover_models?: boolean;
+  /** True for the built-in local provider ids (ollama / vllm / lmstudio /
+   *  lemonade). A claim about WHERE the provider runs — a probed custom
+   *  provider is not local — so it also means "discovery cannot be turned off
+   *  for this one". */
+  is_local?: boolean;
+  /** True when an API key is currently set for this provider's env var.
+   *  Distinct from `auth_status`, which reports `not_required` for every
+   *  `key_required: false` provider whether or not a key is stored — so this
+   *  is the only signal that tells a local-provider dialog to offer "replace"
+   *  / "remove" instead of "add" (#6703). Presence only; never the value. */
+  key_present?: boolean;
 }
 
 export interface MediaProvider {
@@ -1829,6 +1844,12 @@ export async function setProviderUrl(providerId: string, baseUrl: string, proxyU
   const body: Record<string, string> = { base_url: baseUrl };
   if (proxyUrl !== undefined) body.proxy_url = proxyUrl;
   return put<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/url`, body);
+}
+
+export async function setProviderDiscovery(providerId: string, discoverModels: boolean): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/discovery`, {
+    discover_models: discoverModels,
+  });
 }
 
 export async function setDefaultProvider(providerId: string, model?: string): Promise<ApiActionResponse> {

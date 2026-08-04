@@ -13,9 +13,8 @@
 //! without spinning up an agent or hitting an external service.
 //!
 //! Out of scope (skipped intentionally):
-//! - `POST /api/workflows/{id}/run` and `POST /api/schedules/{id}/run` —
-//!   actually invoke an LLM-backed agent loop, which our test kernel has no
-//!   credentials for.
+//! - LLM-backed `POST /api/workflows/{id}/run` and agent-turn `POST /api/schedules/{id}/run` coverage — our test kernel has no model credentials.
+//!   Manual schedule delivery is covered with a deterministic zero-step workflow.
 //! - `POST /api/workflows/{id}/dry-run` agent-execution coverage — the
 //!   step-context path walks into agent-registry lookups for agents we
 //!   haven't registered, so `agent_found` is always false here. The
@@ -29,13 +28,62 @@
 //!   cap → 400 path live in `trigger_workflow_test.rs` (which seeds a real
 //!   agent via `spawn_agent`).
 
+use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
+use futures::Stream;
 use librefang_api::routes::{self, AppState};
+use librefang_channels::types::{
+    ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
+};
 use librefang_testing::{MockKernelBuilder, TestAppState};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
 use tower::ServiceExt;
+
+struct RecordingChannelAdapter {
+    sent: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl ChannelAdapter for RecordingChannelAdapter {
+    fn name(&self) -> &str {
+        "telegram"
+    }
+
+    fn channel_type(&self) -> ChannelType {
+        ChannelType::Telegram
+    }
+
+    async fn start(
+        &self,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+
+    async fn send(
+        &self,
+        user: &ChannelUser,
+        content: ChannelContent,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let ChannelContent::Text(text) = content {
+            self.sent
+                .lock()
+                .expect("recording adapter lock")
+                .push(format!("{}:{text}", user.platform_id));
+        }
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+}
 
 struct Harness {
     app: Router,
@@ -884,6 +932,79 @@ async fn workflow_template_instantiate_unknown_returns_404() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_manual_run_delivers_workflow_output_to_channel_targets() {
+    use chrono::Utc;
+    use librefang_types::agent::AgentId;
+    use librefang_types::scheduler::{
+        CronAction, CronDelivery, CronDeliveryTarget, CronJob, CronJobId, CronSchedule,
+    };
+
+    let h = boot().await;
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    h._state.kernel.channel_adapters_ref().insert(
+        "telegram".to_string(),
+        Arc::new(RecordingChannelAdapter { sent: sent.clone() }),
+    );
+
+    // An empty workflow is deterministic: its output is its input, so the route can be exercised without an LLM provider or live Telegram bot.
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({"name": "manual-delivery", "steps": []})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let workflow_id = body["workflow_id"].as_str().expect("workflow id");
+
+    let job = CronJob {
+        id: CronJobId::new(),
+        agent_id: AgentId::new(),
+        name: "manual telegram delivery".to_string(),
+        enabled: true,
+        schedule: CronSchedule::Every { every_secs: 3600 },
+        action: CronAction::Workflow {
+            workflow_id: workflow_id.to_string(),
+            input: Some("scheduled hello".to_string()),
+            timeout_secs: Some(30),
+        },
+        delivery: CronDelivery::None,
+        delivery_targets: vec![CronDeliveryTarget::Channel {
+            channel_type: "telegram".to_string(),
+            recipient: "test-chat-id".to_string(),
+            thread_id: None,
+            account_id: None,
+        }],
+        peer_id: None,
+        session_mode: None,
+        created_at: Utc::now(),
+        last_run: None,
+        next_run: None,
+    };
+    let job_id = h
+        ._state
+        .kernel
+        .cron()
+        .add_job(job, false)
+        .expect("add schedule");
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/schedules/{job_id}/run"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["output"], "scheduled hello");
+    assert_eq!(
+        sent.lock().expect("recording adapter lock").as_slice(),
+        ["test-chat-id:scheduled hello"],
+        "manual schedule run must use the same delivery_targets fan-out as a timed fire"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

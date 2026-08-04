@@ -928,8 +928,9 @@ impl ModelCatalog {
         self.suppressed_providers.contains(id)
     }
 
-    /// Return `(id, base_url)` for every local HTTP provider that the
-    /// periodic probe loop should poll. Filters out providers the user has
+    /// Return `(id, base_url)` for every provider that the periodic probe loop
+    /// should poll: the built-in local HTTP ids plus any provider that opted in
+    /// via `discover_models` (#6702). Filters out providers the user has
     /// explicitly suppressed — without this, the next probe tick would
     /// overwrite the `Missing` status set by `delete_provider_key` with
     /// `NotRequired`/`LocalOffline` and the provider would re-appear in
@@ -938,12 +939,26 @@ impl ModelCatalog {
         self.providers
             .iter()
             .filter(|p| {
-                crate::provider_health::is_local_provider(&p.id)
+                crate::provider_health::discovers_models(p)
                     && !p.base_url.is_empty()
                     && !self.suppressed_providers.contains(&p.id)
             })
             .map(|p| (p.id.clone(), p.base_url.clone()))
             .collect()
+    }
+
+    /// Turn live model discovery on or off for a provider (#6702).
+    ///
+    /// Returns `false` when the provider is unknown, so the caller can answer
+    /// 404 instead of silently persisting a flag nothing reads.
+    pub fn set_provider_discover_models(&mut self, provider: &str, discover: bool) -> bool {
+        match self.providers.iter_mut().find(|p| p.id == provider) {
+            Some(p) => {
+                p.discover_models = discover;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Load the suppressed-providers list from a JSON file.
@@ -1103,6 +1118,9 @@ impl ModelCatalog {
                 // Credentials come from the derived env var above.
                 cli_managed: false,
                 proxy_url: None,
+                // Discovery is opt-in — a bare `[provider_urls]` entry says
+                // nothing about whether the endpoint serves `/models` (#6702).
+                discover_models: false,
             });
             // Re-detect auth for the newly added provider
             self.detect_auth();
@@ -1149,6 +1167,7 @@ impl ModelCatalog {
             is_custom: false,
             cli_managed: true,
             proxy_url: None,
+            discover_models: false,
         });
         true
     }
@@ -1202,6 +1221,7 @@ impl ModelCatalog {
             is_custom: true,
             cli_managed: false,
             proxy_url: None,
+            discover_models: false,
         });
         true
     }
