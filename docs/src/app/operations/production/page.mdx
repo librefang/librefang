@@ -265,7 +265,7 @@ Every runtime image is scanned with [Trivy](https://trivy.dev) before its digest
 | `release.yml` (`docker-scan`) | Each native release digest — `linux/amd64` on `ubuntu-24.04`, `linux/arm64` on `ubuntu-24.04-arm` | Every release tag, between the per-arch push and the manifest publish |
 
 Each scan covers **OS packages** (Debian packages from the `node:*-bookworm-slim` base) and **language packages** (the bundled Node.js and Python dependencies) — `--pkg-types os,library` — with **secret scanning** left on for the final image.
-No severity is suppressed and `--ignore-unfixed` is never used, so the report contains every finding at every severity, fixed and unfixed alike.
+Neither `--severity` nor `--ignore-unfixed` is passed, so no filter is applied at all and the report contains every finding at every severity, fixed and unfixed alike.
 
 **Enforcement threshold.** The gate ships **report-only** and is *not* currently enforced.
 The runtime image carries a large pre-existing backlog (10 critical and 95 high findings as of 2026-08-01, issue #6694), so an armed gate would fail `main` and every release on its first run.
@@ -284,7 +284,7 @@ A failed scan blocks `docker-manifest`, and therefore `publish_arch_repo`, `depl
 The consequence is that no user-facing tag (`:VERSION`, `:latest`, `:lts`) is ever created or moved onto a digest that failed the gate, and no downstream deployment consumes it.
 An untagged digest left behind in GHCR is not pullable by name.
 
-**Where the reports are retained.** Three places, for 30 days of workflow-artifact retention:
+**Where the reports are retained.** Three places, with artifacts requesting 30 days — the effective figure is whatever the repository's artifact retention limit allows, since `upload-artifact` silently clamps a longer request:
 
 - **Workflow artifacts** named `trivy-main-linux-amd64` (main) and `trivy-release-linux-amd64` / `trivy-release-linux-arm64` (releases), each holding the raw Trivy JSON, the SARIF encoding of the same scan, and a `-summary.json` recording the platform digest, scanner version, database timestamp, threshold, and verdict.
 - **The job summary** on the run, which names the platform digest, the Trivy and vulnerability-database versions, per-severity totals with fixable counts, and a table of every CRITICAL / HIGH finding with its package, installed version, fixed version, CVE id, and severity.

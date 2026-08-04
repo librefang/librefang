@@ -265,7 +265,7 @@ docker run --rm ghcr.io/librefang/librefang:latest --version
 | `release.yml`（`docker-scan`） | 每个原生架构的发布 digest —— `linux/amd64` 在 `ubuntu-24.04`、`linux/arm64` 在 `ubuntu-24.04-arm` | 每个发布标签，位于单架构推送与 manifest 发布之间 |
 
 每次扫描同时覆盖 **OS 软件包**（来自 `node:*-bookworm-slim` 基础镜像的 Debian 包）和 **语言包**（内置的 Node.js 与 Python 依赖）—— 即 `--pkg-types os,library` —— 并对最终镜像保持 **密钥扫描** 开启。
-不屏蔽任何严重级别，也从不使用 `--ignore-unfixed`，因此报告包含所有严重级别的全部发现，无论是否有可用修复。
+既不传 `--severity` 也不传 `--ignore-unfixed`，因此完全不施加任何过滤，报告包含所有严重级别的全部发现，无论是否有可用修复。
 
 **执行阈值。** 该门禁以 **仅报告** 模式发布，目前 *并未* 强制执行。
 运行时镜像存在大量历史遗留问题（截至 2026-08-01 有 10 个 critical 和 95 个 high，见 issue #6694），因此一旦启用强制执行，`main` 和每次发布在第一次运行时就会失败。
@@ -284,7 +284,7 @@ off  →  critical  →  high
 其效果是：任何面向用户的标签（`:VERSION`、`:latest`、`:lts`）都不会被创建或移动到未通过门禁的 digest 上，下游部署也不会消费它。
 遗留在 GHCR 中的无标签 digest 无法通过名称拉取。
 
-**报告保留在哪里。** 三个位置，工作流产物保留 30 天：
+**报告保留在哪里。** 三个位置，产物请求保留 30 天 —— 实际生效值取决于仓库的产物保留上限，因为 `upload-artifact` 会静默地把超出上限的请求截断：
 
 - **工作流产物**，名为 `trivy-main-linux-amd64`（main）以及 `trivy-release-linux-amd64` / `trivy-release-linux-arm64`（发布），每个包含原始 Trivy JSON、同一次扫描的 SARIF 编码，以及记录了平台 digest、扫描器版本、数据库时间戳、阈值和判定结果的 `-summary.json`。
 - **运行的作业摘要**，其中列出平台 digest、Trivy 与漏洞数据库版本、按严重级别统计的总数与可修复数，以及每条 CRITICAL / HIGH 发现的软件包、已安装版本、修复版本、CVE 编号和严重级别。

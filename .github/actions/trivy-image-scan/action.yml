@@ -130,10 +130,19 @@ runs:
         echo "db-date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
     # Cache the vulnerability database so a rebuild does not re-download ~60 MB
-    # from ghcr.io on every run, which is also the main source of the
-    # TOOMANYREQUESTS failures the next step has to distinguish from a clean
-    # scan. Keyed by day so a restored cache is at most one update stale, and
-    # the next step refreshes it regardless.
+    # from ghcr.io on every run. Keyed by day so a restored cache is at most
+    # one update stale, and the refresh step below runs regardless.
+    #
+    # Be honest about what this buys on each path. Actions cache entries are
+    # scoped by ref, and a run can only restore from its own ref or from the
+    # default branch. docker-build.yml runs on `main` and both writes and
+    # reads the X64 entry, so it warms. release.yml's docker-scan runs on a
+    # tag: its X64 leg can restore what `main` last wrote, its ARM64 leg has
+    # no writer on `main` at all and always downloads cold, and whatever
+    # either leg saves is scoped to that tag and never read again. So the
+    # release path is only partially covered — which is precisely why the
+    # refresh step below retries and fails loudly rather than assuming the
+    # download will succeed.
     - name: Cache Trivy vulnerability database
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
@@ -166,7 +175,7 @@ runs:
           if [ "${attempt}" -eq "${attempts}" ]; then
             break
           fi
-          delay=$((attempt * 20))
+          delay=$((attempt * 30))
           echo "::warning::Trivy vulnerability database download attempt ${attempt}/${attempts} failed; retrying in ${delay}s"
           sleep "${delay}"
         done
@@ -196,17 +205,19 @@ runs:
       run: |
         set -euo pipefail
         mkdir -p "${REPORT_DIR}"
-        # --severity lists every level explicitly and --exit-code 0 keeps Trivy
-        # from deciding the verdict: the report must contain everything, and
-        # check-image-vulns.py owns pass/fail. --skip-db-update pairs with the
-        # refresh step above so a missing database fails loudly there rather
-        # than producing an empty report here.
+        # No --severity: its default is already every level, and spelling the
+        # list out would turn into a suppression the day Trivy adds one. The
+        # absence of the flag is the structurally unfiltered form.
+        # --exit-code 0 keeps Trivy from deciding the verdict — the report must
+        # contain everything and check-image-vulns.py owns pass/fail.
+        # --skip-db-update pairs with the refresh step above so a missing
+        # database fails loudly there rather than producing an empty report
+        # here.
         trivy image \
           --format json \
           --output "${REPORT_DIR}/${REPORT_SLUG}.json" \
           --scanners "${SCANNERS}" \
           --pkg-types "${PKG_TYPES}" \
-          --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
           --skip-db-update \
           --exit-code 0 \
           --timeout 20m \
@@ -214,6 +225,14 @@ runs:
         # Convert rather than re-scan: one scan, two encodings, so the SARIF
         # uploaded to code scanning cannot describe a different run than the
         # JSON retained as an artifact.
+        #
+        # Verified against v0.72.0 source rather than assumed: the SARIF writer
+        # iterates res.Secrets alongside res.Vulnerabilities
+        # (pkg/report/sarif.go), so secret findings survive the conversion, and
+        # convert's own --scanners flag is read only when the output format is
+        # `table` (pkg/commands/convert/run.go), so passing it here would be a
+        # no-op that implied otherwise. Convert's default severity set is all
+        # five levels, so it re-filters nothing either.
         trivy convert \
           --format sarif \
           --output "${REPORT_DIR}/${REPORT_SLUG}.sarif" \
