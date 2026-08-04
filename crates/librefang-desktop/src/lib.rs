@@ -90,6 +90,42 @@ pub(crate) fn validate_server_url(url: &str) -> Result<(), String> {
     ))
 }
 
+/// URL schemes a webview-initiated new-window request may hand to the OS.
+///
+/// Mirrors the dashboard's own allowlist in `crates/librefang-api/dashboard/src/lib/safeUrl.ts` — the schemes with no in-context execution semantics.
+/// Not every URL that reaches the handler is first-party: the dashboard renders agent output and server-controlled catalogue entries as markdown links, so a `file:`, `javascript:` or custom-scheme target must never be forwarded to `xdg-open` / `open` / `ShellExecute`.
+#[cfg(desktop)]
+const EXTERNAL_OPEN_SCHEMES: [&str; 3] = ["http", "https", "mailto"];
+
+/// Whether a `window.open()` / `target="_blank"` request should be handed to the user's default browser.
+///
+/// `Url::scheme` is normalised to lowercase by the parser, so the comparison needs no case folding of its own.
+#[cfg(desktop)]
+pub(crate) fn should_open_externally(url: &tauri::Url) -> bool {
+    EXTERNAL_OPEN_SCHEMES.contains(&url.scheme())
+}
+
+/// Hand a webview-requested new window to the OS default handler instead of dropping it (#6706).
+///
+/// wry connects WebKitGTK's `create` signal — and the WKWebView / WebView2 equivalents — only when a new-window handler is registered.
+/// Without one, every `target="_blank"` anchor and `window.open()` call in the dashboard silently does nothing inside the desktop app, including the WebKitGTK context menu's own "Open Link" entry, which routes through the same signal.
+///
+/// The request is always denied: LibreFang never opens a second, chromeless webview onto a third-party page — the URL goes to the user's real browser instead.
+/// `that_detached` is used rather than `that` because this runs on the UI thread and must not block the window while the browser starts.
+#[cfg(desktop)]
+fn open_new_window_request_externally<R: tauri::Runtime>(
+    url: tauri::Url,
+) -> tauri::webview::NewWindowResponse<R> {
+    if should_open_externally(&url) {
+        if let Err(e) = open::that_detached(url.as_str()) {
+            warn!("Failed to open {url} in the system default handler: {e}");
+        }
+    } else {
+        warn!("Refusing to open new-window request with unsupported scheme: {url}");
+    }
+    tauri::webview::NewWindowResponse::Deny
+}
+
 /// Managed state: the port the embedded server listens on.
 /// Wrapped in `RwLock<Option<_>>` — `None` when running in remote mode or before local boot.
 pub struct PortState(pub std::sync::RwLock<Option<u16>>);
@@ -438,6 +474,7 @@ pub fn run(server_url: Option<String>, force_local: bool) {
                     .min_inner_size(800.0, 600.0)
                     .center()
                     .visible(true)
+                    .on_new_window(|url, _features| open_new_window_request_externally(url))
                     .build()?;
                 } else {
                     // Direct mode — navigate to the resolved URL
@@ -451,6 +488,7 @@ pub fn run(server_url: Option<String>, force_local: bool) {
                     .min_inner_size(800.0, 600.0)
                     .center()
                     .visible(true)
+                    .on_new_window(|url, _features| open_new_window_request_externally(url))
                     .build()?;
                 }
             }
@@ -597,5 +635,41 @@ mod tests {
         assert!(validate_server_url("http://localhost@evil.com/").is_err());
         assert!(validate_server_url("http://127.0.0.1@evil.com/").is_err());
         assert!(validate_server_url("http://user:pass@evil.com/").is_err());
+    }
+
+    #[cfg(desktop)]
+    mod new_window_requests {
+        use crate::should_open_externally;
+
+        fn parse(url: &str) -> tauri::Url {
+            url.parse().expect("test URL must parse")
+        }
+
+        #[test]
+        fn web_links_are_handed_to_the_system_browser() {
+            // The EveryAPI partner panel that #6706 reported as dead.
+            assert!(should_open_externally(&parse(
+                "https://everyapi.ai/integrations/librefang?utm_source=librefang_dashboard&utm_medium=partner&utm_campaign=librefang_everyapi"
+            )));
+            assert!(should_open_externally(&parse("http://example.com/docs")));
+            assert!(should_open_externally(&parse("mailto:hi@example.com")));
+        }
+
+        #[test]
+        fn scheme_matching_is_case_insensitive() {
+            // The URL parser lowercases the scheme, so an uppercase href still matches.
+            assert!(should_open_externally(&parse("HTTPS://example.com")));
+        }
+
+        #[test]
+        fn non_web_schemes_are_refused() {
+            // Agent output and catalogue entries are rendered as markdown links,
+            // so these can reach the handler without being first-party.
+            assert!(!should_open_externally(&parse("file:///etc/passwd")));
+            assert!(!should_open_externally(&parse("javascript:alert(1)")));
+            assert!(!should_open_externally(&parse("data:text/html,<h1>x</h1>")));
+            assert!(!should_open_externally(&parse("smb://fileserver/share")));
+            assert!(!should_open_externally(&parse("lfconnect://localhost/")));
+        }
     }
 }
