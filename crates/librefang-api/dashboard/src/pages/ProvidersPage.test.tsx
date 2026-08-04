@@ -20,6 +20,7 @@ import {
   useDeleteProviderKey,
   useEnableProvider,
   useSetProviderUrl,
+  useSetProviderDiscovery,
   useSetDefaultProvider,
   useCreateRegistryContent,
   useConnectEveryApi,
@@ -52,6 +53,7 @@ vi.mock("../lib/mutations/providers", () => ({
   useDeleteProviderKey: vi.fn(),
   useEnableProvider: vi.fn(),
   useSetProviderUrl: vi.fn(),
+  useSetProviderDiscovery: vi.fn(),
   useSetDefaultProvider: vi.fn(),
   useCreateRegistryContent: vi.fn(),
   useConnectEveryApi: vi.fn(),
@@ -104,6 +106,8 @@ const useDeleteProviderKeyMock = useDeleteProviderKey as unknown as ReturnType<
 const useSetProviderUrlMock = useSetProviderUrl as unknown as ReturnType<
   typeof vi.fn
 >;
+const useSetProviderDiscoveryMock =
+  useSetProviderDiscovery as unknown as ReturnType<typeof vi.fn>;
 const useSetDefaultProviderMock = useSetDefaultProvider as unknown as ReturnType<
   typeof vi.fn
 >;
@@ -169,6 +173,7 @@ function DrawerSlot(): React.ReactNode {
 describe("ProvidersPage", () => {
   let testMutateAsync: ReturnType<typeof vi.fn>;
   let connectEveryApiMutateAsync: ReturnType<typeof vi.fn>;
+  let setDiscoveryMutateAsync: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -177,6 +182,7 @@ describe("ProvidersPage", () => {
     useDrawerStore.setState({ isOpen: false, content: null });
     testMutateAsync = vi.fn().mockResolvedValue({ status: "ok" });
     connectEveryApiMutateAsync = vi.fn().mockResolvedValue(undefined);
+    setDiscoveryMutateAsync = vi.fn().mockResolvedValue(undefined);
 
     useProviderStatusMock.mockReturnValue({
       data: { default_provider: "openai" },
@@ -201,6 +207,9 @@ describe("ProvidersPage", () => {
     );
     useSetProviderUrlMock.mockReturnValue(
       stubMutation(vi.fn().mockResolvedValue(undefined)),
+    );
+    useSetProviderDiscoveryMock.mockReturnValue(
+      stubMutation(setDiscoveryMutateAsync),
     );
     useSetDefaultProviderMock.mockReturnValue(
       stubMutation(vi.fn().mockResolvedValue(undefined)),
@@ -507,5 +516,128 @@ describe("ProvidersPage", () => {
     expect(
       within(drawer).getByRole("button", { name: /common\.save/ }),
     ).not.toBeDisabled();
+  });
+  // ── Local providers behind auth (#6703) + model discovery (#6702) ──
+
+  const VLLM: ProviderItem = {
+    id: "vllm",
+    display_name: "vLLM",
+    auth_status: "not_required",
+    reachable: true,
+    model_count: 1,
+    key_required: false,
+    key_present: false,
+    is_local: true,
+    base_url: "http://gpu-box:8000/v1",
+    api_key_env: "VLLM_API_KEY",
+  };
+
+  function openConfigureDrawer(provider: ProviderItem) {
+    useProvidersMock.mockReturnValue({
+      data: [provider],
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+    renderPage();
+    fireEvent.click(screen.getAllByRole("button", { name: /common\.edit/ })[0]);
+    return screen.findByTestId("drawer-slot");
+  }
+
+  it("offers the API key field for a key_required=false provider (#6703)", async () => {
+    // The regression: the field was gated on `key_required !== false`, so a
+    // self-hosted vLLM behind auth had no way to receive a key from the UI even
+    // though the runtime sends whatever key is stored as a Bearer token.
+    const drawer = await openConfigureDrawer(VLLM);
+
+    const keyInput = within(drawer).getByPlaceholderText(
+      "providers.key_placeholder",
+    );
+    expect(keyInput).toBeInTheDocument();
+    // Labelled as optional, because the provider genuinely does not require one.
+    expect(
+      within(drawer).getByText("providers.api_key_optional_hint"),
+    ).toBeInTheDocument();
+  });
+
+  it("treats key_present as a stored key for a keyless provider (#6703)", async () => {
+    // `auth_status` is `not_required` whether or not a key is set, so without
+    // `key_present` the drawer offered no way to replace or remove one.
+    const drawer = await openConfigureDrawer({ ...VLLM, key_present: true });
+
+    expect(
+      within(drawer).getByPlaceholderText("providers.key_placeholder_existing"),
+    ).toBeInTheDocument();
+    expect(
+      within(drawer).getByRole("button", { name: /providers\.remove_key/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the key field away from CLI passthrough providers (#6703)", async () => {
+    // The counterweight to the un-gating above: claude-code & friends also
+    // declare `key_required: false`, but they spawn a subprocess and carry no
+    // base URL. Showing a key field there would plant a meaningless
+    // CLAUDE_CODE_API_KEY in secrets.env, and there is no endpoint to send it to.
+    const drawer = await openConfigureDrawer({
+      id: "claude-code",
+      display_name: "Claude Code",
+      auth_status: "configured_cli",
+      model_count: 2,
+      key_required: false,
+      base_url: "",
+      api_key_env: "",
+    });
+
+    expect(
+      within(drawer).queryByPlaceholderText("providers.key_placeholder"),
+    ).toBeNull();
+    expect(
+      within(drawer).queryByText("providers.api_key_optional_hint"),
+    ).toBeNull();
+    // No endpoint to poll either, so the discovery control stays away too.
+    expect(
+      within(drawer).queryByRole("switch", {
+        name: "providers.discover_models_label",
+      }),
+    ).toBeNull();
+  });
+
+  it("pins discovery on for built-in local providers (#6702)", async () => {
+    const drawer = await openConfigureDrawer(VLLM);
+
+    const toggle = within(drawer).getByRole("switch", {
+      name: "providers.discover_models_label",
+    });
+    expect(toggle).toBeChecked();
+    expect(toggle).toBeDisabled();
+    expect(
+      within(drawer).getByText("providers.discover_models_hint_builtin"),
+    ).toBeInTheDocument();
+  });
+
+  it("lets a custom provider opt into model discovery (#6702)", async () => {
+    const drawer = await openConfigureDrawer({
+      id: "acme-vllm",
+      display_name: "ACME vLLM",
+      auth_status: "configured",
+      model_count: 0,
+      key_required: true,
+      is_custom: true,
+      discover_models: false,
+      base_url: "http://gpu-box:4000/v1",
+      api_key_env: "ACME_VLLM_API_KEY",
+    });
+
+    const toggle = within(drawer).getByRole("switch", {
+      name: "providers.discover_models_label",
+    });
+    expect(toggle).not.toBeChecked();
+    expect(toggle).not.toBeDisabled();
+
+    fireEvent.click(toggle);
+    expect(setDiscoveryMutateAsync).toHaveBeenCalledWith({
+      id: "acme-vllm",
+      discoverModels: true,
+    });
   });
 });

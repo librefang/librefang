@@ -562,6 +562,66 @@ fn local_provider_probe_targets_excludes_suppressed_providers() {
     );
 }
 
+/// #6702: a custom OpenAI-compatible provider joins the periodic probe loop
+/// once it opts in, and drops back out when the operator turns it off. Before
+/// the flag existed, `local_provider_probe_targets` filtered on the hard-coded
+/// `ollama | vllm | lmstudio | lemonade` id list, so a self-hosted endpoint
+/// registered under any other id was never polled and its model list stayed
+/// empty forever.
+#[test]
+fn local_provider_probe_targets_includes_opted_in_custom_providers() {
+    let mut catalog = test_catalog();
+    // A custom entry created the ordinary way — via a base-URL override.
+    catalog.set_provider_url("acme-vllm", "http://gpu-box:4000/v1");
+    assert!(
+        !catalog
+            .local_provider_probe_targets()
+            .iter()
+            .any(|(id, _)| id == "acme-vllm"),
+        "a custom provider stays out of the probe loop until it opts in"
+    );
+
+    assert!(catalog.set_provider_discover_models("acme-vllm", true));
+    let targets = catalog.local_provider_probe_targets();
+    assert!(
+        targets
+            .iter()
+            .any(|(id, url)| id == "acme-vllm" && url == "http://gpu-box:4000/v1"),
+        "an opted-in custom provider must be probed with its own base URL: {targets:?}"
+    );
+    assert!(
+        targets.iter().any(|(id, _)| id == "ollama"),
+        "the built-in local ids keep their place in the list: {targets:?}"
+    );
+
+    // Suppression still wins over the opt-in — the #4803 invariant must hold
+    // for the new entry class too, or "remove key" would be undone by the
+    // next probe tick.
+    catalog.suppress_provider("acme-vllm");
+    assert!(
+        !catalog
+            .local_provider_probe_targets()
+            .iter()
+            .any(|(id, _)| id == "acme-vllm"),
+        "a suppressed provider is never probed, opted in or not"
+    );
+    catalog.unsuppress_provider("acme-vllm");
+
+    assert!(catalog.set_provider_discover_models("acme-vllm", false));
+    assert!(
+        !catalog
+            .local_provider_probe_targets()
+            .iter()
+            .any(|(id, _)| id == "acme-vllm"),
+        "opting back out removes the provider from the probe loop"
+    );
+
+    assert!(
+        !catalog.set_provider_discover_models("__no_such_provider__", true),
+        "an unknown id reports failure so the API can answer 404"
+    );
+}
+
 #[test]
 fn test_available_models_includes_local() {
     let mut catalog = test_catalog();
@@ -2395,6 +2455,7 @@ fn a_provider_file_merge_clears_cli_management() {
             signup_url: None,
             regions: std::collections::HashMap::new(),
             media_capabilities: Vec::new(),
+            discover_models: false,
         }),
         models: Vec::new(),
     });
@@ -2422,6 +2483,7 @@ fn a_provider_file_merge_without_a_key_env_still_clears_cli_management() {
             signup_url: None,
             regions: std::collections::HashMap::new(),
             media_capabilities: Vec::new(),
+            discover_models: false,
         }),
         models: Vec::new(),
     });
