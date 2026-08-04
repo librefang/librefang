@@ -4,4 +4,4 @@ Each run publishes a job summary naming the platform digest, scanner and databas
 The gate ships **report-only**: issue #6694 measured a 10-critical / 95-high backlog with Trivy 0.57.0, so arming it today would fail `main` on the first run.
 The enforcement threshold is a single default — the `fail-on` input of `.github/actions/trivy-image-scan` — that a maintainer moves `off → critical → high` once the backlog is remediated, and neither workflow overrides it.
 Nothing is suppressed to achieve that: no `--ignore-unfixed` and no severity filtering, so the report is complete either way and only the pass/fail decision is narrowed to fixable findings.
-A vulnerability-database download failure is kept distinct from a clean scan — refreshed in its own retried step, with the scan then running `--skip-db-update` — so a scanner outage fails loudly instead of passing as a finding-free image (#6694) (@houko)
+A vulnerability-database download failure is kept distinct from a clean scan — refreshed in its own retried step, with the scan then running `--skip-db-update` — so a scanner outage fails loudly instead of passing as a finding-free image (#6694, #6712) (@houko)
