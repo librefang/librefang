@@ -1098,7 +1098,6 @@ pub async fn export_config(State(state): State<Arc<AppState>>) -> impl IntoRespo
 // ---------------------------------------------------------------------------
 // Config Schema endpoint
 // ---------------------------------------------------------------------------
-/// GET /api/config/schema — Return a simplified JSON description of the config structure.
 /// GET /api/config/status — where the effective configuration came from, and whether it can be written.
 ///
 /// The dashboard branches on `writable` to decide whether to render write controls, rather than
@@ -1117,6 +1116,7 @@ pub async fn config_status() -> impl IntoResponse {
     axum::Json(librefang_kernel::config::config_provenance(None))
 }
 
+/// GET /api/config/schema — Return a simplified JSON description of the config structure.
 #[utoipa::path(
     get,
     path = "/api/config/schema",
