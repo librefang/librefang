@@ -92,8 +92,13 @@ pub(crate) fn validate_server_url(url: &str) -> Result<(), String> {
 
 /// URL schemes a webview-initiated new-window request may hand to the OS.
 ///
-/// Mirrors the dashboard's own allowlist in `crates/librefang-api/dashboard/src/lib/safeUrl.ts` — the schemes with no in-context execution semantics.
+/// Matches the dashboard's `SAFE_SCHEMES` in `crates/librefang-api/dashboard/src/lib/safeUrl.ts` — the schemes with no in-context execution semantics.
 /// Not every URL that reaches the handler is first-party: the dashboard renders agent output and server-controlled catalogue entries as markdown links, so a `file:`, `javascript:` or custom-scheme target must never be forwarded to `xdg-open` / `open` / `ShellExecute`.
+///
+/// This list is deliberately narrower than the dashboard's markdown policy, which is a divergence rather than an oversight.
+/// `MarkdownContent.tsx`'s `EXTRA_URL_SCHEMES` additionally lets `obsidian:` and `obsidian-advanced-uri:` survive sanitisation so agent-emitted `[note](obsidian://…)` links render, and those anchors carry `target="_blank"`, so they reach this handler and are denied here.
+/// That is intended: `obsidian-advanced-uri:` can execute commands in Obsidian and the URL is agent-controlled, so it must not reach the OS handler.
+/// Do not "restore parity" by widening this array.
 #[cfg(desktop)]
 const EXTERNAL_OPEN_SCHEMES: [&str; 3] = ["http", "https", "mailto"];
 
@@ -108,7 +113,7 @@ pub(crate) fn should_open_externally(url: &tauri::Url) -> bool {
 /// Hand a webview-requested new window to the OS default handler instead of dropping it (#6706).
 ///
 /// wry connects WebKitGTK's `create` signal — and the WKWebView / WebView2 equivalents — only when a new-window handler is registered.
-/// Without one, every `target="_blank"` anchor and `window.open()` call in the dashboard silently does nothing inside the desktop app, including the WebKitGTK context menu's own "Open Link" entry, which routes through the same signal.
+/// Without one, every `target="_blank"` anchor and `window.open()` call in the dashboard silently does nothing inside the desktop app.
 ///
 /// The request is always denied: LibreFang never opens a second, chromeless webview onto a third-party page — the URL goes to the user's real browser instead.
 /// `that_detached` is used rather than `that` because this runs on the UI thread and must not block the window while the browser starts.
@@ -670,6 +675,18 @@ mod tests {
             assert!(!should_open_externally(&parse("data:text/html,<h1>x</h1>")));
             assert!(!should_open_externally(&parse("smb://fileserver/share")));
             assert!(!should_open_externally(&parse("lfconnect://localhost/")));
+        }
+
+        #[test]
+        fn a_refused_scheme_still_denies_the_in_app_window() {
+            // The handler denies unconditionally — a refused scheme must not fall through to a second chromeless webview onto the same URL.
+            // Only the deny branch is exercised here: the accept branch calls `open::that_detached`, which would launch a real browser on the test machine.
+            assert!(matches!(
+                crate::open_new_window_request_externally::<tauri::Wry>(parse(
+                    "file:///etc/passwd"
+                )),
+                tauri::webview::NewWindowResponse::Deny
+            ));
         }
     }
 }
