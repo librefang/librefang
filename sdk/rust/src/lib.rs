@@ -2719,6 +2719,18 @@ impl ModelsResource {
         .await
     }
 
+    pub async fn set_provider_discovery(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &format!("/api/providers/{}/discovery", name),
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn enable_provider(&self, name: &str) -> Result<Value> {
         do_req(
             &self.client,

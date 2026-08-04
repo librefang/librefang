@@ -683,6 +683,15 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn channel_adapters_ref(
         &self,
     ) -> &dashmap::DashMap<String, Arc<dyn librefang_channels::types::ChannelAdapter>>;
+    async fn deliver_cron_output(
+        self: Arc<Self>,
+        agent_id: AgentId,
+        job_name: &str,
+        output: &str,
+        silent: bool,
+        delivery: &librefang_types::scheduler::CronDelivery,
+        delivery_targets: &[librefang_types::scheduler::CronDeliveryTarget],
+    );
     fn trigger_engine(&self) -> &crate::triggers::TriggerEngine;
     fn broadcast_ref(&self) -> &librefang_types::config::BroadcastConfig;
     fn auto_reply(&self) -> &crate::auto_reply::AutoReplyEngine;
@@ -1583,6 +1592,26 @@ impl KernelApi for LibreFangKernel {
         &self,
     ) -> &dashmap::DashMap<String, Arc<dyn librefang_channels::types::ChannelAdapter>> {
         <Self as crate::MeshSubsystemApi>::channel_adapters_ref(self)
+    }
+    async fn deliver_cron_output(
+        self: Arc<Self>,
+        agent_id: AgentId,
+        job_name: &str,
+        output: &str,
+        silent: bool,
+        delivery: &librefang_types::scheduler::CronDelivery,
+        delivery_targets: &[librefang_types::scheduler::CronDeliveryTarget],
+    ) {
+        LibreFangKernel::deliver_cron_output(
+            &self,
+            agent_id,
+            job_name,
+            output,
+            silent,
+            delivery,
+            delivery_targets,
+        )
+        .await;
     }
     fn trigger_engine(&self) -> &crate::triggers::TriggerEngine {
         <Self as crate::WorkflowSubsystemApi>::triggers_ref(self)

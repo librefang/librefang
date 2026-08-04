@@ -5,12 +5,12 @@ import { memo, useId, useMemo, useRef, useState, useCallback, useEffect, useRedu
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import type { ApiActionResponse, ProviderItem } from "../api";
-import { isProviderAvailable } from "../lib/status";
+import { isCliProvider, isProviderAvailable } from "../lib/status";
 import { useCredentialPools, useProviders, useProviderStatus } from "../lib/queries/providers";
 import type { CredentialPoolStatus, CredentialPoolKeySnapshot } from "../api";
 import { useModels, useModelOverrides } from "../lib/queries/models";
 import { useUpdateModelOverrides } from "../lib/mutations/models";
-import { useTestProvider, useSetProviderKey, useDeleteProviderKey, useEnableProvider, useSetProviderUrl, useSetDefaultProvider, useCreateRegistryContent, useConnectEveryApi, EVERYAPI_PROVIDER } from "../lib/mutations/providers";
+import { useTestProvider, useSetProviderKey, useDeleteProviderKey, useEnableProvider, useSetProviderUrl, useSetProviderDiscovery, useSetDefaultProvider, useCreateRegistryContent, useConnectEveryApi, EVERYAPI_PROVIDER } from "../lib/mutations/providers";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -65,10 +65,6 @@ const providerIcons: Record<string, React.ReactNode> = {
 function getProviderIcon(id: string): React.ReactNode {
   const key = id.toLowerCase().split("-")[0];
   return providerIcons[key] || <Cpu className="w-5 h-5" />;
-}
-
-function isCliProvider(provider: Pick<ProviderItem, "auth_status" | "base_url" | "key_required">): boolean {
-  return provider.auth_status === "configured_cli" || provider.auth_status === "cli_not_installed" || (!provider.base_url && !provider.key_required);
 }
 
 function getLatencyColor(ms?: number) {
@@ -296,6 +292,65 @@ function ProviderMaxTokensSection({ providerId, addToast }: {
   );
 }
 
+/**
+ * Opt a provider into live model discovery (#6702).
+ *
+ * The built-in local ids (ollama / vllm / lmstudio / lemonade) always discover
+ * — the backend ORs the flag with the id check — so for them the control is
+ * shown as permanently on and disabled rather than hidden, which would leave a
+ * user wondering why the same setting exists for one provider and not another.
+ * Providers with no endpoint to poll (CLI passthroughs) get no control at all.
+ */
+function ProviderDiscoverySection({ provider, addToast }: {
+  provider: ProviderItem;
+  addToast: (msg: string, type?: "success" | "error" | "info") => void;
+}) {
+  const { t } = useTranslation();
+  const setDiscovery = useSetProviderDiscovery();
+  const [saving, setSaving] = useState(false);
+
+  const alwaysOn = provider.is_local === true;
+  const enabled = alwaysOn || provider.discover_models === true;
+
+  if (!provider.base_url) return null;
+
+  const toggle = async () => {
+    if (alwaysOn || saving) return;
+    setSaving(true);
+    try {
+      await setDiscovery.mutateAsync({ id: provider.id, discoverModels: !enabled });
+      addToast(t("providers.discover_models_saved"), "success");
+    } catch (e: unknown) {
+      addToast(getErrorMessage(e) || t("common.error"), "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="border-t border-border-subtle pt-3 mt-1 space-y-1">
+      <label className="flex items-center gap-3 cursor-pointer">
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          aria-label={t("providers.discover_models_label")}
+          disabled={alwaysOn || saving}
+          onClick={toggle}
+          className={`relative w-10 h-5 rounded-full transition-colors duration-200 shrink-0 disabled:opacity-60 disabled:cursor-not-allowed ${enabled ? "bg-brand" : "bg-main border border-border-subtle"}`}
+        >
+          <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200 ${enabled ? "translate-x-5" : "translate-x-0"}`} />
+        </button>
+        <span className="text-xs font-bold text-text-main">{t("providers.discover_models_label")}</span>
+        {saving && <Loader2 className="w-3.5 h-3.5 animate-spin text-text-dim" />}
+      </label>
+      <p className="text-[10px] text-text-dim/60 leading-snug">
+        {alwaysOn ? t("providers.discover_models_hint_builtin") : t("providers.discover_models_hint")}
+      </p>
+    </div>
+  );
+}
+
 // ── useProviderConfig hook ────────────────────────────────────────
 
 interface ProviderConfigState {
@@ -326,7 +381,17 @@ function useProviderConfig(
   const open = useCallback((p: ProviderItem) => {
     setState({
       provider: p, keyInput: "", urlInput: p.base_url || "", proxyInput: p.proxy_url || "",
-      hasStoredKey: p.auth_status === "configured" || p.auth_status === "validated_key" || p.auth_status === "invalid_key" || p.auth_status === "auto_detected",
+      // `auth_status` answers "is a key stored?" for key-required providers
+      // only: `detect_auth` short-circuits a `key_required: false` provider to
+      // `not_required` / `local_offline` whether or not its env var is set. Fall
+      // back to the explicit `key_present` flag for exactly that case, so a
+      // vLLM that IS behind auth offers "replace" / "remove" rather than
+      // pretending no key exists (#6703). Restricting the fallback to keyless
+      // providers keeps every other provider's behaviour byte-identical —
+      // notably github-copilot, whose shared `GITHUB_TOKEN` is deliberately not
+      // treated as a configured key.
+      hasStoredKey: p.auth_status === "configured" || p.auth_status === "validated_key" || p.auth_status === "invalid_key" || p.auth_status === "auto_detected"
+        || (p.key_required === false && p.key_present === true),
       saving: false, error: null, testing: false, testResult: null,
     });
   }, []);
@@ -1067,6 +1132,10 @@ function CreateProviderWizard({
   const [displayName, setDisplayName] = useState("");
   const [apiKeyEnv, setApiKeyEnv] = useState("");
   const [keyRequired, setKeyRequired] = useState(true);
+  // Opt-in live model discovery (#6702). Off by default: an arbitrary
+  // OpenAI-compatible endpoint may not serve `/models`, and probing one that
+  // doesn't just logs failures every cycle.
+  const [discoverModels, setDiscoverModels] = useState(false);
   const [derivedOverridden, setDerivedOverridden] = useState(false);
 
   const [models, setModels] = useState<ModelEntry[]>([]);
@@ -1115,6 +1184,7 @@ function CreateProviderWizard({
       api_key_env: effectiveApiKeyEnv,
       base_url: baseUrl.trim(),
       key_required: effectiveKeyRequired,
+      discover_models: discoverModels,
     };
     if (apiKey.trim()) values.api_key = apiKey.trim();
     if (models.length > 0) {
@@ -1227,6 +1297,18 @@ function CreateProviderWizard({
                 </button>
                 <span className="text-xs font-bold text-text-main">{t("providers.wizard_key_required_label")}</span>
               </label>
+            </div>
+            <div className="space-y-1">
+              <label className="flex items-center gap-3 cursor-pointer">
+                <button type="button" role="switch" aria-checked={discoverModels}
+                  aria-label={t("providers.discover_models_label")}
+                  onClick={() => setDiscoverModels(!discoverModels)}
+                  className={`relative w-10 h-5 rounded-full transition-colors duration-200 shrink-0 ${discoverModels ? "bg-brand" : "bg-main border border-border-subtle"}`}>
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200 ${discoverModels ? "translate-x-5" : "translate-x-0"}`} />
+                </button>
+                <span className="text-xs font-bold text-text-main">{t("providers.discover_models_label")}</span>
+              </label>
+              <p className="text-[10px] text-text-dim/60 leading-snug">{t("providers.discover_models_hint")}</p>
             </div>
           </>
         )}
@@ -1945,12 +2027,32 @@ export function ProvidersPage() {
               </Badge>
             </div>
 
-            {config.provider.key_required !== false && (
+            {/* The key field is offered for every HTTP provider. `key_required`
+                says whether a key is MANDATORY, not whether one is accepted:
+                a self-hosted vLLM / Ollama behind auth declares
+                `key_required: false` yet returns 401 without a Bearer token,
+                and the runtime already forwards whatever key is stored. Gating
+                the input on the flag made those servers unconfigurable from the
+                UI (#6703). CLI passthrough providers (claude-code, codex-cli, …)
+                are the one class that genuinely has nowhere to send a key — they
+                spawn a subprocess and carry no base URL — so they keep no field
+                at all rather than inviting a meaningless `*_API_KEY` env var. */}
+            {!isCliProvider(config.provider) && (
               <div>
-                <label htmlFor={`${cfgFieldId}-api-key`} className="text-[10px] font-bold text-text-dim uppercase">{t("providers.api_key", { defaultValue: "API Key" })}</label>
+                <label htmlFor={`${cfgFieldId}-api-key`} className="text-[10px] font-bold text-text-dim uppercase">
+                  {t("providers.api_key", { defaultValue: "API Key" })}
+                  {config.provider.key_required === false && (
+                    <span className="normal-case font-normal text-text-dim/50"> ({t("providers.optional")})</span>
+                  )}
+                </label>
                 <input id={`${cfgFieldId}-api-key`} type="password" value={config.keyInput} onChange={e => config.setKeyInput(e.target.value)}
                   placeholder={config.hasStoredKey ? t("providers.key_placeholder_existing") : t("providers.key_placeholder")}
                   className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
+                {config.provider.key_required === false && (
+                  <p className="mt-1 text-[10px] text-text-dim/60 leading-snug">
+                    {t("providers.api_key_optional_hint")}
+                  </p>
+                )}
               </div>
             )}
 
@@ -1973,6 +2075,8 @@ export function ProvidersPage() {
                 placeholder={t("providers.proxy_url_placeholder")}
                 className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
             </div>
+
+            <ProviderDiscoverySection provider={config.provider} addToast={addToast} />
 
             {config.error && (
               <div className="flex items-center gap-2 text-error text-xs">

@@ -52,6 +52,11 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/providers/{name}/url",
             axum::routing::put(set_provider_url),
         )
+        // Opt a custom OpenAI-compatible provider into live model discovery (#6702).
+        .route(
+            "/providers/{name}/discovery",
+            axum::routing::put(set_provider_discovery),
+        )
         .route("/providers/{name}", axum::routing::get(get_provider))
         .route(
             "/providers/{name}/default",
@@ -309,7 +314,7 @@ pub async fn list_models(
     let live_models_per_provider: std::collections::HashMap<String, HashSet<String>> = catalog
         .list_providers()
         .iter()
-        .filter(|p| librefang_kernel::provider_health::is_local_provider(&p.id))
+        .filter(|p| librefang_kernel::provider_health::discovers_models(p))
         .filter_map(|p| {
             let probe = state.provider_probe_cache.get(&p.id)?;
             if !probe.reachable || probe.discovered_models.is_empty() {
@@ -760,13 +765,29 @@ pub async fn delete_model_overrides(
 
 /// Attach local-provider probe results to a JSON entry and optionally merge
 /// discovered models into the catalog.
+/// Whether a failed probe should downgrade the reported `auth_status` to `missing`.
+///
+/// For a built-in local provider, reachability is the whole availability story: it needs no key, so a daemon that is not answering is the only way it can be unusable, and showing "needs setup" is right.
+/// An opted-in custom provider (#6702) goes through the same probe, but its `/models` listing is a discovery convenience rather than proof that its key works — a gateway that proxies `/chat/completions` without serving `/models` is an ordinary shape, and #6702's own use case.
+/// Downgrading it would report a working, correctly keyed provider as unconfigured purely because the operator turned discovery on, so the probe's `reachable` / `error_message` fields carry that signal instead.
+fn probe_failure_downgrades_auth(provider_id: &str) -> bool {
+    librefang_kernel::provider_health::is_local_provider(provider_id)
+}
+
 fn attach_probe_result(
     entry: &mut serde_json::Value,
     probe: &librefang_kernel::provider_health::ProbeResult,
     provider_id: &str,
     kernel: &dyn librefang_kernel::KernelApi,
 ) {
-    entry["is_local"] = serde_json::json!(true);
+    // `is_local` is a claim about WHERE the provider runs, not about whether it
+    // was probed. A custom provider that opted into discovery (#6702) is probed
+    // through the same helper but may well be a remote GPU box, so only the
+    // built-in local ids get the label — the probe results below are attached
+    // either way.
+    if librefang_kernel::provider_health::is_local_provider(provider_id) {
+        entry["is_local"] = serde_json::json!(true);
+    }
     entry["reachable"] = serde_json::json!(probe.reachable);
     entry["latency_ms"] = serde_json::json!(probe.latency_ms);
     if !probe.discovered_models.is_empty() {
@@ -804,6 +825,38 @@ fn attach_probe_result(
         entry["error_message"] = serde_json::json!(err);
     }
     entry["last_tested"] = serde_json::json!(&probe.probed_at);
+}
+
+/// Resolve the environment variable that holds a provider's API key: the
+/// catalog-declared `api_key_env` when it is non-empty, else the
+/// `{PROVIDER}_API_KEY` convention that `set_provider_key` derives for
+/// entries that declare none.
+fn provider_api_key_env(provider: &librefang_types::model_catalog::ProviderInfo) -> String {
+    if provider.api_key_env.trim().is_empty() {
+        format!("{}_API_KEY", provider.id.to_uppercase().replace('-', "_"))
+    } else {
+        provider.api_key_env.clone()
+    }
+}
+
+/// The API key currently set for a provider in the process environment, or
+/// `None` when unset / empty.
+fn provider_api_key(provider: &librefang_types::model_catalog::ProviderInfo) -> Option<String> {
+    std::env::var(provider_api_key_env(provider))
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+}
+
+/// Whether a non-empty API key is present for this provider (#6703).
+///
+/// `auth_status` cannot answer this for a `key_required = false` provider:
+/// `detect_auth` short-circuits those to `NotRequired` / `LocalOffline`
+/// regardless of whether a key is set, so a self-hosted vLLM behind auth looked
+/// identical to a bare localhost one and the dashboard could not offer to
+/// replace or remove the key it was already sending. Reports presence only —
+/// never the value.
+fn provider_key_present(provider: &librefang_types::model_catalog::ProviderInfo) -> bool {
+    provider_api_key(provider).is_some()
 }
 
 /// Resolve the effective max-output-token limit shown for a provider on the
@@ -889,24 +942,14 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
         .iter()
         .enumerate()
         .filter(|(_, p)| {
-            librefang_kernel::provider_health::is_local_provider(&p.id) && !p.base_url.is_empty()
+            librefang_kernel::provider_health::discovers_models(p) && !p.base_url.is_empty()
         })
         .map(|(i, p)| {
-            // Resolve the provider's api_key env var (catalog field, falling
-            // back to the {PROVIDER}_API_KEY convention) and read its value
-            // for the probe. Local providers fronted by an authenticating
-            // reverse proxy (Open WebUI, LiteLLM, etc.) need this Bearer
-            // token forwarded; bare-localhost setups have nothing in the
-            // env so the probe runs unauthenticated as before.
-            let env_var = if p.api_key_env.trim().is_empty() {
-                format!("{}_API_KEY", p.id.to_uppercase().replace('-', "_"))
-            } else {
-                p.api_key_env.clone()
-            };
-            let api_key = std::env::var(&env_var)
-                .ok()
-                .filter(|v| !v.trim().is_empty());
-            (i, p.id.clone(), p.base_url.clone(), api_key)
+            // Read the provider's api_key for the probe. Local providers fronted
+            // by an authenticating reverse proxy (Open WebUI, LiteLLM, etc.) need
+            // this Bearer token forwarded; bare-localhost setups have nothing in
+            // the env so the probe runs unauthenticated as before.
+            (i, p.id.clone(), p.base_url.clone(), provider_api_key(p))
         })
         .collect();
 
@@ -949,6 +992,8 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             "suppressed": suppressed_ids.contains(&p.id),
             "is_coding_agent": librefang_kernel::drivers::is_coding_agent_provider(&p.id),
             "max_output_tokens": max_output_tokens_by_provider.get(&p.id),
+            "discover_models": p.discover_models,
+            "key_present": provider_key_present(p),
         });
 
         // Attach region map so the dashboard can show available regions
@@ -974,12 +1019,12 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             }
         }
 
-        // For local providers, attach the probe result and downgrade
-        // auth_status when the service is not reachable so the dashboard
-        // shows "needs setup" instead of "configured".
+        // Attach the probe result, and for a built-in local provider downgrade
+        // auth_status when the service is not reachable so the dashboard shows
+        // "needs setup" instead of "configured".
         if let Some(probe) = probe_map.remove(&i) {
             attach_probe_result(&mut entry, &probe, &p.id, &*state.kernel);
-            if !probe.reachable {
+            if !probe.reachable && probe_failure_downgrades_auth(&p.id) {
                 entry["auth_status"] = serde_json::json!("missing");
             }
         } else if librefang_kernel::provider_health::is_local_provider(&p.id) {
@@ -1040,20 +1085,12 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
         .iter()
         .enumerate()
         .filter(|(_, p)| {
-            librefang_kernel::provider_health::is_local_provider(&p.id) && !p.base_url.is_empty()
+            librefang_kernel::provider_health::discovers_models(p) && !p.base_url.is_empty()
         })
         .map(|(i, p)| {
             // See sibling site above — same env-var resolution so Open WebUI
             // / LiteLLM-fronted local providers get a Bearer token attached.
-            let env_var = if p.api_key_env.trim().is_empty() {
-                format!("{}_API_KEY", p.id.to_uppercase().replace('-', "_"))
-            } else {
-                p.api_key_env.clone()
-            };
-            let api_key = std::env::var(&env_var)
-                .ok()
-                .filter(|v| !v.trim().is_empty());
-            (i, p.id.clone(), p.base_url.clone(), api_key)
+            (i, p.id.clone(), p.base_url.clone(), provider_api_key(p))
         })
         .collect();
 
@@ -1093,10 +1130,12 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
             "suppressed": suppressed_ids.contains(&p.id),
             "is_coding_agent": librefang_kernel::drivers::is_coding_agent_provider(&p.id),
             "max_output_tokens": max_output_tokens_by_provider.get(&p.id),
+            "discover_models": p.discover_models,
+            "key_present": provider_key_present(p),
         });
         if let Some(probe) = probe_map.remove(&i) {
             attach_probe_result(&mut entry, &probe, &p.id, &*state.kernel);
-            if !probe.reachable {
+            if !probe.reachable && probe_failure_downgrades_auth(&p.id) {
                 entry["auth_status"] = serde_json::json!("missing");
             }
         } else if librefang_kernel::provider_health::is_local_provider(&p.id) {
@@ -1185,23 +1224,18 @@ pub async fn get_provider(
         "proxy_url": provider.proxy_url,
         "models": models,
         "max_output_tokens": max_output_tokens,
+        "discover_models": provider.discover_models,
+        "key_present": provider_key_present(&provider),
     });
 
-    // For local providers, run a probe and attach the result
-    if librefang_kernel::provider_health::is_local_provider(&provider.id)
+    // For discovery-participating providers, run a probe and attach the result
+    if librefang_kernel::provider_health::discovers_models(&provider)
         && !provider.base_url.is_empty()
     {
         let cache = &state.provider_probe_cache;
         // Forward the api_key when present so reverse-proxy-fronted local
         // providers (Open WebUI, LiteLLM) get a valid Bearer token.
-        let env_var = if provider.api_key_env.trim().is_empty() {
-            format!("{}_API_KEY", provider.id.to_uppercase().replace('-', "_"))
-        } else {
-            provider.api_key_env.clone()
-        };
-        let api_key = std::env::var(&env_var)
-            .ok()
-            .filter(|v| !v.trim().is_empty());
+        let api_key = provider_api_key(&provider);
         let probe = librefang_kernel::provider_health::probe_provider_cached(
             &provider.id,
             &provider.base_url,
@@ -1211,7 +1245,7 @@ pub async fn get_provider(
         .await;
 
         attach_probe_result(&mut entry, &probe, &provider.id, &*state.kernel);
-        if !probe.reachable {
+        if !probe.reachable && probe_failure_downgrades_auth(&provider.id) {
             entry["auth_status"] = serde_json::json!("missing");
         }
     } else if librefang_kernel::provider_health::is_local_provider(&provider.id) {
@@ -1898,16 +1932,135 @@ pub async fn enable_provider(
     )
 }
 
+/// PUT /api/providers/{name}/discovery — Toggle live model discovery (#6702).
+///
+/// Body: `{ "discover_models": true }`.
+///
+/// Model discovery used to be reachable only through the hard-coded local
+/// provider ids, so a custom OpenAI-compatible endpoint registered under its
+/// own id stayed at `model_count: 0` forever with no UI action to change that.
+/// Flipping the flag here puts the provider on exactly the same probe path as
+/// a built-in local one: the periodic probe loop, `POST .../test`, and the
+/// live-model filter applied to `/api/models`.
+///
+/// The flag is persisted into the provider's own `providers/{name}.toml`
+/// `[provider]` table, which is where the catalog reads it back from on the
+/// next boot. Registry-managed files are rewritten by the boot-time registry
+/// sync when their content drifts from the upstream copy, so the flag is
+/// durable for the custom providers this endpoint exists to serve and
+/// intentionally best-effort for built-in ids — whose discovery behaviour is
+/// decided by the id branch of the predicate anyway.
+#[utoipa::path(
+    put,
+    path = "/api/providers/{name}/discovery",
+    tag = "models",
+    params(("name" = String, Path, description = "Provider identifier")),
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 200, description = "Discovery setting updated", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid provider name or request body"),
+        (status = 404, description = "Provider not found")
+    )
+)]
+pub async fn set_provider_discovery(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    // The name is joined into `providers/{name}.toml`, so gate its shape
+    // before it reaches `Path::join` — same boundary as `set_provider_key`.
+    if let Err(msg) = crate::validation::check_provider_name_shape(&name) {
+        return ApiErrorResponse::bad_request(msg).into_json_tuple();
+    }
+
+    let discover = match body.get("discover_models").and_then(|v| v.as_bool()) {
+        Some(v) => v,
+        None => {
+            return ApiErrorResponse::bad_request("Missing or non-boolean 'discover_models' field")
+                .into_json_tuple();
+        }
+    };
+
+    let mut applied = false;
+    let sink = &mut applied;
+    let name_for_closure = name.clone();
+    state.kernel.model_catalog_update(&mut move |catalog| {
+        *sink = catalog.set_provider_discover_models(&name_for_closure, discover);
+    });
+    if !applied {
+        return ApiErrorResponse::not_found(format!("Provider '{}' not found", name))
+            .into_json_tuple();
+    }
+
+    let providers_dir = state.kernel.home_dir().join("providers");
+    if let Err(e) = upsert_provider_discover_models(&providers_dir, &name, discover) {
+        // The in-memory flip already happened; report the failure rather than
+        // letting the setting silently revert on the next daemon boot.
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "provider": name,
+            "discover_models": discover,
+        })),
+    )
+}
+
+/// Persist `discover_models` into `providers/{name}.toml`'s `[provider]` table.
+///
+/// Uses `toml_edit` so the rest of the file — the `[[models]]` array a custom
+/// provider carries, comments, key order — survives byte-for-byte. Creates a
+/// minimal file only when none exists, which happens for entries that live
+/// solely in memory (a `[provider_urls]`-only custom provider); the catalog
+/// loader reads such a file back exactly as it would a wizard-written one.
+fn upsert_provider_discover_models(
+    providers_dir: &std::path::Path,
+    name: &str,
+    discover: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = providers_dir.join(format!("{name}.toml"));
+    let mut doc: toml_edit::DocumentMut = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw.parse()?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut fresh = toml_edit::DocumentMut::new();
+            fresh["provider"] = toml_edit::Item::Table(toml_edit::Table::new());
+            fresh["provider"]["id"] = toml_edit::value(name);
+            fresh
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    // A file that somehow lacks the `[provider]` table (models-only catalog
+    // fragment) gets one, so the flag lands where `ProviderCatalogToml` reads it.
+    if !doc["provider"].is_table() {
+        doc["provider"] = toml_edit::Item::Table(toml_edit::Table::new());
+        doc["provider"]["id"] = toml_edit::value(name);
+    }
+    doc["provider"]["discover_models"] = toml_edit::value(discover);
+
+    std::fs::create_dir_all(providers_dir)?;
+    crate::atomic_write(&path, doc.to_string().as_bytes())?;
+    Ok(())
+}
+
 /// POST /api/providers/{name}/test — Test a provider's connectivity.
 #[utoipa::path(post, path = "/api/providers/{name}/test", tag = "models", params(("name" = String, Path, description = "Provider name")), responses((status = 200, description = "Provider test result", body = crate::types::JsonObject)))]
 pub async fn test_provider(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let (env_var, base_url, key_required) = {
+    let (env_var, base_url, key_required, discovers) = {
         let catalog = state.kernel.model_catalog_ref().load();
         match catalog.get_provider(&name) {
-            Some(p) => (p.api_key_env.clone(), p.base_url.clone(), p.key_required),
+            Some(p) => (
+                p.api_key_env.clone(),
+                p.base_url.clone(),
+                p.key_required,
+                librefang_kernel::provider_health::discovers_models(p),
+            ),
             None => {
                 return ApiErrorResponse::not_found(format!("Unknown provider '{}'", name))
                     .into_json_tuple();
@@ -1947,13 +2100,21 @@ pub async fn test_provider(
         };
     }
 
-    // ── Local providers (Ollama / vLLM / LM Studio / lemonade) ──
+    // ── Discovery providers (Ollama / vLLM / LM Studio / lemonade, plus any
+    // provider that opted in via `discover_models`) ──
     // Delegate to the kernel's shared probe helper so the on-demand test
     // updates `auth_status` in the catalog (NotRequired on success,
-    // LocalOffline on failure). Before this, the endpoint only refreshed an
-    // in-memory cache — users could start Ollama after LibreFang booted and
-    // the dashboard would stay stuck on `local_offline` forever.
-    if librefang_kernel::provider_health::is_local_provider(&name) {
+    // LocalOffline on failure) and merges the discovered model list. Before
+    // this, the endpoint only refreshed an in-memory cache — users could start
+    // Ollama after LibreFang booted and the dashboard would stay stuck on
+    // `local_offline` forever.
+    // An opted-in provider without a base URL falls through to the
+    // "Provider base URL not configured" branch below rather than probing an
+    // empty URL; the built-in local ids keep their historical path verbatim so
+    // an existing install sees no change.
+    if discovers
+        && (!base_url.is_empty() || librefang_kernel::provider_health::is_local_provider(&name))
+    {
         let result = state
             .kernel
             .clone()
