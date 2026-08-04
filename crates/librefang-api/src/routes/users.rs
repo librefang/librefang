@@ -369,6 +369,7 @@ pub async fn create_user(
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+        Err(PersistError::Managed) => crate::routes::managed_config_response(),
     }
 }
 
@@ -468,6 +469,7 @@ pub async fn update_user(
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+        Err(PersistError::Managed) => crate::routes::managed_config_response(),
     }
 }
 
@@ -504,6 +506,7 @@ pub async fn delete_user(
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
         Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+        Err(PersistError::Managed) => crate::routes::managed_config_response(),
     }
 }
 
@@ -712,6 +715,7 @@ pub async fn import_users(
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+        Err(PersistError::Managed) => crate::routes::managed_config_response(),
     }
 }
 
@@ -811,6 +815,7 @@ pub async fn rotate_user_key(
                 PersistError::BadRequest(m) => err_response(StatusCode::BAD_REQUEST, m),
                 PersistError::Conflict(m) => err_response(StatusCode::CONFLICT, m),
                 PersistError::Internal(m) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+                PersistError::Managed => crate::routes::managed_config_response(),
             };
         }
     };
@@ -1157,6 +1162,8 @@ pub(crate) enum PersistError {
     Conflict(String),
     NotFound(String),
     Internal(String),
+    /// The config file is deployment-managed (#6695), so nothing was written.
+    Managed,
 }
 
 /// Read `config.toml`, run `mutate` on a clone of the current `users`
@@ -1174,6 +1181,9 @@ pub(crate) async fn persist_users<F, R>(
 where
     F: FnOnce(&mut Vec<UserConfig>) -> Result<R, PersistError>,
 {
+    if crate::routes::guard_config_write().is_some() {
+        return Err(PersistError::Managed);
+    }
     let _guard = state.config_write_lock.lock().await;
 
     let mut users: Vec<UserConfig> = state.kernel.config_ref().users.clone();
@@ -1665,5 +1675,6 @@ pub async fn update_user_policy(
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
         Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+        Err(PersistError::Managed) => crate::routes::managed_config_response(),
     }
 }

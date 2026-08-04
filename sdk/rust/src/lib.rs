@@ -4370,6 +4370,18 @@ impl SystemResource {
         .await
     }
 
+    pub async fn config_status(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &"/api/config/status".to_string(),
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn health(&self) -> Result<Value> {
         do_req(
             &self.client,
