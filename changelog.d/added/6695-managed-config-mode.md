@@ -6,4 +6,4 @@ When managed mode is active, every API surface that persists deployment configur
 `GET /api/config/status` reports the mode, the source path, writability, a SHA-256 over the file's bytes, and its last-modified time, so the dashboard can present managed settings as read-only from server-supplied metadata rather than by attempting a save and reading the refusal back.
 Boot-time schema migration no longer tries to write the migrated config back when the file is managed; it logs a single targeted warning instead.
 That write previously failed against a read-only mount with nothing but a `warn!`, so the migration re-ran silently on every boot forever.
-Mutable mode remains the default and is unchanged (#6695) (@houko)
+Mutable mode remains the default and is unchanged (#6695, #6717) (@houko)
