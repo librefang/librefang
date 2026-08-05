@@ -2332,3 +2332,328 @@ async fn everyapi_refresh_keeps_the_registered_catalog_when_the_gateway_is_down(
         .unwrap_or_else(|| panic!("registered catalog must survive: {body}"));
     assert_eq!(sonnet["max_output_tokens"], 64_000);
 }
+
+// ---------------------------------------------------------------------------
+// Model discovery for custom OpenAI-compatible providers (#6702) and API keys
+// for keyless local providers (#6703).
+// ---------------------------------------------------------------------------
+
+/// #6702: a custom provider that opted into discovery is probed by
+/// `POST /api/providers/{name}/test`, which merges the live `/models` listing
+/// into the catalog. Pre-fix the handler gated on the hard-coded local id
+/// allowlist, so this provider fell through to the generic reachability check
+/// and reported no `discovered_models` at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn opted_in_custom_provider_is_probed_and_discovers_models() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                { "id": "qwen3-32b" },
+                { "id": "llama-3.3-70b" },
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let h = boot_with_provider(ProviderInfo {
+        id: "acme-vllm".to_string(),
+        display_name: "ACME vLLM".to_string(),
+        api_key_env: "LIBREFANG_TEST_ACME_VLLM_API_KEY".to_string(),
+        base_url: server.uri(),
+        key_required: false,
+        auth_status: AuthStatus::NotRequired,
+        discover_models: true,
+        ..ProviderInfo::default()
+    });
+
+    let (status, body) =
+        json_request(&h, Method::POST, "/api/providers/acme-vllm/test", None).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["status"].as_str(), Some("ok"), "body: {body}");
+    assert_eq!(
+        body["discovered_models"].as_u64(),
+        Some(2),
+        "an opted-in custom provider must report the models its /models endpoint served; body: {body}"
+    );
+
+    // The discovered ids reach the catalog, which is what makes them selectable
+    // from the Models page rather than a number in a test response.
+    let (_, provider) = json_request(&h, Method::GET, "/api/providers/acme-vllm", None).await;
+    let ids: Vec<&str> = provider["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&"qwen3-32b"),
+        "discovered model must be merged into the catalog; got {ids:?}"
+    );
+}
+
+/// The other half of the #6702 contract: a custom provider that did NOT opt in
+/// keeps the pre-change behaviour exactly — reachability only, no discovery,
+/// no catalog mutation. This is the guard on "an existing install sees no
+/// difference".
+#[tokio::test(flavor = "multi_thread")]
+async fn custom_provider_without_the_flag_is_not_probed_for_models() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{ "id": "qwen3-32b" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let h = boot_with_provider(ProviderInfo {
+        id: "acme-plain".to_string(),
+        display_name: "ACME Plain".to_string(),
+        api_key_env: "LIBREFANG_TEST_ACME_PLAIN_API_KEY".to_string(),
+        base_url: server.uri(),
+        key_required: false,
+        auth_status: AuthStatus::Configured,
+        ..ProviderInfo::default()
+    });
+
+    let (status, body) =
+        json_request(&h, Method::POST, "/api/providers/acme-plain/test", None).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(
+        body.get("discovered_models").is_none(),
+        "a provider that never opted in must not enter the discovery path; body: {body}"
+    );
+
+    let (_, provider) = json_request(&h, Method::GET, "/api/providers/acme-plain", None).await;
+    let ids: Vec<&str> = provider["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert!(
+        !ids.contains(&"qwen3-32b"),
+        "no live model should have been merged; got {ids:?}"
+    );
+}
+
+/// `PUT /api/providers/{name}/discovery` flips the flag, reports it back on
+/// `/api/providers`, and persists it into the provider's own TOML so the
+/// opt-in survives a daemon restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_provider_discovery_flips_flag_and_persists_to_the_provider_file() {
+    let h = boot_with_provider(ProviderInfo {
+        id: "acme-toggle".to_string(),
+        display_name: "ACME Toggle".to_string(),
+        api_key_env: "LIBREFANG_TEST_ACME_TOGGLE_API_KEY".to_string(),
+        base_url: "http://127.0.0.1:59999/v1".to_string(),
+        key_required: true,
+        auth_status: AuthStatus::Configured,
+        ..ProviderInfo::default()
+    });
+
+    let (_, before) = json_request(&h, Method::GET, "/api/providers", None).await;
+    assert_eq!(
+        find_provider(&before, "acme-toggle")["discover_models"].as_bool(),
+        Some(false),
+        "discovery is off until the operator opts in; body: {before}"
+    );
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/providers/acme-toggle/discovery",
+        Some(serde_json::json!({ "discover_models": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["discover_models"].as_bool(), Some(true));
+
+    let (_, after) = json_request(&h, Method::GET, "/api/providers", None).await;
+    assert_eq!(
+        find_provider(&after, "acme-toggle")["discover_models"].as_bool(),
+        Some(true),
+        "the list endpoint must report the new setting; body: {after}"
+    );
+
+    let provider_file = h
+        ._state
+        .kernel
+        .home_dir()
+        .join("providers")
+        .join("acme-toggle.toml");
+    let persisted = std::fs::read_to_string(&provider_file).unwrap_or_else(|e| {
+        panic!(
+            "provider file must exist at {}: {e}",
+            provider_file.display()
+        )
+    });
+    assert!(
+        persisted.contains("discover_models = true"),
+        "the opt-in must survive a restart; file content:\n{persisted}"
+    );
+
+    // Turning it back off rewrites the same key rather than appending a second one.
+    let (status, _) = json_request(
+        &h,
+        Method::PUT,
+        "/api/providers/acme-toggle/discovery",
+        Some(serde_json::json!({ "discover_models": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let persisted = std::fs::read_to_string(&provider_file).expect("provider file still readable");
+    assert!(persisted.contains("discover_models = false"), "{persisted}");
+    assert_eq!(
+        persisted.matches("discover_models").count(),
+        1,
+        "the key is updated in place, not appended; file content:\n{persisted}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_provider_discovery_rejects_unknown_provider() {
+    let h = boot();
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/providers/no-such-provider/discovery",
+        Some(serde_json::json!({ "discover_models": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_provider_discovery_rejects_non_boolean_body() {
+    let h = boot();
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/providers/openai/discovery",
+        Some(serde_json::json!({ "discover_models": "yes" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+}
+
+/// #6703: a provider that declares `key_required = false` — every built-in
+/// local one does — can still be given an API key, and the provider list says
+/// so. The dashboard hid its key field on the strength of `key_required`, so a
+/// self-hosted vLLM behind auth could not be configured from the UI even though
+/// the runtime forwards the key as `Authorization: Bearer` whenever it is set.
+#[tokio::test(flavor = "multi_thread")]
+async fn keyless_provider_accepts_a_key_and_reports_it_as_present() {
+    const KEY_ENV: &str = "LIBREFANG_TEST_VLLM_KEYLESS_6703_API_KEY";
+
+    let h = boot_with_provider(ProviderInfo {
+        id: "acme-keyless".to_string(),
+        display_name: "ACME Keyless".to_string(),
+        api_key_env: KEY_ENV.to_string(),
+        base_url: "http://127.0.0.1:59998/v1".to_string(),
+        key_required: false,
+        auth_status: AuthStatus::NotRequired,
+        ..ProviderInfo::default()
+    });
+
+    let (_, before) = json_request(&h, Method::GET, "/api/providers", None).await;
+    let entry = find_provider(&before, "acme-keyless");
+    assert_eq!(entry["key_required"].as_bool(), Some(false));
+    assert_eq!(
+        entry["key_present"].as_bool(),
+        Some(false),
+        "no key is stored yet; body: {before}"
+    );
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/providers/acme-keyless/key",
+        Some(serde_json::json!({ "key": "vllm-secret" })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a keyless provider must still accept a key; body: {body}"
+    );
+
+    let (_, after) = json_request(&h, Method::GET, "/api/providers", None).await;
+    let entry = find_provider(&after, "acme-keyless");
+    assert_eq!(
+        entry["key_present"].as_bool(),
+        Some(true),
+        "the dashboard needs this to offer replace/remove for a keyless provider; body: {after}"
+    );
+    assert_eq!(
+        entry["key_required"].as_bool(),
+        Some(false),
+        "storing a key must not make the key mandatory; body: {after}"
+    );
+
+    // This test is the one place in the file that plants an env var; the name
+    // is unique to it, and it is removed before returning so no sibling test
+    // observes it.
+    librefang_api::secrets_env::remove_env_var_guarded(KEY_ENV).await;
+}
+
+/// #6702 regression: opting a custom provider into model discovery must not
+/// make it *look* unconfigured when its `/models` listing is unreachable.
+///
+/// Before the guard, every probed provider had `auth_status` forced to
+/// `missing` on an unreachable probe. That rule was written when only the four
+/// built-in local ids were probed, where it is correct — they need no key, so
+/// reachability is the whole availability story. Opting a keyed provider in
+/// (#6702) put it on the same path, and a gateway that proxies
+/// `/chat/completions` without serving `/models` is an ordinary shape, so a
+/// working provider with a valid key would report as needing setup purely
+/// because the operator turned discovery on.
+#[tokio::test(flavor = "multi_thread")]
+async fn discovery_opt_in_does_not_mark_a_keyed_provider_unconfigured() {
+    const KEY_ENV: &str = "LIBREFANG_TEST_ACME_GW_6702_API_KEY";
+
+    let h = boot_with_provider(ProviderInfo {
+        id: "acme-gw".to_string(),
+        display_name: "ACME Gateway".to_string(),
+        api_key_env: KEY_ENV.to_string(),
+        // Deliberately closed: stands in for a gateway that proxies
+        // /chat/completions but serves no /models listing.
+        base_url: "http://127.0.0.1:59321/v1".to_string(),
+        key_required: true,
+        auth_status: AuthStatus::Configured,
+        discover_models: true,
+        ..ProviderInfo::default()
+    });
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/providers/acme-gw/key",
+        Some(serde_json::json!({ "key": "gateway-secret" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let (_, body) = json_request(&h, Method::GET, "/api/providers", None).await;
+    let entry = find_provider(&body, "acme-gw");
+    assert_eq!(
+        entry["reachable"].as_bool(),
+        Some(false),
+        "the probe must genuinely have failed, or this test proves nothing; body: {body}"
+    );
+    assert_eq!(
+        entry["auth_status"].as_str(),
+        Some("configured"),
+        "a keyed provider must keep 'configured' when only its /models probe fails; body: {body}"
+    );
+
+    librefang_api::secrets_env::remove_env_var_guarded(KEY_ENV).await;
+}

@@ -2858,13 +2858,115 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # ═════════════════════════════════════════════════════════════════════════
+  # Container vulnerability gate (#6694)
+  #
+  # Sits between `docker`, which pushes each native image to GHCR by digest and untagged, and `docker-manifest`, which promotes those digests to the shared :VERSION / :latest / :lts tags.
+  #
+  # It is therefore a TAG-PROMOTION gate, not a publish gate.
+  # The per-arch blobs are already in the registry by the time this job starts — that is inherent to `push-by-digest`, which is how the two native builds hand their results to the manifest step.
+  # What a failure here prevents is the digest becoming reachable under any user-facing tag, and it also blocks everything downstream of `docker-manifest`: sync_aur_docker, publish_arch_repo, deploy_fly, and deploy_render.
+  # An untagged digest left behind in GHCR is not pullable by name and is reaped with the package version it belongs to.
+  #
+  # Each architecture is scanned on its own native runner so the report describes the image as it will actually run, not a cross-emulated read.
+  #
+  # REPORT-ONLY today.
+  # The single enforcement threshold for the whole repository is the `fail-on` input of .github/actions/trivy-image-scan, which ships as `off`; see the comment on that input for what arming it means and why it is not armed yet.
+  # ═════════════════════════════════════════════════════════════════════════
+
+  docker-scan:
+    name: Docker Scan / ${{ matrix.platform }}
+    # Byte-identical to the `if:` on `docker` and `docker-manifest`.
+    # Job-level conditions are not inherited through `needs`, and a skipped dependency skips its dependents — so a divergent condition here would silently take the manifest publish down with it on the dispatch path.
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
+    needs: [docker]
+    timeout-minutes: 30
+    # Job-level permissions REPLACE the workflow-level block wholesale rather than merging with it, so every scope this job needs is spelled out.
+    # `packages: read` is deliberate: the scan pulls the digest and never writes to the registry.
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            os: ubuntu-24.04
+            slug: linux-amd64
+          - platform: linux/arm64
+            os: ubuntu-24.04-arm
+            slug: linux-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.RELEASE_REF }}
+      - name: Log in to GHCR
+        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # `slug` here must match the slug the `docker` job derives from its platform (`${platform//\//-}`), because that is what names the digest artifact this step downloads.
+      - name: Download the ${{ matrix.platform }} digest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: docker-digest-${{ matrix.slug }}
+          path: ${{ runner.temp }}/digests
+      - name: Resolve the digest to scan
+        id: digest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          # The `docker` job exports one empty file per pushed digest, named after the hex portion.
+          # Exactly one is expected per platform, and anything else means the upstream job's contract changed — scanning an arbitrary pick would report on an image the manifest may not even reference.
+          mapfile -t files < <(find . -maxdepth 1 -type f -printf '%f\n' | sort)
+          if [ "${#files[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one digest file for ${{ matrix.platform }}, found ${#files[@]}: ${files[*]-none}"
+            exit 1
+          fi
+          echo "ref=ghcr.io/librefang/librefang@sha256:${files[0]}" >> "$GITHUB_OUTPUT"
+          echo "value=sha256:${files[0]}" >> "$GITHUB_OUTPUT"
+      # Paired with `fail-on: off` on the composite action: while the gate is report-only it must not be able to block a release at all, and that has to cover scanner *infrastructure* failure too — a cold arm64 database download, a GHCR hiccup, a Trivy release asset 404.
+      # None of those are true positives about image security, yet every one of them fails this step, and a failed `docker-scan` job would skip `docker-manifest` and with it the entire tag promotion.
+      # Findings still reach the job summary, the artifacts, and code scanning either way, and the step is still marked failed in the run, so an outage stays visible.
+      #
+      # This sits on the step rather than the job on purpose: a step-level `continue-on-error` unambiguously keeps the job green, whereas the job-level form interacts with `needs` in a way that is easy to get wrong.
+      #
+      # ARMING THE GATE IS A TWO-LINE CHANGE, NOT ONE: move `fail-on` off the `off` default in .github/actions/trivy-image-scan/action.yml AND delete this `continue-on-error`.
+      # Leaving it here would arm the threshold while keeping the scan unable to block anything.
+      - name: Scan the ${{ matrix.platform }} release digest
+        id: scan
+        continue-on-error: true
+        uses: ./.github/actions/trivy-image-scan
+        with:
+          image-ref: ${{ steps.digest.outputs.ref }}
+          platform: ${{ matrix.platform }}
+          digest: ${{ steps.digest.outputs.value }}
+          report-slug: release-${{ matrix.slug }}
+          report-dir: ${{ runner.temp }}/trivy-reports
+      - name: Upload SARIF to code scanning
+        # `!cancelled()` so a failed gate still publishes the findings that failed it; `conclusion != 'skipped'` keeps this quiet when the scan never ran; `continue-on-error` keeps a repository without code scanning enabled from turning a green scan red on the upload alone.
+        if: ${{ !cancelled() && steps.scan.conclusion != 'skipped' && github.repository == 'librefang/librefang' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+        with:
+          sarif_file: ${{ runner.temp }}/trivy-reports/release-${{ matrix.slug }}.sarif
+          # Per-architecture: code scanning replaces the previous results for a category, so a shared one would discard one of the two platforms.
+          category: trivy-release-${{ matrix.slug }}
+
   docker-manifest:
     name: Docker Manifest
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
       || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     runs-on: ubuntu-latest
-    needs: [docker]
+    # `docker-scan` is what makes this a gate: the shared :VERSION / :latest tags are only created once both native digests have been scanned.
+    # Keep `docker` in the list too — `needs` is not transitive for the purposes of `steps.*` and artifact availability, and dropping it would make the dependency on the digest artifacts implicit.
+    needs: [docker, docker-scan]
     steps:
       - name: Log in to GHCR
         uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4

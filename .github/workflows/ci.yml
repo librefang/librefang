@@ -426,6 +426,23 @@ jobs:
       - name: pre-commit sha256sum fallback
         run: bash scripts/tests/pre-commit-sha-fallback.sh
 
+  # ── Container vulnerability gate self-test ─────────────────────────────────────
+  # `scripts/check-image-vulns.py` decides whether a release digest is allowed to be promoted to the :latest / :VERSION tags (#6694).
+  # Its decision function is only exercised in CI against whatever the vulnerability database happens to say that day, so a regression that made the gate permanently green would look exactly like a clean image.
+  # The embedded fixture corpus pins the behaviour instead: fixable CRITICAL fails at `critical`, an unfixed CRITICAL does not, a truncated report is an infrastructure failure rather than a pass, and the report-only default never fails on findings.
+  #
+  # Unconditional and ~5s, matching githook-tests: the script is small, and a path filter here would be another thing to keep in sync with the gate.
+  image-vuln-gate:
+    name: Image Vulnerability Gate Self-Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Fixture corpus — the gate fails at the configured threshold
+        run: python3 scripts/check-image-vulns.py --self-test
+
   # ── CHANGELOG attribution check ────────────────────────────────────────────────
   # Enforces the `(@username)` suffix on bullets *added* to the [Unreleased]
   # section in this PR, and on `changelog.d/` fragments this PR introduces —
@@ -1087,6 +1104,7 @@ jobs:
       - skills-wasm-sdk
       - rust-telegram-sidecar
       - githook-tests
+      - image-vuln-gate
       - changelog-attribution
       - changelog-attribution-full
       - openapi-drift

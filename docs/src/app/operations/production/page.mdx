@@ -253,6 +253,59 @@ docker pull ghcr.io/librefang/librefang:0.7.0
 docker run --rm ghcr.io/librefang/librefang:latest --version
 ```
 
+### Container Image Vulnerability Scan
+
+Every runtime image is scanned with [Trivy](https://trivy.dev) before its digest is promoted to a shared tag.
+
+**Scope.** Two workflows run the same scan through the shared composite action at `.github/actions/trivy-image-scan`:
+
+| Workflow | What is scanned | When |
+| --- | --- | --- |
+| `docker-build.yml` | The `linux/amd64` runtime image, after the `/api/health` boot probe | Push to `main` that touches the Dockerfile or its inputs |
+| `release.yml` (`docker-scan`) | Each native release digest — `linux/amd64` on `ubuntu-24.04`, `linux/arm64` on `ubuntu-24.04-arm` | Every release tag, between the per-arch push and the manifest publish |
+
+Each scan covers **OS packages** (Debian packages from the `node:*-bookworm-slim` base) and **language packages** (the bundled Node.js and Python dependencies) — `--pkg-types os,library` — with **secret scanning** left on for the final image.
+Neither `--severity` nor `--ignore-unfixed` is passed, so no filter is applied at all and the report contains every finding at every severity, fixed and unfixed alike.
+
+**Enforcement threshold.** The gate ships **report-only** and is *not* currently enforced.
+The runtime image carries a large pre-existing backlog — issue #6694 measured 10 critical and 95 high findings on 2026-08-01 — so an armed gate would fail `main` and every release on its first run.
+That measurement used Trivy 0.57.0 rather than the 0.72.0 this pipeline pins, and has not been repeated, so read it as the order of magnitude that justifies report-only rather than as the count the first run will report.
+Arming it is a **two-line change**, and both lines matter.
+The threshold itself lives in one place — the `fail-on` input of `.github/actions/trivy-image-scan/action.yml`, which neither workflow overrides:
+
+```
+off  →  critical  →  high
+```
+
+The second line is the `continue-on-error: true` on the scan step of the `docker-scan` job in `.github/workflows/release.yml`.
+While the gate is report-only that flag is what makes report-only *true* on the release path: a scanner outage — a cold arm64 database download, a GHCR hiccup, a Trivy asset 404 — fails the step, and without it a failed `docker-scan` would skip `docker-manifest` and take the whole tag promotion with it.
+None of those failures says anything about image security, so today the scan cannot block a release for any reason, and that is the intended behaviour of a gate that is not enforced.
+The step is still marked failed in the run, so an outage stays visible rather than passing as a clean scan.
+Delete that flag at the same time as you move `fail-on`, or you will arm the threshold while leaving the scan unable to block anything.
+
+The `main` scan in `docker-build.yml` deliberately has no such flag: nothing is gated on it, so a scanner failure there turns the workflow red as a signal and costs nothing.
+
+Once armed, a job fails when the image has any **fixable** vulnerability at or above the threshold, or any embedded secret at all.
+Restricting the decision to fixable findings is not `--ignore-unfixed`: unfixed findings stay in the report, the artifacts, and the job summary, and only the pass/fail decision is narrowed, because an unfixed CVE gives a maintainer nothing to act on.
+
+**What the gate actually blocks.** It is a **tag-promotion gate, not a publish gate**.
+The release pipeline builds each architecture with `push-by-digest`, so both per-arch digests are already in GHCR — untagged — before `docker-scan` runs; that is how the two native build jobs hand their results to the manifest step.
+A failed scan blocks `docker-manifest`, and therefore `publish_arch_repo`, `deploy_fly`, `deploy_render`, and `sync_aur_docker`.
+The consequence is that no user-facing tag (`:VERSION`, `:latest`, `:lts`) is ever created or moved onto a digest that failed the gate, and no downstream deployment consumes it.
+An untagged digest left behind in GHCR is not pullable by name.
+
+**Where the reports are retained.** Three places, with artifacts requesting 30 days — the effective figure is whatever the repository's artifact retention limit allows, since `upload-artifact` silently clamps a longer request:
+
+- **Workflow artifacts** named `trivy-main-linux-amd64` (main) and `trivy-release-linux-amd64` / `trivy-release-linux-arm64` (releases), each holding the raw Trivy JSON, the SARIF encoding of the same scan, and a `-summary.json` recording the platform digest, scanner version, database timestamp, threshold, and verdict.
+- **The job summary** on the run, which names the platform digest, the Trivy and vulnerability-database versions, per-severity totals with fixable counts, and a table of every CRITICAL / HIGH finding with its package, installed version, fixed version, CVE id, and severity.
+- **GitHub code scanning**, under the categories `trivy-main-linux-amd64`, `trivy-release-linux-amd64`, and `trivy-release-linux-arm64` — one category per scanned image, because code scanning replaces the previous results for a category and a shared one would discard an architecture.
+
+**Scanner failures are not clean scans.** The vulnerability database is refreshed in a step of its own, retried three times, and the scan itself then runs with `--skip-db-update`.
+A database that never downloaded therefore ends the job with its own distinct `Scanner infrastructure failure` error instead of producing a finding-free report that looks like a clean image.
+The same discrimination applies to a missing, empty, or truncated report, and to a report identifying no operating system — the runtime image is Debian-based, so that combination means the scanner failed rather than that the image is clean.
+
+The decision function is pinned by a fixture corpus in `scripts/check-image-vulns.py --self-test`, run by the `Image Vulnerability Gate Self-Test` job in `ci.yml` on every PR.
+
 ### Desktop App Auto-Update (test with v0.7.1)
 1. Install v0.7.0 from the release
 2. Tag v0.7.1 and push

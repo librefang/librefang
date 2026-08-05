@@ -13,6 +13,31 @@ use librefang_types::agent::AgentId;
 
 use super::{KernelCronBridge, LibreFangKernel};
 
+impl LibreFangKernel {
+    /// Deliver the output produced by a cron action through both the legacy single-destination setting and the newer multi-target fan-out list.
+    ///
+    /// Keeping this operation on the kernel gives scheduled fires and manual `POST /api/schedules/{id}/run` calls one delivery path.
+    /// Delivery is intentionally best-effort: adapter failures are logged by the helpers and do not turn a successfully completed action into a failed action.
+    pub async fn deliver_cron_output(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        job_name: &str,
+        output: &str,
+        silent: bool,
+        delivery: &librefang_types::scheduler::CronDelivery,
+        delivery_targets: &[librefang_types::scheduler::CronDeliveryTarget],
+    ) {
+        if silent {
+            return;
+        }
+
+        cron_deliver_response(self, agent_id, output, delivery).await;
+        if !delivery_targets.is_empty() {
+            cron_fan_out_targets(self, job_name, output, delivery_targets).await;
+        }
+    }
+}
+
 /// Webhook HTTP timeout used for the fan-out client. Mirrors
 /// `crate::cron_delivery::WEBHOOK_TIMEOUT_SECS` (kept private there); the
 /// duplication is acceptable because this builder lives outside the engine

@@ -1,0 +1,239 @@
+name: Trivy image vulnerability scan
+description: >
+  Scan one already-built container image with Trivy, publish a human-readable job summary, retain the JSON / SARIF / verdict reports as artifacts, and apply the release vulnerability gate.
+  Used by docker-build.yml for the runtime image on main and by release.yml for each native release digest before the multi-arch manifest is published.
+  See #6694.
+
+inputs:
+  image-ref:
+    description: >
+      Image to scan.
+      A local daemon tag (`librefang:ci`) or a registry reference pinned by digest (`ghcr.io/librefang/librefang@sha256:…`).
+      Prefer the digest form so the report names the exact artifact a release tag would be promoted to.
+    required: true
+  platform:
+    description: Platform label used in the job summary, e.g. `linux/amd64`.
+    required: true
+  report-slug:
+    description: >
+      Slug used for the report file names, the artifact name, and the SARIF code-scanning category.
+      Must be unique across every scan in one workflow run — code scanning overwrites same-category uploads, so a shared slug would silently discard one architecture's results.
+    required: true
+  report-dir:
+    description: >
+      Absolute directory the three reports are written to.
+      The caller supplies it (rather than the action defaulting to a `runner.temp` path) so the SARIF upload step in the workflow can name the file without depending on an output of a step that may have failed the gate.
+    required: true
+  digest:
+    description: >
+      Digest to display in the report.
+      Optional — falls back to the report's own `Metadata.RepoDigests` / `Metadata.ImageID`, which is what a locally loaded image has instead.
+    required: false
+    default: ""
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # THE ENFORCEMENT THRESHOLD — the single knob for the whole repository.
+  #
+  # Neither docker-build.yml nor release.yml passes this input, so this default governs both workflows and there is exactly one line to change.
+  #
+  # It ships as `off`, which means REPORT-ONLY: the scan runs, the summary and artifacts are published, the SARIF reaches code scanning, and the job never fails on findings.
+  # That is deliberate and it is not "enforced" — issue #6694 measured 10 critical and 95 high findings in the runtime image on 2026-08-01, so an armed gate would turn `main` and every release red on the first run and the pipeline would be disabled within the hour.
+  # Those figures come from a local Trivy 0.57.0 run, not from the 0.72.0 pinned below, and nobody has re-measured with the pinned scanner.
+  # Treat them as the order of magnitude that justifies shipping report-only, not as the number you will see in the first run's summary.
+  #
+  # A maintainer arms it by moving this default up the ladder once the backlog is remediated:
+  #
+  #     off  →  critical  →  high
+  #
+  # Semantics once armed: the job fails when the image has any FIXABLE vulnerability at or above the threshold, or any embedded secret at all.
+  # Issue #6694's Trivy 0.57.0 run found no embedded secrets, but the secret rules changed substantially between 0.57 and 0.72, so that is not a measured baseline for the pinned scanner — arm `fail-on` on a dry run first rather than trusting a zero-secret backlog.
+  # Restricting the decision to fixable findings is not `--ignore-unfixed`: every finding at every severity, fixed or not, stays in the report, the artifacts, and the job summary.
+  # Only the pass/fail decision is narrowed, because an unfixed CVE gives a maintainer nothing to act on.
+  # ═══════════════════════════════════════════════════════════════════════════
+  fail-on:
+    description: >
+      Enforcement threshold: `off` (report-only, the default), `critical`, `high`, `medium`, `low`, or `unknown`.
+    required: false
+    default: "off"
+
+  trivy-version:
+    description: >
+      Pinned Trivy release, without the leading `v`.
+      Pinned rather than floating for the same reason secret-scan.yml pins gitleaks: the scanner's own behaviour changes between releases, so a floating version turns an unrelated upstream change into a surprise CI failure.
+      Bumping it means re-reading the reports for new noise.
+    required: false
+    default: "0.72.0"
+  scanners:
+    description: >
+      Trivy scanners to enable.
+      Secret scanning stays on for the final runtime image per #6694.
+    required: false
+    default: "vuln,secret"
+  pkg-types:
+    description: >
+      Package classes to scan.
+      `os,library` covers both Debian packages from the bookworm base and the bundled Node.js / Python dependencies.
+    required: false
+    default: "os,library"
+  retention-days:
+    description: Artifact retention for the retained reports.
+    required: false
+    default: "30"
+
+runs:
+  using: composite
+  steps:
+    # Download the pinned release and verify it against the project's own published checksums before installing, so a tampered or truncated download cannot slip a different scanner into CI.
+    # Same approach as the gitleaks install in secret-scan.yml, and it avoids taking on a third-party action as a new pinned dependency.
+    - name: Install Trivy ${{ inputs.trivy-version }}
+      id: install
+      shell: bash
+      working-directory: ${{ runner.temp }}
+      env:
+        TRIVY_VERSION: ${{ inputs.trivy-version }}
+      run: |
+        set -euo pipefail
+        case "$(uname -m)" in
+          x86_64)        asset="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" ;;
+          aarch64|arm64) asset="trivy_${TRIVY_VERSION}_Linux-ARM64.tar.gz" ;;
+          *) echo "::error::Unsupported runner architecture $(uname -m) — no pinned Trivy asset for it"; exit 1 ;;
+        esac
+        base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+        curl -sSfL "${base}/${asset}" -o "${asset}"
+        curl -sSfL "${base}/trivy_${TRIVY_VERSION}_checksums.txt" -o trivy_checksums.txt
+        grep "  ${asset}\$" trivy_checksums.txt | sha256sum -c -
+        tar -xzf "${asset}" trivy
+        sudo install trivy /usr/local/bin/trivy
+        rm -f trivy "${asset}" trivy_checksums.txt
+        trivy --version
+        echo "db-date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+    # Cache the vulnerability database so a rebuild does not re-download ~60 MB from ghcr.io on every run.
+    # Keyed by day so a restored cache is at most one update stale, and the refresh step below runs regardless.
+    #
+    # Be honest about what this buys on each path.
+    # Actions cache entries are scoped by ref, and a run can only restore from its own ref or from the default branch.
+    # docker-build.yml runs on `main` and both writes and reads the X64 entry, so it warms.
+    # release.yml's docker-scan runs on a tag: its X64 leg can restore what `main` last wrote, its ARM64 leg has no writer on `main` at all and always downloads cold, and whatever either leg saves is scoped to that tag and never read again.
+    # So the release path is only partially covered — which is precisely why the refresh step below retries and fails loudly rather than assuming the download will succeed.
+    - name: Cache Trivy vulnerability database
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/trivy
+        key: trivy-db-${{ inputs.trivy-version }}-${{ runner.arch }}-${{ steps.install.outputs.db-date }}
+        restore-keys: |
+          trivy-db-${{ inputs.trivy-version }}-${{ runner.arch }}-
+
+    # SCANNER INFRASTRUCTURE BOUNDARY.
+    #
+    # The database refresh is a separate step from the scan on purpose.
+    # Trivy's database is served from a public registry that rate-limits, and a failed or partial download is the single most likely way a scan produces a finding-free report that is not a clean image.
+    # Refreshing here — and running the scan itself with --skip-db-update so it cannot silently proceed on a database that never arrived — means a download failure ends the job with its own distinct error instead of masquerading as success.
+    - name: Refresh Trivy vulnerability database
+      id: db
+      shell: bash
+      run: |
+        set -uo pipefail
+        attempts=3
+        updated=0
+        for attempt in $(seq 1 "${attempts}"); do
+          if trivy image --download-db-only; then
+            updated=1
+            break
+          fi
+          if [ "${attempt}" -eq "${attempts}" ]; then
+            break
+          fi
+          delay=$((attempt * 30))
+          echo "::warning::Trivy vulnerability database download attempt ${attempt}/${attempts} failed; retrying in ${delay}s"
+          sleep "${delay}"
+        done
+        if [ "${updated}" -ne 1 ]; then
+          echo "::error title=Scanner infrastructure failure::Trivy vulnerability database could not be downloaded after 3 attempts. This is NOT a clean scan — the image was never inspected. Re-run the job; if it persists the database registry is unavailable."
+          exit 1
+        fi
+        python3 - <<'PY' >> "$GITHUB_OUTPUT"
+        import json, subprocess
+        stamp = "unknown"
+        try:
+            raw = subprocess.run(["trivy", "version", "--format", "json"], capture_output=True, text=True, check=True).stdout
+            stamp = str((json.loads(raw).get("VulnerabilityDB") or {}).get("UpdatedAt") or "unknown")
+        except Exception:
+            pass
+        print("updated-at=" + stamp)
+        PY
+
+    - name: Scan ${{ inputs.image-ref }}
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+        REPORT_DIR: ${{ inputs.report-dir }}
+        REPORT_SLUG: ${{ inputs.report-slug }}
+        SCANNERS: ${{ inputs.scanners }}
+        PKG_TYPES: ${{ inputs.pkg-types }}
+      run: |
+        set -euo pipefail
+        mkdir -p "${REPORT_DIR}"
+        # No --severity: its default is already every level, and spelling the list out would turn into a suppression the day Trivy adds one.
+        # The absence of the flag is the structurally unfiltered form.
+        # --exit-code 0 keeps Trivy from deciding the verdict — the report must contain everything and check-image-vulns.py owns pass/fail.
+        # --skip-db-update pairs with the refresh step above so a missing database fails loudly there rather than producing an empty report here.
+        trivy image \
+          --format json \
+          --output "${REPORT_DIR}/${REPORT_SLUG}.json" \
+          --scanners "${SCANNERS}" \
+          --pkg-types "${PKG_TYPES}" \
+          --skip-db-update \
+          --exit-code 0 \
+          --timeout 20m \
+          "${IMAGE_REF}"
+        # Convert rather than re-scan: one scan, two encodings, so the SARIF uploaded to code scanning cannot describe a different run than the JSON retained as an artifact.
+        #
+        # Verified against v0.72.0 source rather than assumed: the SARIF writer iterates res.Secrets alongside res.Vulnerabilities (pkg/report/sarif.go), so secret findings survive the conversion, and convert's own --scanners flag is read only when the output format is `table` (pkg/commands/convert/run.go), so passing it here would be a no-op that implied otherwise.
+        # Convert's default severity set is all five levels, so it re-filters nothing either.
+        trivy convert \
+          --format sarif \
+          --output "${REPORT_DIR}/${REPORT_SLUG}.sarif" \
+          "${REPORT_DIR}/${REPORT_SLUG}.json"
+
+    # Exit codes are the contract: 0 pass / report-only, 1 gate failure, 2 scanner infrastructure failure.
+    # All three are distinguishable in the log, and 2 can never be produced by a clean image.
+    - name: Summarise findings and apply the gate
+      shell: bash
+      env:
+        REPORT_DIR: ${{ inputs.report-dir }}
+        REPORT_SLUG: ${{ inputs.report-slug }}
+        IMAGE_REF: ${{ inputs.image-ref }}
+        PLATFORM: ${{ inputs.platform }}
+        DIGEST: ${{ inputs.digest }}
+        TRIVY_VERSION: ${{ inputs.trivy-version }}
+        DB_UPDATED_AT: ${{ steps.db.outputs.updated-at }}
+        SCANNERS: ${{ inputs.scanners }}
+        PKG_TYPES: ${{ inputs.pkg-types }}
+        FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        set -uo pipefail
+        python3 "${GITHUB_WORKSPACE}/scripts/check-image-vulns.py" \
+          --report "${REPORT_DIR}/${REPORT_SLUG}.json" \
+          --summary-json "${REPORT_DIR}/${REPORT_SLUG}-summary.json" \
+          --image-ref "${IMAGE_REF}" \
+          --platform "${PLATFORM}" \
+          --digest "${DIGEST}" \
+          --trivy-version "${TRIVY_VERSION}" \
+          --db-updated-at "${DB_UPDATED_AT}" \
+          --scanners "${SCANNERS}" \
+          --pkg-types "${PKG_TYPES}" \
+          --fail-on "${FAIL_ON}"
+
+    # always() so the reports survive a failed gate — the artifact is how a maintainer finds out what to fix, which is exactly when the job is red.
+    - name: Upload scan reports
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: trivy-${{ inputs.report-slug }}
+        path: |
+          ${{ inputs.report-dir }}/${{ inputs.report-slug }}.json
+          ${{ inputs.report-dir }}/${{ inputs.report-slug }}.sarif
+          ${{ inputs.report-dir }}/${{ inputs.report-slug }}-summary.json
+        if-no-files-found: warn
+        retention-days: ${{ inputs.retention-days }}

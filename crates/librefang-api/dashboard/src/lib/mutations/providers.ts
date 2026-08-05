@@ -5,6 +5,7 @@ import {
   deleteProviderKey,
   enableProvider,
   setProviderUrl,
+  setProviderDiscovery,
   setDefaultProvider,
   createRegistryContent,
 } from "../http/client";
@@ -78,6 +79,27 @@ export function useSetProviderUrl() {
       baseUrl: string;
       proxyUrl?: string;
     }) => setProviderUrl(id, baseUrl, proxyUrl),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: providerKeys.all });
+      qc.invalidateQueries({ queryKey: modelKeys.lists() });
+    },
+  });
+}
+
+/**
+ * PUT /providers/{id}/discovery — opt a provider in or out of live model
+ * discovery (#6702).
+ *
+ * Invalidates the model lists as well as the provider slice: turning discovery
+ * on makes the next probe merge the endpoint's `/v1/models` listing into the
+ * catalog, and turning it off stops refreshing it — either way the Models page
+ * is showing a stale set until it refetches.
+ */
+export function useSetProviderDiscovery() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, discoverModels }: { id: string; discoverModels: boolean }) =>
+      setProviderDiscovery(id, discoverModels),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: providerKeys.all });
       qc.invalidateQueries({ queryKey: modelKeys.lists() });
@@ -191,20 +213,28 @@ export function useConnectEveryApi() {
 
 const TEST_SUCCESS_STATUSES = new Set(["ok", "success"]);
 
+/**
+ * Persist a typed key (when there is one) and then probe the provider.
+ *
+ * The save is gated on the key being non-empty, NOT on the provider declaring
+ * `key_required` (#6703). A `key_required: false` provider — every built-in
+ * local one — may still sit behind an authenticating server, and the runtime
+ * forwards whatever key is stored as `Authorization: Bearer`; dropping the key
+ * here because the provider "doesn't need one" silently discarded what the
+ * user typed and left the probe 401ing.
+ */
 export function useValidateProviderKey() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({
       providerId,
       apiKey,
-      requiresKey,
     }: {
       providerId: string;
       apiKey: string;
-      requiresKey: boolean;
     }) => {
       if (!providerId) throw new Error("no_provider");
-      if (requiresKey && apiKey.trim()) {
+      if (apiKey.trim()) {
         await setProviderKey(providerId, apiKey.trim());
       }
       const test = await testProvider(providerId);

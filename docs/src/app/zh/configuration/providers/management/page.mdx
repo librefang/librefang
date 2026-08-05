@@ -45,6 +45,38 @@ supports_vision = false
 
 `~/.librefang/providers/` 中的文件在启动时加载，并与内置提供商一起合并到目录中。
 
+### 自定义提供商的模型自动发现
+
+LibreFang 每 60 秒轮询一次内置本地提供商（`ollama`、`vllm`、`lmstudio`、`lemonade`），把它们 `/v1/models` 返回的模型合并进目录。
+以其他 id 注册的提供商——比如叫 `vllm-local` 的自建 vLLM——默认不会被轮询，因为任意一个 OpenAI 兼容端点未必提供模型列表接口。
+用 `discover_models` 按提供商逐个开启：
+
+```toml
+# ~/.librefang/providers/vllm-local.toml
+[provider]
+id = "vllm-local"
+display_name = "vLLM (GPU box)"
+base_url = "http://gpu-box:4000/v1"
+api_key_env = "VLLM_LOCAL_API_KEY"
+key_required = true
+discover_models = true
+```
+
+开启后，该提供商会走内置本地提供商完全相同的路径：周期性探测循环、`POST /api/providers/{name}/test` 刷新（响应中随之带上 `discovered_models`），以及 `GET /api/models` 上的实时模型过滤。
+这个开关不会把内置 id 的发现能力关掉——那些由 id 决定而非由开关决定——所以已有安装不受影响。
+
+Dashboard 在「添加提供商」向导和提供商的配置抽屉里提供同一个开关**自动发现模型**；后者调用 `PUT /api/providers/{name}/discovery`，请求体为 `{"discover_models": true}`，并把值写回该提供商自己的 TOML。
+
+对你自己创建的提供商，这次写入是持久的——没有别的东西拥有那个文件。
+对**注册表下发**的提供商则不然：启动时的注册表同步会重写任何内容与上游副本不一致的文件，所以对 `providers/openai.toml` 之类文件的 `discover_models` 修改会立刻生效，但在下次守护进程启动时被还原。
+对内置本地 id 而言这只是纸面上的限制——它们的发现由 id 而非开关决定；如果你需要让某个注册表下发的远程提供商被长期轮询，请用自己的 id 单独注册一个提供商，而不是修改下发的文件。
+
+### 无需密钥的提供商同样可以配置 API Key
+
+`key_required = false` 表示密钥**不是必填**，而不是拒绝接受密钥。
+内置本地提供商都声明为 false，但启用了鉴权的自建 vLLM、或位于反向代理（Open WebUI、LiteLLM）之后的 Ollama，没有密钥会直接返回 401。
+按配置任何其他提供商的方式设置即可——`POST /api/providers/vllm/key`、Dashboard 配置抽屉里的 API Key 输入框，或直接在环境中导出声明的 `api_key_env`——运行时会在探测和对话请求上都带上 `Authorization: Bearer`。
+
 ### 自定义图像生成 provider
 
 不在内置列表（`openai`、`gemini`、`elevenlabs`、`minimax`、`google_tts`）的媒体驱动名以前会失败 `"Unknown media provider"`。现在配置了 URL 的自定义 provider 会落到通用 OpenAI 兼容图像驱动：

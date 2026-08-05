@@ -209,6 +209,14 @@ const NODE_TYPES = [
 
 // Node types that require an agent binding
 const AGENT_NODE_TYPES_SET = new Set(["agent", "channel", "respond", "condition", "loop", "parallel", "collect"]);
+
+// Output-language instructions appended to imported template prompts, keyed by UI language code.
+// Languages absent from the map (incl. the default "en") get no suffix.
+// Add a language here when its UI locale ships.
+const TEMPLATE_LANG_SUFFIX: Readonly<Record<string, string>> = {
+  zh: "\n\nIMPORTANT: You MUST respond entirely in Chinese (中文).",
+  pl: "\n\nIMPORTANT: You MUST respond entirely in Polish (Polski).",
+};
 const NODE_MODE_MAP: Readonly<Record<string, string>> = {
   condition: "conditional",
   loop: "loop",
@@ -1462,7 +1470,7 @@ function CanvasPageInner() {
         const defaultAgent = availableAgents.find(a => a.state === "Running") || availableAgents[0];
         // Determine output language instruction based on UI language
         const lang = t("_lang", { defaultValue: "en" });
-        const langSuffix = lang === "zh" ? "\n\nIMPORTANT: You MUST respond entirely in Chinese (中文)." : "";
+        const langSuffix = TEMPLATE_LANG_SUFFIX[lang] ?? "";
         const newNodes = templateNodes.map((n, idx) => {
           const nd = n.data;
           const nodeType = nd?.nodeType;

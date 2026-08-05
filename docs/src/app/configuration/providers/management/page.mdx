@@ -45,6 +45,38 @@ supports_vision = false
 
 Files in `~/.librefang/providers/` are loaded at startup and merged into the catalog alongside the builtin providers.
 
+### Model Auto-Discovery for Custom Providers
+
+LibreFang polls the built-in local providers (`ollama`, `vllm`, `lmstudio`, `lemonade`) every 60 seconds and merges whatever their `/v1/models` endpoint reports into the catalog.
+A provider registered under any other id — a self-hosted vLLM at `vllm-local`, say — is not polled by default, because an arbitrary OpenAI-compatible endpoint need not serve a model listing.
+Opt in per provider with `discover_models`:
+
+```toml
+# ~/.librefang/providers/vllm-local.toml
+[provider]
+id = "vllm-local"
+display_name = "vLLM (GPU box)"
+base_url = "http://gpu-box:4000/v1"
+api_key_env = "VLLM_LOCAL_API_KEY"
+key_required = true
+discover_models = true
+```
+
+An opted-in provider joins the same paths a built-in local one already walks: the periodic probe loop, the `POST /api/providers/{name}/test` refresh (whose response then reports `discovered_models`), and the live-model filter applied to `GET /api/models`.
+The flag never turns discovery *off* for the built-in ids — those are decided by the id, not by the flag — so an existing install is unaffected.
+
+The Dashboard exposes the same switch as **Auto-discover models** in the Add Provider wizard and in a provider's Configure drawer; the latter calls `PUT /api/providers/{name}/discovery` with `{"discover_models": true}`, which writes the value back into the provider's own TOML.
+
+The write is durable for a provider you created — nothing else owns its file.
+For a **registry-shipped** provider it is not: the boot-time registry sync rewrites any file whose content differs from the upstream copy, so a `discover_models` edit to e.g. `providers/openai.toml` applies immediately and is reverted on the next daemon start.
+That is only a limitation on paper for the built-in local ids, whose discovery is decided by the id rather than the flag; if you need a registry-shipped remote provider polled permanently, register it under your own id instead of editing the shipped file.
+
+### API Keys for Keyless Providers
+
+`key_required = false` means a key is *not mandatory*, not that one is refused.
+The built-in local providers all declare it false, but a self-hosted vLLM or an Ollama behind a reverse proxy (Open WebUI, LiteLLM) answers 401 without one.
+Set the key exactly as for any other provider — `POST /api/providers/vllm/key`, the API-key field in the Dashboard's Configure drawer, or the declared `api_key_env` in the environment — and the runtime sends it as `Authorization: Bearer` on both the probe and the chat call.
+
 ### Custom Image-Generation Providers
 
 A media driver name not in the builtin list (`openai`, `gemini`, `elevenlabs`, `minimax`, `google_tts`) used to fail with `"Unknown media provider"`. Custom providers with a configured URL now fall through to a generic OpenAI-compatible image driver:

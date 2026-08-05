@@ -481,7 +481,7 @@ function isStylingLiteral(text: string): boolean {
 
 function isAllowedHardcodedText(text: string, kind: string): boolean {
   if (isTechnicalLiteral(text)) return true;
-  if (["English", "Українська", "中文", "简体中文", "한국어"].includes(text)) return true;
+  if (["English", "Українська", "中文", "简体中文", "한국어", "Polski"].includes(text)) return true;
   // Channel product / brand names are proper nouns and must NOT be translated.
   // Mirrors DeliveryTargetsEditor's CHANNEL_PRESETS labels — adding a channel
   // there only needs an entry here when its name is not already brand-like
