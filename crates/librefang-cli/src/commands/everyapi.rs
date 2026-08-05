@@ -621,6 +621,10 @@ pub(crate) fn synthesize_catalog(
                 // registered image / audio / video model unreachable through
                 // the media paths while still appearing in the catalog.
                 media_capabilities: media_capabilities_for(&entries),
+                // EveryAPI is a hosted gateway whose catalog is synthesised
+                // here from its own `/models` + pricing endpoints, so it never
+                // goes through the local-probe discovery path (#6702).
+                discover_models: false,
             }),
             models: entries,
         },

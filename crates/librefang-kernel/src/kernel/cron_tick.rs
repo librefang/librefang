@@ -17,7 +17,6 @@ use librefang_types::event::{Event, EventPayload, EventTarget};
 
 use tracing::{debug, warn};
 
-use super::cron_bridge::{cron_deliver_response, cron_fan_out_targets};
 use super::cron_compaction::{
     apply_cron_prune, cron_clamp_keep_recent, cron_compute_keep_count,
     cron_resolve_compaction_mode, try_summarize_trim,
@@ -363,31 +362,16 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                                 if let Err(e) = kernel_job.workflows.cron_scheduler.persist() {
                                     tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
                                 }
-                                // Deliver response to configured channel (skip NO_REPLY/silent)
-                                if !result.silent {
-                                    cron_deliver_response(
-                                        &kernel_job,
+                                kernel_job
+                                    .deliver_cron_output(
                                         agent_id,
+                                        &job_name,
                                         &result.response,
+                                        result.silent,
                                         &delivery,
+                                        &delivery_targets,
                                     )
                                     .await;
-                                    // Fan out to multi-destination
-                                    // delivery_targets (best-effort,
-                                    // failure-isolated). Skip the whole
-                                    // call when there are no targets so
-                                    // we never construct a fan-out engine
-                                    // for the common no-webhook job (#5127).
-                                    if !delivery_targets.is_empty() {
-                                        cron_fan_out_targets(
-                                            &kernel_job,
-                                            &job_name,
-                                            &result.response,
-                                            &delivery_targets,
-                                        )
-                                        .await;
-                                    }
-                                }
                             }
                             Ok(Err(e)) => {
                                 let err_msg = format!("{e}");
@@ -477,26 +461,16 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                                         {
                                             tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
                                         }
-                                        cron_deliver_response(
-                                            &kernel_job,
-                                            agent_id,
-                                            &output,
-                                            &delivery,
-                                        )
-                                        .await;
-                                        // Skip the fan-out call when no
-                                        // targets are configured so we
-                                        // don't construct an engine for
-                                        // the common no-webhook job (#5127).
-                                        if !delivery_targets.is_empty() {
-                                            cron_fan_out_targets(
-                                                &kernel_job,
+                                        kernel_job
+                                            .deliver_cron_output(
+                                                agent_id,
                                                 &job_name,
                                                 &output,
+                                                false,
+                                                &delivery,
                                                 &delivery_targets,
                                             )
                                             .await;
-                                        }
                                     }
                                     Ok(Err(e)) => {
                                         let err_msg = format!("{e}");

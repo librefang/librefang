@@ -1,0 +1,5 @@
+Opt-in live model discovery for custom OpenAI-compatible providers, via a `discover_models` flag on the provider and a toggle in the dashboard's Add / Configure Provider dialogs.
+Discovery was gated on a hard-coded id allowlist (`ollama | vllm | lmstudio | lemonade`), so a self-hosted endpoint registered under any other id was never probed: its model list stayed empty forever and the only recourse was to register every model by hand, or to squat the built-in `vllm` id and override its base URL.
+A provider that opts in joins exactly the paths a built-in local one already walks — the 60-second probe loop, the `POST /api/providers/{name}/test` refresh, and the live-model filter on `/api/models`.
+The predicate ORs the flag with the id check rather than replacing it, so the built-in ids keep discovering regardless of the flag and an existing install sees no change.
+`PUT /api/providers/{name}/discovery` toggles it and persists the value into the provider's own TOML, so the opt-in survives a restart — for a provider you created, which is the case the feature exists for; on a registry-shipped file the boot-time sync still reverts any local edit (#6702, #6714) (@houko)

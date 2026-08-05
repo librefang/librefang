@@ -253,6 +253,59 @@ docker pull ghcr.io/librefang/librefang:0.7.0
 docker run --rm ghcr.io/librefang/librefang:latest --version
 ```
 
+### 容器镜像漏洞扫描
+
+每个运行时镜像在其 digest 被提升为共享标签之前，都会先经过 [Trivy](https://trivy.dev) 扫描。
+
+**扫描范围。** 两个工作流通过 `.github/actions/trivy-image-scan` 这个共享的 composite action 执行同一套扫描：
+
+| 工作流 | 扫描对象 | 触发时机 |
+| --- | --- | --- |
+| `docker-build.yml` | `linux/amd64` 运行时镜像，在 `/api/health` 启动探针之后 | 推送到 `main` 且改动了 Dockerfile 或其输入 |
+| `release.yml`（`docker-scan`） | 每个原生架构的发布 digest —— `linux/amd64` 在 `ubuntu-24.04`、`linux/arm64` 在 `ubuntu-24.04-arm` | 每个发布标签，位于单架构推送与 manifest 发布之间 |
+
+每次扫描同时覆盖 **OS 软件包**（来自 `node:*-bookworm-slim` 基础镜像的 Debian 包）和 **语言包**（内置的 Node.js 与 Python 依赖）—— 即 `--pkg-types os,library` —— 并对最终镜像保持 **密钥扫描** 开启。
+既不传 `--severity` 也不传 `--ignore-unfixed`，因此完全不施加任何过滤，报告包含所有严重级别的全部发现，无论是否有可用修复。
+
+**执行阈值。** 该门禁以 **仅报告** 模式发布，目前 *并未* 强制执行。
+运行时镜像存在大量历史遗留问题 —— issue #6694 于 2026-08-01 测得 10 个 critical 和 95 个 high —— 因此一旦启用强制执行，`main` 和每次发布在第一次运行时就会失败。
+该测量使用的是 Trivy 0.57.0 而非本流水线固定的 0.72.0，且未重新测量，因此它只能作为「为何先以报告模式发布」的量级依据，而不是首次运行会报出的实际数字。
+启用它需要改 **两行**，两行都不可省。
+阈值本身在一个地方 —— `.github/actions/trivy-image-scan/action.yml` 的 `fail-on` 输入，两个工作流都不覆盖它：
+
+```
+off  →  critical  →  high
+```
+
+第二行是 `.github/workflows/release.yml` 中 `docker-scan` 作业扫描步骤上的 `continue-on-error: true`。
+在报告模式下，正是这个标记让发布路径上的「仅报告」名副其实：扫描器故障 —— arm64 冷启动下载漏洞库、GHCR 抖动、Trivy 资产 404 —— 会让该步骤失败，若没有它，失败的 `docker-scan` 会跳过 `docker-manifest`，连带整个标签提升一起中断。
+这些故障都不说明镜像存在安全问题，因此当前扫描不会因任何原因阻断发布，这正是一个未启用强制执行的门禁应有的行为。
+该步骤在运行记录中仍标记为失败，因此扫描器故障依然可见，不会被当作一次干净的扫描。
+移动 `fail-on` 的同时必须删除这个标记，否则你会在启用阈值的同时让扫描失去阻断能力。
+
+`docker-build.yml` 中的 `main` 扫描刻意没有这个标记：没有任何东西依赖它，因此那里的扫描器故障会把工作流标红作为信号，且不造成任何阻塞。
+
+启用之后，当镜像存在任何达到或超过该阈值的 **可修复** 漏洞，或存在任何内嵌密钥时，作业即失败。
+把判定范围限定在可修复的发现上并不等于 `--ignore-unfixed`：无修复的发现仍然保留在报告、产物和作业摘要中，被收窄的只是通过/失败的判定，因为一个无法修复的 CVE 并不能给维护者任何可执行的动作。
+
+**门禁实际拦截的是什么。** 它是 **标签提升门禁，而非发布门禁**。
+发布流水线使用 `push-by-digest` 构建每个架构，因此在 `docker-scan` 运行之前，两个单架构 digest 就已经（以无标签的形式）存在于 GHCR 中；这正是两个原生构建作业把结果交给 manifest 步骤的方式。
+扫描失败会阻断 `docker-manifest`，进而阻断 `publish_arch_repo`、`deploy_fly`、`deploy_render` 和 `sync_aur_docker`。
+其效果是：任何面向用户的标签（`:VERSION`、`:latest`、`:lts`）都不会被创建或移动到未通过门禁的 digest 上，下游部署也不会消费它。
+遗留在 GHCR 中的无标签 digest 无法通过名称拉取。
+
+**报告保留在哪里。** 三个位置，产物请求保留 30 天 —— 实际生效值取决于仓库的产物保留上限，因为 `upload-artifact` 会静默地把超出上限的请求截断：
+
+- **工作流产物**，名为 `trivy-main-linux-amd64`（main）以及 `trivy-release-linux-amd64` / `trivy-release-linux-arm64`（发布），每个包含原始 Trivy JSON、同一次扫描的 SARIF 编码，以及记录了平台 digest、扫描器版本、数据库时间戳、阈值和判定结果的 `-summary.json`。
+- **运行的作业摘要**，其中列出平台 digest、Trivy 与漏洞数据库版本、按严重级别统计的总数与可修复数，以及每条 CRITICAL / HIGH 发现的软件包、已安装版本、修复版本、CVE 编号和严重级别。
+- **GitHub code scanning**，分类为 `trivy-main-linux-amd64`、`trivy-release-linux-amd64` 和 `trivy-release-linux-arm64` —— 每个被扫描镜像一个分类，因为 code scanning 会替换同一分类下的既有结果，共用分类会丢掉其中一个架构。
+
+**扫描器故障不等于扫描通过。** 漏洞数据库在独立的步骤中刷新并重试三次，之后扫描本身使用 `--skip-db-update` 运行。
+因此数据库下载失败会以独立的 `Scanner infrastructure failure` 错误终止作业，而不会产出一份看起来像干净镜像的零发现报告。
+同样的区分也适用于报告缺失、为空或被截断的情况，以及报告未识别出操作系统的情况 —— 运行时镜像基于 Debian，出现这种组合意味着扫描器失败，而不是镜像干净。
+
+判定逻辑由 `scripts/check-image-vulns.py --self-test` 中的固定用例集锁定，由 `ci.yml` 的 `Image Vulnerability Gate Self-Test` 作业在每个 PR 上运行。
+
 ### 桌面应用自动更新（使用 v0.7.1 进行测试）
 1. 从发布页面安装 v0.7.0
 2. 打标签 v0.7.1 并推送

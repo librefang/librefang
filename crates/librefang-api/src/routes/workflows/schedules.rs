@@ -529,16 +529,30 @@ pub async fn run_schedule(
                 .clone()
                 .unwrap_or_else(|| format!("[Scheduled workflow '{}' triggered]", name));
             match state.kernel.run_workflow_typed(wid, wf_input).await {
-                Ok((run_id, output)) => (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "status": "completed",
-                        "schedule_id": id,
-                        "workflow_id": workflow_id,
-                        "run_id": run_id.to_string(),
-                        "output": output,
-                    })),
-                ),
+                Ok((run_id, output)) => {
+                    state
+                        .kernel
+                        .clone()
+                        .deliver_cron_output(
+                            agent_id,
+                            &name,
+                            &output,
+                            false,
+                            &job.delivery,
+                            &job.delivery_targets,
+                        )
+                        .await;
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "status": "completed",
+                            "schedule_id": id,
+                            "workflow_id": workflow_id,
+                            "run_id": run_id.to_string(),
+                            "output": output,
+                        })),
+                    )
+                }
                 Err(e) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({
@@ -556,15 +570,29 @@ pub async fn run_schedule(
                 .send_message_with_handle(agent_id, message, Some(kernel_handle))
                 .await
             {
-                Ok(result) => (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "status": "completed",
-                        "schedule_id": id,
-                        "agent_id": agent_id.to_string(),
-                        "response": result.response,
-                    })),
-                ),
+                Ok(result) => {
+                    state
+                        .kernel
+                        .clone()
+                        .deliver_cron_output(
+                            agent_id,
+                            &name,
+                            &result.response,
+                            result.silent,
+                            &job.delivery,
+                            &job.delivery_targets,
+                        )
+                        .await;
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "status": "completed",
+                            "schedule_id": id,
+                            "agent_id": agent_id.to_string(),
+                            "response": result.response,
+                        })),
+                    )
+                }
                 Err(e) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({

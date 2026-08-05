@@ -287,6 +287,7 @@ export {
   deleteProviderKey,
   enableProvider,
   setProviderUrl,
+  setProviderDiscovery,
   setDefaultProvider,
   // network / a2a
   discoverA2AAgent,

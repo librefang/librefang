@@ -115,6 +115,21 @@ pub fn is_local_provider(provider: &str) -> bool {
     )
 }
 
+/// Whether a provider participates in live model discovery — the periodic
+/// probe loop, the `/api/providers/{name}/test` refresh, and the live-model
+/// filter applied to `/api/models`.
+///
+/// Discovery used to be gated on [`is_local_provider`] alone, so a custom
+/// OpenAI-compatible endpoint (a self-hosted vLLM behind an API key registered
+/// under its own id) was never probed and its model list stayed empty forever
+/// (#6702). The opt-in `discover_models` flag on the provider is ORed with the
+/// built-in id check rather than replacing it, so a built-in local provider
+/// keeps discovering whatever the flag says and an existing install sees no
+/// behavioural change.
+pub fn discovers_models(provider: &librefang_types::model_catalog::ProviderInfo) -> bool {
+    is_local_provider(&provider.id) || provider.discover_models
+}
+
 /// Per-request total timeout for loopback probe targets.
 ///
 /// The shared probe client (see [`PROBE_CLIENT`]) is configured with the
@@ -711,6 +726,57 @@ mod tests {
         assert!(!is_local_provider("groq"));
         assert!(!is_local_provider("claude-code"));
         assert!(!is_local_provider("qwen-code"));
+    }
+
+    /// #6702: discovery is the union of the built-in local ids and the
+    /// per-provider opt-in, never one replacing the other.
+    #[test]
+    fn discovers_models_is_local_id_or_opt_in() {
+        use librefang_types::model_catalog::ProviderInfo;
+
+        let builtin_local = ProviderInfo {
+            id: "vllm".to_string(),
+            ..Default::default()
+        };
+        assert!(
+            discovers_models(&builtin_local),
+            "a built-in local provider discovers without the flag"
+        );
+
+        let builtin_local_flag_off = ProviderInfo {
+            id: "ollama".to_string(),
+            discover_models: false,
+            ..Default::default()
+        };
+        assert!(
+            discovers_models(&builtin_local_flag_off),
+            "the flag never turns discovery OFF for a built-in local id"
+        );
+
+        let custom_opted_in = ProviderInfo {
+            id: "vllm-local".to_string(),
+            discover_models: true,
+            ..Default::default()
+        };
+        assert!(
+            discovers_models(&custom_opted_in),
+            "a custom provider discovers once it opts in"
+        );
+
+        let custom_default = ProviderInfo {
+            id: "vllm-local".to_string(),
+            ..Default::default()
+        };
+        assert!(
+            !discovers_models(&custom_default),
+            "a custom provider without the flag stays out of the probe path"
+        );
+
+        let remote = ProviderInfo {
+            id: "openai".to_string(),
+            ..Default::default()
+        };
+        assert!(!discovers_models(&remote));
     }
 
     #[test]

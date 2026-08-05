@@ -515,6 +515,19 @@ pub struct ProviderInfo {
     /// are routed through this proxy instead of the global proxy config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
+    /// Opt in to live model discovery for a provider that is not one of the
+    /// built-in local ids (`ollama` / `vllm` / `lmstudio` / `lemonade`).
+    ///
+    /// When true, the periodic probe loop and the `/api/providers/{name}/test`
+    /// handler poll this provider's OpenAI-compatible `/models` endpoint and
+    /// merge the result into the catalog, exactly as they already do for the
+    /// built-in local ids.
+    /// The predicate that reads this field ORs it with the built-in id check
+    /// (`librefang_runtime::provider_health::discovers_models`), so a built-in
+    /// local provider keeps discovering regardless of the flag's value and an
+    /// existing install sees no change.
+    #[serde(default)]
+    pub discover_models: bool,
 }
 
 impl Default for ProviderInfo {
@@ -534,6 +547,7 @@ impl Default for ProviderInfo {
             is_custom: false,
             cli_managed: false,
             proxy_url: None,
+            discover_models: false,
         }
     }
 }
@@ -566,6 +580,11 @@ pub struct ProviderCatalogToml {
     /// Media capabilities supported by this provider (e.g. "image_generation", "text_to_speech").
     #[serde(default)]
     pub media_capabilities: Vec<String>,
+    /// Opt in to live model discovery — see [`ProviderInfo::discover_models`].
+    /// Absent in every registry-shipped file, so it defaults to `false` and the
+    /// built-in local ids keep discovering through the id branch of the predicate.
+    #[serde(default)]
+    pub discover_models: bool,
 }
 
 fn default_key_required() -> bool {
@@ -592,6 +611,7 @@ impl From<ProviderCatalogToml> for ProviderInfo {
             // A provider file declares its own `api_key_env`, so it is an explicit configuration and never CLI-managed.
             cli_managed: false,
             proxy_url: None,
+            discover_models: p.discover_models,
         }
     }
 }
@@ -905,12 +925,14 @@ output_cost_per_m = 8.0
             is_custom: false,
             cli_managed: false,
             proxy_url: None,
+            discover_models: true,
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: ProviderInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.id, "anthropic");
         assert_eq!(parsed.auth_status, AuthStatus::Configured);
         assert_eq!(parsed.model_count, 3);
+        assert!(parsed.discover_models, "the discovery opt-in round-trips");
     }
 
     #[test]
@@ -981,12 +1003,59 @@ aliases = []
             signup_url: Some("https://console.anthropic.com/settings/keys".to_string()),
             regions: HashMap::new(),
             media_capabilities: Vec::new(),
+            discover_models: false,
         };
         let info: ProviderInfo = toml_provider.into();
         assert_eq!(info.id, "anthropic");
         assert_eq!(info.auth_status, AuthStatus::Missing);
         assert_eq!(info.model_count, 0);
         assert!(info.regions.is_empty());
+        assert!(!info.discover_models);
+    }
+
+    /// #6702: `discover_models` must survive the full TOML → `ProviderCatalogToml`
+    /// → `ProviderInfo` → TOML round-trip, and must default to `false` when the
+    /// key is absent — which is the shape of every registry-shipped provider file.
+    #[test]
+    fn provider_discover_models_round_trips_through_toml() {
+        let with_flag = r#"
+[provider]
+id = "vllm-local"
+display_name = "vLLM Local"
+api_key_env = "VLLM_LOCAL_API_KEY"
+base_url = "http://gpu-box:4000/v1"
+key_required = true
+discover_models = true
+"#;
+        let parsed: ModelCatalogFile = toml::from_str(with_flag).expect("parses");
+        let provider = parsed.provider.expect("has a [provider] section");
+        assert!(provider.discover_models, "flag read from TOML");
+
+        // Re-serialize the provider section and parse it again: the flag has to
+        // come back, otherwise a dashboard-written file would lose the opt-in.
+        let reserialized = toml::to_string(&provider).expect("serializes");
+        let reparsed: ProviderCatalogToml = toml::from_str(&reserialized).expect("re-parses");
+        assert!(reparsed.discover_models, "flag survives the round-trip");
+
+        let info: ProviderInfo = reparsed.into();
+        assert!(info.discover_models, "flag reaches ProviderInfo");
+
+        let without_flag = r#"
+[provider]
+id = "vllm"
+display_name = "vLLM"
+api_key_env = "VLLM_API_KEY"
+base_url = "http://127.0.0.1:8000/v1"
+key_required = false
+"#;
+        let legacy: ModelCatalogFile = toml::from_str(without_flag).expect("parses");
+        assert!(
+            !legacy
+                .provider
+                .expect("has a [provider] section")
+                .discover_models,
+            "absent key defaults to false"
+        );
     }
 
     #[test]
@@ -1124,6 +1193,7 @@ aliases = []
             is_custom: false,
             cli_managed: false,
             proxy_url: None,
+            discover_models: false,
         };
 
         // Simulate region selection: if user picks "us", use that region's base_url

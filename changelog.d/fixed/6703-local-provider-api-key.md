@@ -1,0 +1,5 @@
+Always offer the API-key field for a provider that declares `key_required = false`, instead of hiding it.
+The flag says whether a key is *mandatory*, not whether one is accepted: every built-in local provider (`ollama`, `vllm`, `lmstudio`, `lemonade`) declares it false, yet a self-hosted vLLM or an Ollama behind a reverse proxy answers 401 without one — and the runtime has always forwarded whatever key is stored as `Authorization: Bearer`.
+Hiding the input made those servers impossible to configure from the dashboard even though the daemon would have used the key, and the onboarding wizard dropped a typed key on the same reasoning.
+The provider list now also reports `key_present`, so a keyless provider that does have a key stored offers "replace" and "remove" rather than pretending none exists — `auth_status` cannot carry that, since it collapses to `not_required` either way.
+The registry conflict error stops pointing at `?allow_overwrite=true`, a query parameter no UI surface sends, and names the endpoints that actually edit a provider (#6703, #6714) (@houko)

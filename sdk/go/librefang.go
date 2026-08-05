@@ -1052,6 +1052,10 @@ func (r *ModelsResource) SetDefaultProvider(name string, data map[string]interfa
 	return r.client.request("POST", fmt.Sprintf("/api/providers/%s/default", name), data, nil)
 }
 
+func (r *ModelsResource) SetProviderDiscovery(name string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/providers/%s/discovery", name), data, nil)
+}
+
 func (r *ModelsResource) EnableProvider(name string) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/providers/%s/enable", name), nil, nil)
 }

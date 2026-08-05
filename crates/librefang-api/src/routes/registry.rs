@@ -207,10 +207,26 @@ async fn create_registry_content(
         }
     };
 
-    // Don't overwrite existing content unless explicitly allowed
+    // Don't overwrite existing content unless explicitly allowed.
+    //
+    // The message names the actions a caller can actually take. It used to
+    // point only at `?allow_overwrite=true`, which the dashboard never sends —
+    // so a user who hit this on a built-in provider (trying to give the keyless
+    // `vllm` entry an API key) was told to do something no UI surface offers
+    // (#6703). For providers the answer is almost never "replace the file":
+    // the per-provider key / URL / discovery endpoints edit the live entry
+    // without touching the registry-managed TOML, which the boot-time registry
+    // sync would revert anyway.
     if target.exists() && !allow_overwrite {
+        let remedy = if content_type == "provider" {
+            format!(
+                " — set its API key with POST /api/providers/{identifier}/key, its endpoint with PUT /api/providers/{identifier}/url, or replace the whole definition with PUT /api/registry/content/provider"
+            )
+        } else {
+            format!(" — replace the whole definition with PUT /api/registry/content/{content_type}")
+        };
         return ApiErrorResponse::conflict(format!(
-            "{content_type} '{identifier}' already exists (use ?allow_overwrite=true to replace)"
+            "{content_type} '{identifier}' already exists{remedy}"
         ))
         .into_json_tuple()
         .into_response();

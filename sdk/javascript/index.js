@@ -940,6 +940,10 @@ class ModelsResource {
     return this._c._request("POST", `/api/providers/${name}/default`, data, undefined);
   }
 
+  async setProviderDiscovery(name, data) {
+    return this._c._request("PUT", `/api/providers/${name}/discovery`, data, undefined);
+  }
+
   async enableProvider(name) {
     return this._c._request("POST", `/api/providers/${name}/enable`);
   }
