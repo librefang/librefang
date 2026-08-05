@@ -150,6 +150,7 @@ function SlotEditor({
   onChange: (s: SlotForm) => void;
   onRemove?: () => void;
 }) {
+  const { t } = useTranslation();
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
   const hiddenSet = useMemo(() => new Set(hiddenModelKeys), [hiddenModelKeys]);
   const modelsQuery = useModels(
@@ -175,7 +176,7 @@ function SlotEditor({
               onChange={(e) => onChange({ ...slot, enabled: e.target.checked })}
               className="rounded border-border-subtle"
             />
-            Enabled
+            {t("moa.enabled")}
           </label>
           {onRemove && (
             <button type="button" onClick={onRemove} className="text-text-dim hover:text-error transition-colors">
@@ -186,34 +187,34 @@ function SlotEditor({
       </div>
       <div className="grid grid-cols-2 gap-2">
         <div>
-          <label className="text-[10px] font-bold text-text-dim uppercase">Provider</label>
+          <label className="text-[10px] font-bold text-text-dim uppercase">{t("moa.provider")}</label>
           <select
             value={slot.provider}
             onChange={(e) => onChange({ ...slot, provider: e.target.value, model: "" })}
             className={inputClass}
           >
-            <option value="">Select…</option>
+            <option value="">{t("moa.select_provider")}</option>
             {providers.map((p) => (
               <option key={p} value={p}>{p}</option>
             ))}
           </select>
         </div>
         <div>
-          <label className="text-[10px] font-bold text-text-dim uppercase">Model</label>
+          <label className="text-[10px] font-bold text-text-dim uppercase">{t("moa.model")}</label>
           <select
             value={slot.model}
             onChange={(e) => onChange({ ...slot, model: e.target.value })}
             disabled={!slot.provider}
             className={inputClass}
           >
-            <option value="">{slot.provider ? (modelsQuery.isLoading ? "Loading…" : "Select…") : "Pick provider first"}</option>
+            <option value="">{slot.provider ? (modelsQuery.isLoading ? t("common.loading") : t("moa.select_provider")) : t("moa.pick_provider_first")}</option>
             {visibleModels.map((m) => (
               <option key={modelKey(m)} value={m.id}>{m.display_name || m.id}</option>
             ))}
           </select>
         </div>
         <div>
-          <label className="text-[10px] font-bold text-text-dim uppercase">API Key Env</label>
+          <label className="text-[10px] font-bold text-text-dim uppercase">{t("moa.api_key_env")}</label>
           <input
             value={slot.api_key_env}
             onChange={(e) => onChange({ ...slot, api_key_env: e.target.value })}
@@ -222,7 +223,7 @@ function SlotEditor({
           />
         </div>
         <div>
-          <label className="text-[10px] font-bold text-text-dim uppercase">Base URL</label>
+          <label className="text-[10px] font-bold text-text-dim uppercase">{t("moa.base_url")}</label>
           <input
             value={slot.base_url}
             onChange={(e) => onChange({ ...slot, base_url: e.target.value })}
@@ -344,7 +345,7 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
   const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
 
   return (
-    <DrawerPanel isOpen={isOpen} onClose={onClose} title="MoA Configuration" size="xl">
+    <DrawerPanel isOpen={isOpen} onClose={onClose} title={t("moa.config_title")} size="xl">
       <div className="p-5 space-y-5">
         {presetsQuery.isLoading && (
           <div className="flex items-center justify-center py-12 text-text-dim">
@@ -354,7 +355,7 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
 
         {presetsQuery.isError && (
           <div className="rounded-xl bg-error/5 border border-error/20 p-4 text-sm text-error">
-            Failed to load MoA presets.
+            {t("moa.load_error")}
           </div>
         )}
 
@@ -362,16 +363,16 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
           <>
             {/* Global settings */}
             <div className="rounded-xl border border-border-subtle p-4 space-y-3">
-              <h3 className="text-xs font-bold uppercase tracking-widest text-text-dim">Global Settings</h3>
+              <h3 className="text-xs font-bold uppercase tracking-widest text-text-dim">{t("moa.global_settings")}</h3>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <Select
-                  label="Default Preset"
+                  label={t("moa.default_preset")}
                   value={defaultPreset}
                   onChange={(e) => handleConfigChange({ default_preset: e.target.value })}
                   options={presets.map((p) => ({ value: p.name, label: p.name }))}
                 />
                 <Select
-                  label="Privacy Filter"
+                  label={t("moa.privacy_filter")}
                   value={privacyFilter}
                   onChange={(e) => {
                     const next = e.target.value as MoaPrivacyFilter;
@@ -379,13 +380,13 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
                     handleConfigChange({ privacy_filter: next });
                   }}
                   options={[
-                    { value: "off", label: "Off" },
-                    { value: "display", label: "Display" },
-                    { value: "full", label: "Full" },
+                    { value: "off", label: t("moa.privacy_off") },
+                    { value: "display", label: t("moa.privacy_display") },
+                    { value: "full", label: t("moa.privacy_full") },
                   ]}
                 />
                 <div className="flex flex-col gap-1.5">
-                  <span className="text-[10px] font-black uppercase tracking-widest text-text-dim">Save Traces</span>
+                  <span className="text-[10px] font-black uppercase tracking-widest text-text-dim">{t("moa.save_traces")}</span>
                   <label className="flex items-center gap-2 text-sm cursor-pointer">
                     <input
                       type="checkbox"
@@ -396,7 +397,7 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
                       }}
                       className="rounded border-border-subtle"
                     />
-                    <span className="text-text-secondary">Persist advisor traces to disk</span>
+                    <span className="text-text-secondary">{t("moa.save_traces_hint")}</span>
                   </label>
                 </div>
               </div>
@@ -404,10 +405,10 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
 
             {/* Preset list */}
             <div className="flex items-center justify-between">
-              <h3 className="text-xs font-bold uppercase tracking-widest text-text-dim">Presets</h3>
+              <h3 className="text-xs font-bold uppercase tracking-widest text-text-dim">{t("moa.presets")}</h3>
               <Button variant="primary" onClick={() => openEditor()}>
                 <Plus className="w-4 h-4" />
-                <span>Add preset</span>
+                <span>{t("moa.add_preset")}</span>
               </Button>
             </div>
 
@@ -422,7 +423,7 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
                     {entry.is_default && <Badge variant="brand">default</Badge>}
                     {!entry.enabled && <Badge variant="default">disabled</Badge>}
                     <span className="text-xs text-text-dim">
-                      {entry.preset.reference_models.length} advisors · {entry.preset.aggregator.model || "no aggregator"}
+                      {t("moa.advisors", { count: entry.preset.reference_models.length })} {entry.preset.aggregator.model || t("moa.no_aggregator")}
                     </span>
                   </div>
                   <div className="flex items-center gap-1">
@@ -430,7 +431,7 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
                       type="button"
                       onClick={() => openEditor(entry.name)}
                       className="p-1.5 rounded-lg text-text-dim hover:text-brand hover:bg-brand/5 transition-colors"
-                      title="Edit"
+                      title={t("common.edit")}
                     >
                       <Pencil className="w-4 h-4" />
                     </button>
@@ -457,7 +458,7 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
                         type="button"
                         onClick={() => setPendingDelete(entry.name)}
                         className="p-1.5 rounded-lg text-text-dim hover:text-error hover:bg-error/5 transition-colors"
-                        title="Delete"
+                        title={t("common.delete")}
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
@@ -466,7 +467,7 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
                 </div>
               ))}
               {presets.length === 0 && (
-                <p className="text-sm text-text-dim py-4 text-center">No presets configured.</p>
+                <p className="text-sm text-text-dim py-4 text-center">{t("moa.no_presets")}</p>
               )}
             </div>
           </>
@@ -483,14 +484,14 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
               >
                 <ArrowLeft className="w-4 h-4" />
               </button>
-              <h3 className="text-sm font-bold">{editingName ? `Edit: ${editingName}` : "New Preset"}</h3>
+              <h3 className="text-sm font-bold">{editingName ? t("moa.edit_preset", { name: editingName }) : t("moa.new_preset")}</h3>
             </div>
 
             <div className="space-y-4">
               {/* Name + enabled */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="text-[10px] font-bold text-text-dim uppercase">Preset Name</label>
+                  <label className="text-[10px] font-bold text-text-dim uppercase">{t("moa.preset_name")}</label>
                   <input
                     value={form.name}
                     onChange={(e) => setForm({ ...form, name: e.target.value })}
@@ -507,7 +508,7 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
                       onChange={(e) => setForm({ ...form, enabled: e.target.checked })}
                       className="rounded border-border-subtle"
                     />
-                    <span className="text-text-secondary">Enabled</span>
+                    <span className="text-text-secondary">{t("moa.enabled")}</span>
                   </label>
                 </div>
               </div>
@@ -523,19 +524,19 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
               {/* Reference models */}
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold uppercase tracking-widest text-text-dim">Reference Models (Advisors)</span>
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-text-dim">{t("moa.reference_models")}</span>
                   <button
                     type="button"
                     onClick={() => setForm({ ...form, reference_models: [...form.reference_models, emptySlot()] })}
                     className="text-xs text-brand hover:underline"
                   >
-                    + Add slot
+                    {t("moa.add_slot")}
                   </button>
                 </div>
                 {form.reference_models.map((slot, i) => (
                   <SlotEditor
                     key={slot.id}
-                    label={`Advisor ${i + 1}`}
+                    label={t("moa.advisor_n", { n: i + 1 })}
                     slot={slot}
                     providers={providerIds}
                     onChange={(s) => {
@@ -554,10 +555,10 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
 
               {/* Parameters */}
               <div className="rounded-xl border border-border-subtle p-3 space-y-3">
-                <span className="text-[10px] font-bold uppercase tracking-widest text-text-dim">Parameters</span>
+                <span className="text-[10px] font-bold uppercase tracking-widest text-text-dim">{t("moa.parameters")}</span>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="text-[10px] font-bold text-text-dim uppercase">Reference Temp</label>
+                    <label className="text-[10px] font-bold text-text-dim uppercase">{t("moa.reference_temp")}</label>
                     <input
                       type="number"
                       step="0.1"
@@ -570,7 +571,7 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
                     />
                   </div>
                   <div>
-                    <label className="text-[10px] font-bold text-text-dim uppercase">Aggregator Temp</label>
+                    <label className="text-[10px] font-bold text-text-dim uppercase">{t("moa.aggregator_temp")}</label>
                     <input
                       type="number"
                       step="0.1"
@@ -583,7 +584,7 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
                     />
                   </div>
                   <div>
-                    <label className="text-[10px] font-bold text-text-dim uppercase">Timeout (secs)</label>
+                    <label className="text-[10px] font-bold text-text-dim uppercase">{t("moa.timeout_secs")}</label>
                     <input
                       type="number"
                       min="1"
@@ -594,7 +595,7 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
                     />
                   </div>
                   <div>
-                    <label className="text-[10px] font-bold text-text-dim uppercase">Max Tokens</label>
+                    <label className="text-[10px] font-bold text-text-dim uppercase">{t("moa.max_tokens")}</label>
                     <input
                       type="number"
                       min="1"
@@ -605,27 +606,27 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
                     />
                   </div>
                   <div>
-                    <label className="text-[10px] font-bold text-text-dim uppercase">Degraded Policy</label>
+                    <label className="text-[10px] font-bold text-text-dim uppercase">{t("moa.degraded_policy")}</label>
                     <select
                       value={form.degraded_reference_policy}
                       onChange={(e) => setForm({ ...form, degraded_reference_policy: e.target.value as "loud" | "silent" })}
                       className={inputClass}
                     >
-                      <option value="loud">Loud (surface errors)</option>
-                      <option value="silent">Silent (skip failed)</option>
+                      <option value="loud">{t("moa.degraded_fail")}</option>
+                      <option value="silent">{t("moa.degraded_silent")}</option>
                     </select>
                   </div>
                   <div>
-                    <label className="text-[10px] font-bold text-text-dim uppercase">Fanout</label>
+                    <label className="text-[10px] font-bold text-text-dim uppercase">{t("moa.fanout")}</label>
                     <div className="flex gap-2">
                       <select
                         value={form.fanout_mode}
                         onChange={(e) => setForm({ ...form, fanout_mode: e.target.value as FanoutMode })}
                         className={inputClass}
                       >
-                        <option value="user_turn">User turn</option>
-                        <option value="always">Always</option>
-                        <option value="every_n">Every N</option>
+                        <option value="user_turn">{t("moa.fanout_user_turn")}</option>
+                        <option value="always">{t("moa.fanout_always")}</option>
+                        <option value="every_n">{t("moa.fanout_every_n")}</option>
                       </select>
                       {form.fanout_mode === "every_n" && (
                         <input
@@ -643,10 +644,10 @@ export function MoaDrawer({ isOpen, onClose }: MoaDrawerProps) {
 
               {/* Actions */}
               <div className="flex items-center justify-end gap-2 pt-2">
-                <Button variant="ghost" onClick={() => setView("list")}>Cancel</Button>
+                <Button variant="ghost" onClick={() => setView("list")}>{t("common.cancel")}</Button>
                 <Button variant="primary" onClick={handleSave} disabled={putPreset.isPending}>
                   {putPreset.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
-                  <span>{editingName ? "Save changes" : "Create preset"}</span>
+                  <span>{editingName ? t("moa.save_changes") : t("moa.create_preset")}</span>
                 </Button>
               </div>
             </div>
