@@ -6684,11 +6684,9 @@ async fn nested_workflow_run_past_max_agent_call_depth_is_capability_denied() {
          Pending run in the engine"
     );
 
-    // The `WorkflowRunner` trait impl is the path `workflow_run` actually
-    // takes, and it used to stringify every `KernelError` into
-    // `KernelOpError::Internal`. That erased the policy shape before the tool
-    // layer could see it, so the refusal reached the model as an opaque
-    // upstream (5xx-class) failure. Assert the variant survives the hop.
+    // The `WorkflowRunner` trait impl is the path `workflow_run` actually takes, and it used to stringify every `KernelError` into `KernelOpError::Internal`.
+    // That erased the policy shape before the tool layer could see it, so the refusal reached the model as an opaque upstream (5xx-class) failure.
+    // Assert the variant survives the hop.
     {
         use librefang_runtime::kernel_handle::WorkflowRunner;
         let wf_id_str = wf_id.to_string();

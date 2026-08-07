@@ -876,10 +876,8 @@ async fn channel_send_cross_account_blocked_on_embedded_channel() {
 #[derive(Default)]
 struct DispatchCapture {
     calls: std::sync::Mutex<Vec<String>>,
-    /// When set, `run_workflow` answers with the nesting-depth refusal the
-    /// kernel raises past `max_agent_call_depth` (refs #6659) instead of the
-    /// trait's default "workflow engine unavailable". Lets a test drive
-    /// `tool_workflow_run`'s error mapping without a real kernel.
+    /// When set, `run_workflow` answers with the nesting-depth refusal the kernel raises past `max_agent_call_depth` (refs #6659) instead of the trait's default "workflow engine unavailable".
+    /// Lets a test drive `tool_workflow_run`'s error mapping without a real kernel.
     deny_workflow_run: bool,
 }
 
@@ -1494,15 +1492,10 @@ async fn agent_send_quota_sees_depth_established_by_with_agent_call_depth() {
     );
 }
 
-/// The nesting-depth refusal must reach the model as a policy error, the same
-/// way `agent_send`'s does (refs #6659).
+/// The nesting-depth refusal must reach the model as a policy error, the same way `agent_send`'s does (refs #6659).
 ///
-/// `tool_workflow_run` used to map *every* kernel failure through
-/// `ToolError::upstream`, which lifts to a 5xx-class `ToolExecution` that retry
-/// logic reads as a downstream crash. It also matters for turn survival:
-/// `PermissionDenied` classifies as `ToolExecutionStatus::Denied` — a soft
-/// failure — so an agent that keeps hitting the cap does not burn through
-/// `MAX_CONSECUTIVE_ALL_FAILED` and lose the whole turn to an abort.
+/// `tool_workflow_run` used to map *every* kernel failure through `ToolError::upstream`, which lifts to a 5xx-class `ToolExecution` that retry logic reads as a downstream crash.
+/// It also matters for turn survival: `PermissionDenied` classifies as `ToolExecutionStatus::Denied` — a soft failure — so an agent that keeps hitting the cap does not burn through `MAX_CONSECUTIVE_ALL_FAILED` and lose the whole turn to an abort.
 #[tokio::test]
 async fn workflow_run_depth_refusal_is_permission_denied_not_upstream() {
     use super::error::ToolError;
@@ -1533,8 +1526,7 @@ async fn workflow_run_depth_refusal_is_permission_denied_not_upstream() {
         "the refusal must classify as a soft Denied, not a hard Error"
     );
 
-    // Any other kernel failure still goes through `upstream` — the mapping is
-    // a narrow special case, not a blanket reclassification.
+    // Any other kernel failure still goes through `upstream` — the mapping is a narrow special case, not a blanket reclassification.
     let plain = Arc::new(DispatchCapture::default());
     let kernel: Arc<dyn KernelHandle> = plain;
     let err = super::workflow::tool_workflow_run(&input, Some(&kernel))
