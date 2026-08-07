@@ -248,12 +248,8 @@ async fn config_set_is_locked_in_managed_mode_and_leaves_the_file_untouched() {
 // Provider routes that persist deployment configuration
 // ---------------------------------------------------------------------------
 //
-// `set_provider_key` persists `[default_model]` (auto-switch / free-model
-// migration), `set_provider_url` persists `[provider_urls]` and
-// `[provider_proxy_urls]`, and `set_default_provider` persists
-// `[default_model]` outright. All three shipped unguarded in #6717 even
-// though "every API route that persists deployment configuration is locked"
-// is an acceptance criterion of #6695, so each gets a case here.
+// `set_provider_key` persists `[default_model]` (auto-switch / free-model migration), `set_provider_url` persists `[provider_urls]` and `[provider_proxy_urls]`, and `set_default_provider` persists `[default_model]` outright.
+// All three shipped unguarded in #6717 even though "every API route that persists deployment configuration is locked" is an acceptance criterion of #6695, so each gets a case here.
 
 /// `POST /api/providers/{name}/key` is refused **in full**, which is wider than the rest of managed mode.
 /// The route's `config.toml` write is conditional on live daemon state, so guarding only that write would accept or refuse the identical request depending on timing — and in the refusing case it would already have rewritten `secrets.env`.
@@ -267,16 +263,14 @@ async fn set_provider_key_is_locked_in_managed_mode() {
     let config_seed = format!("api_key = \"{API_KEY}\"\n");
     std::fs::write(&config_path, &config_seed).expect("seed config.toml");
 
-    // Seed `secrets.env` too. Asserting it is unchanged is only meaningful
-    // against a file that exists — an absent file would pass the check
-    // trivially even if the handler had written one and then failed.
+    // Seed `secrets.env` too.
+    // Asserting it is unchanged is only meaningful against a file that exists — an absent file would pass the check trivially even if the handler had written one and then failed.
     let secrets_path = h.home.join("secrets.env");
     let secrets_seed = "PREEXISTING_API_KEY=untouched\n";
     std::fs::write(&secrets_path, secrets_seed).expect("seed secrets.env");
 
-    // `groq` is a real catalog provider with a real `api_key_env`, so this
-    // request succeeds in mutable mode. A refusal here is the mode, not a
-    // validation failure on an unknown provider name.
+    // `groq` is a real catalog provider with a real `api_key_env`, so this request succeeds in mutable mode.
+    // A refusal here is the mode, not a validation failure on an unknown provider name.
     let (status, body) = send(
         h.app.clone(),
         auth_post_json(
@@ -371,10 +365,7 @@ async fn set_default_provider_is_locked_in_managed_mode() {
         "a refused write must not have opened, truncated, or rewritten the file"
     );
 
-    // Assert on the *effective* default rather than on `override.is_none()`:
-    // the override being unset at boot is a kernel construction detail, while
-    // "the refused model never became the live default" is the property the
-    // guard is responsible for.
+    // Assert on the *effective* default rather than on `override.is_none()`: the override being unset at boot is a kernel construction detail, while "the refused model never became the live default" is the property the guard is responsible for.
     let effective_model = {
         let guard = h
             .state
