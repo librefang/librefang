@@ -1,0 +1,8 @@
+Restore the Windows test lane, which had aborted on every push to `main` since #6711 and taken `CI Gate` down with it, so for three days no PR merged with a Windows signal behind it.
+`librefang-desktop`'s test binary links on Windows but cannot be loaded — the process dies at start with `0xc0000139` (`STATUS_ENTRYPOINT_NOT_FOUND`) — and nextest executes every test binary with `--list` to enumerate its tests, so the lane died before running a single one.
+The crate is now excluded from that lane's nextest invocation and built there link-only instead, which keeps the Windows compile+link coverage that nothing else in CI provides while its 11 platform-independent URL/scheme tests continue to run on Ubuntu, macOS and the unit-fast lane.
+The missing DLL export behind the abort is still unidentified, so this is a workaround carrying a note to remove it once the real cause is found.
+A green `main` run also no longer closes an open `main-red` issue unless a Rust test lane actually ran on that commit.
+The `changes` gate skips every Rust lane on a docs- or dependency-only push while the run still concludes `success`, which is how this one breakage came to be filed and auto-closed three times (#6716, #6721, #6729) before anyone noticed `main` had been red for days — nine of the last sixteen green `main` runs would have closed it.
+The failure notice now names the head commit and the run URL without asserting that the commit caused the failure, because three consecutive filings told readers to revert an unrelated openrouter model-snapshot PR for a breakage introduced days earlier.
+(#6735) (@houko)

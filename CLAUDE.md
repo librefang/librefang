@@ -103,16 +103,16 @@ CI splits tests into two separate jobs so a unit failure surfaces quickly:
 
 - **Unit-fast** (`Test / Unit (lib+bin)`, ~2 min): `cargo nextest run --workspace -E 'kind(lib) | kind(bin)' --no-fail-fast`
   — lib and binary unit tests only; no integration test binaries. Run this locally for quick iteration.
-- **Integration** (`Test / Ubuntu (shard N/4)`, ~10-20 min): sharded across 4 Ubuntu runners via
-  `--partition hash:N/4`; also single jobs on macOS and Windows. Runs all `--tests` targets.
+- **Integration** (`Test / Ubuntu (shard N/4)`, ~10-20 min): sharded across 4 Ubuntu runners via `--partition hash:N/4`; plus a single macOS job and a 2-way-sharded Windows job, both main-push only.
+  Runs all `--tests` targets.
 
-The unit-fast lane uses nextest's `-E 'kind(lib) | kind(bin)'` filter rather
-than `--lib --bins` because the latter errors with "no library targets found"
-when a `-p <crate>` selector targets a binary-only crate
-(`librefang-cli`, `librefang-desktop`). The expression form matches whichever
-kinds the selected crates actually have, so the selective CI lane stays green
-when a PR touches only `librefang-cli/main.rs` (or when a stale-base diff
-drags it in).
+The unit-fast lane uses nextest's `-E 'kind(lib) | kind(bin)'` filter rather than `--lib --bins` because the latter errors with "no library targets found" when a `-p <crate>` selector targets a binary-only crate (`librefang-cli`).
+The expression form matches whichever kinds the selected crates actually have, so the selective CI lane stays green when a PR touches only `librefang-cli/main.rs` (or when a stale-base diff drags it in).
+`librefang-desktop` is not binary-only — it has a lib target carrying 11 tests, so `-p librefang-desktop` resolves fine.
+
+The Windows lane passes `--exclude librefang-desktop` (#6729): the crate's test binary links on Windows but aborts at load with 0xc0000139 (STATUS_ENTRYPOINT_NOT_FOUND), which kills nextest's list phase and takes the whole lane — and therefore CI Gate — down.
+A dedicated `cargo test -p librefang-desktop --all-targets --no-run` step keeps the Windows compile+link coverage; the tests themselves are platform-independent and still run on Ubuntu, macOS and the unit-fast lane.
+Drop both once the missing DLL export is identified.
 
 Local equivalents:
 ```bash
