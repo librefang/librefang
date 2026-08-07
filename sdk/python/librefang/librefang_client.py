@@ -1158,6 +1158,9 @@ class _SystemResource(_Resource):
     def config_set(self, **data):
         return self._c._request("POST", "/api/config/set", data)
 
+    def config_status(self):
+        return self._c._request("GET", "/api/config/status")
+
     def health(self):
         return self._c._request("GET", "/api/health")
 

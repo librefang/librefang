@@ -520,6 +520,7 @@ pub async fn update_budget(
             // surfaces a 400 instead of a misleading 500.
             PersistBudgetError::BadRequest(m) => ApiErrorResponse::bad_request(m).into_response(),
             PersistBudgetError::Internal(m) => ApiErrorResponse::internal(m).into_response(),
+            PersistBudgetError::Managed => crate::routes::managed_config_response(),
         };
     }
 
@@ -562,12 +563,15 @@ pub async fn update_budget(
 enum PersistBudgetError {
     BadRequest(String),
     Internal(String),
+    /// The config file is deployment-managed (#6695), so nothing was written.
+    Managed,
 }
 
 impl std::fmt::Display for PersistBudgetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::BadRequest(m) | Self::Internal(m) => f.write_str(m),
+            Self::Managed => f.write_str("configuration is managed by the deployment"),
         }
     }
 }
@@ -584,6 +588,9 @@ async fn persist_budget(
     state: &Arc<AppState>,
     new_budget: &librefang_types::config::BudgetConfig,
 ) -> Result<(), PersistBudgetError> {
+    if crate::routes::guard_config_write().is_some() {
+        return Err(PersistBudgetError::Managed);
+    }
     let _guard = state.config_write_lock.lock().await;
 
     let config_path = state.kernel.home_dir().join("config.toml");
@@ -1347,6 +1354,7 @@ pub async fn update_user_budget(
         Err(super::users::PersistError::Internal(m)) => {
             ApiErrorResponse::internal(m).into_response()
         }
+        Err(super::users::PersistError::Managed) => crate::routes::managed_config_response(),
     }
 }
 
@@ -1436,6 +1444,7 @@ pub async fn delete_user_budget(
         Err(super::users::PersistError::Internal(m)) => {
             ApiErrorResponse::internal(m).into_response()
         }
+        Err(super::users::PersistError::Managed) => crate::routes::managed_config_response(),
     }
 }
 
@@ -1725,6 +1734,7 @@ pub async fn update_provider_budget(
         return match e {
             PersistBudgetError::BadRequest(m) => ApiErrorResponse::bad_request(m).into_response(),
             PersistBudgetError::Internal(m) => ApiErrorResponse::internal(m).into_response(),
+            PersistBudgetError::Managed => crate::routes::managed_config_response(),
         };
     }
 
