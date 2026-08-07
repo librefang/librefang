@@ -1491,8 +1491,11 @@ def _build_block_kit(text: str, buttons: list) -> list:
     # chunks <= the limit; an empty string comes back as [""], preserving the
     # historical single-empty-section shape.
     chunks = _split_message(text, SLACK_MSG_LIMIT)
-    # One slot reserved for the truncation marker below.
-    max_sections = MAX_BLOCKS_PER_MESSAGE - len(action_blocks) - 1
+    # One slot reserved for the truncation marker below. Clamped at 0: once
+    # `action_blocks` alone reaches the cap, `chunks[:max_sections]` with a
+    # negative `max_sections` would slice from the end instead of yielding
+    # no sections (Python's `[:-n]` is "drop the last n", not "keep none").
+    max_sections = max(0, MAX_BLOCKS_PER_MESSAGE - len(action_blocks) - 1)
     truncated = len(chunks) > max_sections
     if truncated:
         chunks = chunks[:max_sections]

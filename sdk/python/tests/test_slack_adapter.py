@@ -1289,6 +1289,24 @@ def test_build_block_kit_never_exceeds_block_limit():
                for b in blocks if b["type"] == "section")
 
 
+def test_build_block_kit_button_rows_alone_exceed_block_cap():
+    # Regression: when `action_blocks` alone reaches/exceeds
+    # MAX_BLOCKS_PER_MESSAGE - 1, `max_sections` goes negative. Python's
+    # `list[:-n]` means "drop the last n", not "keep none", so an
+    # unclamped `chunks[:max_sections]` kept a stray section instead of
+    # zero — this pins the clamp that makes zero sections the outcome.
+    buttons = [[{"label": f"B{i}", "action": f"a{i}"}]
+               for i in range(sa.MAX_BLOCKS_PER_MESSAGE)]
+    blocks = sa._build_block_kit("some text", buttons)
+    sections = [b for b in blocks if b["type"] == "section"]
+    # No room for the text itself, just the truncation marker — never a
+    # stray real chunk of the text (the unclamped negative-slice bug).
+    assert len(sections) == 1
+    assert "truncated" in sections[0]["text"]["text"]
+    assert len([b for b in blocks if b["type"] == "actions"]) == \
+        sa.MAX_BLOCKS_PER_MESSAGE
+
+
 def test_post_message_with_blocks_bounds_fallback_text(monkeypatch):
     # With blocks, `text` is only the notification preview — the blocks carry
     # the content. It is bounded rather than chunked, because chunking it
