@@ -399,28 +399,64 @@ fn manifest_to_agent_type(name: &str, m: &AgentManifest) -> serde_json::Value {
         "provider": m.model.provider,
         "model": m.model.model,
         "tools": m.capabilities.tools,
-        "skills": serde_json::Value::Array(vec![]),
+        "skills": m.skills,
     })
+}
+
+/// Escape a string for embedding in a TOML basic string (quoted with `"`).
+/// Without this, a `"`, backslash, or newline in a user-supplied field (e.g.
+/// a multi-line `system_prompt`) breaks out of the string literal and
+/// corrupts — or, crafted deliberately, injects arbitrary keys/sections into
+/// — the manifest written to disk.
+fn toml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Build a minimal `agent.toml` from the dashboard's JSON shape.
 fn agent_type_json_to_toml(v: &serde_json::Value) -> String {
-    let name = v["name"].as_str().unwrap_or("unnamed");
-    let desc = v["description"].as_str().unwrap_or("");
-    let prompt = v["system_prompt"]
-        .as_str()
-        .unwrap_or("You are a helpful AI agent.");
-    let provider = v["provider"].as_str().unwrap_or("default");
-    let model = v["model"].as_str().unwrap_or("default");
+    let name = toml_escape(v["name"].as_str().unwrap_or("unnamed"));
+    let desc = toml_escape(v["description"].as_str().unwrap_or(""));
+    let prompt = toml_escape(
+        v["system_prompt"]
+            .as_str()
+            .unwrap_or("You are a helpful AI agent."),
+    );
+    let provider = toml_escape(v["provider"].as_str().unwrap_or("default"));
+    let model = toml_escape(v["model"].as_str().unwrap_or("default"));
     let tools: Vec<&str> = v["tools"]
         .as_array()
         .map(|arr| arr.iter().filter_map(|t| t.as_str()).collect())
         .unwrap_or_default();
+    let skills: Vec<&str> = v["skills"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|s| s.as_str()).collect())
+        .unwrap_or_default();
 
-    let tools_toml: Vec<String> = tools.iter().map(|t| format!("\"{}\"", t)).collect();
+    let tools_toml: Vec<String> = tools
+        .iter()
+        .map(|t| format!("\"{}\"", toml_escape(t)))
+        .collect();
+    let skills_toml: Vec<String> = skills
+        .iter()
+        .map(|s| format!("\"{}\"", toml_escape(s)))
+        .collect();
     format!(
-        "name = \"{name}\"\ndescription = \"{desc}\"\n\n[model]\nprovider = \"{provider}\"\nmodel = \"{model}\"\nsystem_prompt = \"{prompt}\"\n\n[capabilities]\ntools = [{tools}]\n",
-        name = name, desc = desc, provider = provider, model = model,
+        "name = \"{name}\"\ndescription = \"{desc}\"\nskills = [{skills}]\n\n[model]\nprovider = \"{provider}\"\nmodel = \"{model}\"\nsystem_prompt = \"{prompt}\"\n\n[capabilities]\ntools = [{tools}]\n",
+        name = name, desc = desc, skills = skills_toml.join(", "), provider = provider, model = model,
         prompt = prompt, tools = tools_toml.join(", "),
     )
 }
