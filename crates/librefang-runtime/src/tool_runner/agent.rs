@@ -58,20 +58,12 @@ pub(super) async fn tool_agent_send(
     // blocking this agent's loop until the callee replies (which otherwise
     // trips `tool_timeout_secs` for any long delegation).
     //
-    // Non-blocking is the DEFAULT when a caller agent is known, because the
-    // blocking default made every unannotated delegation a timeout risk: the
-    // model had to predict that the callee would be slow and opt out in
-    // advance, and a wrong guess burned the turn on `tool_timeout_secs`.
+    // Non-blocking is the DEFAULT when a caller agent is known, because the blocking default made every unannotated delegation a timeout risk: the model had to predict that the callee would be slow and opt out in advance, and a wrong guess burned the turn on `tool_timeout_secs`.
     //
-    // The default is deliberately conditional on `caller_agent_id` rather than
-    // an unconditional `true`. The async path below requires a known caller so
-    // the tracker can route the completion back, and rejects the call outright
-    // without one; the blocking path has explicit `(None, _)` arms for
-    // system-initiated sends. An unconditional default would therefore turn
-    // every callerless send — the kernel's own system-initiated dispatches —
-    // into an `InvalidParameter` error. An explicit `"async": true` still
-    // errors without a caller, which is the pre-existing contract and is left
-    // untouched.
+    // The default is deliberately conditional on `caller_agent_id` rather than an unconditional `true`.
+    // The async path below requires a known caller so the tracker can route the completion back, and rejects the call outright without one; the blocking path has explicit `(None, _)` arms for system-initiated sends.
+    // An unconditional default would therefore turn every callerless send — the kernel's own system-initiated dispatches — into an `InvalidParameter` error.
+    // An explicit `"async": true` still errors without a caller, which is the pre-existing contract and is left untouched.
     let async_mode = input["async"]
         .as_bool()
         .unwrap_or_else(|| caller_agent_id.is_some());

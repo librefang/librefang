@@ -1161,10 +1161,8 @@ async fn agent_send_no_key_no_caller_routes_to_send_to_agent() {
 async fn agent_send_no_key_with_caller_routes_to_send_to_agent_as() {
     let cap = Arc::new(DispatchCapture::default());
     let kernel: Arc<dyn KernelHandle> = cap.clone();
-    // `"async": false` is explicit because non-blocking is now the default when
-    // a caller is known. This test covers the blocking path's caller-aware
-    // routing, which still exists and is still reachable — see
-    // `agent_send_defaults_to_async_when_caller_is_known` for the new default.
+    // `"async": false` is explicit because non-blocking is now the default when a caller is known.
+    // This test covers the blocking path's caller-aware routing, which still exists and is still reachable — see `agent_send_defaults_to_async_when_caller_is_known` for the new default.
     let input = serde_json::json!({ "agent_id": "target", "message": "hi", "async": false });
 
     let result =
@@ -1183,8 +1181,7 @@ async fn agent_send_no_key_with_caller_routes_to_send_to_agent_as() {
 async fn agent_send_same_key_routes_to_as_with_key_both_calls() {
     let cap = Arc::new(DispatchCapture::default());
     let kernel: Arc<dyn KernelHandle> = cap.clone();
-    // `"async": false` throughout: this test pins the keyed BLOCKING dispatch,
-    // which non-blocking delegation does not go through.
+    // `"async": false` throughout: this test pins the keyed BLOCKING dispatch, which non-blocking delegation does not go through.
     let input = serde_json::json!({
         "agent_id": "target",
         "message": "turn one",
@@ -1224,8 +1221,7 @@ async fn agent_send_distinct_keys_produce_isolated_dispatch() {
     let call = |key: &'static str| {
         let kernel = kernel.clone();
         async move {
-            // `"async": false`: distinct-key isolation is a property of the
-            // blocking keyed dispatch.
+            // `"async": false`: distinct-key isolation is a property of the blocking keyed dispatch.
             let input = serde_json::json!({
                 "agent_id": "target",
                 "message": "msg",
@@ -1330,7 +1326,8 @@ async fn agent_send_defaults_to_async_when_caller_is_known() {
 /// Omitting `async` WITHOUT a caller agent still dispatches blocking, because the async path cannot serve a callerless send at all.
 ///
 /// `tool_agent_send` rejects `async` with `InvalidParameter` when `caller_agent_id` is `None` — the tracker has nowhere to route the completion — while the blocking path has explicit `(None, Some(key))` and `(None, None)` arms for system-initiated sends.
-/// So an unconditional non-blocking default would convert every kernel-initiated `agent_send` into an error. This test is the guard against "simplifying" the conditional default into `unwrap_or(true)`.
+/// So an unconditional non-blocking default would convert every kernel-initiated `agent_send` into an error.
+/// This test is the guard against "simplifying" the conditional default into `unwrap_or(true)`.
 #[tokio::test]
 async fn agent_send_without_caller_still_defaults_to_blocking() {
     let cap = Arc::new(DispatchCapture::default());
