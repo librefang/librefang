@@ -2502,21 +2502,13 @@ async fn parallel_dispatch_write_read_mix_groups_and_orders() {
     }
 }
 
-/// Proxy measurement for the fat-frame half of #6659, deliberately labelled as
-/// such: it would NOT have caught the missing depth accounting on the workflow
-/// path, and it cannot fail the way a stack overflow does.
+/// Proxy measurement for the fat-frame half of #6659, deliberately labelled as such: it would NOT have caught the missing depth accounting on the workflow path, and it cannot fail the way a stack overflow does.
 ///
-/// `run_agent_loop`'s future is the state machine a nested agent turn stacks
-/// once per level, and the #6659 crash report works out to roughly 40 KB per
-/// frame — which reads as bounded depth with very large frames rather than deep
-/// recursion. So the size of this future is the number worth watching: if it
-/// grows by an order of magnitude, a legal-depth delegation chain starts
-/// aborting a 2 MiB tokio worker even with the depth cap in place.
+/// `run_agent_loop`'s future is the state machine a nested agent turn stacks once per level, and the #6659 crash report works out to roughly 40 KB per frame — which reads as bounded depth with very large frames rather than deep recursion.
+/// So the size of this future is the number worth watching: if it grows by an order of magnitude, a legal-depth delegation chain starts aborting a 2 MiB tokio worker even with the depth cap in place.
 ///
-/// An `async fn` does nothing until polled, so constructing the future without
-/// awaiting it is enough to measure it — no runtime needed. The bound is
-/// generous on purpose: this pins the order of magnitude, not a byte count, so
-/// ordinary feature work does not have to re-baseline it.
+/// An `async fn` does nothing until polled, so constructing the future without awaiting it is enough to measure it — no runtime needed.
+/// The bound is generous on purpose: this pins the order of magnitude, not a byte count, so ordinary feature work does not have to re-baseline it.
 #[test]
 fn run_agent_loop_future_size_stays_within_its_order_of_magnitude() {
     let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
@@ -2568,9 +2560,7 @@ fn run_agent_loop_future_size_stays_within_its_order_of_magnitude() {
     );
 
     let size = std::mem::size_of_val(&fut);
-    // Printed so a `--nocapture` run reports the current figure for a PR body
-    // or an issue comment without anyone having to rebuild with nightly and
-    // `-Zprint-type-sizes`.
+    // Printed so a `--nocapture` run reports the current figure for a PR body or an issue comment without anyone having to rebuild with nightly and `-Zprint-type-sizes`.
     eprintln!("run_agent_loop future size: {size} bytes");
     assert!(
         size < 512 * 1024,

@@ -1398,12 +1398,8 @@ async fn agent_send_depth_exceeded_is_permission_denied() {
     );
 }
 
-/// `with_agent_call_depth` is the single definition of "one level deeper" in
-/// the synchronous inter-agent call chain, shared by `agent_send` and the
-/// kernel's workflow-step dispatch (refs #6659). Each nesting level must add
-/// exactly one, and must not leak its level to the frame that resumes after
-/// it — otherwise a fan-out of sibling delegations would accumulate depth as
-/// if it were nesting and start refusing legal chains.
+/// `with_agent_call_depth` is the single definition of "one level deeper" in the synchronous inter-agent call chain, shared by `agent_send` and the kernel's workflow-step dispatch (refs #6659).
+/// Each nesting level must add exactly one, and must not leak its level to the frame that resumes after it — otherwise a fan-out of sibling delegations would accumulate depth as if it were nesting and start refusing legal chains.
 #[tokio::test]
 async fn with_agent_call_depth_adds_exactly_one_level_per_nesting() {
     use super::{current_agent_depth, with_agent_call_depth};
@@ -1437,11 +1433,7 @@ async fn with_agent_call_depth_adds_exactly_one_level_per_nesting() {
     assert_eq!(current_agent_depth(), 0, "the outermost scope must unwind");
 }
 
-/// The helper and `agent_send`'s quota read the *same* counter: a depth
-/// established by `with_agent_call_depth` (which is how a workflow step's
-/// agent turn gets its level) must be visible to the `agent_send` guard, so a
-/// workflow step's agent cannot regain a full delegation budget by hopping
-/// through the workflow path.
+/// The helper and `agent_send`'s quota read the *same* counter: a depth established by `with_agent_call_depth` (which is how a workflow step's agent turn gets its level) must be visible to the `agent_send` guard, so a workflow step's agent cannot regain a full delegation budget by hopping through the workflow path.
 #[tokio::test]
 async fn agent_send_quota_sees_depth_established_by_with_agent_call_depth() {
     use super::error::ToolError;
@@ -1451,9 +1443,8 @@ async fn agent_send_quota_sees_depth_established_by_with_agent_call_depth() {
     let kernel: Arc<dyn KernelHandle> = cap.clone();
     let input = serde_json::json!({ "agent_id": "target", "message": "hi" });
 
-    // DispatchCapture::max_agent_call_depth() returns 10. Seed 9 directly and
-    // let the helper supply the tenth level, so the assertion fails if the
-    // helper writes to some other counter than the one the guard reads.
+    // DispatchCapture::max_agent_call_depth() returns 10.
+    // Seed 9 directly and let the helper supply the tenth level, so the assertion fails if the helper writes to some other counter than the one the guard reads.
     let result = AGENT_CALL_DEPTH
         .scope(
             std::cell::Cell::new(9),

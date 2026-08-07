@@ -143,12 +143,9 @@ pub(super) async fn tool_agent_send(
         });
     }
 
-    // `with_agent_call_depth` boxes the callee turn's future before entering
-    // the scope. The nested turn is an enormous state machine, and inlining it
-    // here stacked another full copy of it per A->B->C level — the same stack
-    // hazard `held_agent_locks::scope` boxes to avoid (refs #6659). It is also
-    // the single definition of "one level deeper", shared with the kernel's
-    // workflow-step dispatch so both charge the same quota.
+    // `with_agent_call_depth` boxes the callee turn's future before entering the scope.
+    // The nested turn is an enormous state machine, and inlining it here stacked another full copy of it per A->B->C level — the same stack hazard `held_agent_locks::scope` boxes to avoid (refs #6659).
+    // It is also the single definition of "one level deeper", shared with the kernel's workflow-step dispatch so both charge the same quota.
     with_agent_call_depth(async {
         // When we know the caller, use the cascade-aware entry so a
         // parent `/stop` propagates into the callee (issue #3044).

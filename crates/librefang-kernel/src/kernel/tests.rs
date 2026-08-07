@@ -6587,17 +6587,12 @@ fn workflow_spawn_holds_lane_permit_across_run() {
 // ---------------------------------------------------------------------------
 // Nested workflow runs are bounded by `max_agent_call_depth` (refs #6659).
 //
-// `workflow_run` executes the target workflow inline on the calling task, and
-// each step nests a whole agent turn. Before the fix nothing counted that
-// nesting, so a workflow whose step target runs a workflow again recursed
-// until the tokio worker's stack ran out (SIGABRT, taking the HTTP API and
-// every cron job with it, since the daemon runs 2 workers).
+// `workflow_run` executes the target workflow inline on the calling task, and each step nests a whole agent turn.
+// Before the fix nothing counted that nesting, so a workflow whose step target runs a workflow again recursed until the tokio worker's stack ran out (SIGABRT, taking the HTTP API and every cron job with it, since the daemon runs 2 workers).
 // ---------------------------------------------------------------------------
 
-/// Build a one-step workflow whose step targets a registry agent name that
-/// does not exist. Enough to drive `run_workflow` end-to-end: the depth check
-/// sits ahead of `create_run`, and a missing step agent makes the accepted
-/// path fail fast (`format_missing_agent_error`) without any LLM call.
+/// Build a one-step workflow whose step targets a registry agent name that does not exist.
+/// Enough to drive `run_workflow` end-to-end: the depth check sits ahead of `create_run`, and a missing step agent makes the accepted path fail fast (`format_missing_agent_error`) without any LLM call.
 fn depth_probe_workflow() -> crate::workflow::Workflow {
     use crate::workflow::{ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep};
     Workflow {
@@ -6625,11 +6620,8 @@ fn depth_probe_workflow() -> crate::workflow::Workflow {
     }
 }
 
-/// A workflow run entered from inside `max_agent_call_depth` already-stacked
-/// agent turns must be refused as a policy error, and refused *before*
-/// `create_run` so no orphan `Pending` run is left behind. The same call at
-/// depth 0 must be accepted — that pairing is what proves the refusal comes
-/// from the depth quota and not from the workflow being unrunnable.
+/// A workflow run entered from inside `max_agent_call_depth` already-stacked agent turns must be refused as a policy error, and refused *before* `create_run` so no orphan `Pending` run is left behind.
+/// The same call at depth 0 must be accepted — that pairing is what proves the refusal comes from the depth quota and not from the workflow being unrunnable.
 #[tokio::test(flavor = "multi_thread")]
 async fn nested_workflow_run_past_max_agent_call_depth_is_capability_denied() {
     let dir = tempfile::tempdir().unwrap();
@@ -6638,8 +6630,8 @@ async fn nested_workflow_run_past_max_agent_call_depth_is_capability_denied() {
     let config = KernelConfig {
         home_dir: home_dir.clone(),
         data_dir: home_dir.join("data"),
-        // Keep the cap small so the test can nest to it literally rather than
-        // looping a recursive async helper. The production default is 5.
+        // Keep the cap small so the test can nest to it literally rather than looping a recursive async helper.
+        // The production default is 5.
         max_agent_call_depth: 2,
         ..KernelConfig::default()
     };
@@ -6648,8 +6640,7 @@ async fn nested_workflow_run_past_max_agent_call_depth_is_capability_denied() {
     let wf = depth_probe_workflow();
     let wf_id = kernel.register_workflow(wf).await;
 
-    // Depth 0 — accepted. It still fails (the step's agent is not registered),
-    // but with `Internal("Workflow failed: ...")`, not the depth refusal.
+    // Depth 0 — accepted. It still fails (the step's agent is not registered), but with `Internal("Workflow failed: ...")`, not the depth refusal.
     let accepted = kernel.run_workflow(wf_id, "hello".to_string()).await;
     if let Err(KernelError::LibreFang(LibreFangError::CapabilityDenied(msg))) = accepted {
         panic!("a top-level workflow run must not be refused by the depth quota, got: {msg}");
@@ -6661,10 +6652,7 @@ async fn nested_workflow_run_past_max_agent_call_depth_is_capability_denied() {
          below (no run created on refusal) proves nothing"
     );
 
-    // Depth 2 == `max_agent_call_depth` — refused. Two nested
-    // `with_agent_call_depth` frames stand in for two stacked agent turns,
-    // which is exactly what the workflow step dispatch establishes in
-    // production.
+    // Depth 2 == `max_agent_call_depth` — refused. Two nested `with_agent_call_depth` frames stand in for two stacked agent turns, which is exactly what the workflow step dispatch establishes in production.
     let refused = librefang_runtime::tool_runner::with_agent_call_depth(
         librefang_runtime::tool_runner::with_agent_call_depth(
             kernel.run_workflow(wf_id, "hello".to_string()),
@@ -6699,22 +6687,15 @@ async fn nested_workflow_run_past_max_agent_call_depth_is_capability_denied() {
     kernel.shutdown();
 }
 
-/// Source-shape sentinel for the other half of the fix, in the style of
-/// `workflow_send_message_closure_contains_per_agent_semaphore_acquire` above.
+/// Source-shape sentinel for the other half of the fix, in the style of `workflow_send_message_closure_contains_per_agent_semaphore_acquire` above.
 ///
-/// The behavioral test proves the quota *check* rejects a deep run. It cannot
-/// prove the step dispatch actually enters the depth scope, because observing
-/// the depth inside `send_message_full` needs a real LLM turn and this crate's
-/// tests have no driver-injection seam. Without that wrap every nesting level
-/// would read depth 0 and the check would never fire, so pin the wiring:
-/// the `run_workflow` step dispatch must call `send_message_full` through
-/// `with_agent_call_depth`.
+/// The behavioral test proves the quota *check* rejects a deep run.
+/// It cannot prove the step dispatch actually enters the depth scope, because observing the depth inside `send_message_full` needs a real LLM turn and this crate's tests have no driver-injection seam.
+/// Without that wrap every nesting level would read depth 0 and the check would never fire, so pin the wiring: the `run_workflow` step dispatch must call `send_message_full` through `with_agent_call_depth`.
 #[test]
 fn workflow_step_dispatch_enters_agent_call_depth_scope() {
     let src = include_str!("triggers_and_workflow.rs");
-    // Strip line + block comments so a leftover doc reference cannot satisfy
-    // the assertion after the wiring is removed (same approach as the two
-    // sentinels above).
+    // Strip line + block comments so a leftover doc reference cannot satisfy the assertion after the wiring is removed (same approach as the two sentinels above).
     let stripped: String = {
         let mut out = String::with_capacity(src.len());
         let mut in_block = false;
