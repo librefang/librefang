@@ -132,7 +132,8 @@ Stated plainly rather than left to be discovered:
   | `POST /api/init` | `routes/config/system.rs` — `quick_init` | the whole file, but only when it does not already exist |
 
   Two of those need a qualifier.
-  The MCP routes write `config.toml` under `mcp_runtime_store = "file"`, which is the **default**; setting `mcp_runtime_store = "db"` moves that persistence into SQLite so it never reaches the config file, and is worth doing in a managed deployment for that reason alone.
+  The direct MCP-server routes (`POST` / `PUT /api/mcp/servers`, `DELETE /api/mcp/servers/{name}`) write `config.toml` under `mcp_runtime_store = "file"`, which is the **default**; setting `mcp_runtime_store = "db"` moves that persistence into SQLite so it never reaches the config file, and is worth doing in a managed deployment for that reason alone.
+  That escape does **not** extend to the extension routes: `install_extension` / `uninstall_extension` in `routes/skills/extensions.rs` call `upsert_mcp_server_config` / `remove_mcp_server_config` unconditionally, with no `mcp_runtime_store` check, so they keep writing `config.toml` even when the store is `"db"`.
   `quick_init` returns `already_initialized` and writes nothing when the file exists, which is the normal case for a managed deployment mounting a ConfigMap — so it is a live gap in principle and close to unreachable in practice.
 
   These are gaps rather than oversights: locking them is a product decision, not a mechanical extension of the guard.
