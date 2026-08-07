@@ -15,6 +15,30 @@
 
 use super::*;
 
+/// Prompt for the built-in Task Board assignee wake (issue #6728).
+///
+/// Compiled in rather than configurable: it is the fallback for an
+/// installation that declared nothing, so it has to work with no setup at
+/// all. An operator who wants different wording writes their own trigger,
+/// which then takes precedence.
+///
+/// The three-claim cap is deliberate and not arbitrary politeness.
+/// `task_claim` takes no arguments, so "drain until empty" issues
+/// byte-identical calls, and `librefang-runtime::loop_guard` blocks a tool
+/// after `block_threshold` (5) identical calls — or sooner, at
+/// `outcome_block_threshold` (3) identical results, which an empty board
+/// produces immediately. An unbounded drain therefore ends in blocked tool
+/// calls rather than an empty queue. Three claims stay clear of both limits,
+/// and since every post wakes the assignee again, a deeper backlog still
+/// drains — one wake per task, which is the accounting this fix is built on.
+const ASSIGNEE_WAKE_PROMPT: &str = "[TASK BOARD] Task {task_id} was assigned to you: \"{title}\".
+
+Claim it with `task_claim`, do the work, then record the outcome with `task_complete(task_id, result)`.
+
+`task_claim` returns the next task assigned to you, or nothing when there is none left.
+If it returns nothing, stop immediately — do not call it again.
+Claim at most 3 tasks in this activation; anything still queued is picked up on your next wake.";
+
 impl LibreFangKernel {
     /// Auto-generate a short session title via the auxiliary cheap-tier
     /// LLM and persist it to `sessions.label`. Fire-and-forget — runs in
@@ -254,7 +278,7 @@ impl LibreFangKernel {
         let _guard = DepthGuard;
 
         // Evaluate triggers before publishing (so describe_event works on the event)
-        let (triggered, trigger_state_mutated) = self
+        let (mut triggered, trigger_state_mutated) = self
             .workflows
             .triggers
             .evaluate_with_resolver(&event, |id| {
@@ -264,6 +288,15 @@ impl LibreFangKernel {
             if let Err(e) = self.workflows.triggers.persist() {
                 warn!("Failed to persist trigger jobs after fire: {e}");
             }
+        }
+
+        // Built-in Task Board assignee wake (issue #6728). Appended after the
+        // stored-trigger pass so the operator's own triggers keep evaluation
+        // order and the per-event budget, and so this can only ever add the
+        // one match the budget-capped pass structurally cannot produce: a
+        // wake for an addressee nobody subscribed on behalf of.
+        if let Some(wake) = self.synthesize_assignee_wake(&event) {
+            triggered.push(wake);
         }
 
         // Capture event.timestamp before the bus move — the trigger
@@ -321,7 +354,9 @@ impl LibreFangKernel {
                 agent_sem: Option<Arc<tokio::sync::Semaphore>>,
                 /// When set, fire a workflow run instead of send_message_full.
                 workflow_id: Option<String>,
-                trigger_id: crate::triggers::TriggerId,
+                /// What produced this dispatch — a stored trigger, or the
+                /// built-in Task Board assignee wake (#6728).
+                source: crate::triggers::TriggerMatchSource,
             }
 
             let mut dispatches: Vec<TriggerDispatch> = Vec::with_capacity(triggered.len());
@@ -334,7 +369,7 @@ impl LibreFangKernel {
                 let msg = trigger_match.message.clone();
                 let mode_override = trigger_match.session_mode_override;
                 let workflow_id = trigger_match.workflow_id.clone();
-                let trigger_id = trigger_match.trigger_id;
+                let source = trigger_match.source.clone();
 
                 // For workflow-dispatch triggers, skip the agent-registry lookup —
                 // the agent_id on the TriggerMatch is the trigger owner and is not
@@ -364,10 +399,19 @@ impl LibreFangKernel {
                     // is the canonical fire instant — the same value the
                     // trigger registry stamps into `last_fired_at` (captured
                     // before the event was moved into the bus publish).
+                    //
+                    // The built-in assignee wake (#6728) has no trigger id to
+                    // key on, so it derives from `(agent, task_id, fire_time)`
+                    // instead — same property, different stable key.
                     let sid_override = match effective_mode {
-                        librefang_types::agent::SessionMode::New => Some(
-                            SessionId::for_trigger_fire(aid, trigger_id.0, event_timestamp),
-                        ),
+                        librefang_types::agent::SessionMode::New => Some(match &source {
+                            crate::triggers::TriggerMatchSource::Registered(tid) => {
+                                SessionId::for_trigger_fire(aid, tid.0, event_timestamp)
+                            }
+                            crate::triggers::TriggerMatchSource::TaskBoardAssigneeWake {
+                                task_id,
+                            } => SessionId::for_task_wake(aid, task_id, event_timestamp),
+                        }),
                         librefang_types::agent::SessionMode::Persistent => None,
                     };
                     let agent_sem = kernel.agent_concurrency_for(aid);
@@ -388,7 +432,7 @@ impl LibreFangKernel {
                     trigger_sem,
                     agent_sem,
                     workflow_id,
-                    trigger_id,
+                    source,
                 });
             }
 
@@ -434,7 +478,7 @@ impl LibreFangKernel {
                                 trigger_sem,
                                 agent_sem,
                                 workflow_id,
-                                trigger_id,
+                                source,
                             } = d;
 
                             // (1) Global trigger lane permit.
@@ -472,7 +516,7 @@ impl LibreFangKernel {
                                 match resolved_id {
                                     Some(wf_id) => {
                                         info!(
-                                            trigger_id = %trigger_id,
+                                            source = %source,
                                             workflow_id = %wid_str,
                                             "Trigger fired workflow (async)"
                                         );
@@ -494,7 +538,7 @@ impl LibreFangKernel {
                                         let lane_permit_for_spawn = _lane_permit;
                                         let kernel_for_spawn = std::sync::Arc::clone(&kernel);
                                         let wid_for_spawn = wid_str.clone();
-                                        let trigger_id_for_spawn = trigger_id;
+                                        let source_for_spawn = source.clone();
                                         let timeout_for_spawn = fire_timeout;
                                         tokio::spawn(async move {
                                             match tokio::time::timeout(
@@ -505,7 +549,7 @@ impl LibreFangKernel {
                                             {
                                                 Ok(Ok((run_id, _output))) => {
                                                     info!(
-                                                        trigger_id = %trigger_id_for_spawn,
+                                                        source = %source_for_spawn,
                                                         run_id = %run_id,
                                                         workflow_id = %wid_for_spawn,
                                                         "Trigger workflow run completed"
@@ -513,14 +557,14 @@ impl LibreFangKernel {
                                                 }
                                                 Ok(Err(e)) => {
                                                     warn!(
-                                                        trigger_id = %trigger_id_for_spawn,
+                                                        source = %source_for_spawn,
                                                         workflow_id = %wid_for_spawn,
                                                         "Trigger workflow run failed: {e}"
                                                     );
                                                 }
                                                 Err(_) => {
                                                     warn!(
-                                                        trigger_id = %trigger_id_for_spawn,
+                                                        source = %source_for_spawn,
                                                         workflow_id = %wid_for_spawn,
                                                         timeout_secs = timeout_for_spawn.as_secs(),
                                                         "Trigger workflow run timed out"
@@ -539,7 +583,7 @@ impl LibreFangKernel {
                                     }
                                     None => {
                                         warn!(
-                                            trigger_id = %trigger_id,
+                                            source = %source,
                                             workflow_id = %wid_str,
                                             run_id = "(unresolved)",
                                             "Trigger: workflow not found, skipping dispatch"
@@ -593,6 +637,150 @@ impl LibreFangKernel {
         }
 
         triggered
+    }
+
+    /// Synthesize the built-in Task Board wake for a `TaskPosted` event whose
+    /// assignee no stored trigger currently covers (issue #6728).
+    ///
+    /// Returns a [`TriggerMatch`](crate::triggers::TriggerMatch) that the
+    /// caller appends to the dispatch list, so the wake inherits the whole
+    /// dispatch stack — trigger lane, per-agent semaphore, per-fire timeout,
+    /// sequential ordering within one event, and the `PUBLISH_EVENT_DEPTH`
+    /// cycle guard — rather than re-implementing any of it. Nothing is
+    /// persisted: the wake leaves no record in `trigger_jobs.json` and is
+    /// invisible to `trigger list`, so disabling the knob fully reverts it.
+    ///
+    /// `session_mode_override` is left `None` so the assignee's manifest
+    /// governs. With the default `Persistent`, `agent_concurrency_for`
+    /// clamps the per-agent semaphore to 1, which serializes wakes for that
+    /// agent — a burst of posts queues rather than racing, and each wake
+    /// drains what it finds.
+    ///
+    /// Diagnostics are emitted only where delivery actually breaks: an
+    /// assignee nothing can resolve, a wake switched off with no trigger to
+    /// take over, an assignee that cannot claim, or a trigger that exists
+    /// but can no longer fire. The silent-failure mode this issue reports is
+    /// exactly the absence of these lines.
+    fn synthesize_assignee_wake(&self, event: &Event) -> Option<crate::triggers::TriggerMatch> {
+        use crate::triggers::{TaskPostedCoverage, TriggerMatch, TriggerMatchSource};
+        use librefang_types::event::{EventPayload, SystemEvent};
+
+        let EventPayload::System(SystemEvent::TaskPosted {
+            task_id,
+            title,
+            assigned_to,
+            ..
+        }) = &event.payload
+        else {
+            return None;
+        };
+
+        // An unassigned task is a pool task: `substrate::task_claim` matches
+        // `assigned_to = ''` for any claimant, so it is claimable — but with
+        // no addressee there is nobody in particular to wake, and fanning out
+        // to every capable agent is a policy call this path does not make.
+        // A pool worker subscribes with its own trigger.
+        let assigned_to = assigned_to
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?;
+
+        // Resolve the addressee the same way `KernelHandle::task_claim`
+        // does — UUID first, then display name — so anything that can be
+        // claimed can also be woken.
+        let entry = match assigned_to.parse::<AgentId>() {
+            Ok(id) => self.agents.registry.get(id),
+            Err(_) => self.agents.registry.find_by_name(assigned_to),
+        };
+        let Some(entry) = entry else {
+            warn!(
+                task_id = %task_id,
+                assigned_to = %assigned_to,
+                "Task assigned to an unregistered agent — no trigger can match it and \
+                 no claim will find it, so it will stay pending until reassigned"
+            );
+            return None;
+        };
+        let assignee_id = entry.id;
+
+        // Precedence: an operator's own trigger owns delivery, including its
+        // prompt, cooldown, session mode and workflow routing. Checked
+        // declaratively rather than per-event, so a trigger that is merely
+        // cooling down is still coverage and never gets doubled up on.
+        match self.workflows.triggers.task_posted_coverage_for(
+            assignee_id,
+            Some(&entry.name),
+            |id| self.agents.registry.get(id).map(|e| e.name.clone()),
+        ) {
+            TaskPostedCoverage::Covered(trigger_id) => {
+                debug!(
+                    task_id = %task_id,
+                    agent_id = %assignee_id,
+                    %trigger_id,
+                    "Assignee wake stood down — a stored trigger covers this assignee"
+                );
+                return None;
+            }
+            TaskPostedCoverage::Dormant(ids) => {
+                warn!(
+                    task_id = %task_id,
+                    agent_id = %assignee_id,
+                    triggers = ?ids,
+                    "Assignee's task_posted trigger(s) cannot fire (disabled or \
+                     max_fires exhausted) — the built-in wake is taking over; set \
+                     assignee_wake = false to suppress it instead"
+                );
+            }
+            TaskPostedCoverage::None => {}
+        }
+
+        if !entry
+            .manifest
+            .assignee_wake
+            .unwrap_or_else(|| self.config.load().task_board.assignee_wake)
+        {
+            warn!(
+                task_id = %task_id,
+                agent_id = %assignee_id,
+                "Task assigned to an agent with assignee_wake disabled and no trigger \
+                 covering it — nothing will wake it, so the task stays pending until \
+                 something else claims it"
+            );
+            return None;
+        }
+
+        // Wake only agents that can act on the task themselves. An
+        // installation whose board is drained on an agent's behalf — an
+        // external claimer against the HTTP route, or a human triaging by
+        // hand — does not grant the agent `task_claim`, and must not start
+        // racing its own claimant on upgrade.
+        if !entry
+            .manifest
+            .capabilities
+            .tools
+            .iter()
+            .any(|t| t == "task_claim" || t == "*")
+        {
+            warn!(
+                task_id = %task_id,
+                agent_id = %assignee_id,
+                "Task assigned to an agent without the task_claim capability — it \
+                 cannot claim the task, so nothing will move it out of pending"
+            );
+            return None;
+        }
+
+        Some(TriggerMatch {
+            agent_id: assignee_id,
+            message: ASSIGNEE_WAKE_PROMPT
+                .replace("{task_id}", task_id)
+                .replace("{title}", title),
+            session_mode_override: None,
+            workflow_id: None,
+            source: TriggerMatchSource::TaskBoardAssigneeWake {
+                task_id: task_id.clone(),
+            },
+        })
     }
 
     /// Register a trigger for an agent.

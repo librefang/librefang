@@ -3009,11 +3009,17 @@ impl Default for QueueConcurrencyConfig {
 /// [task_board]
 /// claim_ttl_secs = 600         # 10 minutes — auto-reset after this
 /// sweep_interval_secs = 30     # how often the sweeper runs
+/// assignee_wake = true         # wake the assignee even with no trigger declared
 /// ```
 ///
 /// Setting `claim_ttl_secs = 0` disables the sweeper entirely — useful
 /// for long-running human-in-the-loop tasks where a 10 minute reset
 /// would be wrong.
+///
+/// Every field is re-read live by its consumer — the sweeper re-reads its
+/// three knobs on each tick, and `assignee_wake` is read at the synthesis
+/// site on each `TaskPosted` — so the whole struct is hot-reloadable
+/// (`config_reload::build_reload_plan`).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TaskBoardConfig {
@@ -3025,6 +3031,22 @@ pub struct TaskBoardConfig {
     /// Maximum number of auto-resets before a stuck task is marked `failed`.
     /// Default: 0 = no limit (retry indefinitely).
     pub max_retries: u32,
+    /// Wake the assignee of a `TaskPosted` event even when no stored trigger
+    /// covers them (issue #6728). Default: `true`.
+    ///
+    /// A task addressed to an agent used to reach that agent only if an
+    /// operator had separately registered a matching `TaskPosted` trigger;
+    /// with none, the task sat `pending` indefinitely and nothing said so.
+    /// When this is enabled the kernel synthesizes the wake itself, so
+    /// delivery no longer depends on out-of-band operator setup.
+    ///
+    /// The synthesized wake defers to a stored trigger whenever one can
+    /// currently fire for that assignee, so an operator who declared their
+    /// own wake keeps full control of its prompt, session mode and routing.
+    /// Set to `false` (globally here, or per agent via the manifest's
+    /// `assignee_wake`) to opt out entirely — that flag is the only
+    /// suppression; a disabled or fire-exhausted trigger is not one.
+    pub assignee_wake: bool,
 }
 
 impl Default for TaskBoardConfig {
@@ -3033,6 +3055,7 @@ impl Default for TaskBoardConfig {
             claim_ttl_secs: 600,
             sweep_interval_secs: 30,
             max_retries: 0,
+            assignee_wake: true,
         }
     }
 }

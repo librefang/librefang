@@ -1,0 +1,325 @@
+//! Integration tests for the built-in Task Board assignee wake (#6728).
+//!
+//! A task addressed to an agent used to reach that agent only if an operator
+//! had separately registered a matching `TaskPosted` trigger; with none, the
+//! task sat `pending` with nothing in the log. These tests pin the delivery
+//! rule against a real booted kernel:
+//!
+//! 1. `assigned_task_wakes_an_agent_with_no_trigger` — the gap itself.
+//! 2. `assigned_task_wakes_an_agent_addressed_by_name` — `assigned_to` holds
+//!    either identity form, and both must reach the same agent.
+//! 3. `operator_trigger_suppresses_the_builtin_wake` — no double wake.
+//! 4. `dormant_trigger_does_not_suppress_the_builtin_wake` — a disabled
+//!    record is a gap to fill, not a decision to stay silent.
+//! 5. `assignee_wake_disabled_globally_produces_no_wake` — the opt-out.
+//! 6. `per_agent_override_beats_the_global_default` — manifest wins.
+//! 7. `agent_without_task_claim_is_not_woken` — an agent that cannot claim.
+//! 8. `unassigned_task_wakes_nobody` — pool tasks are claimable, not routed.
+//!
+//! The seam is `publish_typed_event`'s return value: it is the exact list the
+//! dispatcher consumes, so asserting on it tests the wake without needing an
+//! LLM behind `send_message_full`.
+
+use librefang_kernel::triggers::{TriggerMatchSource, TriggerPatch, TriggerPattern};
+use librefang_testing::{MockKernelBuilder, TestAppState};
+use librefang_types::agent::{AgentId, AgentManifest, ManifestCapabilities};
+use librefang_types::event::{Event, EventPayload, EventTarget, SystemEvent};
+
+/// Manifest for an agent that can claim its own tasks — the population the
+/// built-in wake targets.
+fn worker_manifest(name: &str) -> AgentManifest {
+    AgentManifest {
+        name: name.to_string(),
+        capabilities: ManifestCapabilities {
+            tools: vec!["task_claim".to_string(), "task_complete".to_string()],
+            ..ManifestCapabilities::default()
+        },
+        ..AgentManifest::default()
+    }
+}
+
+fn task_posted(assigned_to: Option<&str>) -> Event {
+    Event::new(
+        AgentId::new(),
+        EventTarget::Broadcast,
+        EventPayload::System(SystemEvent::TaskPosted {
+            task_id: "task-1".to_string(),
+            title: "Summarize the release notes".to_string(),
+            assigned_to: assigned_to.map(str::to_string),
+            created_by: Some("orchestrator".to_string()),
+        }),
+    )
+}
+
+/// The reported gap: an agent with no trigger at all still gets woken for a
+/// task addressed to it, and the match is attributed to the built-in path
+/// rather than to a record that does not exist.
+#[tokio::test(flavor = "multi_thread")]
+async fn assigned_task_wakes_an_agent_with_no_trigger() {
+    let test = TestAppState::with_builder(MockKernelBuilder::new());
+    let worker = test
+        .state
+        .kernel
+        .spawn_agent_typed(worker_manifest("worker"))
+        .expect("spawn must succeed");
+
+    let matches = test
+        .state
+        .kernel
+        .publish_typed_event(task_posted(Some(&worker.to_string())))
+        .await;
+
+    assert_eq!(matches.len(), 1, "the assignee must be woken exactly once");
+    assert_eq!(matches[0].agent_id, worker);
+    assert_eq!(
+        matches[0].source,
+        TriggerMatchSource::TaskBoardAssigneeWake {
+            task_id: "task-1".to_string()
+        },
+    );
+    assert!(
+        matches[0].message.contains("task_claim"),
+        "the wake must tell the agent how to pick the task up, got: {}",
+        matches[0].message,
+    );
+    assert!(
+        test.state.kernel.list_triggers(Some(worker)).is_empty(),
+        "the wake must not leave a trigger record behind",
+    );
+}
+
+/// `substrate::task_claim` matches `assigned_to` by UUID *or* display name,
+/// so a task addressed by name has to wake the same agent — otherwise the
+/// claimable-but-unreachable case survives the fix.
+#[tokio::test(flavor = "multi_thread")]
+async fn assigned_task_wakes_an_agent_addressed_by_name() {
+    let test = TestAppState::with_builder(MockKernelBuilder::new());
+    let worker = test
+        .state
+        .kernel
+        .spawn_agent_typed(worker_manifest("worker"))
+        .expect("spawn must succeed");
+
+    let matches = test
+        .state
+        .kernel
+        .publish_typed_event(task_posted(Some("worker")))
+        .await;
+
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].agent_id, worker);
+}
+
+/// An operator who declared their own wake keeps it: exactly one match, and
+/// it is theirs, so the prompt / session mode / routing they configured is
+/// what runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_trigger_suppresses_the_builtin_wake() {
+    let test = TestAppState::with_builder(MockKernelBuilder::new());
+    let worker = test
+        .state
+        .kernel
+        .spawn_agent_typed(worker_manifest("worker"))
+        .expect("spawn must succeed");
+    let trigger_id = test
+        .state
+        .kernel
+        .register_trigger_with_target(
+            worker,
+            TriggerPattern::TaskPosted {
+                assignee_match: Some("self".to_string()),
+            },
+            "operator wake: {{event}}".to_string(),
+            0,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("register must succeed");
+
+    let matches = test
+        .state
+        .kernel
+        .publish_typed_event(task_posted(Some(&worker.to_string())))
+        .await;
+
+    assert_eq!(matches.len(), 1, "the assignee must not be woken twice");
+    assert_eq!(
+        matches[0].source,
+        TriggerMatchSource::Registered(trigger_id)
+    );
+    assert!(matches[0].message.starts_with("operator wake:"));
+}
+
+/// The outage shape: a trigger that exists but cannot fire must not keep the
+/// assignee unreachable. Treating any record as coverage is what let tasks
+/// sit `pending` indefinitely.
+#[tokio::test(flavor = "multi_thread")]
+async fn dormant_trigger_does_not_suppress_the_builtin_wake() {
+    let test = TestAppState::with_builder(MockKernelBuilder::new());
+    let worker = test
+        .state
+        .kernel
+        .spawn_agent_typed(worker_manifest("worker"))
+        .expect("spawn must succeed");
+    let trigger_id = test
+        .state
+        .kernel
+        .register_trigger_with_target(
+            worker,
+            TriggerPattern::TaskPosted {
+                assignee_match: Some("self".to_string()),
+            },
+            "operator wake: {{event}}".to_string(),
+            0,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("register must succeed");
+    assert!(test
+        .state
+        .kernel
+        .update_trigger(
+            trigger_id,
+            TriggerPatch {
+                enabled: Some(false),
+                ..TriggerPatch::default()
+            },
+        )
+        .is_some_and(|t| !t.enabled));
+
+    let matches = test
+        .state
+        .kernel
+        .publish_typed_event(task_posted(Some(&worker.to_string())))
+        .await;
+
+    assert_eq!(matches.len(), 1, "the built-in wake must take over");
+    assert_eq!(
+        matches[0].source,
+        TriggerMatchSource::TaskBoardAssigneeWake {
+            task_id: "task-1".to_string()
+        },
+    );
+}
+
+/// The global opt-out is honoured — and it is the only thing that silences
+/// the path.
+#[tokio::test(flavor = "multi_thread")]
+async fn assignee_wake_disabled_globally_produces_no_wake() {
+    let test = TestAppState::with_builder(
+        MockKernelBuilder::new().with_config(|cfg| cfg.task_board.assignee_wake = false),
+    );
+    let worker = test
+        .state
+        .kernel
+        .spawn_agent_typed(worker_manifest("worker"))
+        .expect("spawn must succeed");
+
+    let matches = test
+        .state
+        .kernel
+        .publish_typed_event(task_posted(Some(&worker.to_string())))
+        .await;
+
+    assert!(
+        matches.is_empty(),
+        "assignee_wake = false must suppress the built-in wake"
+    );
+}
+
+/// Per-agent override resolves against the global default in both
+/// directions, so one agent can opt out of an installation-wide default —
+/// or into it.
+#[tokio::test(flavor = "multi_thread")]
+async fn per_agent_override_beats_the_global_default() {
+    // Global ON, agent OFF.
+    let test = TestAppState::with_builder(MockKernelBuilder::new());
+    let mut manifest = worker_manifest("opted-out");
+    manifest.assignee_wake = Some(false);
+    let worker = test
+        .state
+        .kernel
+        .spawn_agent_typed(manifest)
+        .expect("spawn must succeed");
+    let matches = test
+        .state
+        .kernel
+        .publish_typed_event(task_posted(Some(&worker.to_string())))
+        .await;
+    assert!(
+        matches.is_empty(),
+        "manifest opt-out must win over global ON"
+    );
+
+    // Global OFF, agent ON.
+    let test = TestAppState::with_builder(
+        MockKernelBuilder::new().with_config(|cfg| cfg.task_board.assignee_wake = false),
+    );
+    let mut manifest = worker_manifest("opted-in");
+    manifest.assignee_wake = Some(true);
+    let worker = test
+        .state
+        .kernel
+        .spawn_agent_typed(manifest)
+        .expect("spawn must succeed");
+    let matches = test
+        .state
+        .kernel
+        .publish_typed_event(task_posted(Some(&worker.to_string())))
+        .await;
+    assert_eq!(matches.len(), 1, "manifest opt-in must win over global OFF");
+}
+
+/// An installation whose board is drained on the agent's behalf (an external
+/// claimer, or a human) does not grant the agent `task_claim` — and must not
+/// find the kernel racing its claimant after an upgrade.
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_without_task_claim_is_not_woken() {
+    let test = TestAppState::with_builder(MockKernelBuilder::new());
+    let mut manifest = worker_manifest("no-claim");
+    manifest.capabilities.tools = vec!["web_search".to_string()];
+    let worker = test
+        .state
+        .kernel
+        .spawn_agent_typed(manifest)
+        .expect("spawn must succeed");
+
+    let matches = test
+        .state
+        .kernel
+        .publish_typed_event(task_posted(Some(&worker.to_string())))
+        .await;
+
+    assert!(
+        matches.is_empty(),
+        "an agent that cannot claim must not be woken"
+    );
+}
+
+/// Unassigned tasks are claimable by anyone (`assigned_to = ''` in the claim
+/// SQL) but addressed to nobody. Fanning out to every capable agent is a
+/// policy decision this path deliberately does not make.
+#[tokio::test(flavor = "multi_thread")]
+async fn unassigned_task_wakes_nobody() {
+    let test = TestAppState::with_builder(MockKernelBuilder::new());
+    test.state
+        .kernel
+        .spawn_agent_typed(worker_manifest("worker"))
+        .expect("spawn must succeed");
+
+    for assigned_to in [None, Some(""), Some("   ")] {
+        let matches = test
+            .state
+            .kernel
+            .publish_typed_event(task_posted(assigned_to))
+            .await;
+        assert!(
+            matches.is_empty(),
+            "an unassigned task must wake nobody (assigned_to = {assigned_to:?})"
+        );
+    }
+}
