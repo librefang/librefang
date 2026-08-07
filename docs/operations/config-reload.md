@@ -15,6 +15,8 @@ fails the build if a field is added to the planner but not to this doc
 (or vice-versa). **When you change a field's classification in
 `build_reload_plan`, update this table in the same PR.**
 
+If the file is owned by your deployment rather than by LibreFang, see [managed-config.md](./managed-config.md) — the reload semantics below are unchanged, but writes through the API are refused.
+
 ## How `POST /api/config/reload` works
 
 1. The new config is parsed and validated (`validate_config_for_reload`).

@@ -205,8 +205,23 @@ pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
                                      sidecar-crate change."
                                 );
                             }
-                            // Write migrated config back to disk so future loads skip migration
-                            if migrated && file_version < CONFIG_VERSION {
+                            // Write migrated config back to disk so future loads skip migration.
+                            //
+                            // Managed mode owns the file, so the write is skipped rather than attempted and warned about.
+                            // Attempting it against a read-only ConfigMap mount fails on every boot, and because the failure is only a `warn!` the migration silently re-runs forever with nothing but a repeating log line to show for it.
+                            // The in-memory config is already migrated either way, so skipping costs nothing at runtime — what the operator loses is the on-disk persistence, and they need to know that their manifest is now a schema version behind.
+                            if migrated
+                                && file_version < CONFIG_VERSION
+                                && config_mode() == ConfigMode::Managed
+                            {
+                                tracing::warn!(
+                                    path = %config_path.display(),
+                                    from_version = file_version,
+                                    to_version = CONFIG_VERSION,
+                                    "Config was migrated in memory but NOT written back: the file is deployment-managed (LIBREFANG_CONFIG_MODE=managed). \
+                                     This migration re-runs on every boot until the managed source is updated to the new schema."
+                                );
+                            } else if migrated && file_version < CONFIG_VERSION {
                                 let toml_str = toml::to_string_pretty(&config);
                                 match toml_str {
                                     Ok(s) => {
@@ -522,11 +537,110 @@ pub fn deep_merge_toml(base: &mut toml::Value, overlay: &toml::Value) {
     }
 }
 
+/// Env var that relocates `config.toml` away from `LIBREFANG_HOME`.
+///
+/// Relocation and locking are deliberately separate concerns — see [`ConfigMode`].
+pub const CONFIG_PATH_ENV: &str = "LIBREFANG_CONFIG_PATH";
+
+/// Env var that selects [`ConfigMode`]. Only the exact value `managed` locks.
+pub const CONFIG_MODE_ENV: &str = "LIBREFANG_CONFIG_MODE";
+
+/// Who owns `config.toml`.
+///
+/// The mode is read from the process environment, never from the config file itself, so a write through the API can never unlock the very file it is being refused access to (#6695).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigMode {
+    /// Default. The file is application state: the API may persist to it.
+    Mutable,
+    /// The file is owned by the deployment (a Kubernetes ConfigMap, a bind mount, a config management system).
+    /// Every API surface that would persist to it refuses with `423 Locked`.
+    Managed,
+}
+
+impl ConfigMode {
+    /// Whether configuration may be persisted through the API in this mode.
+    pub fn is_writable(self) -> bool {
+        matches!(self, ConfigMode::Mutable)
+    }
+
+    /// The stable wire string used by the API and the dashboard.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConfigMode::Mutable => "mutable",
+            ConfigMode::Managed => "managed",
+        }
+    }
+}
+
+/// Resolve the configuration ownership mode from the environment.
+///
+/// Anything other than a case-insensitive `managed` — including unset, empty, and a typo — resolves to [`ConfigMode::Mutable`].
+/// Defaulting a typo to the locked mode would brick the dashboard for a deployment that never asked for it; defaulting it to mutable preserves today's behaviour, which is the compatibility guarantee the RFC requires.
+pub fn config_mode() -> ConfigMode {
+    match std::env::var(CONFIG_MODE_ENV) {
+        Ok(v) if v.trim().eq_ignore_ascii_case("managed") => ConfigMode::Managed,
+        _ => ConfigMode::Mutable,
+    }
+}
+
 /// Get the default config file path.
 ///
-/// Respects `LIBREFANG_HOME` env var (e.g. `LIBREFANG_HOME=/opt/librefang`).
+/// Priority: `LIBREFANG_CONFIG_PATH` > `LIBREFANG_HOME`/config.toml > `~/.librefang/config.toml`.
+///
+/// `LIBREFANG_CONFIG_PATH` relocates the file and nothing more.
+/// It is independent of [`config_mode`] on purpose: a Compose deployment may reasonably bind-mount the config directory somewhere outside `LIBREFANG_HOME` while still editing it from the dashboard, and inferring the lock from the path would hand that operator a read-only UI they never asked for.
 pub fn default_config_path() -> PathBuf {
+    if let Ok(p) = std::env::var(CONFIG_PATH_ENV) {
+        let trimmed = p.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
     librefang_home().join("config.toml")
+}
+
+/// Provenance of the effective configuration, for the authenticated status endpoint.
+///
+/// Deliberately carries no secret material: the checksum is over the raw file bytes, which the caller already has to be authenticated to influence, and the path is a deployment fact an operator needs in order to know where to make a change.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConfigProvenance {
+    /// `"mutable"` or `"managed"`.
+    pub mode: &'static str,
+    /// Absolute path the effective configuration was loaded from.
+    pub source: String,
+    /// Whether the API will accept a write.
+    /// Equivalent to `mode == "mutable"`, surfaced separately so the dashboard branches on a boolean rather than string-matching a mode name.
+    pub writable: bool,
+    /// `sha256:<hex>` over the config file's bytes, or `None` when the file does not exist.
+    pub checksum: Option<String>,
+    /// RFC 3339 timestamp of the file's last modification, or `None` when unavailable.
+    pub modified_at: Option<String>,
+}
+
+/// Build the provenance record for the config file currently in effect.
+pub fn config_provenance(path: Option<&Path>) -> ConfigProvenance {
+    let config_path = path
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(default_config_path);
+    let mode = config_mode();
+
+    let checksum = std::fs::read(&config_path).ok().map(|bytes| {
+        use sha2::{Digest, Sha256};
+        format!("sha256:{:x}", Sha256::digest(&bytes))
+    });
+
+    let modified_at = std::fs::metadata(&config_path)
+        .and_then(|m| m.modified())
+        .ok()
+        .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+
+    ConfigProvenance {
+        mode: mode.as_str(),
+        source: config_path.display().to_string(),
+        writable: mode.is_writable(),
+        checksum,
+        modified_at,
+    }
 }
 
 /// Get the LibreFang home directory.

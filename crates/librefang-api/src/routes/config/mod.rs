@@ -39,6 +39,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/config", axum::routing::get(get_config))
         .route("/config/export", axum::routing::get(export_config))
         .route("/config/schema", axum::routing::get(config_schema))
+        .route("/config/status", axum::routing::get(config_status))
         .route("/config/set", axum::routing::post(config_set))
         .route("/config/reload", axum::routing::post(config_reload))
         .route("/security", axum::routing::get(security_status))

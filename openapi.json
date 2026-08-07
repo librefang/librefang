@@ -5700,6 +5700,28 @@
         }
       }
     },
+    "/api/config/status": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/config/status — where the effective configuration came from, and whether it can be written.",
+        "description": "The dashboard branches on `writable` to decide whether to render write controls, rather than discovering managed mode by attempting a save and reading the `423` back (#6695).\nAuthenticated like every other `/api/*` route; it exposes a path and a checksum over the file's bytes, never a value from inside it.",
+        "operationId": "config_status",
+        "responses": {
+          "200": {
+            "description": "Configuration provenance and writability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/context-engine/chain": {
       "get": {
         "tags": [

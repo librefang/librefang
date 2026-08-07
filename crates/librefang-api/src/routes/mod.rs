@@ -209,6 +209,8 @@ pub struct AppState {
     /// Mutex for serializing config file writes — prevents concurrent config_set
     /// calls from reading the same file and overwriting each other's changes.
     pub config_write_lock: tokio::sync::Mutex<()>,
+    // NOTE: taking this lock is NOT the same as being allowed to write.
+    // Managed mode (#6695) is enforced by `guard_config_write` below, which every config-persisting handler must call before it starts building a new file.
     /// Pending A2A agents awaiting operator approval (Bug #3786).
     /// Maps discovery URL → AgentCard. Agents here are NOT trusted yet and
     /// cannot receive tasks. Use POST /api/a2a/agents/{url}/approve to promote
@@ -244,4 +246,56 @@ pub struct AppState {
     /// the RP config built successfully at boot; `None` otherwise (the
     /// `/api/auth/passkey/*` routes then answer `503`).
     pub passkey_engine: Option<Arc<crate::passkey::PasskeyEngine>>,
+}
+
+/// Refuse a configuration write when the file is owned by the deployment (#6695).
+///
+/// Returns `Some(response)` — a `423 Locked` carrying a structured body — when [`librefang_kernel::config::ConfigMode::Managed`] is in effect, and `None` when the caller may proceed.
+///
+/// Every handler that persists into `config.toml` calls this **before** it reads the existing file, so a refused write never opens, truncates, or rewrites anything.
+/// Enforcement lives here rather than relying on the mount being read-only: a filesystem `EACCES` surfaces as a 500 with an errno, which tells an operator nothing about *why* the write is not allowed, and it does not apply at all when the deployment leaves the file writable but still expects the manifest to be the source of truth.
+///
+/// The mode is read from the process environment on every call rather than cached at boot.
+/// It costs one `std::env::var`, and it means a mode set by an orchestrator that rewrites the environment mid-life cannot be stale.
+pub fn guard_config_write() -> Option<(
+    axum::http::StatusCode,
+    axum::response::Json<serde_json::Value>,
+)> {
+    let mode = librefang_kernel::config::config_mode();
+    if mode.is_writable() {
+        return None;
+    }
+
+    let source = librefang_kernel::config::default_config_path();
+    Some((
+        axum::http::StatusCode::LOCKED,
+        axum::response::Json(serde_json::json!({
+            "ok": false,
+            "error": "configuration is managed by the deployment",
+            "code": "config_managed",
+            "source": source.display().to_string(),
+        })),
+    ))
+}
+
+/// The `423 Locked` body `guard_config_write` produces, as a ready `Response`.
+///
+/// Handlers whose error type cannot carry a `Response` (the `PersistError` / `PersistBudgetError` enums are `Clone`-free but also `Debug`-matched in several places) store a unit `Managed` variant and call this at the point of conversion, so there is still exactly one place that decides the status code and the body shape.
+pub fn managed_config_response() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match guard_config_write() {
+        Some(parts) => parts.into_response(),
+        // Unreachable in practice: only called from a `Managed` error arm, which is only constructed when the guard fired.
+        // Falling back to the same body keeps the wire contract stable if that ever stops holding.
+        None => (
+            axum::http::StatusCode::LOCKED,
+            axum::response::Json(serde_json::json!({
+                "ok": false,
+                "error": "configuration is managed by the deployment",
+                "code": "config_managed",
+                "source": librefang_kernel::config::default_config_path().display().to_string(),
+            })),
+        )
+            .into_response(),
+    }
 }
