@@ -1098,6 +1098,22 @@ pub async fn export_config(State(state): State<Arc<AppState>>) -> impl IntoRespo
 // ---------------------------------------------------------------------------
 // Config Schema endpoint
 // ---------------------------------------------------------------------------
+/// GET /api/config/status — where the effective configuration came from, and whether it can be written.
+///
+/// The dashboard branches on `writable` to decide whether to render write controls, rather than discovering managed mode by attempting a save and reading the `423` back (#6695).
+/// Authenticated like every other `/api/*` route; it exposes a path and a checksum over the file's bytes, never a value from inside it.
+#[utoipa::path(
+    get,
+    path = "/api/config/status",
+    tag = "system",
+    responses(
+        (status = 200, description = "Configuration provenance and writability", body = crate::types::JsonObject)
+    )
+)]
+pub async fn config_status() -> impl IntoResponse {
+    axum::Json(librefang_kernel::config::config_provenance(None))
+}
+
 /// GET /api/config/schema — Return a simplified JSON description of the config structure.
 #[utoipa::path(
     get,
@@ -1337,6 +1353,9 @@ pub async fn config_set(
     }
 
     // Serialize concurrent writes to prevent read-modify-write races
+    if let Some(locked) = crate::routes::guard_config_write() {
+        return locked;
+    }
     let _config_guard = state.config_write_lock.lock().await;
 
     // Read existing config — use toml_edit to preserve comments and formatting.

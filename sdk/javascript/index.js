@@ -1474,6 +1474,10 @@ class SystemResource {
     return this._c._request("POST", "/api/config/set", data, undefined);
   }
 
+  async configStatus() {
+    return this._c._request("GET", "/api/config/status");
+  }
+
   async health() {
     return this._c._request("GET", "/api/health");
   }

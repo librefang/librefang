@@ -1572,6 +1572,10 @@ func (r *SystemResource) ConfigSet(data map[string]interface{}) (interface{}, er
 	return r.client.request("POST", "/api/config/set", data, nil)
 }
 
+func (r *SystemResource) ConfigStatus() (interface{}, error) {
+	return r.client.request("GET", "/api/config/status", nil, nil)
+}
+
 func (r *SystemResource) Health() (interface{}, error) {
 	return r.client.request("GET", "/api/health", nil, nil)
 }

@@ -1307,7 +1307,7 @@ jobs:
         # OIDC trusted publishing — configure at:
         # pypi.org/manage/project/librefang/settings/publishing
         # workflow filename: release.yml, environment: (none)
-        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: ${{ runner.temp }}/cli-pypi-dist
           skip-existing: true
@@ -1844,7 +1844,7 @@ jobs:
           ref: ${{ env.RELEASE_REF }}
 
       - name: Set up JDK 17 (Temurin)
-        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: temurin
           java-version: "17"
@@ -2820,7 +2820,7 @@ jobs:
         with:
           ref: ${{ env.RELEASE_REF }}
       - name: Log in to GHCR
-        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2905,7 +2905,7 @@ jobs:
         with:
           ref: ${{ env.RELEASE_REF }}
       - name: Log in to GHCR
-        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2969,7 +2969,7 @@ jobs:
     needs: [docker, docker-scan]
     steps:
       - name: Log in to GHCR
-        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -3221,7 +3221,7 @@ jobs:
       - name: Publish to PyPI
         # OIDC trusted publishing — configure at:
         # pypi.org/manage/project/librefang-sdk/settings/publishing
-        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: sdk/python/dist/
           skip-existing: true
