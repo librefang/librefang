@@ -103,8 +103,8 @@ CI splits tests into two separate jobs so a unit failure surfaces quickly:
 
 - **Unit-fast** (`Test / Unit (lib+bin)`, ~2 min): `cargo nextest run --workspace -E 'kind(lib) | kind(bin)' --no-fail-fast`
   — lib and binary unit tests only; no integration test binaries. Run this locally for quick iteration.
-- **Integration** (`Test / Ubuntu (shard N/4)`, ~10-20 min): sharded across 4 Ubuntu runners via
-  `--partition hash:N/4`; plus a single macOS job and a 2-way-sharded Windows job, both main-push only. Runs all `--tests` targets.
+- **Integration** (`Test / Ubuntu (shard N/4)`, ~10-20 min): sharded across 4 Ubuntu runners via `--partition hash:N/4`; plus a single macOS job and a 2-way-sharded Windows job, both main-push only.
+  Runs all `--tests` targets.
 
 The unit-fast lane uses nextest's `-E 'kind(lib) | kind(bin)'` filter rather than `--lib --bins` because the latter errors with "no library targets found" when a `-p <crate>` selector targets a binary-only crate (`librefang-cli`).
 The expression form matches whichever kinds the selected crates actually have, so the selective CI lane stays green when a PR touches only `librefang-cli/main.rs` (or when a stale-base diff drags it in).

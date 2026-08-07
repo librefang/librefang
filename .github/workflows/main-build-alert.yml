@@ -9,15 +9,10 @@ name: Main Build Alert
 # a red main when merged in sequence (incident: #4179). Without a signal
 # at merge time, the breakage stays invisible until the next PR opens.
 #
-# Green does not automatically mean recovered. The CI workflow's `changes`
-# gate skips every Rust lane on a docs- or dependency-only push, and the run
-# still concludes `success`, so auto-closing on conclusion alone erases a real
-# breakage as soon as an unrelated Dependabot PR lands. That is not
-# hypothetical: the Windows lane died on 2026-08-04 and the same failure was
-# filed and falsely auto-closed three times (#6716, #6721, #6729) before
-# anyone noticed main had been red for days. The success branch below
-# therefore requires that at least one Rust test lane actually ran and passed
-# on the commit before it closes anything.
+# Green does not automatically mean recovered.
+# The CI workflow's `changes` gate skips every Rust lane on a docs- or dependency-only push, and the run still concludes `success`, so auto-closing on conclusion alone erases a real breakage as soon as an unrelated Dependabot PR lands.
+# That is not hypothetical: the Windows lane died on 2026-08-04 and the same failure was filed and falsely auto-closed three times (#6716, #6721, #6729) before anyone noticed main had been red for days.
+# The success branch below therefore requires that at least one Rust test lane actually ran and passed on the commit before it closes anything.
 
 on:
   workflow_run:
@@ -50,10 +45,8 @@ jobs:
             const runId = context.payload.workflow_run.id;
             const label = 'main-red';
 
-            // Job names of the lanes that actually compile and run Rust. The
-            // `changes` gate skips all of them on a docs- or dependency-only
-            // push, so a `success` conclusion from such a run proves nothing
-            // about the state of the Rust build.
+            // Job names of the lanes that actually compile and run Rust.
+            // The `changes` gate skips all of them on a docs- or dependency-only push, so a `success` conclusion from such a run proves nothing about the state of the Rust build.
             const RUST_TEST_LANE = /^Test \/ (Windows|macOS|Ubuntu|Unit)/;
 
             // Ensure the label exists; ignore "already_exists" 422.
@@ -80,14 +73,9 @@ jobs:
             if (conclusion === 'success') {
               if (open.length === 0) return;
 
-              // A green run only clears an open `main-red` issue if at least
-              // one Rust test lane actually ran on this commit. Docs- and
-              // dependency-only pushes skip every Rust lane and still report
-              // `success`, which is how the Windows breakage from #6711 was
-              // filed and falsely auto-closed three times (#6716, #6721,
-              // #6729) while main stayed red. Errors here mean we do not know,
-              // so we leave the issue open — a false close hides a real
-              // breakage, a false open costs one glance.
+              // A green run only clears an open `main-red` issue if at least one Rust test lane actually ran on this commit.
+              // Docs- and dependency-only pushes skip every Rust lane and still report `success`, which is how the Windows breakage from #6711 was filed and falsely auto-closed three times (#6716, #6721, #6729) while main stayed red.
+              // Errors here mean we do not know, so we leave the issue open — a false close hides a real breakage, a false open costs one glance.
               let rustLaneRan = false;
               try {
                 const jobs = await github.paginate(
@@ -135,16 +123,9 @@ jobs:
             }
 
             // ── Identify the head commit the run fired on ────────────────
-            // Identification only, deliberately NOT attribution: the run
-            // reports the state of `main` at this commit, which is not
-            // evidence that this commit caused the failure. A lane can be red
-            // from an earlier merge whose own run skipped it, from an
-            // infrastructure change, or from a flaky runner. Three consecutive
-            // filings (#6715, #6720, #6727) named unrelated openrouter
-            // snapshot PRs for a Windows breakage introduced days earlier by
-            // db81fe79, and the alert's "revert PR #N" line is what made that
-            // read as a verdict, so the PR number and commit author are no
-            // longer surfaced at all.
+            // Identification only, deliberately NOT attribution: the run reports the state of `main` at this commit, which is not evidence that this commit caused the failure.
+            // A lane can be red from an earlier merge whose own run skipped it, from an infrastructure change, or from a flaky runner.
+            // Three consecutive filings (#6715, #6720, #6727) named unrelated openrouter snapshot PRs for a Windows breakage introduced days earlier by db81fe79, and the alert's "revert PR #N" line is what made that read as a verdict, so the PR number and commit author are no longer surfaced at all.
             let commitSubject = '';
             try {
               const { data: commit } = await github.rest.repos.getCommit({
@@ -185,11 +166,8 @@ jobs:
             }
 
             // ── Build the issue body ─────────────────────────────────────
-            // Strip the merge subject's trailing `(#NNNN)`: leaving it in
-            // renders as a cross-reference that back-links the issue onto that
-            // PR's timeline, which is the same false accusation in a quieter
-            // form. `shortSha` still auto-links to the commit, and the commit
-            // page names its PR, so nothing navigable is lost.
+            // Strip the merge subject's trailing `(#NNNN)`: leaving it in renders as a cross-reference that back-links the issue onto that PR's timeline, which is the same false accusation in a quieter form.
+            // `shortSha` still auto-links to the commit, and the commit page names its PR, so nothing navigable is lost.
             const cleanSubject = commitSubject.replace(/\s*\(#\d+\)\s*$/, '');
             const subj = cleanSubject ? ` — ${cleanSubject}` : '';
             const lines = [];
