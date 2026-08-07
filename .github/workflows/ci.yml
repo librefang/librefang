@@ -129,7 +129,7 @@ jobs:
           # PR time. See #5936.
           SIDECAR_RUST=false; has '^(sdk/rust/librefang-sidecar/|sdk/rust/librefang-sidecar-telegram/|\.github/workflows/release(-cli)?\.yml$)' && SIDECAR_RUST=true
           # The Python SDK carries the sidecar channel adapters (slack, discord,
-          # telegram, …) and ~1900 pytest cases that no lane ran before #6738.
+          # telegram, …) and ~1900 pytest cases that no lane ran before #6741.
           # `sdk/` is folded into RUST above only as an openapi/codegen drift
           # guard — that lane runs cargo, never pytest — so a Python-only
           # regression shipped green. Route `sdk/python/**` to its own job.
@@ -419,7 +419,7 @@ jobs:
   # ── Python SDK + sidecar adapter test suite ────────────────────────────────────
   # `sdk/python/tests/` holds ~1900 pytest cases covering the HTTP client and every
   # stdlib-only sidecar channel adapter (slack, discord, telegram, mastodon, …), and
-  # until #6738 no workflow ran a single one of them — `grep -rn pytest .github/workflows/`
+  # until #6741 no workflow ran a single one of them — `grep -rn pytest .github/workflows/`
   # came back empty. The adapters are the production code path for every sidecar
   # channel, so a regression there reached users with CI fully green.
   # The suite is hermetic (urllib and the WebSocket client are monkeypatched, no
