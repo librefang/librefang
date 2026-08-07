@@ -8,6 +8,11 @@ name: Main Build Alert
 # `PR + current main`, so two PRs that are individually green can produce
 # a red main when merged in sequence (incident: #4179). Without a signal
 # at merge time, the breakage stays invisible until the next PR opens.
+#
+# Green does not automatically mean recovered.
+# The CI workflow's `changes` gate skips every Rust lane on a docs- or dependency-only push, and the run still concludes `success`, so auto-closing on conclusion alone erases a real breakage as soon as an unrelated Dependabot PR lands.
+# That is not hypothetical: the Windows lane died on 2026-08-04 and the same failure was filed and falsely auto-closed three times (#6716, #6721, #6729) before anyone noticed main had been red for days.
+# The success branch below therefore requires that at least one Rust test lane actually ran and passed on the commit before it closes anything.
 
 on:
   workflow_run:
@@ -37,7 +42,12 @@ jobs:
             const runUrl = process.env.RUN_URL;
             const headSha = process.env.HEAD_SHA;
             const shortSha = headSha.slice(0, 7);
+            const runId = context.payload.workflow_run.id;
             const label = 'main-red';
+
+            // Job names of the lanes that actually compile and run Rust.
+            // The `changes` gate skips all of them on a docs- or dependency-only push, so a `success` conclusion from such a run proves nothing about the state of the Rust build.
+            const RUST_TEST_LANE = /^Test \/ (Windows|macOS|Ubuntu|Unit)/;
 
             // Ensure the label exists; ignore "already_exists" 422.
             try {
@@ -61,6 +71,35 @@ jobs:
             });
 
             if (conclusion === 'success') {
+              if (open.length === 0) return;
+
+              // A green run only clears an open `main-red` issue if at least one Rust test lane actually ran on this commit.
+              // Docs- and dependency-only pushes skip every Rust lane and still report `success`, which is how the Windows breakage from #6711 was filed and falsely auto-closed three times (#6716, #6721, #6729) while main stayed red.
+              // Errors here mean we do not know, so we leave the issue open — a false close hides a real breakage, a false open costs one glance.
+              let rustLaneRan = false;
+              try {
+                const jobs = await github.paginate(
+                  github.rest.actions.listJobsForWorkflowRun,
+                  {
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    run_id: runId,
+                    per_page: 100,
+                  }
+                );
+                rustLaneRan = jobs.some(
+                  job => RUST_TEST_LANE.test(job.name) && job.conclusion === 'success'
+                );
+              } catch (e) {
+                core.warning(`Could not enumerate jobs for ${shortSha}: ${e.message} — not auto-closing.`);
+                return;
+              }
+
+              if (!rustLaneRan) {
+                core.info(`Main CI succeeded on ${shortSha} (${runUrl}) but no Rust test lane ran on that commit — leaving open.`);
+                return;
+              }
+
               // Auto-close any open red-main issue when CI goes green again.
               for (const issue of open) {
                 await github.rest.issues.createComment({
@@ -83,14 +122,11 @@ jobs:
               return; // skipped/neutral/etc — nothing to do
             }
 
-            // ── Resolve the PR that introduced the breakage ──────────────
-            // The merge commit subject conventionally ends in `(#NNNN)`.
-            // Falling back to the listPullRequestsAssociatedWithCommit API
-            // covers squash-merges that ship without the PR suffix in the
-            // subject. Best-effort — title/body still readable if both fail.
-            let prNumber = null;
+            // ── Identify the head commit the run fired on ────────────────
+            // Identification only, deliberately NOT attribution: the run reports the state of `main` at this commit, which is not evidence that this commit caused the failure.
+            // A lane can be red from an earlier merge whose own run skipped it, from an infrastructure change, or from a flaky runner.
+            // Three consecutive filings (#6715, #6720, #6727) named unrelated openrouter snapshot PRs for a Windows breakage introduced days earlier by db81fe79, and the alert's "revert PR #N" line is what made that read as a verdict, so the PR number and commit author are no longer surfaced at all.
             let commitSubject = '';
-            let commitAuthor = '';
             try {
               const { data: commit } = await github.rest.repos.getCommit({
                 owner: context.repo.owner,
@@ -98,18 +134,6 @@ jobs:
                 ref: headSha,
               });
               commitSubject = (commit.commit.message || '').split('\n')[0];
-              commitAuthor = commit.author?.login || commit.commit.author?.name || '';
-              const m = commitSubject.match(/\(#(\d+)\)\s*$/);
-              if (m) {
-                prNumber = parseInt(m[1], 10);
-              } else {
-                const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  commit_sha: headSha,
-                });
-                if (prs.length > 0) prNumber = prs[0].number;
-              }
             } catch (e) {
               core.warning(`Could not resolve commit metadata for ${shortSha}: ${e.message}`);
             }
@@ -122,7 +146,7 @@ jobs:
                 {
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  run_id: context.payload.workflow_run.id,
+                  run_id: runId,
                   per_page: 100,
                 }
               );
@@ -142,17 +166,12 @@ jobs:
             }
 
             // ── Build the issue body ─────────────────────────────────────
+            // Strip the merge subject's trailing `(#NNNN)`: leaving it in renders as a cross-reference that back-links the issue onto that PR's timeline, which is the same false accusation in a quieter form.
+            // `shortSha` still auto-links to the commit, and the commit page names its PR, so nothing navigable is lost.
             const cleanSubject = commitSubject.replace(/\s*\(#\d+\)\s*$/, '');
+            const subj = cleanSubject ? ` — ${cleanSubject}` : '';
             const lines = [];
-            if (prNumber) {
-              const subj = cleanSubject ? ` — ${cleanSubject}` : '';
-              const by = commitAuthor ? ` by @${commitAuthor}` : '';
-              lines.push(`Main CI **${conclusion}** on PR #${prNumber}${subj}${by} (commit ${shortSha}).`);
-            } else {
-              const subj = cleanSubject ? ` — ${cleanSubject}` : '';
-              const by = commitAuthor ? ` by @${commitAuthor}` : '';
-              lines.push(`Main CI **${conclusion}** on commit ${shortSha}${subj}${by}.`);
-            }
+            lines.push(`Main CI **${conclusion}** on \`main\` at commit ${shortSha}${subj}.`);
             lines.push('');
             lines.push(`Run: ${runUrl}`);
             lines.push('');
@@ -166,16 +185,11 @@ jobs:
               lines.push('');
             }
 
-            lines.push(`Every open PR will inherit this failure on its next CI run.`);
-            if (prNumber) {
-              lines.push(`Either land a fix (preferred) or revert PR #${prNumber}.`);
-            } else {
-              lines.push(`Either land a fix (preferred) or revert the offending merge.`);
-            }
+            lines.push(`This is the state of \`main\` at that commit, not a claim that the commit introduced the failure — read the failing job's log before attributing it.`);
+            lines.push(`Every open PR will inherit this failure on its next CI run, so land a fix on \`main\` or revert the merge the log actually implicates.`);
 
             const body = lines.join('\n');
-            const titleSuffix = prNumber ? `PR #${prNumber}` : `${shortSha}`;
-            const title = `[main red] CI ${conclusion} on ${titleSuffix}`;
+            const title = `[main red] CI ${conclusion} on ${shortSha}`;
 
             if (open.length > 0) {
               await github.rest.issues.createComment({
