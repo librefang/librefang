@@ -132,8 +132,10 @@ pub struct ChannelOverrides {
     /// This must stay distinct from `Some(GroupPolicy::MentionOnly)` (the enum default): before #6445, writing any single override field silently flipped an unset group policy to `MentionOnly` and dropped all non-mention group traffic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_policy: Option<GroupPolicy>,
-    /// Regex patterns that can trigger a reply in group chats when
-    /// `group_policy` is `mention_only`.
+    /// Extra `regex`-crate patterns (full syntax, not globs) that widen the mention gate in group chats — a message matching any of them wakes the agent as if it had been @mentioned.
+    /// Only consulted under mention-only semantics: an explicit `group_policy = "mention_only"`, or an unset `group_policy` together with a non-empty list here (setting patterns is itself a gating decision, so it resolves to mention-only). Under `all` / `commands_only` / `ignore` the policy already decides and these are never read.
+    /// Prefer a TOML **literal** (single-quoted) string: `group_trigger_patterns = ['(?i)\bvivi\b']`. In a TOML *basic* (double-quoted) string `\b` is the backspace escape, so `"(?i)\bvivi\b"` silently becomes `(?i)<U+0008>vivi<U+0008>` — which the regex crate accepts as a literal, so it compiles without error and then never matches anything (#6732). The double-quoted form needs every backslash doubled: `"(?i)\\bvivi\\b"`.
+    /// A pattern that is unparseable, or that contains a control character from a mis-read escape, is reported with a `WARN` naming the agent when its manifest is accepted; it never blocks the spawn.
     #[serde(default)]
     pub group_trigger_patterns: Vec<String>,
     /// Enable LLM-based reply-intent precheck for group messages.

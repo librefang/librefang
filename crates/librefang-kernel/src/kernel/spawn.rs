@@ -55,7 +55,9 @@ impl LibreFangKernel {
     /// Runs the manifest module-path sandbox check (#3533), the reserved
     /// agent-name namespace check (#4980), and the tool_exec backend
     /// override check (#3332). None of these create sessions, directories,
-    /// or registry entries. Hand reactivation calls this for every role
+    /// or registry entries.
+    /// It also emits the report-only `group_trigger_patterns` diagnostic (#6732), which warns and never rejects — see `warn_invalid_group_trigger_patterns`.
+    /// Hand reactivation calls this for every role
     /// BEFORE killing the existing agents, so a malformed hand definition is
     /// rejected with the old agents and their cron/triggers still intact
     /// instead of after `kill_agent` has already wiped them (#5956).
@@ -74,6 +76,10 @@ impl LibreFangKernel {
             warn!(agent = %name, %reason, "Rejecting manifest — reserved agent-name namespace");
             return Err(KernelError::LibreFang(reason));
         }
+
+        // #6732: report-only, deliberately AFTER the rejecting checks and never
+        // `?`-propagated — a mis-escaped group trigger pattern must not block a spawn.
+        warn_invalid_group_trigger_patterns(manifest, name);
 
         if let Some(override_kind) = manifest.tool_exec_backend {
             if let Err(e) = self
