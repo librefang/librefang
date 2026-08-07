@@ -321,9 +321,9 @@ jobs:
             PFLAGS=""
             for c in $CRATES; do PFLAGS="$PFLAGS -p $c"; done
             echo "Selective build for:  $CRATES"
-            # No --lib: binary-only crates (librefang-cli, librefang-desktop)
-            # error with "no library targets found" otherwise. Default targets
-            # (lib + bins) are what we want anyway.
+            # No --lib: binary-only crates (librefang-cli) error with "no
+            # library targets found" otherwise. Default targets (lib + bins)
+            # are what we want anyway.
             cargo build $PFLAGS
             echo "Selective clippy for: $CRATES"
             cargo clippy $PFLAGS --all-targets --all-features -- -D warnings
@@ -782,7 +782,7 @@ jobs:
   #
   # Filter via nextest's expression language (`-E`) instead of `--lib --bins`:
   # the latter errors with "no library targets found" when a `-p <crate>`
-  # selector targets a binary-only crate (librefang-cli, librefang-desktop).
+  # selector targets a binary-only crate (librefang-cli).
   # The `-E 'kind(lib) | kind(bin)'` form matches whichever target kinds the
   # selected crates actually contain — silently skipping the missing kind for
   # bin-only crates — so the selective lane no longer breaks when a PR (or a
@@ -940,8 +940,8 @@ jobs:
             PFLAGS=""
             for c in $CRATES; do PFLAGS="$PFLAGS -p $c"; done
             # `--no-tests=pass` keeps PRs that only touch a crate without
-            # tests (e.g. librefang-desktop) from failing the selective lane
-            # — nextest defaults to exit-4 when -p X resolves to zero tests.
+            # tests from failing the selective lane — nextest defaults to
+            # exit-4 when -p X resolves to zero tests.
             cargo nextest run $PFLAGS --no-fail-fast --no-tests=pass
           fi
 
@@ -996,8 +996,24 @@ jobs:
           # one of M shards by the hash of its name. Adding tests doesn't
           # reshuffle the others; deleting tests doesn't either. Stable
           # buckets are critical for cache hit rates across runs.
-          cargo nextest run --workspace --no-fail-fast \
+          #
+          # `--exclude librefang-desktop`: its test binary builds and links on Windows but cannot be *loaded* — the process aborts at start with 0xc0000139 (STATUS_ENTRYPOINT_NOT_FOUND, "the specified procedure could not be found"), so nextest cannot even run `--list` against it and the whole lane aborts before a single test executes (#6729).
+          # A nextest filter expression (`-E 'not binary_id(…)'`) would not help: nextest still executes the binary during the list phase.
+          # Cargo's package-level `--exclude` is what keeps it out of the selected set entirely, and since nothing in the workspace depends on librefang-desktop (it is a leaf) it is then never built here.
+          # Its 11 tests are platform-independent URL/scheme logic and still run on the Ubuntu shards, the unit-fast lane and macOS; the separate link-only step below keeps the Windows compile+link coverage.
+          # Remove both once the missing DLL export is identified.
+          cargo nextest run --workspace --exclude librefang-desktop --no-fail-fast \
             --partition hash:${{ matrix.shard }}/2
+      # Restores the Windows compile+link coverage that `--exclude` above drops.
+      # This is the only Windows build of librefang-desktop in CI (release-desktop.yml is workflow_dispatch-only, mobile-smoke.yml is ubuntu/macOS), so without this a Windows-only break in the crate would reach a release tag unseen.
+      # `--no-run` rather than `cargo check` because only the former exercises the link step, which is where such a regression shows up.
+      # Its own step — not a trailing line in `Run tests` — so a failure elsewhere in the workspace does not skip it (`shell: bash` runs with `-e`), and so the alert workflow can name it as the failing step.
+      - name: Build librefang-desktop test targets (link-only)
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          OPENSSL_SRC_PERL: C:/Strawberry/perl/bin/perl.exe
+        run: cargo test -p librefang-desktop --all-targets --no-run
 
   # ── macOS tests: main-push only ────────────────────────────────────────────────
   # See test-windows above — macOS does not run on PRs (the PR test lane is
