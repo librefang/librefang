@@ -1,0 +1,2 @@
+Add ephemeral agent spawning: an agent can now spawn a disposable worker that runs a single task and returns its result directly, with no workspace, no SQLite persistence, and no registry entry to clean up.
+Reach it via `agent_spawn(ephemeral: true, ...)` or `POST /api/agents/spawn-ephemeral`, optionally backed by a reusable "agent type" template stored under `~/.librefang/templates/` and managed through the new `GET/POST/PUT/DELETE /api/agent-types` endpoints and the dashboard's Agent Types page (#6723) (@DaBlitzStein)
