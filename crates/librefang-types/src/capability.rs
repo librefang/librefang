@@ -224,10 +224,8 @@ pub fn glob_matches(pattern: &str, value: &str) -> bool {
     if pattern == value {
         return true;
     }
-    // Wildcard grants must never manufacture access through filesystem
-    // traversal components, even when the pattern itself has no separator
-    // and would otherwise take the legacy matcher path. Bare `*` above is
-    // the documented universal grant; an exact grant above remains explicit.
+    // Wildcard grants must never manufacture access through filesystem traversal components, even when the pattern itself has no separator and would otherwise take the legacy matcher path.
+    // Bare `*` above is the documented universal grant; an exact grant above remains explicit.
     if has_path_traversal_segment(value) {
         return false;
     }
