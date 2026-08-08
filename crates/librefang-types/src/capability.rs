@@ -195,7 +195,8 @@ pub fn validate_capability_inheritance(
 /// `data/*` matches `data/file.txt` but NOT `data/../../etc/passwd`.
 ///
 /// **Double-segment wildcard `**`** — matches any characters including `/`,
-/// so `data/**` matches `data/a/b/c/file.txt`.
+/// so `data/**` matches `data/a/b/c/file.txt`. Path values containing literal
+/// `.` or `..` segments never match a path glob.
 ///
 /// **Bare `*`** (the entire pattern is just `"*"`) — matches anything, for
 /// backward compatibility with the universal wildcard grant.
@@ -306,6 +307,12 @@ fn glob_matches_path(pattern: &str, value: &str) -> bool {
     const SEPS: &[char] = &['/', '\\'];
     let pat_segs: Vec<&str> = pattern.split(SEPS).collect();
     let val_segs: Vec<&str> = value.split(SEPS).collect();
+    if val_segs
+        .iter()
+        .any(|segment| matches!(*segment, "." | ".."))
+    {
+        return false;
+    }
     glob_match_segments(&pat_segs, &val_segs)
 }
 
@@ -620,6 +627,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_path_globs_reject_dot_and_parent_segments() {
+        for (pattern, value) in [
+            ("data/*", "data/.."),
+            ("data/*", "data/."),
+            ("data/**", "data/../../etc/passwd"),
+            ("data/**", "data/./file.txt"),
+            ("C:\\data\\**", "C:\\data\\..\\Windows\\secret"),
+        ] {
+            assert!(
+                !glob_matches(pattern, value),
+                "path glob {pattern:?} must reject traversal value {value:?}"
+            );
+        }
+
+        assert!(
+            glob_matches("data/**", "data/.env"),
+            "ordinary dot-prefixed names are not traversal segments"
+        );
+    }
+
     /// URL capability patterns: `*` in the host portion must NOT match an
     /// entirely different domain. The host string is already extracted as
     /// `hostname:port` before this function is called, so the separator to
@@ -676,6 +704,14 @@ mod tests {
         assert!(!capability_matches(
             &Capability::FileRead("/data/*".to_string()),
             &Capability::FileRead("/data/../../etc/passwd".to_string()),
+        ));
+        assert!(!capability_matches(
+            &Capability::FileRead("/data/**".to_string()),
+            &Capability::FileRead("/data/../../etc/passwd".to_string()),
+        ));
+        assert!(!capability_matches(
+            &Capability::FileWrite("/data/*".to_string()),
+            &Capability::FileWrite("/data/..".to_string()),
         ));
     }
 
