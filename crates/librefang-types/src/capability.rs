@@ -195,8 +195,10 @@ pub fn validate_capability_inheritance(
 /// `data/*` matches `data/file.txt` but NOT `data/../../etc/passwd`.
 ///
 /// **Double-segment wildcard `**`** — matches any characters including `/`,
-/// so `data/**` matches `data/a/b/c/file.txt`. Path values containing literal
-/// `.` or `..` segments never match a path glob.
+/// so `data/**` matches `data/a/b/c/file.txt`.
+///
+/// Any value containing a literal `.` or `..` path segment is rejected up front, before pattern dispatch, regardless of which matcher below would otherwise have handled it.
+/// This closes the traversal bypass for `**` (which can span segments) and for separator-free patterns (which fall through to the legacy matcher).
 ///
 /// **Bare `*`** (the entire pattern is just `"*"`) — matches anything, for
 /// backward compatibility with the universal wildcard grant.
