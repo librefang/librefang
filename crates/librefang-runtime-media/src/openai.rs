@@ -50,14 +50,10 @@ impl OpenAIMediaDriver {
 
 /// Whether `/images/generations` accepts a `response_format` parameter for this model.
 ///
-/// The DALL·E models take `response_format` as `"url"` or `"b64_json"`. The
-/// `gpt-image-*` family rejects the parameter outright with
-/// `400 Unknown parameter: 'response_format'` and always returns base64, so
-/// sending it makes every image request fail against those models.
+/// The DALL·E models take `response_format` as `"url"` or `"b64_json"`.
+/// The `gpt-image-*` family rejects the parameter outright with `400 Unknown parameter: 'response_format'` and always returns base64, so sending it makes every image request fail against those models.
 ///
-/// Defaulting to `true` for unrecognised names keeps third-party
-/// OpenAI-compatible endpoints on the behaviour they have today; only the
-/// family known to reject it is special-cased.
+/// Defaulting to `true` for unrecognised names keeps third-party OpenAI-compatible endpoints on the behaviour they have today; only the family known to reject it is special-cased.
 fn image_model_accepts_response_format(model: &str) -> bool {
     !model.starts_with("gpt-image")
 }
@@ -417,9 +413,8 @@ impl MediaDriver for GenericOpenAICompatMediaDriver {
 mod tests {
     use super::*;
 
-    /// `gpt-image-*` rejects `response_format` with `400 Unknown parameter`, so
-    /// sending it makes every image request against that family fail. DALL·E
-    /// requires it to get base64 back instead of an expiring URL.
+    /// `gpt-image-*` rejects `response_format` with `400 Unknown parameter`, so sending it makes every image request against that family fail.
+    /// DALL·E requires it to get base64 back instead of an expiring URL.
     #[test]
     fn gpt_image_models_do_not_accept_response_format() {
         assert!(!image_model_accepts_response_format("gpt-image-1"));
@@ -432,8 +427,7 @@ mod tests {
         assert!(image_model_accepts_response_format("dall-e-2"));
     }
 
-    /// Unknown names keep today's behaviour so third-party OpenAI-compatible
-    /// endpoints are not changed by this fix.
+    /// Unknown names keep today's behaviour so third-party OpenAI-compatible endpoints are not changed by this fix.
     #[test]
     fn unknown_image_models_keep_sending_response_format() {
         assert!(image_model_accepts_response_format("flux-pro"));

@@ -1659,25 +1659,17 @@ mod tests {
         assert!(result.unwrap_err().contains("Expected image"));
     }
 
-    /// #6679: `transcribe_audio` must accept `MediaType::Video` (it used to
-    /// reject every non-`Audio` type outright) — asserted by checking the call
-    /// gets PAST the type guard, which needs no ffmpeg and reaches no network.
+    /// #6679: `transcribe_audio` must accept `MediaType::Video` (it used to reject every non-`Audio` type outright) — asserted by checking the call gets PAST the type guard, which needs no ffmpeg and reaches no network.
     ///
-    /// Which error comes back past the guard depends on the developer's
-    /// environment, so both are accepted. `transcribe_audio` resolves the
-    /// provider (`config.audio_provider`, else `detect_audio_provider()`, which
-    /// reads `OPENAI_API_KEY` / `GROQ_API_KEY` / … from the process) BEFORE it
-    /// reads the file. On a clean machine and in CI that resolution fails and
-    /// the call stops there; with any STT key exported it succeeds and the call
-    /// proceeds to the file read. Pinning only the provider message made this
-    /// test fail on any machine with a key configured, which is a statement
-    /// about the shell rather than about the type guard.
+    /// Which error comes back past the guard depends on the developer's environment, so both are accepted.
+    /// `transcribe_audio` resolves the provider (`config.audio_provider`, else `detect_audio_provider()`, which reads `OPENAI_API_KEY` / `GROQ_API_KEY` / … from the process) BEFORE it reads the file.
+    /// On a clean machine and in CI that resolution fails and the call stops there; with any STT key exported it succeeds and the call proceeds to the file read.
+    /// Pinning only the provider message made this test fail on any machine with a key configured, which is a statement about the shell rather than about the type guard.
     ///
-    /// The path must not exist for a second reason: it is what keeps the test
-    /// off the network. Provider resolution succeeding is not hypothetical, and
-    /// if the read then succeeded the next step would be a real, billable STT
-    /// call. A guaranteed-absent path makes that unreachable. Constructed
-    /// rather than borrowed from the host filesystem — see #5716.
+    /// The path must not exist for a second reason: it is what keeps the test off the network.
+    /// Provider resolution succeeding is not hypothetical, and if the read then succeeded the next step would be a real, billable STT call.
+    /// A guaranteed-absent path makes that unreachable.
+    /// Constructed rather than borrowed from the host filesystem — see #5716.
     #[tokio::test]
     async fn transcribe_audio_accepts_video_type() {
         let engine = MediaEngine::new(MediaConfig::default());

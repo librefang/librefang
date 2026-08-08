@@ -1,9 +1,6 @@
 //! Integration tests for the `/media/*` HTTP surface.
 //!
-//! These exercise the real `media` router against a freshly-booted kernel
-//! with no media-provider API keys configured — `boot()` strips them from the
-//! process environment rather than assuming the developer's shell has none, so
-//! a test asserting the missing-key path cannot silently make a billable call.
+//! These exercise the real `media` router against a freshly-booted kernel with no media-provider API keys configured — `boot()` strips them from the process environment rather than assuming the developer's shell has none, so a test asserting the missing-key path cannot silently make a billable call.
 //! We focus on:
 //!
 //! 1. Validation paths in each `MediaError`-producing handler — the cheap,
@@ -38,10 +35,7 @@ struct Harness {
 
 /// Every environment variable any media driver consults for credentials.
 ///
-/// Kept as one list rather than scattered per-test removals so that adding a
-/// provider to `librefang-runtime-media` and forgetting this array is the only
-/// way to regress — grep for `_API_KEY` under `crates/librefang-runtime-media/src/`
-/// to re-derive it.
+/// Kept as one list rather than scattered per-test removals so that adding a provider to `librefang-runtime-media` and forgetting this array is the only way to regress — grep for `_API_KEY` under `crates/librefang-runtime-media/src/` to re-derive it.
 const MEDIA_PROVIDER_KEY_VARS: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "ELEVENLABS_API_KEY",
@@ -60,25 +54,14 @@ const MEDIA_PROVIDER_KEY_VARS: &[&str] = &[
 
 /// Strip provider credentials from this test binary's environment.
 ///
-/// The module doc above says these tests run "with no media-provider API keys
-/// configured", but that was an assumption about the developer's shell rather
-/// than something the harness enforced. With `OPENAI_API_KEY` exported, tests
-/// whose names assert the *absence* of a provider stopped testing the
-/// missing-key path and instead made real, billable calls to OpenAI —
-/// `media_speech_no_configured_provider_returns_missing_key` asserted 422 and
-/// got 200 back with a generated mp3. A test that asserts "no configured
-/// provider" must be structurally incapable of reaching one.
+/// The module doc above says these tests run "with no media-provider API keys configured", but that was an assumption about the developer's shell rather than something the harness enforced.
+/// With `OPENAI_API_KEY` exported, tests whose names assert the *absence* of a provider stopped testing the missing-key path and instead made real, billable calls to OpenAI — `media_speech_no_configured_provider_returns_missing_key` asserted 422 and got 200 back with a generated mp3.
+/// A test that asserts "no configured provider" must be structurally incapable of reaching one.
 ///
-/// Every driver reads its key through `std::env::var` at call time
-/// (`openai.rs:42`, `:281`, and the equivalents in each sibling module), so
-/// clearing the process environment before the first request is what makes the
-/// assertion true rather than merely likely. This is an integration test, so
-/// the process is this test binary alone and nothing outside it is affected.
+/// Every driver reads its key through `std::env::var` at call time (`openai.rs:42`, `:281`, and the equivalents in each sibling module), so clearing the process environment before the first request is what makes the assertion true rather than merely likely.
+/// This is an integration test, so the process is this test binary alone and nothing outside it is affected.
 ///
-/// `Once` rather than a per-`boot()` loop because every test reaches its
-/// provider through a request issued after its own `boot()` returns, so a
-/// single clear that completes before the first harness is handed out covers
-/// all of them.
+/// `Once` rather than a per-`boot()` loop because every test reaches its provider through a request issued after its own `boot()` returns, so a single clear that completes before the first harness is handed out covers all of them.
 fn clear_media_provider_env() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -90,11 +73,9 @@ fn clear_media_provider_env() {
 
 /// The guard for the guard: `boot()` must leave the environment credential-free.
 ///
-/// Every other test in this file asserts a 4xx that is only meaningful when no
-/// provider is reachable. Those assertions can pass for the wrong reason — a
-/// bogus key set in the developer's shell produces a provider-side 401, which
-/// several of them would also accept. This one fails outright if the clearing
-/// stops happening, which is what makes the rest trustworthy.
+/// Every other test in this file asserts a 4xx that is only meaningful when no provider is reachable.
+/// Those assertions can pass for the wrong reason — a bogus key set in the developer's shell produces a provider-side 401, which several of them would also accept.
+/// This one fails outright if the clearing stops happening, which is what makes the rest trustworthy.
 #[tokio::test(flavor = "multi_thread")]
 async fn boot_clears_provider_credentials_from_the_environment() {
     let _h = boot().await;
