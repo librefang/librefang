@@ -6640,7 +6640,8 @@ async fn nested_workflow_run_past_max_agent_call_depth_is_capability_denied() {
     let wf = depth_probe_workflow();
     let wf_id = kernel.register_workflow(wf).await;
 
-    // Depth 0 — accepted. It still fails (the step's agent is not registered), but with `Internal("Workflow failed: ...")`, not the depth refusal.
+    // Depth 0 — accepted.
+    // It still fails (the step's agent is not registered), but with `Internal("Workflow failed: ...")`, not the depth refusal.
     let accepted = kernel.run_workflow(wf_id, "hello".to_string()).await;
     if let Err(KernelError::LibreFang(LibreFangError::CapabilityDenied(msg))) = accepted {
         panic!("a top-level workflow run must not be refused by the depth quota, got: {msg}");
@@ -6652,7 +6653,8 @@ async fn nested_workflow_run_past_max_agent_call_depth_is_capability_denied() {
          below (no run created on refusal) proves nothing"
     );
 
-    // Depth 2 == `max_agent_call_depth` — refused. Two nested `with_agent_call_depth` frames stand in for two stacked agent turns, which is exactly what the workflow step dispatch establishes in production.
+    // Depth 2 == `max_agent_call_depth` — refused.
+    // Two nested `with_agent_call_depth` frames stand in for two stacked agent turns, which is exactly what the workflow step dispatch establishes in production.
     let refused = librefang_runtime::tool_runner::with_agent_call_depth(
         librefang_runtime::tool_runner::with_agent_call_depth(
             kernel.run_workflow(wf_id, "hello".to_string()),
