@@ -68,7 +68,14 @@ async fn boot() -> Harness {
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
         user_api_keys: state.user_api_keys.clone(),
-        require_auth_for_reads: false,
+        // `true`, not the test-harness-typical `false`: production's own
+        // `derive_require_auth_for_reads` (server.rs) auto-enables this whenever any
+        // authentication is configured, which this harness's `[[users]]` always does.
+        // Every dashboard-read-public route (including bare `GET /api/agents`) must
+        // go through the real bearer check here, or `AuthenticatedApiUser` is never
+        // populated for those routes and the ownership assertions below would pass
+        // vacuously — see `non_admin_cannot_override_owner_filter_on_list_agents`.
+        require_auth_for_reads: true,
         allow_no_auth: false,
         audit_log: Some(state.kernel.audit().clone()),
     };
@@ -497,6 +504,63 @@ async fn cron_and_schedule_routes_enforce_owner_read() {
             jobs.iter()
                 .any(|j| j["id"] == serde_json::json!(job_id.to_string())),
             "{key} should still see the job in /api/cron/jobs"
+        );
+    }
+}
+
+async fn get_json(app: &Router, path: &str, bearer: &str) -> (StatusCode, serde_json::Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(path)
+                .header("authorization", format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("route response");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    (
+        status,
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn non_admin_cannot_override_owner_filter_on_list_agents() {
+    // `list_agents` only auto-injected `?owner=<caller>` when the query param was
+    // absent — a non-admin caller supplying `?owner=<someone-else>` explicitly was
+    // trusted as-is, defeating the ownership scoping this PR enforces on every
+    // other agent-scoped route.
+    let h = boot().await;
+    let alice_agent = spawn_authored(&h.state, "Alice");
+
+    // Bob explicitly asks for Alice's agents — must still be scoped to Bob, not Alice.
+    let (status, body) = get_json(&h.app, "/api/agents?owner=Alice", BOB_KEY).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body["items"].as_array().expect("items[]");
+    assert!(
+        items
+            .iter()
+            .all(|a| a["id"] != serde_json::json!(alice_agent.to_string())),
+        "Bob must not see Alice's agent even when explicitly requesting ?owner=Alice: {body}"
+    );
+
+    // Alice herself, and an Admin explicitly filtering by her name, still see it.
+    for key in [ALICE_KEY, ADMIN_KEY] {
+        let (status, body) = get_json(&h.app, "/api/agents?owner=Alice", key).await;
+        assert_eq!(status, StatusCode::OK);
+        let items = body["items"].as_array().expect("items[]");
+        assert!(
+            items
+                .iter()
+                .any(|a| a["id"] == serde_json::json!(alice_agent.to_string())),
+            "{key} should still see Alice's agent via ?owner=Alice: {body}"
         );
     }
 }
