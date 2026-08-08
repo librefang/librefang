@@ -163,7 +163,7 @@ fn is_safe_url(url: &str) -> bool {
     if decoded.chars().any(|ch| ch.is_ascii_control()) {
         return false;
     }
-    let lower = decoded.to_lowercase();
+    let lower = decoded.trim_matches(|ch| ch <= '\u{20}').to_lowercase();
     if lower.starts_with("javascript:") || lower.starts_with("vbscript:") {
         return false;
     }
@@ -489,6 +489,8 @@ mod tests {
             r#"<a href="&#x6a;avascript:alert(1)">x</a>"#,
             r#"<a href="jav&#x61;script&#58;alert(1)">x</a>"#,
             r#"<a href="javascript&colon;alert(1)">x</a>"#,
+            r#"<a href="&#32;javascript:alert(1)">x</a>"#,
+            r#"<a href="&#x20;javascript:alert(1)">x</a>"#,
             r#"<a href="java&Tab;script:alert(1)">x</a>"#,
             "<a href=\"java\tscript:alert(1)\">x</a>",
             "<a href=\"java\nscript:alert(1)\">x</a>",
