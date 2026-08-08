@@ -1031,9 +1031,8 @@ fn mime_to_ext(mime: &str) -> Option<String> {
 
 /// A scratch file that deletes itself when it goes out of scope.
 ///
-/// Used only where ffmpeg genuinely cannot work from a pipe — see
-/// `extract_video_audio_track`. Written by hand rather than pulling `tempfile`
-/// into this crate's dependencies for one call site.
+/// Used only where ffmpeg genuinely cannot work from a pipe — see `extract_video_audio_track`.
+/// Written by hand rather than pulling `tempfile` into this crate's dependencies for one call site.
 struct ScopedTempFile {
     path: std::path::PathBuf,
 }
@@ -1041,9 +1040,7 @@ struct ScopedTempFile {
 impl ScopedTempFile {
     /// Create a uniquely-named scratch file and write `bytes` into it.
     ///
-    /// Uniqueness comes from pid plus a process-wide counter, so two
-    /// concurrent extractions in the same process cannot collide and neither
-    /// can two daemons sharing a temp dir.
+    /// Uniqueness comes from pid plus a process-wide counter, so two concurrent extractions in the same process cannot collide and neither can two daemons sharing a temp dir.
     async fn write(bytes: &[u8], extension: &str) -> Result<Self, String> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1070,13 +1067,10 @@ impl Drop for ScopedTempFile {
 
 /// Run `ffmpeg` with the given arguments and collect stdout.
 ///
-/// `input_bytes` is `Some` when the input is fed on stdin (the args then name
-/// `pipe:0`), and `None` when the args already point at a path on disk. The
-/// distinction matters: a pipe cannot seek, and some containers require a
-/// backward seek to be demuxed at all — see `extract_video_audio_track`.
+/// `input_bytes` is `Some` when the input is fed on stdin (the args then name `pipe:0`), and `None` when the args already point at a path on disk.
+/// The distinction matters: a pipe cannot seek, and some containers require a backward seek to be demuxed at all — see `extract_video_audio_track`.
 ///
-/// Shared by every ffmpeg-based transcode in this module so the spawn / pipe /
-/// timeout / kill-on-timeout plumbing exists once.
+/// Shared by every ffmpeg-based transcode in this module so the spawn / pipe / timeout / kill-on-timeout plumbing exists once.
 ///
 /// `install_hint` names the feature that needs ffmpeg, so the "not on PATH"
 /// error tells the operator what stopped working rather than just that a
@@ -1103,8 +1097,7 @@ async fn run_ffmpeg_pipe(
 
     // Feed stdin concurrently; hanging the write inside the main task
     // would deadlock once ffmpeg's stdout pipe buffer fills.
-    // With a file input there is nothing to write — dropping the handle
-    // closes it so ffmpeg does not wait on a stdin that will never arrive.
+    // With a file input there is nothing to write — dropping the handle closes it so ffmpeg does not wait on a stdin that will never arrive.
     match (child.stdin.take(), input_bytes) {
         (Some(mut stdin), Some(bytes)) => {
             let bytes = bytes.to_vec();
@@ -1201,20 +1194,14 @@ async fn transcode_oga_to_ogg_opus(input_bytes: &[u8]) -> Result<Vec<u8>, String
 /// which is what makes this work across `mp4`/`mov`/`mkv`/`avi` uniformly
 /// rather than needing a format hint per extension.
 ///
-/// The input is staged to a scratch file rather than piped, because a pipe
-/// cannot seek and ISO-BMFF cannot always be demuxed without seeking (#6747).
+/// The input is staged to a scratch file rather than piped, because a pipe cannot seek and ISO-BMFF cannot always be demuxed without seeking (#6747).
 ///
-/// An `mp4` / `mov` stores its index in the `moov` atom. When `moov` sits after
-/// `mdat` — the default output of ffmpeg's own muxer, phone cameras, screen
-/// recorders and meeting exporters — the demuxer has to seek backwards to read
-/// it. Over `pipe:0` that fails, and it fails *quietly*: ffmpeg writes
-/// `Error during demuxing` to stderr but can still exit 0, emitting a
-/// header-only Ogg with zero audio packets. Those bytes then went to the
-/// transcription provider, and the operator saw whatever a provider says about
-/// a soundless file — arbitrarily far from the real cause.
+/// An `mp4` / `mov` stores its index in the `moov` atom.
+/// When `moov` sits after `mdat` — the default output of ffmpeg's own muxer, phone cameras, screen recorders and meeting exporters — the demuxer has to seek backwards to read it.
+/// Over `pipe:0` that fails, and it fails *quietly*: ffmpeg writes `Error during demuxing` to stderr but can still exit 0, emitting a header-only Ogg with zero audio packets.
+/// Those bytes then went to the transcription provider, and the operator saw whatever a provider says about a soundless file — arbitrarily far from the real cause.
 ///
-/// `mkv` and `avi` are streamable and were never affected, which is why the
-/// four container types enabled by #6679 / #6683 split exactly in half.
+/// `mkv` and `avi` are streamable and were never affected, which is why the four container types enabled by #6679 / #6683 split exactly in half.
 async fn extract_video_audio_track(input_bytes: &[u8]) -> Result<Vec<u8>, String> {
     let staged = ScopedTempFile::write(input_bytes, "media").await?;
     let input_path = staged.path.to_string_lossy().into_owned();
@@ -1244,11 +1231,9 @@ async fn extract_video_audio_track(input_bytes: &[u8]) -> Result<Vec<u8>, String
     )
     .await?;
 
-    // Defence in depth for the silent half of #6747. The staged file fixes the
-    // cause, but neither guard in `run_ffmpeg_pipe` can catch a demux that
-    // fails while the process still exits 0 and still writes a container: the
-    // exit code is success and the output is not empty. Exit-code behaviour
-    // also varies across ffmpeg builds, so it cannot be the only line.
+    // Defence in depth for the silent half of #6747.
+    // The staged file fixes the cause, but neither guard in `run_ffmpeg_pipe` can catch a demux that fails while the process still exits 0 and still writes a container: the exit code is success and the output is not empty.
+    // Exit-code behaviour also varies across ffmpeg builds, so it cannot be the only line.
     if !ogg_contains_audio(&out) {
         return Err(format!(
             "ffmpeg produced an Ogg stream with no audio packets ({} bytes) — \
@@ -1262,10 +1247,8 @@ async fn extract_video_audio_track(input_bytes: &[u8]) -> Result<Vec<u8>, String
 
 /// Whether an Ogg stream carries audio, rather than only its headers.
 ///
-/// An Opus stream opens with two header pages, `OpusHead` and `OpusTags`; audio
-/// data begins on the third. Counting `OggS` page captures is enough to tell a
-/// real stream from the 261-byte headers-only artefact a failed demux produces,
-/// and does not require parsing the container.
+/// An Opus stream opens with two header pages, `OpusHead` and `OpusTags`; audio data begins on the third.
+/// Counting `OggS` page captures is enough to tell a real stream from the 261-byte headers-only artefact a failed demux produces, and does not require parsing the container.
 fn ogg_contains_audio(bytes: &[u8]) -> bool {
     const OGG_PAGE_MAGIC: &[u8; 4] = b"OggS";
     bytes
@@ -1603,30 +1586,19 @@ mod tests {
         );
     }
 
-    /// #6747: a plain, non-fragmented mp4 — `moov` written after `mdat`, which
-    /// is what every phone camera, screen recorder and meeting exporter
-    /// produces — must yield a stream with actual audio in it.
+    /// #6747: a plain, non-fragmented mp4 — `moov` written after `mdat`, which is what every phone camera, screen recorder and meeting exporter produces — must yield a stream with actual audio in it.
     ///
-    /// The existing smoke test cannot catch this, for two independent reasons,
-    /// and both had to be fixed here for the test to discriminate.
+    /// The existing smoke test cannot catch this, for two independent reasons, and both had to be fixed here for the test to discriminate.
     ///
-    /// Its fixture passes `-movflags frag_keyframe+empty_moov`, producing a
-    /// *fragmented* mp4 — the one mp4 flavour that demuxes from a non-seekable
-    /// pipe. It exercised precisely the shape that worked.
+    /// Its fixture passes `-movflags frag_keyframe+empty_moov`, producing a *fragmented* mp4 — the one mp4 flavour that demuxes from a non-seekable pipe.
+    /// It exercised precisely the shape that worked.
     ///
-    /// It is also only ~8 KB, and that alone is disqualifying. ffmpeg buffers
-    /// the head of an unseekable input (32 KB by default), so a file small
-    /// enough to fit entirely in that buffer can still be "seeked" backwards
-    /// and demuxes fine over a pipe. Measured against ffmpeg 8.1.1: a 0.5 s /
-    /// 11 KB clip yields 2,500 bytes of Ogg and succeeds, while 5 s / 69 KB,
-    /// 30 s / 389 KB and 120 s / 1.5 MB all yield exactly 261 bytes with
-    /// `stream 0, offset 0x30: partial file` on stderr. That is why the
-    /// fixture below is 10 s rather than the smoke test's 0.5 s — a shorter
-    /// one passes with or without the fix.
+    /// It is also only ~8 KB, and that alone is disqualifying.
+    /// ffmpeg buffers the head of an unseekable input (32 KB by default), so a file small enough to fit entirely in that buffer can still be "seeked" backwards and demuxes fine over a pipe.
+    /// Measured against ffmpeg 8.1.1: a 0.5 s / 11 KB clip yields 2,500 bytes of Ogg and succeeds, while 5 s / 69 KB, 30 s / 389 KB and 120 s / 1.5 MB all yield exactly 261 bytes with `stream 0, offset 0x30: partial file` on stderr.
+    /// That is why the fixture below is 10 s rather than the smoke test's 0.5 s — a shorter one passes with or without the fix.
     ///
-    /// The assertions are the ones the old code failed: a header-only Ogg is
-    /// non-empty, starts with `OggS`, and is smaller than the source mp4, so
-    /// every assertion in the smoke test passed on a stream carrying no audio.
+    /// The assertions are the ones the old code failed: a header-only Ogg is non-empty, starts with `OggS`, and is smaller than the source mp4, so every assertion in the smoke test passed on a stream carrying no audio.
     #[tokio::test]
     async fn extract_video_audio_track_handles_non_fragmented_mp4_6747() {
         if !ffmpeg_available() {
@@ -1634,10 +1606,8 @@ mod tests {
             return;
         }
 
-        // Written to a file rather than `pipe:1`: a non-fragmented mp4 cannot
-        // be *muxed* to a pipe either, since the muxer rewinds to write moov.
-        // Generating the fixture the same way the failing input arises is the
-        // point of the test.
+        // Written to a file rather than `pipe:1`: a non-fragmented mp4 cannot be *muxed* to a pipe either, since the muxer rewinds to write moov.
+        // Generating the fixture the same way the failing input arises is the point of the test.
         let dir = std::env::temp_dir().join(format!("librefang-6747-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let fixture = dir.join("plain.mp4");
@@ -1656,9 +1626,8 @@ mod tests {
                 "lavfi",
                 "-i",
                 "sine=frequency=440",
-                // 10 s at this size lands around 130 KB, comfortably past the
-                // 32 KB read-ahead buffer that lets a small unseekable input
-                // demux anyway. See the doc comment for the measured cutoff.
+                // 10 s at this size lands around 130 KB, comfortably past the 32 KB read-ahead buffer that lets a small unseekable input demux anyway.
+                // See the doc comment for the measured cutoff.
                 "-t",
                 "10",
                 "-c:v",
@@ -1695,12 +1664,11 @@ mod tests {
 
     /// The audio guard must reject a headers-only stream and accept a real one.
     ///
-    /// Pinned directly so the #6747 regression above cannot be satisfied by a
-    /// guard that returns `true` unconditionally.
+    /// Pinned directly so the #6747 regression above cannot be satisfied by a guard that returns `true` unconditionally.
     #[test]
     fn ogg_contains_audio_distinguishes_headers_from_audio() {
-        // Two pages: OpusHead + OpusTags, no audio. This is the shape of the
-        // 261-byte artefact a failed demux emitted.
+        // Two pages: OpusHead + OpusTags, no audio.
+        // This is the shape of the 261-byte artefact a failed demux emitted.
         let headers_only = b"OggS____OpusHead____OggS____OpusTags____".to_vec();
         assert!(!ogg_contains_audio(&headers_only));
 
