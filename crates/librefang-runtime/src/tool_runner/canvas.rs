@@ -499,7 +499,9 @@ mod tests {
             "<a href=\"java\nscript:alert(1)\">x</a>",
             "<a href=\"java\rscript:alert(1)\">x</a>",
             "<a href=\"java\0script:alert(1)\">x</a>",
+            r#"<a href="JaVaScRiPt:alert(1)">x</a>"#,
             r#"<img src="data:image/svg+xml;base64,PHN2Zz48c2NyaXB0PmFsZXJ0KDEpPC9zY3JpcHQ+PC9zdmc+">"#,
+            r#"<img src="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">"#,
         ] {
             let sanitized = sanitize_canvas_html(html, 512 * 1024).expect("sanitize");
             assert!(
