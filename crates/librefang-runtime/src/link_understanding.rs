@@ -17,9 +17,8 @@ pub struct LinkSummary {
 
 /// Extract URLs from text, with a network-free SSRF prefilter.
 ///
-/// Returns up to `max` valid, unique URLs that do not contain private literal
-/// targets or restricted hostnames. Any later fetch must still use the shared
-/// WebFetch SSRF resolver and pinned transport to validate DNS at connect time.
+/// Returns up to `max` valid, unique URLs that do not contain private literal targets or restricted hostnames.
+/// Any later fetch must still use the shared WebFetch SSRF resolver and pinned transport to validate DNS at connect time.
 pub fn extract_urls(text: &str, max: usize) -> Vec<String> {
     // Simple but effective URL regex
     let url_pattern = regex_lite::Regex::new(
@@ -54,8 +53,7 @@ pub fn extract_urls(text: &str, max: usize) -> Vec<String> {
 }
 
 /// Check URL syntax, userinfo, restricted hostnames, and literal IP ranges.
-/// This intentionally performs no DNS resolution because link extraction is
-/// synchronous and does not initiate network I/O.
+/// This intentionally performs no DNS resolution because link extraction is synchronous and does not initiate network I/O.
 fn is_private_url(url: &str) -> bool {
     let parsed = match url::Url::parse(url) {
         Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => parsed,
@@ -97,6 +95,14 @@ fn is_blocked_literal_ip(ip: std::net::IpAddr) -> bool {
                 return true;
             }
         }
+        // NAT64 well-known prefix (64:ff9b::/96, RFC 6052) embeds an IPv4 address in the low 32 bits.
+        // `crate::web_fetch::is_private_ip` / `is_cloud_metadata_ip` already unwrap this internally for RFC1918 / link-local / metadata ranges, but loopback (127.0.0.0/8) and unspecified (0.0.0.0) are only checked against `canonical` below, which this branch does not populate for NAT64.
+        // Recurse explicitly so e.g. `64:ff9b::7f00:1` (embedded 127.0.0.1) is not missed.
+        if let Some(embedded) = crate::web_fetch::extract_nat64_well_known(&v6) {
+            if is_blocked_literal_ip(std::net::IpAddr::V4(embedded)) {
+                return true;
+            }
+        }
     }
 
     let canonical = match ip {
@@ -116,8 +122,8 @@ fn is_blocked_literal_ip(ip: std::net::IpAddr) -> bool {
     }
 
     match canonical {
-        // Treat the complete "this network" block as non-public. URL parsers
-        // and OS resolvers may interpret alternate spellings as these values.
+        // Treat the complete "this network" block as non-public.
+        // URL parsers and OS resolvers may interpret alternate spellings as these values.
         std::net::IpAddr::V4(v4) => v4.octets()[0] == 0,
         std::net::IpAddr::V6(_) => false,
     }
@@ -209,6 +215,20 @@ mod tests {
         assert!(is_private_url("http://[2002:7f00:1::]/admin"));
         assert!(is_private_url("http://2130706433/admin"));
         assert!(is_private_url("http://0x7f000001/admin"));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_nat64_embedded_ips() {
+        // 64:ff9b::/96 (RFC 6052) embeds an IPv4 address in the low 32 bits.
+        // `is_private_ip`/`is_cloud_metadata_ip` unwrap this internally for
+        // RFC1918/link-local/metadata ranges, but loopback and unspecified
+        // are only caught by the explicit recursion added above — regression
+        // coverage for that gap.
+        assert!(is_private_url("http://[64:ff9b::7f00:1]/admin")); // embeds 127.0.0.1
+        assert!(is_private_url("http://[64:ff9b::]/admin")); // embeds 0.0.0.0
+        assert!(is_private_url("http://[64:ff9b::a00:1]/admin")); // embeds 10.0.0.1
+        assert!(is_private_url("http://[64:ff9b::a9fe:a9fe]/admin")); // embeds 169.254.169.254
+        assert!(!is_private_url("http://[64:ff9b::808:808]/admin")); // embeds 8.8.8.8 (public)
     }
 
     #[test]
