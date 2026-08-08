@@ -167,9 +167,8 @@ pub fn proxied_client_builder() -> reqwest::ClientBuilder {
 
 /// Build an HTTP client that never uses configured or environment proxies.
 ///
-/// SSRF-sensitive callers that pin a hostname to locally validated socket
-/// addresses must connect directly. A proxy can resolve the original hostname
-/// itself, bypassing reqwest's DNS overrides and reopening DNS rebinding.
+/// SSRF-sensitive callers that pin a hostname to locally validated socket addresses must connect directly.
+/// A proxy can resolve the original hostname itself, bypassing reqwest's DNS overrides and reopening DNS rebinding.
 pub fn direct_client_builder() -> reqwest::ClientBuilder {
     build_http_client(&ProxyConfig::default()).no_proxy()
 }

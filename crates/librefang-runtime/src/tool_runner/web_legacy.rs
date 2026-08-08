@@ -237,8 +237,8 @@ mod tests {
         );
         let resolution = crate::web_fetch::SsrfResolution {
             hostname: "legacy-fetch.test".to_string(),
-            // The historical loop of `resolve()` calls kept only the last
-            // address. Keep the reachable address first to catch that loss.
+            // The historical loop of `resolve()` calls kept only the last address.
+            // Keep the reachable address first to catch that loss.
             resolved: vec![*server.address(), unreachable],
         };
         let client = build_legacy_fetch_client(resolution).expect("client should build");
