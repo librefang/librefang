@@ -343,10 +343,11 @@ impl AuthManager {
     /// The replacement is built before publication.
     /// Concurrent readers retain either the complete old generation or the complete new generation.
     pub fn reload(&self, user_configs: &[UserConfig], tool_groups: &[ToolGroup]) {
-        self.snapshot
-            .store(Arc::new(Self::build_snapshot(user_configs, tool_groups)));
+        let snapshot = Self::build_snapshot(user_configs, tool_groups);
+        let registered_users = snapshot.users.len();
+        self.snapshot.store(Arc::new(snapshot));
         info!(
-            users = user_configs.len(),
+            users = registered_users,
             tool_groups = tool_groups.len(),
             "AuthManager reloaded from config"
         );
