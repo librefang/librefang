@@ -546,13 +546,11 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
                     return e;
                 }
 
-                // DNS-pinned, non-redirecting client: connect to the exact IPs
-                // we just validated for this hop.
-                let mut builder = librefang_http::proxied_client_builder()
-                    .redirect(reqwest::redirect::Policy::none());
-                for addr in &ssrf_result.resolved {
-                    builder = builder.resolve(&ssrf_result.hostname, *addr);
-                }
+                // Direct, DNS-pinned, non-redirecting client: connect to the exact IPs validated for this hop.
+                // Proxies are disabled because proxy-side DNS would bypass reqwest's overrides.
+                let builder = librefang_http::direct_client_builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .resolve_to_addrs(&ssrf_result.hostname, &ssrf_result.resolved);
                 let client = builder.build().expect("HTTP client build");
                 let request = match current_method.as_str() {
                     "POST" => client.post(&current_url).body(current_body.clone()),

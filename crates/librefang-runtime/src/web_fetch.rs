@@ -33,8 +33,7 @@ impl WebFetchEngine {
 
     /// Build a per-request reqwest client pinned to the SSRF-validated IPs.
     ///
-    /// Uses the resolved addresses from [`check_ssrf`] to configure DNS
-    /// pinning on the builder, preventing DNS-rebinding TOCTOU attacks.
+    /// Uses the resolved addresses from [`check_ssrf`] to configure DNS pinning on a direct (no-proxy) builder, preventing both local and proxy-side DNS rebinding TOCTOU attacks.
     ///
     /// Auto-redirects are **disabled** (`Policy::none`). A `Policy::custom`
     /// that re-runs `check_ssrf` on each hop is not enough: reqwest
@@ -46,7 +45,7 @@ impl WebFetchEngine {
     /// [`Self::send_with_pinned_redirects`], which re-validates AND re-pins
     /// every hop so the IP we checked is the IP we connect to.
     pub(crate) fn pinned_client(&self, resolution: SsrfResolution) -> reqwest::Client {
-        let builder = crate::http_client::proxied_client_builder()
+        let builder = crate::http_client::direct_client_builder()
             .timeout(std::time::Duration::from_secs(self.config.timeout_secs))
             .redirect(reqwest::redirect::Policy::none())
             .gzip(true)
