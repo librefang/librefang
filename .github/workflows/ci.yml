@@ -56,6 +56,7 @@ jobs:
       crates: ${{ steps.diff.outputs.crates }}
       skill_sdk: ${{ steps.diff.outputs.skill_sdk }}
       sidecar_rust: ${{ steps.diff.outputs.sidecar_rust }}
+      sdk_python: ${{ steps.diff.outputs.sdk_python }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -79,6 +80,7 @@ jobs:
               echo "rust=true"; echo "docs=true"; echo "ci=true"; echo "install=true"
               echo "full_run=true"; echo "full_test=true"
               echo "skill_sdk=true"; echo "sidecar_rust=true"
+              echo "sdk_python=true"
               echo "crates="
             } >> "$GITHUB_OUTPUT"
             echo "merge_group: forcing full run on all platforms"
@@ -126,6 +128,10 @@ jobs:
           # pipeline relies on, catching cross / sibling-path-dep breakage at
           # PR time. See #5936.
           SIDECAR_RUST=false; has '^(sdk/rust/librefang-sidecar/|sdk/rust/librefang-sidecar-telegram/|\.github/workflows/release(-cli)?\.yml$)' && SIDECAR_RUST=true
+          # The Python SDK carries the sidecar channel adapters (slack, discord, telegram, …) and ~1900 pytest cases that no lane ran before #6741.
+          # `sdk/` is folded into RUST above only as an openapi/codegen drift guard — that lane runs cargo, never pytest — so a Python-only regression shipped green.
+          # Route `sdk/python/**` to its own job.
+          SDK_PYTHON=false; has '^sdk/python/' && SDK_PYTHON=true
           # Workspace-level Cargo manifest ≠ xtask source. A workspace
           # `Cargo.toml` change can shift dep versions, profile flags,
           # workspace lints, or membership — anything in the tree may
@@ -185,6 +191,7 @@ jobs:
             echo "full_test=$FULL_TEST"
             echo "skill_sdk=$SKILL_SDK"
             echo "sidecar_rust=$SIDECAR_RUST"
+            echo "sdk_python=$SDK_PYTHON"
           } >> "$GITHUB_OUTPUT"
           echo "Route: full_run=$FULL ($REASON), full_test=$FULL_TEST ($TREASON)"
 
@@ -406,6 +413,29 @@ jobs:
         # Mirrors the release pipeline's cross step. Proves `cross` can mount
         # and resolve the out-of-workspace `../librefang-sidecar` path dep.
         run: cross build --release --target aarch64-unknown-linux-musl --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
+
+  # ── Python SDK + sidecar adapter test suite ────────────────────────────────────
+  # `sdk/python/tests/` holds ~1900 pytest cases covering the HTTP client and every stdlib-only sidecar channel adapter (slack, discord, telegram, mastodon, …), and until #6741 no workflow ran a single one of them — `grep -rn pytest .github/workflows/` came back empty.
+  # The adapters are the production code path for every sidecar channel, so a regression there reached users with CI fully green.
+  # The suite is hermetic (urllib and the WebSocket client are monkeypatched, no network) and finishes in well under a minute, so it runs on any `sdk/python/**` change with no path-filter subtlety beyond that one prefix.
+  sdk-python:
+    name: Python SDK Tests
+    needs: changes
+    if: needs.changes.outputs.sdk_python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      # `pyproject.toml` declares `dependencies = []` with pytest / pytest-asyncio under `[project.optional-dependencies] dev`, so the editable install with the `dev` extra is the whole environment.
+      # Installing (rather than setting PYTHONPATH) is what makes `import librefang` resolve — running pytest from the repo root against an uninstalled tree fails with `ModuleNotFoundError: No module named 'librefang'`.
+      - name: Install the SDK with dev extras
+        run: python -m pip install -e './sdk/python[dev]'
+      # `working-directory` puts pytest's rootdir on `sdk/python`, so `[tool.pytest.ini_options]` — and with it `asyncio_mode = "auto"`, which the async adapter tests need — is picked up without relying on rootdir discovery walking up from an argument path.
+      - name: pytest
+        working-directory: sdk/python
+        run: python -m pytest tests -q
 
   # ── git-side hook corpus tests ─────────────────────────────────────────────────
   # `scripts/hooks/*` run inside git, so nothing in the Rust or dashboard test suites covers them, and their corpus tests under `scripts/tests/` existed without ever being wired into CI — the same gap #3400 closed for the changelog validator's own unit tests, one directory over.
@@ -1119,6 +1149,7 @@ jobs:
       - quality
       - skills-wasm-sdk
       - rust-telegram-sidecar
+      - sdk-python
       - githook-tests
       - image-vuln-gate
       - changelog-attribution
