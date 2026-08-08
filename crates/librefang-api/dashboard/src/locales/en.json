@@ -17,6 +17,7 @@
     "tasks": "Tasks",
     "goals": "Goals",
     "agents": "Agents",
+    "agent_types": "Agent Types",
     "users": "Users",
     "providers": "Providers",
     "channels": "Channels",
@@ -273,6 +274,30 @@
       "no_peers": "no peers"
     },
     "setup_failed": "Quick init failed"
+  },
+  "agentTypes": {
+    "title": "Agent Types",
+    "create": "Create Type",
+    "edit": "Edit Type",
+    "delete": "Delete Type",
+    "quickRun": "Quick Run",
+    "name": "Name",
+    "description": "Description",
+    "systemPrompt": "System Prompt",
+    "provider": "Provider",
+    "model": "Model",
+    "tools": "Tools",
+    "skills": "Skills",
+    "message": "Message",
+    "result": "Result",
+    "noTypes": "No agent types defined yet",
+    "confirmDelete": "Delete this agent type?",
+    "runSuccess": "Task completed",
+    "createSuccess": "Agent type created",
+    "ephemeral": "Ephemeral",
+    "iterations": "Iterations",
+    "latency": "Latency",
+    "cost": "Cost"
   },
   "agents": {
     "title": "Agents",

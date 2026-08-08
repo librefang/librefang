@@ -252,6 +252,57 @@ pub(super) async fn tool_agent_spawn(
 ) -> ToolResult {
     let kh = require_kernel_typed(kernel)?;
 
+    // Ephemeral path: spawn a temporary worker, run task, return result directly
+    if input["ephemeral"].as_bool().unwrap_or(false) {
+        let message = input["message"]
+            .as_str()
+            .ok_or(ToolError::MissingParameter("message"))?;
+
+        let spawn_sink = TaintSink::agent_message();
+        if let Some(violation) = check_taint_outbound_text(message, &spawn_sink) {
+            return Err(ToolError::PermissionDenied(format!(
+                "Taint violation (message): {violation}"
+            )));
+        }
+
+        let request = librefang_types::agent::EphemeralSpawnRequest {
+            system_prompt: input["system_prompt"].as_str().map(String::from),
+            agent_type: input["agent_type"].as_str().map(String::from),
+            model: input.get("model").and_then(|v| {
+                if let Some(s) = v.as_str() {
+                    // "provider/model" shorthand
+                    let mut parts = s.splitn(2, '/');
+                    let provider = parts.next().unwrap_or("default").to_string();
+                    let model = parts.next().unwrap_or("default").to_string();
+                    Some(librefang_types::agent::ModelConfig {
+                        provider,
+                        model,
+                        ..Default::default()
+                    })
+                } else {
+                    serde_json::from_value(v.clone()).ok()
+                }
+            }),
+            tools: input["tools"].as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            }),
+            skills: input["skills"].as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            }),
+            message: message.to_string(),
+            max_iterations: input["max_iterations"].as_u64().map(|v| v as u32),
+        };
+
+        return kh
+            .spawn_ephemeral(request, parent_id)
+            .await
+            .map_err(ToolError::upstream);
+    }
+
     let name = input["name"]
         .as_str()
         .ok_or(ToolError::MissingParameter("name"))?;
