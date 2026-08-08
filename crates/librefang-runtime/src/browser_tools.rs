@@ -14,6 +14,36 @@
 use crate::browser::{BrowserCommand, BrowserManager};
 use crate::tool_runner::ToolError;
 
+/// Render extracted page content together with its link table.
+///
+/// The extraction returns the two separately — prose carrying `⟨n⟩` markers, and a deduplicated marker-to-URL table — so that a caller reading `content` is unaffected and `browser_click` resolves a marker from data rather than by parsing prose.
+/// A tool result is a single string, so the two are joined here, and the table sits *inside* the untrusted-content boundary: every URL in it comes from the page and is exactly as attacker-controlled as the prose it was lifted out of.
+fn render_page(source_url: &str, data: &serde_json::Value) -> String {
+    let content = data["content"].as_str().unwrap_or("");
+    let links = data["links"].as_array();
+    let body = match links {
+        Some(links) if !links.is_empty() => {
+            let base = data["links_base"].as_str().unwrap_or("");
+            let mut out = String::with_capacity(content.len() + links.len() * 48);
+            out.push_str(content);
+            out.push_str("\n\nLinks (click with browser_click, e.g. \u{27e8}1\u{27e9})");
+            if !base.is_empty() {
+                out.push_str(&format!("; paths are relative to {base}"));
+            }
+            out.push('\n');
+            for l in links {
+                let (Some(id), Some(url)) = (l["id"].as_u64(), l["url"].as_str()) else {
+                    continue;
+                };
+                out.push_str(&format!("\u{27e8}{id}\u{27e9} {url}\n"));
+            }
+            out
+        }
+        _ => content.to_string(),
+    };
+    crate::web_content::wrap_external_content(source_url, &body)
+}
+
 pub async fn tool_browser_navigate(
     input: &serde_json::Value,
     mgr: &BrowserManager,
@@ -49,8 +79,7 @@ pub async fn tool_browser_navigate(
     let data = resp.data.unwrap_or_default();
     let title = data["title"].as_str().unwrap_or("(no title)");
     let page_url = data["url"].as_str().unwrap_or(url);
-    let content = data["content"].as_str().unwrap_or("");
-    let wrapped = crate::web_content::wrap_external_content(page_url, content);
+    let wrapped = render_page(page_url, &data);
 
     Ok(format!(
         "Navigated to: {page_url}\nTitle: {title}\n\n{wrapped}"
@@ -187,8 +216,7 @@ pub async fn tool_browser_read_page(
     let data = resp.data.unwrap_or_default();
     let title = data["title"].as_str().unwrap_or("(no title)");
     let url = data["url"].as_str().unwrap_or("");
-    let content = data["content"].as_str().unwrap_or("");
-    let wrapped = crate::web_content::wrap_external_content(url, content);
+    let wrapped = render_page(url, &data);
 
     Ok(format!("Page: {title}\nURL: {url}\n\n{wrapped}"))
 }
@@ -305,4 +333,67 @@ pub async fn tool_browser_back(
     let title = data["title"].as_str().unwrap_or("(no title)");
     let url = data["url"].as_str().unwrap_or("");
     Ok(format!("Went back.\nPage: {title}\nURL: {url}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn page_with_links() -> serde_json::Value {
+        serde_json::json!({
+            "title": "Hacker News",
+            "url": "https://news.ycombinator.com/",
+            "content": "Ask HN\u{27e8}1\u{27e9}\nRust\u{27e8}2\u{27e9}",
+            "links": [
+                {"id": 1, "url": "/ask"},
+                {"id": 2, "url": "https://rust-lang.org/"},
+            ],
+            "links_base": "https://news.ycombinator.com",
+        })
+    }
+
+    /// The link table is content lifted out of the page, so it belongs inside the untrusted-content boundary rather than in the trusted preamble around it.
+    #[test]
+    fn test_link_table_stays_inside_the_untrusted_boundary() {
+        let out = render_page("https://news.ycombinator.com/", &page_with_links());
+        let boundary = crate::web_content::content_boundary("https://news.ycombinator.com/");
+        let close = format!("<<</{boundary}>>>");
+        let table_at = out
+            .find("\u{27e8}1\u{27e9} /ask")
+            .expect("table is rendered");
+        let close_at = out.find(&close).expect("boundary is closed");
+        assert!(
+            table_at < close_at,
+            "a URL taken from the page must not sit outside the untrusted-content fence"
+        );
+    }
+
+    #[test]
+    fn test_link_table_lists_every_marker_the_prose_carries() {
+        let out = render_page("https://news.ycombinator.com/", &page_with_links());
+        assert!(out.contains("\u{27e8}1\u{27e9} /ask"));
+        // Cross-origin entries stay absolute; same-origin ones are a path.
+        assert!(out.contains("\u{27e8}2\u{27e9} https://rust-lang.org/"));
+        assert!(out.contains("relative to https://news.ycombinator.com"));
+    }
+
+    /// A page with no links renders exactly as it did before the table existed.
+    #[test]
+    fn test_page_without_links_is_unchanged() {
+        let data = serde_json::json!({"content": "Just prose.", "links": [], "links_base": ""});
+        assert_eq!(
+            render_page("https://example.com/", &data),
+            crate::web_content::wrap_external_content("https://example.com/", "Just prose.")
+        );
+    }
+
+    /// An extraction that predates the table — or any caller that only sets `content` — must still render, since `links` is an additive field.
+    #[test]
+    fn test_missing_links_field_falls_back_to_content_only() {
+        let data = serde_json::json!({"content": "Just prose."});
+        assert_eq!(
+            render_page("https://example.com/", &data),
+            crate::web_content::wrap_external_content("https://example.com/", "Just prose.")
+        );
+    }
 }
