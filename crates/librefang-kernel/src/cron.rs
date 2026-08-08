@@ -448,17 +448,20 @@ impl CronScheduler {
             .map_err(|e| LibreFangError::Internal(format!("Invalid delivery_targets: {e}")))?;
         }
 
-        // Run the same shape + SSRF validation `add_job` runs. We pass
-        // `existing_count = 0` because this is an in-place update on an
-        // existing job — capacity (MAX_JOBS_PER_AGENT) is unaffected by
-        // an update that doesn't change `agent_id`. Cross-agent moves
-        // are NOT capacity-checked here today; tracking under a
-        // separate follow-up issue (#4732 followup).
+        // Run the same shape, SSRF, and pre_script path validation as
+        // `add_job`. Count the candidate owner's other jobs so an in-place
+        // update does not count itself, while a cross-agent move still
+        // respects MAX_JOBS_PER_AGENT.
+        let existing_count = self
+            .jobs
+            .iter()
+            .filter(|entry| *entry.key() != id && entry.value().job.agent_id == candidate.agent_id)
+            .count();
         candidate
-            .validate(0)
+            .validate_with_home(existing_count, Some(&self.home_dir))
             .map_err(LibreFangError::InvalidInput)?;
 
-        // #5113 follow-up: `validate(0)` only checks field count and
+        // #5113 follow-up: shape validation only checks field count and
         // character set of the cron expression — it doesn't detect
         // semantically-impossible schedules like `"0 0 30 2 *"` (Feb 30,
         // never fires). `add_job` probes for this with
@@ -2668,6 +2671,88 @@ mod tests {
 
         // State invariant: targets must not have been partially written.
         assert!(sched.get_job(id).unwrap().delivery_targets.is_empty());
+    }
+
+    #[test]
+    fn update_job_rejects_pre_script_outside_home_scripts() {
+        let (sched, tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let id = sched.add_job(make_job(agent), false).unwrap();
+        let outside_script = tmp.path().join("outside.sh");
+        std::fs::write(&outside_script, "#!/bin/sh\n").unwrap();
+
+        let updates = serde_json::json!({
+            "action": {
+                "kind": "agent_turn",
+                "message": "run pre-processing",
+                "model_override": null,
+                "timeout_secs": null,
+                "pre_script": {"argv": [outside_script], "env": {}}
+            }
+        });
+        let err = sched
+            .update_job(id, &updates)
+            .expect_err("update must enforce the same pre_script allowlist as add");
+
+        assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
+        assert!(matches!(
+            sched.get_job(id).unwrap().action,
+            CronAction::SystemEvent { .. }
+        ));
+    }
+
+    #[test]
+    fn update_job_accepts_pre_script_inside_home_scripts() {
+        let (sched, tmp) = make_scheduler(100);
+        let scripts_dir = tmp.path().join("scripts");
+        std::fs::create_dir_all(&scripts_dir).unwrap();
+        let allowed_script = scripts_dir.join("allowed.sh");
+        std::fs::write(&allowed_script, "#!/bin/sh\n").unwrap();
+        let id = sched.add_job(make_job(AgentId::new()), false).unwrap();
+
+        let updates = serde_json::json!({
+            "action": {
+                "kind": "agent_turn",
+                "message": "run pre-processing",
+                "model_override": null,
+                "timeout_secs": null,
+                "pre_script": {"argv": [allowed_script], "env": {}}
+            }
+        });
+        let updated = sched.update_job(id, &updates).unwrap();
+
+        assert!(matches!(updated.action, CronAction::AgentTurn { .. }));
+    }
+
+    #[test]
+    fn update_job_counts_other_jobs_for_agent_limit() {
+        let (sched, _tmp) = make_scheduler(100);
+        let target_agent = AgentId::new();
+        let mut first_id = None;
+        for index in 0..librefang_types::scheduler::MAX_JOBS_PER_AGENT {
+            let mut job = make_job(target_agent);
+            job.name = format!("target-{index}");
+            let id = sched.add_job(job, false).unwrap();
+            first_id.get_or_insert(id);
+        }
+
+        sched
+            .update_job(
+                first_id.unwrap(),
+                &serde_json::json!({"name": "same-agent-update"}),
+            )
+            .expect("an update must exclude its own job from the limit count");
+
+        let source_agent = AgentId::new();
+        let source_id = sched.add_job(make_job(source_agent), false).unwrap();
+        let err = sched
+            .update_job(
+                source_id,
+                &serde_json::json!({"agent_id": target_agent.to_string()}),
+            )
+            .expect_err("a cross-agent move must respect the target agent limit");
+        assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
+        assert_eq!(sched.get_job(source_id).unwrap().agent_id, source_agent);
     }
 
     /// Issue #5113 follow-up: `update_job` must apply the same
