@@ -1180,9 +1180,8 @@ struct ReactionRecordingAdapter {
     name: String,
     channel_type: ChannelType,
     rx: Mutex<Option<mpsc::Receiver<ChannelMessage>>>,
-    /// Every reaction, paired with the `message_id` it targeted. The id is
-    /// what the Slack sidecar keys its receipt on (#6731), so a test that
-    /// asserts "this message got no reaction" needs it recorded.
+    /// Every reaction, paired with the `message_id` it targeted.
+    /// The id is what the Slack sidecar keys its receipt on (#6731), so a test that asserts "this message got no reaction" needs it recorded.
     reactions: Arc<Mutex<Vec<(String, LifecycleReaction)>>>,
     shutdown_tx: watch::Sender<bool>,
 }
@@ -1403,19 +1402,12 @@ async fn test_non_streaming_adapter_receives_tool_use_reaction() {
 // Group gating emits NO lifecycle reaction (#6731)
 // ---------------------------------------------------------------------------
 //
-// The Slack sidecar's eyes/check receipt keys off the `Queued` lifecycle phase
-// rather than off receiving a message, which is only correct if a message the
-// bridge declines to answer produces no lifecycle signal at all. Mention-only
-// group gating is the path #6731 was reported on: `dispatch_message` returns at
-// the `!should_process_group_message` arm, well before the first
-// `send_lifecycle_reaction(Queued)` call. This test pins that contract so a
-// future refactor that moved the reaction above the gate would resurrect the
-// permanently-stuck eyes on the Slack side.
+// The Slack sidecar's eyes/check receipt keys off the `Queued` lifecycle phase rather than off receiving a message, which is only correct if a message the bridge declines to answer produces no lifecycle signal at all.
+// Mention-only group gating is the path #6731 was reported on: `dispatch_message` returns at the `!should_process_group_message` arm, well before the first `send_lifecycle_reaction(Queued)` call.
+// This test pins that contract so a future refactor that moved the reaction above the gate would resurrect the permanently-stuck eyes on the Slack side.
 
-/// Handle that reports `group_policy = mention_only` as a per-agent override,
-/// the way an `agent.toml` `[channel_overrides]` block does. The trait default
-/// returns `None`, so without this the bridge sees no policy and processes
-/// every group message.
+/// Handle that reports `group_policy = mention_only` as a per-agent override, the way an `agent.toml` `[channel_overrides]` block does.
+/// The trait default returns `None`, so without this the bridge sees no policy and processes every group message.
 struct MockMentionOnlyHandle {
     agents: Mutex<Vec<(AgentId, String)>>,
 }
@@ -1457,8 +1449,7 @@ impl ChannelBridgeHandle for MockMentionOnlyHandle {
     fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}
 }
 
-/// Build a group message with an explicit platform message id, so a test can
-/// tell one message's reactions from another's.
+/// Build a group message with an explicit platform message id, so a test can tell one message's reactions from another's.
 fn make_group_msg(
     channel: ChannelType,
     group_id: &str,
@@ -1505,10 +1496,8 @@ async fn test_group_gating_skip_emits_no_lifecycle_reaction_6731() {
     let mut manager = BridgeManager::new(handle.clone(), router);
     manager.start_adapter(adapter.clone()).await.unwrap();
 
-    // Unaddressed first, then an addressed one. Both are dispatched on the same
-    // serialized adapter stream, so once the addressed message has reached its
-    // terminal phase the unaddressed one has had its full turn to produce a
-    // reaction — no sleeps needed to prove the absence.
+    // Unaddressed first, then an addressed one.
+    // Both are dispatched on the same serialized adapter stream, so once the addressed message has reached its terminal phase the unaddressed one has had its full turn to produce a reaction — no sleeps needed to prove the absence.
     tx.send(make_group_msg(
         ChannelType::Slack,
         "G01",
@@ -1528,8 +1517,7 @@ async fn test_group_gating_skip_emits_no_lifecycle_reaction_6731() {
     .await
     .unwrap();
 
-    // Positive control: the addressed message really did run a turn, so the
-    // harness and the override are both wired correctly.
+    // Positive control: the addressed message really did run a turn, so the harness and the override are both wired correctly.
     wait_until("done reaction for the addressed message", || {
         adapter_ref
             .phases_for("pass-1")
@@ -1538,8 +1526,7 @@ async fn test_group_gating_skip_emits_no_lifecycle_reaction_6731() {
     })
     .await;
 
-    // The gated-out message never got a lifecycle signal, so the Slack sidecar
-    // never adds an eyes it would have no way to clear.
+    // The gated-out message never got a lifecycle signal, so the Slack sidecar never adds an eyes it would have no way to clear.
     assert!(
         adapter_ref.phases_for("skip-1").is_empty(),
         "a mention-only-gated group message must produce no lifecycle reaction, got {:?}",
@@ -1583,9 +1570,7 @@ async fn test_group_gating_pass_emits_queued_then_done_6731() {
     })
     .await;
 
-    // Queued must arrive, and arrive first: it is what the Slack sidecar hangs
-    // the eyes on, and a Done without a preceding Queued would leave a turn
-    // with a check and no in-progress marker.
+    // Queued must arrive, and arrive first: it is what the Slack sidecar hangs the eyes on, and a Done without a preceding Queued would leave a turn with a check and no in-progress marker.
     let phases = adapter_ref.phases_for("pass-1");
     assert!(
         matches!(phases.first(), Some(AgentPhase::Queued)),
