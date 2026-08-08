@@ -928,9 +928,9 @@ impl A2aClient {
     /// [`build_client_for_url`], which:
     /// 1. Runs `web_fetch::check_ssrf` on the URL to resolve DNS once,
     ///    validate the addresses, and obtain a [`SsrfResolution`].
-    /// 2. Pins those exact addresses via `ClientBuilder::resolve` so the
-    ///    HTTP stack cannot re-resolve and connect to a different IP — this
-    ///    closes the DNS-rebinding TOCTOU window (#3563).
+    /// 2. Pins those exact addresses on a direct (no-proxy) client so neither
+    ///    the HTTP stack nor a proxy can re-resolve and connect to a different
+    ///    IP — this closes the DNS-rebinding TOCTOU window (#3563).
     /// 3. Installs a custom redirect policy that re-runs `check_ssrf` against
     ///    every redirect target (#3782), since the DNS pin only protects the
     ///    original hostname.
@@ -953,7 +953,7 @@ impl A2aClient {
         // already short-circuits on `response.status().is_redirection()`.
         let redirect_policy = reqwest::redirect::Policy::none();
 
-        let builder = crate::http_client::proxied_client_builder()
+        let builder = crate::http_client::direct_client_builder()
             .timeout(std::time::Duration::from_secs(30))
             .redirect(redirect_policy)
             // Bug #3785: disable transport-layer decompression. Otherwise
