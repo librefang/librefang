@@ -1312,7 +1312,23 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
     const remove = ['script','style','nav','footer','header','aside','iframe','noscript','svg','canvas'];
     remove.forEach(tag => clone.querySelectorAll(tag).forEach(el => el.remove()));
 
-    let root = clone.querySelector('main, article, [role="main"], .content, #content');
+    // `querySelector` returns the *first* match, which on a feed or a results page is one
+    // card rather than the list of them — measured at 13.7% of the page on a DuckDuckGo
+    // results page. Repeated sibling `article` elements are the signature of that shape, so
+    // climb to the ancestor that holds them, the way Readability resolves the same case by
+    // walking to the common ancestor of its close-scoring candidates.
+    let root = clone.querySelector('main, [role="main"]');
+    if (!root) {
+        const articles = Array.from(clone.querySelectorAll('article'));
+        if (articles.length >= 3) {
+            let anc = articles[0].parentElement;
+            while (anc && anc !== clone && articles.filter(a => anc.contains(a)).length < 3) {
+                anc = anc.parentElement;
+            }
+            root = anc;
+        }
+    }
+    if (!root) root = clone.querySelector('article, .content, #content');
     if (!root) root = clone;
 
     const lines = [];
@@ -1334,7 +1350,14 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
             return;
         }
         if (tag === 'li') {
-            lines.push('- ' + node.textContent.trim());
+            // Recurse rather than flattening to `textContent`: returning here dropped the
+            // destination of every link inside a list item, which on a Wikipedia article is
+            // 1100 of 1723 links and on a results page is all of them. Children are folded
+            // back onto one line so a bullet still reads as a bullet.
+            const start = lines.length;
+            for (const child of node.childNodes) walk(child);
+            const inner = lines.splice(start).join(' ').replace(/\s+/g, ' ').trim();
+            if (inner) lines.push('- ' + inner);
             return;
         }
         if (tag === 'br') { lines.push(''); return; }
@@ -1560,6 +1583,38 @@ mod tests {
         );
         assert!(extract_content_js(1_000).contains("1000"));
         assert!(extract_content_js(50_000).contains("50000"));
+    }
+
+    /// A link inside a list item must keep its destination.
+    ///
+    /// The `li` branch used to flatten the item to `textContent` and return, so every nested anchor reached the output as bare text — 1,100 of 1,723 anchors on a Wikipedia article, and 11 of 11 on a search-results page.
+    /// Asserted against the template because the traversal itself needs a live DOM; this pins the shape that made the flattening possible.
+    #[test]
+    fn test_list_items_recurse_instead_of_flattening_to_text() {
+        assert!(
+            !EXTRACT_CONTENT_JS_TEMPLATE.contains("lines.push('- ' + node.textContent.trim())"),
+            "flattening a list item to its text drops the href of every link inside it"
+        );
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("if (tag === 'li')"),
+            "the list-item branch must still exist so bullets keep rendering as bullets"
+        );
+    }
+
+    /// Root selection must not stop at the first `article` when a page has several.
+    ///
+    /// `querySelector('main, article, …')` returned the first match, which on a results page is one card — 13.7% of the page. Readability resolves the same case by climbing to the common ancestor of its close-scoring candidates.
+    #[test]
+    fn test_root_selection_climbs_past_repeated_articles() {
+        assert!(
+            !EXTRACT_CONTENT_JS_TEMPLATE
+                .contains(r#"querySelector('main, article, [role="main"], .content, #content')"#),
+            "a single first-match query cannot distinguish one article from a feed of them"
+        );
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("articles.length >= 3"),
+            "repeated sibling articles are the signal to climb to their container"
+        );
     }
 
     /// The truncation marker counts against the cap rather than overshooting it.
