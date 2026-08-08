@@ -643,6 +643,32 @@ async fn skillhub_install_path_traversal_hand_rejected_400() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn skillhub_install_accepts_canonical_max_length_hand_identifier() {
+    let h = boot().await;
+    let hand_id = "a".repeat(128);
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/skillhub/install",
+        Some(serde_json::json!({"slug": "anything", "hand": hand_id})),
+    )
+    .await;
+
+    // The hand does not exist in this isolated home, so reaching the lookup's
+    // 404 proves the canonical 128-character id passed API validation without
+    // allowing the request to continue to the network client.
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("not found"),
+        "expected the request to reach the hand lookup: {body:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/skills/uninstall — error path only.
 // ---------------------------------------------------------------------------
