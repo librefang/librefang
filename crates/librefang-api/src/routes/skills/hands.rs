@@ -67,18 +67,13 @@ pub async fn list_hands(
                 "degraded": degraded,
                 "is_custom": is_custom,
                 "requirements": reqs.iter().map(|(r, ok)| {
-                    let mut req = serde_json::json!({
-                        "key": r.check_value,
+                    serde_json::json!({
+                        "key": r.key,
+                        "check_value": r.check_value,
                         "label": r.label,
                         "satisfied": ok,
                         "optional": r.optional,
-                    });
-                    if *ok {
-                        if let Ok(val) = std::env::var(&r.check_value) {
-                            req["current_value"] = serde_json::json!(val);
-                        }
-                    }
-                    req
+                    })
                 }).collect::<Vec<_>>(),
                 "dashboard_metrics": d.dashboard.metrics.len(),
                 "has_settings": !d.settings.is_empty(),

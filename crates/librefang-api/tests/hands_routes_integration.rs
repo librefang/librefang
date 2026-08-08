@@ -234,6 +234,79 @@ async fn list_hands_response_is_application_json() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn list_hands_does_not_expose_satisfied_environment_variable_values() {
+    let h = boot_router_open().await;
+    let toml = r#"
+id = "secret-redaction-test"
+name = "Secret Redaction Test"
+description = "Verifies that requirement status never exposes values."
+category = "other"
+
+[[requires]]
+key = "process-path"
+label = "Process PATH"
+requirement_type = "env_var"
+check_value = "PATH"
+
+[agent]
+name = "secret-redaction-agent"
+description = "Test hand agent"
+system_prompt = "Test prompt"
+"#;
+
+    let (install_status, install_body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/install",
+        Some(serde_json::json!({
+            "toml_content": toml,
+            "skill_content": "# Test skill\n",
+        })),
+    )
+    .await;
+    assert_eq!(
+        install_status,
+        StatusCode::OK,
+        "install_hand body: {install_body}"
+    );
+
+    let (status, body) = get_json(&h.app, "/api/hands").await;
+    assert_eq!(status, StatusCode::OK);
+    let hand = body["items"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["id"] == "secret-redaction-test")
+        })
+        .unwrap_or_else(|| panic!("installed hand missing from list response: {body}"));
+    let requirement = hand["requirements"]
+        .as_array()
+        .and_then(|requirements| requirements.first())
+        .unwrap_or_else(|| panic!("installed hand requirement missing from list response: {hand}"));
+
+    assert_eq!(
+        requirement["satisfied"].as_bool(),
+        Some(true),
+        "{requirement}"
+    );
+    assert_eq!(
+        requirement["key"].as_str(),
+        Some("process-path"),
+        "{requirement}"
+    );
+    assert_eq!(
+        requirement["check_value"].as_str(),
+        Some("PATH"),
+        "{requirement}"
+    );
+    assert!(
+        requirement.get("current_value").is_none(),
+        "requirement status must not expose environment variable values: {requirement}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/hands/active — list active hand instances
 // ---------------------------------------------------------------------------
