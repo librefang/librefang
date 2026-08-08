@@ -713,39 +713,58 @@ fn group_trigger_pattern_diagnostic_is_wired_into_every_manifest_path() {
     //
     // The open/close scan loops within a line rather than handling one delimiter per line.
     // A single-line `/* … */` — `boot.rs` has one at the sqlite match arm — would otherwise leave the stripper stuck in block-comment state and silently swallow the entire rest of the file, including the call this test exists to find.
+    //
+    // The scan also tracks double-quoted string literals so a `//` inside one (e.g. `"https://api.everyapi.ai/v1"` in `boot.rs`) is not mistaken for a line-comment start.
+    // Without that, a call site sharing a line with such a literal would be silently truncated away, the same "shape check stops finding what it's for" failure mode this sentinel already fixed once for block comments.
     let strip = |src: &str| -> String {
         let mut out = String::with_capacity(src.len());
         let mut in_block = false;
         for line in src.lines() {
-            let mut s = line.to_string();
-            loop {
+            let mut kept = String::with_capacity(line.len());
+            let chars: Vec<char> = line.chars().collect();
+            let mut i = 0;
+            let mut in_string = false;
+            while i < chars.len() {
                 if in_block {
-                    match s.find("*/") {
-                        Some(end) => {
-                            s = s.split_at(end + 2).1.to_string();
-                            in_block = false;
-                        }
-                        None => {
-                            s.clear();
-                            break;
-                        }
+                    if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+                        in_block = false;
+                        i += 2;
+                    } else {
+                        i += 1;
                     }
+                    continue;
                 }
-                // A `//` before any `/*` ends the line — the `/*` is inside it.
-                let line_comment = s.find("//");
-                match s.find("/*") {
-                    Some(idx) if line_comment.is_none_or(|lc| idx < lc) => {
-                        out.push_str(&s[..idx]);
-                        s = s.split_at(idx + 2).1.to_string();
-                        in_block = true;
+                if in_string {
+                    kept.push(chars[i]);
+                    if chars[i] == '\\' && i + 1 < chars.len() {
+                        kept.push(chars[i + 1]);
+                        i += 2;
+                        continue;
                     }
-                    _ => break,
+                    if chars[i] == '"' {
+                        in_string = false;
+                    }
+                    i += 1;
+                    continue;
                 }
+                if chars[i] == '"' {
+                    in_string = true;
+                    kept.push(chars[i]);
+                    i += 1;
+                    continue;
+                }
+                if chars[i] == '/' && chars.get(i + 1) == Some(&'/') {
+                    break;
+                }
+                if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+                    in_block = true;
+                    i += 2;
+                    continue;
+                }
+                kept.push(chars[i]);
+                i += 1;
             }
-            if let Some(idx) = s.find("//") {
-                s.truncate(idx);
-            }
-            out.push_str(&s);
+            out.push_str(&kept);
             out.push('\n');
         }
         out
