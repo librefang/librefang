@@ -1314,22 +1314,25 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
 
     // `querySelector` returns the *first* match, which on a feed or a results page is one card rather than the list of them — measured at 13.7% of the page on a DuckDuckGo results page.
     // Repeated sibling `article` elements are the signature of that shape, so climb to the ancestor that holds them, the way Readability resolves the same case by walking to the common ancestor of its close-scoring candidates.
-    // The test is on the ancestor's *direct children*: at least three of them must each carry an article of their own.
-    // Merely containing three articles somewhere below is not the same shape and climbs too far — an ordinary post page whose "related posts" widget is built out of `article` clears that bar, and the climb then runs to the top of the document and pulls the widget in beside the post.
+    // The test is on a node's *direct children*: at least three of them must each carry an article of their own.
+    // Merely containing three articles somewhere below is not the same shape and reaches too far — an ordinary post page whose "related posts" widget is built out of `article` clears that bar, and selection then lands on the whole document and pulls the widget in beside the post.
     // Counting article-carrying children instead sees two there, one for the post and one for the widget, so selection falls through to the single-article path that page always had.
     // Counting the articles themselves as direct children would be the narrower rule and would miss a feed whose cards each sit in a wrapper, which is the common shape.
+    //
+    // Searched over the whole tree rather than climbed from the first article's ancestors, because the container is not always an ancestor of the article that happens to come first in the document.
+    // A featured card above a grid — `<div><article/></div>` followed by a sibling `<div>` of three more — puts the first article in a branch the grid is not under, so a climb never examines the grid at all and falls through to the very first-match query this exists to replace.
+    // The deepest qualifying node wins, so a page whose feed sits beside unrelated single-article widgets selects the feed rather than their common ancestor.
     let root = clone.querySelector('main, [role="main"]');
     if (!root) {
-        const articles = Array.from(clone.querySelectorAll('article'));
-        if (articles.length >= 3) {
-            let anc = articles[0].parentElement;
-            while (anc) {
-                const carriers = Array.from(anc.children).filter(c => c.tagName === 'ARTICLE' || c.querySelector('article'));
-                if (carriers.length >= 3) { root = anc; break; }
-                if (anc === clone) break;
-                anc = anc.parentElement;
+        const carriesArticle = el => el.tagName === 'ARTICLE' || el.querySelector('article');
+        function cardContainer(node) {
+            for (const child of node.children) {
+                const found = cardContainer(child);
+                if (found) return found;
             }
+            return Array.from(node.children).filter(carriesArticle).length >= 3 ? node : null;
         }
+        if (clone.querySelectorAll('article').length >= 3) root = cardContainer(clone);
     }
     if (!root) root = clone.querySelector('article, .content, #content');
     if (!root) root = clone;
@@ -1694,29 +1697,26 @@ mod tests {
         );
     }
 
-    /// Root selection must not stop at the first `article` when a page has several.
+    /// The first-match query must not be what selects the root on a page with several articles.
     ///
     /// `querySelector('main, article, …')` returned the first match, which on a results page is one card — 13.7% of the page.
-    /// Readability resolves the same case by climbing to the common ancestor of its close-scoring candidates.
+    /// Which container is chosen instead is pinned by behaviour in `test_root_selection_finds_a_container_of_repeated_cards`; this only guards the query from coming back.
     #[test]
-    fn test_root_selection_climbs_past_repeated_articles() {
+    fn test_root_selection_does_not_take_the_first_article_match() {
         assert!(
             !EXTRACT_CONTENT_JS_TEMPLATE
                 .contains(r#"querySelector('main, article, [role="main"], .content, #content')"#),
             "a single first-match query cannot distinguish one article from a feed of them"
         );
-        assert!(
-            EXTRACT_CONTENT_JS_TEMPLATE.contains("articles.length >= 3"),
-            "repeated sibling articles are the signal to climb to their container"
-        );
     }
 
-    /// The climb stops at a container of repeated cards, and does not run past it on a page that merely has articles in more than one place.
+    /// Selection finds the container of repeated cards, and does not reach past it on a page that merely has articles in more than one place.
     ///
-    /// Ported from the JS the script runs, because the climb needs a live DOM.
-    /// Counting *contained* articles rather than article-carrying children climbs to the top of the document on an ordinary post page whose "related posts" widget is built out of `article`, taking the widget along with the post.
+    /// Ported from the JS the script runs, because the search needs a live DOM.
+    /// Counting *contained* articles rather than article-carrying children reaches the whole document on an ordinary post page whose "related posts" widget is built out of `article`, taking the widget along with the post.
+    /// Anchoring on the first article's ancestors instead of searching the tree misses a grid that sits beside a featured card rather than under it.
     #[test]
-    fn test_root_climb_stops_at_a_container_of_repeated_cards() {
+    fn test_root_selection_finds_a_container_of_repeated_cards() {
         struct Node {
             tag: &'static str,
             name: &'static str,
@@ -1737,7 +1737,7 @@ mod tests {
 
         /// The chosen root's name, or `None` when selection falls through to the single-article path.
         ///
-        /// The script climbs from the first article upwards; walking down and taking the deepest ancestor that qualifies reaches the same node, since an ancestor of a qualifying node cannot qualify with fewer carriers.
+        /// The same depth-first search the script runs: children before the node itself, so the deepest qualifying node wins, and document order breaks ties between branches at the same depth.
         fn chosen(page: &Node) -> Option<&'static str> {
             if count_articles(page) < 3 {
                 return None;
@@ -1803,6 +1803,45 @@ mod tests {
             vec![el("div", "content", vec![article("only")])],
         );
         assert_eq!(chosen(&single), None);
+
+        // A featured card above the grid, which a search anchored on the first article cannot reach: the grid is that article's sibling subtree, not one of its ancestors.
+        let featured = el(
+            "body",
+            "body",
+            vec![
+                el("div", "lone", vec![article("featured")]),
+                el(
+                    "div",
+                    "feed",
+                    vec![article("a"), article("b"), article("c")],
+                ),
+            ],
+        );
+        assert_eq!(
+            chosen(&featured),
+            Some("feed"),
+            "a grid beside a featured card is still the grid, and returning the featured card alone is the bug this exists to fix"
+        );
+
+        // A feed flanked by unrelated single-article widgets: the deepest qualifying node is the feed, not the ancestor that happens to hold all three.
+        let flanked = el(
+            "body",
+            "body",
+            vec![
+                el(
+                    "div",
+                    "feed",
+                    vec![article("a"), article("b"), article("c")],
+                ),
+                el("div", "trending", vec![article("teaser")]),
+                el("div", "related", vec![article("teaser")]),
+            ],
+        );
+        assert_eq!(
+            chosen(&flanked),
+            Some("feed"),
+            "scattered single-article widgets must not widen selection to the whole page"
+        );
     }
 
     /// The truncation marker counts against the cap rather than overshooting it.
