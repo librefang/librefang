@@ -110,14 +110,19 @@ Env vars for each channel are listed in their respective setup sections below.
 
 ## Channel Overrides
 
-`ChannelOverrides` let an agent customize its behaviour per-channel. What the sidecar migration removed is the old `[channels.<name>.overrides]` sub-table specifically — it lived on the deleted in-process `ChannelsConfig` — but a channel-level layer still exists, now spelled as first-class fields on the sidecar's own entry. See [the migration mapping in the channels configuration guide](/configuration/channels#channel-overrides-legacy--removed).
+`ChannelOverrides` let an agent customize its behaviour per-channel.
+What the sidecar migration removed is the old `[channels.<name>.overrides]` sub-table specifically — it lived on the deleted in-process `ChannelsConfig` — but a channel-level layer still exists, now spelled as first-class fields on the sidecar's own entry.
+See [the migration mapping in the channels configuration guide](/configuration/channels#channel-overrides-legacy--removed).
 
 - **Agent-level** in `agent.toml` — applies only to that specific agent on every channel. Add a top-level `[channel_overrides]` section.
-- **Channel-level** in `[[sidecar_channels]]` — applies to every agent on that one channel. Set as direct keys on the entry (`dm_policy`, `group_policy`, `threading`, `output_format`, `command_policy`, `message_coalesce_window_ms`), *not* under `[sidecar_channels.env]`. The bridge builds a `ChannelOverrides` from them only when at least one is set, so a plain sidecar entry contributes nothing.
+- **Channel-level** in `[[sidecar_channels]]` — applies to every agent on that one channel.
+  Set as direct keys on the entry (`dm_policy`, `group_policy`, `threading`, `output_format`, `command_policy`, `message_coalesce_window_ms`), *not* under `[sidecar_channels.env]`.
+  The bridge builds a `ChannelOverrides` from them only when at least one is set, so a plain sidecar entry contributes nothing.
 
 **Resolution order**: agent-level → channel-level (`[[sidecar_channels]]`) → built-in default.
 
-Precedence is **whole-struct, not per-field**: if the agent has a `[channel_overrides]` section at all, that struct is used and the channel-level struct is not consulted, so a field the agent leaves unset falls through to the *built-in default* rather than to the channel-level value. Set every field you care about on whichever layer you use.
+Precedence is **whole-struct, not per-field**: if the agent has a `[channel_overrides]` section at all, that struct is used and the channel-level struct is not consulted, so a field the agent leaves unset falls through to the *built-in default* rather than to the channel-level value.
+Set every field you care about on whichever layer you use.
 (Sidecar env vars are not part of this chain — only the WhatsApp sidecar reads a `WHATSAPP_DM_POLICY`, and it filters inbound before the kernel ever sees the message.)
 
 ```toml
