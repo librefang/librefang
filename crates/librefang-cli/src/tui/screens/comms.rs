@@ -6,7 +6,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -44,6 +44,18 @@ pub struct CommsEventItem {
 pub enum CommsFocus {
     Topology,
     EventList,
+    Channels,
+    ChannelAdd,
+}
+
+#[derive(Clone, Default)]
+pub struct ChannelInfo {
+    pub adapter: String,
+    pub default_agent: String,
+    pub token_set: bool,
+    pub enabled: bool,
+    #[allow(dead_code)]
+    pub index: usize, // position in config array
 }
 
 pub struct CommsState {
@@ -61,6 +73,14 @@ pub struct CommsState {
     pub send_to: String,
     pub send_msg: String,
     pub send_field: usize,
+    // Channels management
+    pub channels: Vec<ChannelInfo>,
+    pub channel_list_state: ListState,
+    // New channel form
+    pub new_adapter: String,
+    pub new_default_agent: String,
+    pub new_token: String,
+    pub new_field: usize, // 0=adapter, 1=token, 2=agent
     // Task modal
     pub show_task_modal: bool,
     pub task_title: String,
@@ -93,6 +113,13 @@ impl CommsState {
             edges: Vec::new(),
             events: Vec::new(),
             event_list_state: ListState::default(),
+            channels: Vec::new(),
+            channel_list_state: ListState::default(),
+            new_adapter: String::new(),
+            new_default_agent: String::new(),
+            new_token: String::new(),
+            new_field: 0,
+            status_msg: String::new(),
             focus: CommsFocus::Topology,
             loading: false,
             tick: 0,
@@ -107,7 +134,6 @@ impl CommsState {
             task_desc: String::new(),
             task_assign: String::new(),
             task_field: 0,
-            status_msg: String::new(),
         }
     }
 
@@ -134,11 +160,18 @@ impl CommsState {
             return self.handle_task_modal_key(key);
         }
 
+        // Channel creation form
+        if self.focus == CommsFocus::ChannelAdd {
+            return self.handle_channel_add_key(key);
+        }
+
         match key.code {
             KeyCode::Tab => {
                 self.focus = match self.focus {
                     CommsFocus::Topology => CommsFocus::EventList,
-                    CommsFocus::EventList => CommsFocus::Topology,
+                    CommsFocus::EventList => CommsFocus::Channels,
+                    CommsFocus::Channels => CommsFocus::Topology,
+                    _ => CommsFocus::Topology,
                 };
             }
             KeyCode::Char('s') => {
@@ -156,6 +189,32 @@ impl CommsState {
                 self.task_field = 0;
             }
             KeyCode::Char('r') => return CommsAction::Refresh,
+            // Channel list navigation
+            KeyCode::Up | KeyCode::Char('k')
+                if self.focus == CommsFocus::Channels && !self.channels.is_empty() =>
+            {
+                let i = self.channel_list_state.selected().unwrap_or(0);
+                let next = if i == 0 {
+                    self.channels.len() - 1
+                } else {
+                    i - 1
+                };
+                self.channel_list_state.select(Some(next));
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if self.focus == CommsFocus::Channels && !self.channels.is_empty() =>
+            {
+                let i = self.channel_list_state.selected().unwrap_or(0);
+                let next = (i + 1) % self.channels.len();
+                self.channel_list_state.select(Some(next));
+            }
+            KeyCode::Char('a') if self.focus == CommsFocus::Channels => {
+                self.focus = CommsFocus::ChannelAdd;
+                self.new_adapter = "telegram".to_string();
+                self.new_default_agent.clear();
+                self.new_token.clear();
+                self.new_field = 0;
+            }
             KeyCode::Up | KeyCode::Char('k')
                 if self.focus == CommsFocus::EventList && !self.events.is_empty() =>
             {
@@ -169,6 +228,52 @@ impl CommsState {
                 let i = self.event_list_state.selected().unwrap_or(0);
                 let next = (i + 1) % self.events.len();
                 self.event_list_state.select(Some(next));
+            }
+            _ => {}
+        }
+        CommsAction::Continue
+    }
+
+    fn handle_channel_add_key(&mut self, key: KeyEvent) -> CommsAction {
+        match key.code {
+            KeyCode::Esc => {
+                self.focus = CommsFocus::Channels;
+            }
+            KeyCode::Tab => {
+                self.new_field = (self.new_field + 1) % 3;
+            }
+            KeyCode::Char(c) => match self.new_field {
+                0 => self.new_adapter.push(c),
+                1 => self.new_token.push(c),
+                2 => self.new_default_agent.push(c),
+                _ => {}
+            },
+            KeyCode::Backspace => match self.new_field {
+                0 => {
+                    self.new_adapter.pop();
+                }
+                1 => {
+                    self.new_token.pop();
+                }
+                2 => {
+                    self.new_default_agent.pop();
+                }
+                _ => {}
+            },
+            KeyCode::Enter => {
+                let info = ChannelInfo {
+                    adapter: self.new_adapter.clone(),
+                    default_agent: self.new_default_agent.clone(),
+                    token_set: !self.new_token.is_empty(),
+                    enabled: true,
+                    index: self.channels.len(),
+                };
+                self.channels.push(info);
+                self.channel_list_state
+                    .select(Some(self.channels.len() - 1));
+                self.status_msg = format!("Channel added. Reload config to apply.");
+                self.focus = CommsFocus::Channels;
+                return CommsAction::Refresh;
             }
             _ => {}
         }
@@ -337,12 +442,29 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut CommsState) {
     .split(inner);
 
     // Focus tab indicator
+    if state.focus == CommsFocus::Channels {
+        draw_channel_list(f, inner, state);
+        if state.focus == CommsFocus::ChannelAdd {
+            draw_channel_add(f, inner, state);
+        }
+        f.render_widget(
+            widgets::hint_bar("a add channel | j/k navigate | Tab switch focus"),
+            chunks[5],
+        );
+        return;
+    }
     let topo_style = if state.focus == CommsFocus::Topology {
         theme::tab_active()
     } else {
         theme::tab_inactive()
     };
     let event_style = if state.focus == CommsFocus::EventList {
+        theme::tab_active()
+    } else {
+        theme::tab_inactive()
+    };
+
+    let _chan_style = if state.focus == CommsFocus::Channels {
         theme::tab_active()
     } else {
         theme::tab_inactive()
@@ -776,4 +898,130 @@ fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     Rect::new(x, y, w, height.min(area.height))
+}
+
+fn draw_channel_list(f: &mut Frame, area: Rect, state: &mut CommsState) {
+    let items: Vec<ListItem> = if state.channels.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "  No channels configured. Press 'a' to add one.",
+            Style::default().fg(theme::TEXT_TERTIARY),
+        )))]
+    } else {
+        state
+            .channels
+            .iter()
+            .map(|ch| {
+                let adapter = &ch.adapter;
+                let agent = if ch.default_agent.is_empty() {
+                    "(any)"
+                } else {
+                    &ch.default_agent
+                };
+                let token = if ch.token_set {
+                    "token ✓"
+                } else {
+                    "token ✗"
+                };
+                let enabled = if ch.enabled { "enabled" } else { "disabled" };
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("  {adapter:12} "),
+                        Style::default()
+                            .fg(theme::CYAN)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("agent: {agent:20} "),
+                        Style::default().fg(theme::TEXT_SECONDARY),
+                    ),
+                    Span::styled(format!("{token} "), Style::default().fg(theme::GREEN)),
+                    Span::styled(
+                        format!("{enabled}"),
+                        Style::default().fg(theme::TEXT_TERTIARY),
+                    ),
+                ]))
+            })
+            .collect()
+    };
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::NONE))
+        .highlight_style(Style::default().fg(theme::ACCENT));
+    let mut list_state = state.channel_list_state.clone();
+    f.render_stateful_widget(list, area, &mut list_state);
+    state.channel_list_state = list_state;
+}
+
+fn draw_channel_add(f: &mut Frame, area: Rect, state: &CommsState) {
+    let popup_area = Rect::new(area.x + 2, area.y + 2, area.width.saturating_sub(4), 8);
+    f.render_widget(Clear, popup_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::ACCENT))
+        .title(" New Channel ");
+    f.render_widget(block, popup_area);
+    let inner = Rect::new(
+        popup_area.x + 1,
+        popup_area.y + 1,
+        popup_area.width - 2,
+        popup_area.height - 2,
+    );
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(
+                if state.new_field == 0 { "▶ " } else { "  " },
+                Style::default().fg(theme::ACCENT),
+            ),
+            Span::styled("Adapter: ", Style::default().fg(theme::TEXT_TERTIARY)),
+            Span::styled(&state.new_adapter, Style::default().fg(theme::TEXT_PRIMARY)),
+            Span::styled(
+                " (telegram/slack/discord/whatsapp)",
+                Style::default().fg(theme::TEXT_TERTIARY),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                if state.new_field == 1 { "▶ " } else { "  " },
+                Style::default().fg(theme::ACCENT),
+            ),
+            Span::styled("Token: ", Style::default().fg(theme::TEXT_TERTIARY)),
+            Span::styled(
+                if state.new_token.is_empty() {
+                    "(paste bot token)"
+                } else {
+                    "••••••••"
+                },
+                Style::default().fg(theme::TEXT_PRIMARY),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                if state.new_field == 2 { "▶ " } else { "  " },
+                Style::default().fg(theme::ACCENT),
+            ),
+            Span::styled("Default Agent: ", Style::default().fg(theme::TEXT_TERTIARY)),
+            Span::styled(
+                if state.new_default_agent.is_empty() {
+                    "(agent name or UUID)"
+                } else {
+                    &state.new_default_agent
+                },
+                Style::default().fg(theme::TEXT_PRIMARY),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Enter to add | Esc to cancel",
+            Style::default().fg(theme::TEXT_TERTIARY),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
+    if !state.status_msg.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                &state.status_msg,
+                Style::default().fg(theme::GREEN),
+            ))),
+            Rect::new(area.x, area.y + area.height - 1, area.width, 1),
+        );
+    }
 }

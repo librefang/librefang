@@ -57,7 +57,7 @@ pub(super) async fn tool_agent_send(
     // kernel async-task tracker and return a task id immediately instead of
     // blocking this agent's loop until the callee replies (which otherwise
     // trips `tool_timeout_secs` for any long delegation).
-    let async_mode = input["async"].as_bool().unwrap_or(false);
+    let async_mode = input["async"].as_bool().unwrap_or(true);
 
     if let Some(caller) = caller_agent_id {
         if caller == agent_id {
@@ -162,12 +162,16 @@ pub(super) async fn tool_agent_send(
 }
 
 /// Build agent manifest TOML from parsed parameters.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_agent_manifest_toml(
     name: &str,
     system_prompt: &str,
     tools: Vec<String>,
     shell: Vec<String>,
     network: bool,
+    profile: Option<&str>,
+    model_provider: Option<&str>,
+    model_name: Option<&str>,
 ) -> Result<String, String> {
     let mut tools = tools;
     let has_shell = !shell.is_empty();
@@ -187,11 +191,23 @@ pub(super) fn build_agent_manifest_toml(
         capabilities["shell"] = serde_json::json!(shell);
     }
 
+    let mut model_json = serde_json::json!({
+        "system_prompt": system_prompt,
+    });
+    // Apply model_override or profile to the spawned agent's model config.
+    if let Some(p) = model_provider {
+        model_json["provider"] = serde_json::json!(p);
+    }
+    if let Some(m) = model_name {
+        model_json["model"] = serde_json::json!(m);
+    }
+    if profile.is_some() {
+        model_json["mode"] = serde_json::json!("flexible");
+    }
+
     let manifest_json = serde_json::json!({
         "name": name,
-        "model": {
-            "system_prompt": system_prompt,
-        },
+        "model": model_json,
         "capabilities": capabilities,
     });
 
@@ -271,6 +287,18 @@ pub(super) async fn tool_agent_spawn(
         )));
     }
 
+    // Depth guard: prevent unbounded recursive spawn chains. Mirrors the
+    // agent_send guard. Without this, a spawned agent calls agent_spawn to
+    // create another, which spawns another — burning tokens indefinitely.
+    let max_depth = kh.max_agent_call_depth();
+    let current_depth = AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0);
+    if current_depth >= max_depth {
+        return Err(ToolError::PermissionDenied(format!(
+            "Agent spawn depth exceeded (max {max_depth}). \
+             Too many nested agent_spawn calls."
+        )));
+    }
+
     let tools: Vec<String> = input["tools"]
         .as_array()
         .map(|arr| {
@@ -304,8 +332,27 @@ pub(super) async fn tool_agent_spawn(
         })
         .unwrap_or_default();
 
-    let manifest_toml = build_agent_manifest_toml(name, system_prompt, tools, shell, network)
-        .map_err(ToolError::upstream_msg)?;
+    let ephemeral = input["ephemeral"].as_bool().unwrap_or(false);
+    let task_description = input["task"].as_str().unwrap_or(system_prompt);
+    let profile = input["profile"].as_str();
+    let model_provider = input["model_override"]
+        .get("provider")
+        .and_then(|v| v.as_str());
+    let model_name = input["model_override"]
+        .get("model")
+        .and_then(|v| v.as_str());
+
+    let manifest_toml = build_agent_manifest_toml(
+        name,
+        system_prompt,
+        tools,
+        shell,
+        network,
+        profile,
+        model_provider,
+        model_name,
+    )
+    .map_err(ToolError::upstream_msg)?;
     // Build parent capabilities from the parent's allowed tools list.
     // This prevents a sub-agent from escalating privileges beyond what
     // its parent is permitted to use (capability inheritance enforcement).
@@ -328,6 +375,24 @@ pub(super) async fn tool_agent_spawn(
         .spawn_agent_checked(&manifest_toml, parent_id, &parent_caps)
         .await
         .map_err(ToolError::upstream)?;
+
+    if ephemeral {
+        // Send the task as a user message, wait for response, kill agent.
+        // No workspace persistence, no session reuse — like Claude Code.
+        let response = kh
+            .send_to_agent(&id.to_string(), task_description)
+            .await
+            .map_err(ToolError::upstream)?;
+        let _ = kh.kill_agent(&id.to_string());
+        return Ok(serde_json::json!({
+            "agent_id": id.to_string(),
+            "agent_name": agent_name,
+            "response": response,
+            "status": "completed_and_killed"
+        })
+        .to_string());
+    }
+
     Ok(format!(
         "Agent spawned successfully.\n  ID: {id}\n  Name: {agent_name}"
     ))

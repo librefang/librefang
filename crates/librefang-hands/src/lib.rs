@@ -418,6 +418,7 @@ impl From<LegacyHandAgentConfig> for AgentManifest {
                 context_window: None,
                 max_output_tokens: None,
                 extra_params: std::collections::BTreeMap::new(),
+                ..Default::default()
             },
             schedule: legacy.schedule.unwrap_or_default(),
             autonomous,

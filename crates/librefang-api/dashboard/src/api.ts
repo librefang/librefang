@@ -622,10 +622,10 @@ export interface WorkflowRunItem {
   workflow_name?: string;
   state?: unknown;
   steps_completed?: number;
-  /** Parameters the run was launched with (JSON object string or raw text). */
+  current_step_index?: number | null;
+  total_steps?: number;
   input?: string;
-  /** Run-level failure message, present on failed runs. */
-  error?: string;
+  error?: string | null;
   started_at?: string;
   completed_at?: string | null;
 }
@@ -1075,6 +1075,8 @@ export interface GoalItem {
   agent_id?: string;
   status?: string;
   progress?: number;
+  loop_engineering?: boolean;
+  verify_agent_id?: string;
   created_at?: string;
   updated_at?: string;
 }
@@ -1760,9 +1762,6 @@ export interface ModelItem {
   };
   aliases?: string[];
   available?: boolean;
-  // Provenance hint. "cli_config" marks a row synthesized from a CLI tool's own
-  // live config (codex/claude-code/gemini/qwen) rather than a catalog entry — it
-  // is not a user-added custom model, so it must not show a delete control.
   source?: string;
 }
 
@@ -2476,6 +2475,11 @@ export async function runWorkflow(
   }, LONG_RUNNING_TIMEOUT_MS); // 5 min timeout — workflows run multiple LLM steps
 }
 
+/** Re-run a previous workflow run with the same input parameters. */
+export async function rerunWorkflowRun(runId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/workflows/runs/${encodeURIComponent(runId)}/rerun`, {}, DEFAULT_POST_TIMEOUT_MS);
+}
+
 export async function deleteWorkflow(workflowId: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}`);
 }
@@ -2499,22 +2503,6 @@ export async function listWorkflowRuns(workflowId: string): Promise<WorkflowRunI
   return get<WorkflowRunItem[]>(`/api/workflows/${encodeURIComponent(workflowId)}/runs`);
 }
 
-/**
- * Re-run a previous run with its original parameters.
- *
- * The backend reads the workflow + input off the stored run (not caller-supplied
- * params), so this is a faithful, non-destructive repeat of what executed. The
- * original run is left untouched; a fresh run is queued and `{ run_id }` of the
- * new run is returned.
- */
-export async function rerunWorkflowRun(runId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(
-    `/api/workflows/runs/${encodeURIComponent(runId)}/rerun`,
-    {},
-    LONG_RUNNING_TIMEOUT_MS, // queues a multi-step LLM run
-  );
-}
-
 /** Per-step execution result returned by run/detail endpoints. */
 export interface WorkflowStepResult {
   step_name: string;
@@ -2526,8 +2514,9 @@ export interface WorkflowStepResult {
   input_tokens: number;
   output_tokens: number;
   duration_ms: number;
-  /** Step-level failure message; present on the step that failed. */
-  error?: string;
+  error?: string | null;
+  /** Variable bindings at the time this step executed. */
+  variables?: Record<string, string>;
 }
 
 /** Full detail for a single workflow run. */
@@ -2537,6 +2526,8 @@ export interface WorkflowRunDetail {
   workflow_name: string;
   input: string;
   state: string;
+  current_step_index?: number | null;
+  total_steps?: number;
   output?: string;
   error?: string;
   started_at: string;
@@ -3969,6 +3960,8 @@ export interface GoalRunState {
   max_iterations: number;
   last_progress: number;
   last_error?: string;
+  verify_agent_id?: string;
+  verify_max_retries?: number;
   started_at: string;
   updated_at: string;
 }
@@ -3976,7 +3969,7 @@ export interface GoalRunState {
 /** Begin an autonomous run that drives the goal's assigned agent. */
 export async function startGoalRun(
   goalId: string,
-  payload?: { max_iterations?: number }
+  payload?: { max_iterations?: number; verify_max_retries?: number }
 ): Promise<{ ok: boolean; run: GoalRunState | null }> {
   return post<{ ok: boolean; run: GoalRunState | null }>(
     `/api/goals/${encodeURIComponent(goalId)}/start`,
