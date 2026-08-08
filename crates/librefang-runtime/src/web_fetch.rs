@@ -33,9 +33,7 @@ impl WebFetchEngine {
 
     /// Build a per-request reqwest client pinned to the SSRF-validated IPs.
     ///
-    /// Uses the resolved addresses from [`check_ssrf`] to configure DNS
-    /// pinning on a direct (no-proxy) builder, preventing both local and
-    /// proxy-side DNS rebinding TOCTOU attacks.
+    /// Uses the resolved addresses from [`check_ssrf`] to configure DNS pinning on a direct (no-proxy) builder, preventing both local and proxy-side DNS rebinding TOCTOU attacks.
     ///
     /// Auto-redirects are **disabled** (`Policy::none`). A `Policy::custom`
     /// that re-runs `check_ssrf` on each hop is not enough: reqwest
