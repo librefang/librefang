@@ -110,11 +110,19 @@ Env vars for each channel are listed in their respective setup sections below.
 
 ## Channel Overrides
 
-`ChannelOverrides` let an agent customize its behaviour per-channel. Post-sidecar migration the **channel-level** layer is gone (the `[channels.<name>.overrides]` sub-table lived on the deleted in-process `ChannelsConfig`); only **agent-level overrides** in `agent.toml` survive. Most knobs that the old channel-level table exposed are now set per-sidecar through `[sidecar_channels.env]` instead — see [the migration mapping in the channels configuration guide](/configuration/channels#channel-overrides-legacy--removed).
+`ChannelOverrides` let an agent customize its behaviour per-channel.
+What the sidecar migration removed is the old `[channels.<name>.overrides]` sub-table specifically — it lived on the deleted in-process `ChannelsConfig` — but a channel-level layer still exists, now spelled as first-class fields on the sidecar's own entry.
+See [the migration mapping in the channels configuration guide](/configuration/channels#channel-overrides-legacy--removed).
 
 - **Agent-level** in `agent.toml` — applies only to that specific agent on every channel. Add a top-level `[channel_overrides]` section.
+- **Channel-level** in `[[sidecar_channels]]` — applies to every agent on that one channel.
+  Set as direct keys on the entry (`dm_policy`, `group_policy`, `threading`, `output_format`, `command_policy`, `message_coalesce_window_ms`), *not* under `[sidecar_channels.env]`.
+  The bridge builds a `ChannelOverrides` from them only when at least one is set, so a plain sidecar entry contributes nothing.
 
-**Resolution order** (post-migration): agent-level → built-in default. Whichever sets the field wins.
+**Resolution order**: agent-level → channel-level (`[[sidecar_channels]]`) → built-in default.
+
+Precedence is **whole-struct, not per-field**: if the agent has a `[channel_overrides]` section at all, that struct is used and the channel-level struct is not consulted, so a field the agent leaves unset falls through to the *built-in default* rather than to the channel-level value.
+Set every field you care about on whichever layer you use.
 (Sidecar env vars are not part of this chain — only the WhatsApp sidecar reads a `WHATSAPP_DM_POLICY`, and it filters inbound before the kernel ever sees the message.)
 
 ```toml
@@ -149,6 +157,7 @@ usage_footer = "compact"
 | `system_prompt` | `Option<String>` | Agent default | Override the system prompt for this channel. |
 | `dm_policy` | `Option<DmPolicy>` | `None` (unset) | How to handle direct messages. `None` applies no DM gating (DMs flow) and does not affect other overrides (#6445). |
 | `group_policy` | `Option<GroupPolicy>` | `None` (unset) | How to handle group/channel messages. `None` processes every group message; an explicit `MentionOnly` gates to @mentions (#6445). |
+| `group_trigger_patterns` | `Vec<String>` | `[]` (empty) | Extra `regex` patterns that wake the agent in a group as if it had been @mentioned. Only read under mention-only semantics — an explicit `group_policy = "mention_only"`, or an unset `group_policy` plus a non-empty list here. See the escaping note below. |
 | `rate_limit_per_user` | `u32` | `0` (unlimited) | Max messages per minute per user. |
 | `threading` | `bool` | `false` | Send replies as thread responses (platforms that support it). |
 | `output_format` | `Option<OutputFormat>` | `Markdown` | Output format for this channel. |
@@ -179,7 +188,7 @@ Controls how the adapter handles direct messages:
 
 | DmPolicy | Behavior |
 |----------|----------|
-| `Respond` | Respond to all DMs (default). |
+| `Respond` | Respond to all DMs. This is the `DmPolicy` enum's own default, and it is also what an unset `dm_policy` does, so the two coincide. |
 | `AllowedOnly` | Only respond to DMs from users in `allowed_users`. |
 | `Ignore` | Silently drop all DMs. |
 
@@ -190,11 +199,35 @@ Controls how the adapter handles messages in group chats, channels, and rooms:
 | GroupPolicy | Behavior |
 |-------------|----------|
 | `All` | Respond to every message in the group. |
-| `MentionOnly` | Only respond when the bot is @mentioned (default). |
+| `MentionOnly` | Only respond when the bot is @mentioned, or when the message matches a `group_trigger_patterns` entry. This is the `GroupPolicy` enum's default, but do **not** read that as the behaviour of an unset `group_policy` — leaving the field out processes every group message, same as `All` (#6445). You get `MentionOnly` by writing it explicitly, or implicitly by declaring `group_trigger_patterns` with no `group_policy`. |
 | `CommandsOnly` | Only respond to `/command` messages. |
 | `Ignore` | Silently ignore all group messages. |
 
 Policy enforcement happens in `dispatch_message()` before the message reaches the agent loop. This means ignored messages consume zero LLM tokens.
+
+#### Escaping `group_trigger_patterns`
+
+These are full `regex`-crate patterns, and the usual way to write one is a word-boundary-anchored alias so the agent's name does not match inside a longer word.
+Use a TOML **literal** (single-quoted) string so the backslashes reach the regex engine untouched:
+
+```toml
+# agent.toml — correct
+[channel_overrides]
+group_trigger_patterns = ['(?i)\bvivi\b']
+```
+
+In a TOML **basic** (double-quoted) string `\b` is the *backspace* escape, not a regex escape.
+So `"(?i)\bvivi\b"` reaches the kernel as `(?i)<U+0008>vivi<U+0008>`, which the regex crate happily accepts as a literal — it compiles without error and then never matches any real message, so the agent simply never answers to its alias (#6732).
+If you must use double quotes, double every backslash:
+
+```toml
+# agent.toml — also correct, but easier to get wrong
+[channel_overrides]
+group_trigger_patterns = ["(?i)\\bvivi\\b"]
+```
+
+An unparseable pattern, or one carrying a control character from a mis-read escape, is reported with a `WARN` naming the agent when its manifest is accepted — at boot, on hot-reload, and on a manifest update.
+The warning never blocks the spawn, so check the daemon log if a group alias is not waking your agent.
 
 ---
 

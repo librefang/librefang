@@ -132,8 +132,15 @@ pub struct ChannelOverrides {
     /// This must stay distinct from `Some(GroupPolicy::MentionOnly)` (the enum default): before #6445, writing any single override field silently flipped an unset group policy to `MentionOnly` and dropped all non-mention group traffic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_policy: Option<GroupPolicy>,
-    /// Regex patterns that can trigger a reply in group chats when
-    /// `group_policy` is `mention_only`.
+    /// Extra `regex`-crate patterns (full syntax, not globs) that widen the mention gate in group chats — a message matching any of them wakes the agent as if it had been @mentioned.
+    /// As a *gate* these are consulted only under mention-only semantics: an explicit `group_policy = "mention_only"`, or an unset `group_policy` together with a non-empty list here (setting patterns is itself a gating decision, so it resolves to mention-only).
+    /// Under `commands_only` / `ignore` the policy decides on its own and the list is not read at all.
+    /// `all` is the exception, and it is not a gating one: with `reply_precheck = true` the list is handed to the reply-intent classifier as the bot's aliases and interpolated into its prompt, so the patterns still shape whether the bot answers even though they gate nothing.
+    /// A pattern broken by the escaping trap below therefore degrades the classifier's alias list too, not just the mention gate.
+    /// Prefer a TOML **literal** (single-quoted) string: `group_trigger_patterns = ['(?i)\bvivi\b']`.
+    /// In a TOML *basic* (double-quoted) string `\b` is the backspace escape, so `"(?i)\bvivi\b"` silently becomes `(?i)<U+0008>vivi<U+0008>` — which the regex crate accepts as a literal, so it compiles without error and then never matches anything (#6732).
+    /// The double-quoted form needs every backslash doubled: `"(?i)\\bvivi\\b"`.
+    /// A pattern that is unparseable, or that contains a control character from a mis-read escape, is reported with a `WARN` naming the agent when its manifest is accepted; it never blocks the spawn.
     #[serde(default)]
     pub group_trigger_patterns: Vec<String>,
     /// Enable LLM-based reply-intent precheck for group messages.
