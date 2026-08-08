@@ -1609,9 +1609,12 @@ mod tests {
 
         // Written to a file rather than `pipe:1`: a non-fragmented mp4 cannot be *muxed* to a pipe either, since the muxer rewinds to write moov.
         // Generating the fixture the same way the failing input arises is the point of the test.
-        let dir = std::env::temp_dir().join(format!("librefang-6747-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let fixture = dir.join("plain.mp4");
+        // `TempDir` cleans up on drop even if an `assert!` below panics — a hand-rolled path plus `remove_dir_all` after the assertions would leak the directory on that path.
+        let dir = tempfile::Builder::new()
+            .prefix("librefang-6747-")
+            .tempdir()
+            .expect("temp dir");
+        let fixture = dir.path().join("plain.mp4");
 
         let gen = tokio::process::Command::new("ffmpeg")
             .args([
@@ -1647,7 +1650,6 @@ mod tests {
         );
 
         let mp4_bytes = std::fs::read(&fixture).expect("fixture readable");
-        let _ = std::fs::remove_dir_all(&dir);
         assert!(!mp4_bytes.is_empty());
 
         let out = extract_video_audio_track(&mp4_bytes)
