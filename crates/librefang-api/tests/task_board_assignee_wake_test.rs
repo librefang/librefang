@@ -1,24 +1,19 @@
 //! Integration tests for the built-in Task Board assignee wake (#6728).
 //!
-//! A task addressed to an agent used to reach that agent only if an operator
-//! had separately registered a matching `TaskPosted` trigger; with none, the
-//! task sat `pending` with nothing in the log. These tests pin the delivery
-//! rule against a real booted kernel:
+//! A task addressed to an agent used to reach that agent only if an operator had separately registered a matching `TaskPosted` trigger; with none, the task sat `pending` with nothing in the log.
+//! These tests pin the delivery rule against a real booted kernel:
 //!
 //! 1. `assigned_task_wakes_an_agent_with_no_trigger` — the gap itself.
-//! 2. `assigned_task_wakes_an_agent_addressed_by_name` — `assigned_to` holds
-//!    either identity form, and both must reach the same agent.
+//! 2. `assigned_task_wakes_an_agent_addressed_by_name` — `assigned_to` holds either identity form, and both must reach the same agent.
 //! 3. `operator_trigger_suppresses_the_builtin_wake` — no double wake.
-//! 4. `dormant_trigger_does_not_suppress_the_builtin_wake` — a disabled
-//!    record is a gap to fill, not a decision to stay silent.
+//! 4. `dormant_trigger_does_not_suppress_the_builtin_wake` — a disabled record is a gap to fill, not a decision to stay silent.
 //! 5. `assignee_wake_disabled_globally_produces_no_wake` — the opt-out.
 //! 6. `per_agent_override_beats_the_global_default` — manifest wins.
-//! 7. `agent_without_task_claim_is_not_woken` — an agent that cannot claim.
-//! 8. `unassigned_task_wakes_nobody` — pool tasks are claimable, not routed.
+//! 7. `agent_without_task_claim_is_not_woken` — an agent whose declared tool list withholds `task_claim`.
+//! 8. `unrestricted_agent_is_woken` — an empty `capabilities.tools` means unrestricted, not "no tools".
+//! 9. `unassigned_task_wakes_nobody` — pool tasks are claimable, not routed.
 //!
-//! The seam is `publish_typed_event`'s return value: it is the exact list the
-//! dispatcher consumes, so asserting on it tests the wake without needing an
-//! LLM behind `send_message_full`.
+//! The seam is `publish_typed_event`'s return value: it is the exact list the dispatcher consumes, so asserting on it tests the wake without needing an LLM behind `send_message_full`.
 
 use librefang_kernel::triggers::{TriggerMatchSource, TriggerPatch, TriggerPattern};
 use librefang_testing::{MockKernelBuilder, TestAppState};
@@ -274,9 +269,10 @@ async fn per_agent_override_beats_the_global_default() {
     assert_eq!(matches.len(), 1, "manifest opt-in must win over global OFF");
 }
 
-/// An installation whose board is drained on the agent's behalf (an external
-/// claimer, or a human) does not grant the agent `task_claim` — and must not
-/// find the kernel racing its claimant after an upgrade.
+/// An installation whose board is drained on the agent's behalf (an external claimer, or a human) declares a tool list that withholds `task_claim` — and must not find the kernel racing its claimant after an upgrade.
+///
+/// Note the manifest declares a non-empty list: withholding is an explicit list without `task_claim` in it, never an empty one.
+/// See `unrestricted_agent_is_woken` for the other side of that distinction.
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_without_task_claim_is_not_woken() {
     let test = TestAppState::with_builder(MockKernelBuilder::new());
@@ -300,9 +296,43 @@ async fn agent_without_task_claim_is_not_woken() {
     );
 }
 
-/// Unassigned tasks are claimable by anyone (`assigned_to = ''` in the claim
-/// SQL) but addressed to nobody. Fanning out to every capable agent is a
-/// policy decision this path deliberately does not make.
+/// An **empty** `capabilities.tools` means "unrestricted — every tool", which is what an agent with no `[capabilities]` section at all gets, and is the convention `kernel::tools_and_skills::available_tools` encodes as `tools_unrestricted`.
+/// Reading the raw field as a deny-list inverts it and silences the wake for exactly the installations that configured nothing — the case this whole feature exists to serve.
+///
+/// A glob grant is checked in the same test because the declared list is matched with `glob_matches`, not string equality, mirroring how the runtime resolves declared tools at dispatch: `task_*` grants `task_claim` there, so it has to grant it here too.
+#[tokio::test(flavor = "multi_thread")]
+async fn unrestricted_agent_is_woken() {
+    for tools in [
+        vec![],
+        vec!["*".to_string()],
+        vec!["task_*".to_string()],
+        vec!["task_claim".to_string()],
+    ] {
+        let test = TestAppState::with_builder(MockKernelBuilder::new());
+        let mut manifest = worker_manifest("unrestricted");
+        manifest.capabilities.tools = tools.clone();
+        let worker = test
+            .state
+            .kernel
+            .spawn_agent_typed(manifest)
+            .expect("spawn must succeed");
+
+        let matches = test
+            .state
+            .kernel
+            .publish_typed_event(task_posted(Some(&worker.to_string())))
+            .await;
+
+        assert_eq!(
+            matches.len(),
+            1,
+            "an agent that can reach task_claim must be woken (tools = {tools:?})"
+        );
+    }
+}
+
+/// Unassigned tasks are claimable by anyone (`assigned_to = ''` in the claim SQL) but addressed to nobody.
+/// Fanning out to every capable agent is a policy decision this path deliberately does not make.
 #[tokio::test(flavor = "multi_thread")]
 async fn unassigned_task_wakes_nobody() {
     let test = TestAppState::with_builder(MockKernelBuilder::new());

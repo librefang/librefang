@@ -218,21 +218,16 @@ pub struct Trigger {
     pub workflow_id: Option<String>,
 }
 
-/// Whether a stored trigger already delivers `TaskPosted` events to a given
-/// assignee — the precedence input for the built-in assignee wake.
+/// Whether a stored trigger already delivers `TaskPosted` events to a given assignee — the precedence input for the built-in assignee wake.
 ///
-/// The three states are distinct on purpose: `Dormant` is a wake that an
-/// operator once configured and that can no longer fire, which is worth
-/// saying out loud when the built-in path takes over from it, while `None`
-/// is an installation that never declared one.
+/// The three states are distinct on purpose: `Dormant` is a wake that an operator once configured and that can no longer fire, which is worth saying out loud when the built-in path takes over from it, while `None` is an installation that never declared one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskPostedCoverage {
-    /// A stored trigger can currently fire for this assignee. The built-in
-    /// wake stands down and the operator's trigger owns delivery.
+    /// A stored trigger can currently fire for this assignee.
+    /// The built-in wake stands down and the operator's trigger owns delivery.
     Covered(TriggerId),
-    /// Triggers address this assignee but none can fire — each is disabled
-    /// or has exhausted `max_fires`. The built-in wake fires and names
-    /// these, since a dead record is a gap, not a decision to stay silent.
+    /// Triggers address this assignee but none can fire — each is disabled or has exhausted `max_fires`.
+    /// The built-in wake fires and names these, since a dead record is a gap, not a decision to stay silent.
     Dormant(Vec<TriggerId>),
     /// No stored trigger addresses this assignee at all.
     None,
@@ -240,31 +235,14 @@ pub enum TaskPostedCoverage {
 
 /// What produced a [`TriggerMatch`].
 ///
-/// Dispatch is uniform across the variants — the dispatcher consumes one
-/// list — but the two differ in what they can be keyed on for diagnostics
-/// and for `SessionMode::New` session derivation, and a log line that says
-/// only "trigger fired" cannot answer "which trigger?" for a match that has
-/// no trigger behind it.
+/// Dispatch is uniform across the variants — the dispatcher consumes one list — but the two differ in what they can be keyed on for diagnostics and for `SessionMode::New` session derivation, and a log line that says only "trigger fired" cannot answer "which trigger?" for a match that has no trigger behind it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TriggerMatchSource {
     /// A stored trigger record matched the event.
     Registered(TriggerId),
-    /// The kernel synthesized this match for the assignee of a `TaskPosted`
-    /// event that no stored trigger currently covers (issue #6728). Carries
-    /// the task id so the wake is traceable to the task that caused it, and
-    /// so `SessionId::for_task_wake` has a stable key.
+    /// The kernel synthesized this match for the assignee of a `TaskPosted` event that no stored trigger currently covers (issue #6728).
+    /// Carries the task id so the wake is traceable to the task that caused it, and so `SessionId::for_task_wake` has a stable key.
     TaskBoardAssigneeWake { task_id: String },
-}
-
-impl TriggerMatchSource {
-    /// The stored trigger behind this match, if any. `None` for the
-    /// synthesized assignee wake, which has no record by design.
-    pub fn trigger_id(&self) -> Option<TriggerId> {
-        match self {
-            Self::Registered(id) => Some(*id),
-            Self::TaskBoardAssigneeWake { .. } => None,
-        }
-    }
 }
 
 impl std::fmt::Display for TriggerMatchSource {
@@ -493,23 +471,13 @@ impl TriggerEngine {
     /// **whatever its `enabled` state**. Used to skip duplicate registration
     /// of proactive triggers on restart.
     ///
-    /// Ignoring `enabled` is deliberate, and differs from the coverage rule
-    /// used by the Task Board assignee wake
-    /// ([`Self::task_posted_coverage_for`]), which treats a disabled record
-    /// as no coverage. The two questions are not the same one:
+    /// Ignoring `enabled` is deliberate, and differs from the coverage rule used by the Task Board assignee wake ([`Self::task_posted_coverage_for`]), which treats a disabled record as no coverage.
+    /// The two questions are not the same one:
     ///
-    /// - Proactive triggers are auto-registered from
-    ///   `ScheduleMode::Proactive` conditions with `max_fires = 0`
-    ///   (`kernel/spawn.rs`, `kernel/background_lifecycle.rs`), so they can
-    ///   never become disabled by exhausting a budget — `enabled = false`
-    ///   there means exactly one thing, that an operator turned the trigger
-    ///   off. Disabling it is also the *only* off switch: the condition
-    ///   would otherwise be re-registered on the next spawn. Skipping on
-    ///   pattern alone is what makes that switch stick.
-    /// - The assignee wake has an explicit off switch of its own
-    ///   (`[task_board] assignee_wake`, or the per-agent manifest override),
-    ///   so it can afford to treat a dead record as a gap to fill rather
-    ///   than as a decision to stay silent.
+    /// - Proactive triggers are auto-registered from `ScheduleMode::Proactive` conditions with `max_fires = 0` (`kernel/spawn.rs`, `kernel/background_lifecycle.rs`), so they can never become disabled by exhausting a budget — `enabled = false` there means exactly one thing, that an operator turned the trigger off.
+    ///   Disabling it is also the *only* off switch: the condition would otherwise be re-registered on the next spawn.
+    ///   Skipping on pattern alone is what makes that switch stick.
+    /// - The assignee wake has an explicit off switch of its own (`[task_board] assignee_wake`, or the per-agent manifest override), so it can afford to treat a dead record as a gap to fill rather than as a decision to stay silent.
     pub fn agent_has_pattern(&self, agent_id: AgentId, pattern: &TriggerPattern) -> bool {
         let Some(ids) = self.agent_triggers.get(&agent_id) else {
             return false;
@@ -1041,26 +1009,18 @@ impl TriggerEngine {
     /// `assignee_id`, for the built-in assignee wake (issue #6728).
     ///
     /// A record covers the assignee when **both** hold:
-    /// 1. its pattern would match a `TaskPosted` addressed to that assignee —
-    ///    evaluated through [`agent_identity_filter_matches`], the same
-    ///    helper [`matches_pattern`] uses, against both identity forms the
-    ///    substrate accepts in `assigned_to` (UUID and display name); and
-    /// 2. it dispatches *to* that assignee — owner, or `target_agent` when
-    ///    set. An orchestrator's `assignee_match = "self"` trigger that
-    ///    happens to target the assignee fails (1) and is correctly not
-    ///    coverage: it fires for tasks addressed to the orchestrator.
+    /// 1. its pattern would match a `TaskPosted` addressed to that assignee — evaluated through [`agent_identity_filter_matches`], the same helper [`matches_pattern`] uses, against both identity forms the substrate accepts in `assigned_to` (UUID and display name); and
+    /// 2. it dispatches *to* that assignee — owner, or `target_agent` when set.
+    ///    An orchestrator's `assignee_match = "self"` trigger that happens to target the assignee fails (1) and is correctly not coverage: it fires for tasks addressed to the orchestrator.
     ///
-    /// Scans all triggers rather than the `agent_triggers` index because
-    /// that index is owner-keyed, so a trigger owned by one agent and
-    /// targeted at another would be missed. The set is bounded by
-    /// [`MAX_TRIGGERS_PER_AGENT`] per agent and the scan runs once per
-    /// `TaskPosted`, which is cheaper than keeping a second index
-    /// consistent across register / update / remove / re-key.
+    /// Scans all triggers rather than the `agent_triggers` index because that index is owner-keyed, so a trigger owned by one agent and targeted at another would be missed.
+    /// The scan is O(triggers in the installation) — not O(one agent's triggers) — and runs once per `TaskPosted`, inside `publish_event_inner` and therefore ahead of dispatch.
+    /// That is accepted rather than overlooked: the alternative is a second, assignee-keyed index that has to stay consistent across register / update / remove / re-key, and the ceiling here is `MAX_TRIGGERS_PER_AGENT` × agent count with a cheap per-entry test (a pattern discriminant and an id comparison reject almost everything before any string work).
+    /// If an installation ever makes that product large enough to matter, the index is the fix, and it can be added without changing this function's contract.
     ///
-    /// Cooldown state is deliberately not consulted: a cooldown-suppressed
-    /// trigger is still coverage. Cooldown is transient dispatch state, and
-    /// treating it as a gap would re-introduce the double wake that a
-    /// per-event check causes. Only `enabled` and fire-exhaustion count.
+    /// Cooldown state is deliberately not consulted: a cooldown-suppressed trigger is still coverage.
+    /// Cooldown is transient dispatch state, and treating it as a gap would re-introduce the double wake that a per-event check causes.
+    /// Only `enabled` and fire-exhaustion count.
     pub fn task_posted_coverage_for(
         &self,
         assignee_id: AgentId,

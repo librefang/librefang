@@ -322,10 +322,8 @@ const TRIGGER_FIRE_SESSION_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
 
 /// Distinct UUID v5 namespace for the built-in Task Board assignee wake.
 ///
-/// The wake is synthesized by the kernel rather than produced by a stored
-/// trigger, so there is no `TriggerId` to key `for_trigger_fire` on. Keying
-/// on the task instead keeps the id reproducible from a log line, and a
-/// dedicated namespace keeps it disjoint from every other session flavour.
+/// The wake is synthesized by the kernel rather than produced by a stored trigger, so there is no `TriggerId` to key `for_trigger_fire` on.
+/// Keying on the task instead keeps the id reproducible from a log line, and a dedicated namespace keeps it disjoint from every other session flavour.
 /// Generated via `uuidgen`: 1cdd0042-32fd-4bac-91b0-b0eed5af0404.
 const TASK_WAKE_SESSION_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
     0x1c, 0xdd, 0x00, 0x42, 0x32, 0xfd, 0x4b, 0xac, 0x91, 0xb0, 0xb0, 0xee, 0xd5, 0xaf, 0x04, 0x04,
@@ -407,7 +405,10 @@ impl SessionId {
     ///
     /// `trigger_id` is taken as a raw `Uuid` to avoid a layering inversion:
     /// the concrete `TriggerId` newtype lives in `librefang-kernel`, which
-    /// depends on this crate. The dispatcher passes `trigger_match.trigger_id.0`.
+    /// depends on this crate. The dispatcher passes the id carried by
+    /// `TriggerMatchSource::Registered` (`tid.0`); `TriggerMatch` has had no
+    /// `trigger_id` field of its own since issue #6728, because a synthesized
+    /// match has no trigger behind it.
     /// `fire_time` is the moment the dispatcher resolved the match; the
     /// kernel event bus already carries `Event::timestamp` for this.
     pub fn for_trigger_fire(
@@ -429,16 +430,11 @@ impl SessionId {
 
     /// Derive a per-task session id for the built-in Task Board assignee wake.
     ///
-    /// Used when the wake resolves to `SessionMode::New` and each fire must
-    /// land on its own isolated session. The built-in wake has no stored
-    /// trigger, so `for_trigger_fire`'s `(agent, trigger_id, fire_time)` key
-    /// has nothing to bind to; `(agent, task_id, fire_time)` is the natural
-    /// substitute and keeps the id reproducible from the post-time log line.
+    /// Used when the wake resolves to `SessionMode::New` and each fire must land on its own isolated session.
+    /// The built-in wake has no stored trigger, so `for_trigger_fire`'s `(agent, trigger_id, fire_time)` key has nothing to bind to; `(agent, task_id, fire_time)` is the natural substitute and keeps the id reproducible from the post-time log line.
     ///
-    /// `task_id` is taken as `&str` rather than `Uuid` because the substrate
-    /// stores task ids as opaque strings (`memory::substrate::task_post`
-    /// mints them, but nothing in the type system pins the shape). Lower-cased
-    /// before hashing, mirroring `for_cron_run`.
+    /// `task_id` is taken as `&str` rather than `Uuid` because the substrate stores task ids as opaque strings (`memory::substrate::task_post` mints them, but nothing in the type system pins the shape).
+    /// Lower-cased before hashing, mirroring `for_cron_run`.
     pub fn for_task_wake(agent_id: AgentId, task_id: &str, fire_time: DateTime<Utc>) -> Self {
         let name = format!(
             "{}:{}:{}",
@@ -1350,18 +1346,12 @@ pub struct AgentManifest {
     /// capacity.
     #[serde(default)]
     pub max_concurrent_invocations: Option<u32>,
-    /// Per-agent override for the built-in Task Board assignee wake
-    /// (issue #6728). `None` inherits `KernelConfig.task_board.assignee_wake`.
+    /// Per-agent override for the built-in Task Board assignee wake (issue #6728).
+    /// `None` inherits `KernelConfig.task_board.assignee_wake`.
     ///
-    /// `Some(false)` is the only way to suppress the built-in wake for this
-    /// agent: the absence of a stored trigger, or a stored trigger that is
-    /// disabled or fire-exhausted, deliberately does **not** suppress it —
-    /// treating a dead record as suppression is what let an addressed task
-    /// sit `pending` indefinitely with nothing in the log.
+    /// `Some(false)` is the only way to suppress the built-in wake for this agent: the absence of a stored trigger, or a stored trigger that is disabled or fire-exhausted, deliberately does **not** suppress it — treating a dead record as suppression is what let an addressed task sit `pending` indefinitely with nothing in the log.
     ///
-    /// Set this when something other than the agent itself drains the board
-    /// on its behalf (an external claimer against the HTTP claim route, or a
-    /// human triaging by hand) and an autonomous wake would race it.
+    /// Set this when something other than the agent itself drains the board on its behalf (an external claimer against the HTTP claim route, or a human triaging by hand) and an autonomous wake would race it.
     #[serde(default)]
     pub assignee_wake: Option<bool>,
     /// If true, the agent's `context.md` is read once at session start and

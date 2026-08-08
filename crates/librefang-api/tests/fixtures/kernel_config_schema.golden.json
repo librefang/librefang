@@ -1272,7 +1272,9 @@
         "claim_ttl_secs": 600,
         "sweep_interval_secs": 30,
         "max_retries": 0,
-        "assignee_wake": true
+        "assignee_wake": true,
+        "pending_grace_secs": 60,
+        "wake_backoff_max_secs": 900
       },
       "allOf": [
         {
@@ -6878,9 +6880,23 @@
           "format": "uint32",
           "minimum": 0.0
         },
+        "pending_grace_secs": {
+          "description": "How long a task may sit `pending` before the sweeper's reconcile wakes its assignee, in seconds. Default: 60.\n\nThe event-driven wake is the fast path; this is the floor under it, so the grace window is what keeps the two from racing. A task younger than this is assumed to be in the hands of the wake its own `TaskPosted` event produced.\n\nLower means work lost by a dropped event is recovered sooner; higher means fewer redundant activations while an agent is mid-turn. `0` disables the reconcile, leaving delivery purely event-driven — which is the behaviour this floor exists to correct, so prefer the per-agent `assignee_wake` opt-out for one noisy agent.",
+          "default": 60,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "sweep_interval_secs": {
           "description": "How often the sweeper scans for stuck tasks. Default: 30 s.",
           "default": 30,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "wake_backoff_max_secs": {
+          "description": "Upper bound, in seconds, on the exponential backoff applied when reconcile wakes do not move an agent's pending tasks. Default: 900.\n\nEach wake that leaves the agent's pending set unchanged doubles the delay from `pending_grace_secs` up to this cap; any task leaving `pending` resets it. Without the cap, an agent that cannot act on its tasks — a failing provider, a missing `task_claim` capability — would be woken on every tick forever.",
+          "default": 900,
           "type": "integer",
           "format": "uint64",
           "minimum": 0.0
