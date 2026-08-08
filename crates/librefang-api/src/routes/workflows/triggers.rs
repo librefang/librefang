@@ -233,8 +233,7 @@ pub async fn get_trigger(
         Some(t) if super::super::can_access_agent(&state, t.agent_id, api_user.as_ref()) => {
             (StatusCode::OK, Json(trigger_to_json(&t)))
         }
-        Some(_) => ApiErrorResponse::not_found("Trigger not found").into_json_tuple(),
-        None => ApiErrorResponse::not_found("Trigger not found").into_json_tuple(),
+        _ => ApiErrorResponse::not_found("Trigger not found").into_json_tuple(),
     }
 }
 
