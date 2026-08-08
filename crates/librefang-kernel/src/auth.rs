@@ -238,8 +238,7 @@ struct AuthSnapshot {
     /// Channel binding index: "channel_type:platform_id" → UserId.
     channel_index: HashMap<String, UserId>,
     /// Resolved channel-role cache: `(channel, account, chat, user) → UserRole`.
-    /// Kept inside the generation so an in-flight lookup from an old config
-    /// can never repopulate the cache used by the new config.
+    /// Kept inside the generation so an in-flight lookup from an old config can never repopulate the cache used by the new config.
     role_cache: DashMap<RoleCacheKey, UserRole>,
     /// Tool groups (categories) referenced by per-user policies. Cloned
     /// from `KernelConfig.tool_policy.groups` at construction.
@@ -248,10 +247,8 @@ struct AuthSnapshot {
 
 /// RBAC authentication and authorization manager.
 pub struct AuthManager {
-    /// Config reload builds a complete replacement off to the side, then
-    /// publishes it with one atomic pointer swap. Readers retain their loaded
-    /// generation for the duration of a decision, so they cannot observe a
-    /// cleared user table, mismatched channel index, or mismatched tool groups.
+    /// Config reload builds a complete replacement off to the side, then publishes it with one atomic pointer swap.
+    /// Readers retain their loaded generation for the duration of a decision, so they cannot observe a cleared user table, mismatched channel index, or mismatched tool groups.
     snapshot: ArcSwap<AuthSnapshot>,
 }
 
@@ -343,8 +340,8 @@ impl AuthManager {
     /// `[users.tool_policy]`, and `[tool_policy.groups]` take effect
     /// without a daemon restart.
     ///
-    /// The replacement is built before publication. Concurrent readers retain
-    /// either the complete old generation or the complete new generation.
+    /// The replacement is built before publication.
+    /// Concurrent readers retain either the complete old generation or the complete new generation.
     pub fn reload(&self, user_configs: &[UserConfig], tool_groups: &[ToolGroup]) {
         self.snapshot
             .store(Arc::new(Self::build_snapshot(user_configs, tool_groups)));
@@ -568,10 +565,9 @@ impl AuthManager {
         self.snapshot.load().channel_index.get(&key).copied()
     }
 
-    /// Cheap snapshot of the kernel's tool groups (used for per-user
-    /// category evaluation). Returns an `Arc::clone` of the live
-    /// snapshot so the resolution hot path doesn't pay a `Vec` clone per tool
-    /// call. Existing clones keep their generation alive across config reload.
+    /// Cheap snapshot of the kernel's tool groups (used for per-user category evaluation).
+    /// Returns an `Arc::clone` of the live snapshot so the resolution hot path doesn't pay a `Vec` clone per tool call.
+    /// Existing clones keep their generation alive across config reload.
     pub fn tool_groups(&self) -> Arc<Vec<ToolGroup>> {
         Arc::clone(&self.snapshot.load().tool_groups)
     }
