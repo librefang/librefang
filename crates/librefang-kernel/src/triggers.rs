@@ -1391,8 +1391,7 @@ fn agent_identity_filter_matches(
     let Some(filter) = filter else {
         return true;
     };
-    // Before the `candidate == None` early-exit: "unassigned" is the one filter for which an
-    // absent candidate is a MATCH, not a miss.
+    // Before the `candidate == None` early-exit: "unassigned" is the one filter for which an absent candidate is a MATCH, not a miss.
     if filter == "unassigned" {
         return candidate.is_none_or(|c| c.is_empty());
     }
@@ -2438,11 +2437,8 @@ mod tests {
 
     #[test]
     fn task_posted_assignee_match_unassigned_matches_none_and_empty_string() {
-        // `assignee_match = "unassigned"` is the "pick up unowned work" filter, so it must
-        // match BOTH spellings of unowned that the system actually produces:
-        // `None` (task_post never set the field) and `""` (the stuck-task sweeper releases a
-        // claim with `SET assigned_to = ''`). Missing the empty-string half would make the
-        // trigger go permanently quiet for any task that had ever been claimed.
+        // `assignee_match = "unassigned"` is the "pick up unowned work" filter, so it must match BOTH spellings of unowned that the system actually produces: `None` (task_post never set the field) and `""` (the stuck-task sweeper releases a claim with `SET assigned_to = ''`).
+        // Missing the empty-string half would make the trigger go permanently quiet for any task that had ever been claimed.
         let engine = TriggerEngine::new();
         let worker = AgentId::new();
         let delegator = AgentId::new();
@@ -2477,8 +2473,7 @@ mod tests {
                 }),
             )
         };
-        // Each `evaluate_with_resolver` below needs the cooldown cleared, since a previous
-        // match would otherwise suppress the next one.
+        // Each `evaluate_with_resolver` below needs the cooldown cleared, since a previous match would otherwise suppress the next one.
         let reset_cooldown = || {
             for mut entry in engine.triggers.iter_mut() {
                 entry.cooldown_secs = Some(0);
@@ -2493,9 +2488,8 @@ mod tests {
             "unassigned must fire when assigned_to is absent"
         );
 
-        // `Some("")` — the sweeper-released form. This is the case that requires the
-        // `unassigned` arm to sit BEFORE the `candidate == None` early-exit AND to treat the
-        // empty string as unowned.
+        // `Some("")` — the sweeper-released form.
+        // This is the case that requires the `unassigned` arm to sit BEFORE the `candidate == None` early-exit AND to treat the empty string as unowned.
         reset_cooldown();
         let (matches, _) =
             engine.evaluate_with_resolver(&posted("t-2", Some(String::new())), resolver);
@@ -2505,8 +2499,7 @@ mod tests {
             "unassigned must fire when assigned_to is the empty string the sweeper writes"
         );
 
-        // An addressed task must NOT match, whether addressed to the trigger owner or anyone
-        // else — "unassigned" is not a wildcard.
+        // An addressed task must NOT match, whether addressed to the trigger owner or anyone else — "unassigned" is not a wildcard.
         reset_cooldown();
         let (matches, _) =
             engine.evaluate_with_resolver(&posted("t-3", Some(worker.to_string())), resolver);

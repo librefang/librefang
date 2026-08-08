@@ -2353,18 +2353,13 @@ pub fn validate_group_trigger_patterns(patterns: &[String]) -> Vec<String> {
             diagnostics.push(format!(
                 "group_trigger_patterns[{idx}] is not a valid regex: {err}"
             ));
-            // A pattern that does not compile is dropped outright by
-            // `compile_group_trigger_patterns`; the escaping hint below would only add noise.
+            // A pattern that does not compile is dropped outright by `compile_group_trigger_patterns`; the escaping hint below would only add noise.
             continue;
         }
-        // Report every control character, not just the first, so an operator who wrote both
-        // `\b` anchors sees that both ends are broken.
+        // Report every control character, not just the first, so an operator who wrote both `\b` anchors sees that both ends are broken.
         for c in pattern.chars().filter(|c| c.is_control()) {
-            // Tab, newline and carriage return DO occur in chat messages, so a
-            // pattern carrying one can still match — on the literal whitespace
-            // rather than on the anchor the operator meant. Claiming it "never
-            // matches" would be wrong, and the silent-wrong-match case is the
-            // harder one to debug of the two.
+            // Tab, newline and carriage return DO occur in chat messages, so a pattern carrying one can still match — on the literal whitespace rather than on the anchor the operator meant.
+            // Claiming it "never matches" would be wrong, and the silent-wrong-match case is the harder one to debug of the two.
             let effect = if matches!(c, '\t' | '\n' | '\r') {
                 "so this pattern matches a literal control character instead of the anchor you intended — \
                  and unlike the other escapes this one can still fire, on whitespace"
@@ -2400,8 +2395,8 @@ fn control_char_name(c: char) -> &'static str {
     }
 }
 
-/// The TOML escape letter that produces `c`, used to quote the operator's likely typo back at
-/// them. Falls back to the codepoint's own `\u` form for anything without a letter escape.
+/// The TOML escape letter that produces `c`, used to quote the operator's likely typo back at them.
+/// Falls back to the codepoint's own `\u` form for anything without a letter escape.
 fn toml_escape_letter(c: char) -> String {
     match c {
         '\u{8}' => "b".to_string(),
@@ -8464,13 +8459,9 @@ mod tests {
         });
     }
 
-    /// Pins the #6732 diagnosis: a TOML basic string `"(?i)\bvivi\b"` reaches the kernel
-    /// as `(?i)<U+0008>vivi<U+0008>` because `\b` is TOML's backspace escape, and the regex
-    /// crate accepts a bare control character as a verbatim literal.
-    /// So the pattern compiles — the `error!` in `compile_group_trigger_patterns` never fires —
-    /// and then never matches, which is exactly the silent degradation the reporter hit.
-    /// If regex-syntax ever starts rejecting control characters this test fails loudly and
-    /// `validate_group_trigger_patterns` can drop its control-character arm.
+    /// Pins the #6732 diagnosis: a TOML basic string `"(?i)\bvivi\b"` reaches the kernel as `(?i)<U+0008>vivi<U+0008>` because `\b` is TOML's backspace escape, and the regex crate accepts a bare control character as a verbatim literal.
+    /// So the pattern compiles — the `error!` in `compile_group_trigger_patterns` never fires — and then never matches, which is exactly the silent degradation the reporter hit.
+    /// If regex-syntax ever starts rejecting control characters this test fails loudly and `validate_group_trigger_patterns` can drop its control-character arm.
     #[test]
     fn group_trigger_pattern_with_backspace_compiles_but_never_matches_6732() {
         let backspaced = "(?i)\u{8}vivi\u{8}".to_string();
@@ -8528,15 +8519,11 @@ mod tests {
             assert!(d.contains("literal (single-quoted) string"), "{d}");
         }
 
-        // Backspace cannot appear in a chat message, so "never matches" is
-        // accurate there.
+        // Backspace cannot appear in a chat message, so "never matches" is accurate there.
         assert!(backspaced[0].contains("never matches"), "{}", backspaced[0]);
 
-        // Tab, newline and CR are different: they DO occur in chat text, so
-        // such a pattern can still fire — on literal whitespace rather than on
-        // the anchor the operator meant. Telling them it never matches would
-        // send them looking for the wrong failure, and a wrong match is the
-        // harder of the two to spot.
+        // Tab, newline and CR are different: they DO occur in chat text, so such a pattern can still fire — on literal whitespace rather than on the anchor the operator meant.
+        // Telling them it never matches would send them looking for the wrong failure, and a wrong match is the harder of the two to spot.
         for (c, name) in [
             ('\t', "tab"),
             ('\n', "line feed"),
@@ -8554,8 +8541,7 @@ mod tests {
             assert!(d[0].contains("can still fire"), "{}", d[0]);
         }
 
-        // A pattern that fails to compile is reported once, not also for its control chars —
-        // it is dropped outright, so the escaping hint would be noise.
+        // A pattern that fails to compile is reported once, not also for its control chars — it is dropped outright, so the escaping hint would be noise.
         let both = validate_group_trigger_patterns(&["(\u{8}".to_string()]);
         assert_eq!(both.len(), 1, "got {both:?}");
         assert!(both[0].contains("not a valid regex"), "{}", both[0]);

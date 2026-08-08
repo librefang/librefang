@@ -700,33 +700,19 @@ fn test_spawn_agent_applies_local_default_model_override() {
 
 /// Source-shape sentinel for the #6732 diagnostic wiring.
 ///
-/// `warn_invalid_group_trigger_patterns` returns nothing and only emits a
-/// `warn!`, so a test that calls it — or calls the validator underneath it —
-/// proves the validator works without proving anything is wired to it. Delete
-/// all four call sites and every behavioural assertion in this file still
-/// passes, which is precisely the hole this closes.
+/// `warn_invalid_group_trigger_patterns` returns nothing and only emits a `warn!`, so a test that calls it — or calls the validator underneath it — proves the validator works without proving anything is wired to it.
+/// Delete all four call sites and every behavioural assertion in this file still passes, which is precisely the hole this closes.
 ///
-/// This is a shape check, not a behavioural one, and is labelled as such: it
-/// cannot tell you the warning reached a subscriber, only that the manifest is
-/// still handed to the diagnostic on each of the four paths that accept one.
-/// Exercising all four behaviourally means driving a spawn, two `agent_state`
-/// transitions and a boot-time restore against a real kernel with tracing
-/// captured; that is worth doing and is not done here.
+/// This is a shape check, not a behavioural one, and is labelled as such: it cannot tell you the warning reached a subscriber, only that the manifest is still handed to the diagnostic on each of the four paths that accept one.
+/// Exercising all four behaviourally means driving a spawn, two `agent_state` transitions and a boot-time restore against a real kernel with tracing captured; that is worth doing and is not done here.
 ///
-/// The boot-restore site is the one that matters most in production: after a
-/// daemon's first run every agent arrives through it, so a manifest whose
-/// pattern silently never matches is re-loaded on every restart with no
-/// diagnostic at all if that call is dropped.
+/// The boot-restore site is the one that matters most in production: after a daemon's first run every agent arrives through it, so a manifest whose pattern silently never matches is re-loaded on every restart with no diagnostic at all if that call is dropped.
 #[test]
 fn group_trigger_pattern_diagnostic_is_wired_into_every_manifest_path() {
-    // Comments are stripped so a leftover doc reference cannot satisfy the
-    // assertion after the call itself is removed.
+    // Comments are stripped so a leftover doc reference cannot satisfy the assertion after the call itself is removed.
     //
-    // The open/close scan loops within a line rather than handling one
-    // delimiter per line. A single-line `/* … */` — `boot.rs` has one at the
-    // sqlite match arm — would otherwise leave the stripper stuck in
-    // block-comment state and silently swallow the entire rest of the file,
-    // including the call this test exists to find.
+    // The open/close scan loops within a line rather than handling one delimiter per line.
+    // A single-line `/* … */` — `boot.rs` has one at the sqlite match arm — would otherwise leave the stripper stuck in block-comment state and silently swallow the entire rest of the file, including the call this test exists to find.
     let strip = |src: &str| -> String {
         let mut out = String::with_capacity(src.len());
         let mut in_block = false;
@@ -792,9 +778,7 @@ fn group_trigger_pattern_diagnostic_is_wired_into_every_manifest_path() {
         );
     }
 
-    // agent_state.rs carries two independent paths — the disk manifest and the
-    // replacement manifest — and a single `contains` would pass with either one
-    // wired.
+    // agent_state.rs carries two independent paths — the disk manifest and the replacement manifest — and a single `contains` would pass with either one wired.
     let agent_state = strip(include_str!("agent_state.rs"));
     assert_eq!(
         agent_state.matches(CALL).count(),
@@ -806,14 +790,10 @@ fn group_trigger_pattern_diagnostic_is_wired_into_every_manifest_path() {
 
 /// #6732: a mis-escaped `group_trigger_patterns` entry is a diagnostic, not a rejection.
 ///
-/// The whole point of the new check is that the operator's alias silently never matches; failing
-/// the spawn would convert a cosmetic typo into an agent that does not exist at all, which is a
-/// strictly worse outcome. This pins WARN-not-Err so a later refactor cannot promote the
-/// report-only validator into `validate_spawnable`'s rejecting group by accident.
+/// The whole point of the new check is that the operator's alias silently never matches; failing the spawn would convert a cosmetic typo into an agent that does not exist at all, which is a strictly worse outcome.
+/// This pins WARN-not-Err so a later refactor cannot promote the report-only validator into `validate_spawnable`'s rejecting group by accident.
 ///
-/// `"(?i)\u{8}vivi\u{8}"` is the exact byte sequence a TOML basic string
-/// `"(?i)\bvivi\b"` produces — see
-/// `librefang_channels::bridge::validate_group_trigger_patterns`.
+/// `"(?i)\u{8}vivi\u{8}"` is the exact byte sequence a TOML basic string `"(?i)\bvivi\b"` produces — see `librefang_channels::bridge::validate_group_trigger_patterns`.
 #[test]
 fn spawn_still_succeeds_when_group_trigger_pattern_has_control_char_6732() {
     let tmp = tempfile::tempdir().unwrap();
@@ -842,9 +822,7 @@ fn spawn_still_succeeds_when_group_trigger_pattern_has_control_char_6732() {
         ..Default::default()
     };
 
-    // The validator is pure and side-effect free, so assert directly that it *did* have
-    // something to say — otherwise this test could pass for the wrong reason (e.g. the
-    // manifest field silently not reaching the check at all).
+    // The validator is pure and side-effect free, so assert directly that it *did* have something to say — otherwise this test could pass for the wrong reason (e.g. the manifest field silently not reaching the check at all).
     let diagnostics = librefang_channels::bridge::validate_group_trigger_patterns(
         &manifest
             .channel_overrides

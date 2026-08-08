@@ -1112,7 +1112,7 @@ fn validate_manifest_module_path(manifest: &AgentManifest, agent_name: &str) -> 
 /// WARN, never reject: a mis-escaped alias is an operator typo, not a security problem, and an agent that cannot be woken by name is still a working agent.
 /// Failing the spawn would turn a cosmetic mistake into an outage.
 ///
-/// Centralised next to [`validate_manifest_module_path`] and called from every path that accepts a manifest — spawn (via `validate_spawnable`), hand-role activation, on-disk hot-reload, and `update_manifest` — because the underlying bug is invisible by construction: the pattern compiles, so the lazy `error!` inside the channel bridge never fires, and the only symptom is an agent that never answers to its own name.
+/// Centralised next to [`validate_manifest_module_path`] and called from every path that accepts a manifest — spawn (via `validate_spawnable`), hand-role activation, on-disk hot-reload, `update_manifest`, and boot-time restore from persistent storage — because the underlying bug is invisible by construction: the pattern compiles, so the lazy `error!` inside the channel bridge never fires, and the only symptom is an agent that never answers to its own name.
 /// See [`librefang_channels::bridge::validate_group_trigger_patterns`] for the diagnosis.
 fn warn_invalid_group_trigger_patterns(manifest: &AgentManifest, agent_name: &str) {
     let Some(overrides) = manifest.channel_overrides.as_ref() else {
