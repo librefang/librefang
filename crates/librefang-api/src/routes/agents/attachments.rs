@@ -380,12 +380,9 @@ pub async fn resolve_url_attachments(
             }
         };
 
-        // Build a direct per-attachment client and pin DNS to the IP we just
-        // validated. Proxies are disabled because proxy-side DNS would bypass
-        // the local override. Without the pin, reqwest performs its own
-        // independent lookup before connecting — a low-TTL record can
-        // flip to a private IP between our validation and reqwest's
-        // resolver call (DNS rebind, #3701).
+        // Build a direct per-attachment client and pin DNS to the IP we just validated.
+        // Proxies are disabled because proxy-side DNS would bypass the local override.
+        // Without the pin, reqwest performs its own independent lookup before connecting — a low-TTL record can flip to a private IP between our validation and reqwest's resolver call (DNS rebind, #3701).
         let mut builder = librefang_kernel::http_client::direct_client_builder()
             .timeout(std::time::Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none());
