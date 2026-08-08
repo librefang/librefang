@@ -347,3 +347,32 @@ async fn owner_and_admin_can_access_agent_observability() {
         assert_eq!(status, StatusCode::NOT_FOUND, "{endpoint}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn non_owner_cannot_clone_agent() {
+    // `agent_clone` in `middleware::user_role_allows_request` deliberately lets any `User`-role caller POST `/clone` on an arbitrary agent id (unlike most mutations, which require Admin+), so the ownership boundary has to be enforced in the handler itself.
+    // Bob cannot read the resulting clone back afterwards either way (it keeps Alice's `author`), but without this check he could still trigger unauthorized cloning of her agent by guessing/enumerating its UUID.
+    let h = boot().await;
+    let agent_id = spawn_authored(&h.state, "Alice");
+    let aid = agent_id.to_string();
+
+    let status = request_status(
+        &h.app,
+        Method::POST,
+        &format!("/api/agents/{aid}/clone"),
+        BOB_KEY,
+        Some(serde_json::json!({"new_name": "bob-should-not-get-this"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let status = request_status(
+        &h.app,
+        Method::POST,
+        &format!("/api/agents/{aid}/clone"),
+        ALICE_KEY,
+        Some(serde_json::json!({"new_name": format!("alice-clone-{}", uuid::Uuid::new_v4())})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+}
