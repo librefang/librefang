@@ -1280,9 +1280,12 @@ def _build_task_progress_blocks(
     return text, blocks
 
 
-# Matches one code span — fenced ```...``` or inline `...`.
+# Matches one code span — fenced ```...```, an UNCLOSED ``` running to the end
+# of the message, or inline `...`.
 # The converter masks every match with an index token before any other rule runs, then restores the spans at the end, so a bold/link span or header/bullet line that wraps around a code span is still seen whole by the regexes (the previous top-level split hid everything past the code delimiter from them).
-_CODE_SPAN_RE = re.compile(r"```.*?```|`[^`]*`", re.DOTALL)
+# The unclosed alternative is second so a closed fence always wins; it matters because a truncated model response ends mid-block, and Slack renders an unterminated ``` as code all the way to the end of the message. Without it the blank-line collapse would rewrite the interior of something the user sees as a code block.
+# Deliberately NOT covered: `~~~` fences and 4-space-indented blocks. Both are GitHub-flavoured Markdown that Slack's mrkdwn does not render as code, so their blank lines are ordinary prose whitespace and collapsing them is exactly what #6730 asks for.
+_CODE_SPAN_RE = re.compile(r"```.*?```|```.*|`[^`]*`", re.DOTALL)
 # An index token standing in for a masked code span: \x00<index>\x01.
 # Control-character delimiters guarantee no Markdown rule can match into or across a token.
 _CODE_TOKEN_RE = re.compile("\x00(\\d+)\x01")
@@ -1491,14 +1494,30 @@ def _build_block_kit(text: str, buttons: list) -> list:
     # chunks <= the limit; an empty string comes back as [""], preserving the
     # historical single-empty-section shape.
     chunks = _split_message(text, SLACK_MSG_LIMIT)
-    # One slot reserved for the truncation marker below. Clamped at 0: once
-    # `action_blocks` alone reaches the cap, `chunks[:max_sections]` with a
-    # negative `max_sections` would slice from the end instead of yielding
-    # no sections (Python's `[:-n]` is "drop the last n", not "keep none").
-    max_sections = max(0, MAX_BLOCKS_PER_MESSAGE - len(action_blocks) - 1)
-    truncated = len(chunks) > max_sections
-    if truncated:
-        chunks = chunks[:max_sections]
+
+    # The marker costs a block, so its slot is reserved only once truncation
+    # is actually happening. Reserving it up front spends a slot that the
+    # content may not need: with 49 button rows and one chunk, one section
+    # plus 49 actions is exactly 50 blocks and fits, but an unconditional
+    # reservation left zero sections and replaced the text with the marker.
+    # `/agents` and `/models` build one row per agent / per provider with no
+    # cap, so that is reachable rather than theoretical.
+    #
+    # When the rows alone reach the cap the message cannot carry text at all,
+    # and the rows themselves have to give — Slack rejects an over-cap message
+    # outright, so "buttons are never dropped" cannot mean emitting 51 blocks;
+    # that delivers nothing at all, buttons included.
+    truncated = False
+    if len(action_blocks) >= MAX_BLOCKS_PER_MESSAGE:
+        action_blocks = action_blocks[: MAX_BLOCKS_PER_MESSAGE - 1]
+        chunks = []
+        truncated = True
+    else:
+        section_budget = MAX_BLOCKS_PER_MESSAGE - len(action_blocks)
+        if len(chunks) > section_budget:
+            truncated = True
+            # Now — and only now — the marker takes one of the slots.
+            chunks = chunks[: max(0, section_budget - 1)]
     blocks: list = [
         {"type": "section", "text": {"type": "mrkdwn", "text": chunk}}
         for chunk in chunks

@@ -1253,6 +1253,25 @@ def test_markdown_preserves_blank_lines_inside_fenced_code():
     assert out.endswith("```\n\nouttro")
 
 
+def test_markdown_preserves_blank_lines_inside_an_unclosed_fence():
+    # A truncated model response ends mid-block. Slack renders an
+    # unterminated ``` as code to the end of the message, so the collapse
+    # must not reflow what the user sees as code either.
+    src = "intro\n\n\n\n```\nx = 1\n\n\n\ny = 2"
+    out = sa._markdown_to_mrkdwn(src)
+    assert "x = 1\n\n\n\ny = 2" in out
+    # Prose before the fence is still collapsed.
+    assert out.startswith("intro\n\n```")
+
+
+def test_markdown_still_collapses_inside_a_tilde_fence():
+    # `~~~` is GitHub-flavoured Markdown that Slack does not render as code,
+    # so its contents are prose and the blank-line collapse applies. Pinned
+    # so the deliberate boundary is not "fixed" into masking it.
+    src = "~~~\na\n\n\n\nb\n~~~"
+    assert "a\n\nb" in sa._markdown_to_mrkdwn(src)
+
+
 def test_markdown_collapses_run_left_by_empty_header():
     # A content-less ATX header (hashes, a space, nothing else) emits an
     # empty line of its own, so the converter can manufacture a blank-line
@@ -1290,21 +1309,50 @@ def test_build_block_kit_never_exceeds_block_limit():
 
 
 def test_build_block_kit_button_rows_alone_exceed_block_cap():
-    # Regression: when `action_blocks` alone reaches/exceeds
-    # MAX_BLOCKS_PER_MESSAGE - 1, `max_sections` goes negative. Python's
-    # `list[:-n]` means "drop the last n", not "keep none", so an
-    # unclamped `chunks[:max_sections]` kept a stray section instead of
-    # zero — this pins the clamp that makes zero sections the outcome.
+    # When the rows alone reach the cap there is no room for text, so the
+    # payload is the marker plus as many rows as still fit. The whole
+    # message must stay within the cap: Slack rejects an over-cap message,
+    # so emitting 51 blocks to "keep every button" delivers no buttons.
     buttons = [[{"label": f"B{i}", "action": f"a{i}"}]
                for i in range(sa.MAX_BLOCKS_PER_MESSAGE)]
     blocks = sa._build_block_kit("some text", buttons)
+    assert len(blocks) <= sa.MAX_BLOCKS_PER_MESSAGE
     sections = [b for b in blocks if b["type"] == "section"]
     # No room for the text itself, just the truncation marker — never a
     # stray real chunk of the text (the unclamped negative-slice bug).
     assert len(sections) == 1
     assert "truncated" in sections[0]["text"]["text"]
     assert len([b for b in blocks if b["type"] == "actions"]) == \
-        sa.MAX_BLOCKS_PER_MESSAGE
+        sa.MAX_BLOCKS_PER_MESSAGE - 1
+
+
+def test_build_block_kit_keeps_text_when_rows_exactly_fill_the_budget():
+    # Regression: the marker slot used to be reserved before checking whether
+    # truncation was needed, so at exactly MAX-1 rows the real text was
+    # dropped and replaced by "_(message truncated)_" even though one section
+    # plus the rows is exactly the cap. `/agents` builds one row per agent
+    # with no cap, so a daemon with 49 agents hit this.
+    rows = sa.MAX_BLOCKS_PER_MESSAGE - 1
+    buttons = [[{"label": f"B{i}", "action": f"a{i}"}] for i in range(rows)]
+    blocks = sa._build_block_kit("Select an agent:", buttons)
+
+    assert len(blocks) == sa.MAX_BLOCKS_PER_MESSAGE
+    sections = [b for b in blocks if b["type"] == "section"]
+    assert len(sections) == 1
+    assert sections[0]["text"]["text"] == "Select an agent:"
+    assert not any("truncated" in b.get("text", {}).get("text", "")
+                   for b in blocks if b["type"] == "section")
+    assert len([b for b in blocks if b["type"] == "actions"]) == rows
+
+
+@pytest.mark.parametrize("rows", [1, 10, 47, 48, 49, 50, 60])
+def test_build_block_kit_never_exceeds_cap_for_any_row_count(rows):
+    # The cap is a hard Slack limit, so it has to hold across the whole
+    # range rather than at the two counts the other tests happen to use.
+    buttons = [[{"label": f"B{i}", "action": f"a{i}"}] for i in range(rows)]
+    blocks = sa._build_block_kit("some text", buttons)
+    assert len(blocks) <= sa.MAX_BLOCKS_PER_MESSAGE, \
+        f"{rows} rows produced {len(blocks)} blocks"
 
 
 def test_post_message_with_blocks_bounds_fallback_text(monkeypatch):
