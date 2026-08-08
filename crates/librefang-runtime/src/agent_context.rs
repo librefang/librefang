@@ -234,6 +234,10 @@ fn open_context_file(path: &Path) -> io::Result<fs::File> {
         let mut flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
         if directory {
             flags |= libc::O_DIRECTORY;
+        } else {
+            // Opening a FIFO read-only blocks before we can reject it via
+            // fstat. Regular files ignore O_NONBLOCK.
+            flags |= libc::O_NONBLOCK;
         }
         // SAFETY: `dir` remains open for the call and `name` is a live
         // NUL-terminated relative component. The returned fd is owned below.
@@ -277,14 +281,141 @@ fn open_context_file(path: &Path) -> io::Result<fs::File> {
 
 #[cfg(windows)]
 fn open_context_file(path: &Path) -> io::Result<fs::File> {
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    use std::os::windows::fs::OpenOptionsExt;
-    // Open the reparse point itself rather than following it. Reading a
-    // symlink handle is refused by the regular-file check below.
+    use std::ffi::c_void;
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::io::AsRawHandle;
+
+    type Handle = *mut c_void;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetFinalPathNameByHandleW(
+            file: Handle,
+            path: *mut u16,
+            path_len: u32,
+            flags: u32,
+        ) -> u32;
+        fn CompareStringOrdinal(
+            string1: *const u16,
+            string1_len: i32,
+            string2: *const u16,
+            string2_len: i32,
+            ignore_case: i32,
+        ) -> i32;
+    }
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    options.open(path)
+    const FILE_NAME_NORMALIZED: u32 = 0;
+    const VOLUME_NAME_DOS: u32 = 0;
+    const CSTR_EQUAL: i32 = 2;
+
+    fn final_path(file: &fs::File) -> io::Result<Vec<u16>> {
+        let mut buffer = vec![0_u16; 512];
+        loop {
+            // SAFETY: the file handle remains live and `buffer` provides the
+            // writable capacity reported to the Windows API.
+            let len = unsafe {
+                GetFinalPathNameByHandleW(
+                    file.as_raw_handle().cast(),
+                    buffer.as_mut_ptr(),
+                    buffer.len().try_into().unwrap_or(u32::MAX),
+                    FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+                )
+            };
+            if len == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let len = len as usize;
+            if len < buffer.len() {
+                buffer.truncate(len);
+                return Ok(buffer);
+            }
+            buffer.resize(len.saturating_add(1), 0);
+        }
+    }
+
+    fn path_is_beneath(root: &[u16], candidate: &[u16]) -> bool {
+        if candidate.len() <= root.len() || root.len() > i32::MAX as usize {
+            return false;
+        }
+        // SAFETY: both slices remain live for the comparison and their
+        // lengths are bounded to i32 above/by the Win32 path API.
+        let equal = unsafe {
+            CompareStringOrdinal(
+                root.as_ptr(),
+                root.len() as i32,
+                candidate.as_ptr(),
+                root.len() as i32,
+                1,
+            )
+        } == CSTR_EQUAL;
+        if !equal {
+            return false;
+        }
+        root.last()
+            .is_some_and(|c| *c == b'\\' as u16 || *c == b'/' as u16)
+            || matches!(candidate.get(root.len()), Some(c) if *c == b'\\' as u16 || *c == b'/' as u16)
+    }
+
+    fn open_reparse_point(path: &Path, directory: bool) -> io::Result<fs::File> {
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        let mut flags = FILE_FLAG_OPEN_REPARSE_POINT;
+        if directory {
+            flags |= FILE_FLAG_BACKUP_SEMANTICS;
+        }
+        options.custom_flags(flags).open(path)
+    }
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "context path has no parent"))?;
+    let workspace = if parent.file_name() == Some(std::ffi::OsStr::new(".identity")) {
+        parent.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "identity path has no workspace",
+            )
+        })?
+    } else {
+        parent
+    };
+
+    let workspace_handle = open_reparse_point(workspace, true)?;
+    let workspace_meta = workspace_handle.metadata()?;
+    if !workspace_meta.is_dir()
+        || workspace_meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "context workspace is not a regular directory",
+        ));
+    }
+
+    let file = open_reparse_point(path, false)?;
+    let file_meta = file.metadata()?;
+    if file_meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "context.md is a reparse point",
+        ));
+    }
+
+    // The final path comes from the already-opened handle. If an intermediate
+    // directory was swapped for a junction, this resolves outside the opened
+    // workspace and is rejected before any bytes are read.
+    let workspace_path = final_path(&workspace_handle)?;
+    let file_path = final_path(&file)?;
+    if !path_is_beneath(&workspace_path, &file_path) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "context.md resolved outside its workspace",
+        ));
+    }
+
+    Ok(file)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -485,9 +616,9 @@ mod tests {
 
     /// Regression test for the prompt-injection exfil vector caught in
     /// review: a symlinked context.md must NOT be followed, even when the
-    /// target is a regular readable file. Without `symlink_metadata` +
-    /// explicit refusal, an attacker who can drop a symlink into the agent
-    /// workspace could point context.md at /etc/passwd and have its
+    /// target is a regular readable file. Without a no-follow open bound to
+    /// the subsequent handle checks, an attacker who can drop a symlink into
+    /// the agent workspace could point context.md at /etc/passwd and have its
     /// contents injected into the LLM prompt.
     #[cfg(unix)]
     #[test]
@@ -520,6 +651,64 @@ mod tests {
             "the file open operation itself must reject a symlink"
         );
         let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_reader_does_not_block_on_fifo() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let ws = fresh_workspace("nofollow_fifo");
+        let fifo = ws.join(CONTEXT_FILENAME);
+        let fifo_c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `fifo_c` is a live NUL-terminated path and the mode contains
+        // only ordinary permission bits.
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = tx.send(read_capped(&fifo).map(|_| ()));
+        });
+        // Wait for the actual completion event. The deadline is only a failure
+        // bound proving that a FIFO open did not block waiting for a writer.
+        let result = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("opening a FIFO must not wait for a writer");
+        worker.join().unwrap();
+        assert!(result.is_err(), "a FIFO must not be accepted as context");
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_context_file_opener_rejects_file_symlink() {
+        let ws = fresh_workspace("windows_file_symlink");
+        let target = ws.join("target.md");
+        let link = ws.join(CONTEXT_FILENAME);
+        fs::write(&target, "must not load").unwrap();
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+
+        assert!(open_context_file(&link).is_err());
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_context_file_opener_rejects_symlinked_identity_directory() {
+        let ws = fresh_workspace("windows_identity_dir_symlink");
+        let outside = fresh_workspace("windows_identity_dir_target");
+        fs::write(outside.join(CONTEXT_FILENAME), "must not load").unwrap();
+        std::os::windows::fs::symlink_dir(&outside, ws.join(".identity")).unwrap();
+
+        assert!(
+            open_context_file(&ws.join(".identity").join(CONTEXT_FILENAME)).is_err(),
+            "the opened file handle must be rejected when an intermediate reparse point escapes the workspace"
+        );
+        let _ = fs::remove_dir_all(&ws);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     #[cfg(unix)]
