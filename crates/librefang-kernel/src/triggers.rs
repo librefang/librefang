@@ -1028,17 +1028,12 @@ impl TriggerEngine {
         resolve_name: impl Fn(AgentId) -> Option<String>,
     ) -> TaskPostedCoverage {
         let assignee_uuid = assignee_id.to_string();
-        let mut dormant = Vec::new();
 
-        // Deterministic order so the reported trigger id is stable across
-        // runs (DashMap iterates by shard and hash).
-        let mut ids: Vec<TriggerId> = self.triggers.iter().map(|e| *e.key()).collect();
-        ids.sort();
-
-        for id in ids {
-            let Some(trigger) = self.triggers.get(&id) else {
-                continue;
-            };
+        // Filter during the walk so only records that actually address this assignee are materialised.
+        // Collecting and sorting every id first, then looking each one up again, paid an O(n log n) sort and n shard lookups on every `TaskPosted` for a candidate set that is almost always empty or a single entry.
+        let mut candidates: Vec<(TriggerId, bool)> = Vec::new();
+        for entry in self.triggers.iter() {
+            let trigger = entry.value();
             let TriggerPattern::TaskPosted { assignee_match } = &trigger.pattern else {
                 continue;
             };
@@ -1059,11 +1054,16 @@ impl TriggerEngine {
             }
 
             let exhausted = trigger.max_fires > 0 && trigger.fire_count >= trigger.max_fires;
-            if trigger.enabled && !exhausted {
-                return TaskPostedCoverage::Covered(trigger.id);
-            }
-            dormant.push(trigger.id);
+            candidates.push((trigger.id, trigger.enabled && !exhausted));
         }
+
+        // `DashMap` iterates by shard and hash, so which record gets reported must not depend on iteration order.
+        // Ordering the handful that address one assignee gives the same guarantee the whole-store sort used to, without paying for the whole store.
+        candidates.sort_by_key(|(id, _)| *id);
+        if let Some((id, _)) = candidates.iter().find(|(_, can_fire)| *can_fire) {
+            return TaskPostedCoverage::Covered(*id);
+        }
+        let dormant: Vec<TriggerId> = candidates.into_iter().map(|(id, _)| id).collect();
 
         if dormant.is_empty() {
             TaskPostedCoverage::None
