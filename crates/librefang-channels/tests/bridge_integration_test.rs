@@ -1486,8 +1486,7 @@ async fn test_group_gating_skip_emits_no_lifecycle_reaction_6731() {
         "gated".to_string(),
     )]));
     let router = Arc::new(AgentRouter::new());
-    // Group messages resolve on `sender.platform_id`, which for a group is the
-    // chat id (see `resolve_or_fallback`'s binding-keys comment).
+    // Group messages resolve on `sender.platform_id`, which for a group is the chat id (see `resolve_or_fallback`'s binding-keys comment).
     router.set_user_default("G01".to_string(), agent_id);
 
     let (adapter, tx) = ReactionRecordingAdapter::new("slack-mock", ChannelType::Slack);

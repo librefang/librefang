@@ -107,9 +107,8 @@ DEFAULT_API_BASE = "https://slack.com/api"
 # clients render the first 3000 cleanly; the Rust adapter used 3000
 # (`SLACK_MSG_LIMIT`) so we preserve that.
 SLACK_MSG_LIMIT = 3000
-# Slack rejects a `chat.postMessage` carrying more than 50 blocks. Only the
-# Block Kit paths (interactive replies, the task-progress card) can approach
-# this; the plain-text path chunks into separate messages instead.
+# Slack rejects a `chat.postMessage` carrying more than 50 blocks.
+# Only the Block Kit paths (interactive replies, the task-progress card) can approach this; the plain-text path chunks into separate messages instead.
 MAX_BLOCKS_PER_MESSAGE = 50
 
 SEND_TIMEOUT_SECS = 15.0
@@ -486,12 +485,8 @@ class SlackAdapter(SidecarAdapter):
         self.reactions_enabled = _bool_env(
             os.environ.get("SLACK_REACTIONS", ""), default=True,
         )
-        # The task-progress card is a separate indicator from the receipt
-        # reaction (#6730): silencing the emoji noise used to silence the
-        # card too, which was the only workaround for either. It defaults
-        # to whatever `SLACK_REACTIONS` resolved to, so an operator who
-        # already runs `SLACK_REACTIONS=false` for total silence keeps it
-        # and does not suddenly start receiving cards.
+        # The task-progress card is a separate indicator from the receipt reaction (#6730): silencing the emoji noise used to silence the card too, which was the only workaround for either.
+        # It defaults to whatever `SLACK_REACTIONS` resolved to, so an operator who already runs `SLACK_REACTIONS=false` for total silence keeps it and does not suddenly start receiving cards.
         self.progress_card_enabled = _bool_env(
             os.environ.get("SLACK_PROGRESS_CARD", ""),
             default=self.reactions_enabled,
@@ -646,12 +641,8 @@ class SlackAdapter(SidecarAdapter):
         chunks = (
             _split_message(text, SLACK_MSG_LIMIT)
             if blocks is None
-            # With blocks, `text` is only the notification-preview fallback
-            # (the blocks carry the rendered content, already split to fit
-            # per-section), so chunking it into several messages would post
-            # the same blocks repeatedly. Bound it instead — an unbounded
-            # notification string buys nothing and is one more length the
-            # API can reject.
+            # With blocks, `text` is only the notification-preview fallback (the blocks carry the rendered content, already split to fit per-section), so chunking it into several messages would post the same blocks repeatedly.
+            # Bound it instead — an unbounded notification string buys nothing and is one more length the API can reject.
             else [text[:SLACK_MSG_LIMIT]]
         )
         for chunk in chunks:
@@ -908,14 +899,8 @@ class SlackAdapter(SidecarAdapter):
             )
             if ev is None:
                 return
-            # No reaction here (#6731). Receiving a message is not the
-            # same as answering it: the daemon may decline the turn for
-            # any of ~two dozen reasons (mention-only group gating, an
-            # `[allowed_channels]`-adjacent RBAC denial, a per-user rate
-            # limit, a slash command it handles itself), all of which
-            # return before any adapter-visible lifecycle signal. The
-            # receipt is added from the `queued` phase in `_on_phase`
-            # instead, which fires only for a turn that is actually run.
+            # No reaction here (#6731). Receiving a message is not the same as answering it: the daemon may decline the turn for any of ~two dozen reasons (mention-only group gating, an `[allowed_channels]`-adjacent RBAC denial, a per-user rate limit, a slash command it handles itself), all of which return before any adapter-visible lifecycle signal.
+            # The receipt is added from the `queued` phase in `_on_phase` instead, which fires only for a turn that is actually run.
             emit(ev)
             return
         if env_type == "interactive":
@@ -985,11 +970,8 @@ class SlackAdapter(SidecarAdapter):
         if not channel_id:
             log.warn("slack on_send: empty channel_id, dropping")
             return
-        # The inbound thread id (post-#5302 this is the message's own ts
-        # for a top-level message, or the thread root for an in-thread
-        # reply). Used to decide where to post, nothing else — reaction
-        # finalization moved onto the lifecycle stream in #6731, keyed by
-        # the triggering message's own ts rather than this.
+        # The inbound thread id (post-#5302 this is the message's own ts for a top-level message, or the thread root for an in-thread reply).
+        # Used to decide where to post, nothing else — reaction finalization moved onto the lifecycle stream in #6731, keyed by the triggering message's own ts rather than this.
         inbound_thread_id = getattr(cmd, "thread_id", None)
         # Decide thread context for *posting*: force-flat-replies mode
         # forces the reply to a top-level post (mirrors the Rust adapter's
@@ -1076,10 +1058,8 @@ class SlackAdapter(SidecarAdapter):
                     lambda: self._add_reaction(channel_id, message_id, "eyes"),
                 )
             else:
-                # An empty emoji on the wire is the daemon's
-                # `clear_done_reaction` signal ("remove, add nothing").
-                # Every other terminal frame carries one, so only Done can
-                # be empty — see `lifecycle_reaction_emoji` in bridge.rs.
+                # An empty emoji on the wire is the daemon's `clear_done_reaction` signal ("remove, add nothing").
+                # Every other terminal frame carries one, so only Done can be empty — see `lifecycle_reaction_emoji` in bridge.rs.
                 wire_emoji = getattr(cmd, "reaction", "") or ""
                 if phase == "error":
                     terminal_emoji: Optional[str] = "x"
@@ -1094,9 +1074,7 @@ class SlackAdapter(SidecarAdapter):
                     ),
                 )
         if phase == "queued":
-            # `queued` is never rendered in the card, so there is nothing
-            # left to do — and materializing card state for it would make
-            # every turn look multi-step.
+            # `queued` is never rendered in the card, so there is nothing left to do — and materializing card state for it would make every turn look multi-step.
             return
         if not self.progress_card_enabled:
             return
@@ -1254,10 +1232,8 @@ _BOLD_STAR_RE = re.compile(r"\*\*([^*\n]+)\*\*")
 _BOLD_USCORE_RE = re.compile(r"__([^_\n]+)__")
 _STRIKE_RE = re.compile(r"~~([^~\n]+)~~")
 # A run of three or more newlines, i.e. two or more consecutive blank lines.
-# Collapsed to a single blank line (Slack's paragraph separator) so a model that
-# pads its answer with blank lines does not turn a short reply into a wall of
-# whitespace (#6730). Applied to the code-MASKED string, so a fenced block's
-# interior — already a single token by then — is untouchable.
+# Collapsed to a single blank line (Slack's paragraph separator) so a model that pads its answer with blank lines does not turn a short reply into a wall of whitespace (#6730).
+# Applied to the code-MASKED string, so a fenced block's interior — already a single token by then — is untouchable.
 _BLANK_LINE_RUN_RE = re.compile(r"\n{3,}")
 # A GitHub-flavoured-Markdown table divider row: |---|:--:|---:| etc.
 # Requires ≥2 columns (≥1 internal pipe) so a lone `---` horizontal rule is not mistaken for a table.
@@ -1390,11 +1366,8 @@ def _markdown_to_mrkdwn(text: str) -> str:
 
     masked = _CODE_SPAN_RE.sub(mask, text)
     converted = _convert_md_lines(masked, codes)
-    # Collapse blank-line runs while the code spans are still masked — a
-    # fenced block is one token at this point, so its interior blank lines
-    # cannot be touched. `_convert_md_lines` is a 1:1 line mapper (a
-    # content-less header even emits an extra empty line), so without this
-    # an `\n\n\n\n` run reached Slack verbatim.
+    # Collapse blank-line runs while the code spans are still masked — a fenced block is one token at this point, so its interior blank lines cannot be touched.
+    # `_convert_md_lines` is a 1:1 line mapper (a content-less header even emits an extra empty line), so without this an `\n\n\n\n` run reached Slack verbatim.
     converted = _BLANK_LINE_RUN_RE.sub("\n\n", converted)
     return _restore_code_spans(converted, codes)
 
@@ -1442,9 +1415,7 @@ def _build_block_kit(text: str, buttons: list) -> list:
                 "elements": elements,
             })
 
-    # `_split_message` cuts on newlines where it can and provably yields
-    # chunks <= the limit; an empty string comes back as [""], preserving the
-    # historical single-empty-section shape.
+    # `_split_message` cuts on newlines where it can and provably yields chunks <= the limit; an empty string comes back as [""], preserving the historical single-empty-section shape.
     chunks = _split_message(text, SLACK_MSG_LIMIT)
 
     # The marker costs a block, so its slot is reserved only once truncation is actually happening.
