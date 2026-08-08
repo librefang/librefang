@@ -220,10 +220,7 @@ mod tests {
     #[test]
     fn test_ssrf_blocks_nat64_embedded_ips() {
         // 64:ff9b::/96 (RFC 6052) embeds an IPv4 address in the low 32 bits.
-        // `is_private_ip`/`is_cloud_metadata_ip` unwrap this internally for
-        // RFC1918/link-local/metadata ranges, but loopback and unspecified
-        // are only caught by the explicit recursion added above — regression
-        // coverage for that gap.
+        // `is_private_ip`/`is_cloud_metadata_ip` unwrap this internally for RFC1918/link-local/metadata ranges, but loopback and unspecified are only caught by the explicit recursion added above — regression coverage for that gap.
         assert!(is_private_url("http://[64:ff9b::7f00:1]/admin")); // embeds 127.0.0.1
         assert!(is_private_url("http://[64:ff9b::]/admin")); // embeds 0.0.0.0
         assert!(is_private_url("http://[64:ff9b::a00:1]/admin")); // embeds 10.0.0.1
