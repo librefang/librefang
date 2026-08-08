@@ -1014,9 +1014,7 @@ class SlackAdapter(SidecarAdapter):
             )
 
     async def on_command(self, cmd) -> None:
-        """Route lifecycle ``reaction`` commands to the receipt reaction
-        and task-progress display; defer everything else (``send`` →
-        ``on_send``) to the base dispatcher."""
+        """Route lifecycle ``reaction`` commands to the receipt reaction and task-progress display; defer everything else (``send`` → ``on_send``) to the base dispatcher."""
         if isinstance(cmd, protocol.Reaction):
             await self._on_phase(cmd)
             return

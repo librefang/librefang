@@ -428,18 +428,11 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
-      # `pyproject.toml` declares `dependencies = []` with pytest / pytest-asyncio
-      # under `[project.optional-dependencies] dev`, so the editable install with
-      # the `dev` extra is the whole environment. Installing (rather than setting
-      # PYTHONPATH) is what makes `import librefang` resolve — running pytest from
-      # the repo root against an uninstalled tree fails with
-      # `ModuleNotFoundError: No module named 'librefang'`.
+      # `pyproject.toml` declares `dependencies = []` with pytest / pytest-asyncio under `[project.optional-dependencies] dev`, so the editable install with the `dev` extra is the whole environment.
+      # Installing (rather than setting PYTHONPATH) is what makes `import librefang` resolve — running pytest from the repo root against an uninstalled tree fails with `ModuleNotFoundError: No module named 'librefang'`.
       - name: Install the SDK with dev extras
         run: python -m pip install -e './sdk/python[dev]'
-      # `working-directory` puts pytest's rootdir on `sdk/python`, so
-      # `[tool.pytest.ini_options]` — and with it `asyncio_mode = "auto"`, which the
-      # async adapter tests need — is picked up without relying on rootdir discovery
-      # walking up from an argument path.
+      # `working-directory` puts pytest's rootdir on `sdk/python`, so `[tool.pytest.ini_options]` — and with it `asyncio_mode = "auto"`, which the async adapter tests need — is picked up without relying on rootdir discovery walking up from an argument path.
       - name: pytest
         working-directory: sdk/python
         run: python -m pytest tests -q

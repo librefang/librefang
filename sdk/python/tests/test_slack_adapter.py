@@ -1372,9 +1372,7 @@ async def test_on_send_converts_markdown_to_mrkdwn(monkeypatch):
 
 def _reaction(phase, tool_name=None, channel_id="C01", message_id="T1",
               emoji="x"):
-    """Build an AgentPhase lifecycle `reaction` command the way the
-    bridge serializes it (channel_id, message_id, emoji, phase,
-    tool_name).
+    """Build an AgentPhase lifecycle `reaction` command the way the bridge serializes it (channel_id, message_id, emoji, phase, tool_name).
 
     `emoji` is the wire emoji the daemon computed for the phase.
     Its only load-bearing value is the empty string, which is the `clear_done_reaction` signal on a terminal frame; the adapter maps every other value to a Slack emoji *name* itself, because `reactions.add` takes `white_check_mark`, not the `✅` codepoint.
