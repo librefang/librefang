@@ -187,7 +187,9 @@ The Slack adapter uses Socket Mode, which establishes a WebSocket connection to 
 
 The Slack adapter shows live "I'm working on it" feedback by adding 👀 to the message that triggered a turn, then replacing it with ✅ when the turn succeeds or ❌ when it fails.
 The receipt is driven by the daemon's turn lifecycle, not by receiving the message, so a message the daemon declines to answer — one that misses mention-only group gating, a rate-limited sender, a slash command the bridge handles itself — gets no reaction at all rather than a 👀 that is never cleared.
-Toggle with the `SLACK_REACTIONS` environment variable (default `true` — set to `false` to disable). `already_reacted` and `no_reaction` errors are silently ignored, so reaction failures never block message processing. See [Reactions and Processing State](/integrations/channels#reactions-and-processing-state) on the channels overview.
+Toggle with the `SLACK_REACTIONS` environment variable (default `true` — set to `false` to disable).
+`already_reacted` and `no_reaction` errors are silently ignored, so reaction failures never block message processing.
+See [Reactions and Processing State](/integrations/channels#reactions-and-processing-state) on the channels overview.
 
 The multi-step task-progress card (the Block Kit step list a tool-using turn updates in place) is a separate indicator with its own switch, `SLACK_PROGRESS_CARD`.
 It defaults to whatever `SLACK_REACTIONS` is set to, so `SLACK_REACTIONS=false` still means total silence — but the two can now be set independently: `SLACK_REACTIONS=false` with `SLACK_PROGRESS_CARD=true` gives the card without the emoji, and the reverse gives the receipt without the card.
