@@ -124,11 +124,13 @@ fn decode_url_html_entities(value: &str) -> String {
                 }
             }
         }
-        if let Some(end) = rest
-            .strip_prefix('&')
-            .and_then(|entity| entity.find(';').map(|end| end + 1))
-            .filter(|end| *end <= 16)
-        {
+        let named_entity_end = rest.strip_prefix('&').and_then(|_| {
+            rest.as_bytes()
+                .iter()
+                .take(17)
+                .position(|byte| *byte == b';')
+        });
+        if let Some(end) = named_entity_end {
             let entity = &rest[1..end].to_ascii_lowercase();
             let replacement = match entity.as_str() {
                 "amp" => Some('&'),
@@ -158,10 +160,7 @@ fn decode_url_html_entities(value: &str) -> String {
 fn is_safe_url(url: &str) -> bool {
     let trimmed = url.trim().trim_matches(|c| c == '"' || c == '\'');
     let decoded = decode_url_html_entities(trimmed);
-    if decoded
-        .chars()
-        .any(|ch| ch.is_ascii_control() || ch.is_whitespace())
-    {
+    if decoded.chars().any(|ch| ch.is_ascii_control()) {
         return false;
     }
     let lower = decoded.to_lowercase();
@@ -508,10 +507,20 @@ mod tests {
 
     #[test]
     fn sanitizer_preserves_safe_http_and_raster_urls() {
-        let html = r#"<a href="https://example.com/?a=1&amp;b=2">link</a><img src="data:image/png;base64,AA==">"#;
+        let html = concat!(
+            r#"<a href="https://example.com/a b?a=1&amp;b=2">link</a>"#,
+            "<a href=\"https://example.com/a\u{2002}b\">unicode space</a>",
+            r#"<img src="data:image/png;base64,AA==">"#,
+        );
         let sanitized = sanitize_canvas_html(html, 512 * 1024).expect("sanitize");
         assert!(sanitized.contains("href="), "{sanitized}");
         assert!(sanitized.contains("src="), "{sanitized}");
+    }
+
+    #[test]
+    fn entity_decoder_handles_large_ampersand_input_linearly() {
+        let value = "&".repeat(512 * 1024);
+        assert_eq!(decode_url_html_entities(&value), value);
     }
 
     #[tokio::test]
