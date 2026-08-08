@@ -11,7 +11,8 @@
 //! 6. `per_agent_override_beats_the_global_default` — manifest wins.
 //! 7. `agent_without_task_claim_is_not_woken` — an agent whose declared tool list withholds `task_claim`.
 //! 8. `unrestricted_agent_is_woken` — an empty `capabilities.tools` means unrestricted, not "no tools".
-//! 9. `unassigned_task_wakes_nobody` — pool tasks are claimable, not routed.
+//! 9. `agent_denied_task_claim_by_list_is_not_woken` — `tool_allowlist` / `tool_blocklist` withhold it just as effectively.
+//! 10. `unassigned_task_wakes_nobody` — pool tasks are claimable, not routed.
 //!
 //! The seam is `publish_typed_event`'s return value: it is the exact list the dispatcher consumes, so asserting on it tests the wake without needing an LLM behind `send_message_full`.
 
@@ -327,6 +328,43 @@ async fn unrestricted_agent_is_woken() {
             matches.len(),
             1,
             "an agent that can reach task_claim must be woken (tools = {tools:?})"
+        );
+    }
+}
+
+/// `capabilities.tools` is not the only way to withhold a tool: `tool_allowlist` narrows whatever survived it, and `tool_blocklist` strips unconditionally (both at Step 4 of `available_tools`).
+/// Either one alone can leave an otherwise unrestricted agent unable to claim, so checking the declared set alone would wake an agent whose operator had withheld `task_claim` through the mechanism this codebase actually documents for it — and race the external claimer that withholding exists to protect.
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_denied_task_claim_by_list_is_not_woken() {
+    // Each case leaves `capabilities.tools` unrestricted (empty), so only the
+    // allowlist / blocklist under test can withhold the tool.
+    let cases: Vec<(&str, Vec<String>, Vec<String>)> = vec![
+        ("blocklist-exact", vec![], vec!["task_claim".to_string()]),
+        ("blocklist-glob", vec![], vec!["task_*".to_string()]),
+        ("allowlist-omits", vec!["web_search".to_string()], vec![]),
+    ];
+
+    for (label, allowlist, blocklist) in cases {
+        let test = TestAppState::with_builder(MockKernelBuilder::new());
+        let mut manifest = worker_manifest(label);
+        manifest.capabilities.tools = vec![];
+        manifest.tool_allowlist = allowlist;
+        manifest.tool_blocklist = blocklist;
+        let worker = test
+            .state
+            .kernel
+            .spawn_agent_typed(manifest)
+            .expect("spawn must succeed");
+
+        let matches = test
+            .state
+            .kernel
+            .publish_typed_event(task_posted(Some(&worker.to_string())))
+            .await;
+
+        assert!(
+            matches.is_empty(),
+            "an agent that cannot reach task_claim must not be woken ({label})"
         );
     }
 }

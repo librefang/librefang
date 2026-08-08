@@ -737,14 +737,9 @@ impl LibreFangKernel {
                     }
                 }
 
-                // Delivery reconcile (#6728) runs BEFORE the `ttl_secs` gate on
-                // purpose: `claim_ttl_secs = 0` means "do not reclaim tasks a
-                // worker is holding", which an operator sets for
-                // human-in-the-loop workflows. It must not also switch off the
-                // guarantee that an addressed task eventually reaches its
-                // assignee — two rules, two switches. The reconcile's own
-                // switches are `[task_board] pending_grace_secs` and
-                // `assignee_wake`.
+                // Delivery reconcile (#6728) runs BEFORE the `ttl_secs` gate on purpose: `claim_ttl_secs = 0` means "do not reclaim tasks a worker is holding", which an operator sets for human-in-the-loop workflows.
+                // It must not also switch off the guarantee that an addressed task eventually reaches its assignee — two rules, two switches.
+                // The reconcile's own switches are `[task_board] pending_grace_secs` and `assignee_wake`.
                 kernel.reconcile_pending_task_wakes().await;
 
                 if ttl_secs == 0 {

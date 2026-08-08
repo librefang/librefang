@@ -44,19 +44,38 @@ Claim with `task_claim`, do the work, then record the outcome with `task_complet
 If it returns nothing, stop immediately — do not call it again.
 Claim at most 3 tasks in this activation; anything still queued is picked up on your next wake.";
 
-/// Whether `task_claim` is reachable for an agent declaring `tools`.
+/// Whether `task_claim` actually reaches this agent, deciding whether waking it can accomplish anything.
 ///
-/// An **empty** `capabilities.tools` means "unrestricted — every tool", not "no tools".
-/// That is this crate's own convention, spelled out as `tools_unrestricted` in `kernel::tools_and_skills::available_tools` and relied on by `AgentManifest::default()`, whose `ManifestCapabilities::tools` is an empty `Vec`.
-/// Reading the raw field as if it were a deny-list inverts it for exactly the installations that configured nothing at all — the common case this wake exists to serve — and the accompanying "without the task_claim capability" warning would be false for an agent that can in fact claim.
+/// Mirrors the three independent filters `kernel::tools_and_skills::available_tools` applies, because a wake is only useful if the tool survives all of them — and each one alone is enough to withhold it:
 ///
-/// Declared entries are matched with [`glob_matches`] rather than string equality, mirroring how `available_tools` resolves declared tools, so a manifest granting `task_*` is honoured here exactly as it is at dispatch.
+/// 1. `capabilities.tools` — the declared set, and the one that is easy to read backwards.
+///    **Empty means "unrestricted — every tool"**, not "no tools": that is the convention `available_tools` spells out as `tools_unrestricted`, and it is what `AgentManifest::default()` produces, since `ManifestCapabilities::tools` is an empty `Vec`.
+///    Treating the raw field as a deny-list inverts it for exactly the installations that configured nothing at all — the common case this wake exists to serve.
+/// 2. `tool_allowlist` — narrows further when non-empty and can only ever remove (#6609), so an allowlist that omits `task_claim` withholds it even from an otherwise unrestricted agent.
+/// 3. `tool_blocklist` — strips unconditionally at Step 4, and is the mechanism this codebase documents for withholding a tool an agent would otherwise have.
+///
+/// All three are matched with [`glob_matches`] rather than string equality, the same way `available_tools` resolves them, so `task_*` grants here exactly as it grants at dispatch and a blocklist entry of `task_*` withholds just as broadly.
 /// A bare `*` is subsumed: `glob_matches` returns `true` for it unconditionally.
-fn can_claim_tasks(tools: &[String]) -> bool {
-    tools.is_empty()
-        || tools
+fn can_claim_tasks(manifest: &AgentManifest) -> bool {
+    use librefang_types::capability::glob_matches;
+    const TASK_CLAIM: &str = "task_claim";
+
+    let declared = &manifest.capabilities.tools;
+    if !declared.is_empty() && !declared.iter().any(|t| glob_matches(t, TASK_CLAIM)) {
+        return false;
+    }
+    if !manifest.tool_allowlist.is_empty()
+        && !manifest
+            .tool_allowlist
             .iter()
-            .any(|t| librefang_types::capability::glob_matches(t, "task_claim"))
+            .any(|a| glob_matches(a, TASK_CLAIM))
+    {
+        return false;
+    }
+    !manifest
+        .tool_blocklist
+        .iter()
+        .any(|b| glob_matches(b, TASK_CLAIM))
 }
 
 impl LibreFangKernel {
@@ -366,16 +385,11 @@ impl LibreFangKernel {
 
     /// Dispatch a list of trigger matches to their agents.
     ///
-    /// Single point where "a match exists" becomes "an agent runs", shared by
-    /// both producers: the event-driven pass in [`Self::publish_event_inner`]
-    /// and the state-driven reconcile in the Task Board sweeper (#6728). Both
-    /// must inherit the same concurrency, ordering and timeout guarantees, and
-    /// the only way to guarantee that is for there to be one implementation.
+    /// Single point where "a match exists" becomes "an agent runs", shared by both producers: the event-driven pass in [`Self::publish_event_inner`] and the state-driven reconcile in the Task Board sweeper (#6728).
+    /// Both must inherit the same concurrency, ordering and timeout guarantees, and the only way to guarantee that is for there to be one implementation.
     ///
-    /// `fire_time` is the instant the matches were resolved. It keys the
-    /// deterministic `SessionMode::New` session ids, so callers pass the event
-    /// timestamp (event path) or the tick instant (reconcile path) rather than
-    /// reading the clock here — the id must be reproducible from a log line.
+    /// `fire_time` is the instant the matches were resolved.
+    /// It keys the deterministic `SessionMode::New` session ids, so callers pass the event timestamp (event path) or the tick instant (reconcile path) rather than reading the clock here — the id must be reproducible from a log line.
     fn dispatch_trigger_matches(
         &self,
         matches: &[crate::triggers::TriggerMatch],
@@ -777,7 +791,7 @@ impl LibreFangKernel {
             if !entry.manifest.assignee_wake.unwrap_or(global_wake) {
                 continue;
             }
-            if !can_claim_tasks(&entry.manifest.capabilities.tools) {
+            if !can_claim_tasks(&entry.manifest) {
                 continue; // reported at post time; re-warning every tick would be noise
             }
             by_agent
@@ -969,7 +983,7 @@ impl LibreFangKernel {
         // hand — declares a tool list that withholds `task_claim`, and must
         // not start racing its own claimant on upgrade. Withholding is an
         // explicit list without it; declaring nothing grants everything.
-        if !can_claim_tasks(&entry.manifest.capabilities.tools) {
+        if !can_claim_tasks(&entry.manifest) {
             warn!(
                 task_id = %task_id,
                 agent_id = %assignee_id,
