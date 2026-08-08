@@ -1032,36 +1032,37 @@ fn mime_to_ext(mime: &str) -> Option<String> {
 /// A scratch file that deletes itself when it goes out of scope.
 ///
 /// Used only where ffmpeg genuinely cannot work from a pipe — see `extract_video_audio_track`.
-/// Written by hand rather than pulling `tempfile` into this crate's dependencies for one call site.
+/// Backed by `tempfile::NamedTempFile` (already a workspace dependency used by `librefang-runtime` and others) rather than a hand-rolled pid+counter path.
+/// `NamedTempFile` creates with `O_EXCL` and `0600` permissions on Unix, which closes both the symlink-race and world-readable-recording gaps a predictable path in the shared temp dir would otherwise open on a multi-user host — the staged bytes here are a user's raw audio/video.
 struct ScopedTempFile {
-    path: std::path::PathBuf,
+    file: tempfile::NamedTempFile,
 }
 
 impl ScopedTempFile {
-    /// Create a uniquely-named scratch file and write `bytes` into it.
+    /// Create a securely-named scratch file and write `bytes` into it.
     ///
-    /// Uniqueness comes from pid plus a process-wide counter, so two concurrent extractions in the same process cannot collide and neither can two daemons sharing a temp dir.
+    /// Runs on the blocking pool: creation plus a write of up to the 50 MB `MediaAttachment::validate()` cap is real (if brief) disk I/O, matching the `spawn_blocking`-for-temp-file-writes pattern used elsewhere in the workspace (e.g. `librefang-api`'s device-token and backup-archive writers).
     async fn write(bytes: &[u8], extension: &str) -> Result<Self, String> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        use std::io::Write as _;
 
-        let path = std::env::temp_dir().join(format!(
-            "librefang-media-{}-{}.{extension}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        tokio::fs::write(&path, bytes)
-            .await
-            .map_err(|e| format!("failed to stage media for extraction at {path:?}: {e}"))?;
-        Ok(Self { path })
+        let bytes = bytes.to_vec();
+        let suffix = format!(".{extension}");
+        tokio::task::spawn_blocking(move || {
+            let mut file = tempfile::Builder::new()
+                .prefix("librefang-media-")
+                .suffix(&suffix)
+                .tempfile()
+                .map_err(|e| format!("failed to create scratch file for media extraction: {e}"))?;
+            file.write_all(&bytes)
+                .map_err(|e| format!("failed to stage media for extraction: {e}"))?;
+            Ok(Self { file })
+        })
+        .await
+        .map_err(|e| format!("scratch-file staging task panicked: {e}"))?
     }
-}
 
-impl Drop for ScopedTempFile {
-    fn drop(&mut self) {
-        // Best-effort: a leftover file in the temp dir is not worth failing a
-        // transcription that already succeeded, and the OS reclaims it anyway.
-        let _ = std::fs::remove_file(&self.path);
+    fn path(&self) -> &std::path::Path {
+        self.file.path()
     }
 }
 
@@ -1204,7 +1205,7 @@ async fn transcode_oga_to_ogg_opus(input_bytes: &[u8]) -> Result<Vec<u8>, String
 /// `mkv` and `avi` are streamable and were never affected, which is why the four container types enabled by #6679 / #6683 split exactly in half.
 async fn extract_video_audio_track(input_bytes: &[u8]) -> Result<Vec<u8>, String> {
     let staged = ScopedTempFile::write(input_bytes, "media").await?;
-    let input_path = staged.path.to_string_lossy().into_owned();
+    let input_path = staged.path().to_string_lossy().into_owned();
 
     let out = run_ffmpeg_pipe(
         &[
