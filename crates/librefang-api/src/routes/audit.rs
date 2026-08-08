@@ -1,8 +1,7 @@
 //! RBAC M5 — admin-only audit query and export endpoints.
 //!
-//! These endpoints sit alongside the existing `/api/audit/recent` and
-//! `/api/audit/verify` handlers in `system.rs`. They are deliberately
-//! gated to `UserRole::Admin+` because filtered audit access leaks
+//! All audit endpoints are deliberately gated to `UserRole::Admin+` with an
+//! actual credential because audit access leaks
 //! sensitive identity / action data — the role check happens in-handler
 //! (the global auth middleware only enforces "is this a recognised
 //! token", not "may this caller see audit").
@@ -12,8 +11,7 @@
 //! `rusqlite::params!` to keep the SQL injection surface zero.
 
 use super::AppState;
-use crate::middleware::AuthenticatedApiUser;
-use crate::middleware::UserRole;
+use crate::middleware::{AuthenticatedApiUser, TrustedNoAuthCaller, UserRole};
 use crate::types::ApiErrorResponse;
 use axum::body::Body;
 use axum::extract::{Query, State};
@@ -87,18 +85,35 @@ const MAX_AUDIT_QUERY_LIMIT: u32 = 5000;
 
 /// Reject the request unless the caller is an authenticated `Admin`+.
 ///
-/// **Anonymous callers are rejected outright.** The middleware allows
-/// loopback / `LIBREFANG_ALLOW_NO_AUTH=1` requests through without an
-/// `AuthenticatedApiUser`; for low-value endpoints like `/api/config/set`
-/// we trust those as Owner, but the hash-chained audit log carries every
-/// past attribution and detail string and is too sensitive for that
-/// blanket trust — a co-resident process at `127.0.0.1` would otherwise
-/// be able to exfiltrate the entire chain. Operators that want audit
-/// access in a no-auth deployment must configure at least one user with
-/// an admin api_key.
+/// **Anonymous callers are rejected outright.** For trusted loopback /
+/// `LIBREFANG_ALLOW_NO_AUTH=1` requests, the middleware injects both a
+/// synthetic Owner and a `TrustedNoAuthCaller` marker. Low-value endpoints
+/// accept that compatibility identity, but the hash-chained audit log carries
+/// every past attribution and detail string and is too sensitive for that
+/// blanket trust — a co-resident process at `127.0.0.1` would otherwise be
+/// able to exfiltrate the entire chain. Operators that want audit access in a
+/// no-auth deployment must configure at least one user with an admin api_key.
 ///
 /// Returns `Some(response)` when the request should be aborted with 403.
-fn require_admin(state: &AppState, api_user: Option<&AuthenticatedApiUser>) -> Option<Response> {
+fn require_admin(
+    state: &AppState,
+    api_user: Option<&AuthenticatedApiUser>,
+    trusted_no_auth: bool,
+) -> Option<Response> {
+    if trusted_no_auth {
+        state.kernel.audit().record_with_context(
+            "system",
+            librefang_kernel::audit::AuditAction::PermissionDenied,
+            "audit endpoint denied for trusted no-auth caller",
+            "denied",
+            None,
+            Some("api".to_string()),
+        );
+        return Some(
+            ApiErrorResponse::forbidden("Admin credential required for audit access")
+                .into_response(),
+        );
+    }
     match api_user {
         Some(u) if u.role >= UserRole::Admin => None,
         Some(u) => {
@@ -225,9 +240,10 @@ pub async fn audit_query(
     State(state): State<Arc<AppState>>,
     Query(filter): Query<AuditFilter>,
     api_user: Option<axum::Extension<AuthenticatedApiUser>>,
+    trusted_no_auth: Option<axum::Extension<TrustedNoAuthCaller>>,
 ) -> Response {
     let api_user_ref = api_user.as_ref().map(|e| &e.0);
-    if let Some(deny) = require_admin(&state, api_user_ref) {
+    if let Some(deny) = require_admin(&state, api_user_ref, trusted_no_auth.is_some()) {
         return deny;
     }
 
@@ -315,9 +331,10 @@ pub async fn audit_export(
     Query(filter): Query<AuditFilter>,
     Query(fmt): Query<ExportFormat>,
     api_user: Option<axum::Extension<AuthenticatedApiUser>>,
+    trusted_no_auth: Option<axum::Extension<TrustedNoAuthCaller>>,
 ) -> Response {
     let api_user_ref = api_user.as_ref().map(|e| &e.0);
-    if let Some(deny) = require_admin(&state, api_user_ref) {
+    if let Some(deny) = require_admin(&state, api_user_ref, trusted_no_auth.is_some()) {
         return deny;
     }
 
@@ -507,9 +524,14 @@ fn csv_escape(s: &str) -> String {
 pub async fn audit_recent(
     State(state): State<Arc<AppState>>,
     api_user: Option<axum::Extension<AuthenticatedApiUser>>,
+    trusted_no_auth: Option<axum::Extension<TrustedNoAuthCaller>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Some(deny) = require_admin(&state, api_user.as_ref().map(|e| &e.0)) {
+    if let Some(deny) = require_admin(
+        &state,
+        api_user.as_ref().map(|e| &e.0),
+        trusted_no_auth.is_some(),
+    ) {
         return deny;
     }
     let n: usize = params
@@ -552,8 +574,13 @@ pub async fn audit_recent(
 pub async fn audit_verify(
     State(state): State<Arc<AppState>>,
     api_user: Option<axum::Extension<AuthenticatedApiUser>>,
+    trusted_no_auth: Option<axum::Extension<TrustedNoAuthCaller>>,
 ) -> Response {
-    if let Some(deny) = require_admin(&state, api_user.as_ref().map(|e| &e.0)) {
+    if let Some(deny) = require_admin(
+        &state,
+        api_user.as_ref().map(|e| &e.0),
+        trusted_no_auth.is_some(),
+    ) {
         return deny;
     }
     let audit = state.kernel.audit();

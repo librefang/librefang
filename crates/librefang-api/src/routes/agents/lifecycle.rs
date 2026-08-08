@@ -985,6 +985,7 @@ pub async fn set_agent_mode(
 )]
 pub async fn get_agent(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -1006,6 +1007,11 @@ pub async fn get_agent(
                 .into_response();
         }
     };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+            .with_code("agent_not_found")
+            .into_response();
+    }
 
     let dm = {
         let dm_override = state
@@ -1135,6 +1141,7 @@ pub async fn stop_agent(
 )]
 pub async fn list_agent_runtime(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -1148,6 +1155,12 @@ pub async fn list_agent_runtime(
             )
         }
     };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     let snapshots = state.kernel.list_running_sessions(agent_id);
     (StatusCode::OK, Json(serde_json::json!(snapshots)))
 }

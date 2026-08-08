@@ -134,18 +134,16 @@ pub(crate) fn can_access_agent(
     agent_id: librefang_types::agent::AgentId,
     api_user: Option<&axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> bool {
+    let Some(entry) = state.kernel.agent_registry().get(agent_id) else {
+        return false;
+    };
     let Some(user) = api_user else {
         return true;
     };
     if user.0.role >= crate::middleware::UserRole::Admin {
         return true;
     }
-    state
-        .kernel
-        .agent_registry()
-        .get(agent_id)
-        .map(|entry| entry.manifest.author.eq_ignore_ascii_case(&user.0.name))
-        .unwrap_or(false)
+    entry.manifest.author.eq_ignore_ascii_case(&user.0.name)
 }
 
 /// Shared application state.

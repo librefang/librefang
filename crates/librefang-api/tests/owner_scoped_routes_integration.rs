@@ -126,7 +126,7 @@ async fn request_status(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn non_owner_cannot_read_agent_sessions_or_observability() {
+async fn non_owner_cannot_read_agent_scoped_resources() {
     let h = boot().await;
     let agent_id = spawn_authored(&h.state, "Alice");
     let created = h
@@ -142,6 +142,19 @@ async fn non_owner_cannot_read_agent_sessions_or_observability() {
     let aid = agent_id.to_string();
     let sid = session_id.to_string();
     let cases = vec![
+        (Method::GET, format!("/api/agents/{aid}"), None),
+        (Method::GET, format!("/api/agents/{aid}/runtime"), None),
+        (Method::GET, format!("/api/agents/{aid}/tools"), None),
+        (Method::GET, format!("/api/agents/{aid}/skills"), None),
+        (Method::GET, format!("/api/agents/{aid}/mcp_servers"), None),
+        (Method::GET, format!("/api/agents/{aid}/channels"), None),
+        (Method::GET, format!("/api/agents/{aid}/files"), None),
+        (
+            Method::GET,
+            format!("/api/agents/{aid}/files/AGENT.md"),
+            None,
+        ),
+        (Method::GET, format!("/api/agents/{aid}/deliveries"), None),
         (Method::GET, format!("/api/agents/{aid}/traces"), None),
         (Method::GET, format!("/api/agents/{aid}/metrics"), None),
         (Method::GET, format!("/api/agents/{aid}/logs"), None),
@@ -319,5 +332,18 @@ async fn owner_and_admin_can_access_agent_observability() {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    let missing = AgentId::new();
+    for endpoint in ["traces", "logs"] {
+        let status = request_status(
+            &h.app,
+            Method::GET,
+            &format!("/api/agents/{missing}/{endpoint}"),
+            ADMIN_KEY,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{endpoint}");
     }
 }

@@ -633,6 +633,20 @@ async fn audit_export_rejects_viewer() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
+async fn audit_endpoints_reject_trusted_no_auth_mode() {
+    let h = build_audit_harness("", vec![]);
+    for path in [
+        "/api/audit/query",
+        "/api/audit/export?format=json",
+        "/api/audit/recent",
+        "/api/audit/verify",
+    ] {
+        let (status, _) = send_get(h.app.clone(), path, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn audit_recent_rejects_viewer() {
     let h = build_audit_harness(
         "master-key",
