@@ -150,7 +150,13 @@ fn decode_url_html_entities(value: &str) -> String {
             }
         }
 
-        let ch = rest.chars().next().expect("index is inside value");
+        // `rest` is non-empty here (loop guard: `index < value.len()`), but
+        // avoid `expect()`/`unwrap()` on data derived from agent-supplied
+        // HTML — fail closed by stopping the decode rather than asserting
+        // an invariant on untrusted input.
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
         decoded.push(ch);
         index += ch.len_utf8();
     }
