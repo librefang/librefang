@@ -68,8 +68,7 @@ pub async fn list_hands(
                 "is_custom": is_custom,
                 "requirements": reqs.iter().map(|(r, ok)| {
                     serde_json::json!({
-                        "key": r.key,
-                        "check_value": r.check_value,
+                        "key": r.check_value,
                         "label": r.label,
                         "satisfied": ok,
                         "optional": r.optional,
@@ -1058,7 +1057,7 @@ pub async fn set_hand_secret(
     Path(hand_id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let requested_key = match body["key"].as_str() {
+    let env_key = match body["key"].as_str() {
         Some(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => {
             return ApiErrorResponse::bad_request("Missing 'key' field (env var name)")
@@ -1073,26 +1072,26 @@ pub async fn set_hand_secret(
         }
     };
 
-    // Resolve the stable requirement key exposed by `list_hands` to the
-    // actual environment-variable name. Keep accepting `check_value`
-    // directly for compatibility with older clients.
-    let env_key = {
+    // Verify this key belongs to a requirement of the specified hand
+    let valid = {
         let defs = state.kernel.hands().list_definitions();
-        defs.iter().find(|d| d.id == hand_id).and_then(|def| {
-            def.requires
-                .iter()
-                .find(|r| r.check_value == requested_key || r.key == requested_key)
-                .map(|r| r.check_value.clone())
-        })
+        defs.iter()
+            .find(|d| d.id == hand_id)
+            .map(|def| {
+                def.requires
+                    .iter()
+                    .any(|r| r.check_value == env_key || r.key == env_key)
+            })
+            .unwrap_or(false)
     };
 
-    let Some(env_key) = env_key else {
+    if !valid {
         return ApiErrorResponse::bad_request(format!(
             "'{}' is not a requirement of hand '{}'",
-            requested_key, hand_id
+            env_key, hand_id
         ))
         .into_json_tuple();
-    };
+    }
 
     // Write to secrets.env
     let secrets_path = state.kernel.home_dir().join("secrets.env");

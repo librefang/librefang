@@ -292,15 +292,10 @@ system_prompt = "Test prompt"
         Some(true),
         "{requirement}"
     );
-    assert_eq!(
-        requirement["key"].as_str(),
-        Some("process-path"),
-        "{requirement}"
-    );
-    assert_eq!(
-        requirement["check_value"].as_str(),
-        Some("PATH"),
-        "{requirement}"
+    assert_eq!(requirement["key"].as_str(), Some("PATH"), "{requirement}");
+    assert!(
+        requirement.get("check_value").is_none(),
+        "list response must preserve the existing requirement shape: {requirement}"
     );
     assert!(
         requirement.get("current_value").is_none(),
@@ -955,7 +950,7 @@ system_prompt = "Test prompt"
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-async fn set_hand_secret_resolves_stable_requirement_key_to_environment_variable() {
+async fn set_hand_secret_accepts_the_key_returned_by_list_hands() {
     const ENV_KEY: &str = "LIBREFANG_HAND_SECRET_CANONICAL_ENV_TEST";
     const STABLE_KEY: &str = "canonical-env-test";
     const VALUE: &str = "canonical-value";
@@ -999,26 +994,38 @@ system_prompt = "Test prompt"
         "install_hand body: {install_body}"
     );
 
+    let (_, initial_list_body) = get_json(&h.app, "/api/hands").await;
+    let initial_requirement = initial_list_body["items"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["id"] == "stable-secret-key-test")
+        })
+        .and_then(|hand| hand["requirements"].as_array())
+        .and_then(|requirements| requirements.first())
+        .unwrap_or_else(|| panic!("installed requirement missing: {initial_list_body}"));
+    let listed_key = initial_requirement["key"]
+        .as_str()
+        .expect("listed requirement must have a key");
+    assert_eq!(listed_key, ENV_KEY, "{initial_requirement}");
+    assert_eq!(
+        initial_requirement["satisfied"].as_bool(),
+        Some(false),
+        "{initial_requirement}"
+    );
+
     let (save_status, save_body) = json_request(
         &h.app,
         Method::POST,
         "/api/hands/stable-secret-key-test/secret",
-        Some(serde_json::json!({"key": STABLE_KEY, "value": VALUE})),
+        Some(serde_json::json!({"key": listed_key, "value": VALUE})),
     )
     .await;
     let (_, list_body) = get_json(&h.app, "/api/hands").await;
     let persisted = std::fs::read_to_string(h._tmp.path().join("secrets.env"))
         .expect("secret must be persisted");
 
-    let (legacy_status, legacy_body) = json_request(
-        &h.app,
-        Method::POST,
-        "/api/hands/stable-secret-key-test/secret",
-        Some(serde_json::json!({"key": ENV_KEY, "value": "legacy-value"})),
-    )
-    .await;
-    let legacy_persisted = std::fs::read_to_string(h._tmp.path().join("secrets.env"))
-        .expect("legacy secret must be persisted");
     librefang_api::secrets_env::remove_env_var_guarded(ENV_KEY).await;
     librefang_api::secrets_env::remove_env_var_guarded(STABLE_KEY).await;
 
@@ -1047,16 +1054,6 @@ system_prompt = "Test prompt"
     assert!(
         !persisted.contains(&format!("{STABLE_KEY}=")),
         "{persisted}"
-    );
-    assert_eq!(
-        legacy_status,
-        StatusCode::OK,
-        "legacy save body: {legacy_body}"
-    );
-    assert_eq!(legacy_body["key"].as_str(), Some(ENV_KEY), "{legacy_body}");
-    assert!(
-        legacy_persisted.contains(&format!("{ENV_KEY}=legacy-value")),
-        "{legacy_persisted}"
     );
 }
 

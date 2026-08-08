@@ -1017,7 +1017,6 @@ export interface CommsEventItem {
 
 export interface HandRequirementItem {
   key?: string;
-  check_value?: string;
   label?: string;
   satisfied?: boolean;
   optional?: boolean;
