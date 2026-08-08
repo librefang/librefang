@@ -354,11 +354,8 @@ pub struct SsrfResolution {
 impl SsrfResolution {
     /// Apply the pinned DNS resolution to a [`reqwest::ClientBuilder`] so
     /// the actual HTTP request connects to the IPs we already validated.
-    pub fn pin_dns(self, mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-        for addr in &self.resolved {
-            builder = builder.resolve(&self.hostname, *addr);
-        }
-        builder
+    pub fn pin_dns(self, builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+        builder.resolve_to_addrs(&self.hostname, &self.resolved)
     }
 }
 
