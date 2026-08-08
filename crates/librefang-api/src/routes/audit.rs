@@ -506,8 +506,12 @@ fn csv_escape(s: &str) -> String {
 #[utoipa::path(get, path = "/api/audit/recent", tag = "system", responses((status = 200, description = "Recent audit entries", body = Vec<serde_json::Value>)))]
 pub async fn audit_recent(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
     Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Some(deny) = require_admin(&state, api_user.as_ref().map(|e| &e.0)) {
+        return deny;
+    }
     let n: usize = params
         .get("n")
         .and_then(|v| v.parse().ok())
@@ -540,11 +544,18 @@ pub async fn audit_recent(
         "limit": n,
         "tip_hash": tip,
     }))
+    .into_response()
 }
 
 /// GET /api/audit/verify — Verify the audit chain integrity.
 #[utoipa::path(get, path = "/api/audit/verify", tag = "system", responses((status = 200, description = "Audit verification result", body = crate::types::JsonObject)))]
-pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn audit_verify(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
+) -> Response {
+    if let Some(deny) = require_admin(&state, api_user.as_ref().map(|e| &e.0)) {
+        return deny;
+    }
     let audit = state.kernel.audit();
     let entry_count = audit.len();
     // External tip-anchor surfacing (see SECURITY.md "Audit"). When
@@ -573,7 +584,7 @@ pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoRespon
                     "Audit log is empty — no events have been recorded yet".to_string(),
                 );
             }
-            Json(body)
+            Json(body).into_response()
         }
         Err(msg) => {
             // verify_integrity() returns Err when the chain is broken
@@ -589,6 +600,7 @@ pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoRespon
                 "anchor_path": anchor_path,
                 "anchor_status": anchor_status,
             }))
+            .into_response()
         }
     }
 }

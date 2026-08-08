@@ -247,6 +247,7 @@ pub async fn list_agent_events(
 )]
 pub async fn get_agent_traces(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -262,7 +263,7 @@ pub async fn get_agent_traces(
     };
 
     // Check agent exists
-    if state.kernel.agent_registry().get(agent_id).is_none() {
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
@@ -303,6 +304,7 @@ pub async fn get_agent_traces(
 )]
 pub async fn agent_metrics(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -326,6 +328,12 @@ pub async fn agent_metrics(
             );
         }
     };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
 
     // Session-level token/tool stats from the scheduler (in-memory, windowed).
     let sched_snap = state
@@ -436,6 +444,7 @@ pub async fn agent_metrics(
 )]
 pub async fn agent_logs(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Query(params): Query<HashMap<String, String>>,
@@ -452,7 +461,7 @@ pub async fn agent_logs(
     };
 
     // Verify the agent exists.
-    if state.kernel.agent_registry().get(agent_id).is_none() {
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
