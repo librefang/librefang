@@ -6,5 +6,7 @@ post_install() {
 
 post_upgrade() {
   echo "LibreFang Docker runner upgraded."
+  echo "Security: pacman preserves /etc/librefang/docker.env. Review any existing"
+  echo "LIBREFANG_ALLOW_NO_AUTH=1 setting and change it to 0 unless no-auth is intentional."
   echo "Restart the service with: systemctl restart librefang-docker.service"
 }
