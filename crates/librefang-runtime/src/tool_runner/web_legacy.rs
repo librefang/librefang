@@ -262,6 +262,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn web_fetch_legacy_blocks_private_ip() {
+        // Regression for the sync -> async check_ssrf rewiring in this PR:
+        // tool_web_fetch_legacy must still reject a private-IP target end to
+        // end through check_ssrf_async, not just at the check_ssrf_async unit
+        // level, before any HTTP client is built or connection attempted.
+        let r = tool_web_fetch_legacy(
+            &serde_json::json!({ "url": "http://127.0.0.1:1/admin" }),
+            0,
+            0,
+        )
+        .await;
+        assert!(
+            matches!(r, Err(ToolError::InvalidParameter { name: "url", .. })),
+            "expected SSRF block, got: {r:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn web_search_legacy_missing_query_is_missing_parameter() {
         let r = tool_web_search_legacy(&serde_json::json!({})).await;
         assert!(matches!(r, Err(ToolError::MissingParameter("query"))));
