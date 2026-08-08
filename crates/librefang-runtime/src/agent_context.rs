@@ -201,6 +201,19 @@ fn store_cached(path: &Path, content: &str) {
     }
 }
 
+#[cfg(any(windows, test))]
+fn windows_path_is_beneath(root: &[u16], candidate: &[u16]) -> bool {
+    if candidate.len() <= root.len() || !candidate.starts_with(root) {
+        return false;
+    }
+    // Compare the normalized handle paths exactly. Windows can enable
+    // per-directory case sensitivity, where `Foo` and `foo` are distinct
+    // siblings; a case-insensitive prefix check would escape the root.
+    root.last()
+        .is_some_and(|c| *c == b'\\' as u16 || *c == b'/' as u16)
+        || matches!(candidate.get(root.len()), Some(c) if *c == b'\\' as u16 || *c == b'/' as u16)
+}
+
 #[cfg(unix)]
 fn open_context_file(path: &Path) -> io::Result<fs::File> {
     use std::ffi::{CString, OsStr};
@@ -295,13 +308,6 @@ fn open_context_file(path: &Path) -> io::Result<fs::File> {
             path_len: u32,
             flags: u32,
         ) -> u32;
-        fn CompareStringOrdinal(
-            string1: *const u16,
-            string1_len: i32,
-            string2: *const u16,
-            string2_len: i32,
-            ignore_case: i32,
-        ) -> i32;
     }
 
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
@@ -309,7 +315,6 @@ fn open_context_file(path: &Path) -> io::Result<fs::File> {
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     const FILE_NAME_NORMALIZED: u32 = 0;
     const VOLUME_NAME_DOS: u32 = 0;
-    const CSTR_EQUAL: i32 = 2;
 
     fn final_path(file: &fs::File) -> io::Result<Vec<u16>> {
         let mut buffer = vec![0_u16; 512];
@@ -334,29 +339,6 @@ fn open_context_file(path: &Path) -> io::Result<fs::File> {
             }
             buffer.resize(len.saturating_add(1), 0);
         }
-    }
-
-    fn path_is_beneath(root: &[u16], candidate: &[u16]) -> bool {
-        if candidate.len() <= root.len() || root.len() > i32::MAX as usize {
-            return false;
-        }
-        // SAFETY: both slices remain live for the comparison and their
-        // lengths are bounded to i32 above/by the Win32 path API.
-        let equal = unsafe {
-            CompareStringOrdinal(
-                root.as_ptr(),
-                root.len() as i32,
-                candidate.as_ptr(),
-                root.len() as i32,
-                1,
-            )
-        } == CSTR_EQUAL;
-        if !equal {
-            return false;
-        }
-        root.last()
-            .is_some_and(|c| *c == b'\\' as u16 || *c == b'/' as u16)
-            || matches!(candidate.get(root.len()), Some(c) if *c == b'\\' as u16 || *c == b'/' as u16)
     }
 
     fn open_reparse_point(path: &Path, directory: bool) -> io::Result<fs::File> {
@@ -408,7 +390,7 @@ fn open_context_file(path: &Path) -> io::Result<fs::File> {
     // workspace and is rejected before any bytes are read.
     let workspace_path = final_path(&workspace_handle)?;
     let file_path = final_path(&file)?;
-    if !path_is_beneath(&workspace_path, &file_path) {
+    if !windows_path_is_beneath(&workspace_path, &file_path) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "context.md resolved outside its workspace",
@@ -653,6 +635,19 @@ mod tests {
         let _ = fs::remove_dir_all(&ws);
     }
 
+    #[test]
+    fn windows_handle_path_containment_is_exact_and_component_bounded() {
+        let root: Vec<u16> = r"\\?\C:\work\Foo".encode_utf16().collect();
+        let child: Vec<u16> = r"\\?\C:\work\Foo\context.md".encode_utf16().collect();
+        let case_distinct_sibling: Vec<u16> =
+            r"\\?\C:\work\foo\context.md".encode_utf16().collect();
+        let prefix_sibling: Vec<u16> = r"\\?\C:\work\Foobar\context.md".encode_utf16().collect();
+
+        assert!(windows_path_is_beneath(&root, &child));
+        assert!(!windows_path_is_beneath(&root, &case_distinct_sibling));
+        assert!(!windows_path_is_beneath(&root, &prefix_sibling));
+    }
+
     #[cfg(unix)]
     #[test]
     fn context_reader_does_not_block_on_fifo() {
@@ -689,7 +684,16 @@ mod tests {
         let target = ws.join("target.md");
         let link = ws.join(CONTEXT_FILENAME);
         fs::write(&target, "must not load").unwrap();
-        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        if let Err(error) = std::os::windows::fs::symlink_file(&target, &link) {
+            // Windows requires Developer Mode or SeCreateSymbolicLinkPrivilege
+            // for this fixture. The production check remains compiled even on
+            // hosts where the test account cannot create reparse points.
+            if error.kind() == io::ErrorKind::PermissionDenied {
+                let _ = fs::remove_dir_all(&ws);
+                return;
+            }
+            panic!("failed to create file symlink fixture: {error}");
+        }
 
         assert!(open_context_file(&link).is_err());
         let _ = fs::remove_dir_all(&ws);
@@ -701,7 +705,14 @@ mod tests {
         let ws = fresh_workspace("windows_identity_dir_symlink");
         let outside = fresh_workspace("windows_identity_dir_target");
         fs::write(outside.join(CONTEXT_FILENAME), "must not load").unwrap();
-        std::os::windows::fs::symlink_dir(&outside, ws.join(".identity")).unwrap();
+        if let Err(error) = std::os::windows::fs::symlink_dir(&outside, ws.join(".identity")) {
+            if error.kind() == io::ErrorKind::PermissionDenied {
+                let _ = fs::remove_dir_all(&ws);
+                let _ = fs::remove_dir_all(&outside);
+                return;
+            }
+            panic!("failed to create directory symlink fixture: {error}");
+        }
 
         assert!(
             open_context_file(&ws.join(".identity").join(CONTEXT_FILENAME)).is_err(),
