@@ -36,7 +36,7 @@ where
 fn build_legacy_fetch_client(
     resolution: crate::web_fetch::SsrfResolution,
 ) -> Result<reqwest::Client, ToolError> {
-    let builder = crate::http_client::proxied_client_builder()
+    let builder = crate::http_client::direct_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none());
     resolution
@@ -216,6 +216,43 @@ mod tests {
         let requests = server.received_requests().await.expect("request log");
         assert_eq!(requests.len(), 1, "client must not request /final");
         assert_eq!(requests[0].url.path(), "/redirect");
+    }
+
+    #[tokio::test]
+    async fn legacy_client_uses_all_validated_addresses() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ok"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("pinned"))
+            .mount(&server)
+            .await;
+
+        let unreachable = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)),
+            server.address().port(),
+        );
+        let resolution = crate::web_fetch::SsrfResolution {
+            hostname: "legacy-fetch.test".to_string(),
+            // The historical loop of `resolve()` calls kept only the last
+            // address. Keep the reachable address first to catch that loss.
+            resolved: vec![*server.address(), unreachable],
+        };
+        let client = build_legacy_fetch_client(resolution).expect("client should build");
+        let response = client
+            .get(format!(
+                "http://legacy-fetch.test:{}/ok",
+                server.address().port()
+            ))
+            .send()
+            .await
+            .expect("client should fall back across validated addresses");
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.text().await.expect("body"), "pinned");
     }
 
     #[tokio::test]
