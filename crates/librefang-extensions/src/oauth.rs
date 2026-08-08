@@ -304,9 +304,7 @@ pub async fn run_pkce_flow(oauth: &OAuthTemplate, client_id: &str) -> ExtensionR
                         if let Some(tx) = code_tx.lock().await.take() {
                             let _ = tx.send(Err(format!("OAuth error: {error}")));
                         }
-                        return axum::response::Html(format!(
-                            "<h1>Error</h1><p>OAuth error: {error}</p>"
-                        ));
+                        return axum::response::Html(oauth_error_html(error));
                     }
                     if let Some(ref code) = query.code {
                         // #3791: only the first valid callback wins; subsequent
@@ -407,6 +405,26 @@ struct CallbackParams {
     error: Option<String>,
 }
 
+fn oauth_error_html(error: &str) -> String {
+    let error = escape_html_text(error);
+    format!("<h1>Error</h1><p>OAuth error: {error}</p>")
+}
+
+fn escape_html_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 /// Simple percent-encoding for URL parameters.
 fn urlencoding_encode(s: &str) -> String {
     let mut result = String::with_capacity(s.len() * 3);
@@ -468,6 +486,14 @@ mod tests {
         assert!(!pkce.challenge.is_empty());
         // Verifier and challenge should be different
         assert_ne!(pkce.verifier.as_str(), &pkce.challenge);
+    }
+
+    #[test]
+    fn oauth_error_html_escapes_untrusted_callback_value() {
+        let html = oauth_error_html(r#"<script>alert("xss")</script>&'"#);
+
+        assert!(!html.contains("<script>"), "{html}");
+        assert!(html.contains("&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;&amp;&#39;"));
     }
 
     #[test]
