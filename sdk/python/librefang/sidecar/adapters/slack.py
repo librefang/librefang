@@ -501,9 +501,10 @@ class SlackAdapter(SidecarAdapter):
 
         self.api_base = DEFAULT_API_BASE
         self.bot_user_id: Optional[str] = None
-        # (channel, ts) → emoji name. Cleared when the bot replies.
+        # (channel, ts) → emoji name. Cleared when the triggering turn
+        # reaches its terminal (done/error) lifecycle phase (#6731).
         # Bounded by `MAX_PENDING_REACTIONS` so a spike of receives
-        # without sends can't grow this without bound.
+        # without terminations can't grow this without bound.
         self._pending_reactions: dict[tuple[str, str], str] = {}
         self._pending_lock = threading.Lock()
         # Live task-progress cards keyed by (channel_id, triggering ts).
