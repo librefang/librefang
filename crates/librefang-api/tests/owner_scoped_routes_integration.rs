@@ -375,3 +375,131 @@ async fn non_owner_cannot_clone_agent() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
 }
+
+fn spawn_cron_job(
+    state: &AppState,
+    agent_id: AgentId,
+    name: &str,
+) -> librefang_types::scheduler::CronJobId {
+    let job = librefang_types::scheduler::CronJob {
+        id: librefang_types::scheduler::CronJobId::new(),
+        agent_id,
+        name: name.to_string(),
+        enabled: true,
+        schedule: librefang_types::scheduler::CronSchedule::Cron {
+            expr: "* * * * *".to_string(),
+            tz: None,
+        },
+        action: librefang_types::scheduler::CronAction::AgentTurn {
+            message: "owner-scope cron probe".to_string(),
+            model_override: None,
+            timeout_secs: None,
+            pre_check_script: None,
+            pre_script: None,
+            silent_marker: None,
+        },
+        delivery: librefang_types::scheduler::CronDelivery::None,
+        delivery_targets: Vec::new(),
+        peer_id: None,
+        session_mode: None,
+        created_at: chrono::Utc::now(),
+        last_run: None,
+        next_run: None,
+    };
+    state
+        .kernel
+        .cron()
+        .add_job(job, false)
+        .expect("register test cron job")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_and_schedule_routes_enforce_owner_read() {
+    // #6753 follow-up: `/api/cron/jobs*` and `/api/schedules*` carry the same
+    // cross-owner disclosure class (user-authored `message`/`prompt_template`
+    // content) this PR closed for `/api/triggers/*`, but the GET handlers had
+    // no `can_access_agent` check at all.
+    let h = boot().await;
+    let agent_id = spawn_authored(&h.state, "Alice");
+    let job_id = spawn_cron_job(&h.state, agent_id, "owner-scope-cron-job");
+    let aid = agent_id.to_string();
+
+    // Detail reads: non-owner gets 404, owner and admin get 200.
+    for path in [
+        format!("/api/cron/jobs/{job_id}"),
+        format!("/api/cron/jobs/{job_id}/status"),
+        format!("/api/schedules/{job_id}"),
+    ] {
+        let status = request_status(&h.app, Method::GET, &path, BOB_KEY, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        for key in [ALICE_KEY, ADMIN_KEY] {
+            let status = request_status(&h.app, Method::GET, &path, key, None).await;
+            assert_eq!(status, StatusCode::OK, "{path} as {key}");
+        }
+    }
+
+    // Filtered list (?agent_id=): non-owner gets an empty list, not the job.
+    let status_and_body = |bearer: &'static str, path: String| {
+        let app = h.app.clone();
+        async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(path)
+                        .header("authorization", format!("Bearer {bearer}"))
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("route response");
+            let status = resp.status();
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("read body");
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default(),
+            )
+        }
+    };
+    let (status, body) = status_and_body(BOB_KEY, format!("/api/cron/jobs?agent_id={aid}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["total"],
+        serde_json::json!(0),
+        "Bob must not see Alice's cron job"
+    );
+
+    // Unfiltered list: non-owner's result must not contain the other user's job.
+    let (status, body) = status_and_body(BOB_KEY, "/api/cron/jobs".to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    let jobs = body["jobs"].as_array().expect("jobs[]");
+    assert!(
+        jobs.iter()
+            .all(|j| j["id"] != serde_json::json!(job_id.to_string())),
+        "Bob's unfiltered /api/cron/jobs must not include Alice's job"
+    );
+
+    let (status, body) = status_and_body(BOB_KEY, "/api/schedules".to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body["items"].as_array().expect("items[]");
+    assert!(
+        items
+            .iter()
+            .all(|j| j["id"] != serde_json::json!(job_id.to_string())),
+        "Bob's unfiltered /api/schedules must not include Alice's job"
+    );
+
+    // Owner and admin still see it in the unfiltered lists.
+    for key in [ALICE_KEY, ADMIN_KEY] {
+        let (status, body) = status_and_body(key, "/api/cron/jobs".to_string()).await;
+        assert_eq!(status, StatusCode::OK);
+        let jobs = body["jobs"].as_array().expect("jobs[]");
+        assert!(
+            jobs.iter()
+                .any(|j| j["id"] == serde_json::json!(job_id.to_string())),
+            "{key} should still see the job in /api/cron/jobs"
+        );
+    }
+}
