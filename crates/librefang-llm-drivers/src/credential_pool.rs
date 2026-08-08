@@ -85,9 +85,8 @@ pub struct PooledCredential {
     /// When `Some(t)`, this credential is exhausted and must not be used until
     /// `Instant::now() >= t`.
     exhausted_until: Option<Instant>,
-    /// Auth failures disable a credential until the pool is rebuilt by a
-    /// configuration reload. A separate flag keeps permanence distinct from
-    /// temporary cooldowns and cannot overflow the monotonic clock.
+    /// Auth failures disable a credential until the pool is rebuilt by a configuration reload.
+    /// A separate flag keeps permanence distinct from temporary cooldowns and cannot overflow the monotonic clock.
     permanently_disabled: bool,
 }
 
@@ -364,9 +363,8 @@ impl CredentialPool {
     }
 
     /// Report that a credential is permanently invalid (e.g. auth failure).
-    /// Unlike [`mark_exhausted`] which uses a TTL-based cooldown, this marks
-    /// the key as unavailable for the lifetime of the pool. Only a hot-reload
-    /// that rebuilds the pool can recover the credential.
+    /// Unlike [`mark_exhausted`] which uses a TTL-based cooldown, this marks the key as unavailable for the lifetime of the pool.
+    /// Only a hot-reload that rebuilds the pool can recover the credential.
     pub fn mark_permanent(&self, api_key: &str) {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(c) = inner.credentials.iter_mut().find(|c| c.api_key == api_key) {
@@ -375,16 +373,15 @@ impl CredentialPool {
         }
     }
 
-    /// Report that a request with `api_key` succeeded. Increments the
-    /// credential's `request_count` and clears a temporary cooldown (e.g. if
-    /// a provider recovered before the TTL expired). Permanent auth-failure
-    /// markers remain until a configuration reload rebuilds the pool.
+    /// Report that a request with `api_key` succeeded.
+    /// Increments the credential's `request_count` and clears a temporary cooldown (e.g. if a provider recovered before the TTL expired).
+    /// Permanent auth-failure markers remain until a configuration reload rebuilds the pool.
     pub fn mark_success(&self, api_key: &str) {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(c) = inner.credentials.iter_mut().find(|c| c.api_key == api_key) {
             c.request_count = c.request_count.saturating_add(1);
-            // Clear only temporary cooldowns. A stale in-flight success must
-            // not revive a key another request proved permanently invalid.
+            // Clear only temporary cooldowns.
+            // A stale in-flight success must not revive a key another request proved permanently invalid.
             if !c.permanently_disabled {
                 c.exhausted_until = None;
             }
