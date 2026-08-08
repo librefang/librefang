@@ -1058,7 +1058,7 @@ pub async fn set_hand_secret(
     Path(hand_id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let env_key = match body["key"].as_str() {
+    let requested_key = match body["key"].as_str() {
         Some(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => {
             return ApiErrorResponse::bad_request("Missing 'key' field (env var name)")
@@ -1073,26 +1073,26 @@ pub async fn set_hand_secret(
         }
     };
 
-    // Verify this key belongs to a requirement of the specified hand
-    let valid = {
+    // Resolve the stable requirement key exposed by `list_hands` to the
+    // actual environment-variable name. Keep accepting `check_value`
+    // directly for compatibility with older clients.
+    let env_key = {
         let defs = state.kernel.hands().list_definitions();
-        defs.iter()
-            .find(|d| d.id == hand_id)
-            .map(|def| {
-                def.requires
-                    .iter()
-                    .any(|r| r.check_value == env_key || r.key == env_key)
-            })
-            .unwrap_or(false)
+        defs.iter().find(|d| d.id == hand_id).and_then(|def| {
+            def.requires
+                .iter()
+                .find(|r| r.check_value == requested_key || r.key == requested_key)
+                .map(|r| r.check_value.clone())
+        })
     };
 
-    if !valid {
+    let Some(env_key) = env_key else {
         return ApiErrorResponse::bad_request(format!(
             "'{}' is not a requirement of hand '{}'",
-            env_key, hand_id
+            requested_key, hand_id
         ))
         .into_json_tuple();
-    }
+    };
 
     // Write to secrets.env
     let secrets_path = state.kernel.home_dir().join("secrets.env");
