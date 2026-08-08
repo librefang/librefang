@@ -1312,11 +1312,8 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
     const remove = ['script','style','nav','footer','header','aside','iframe','noscript','svg','canvas'];
     remove.forEach(tag => clone.querySelectorAll(tag).forEach(el => el.remove()));
 
-    // `querySelector` returns the *first* match, which on a feed or a results page is one
-    // card rather than the list of them — measured at 13.7% of the page on a DuckDuckGo
-    // results page. Repeated sibling `article` elements are the signature of that shape, so
-    // climb to the ancestor that holds them, the way Readability resolves the same case by
-    // walking to the common ancestor of its close-scoring candidates.
+    // `querySelector` returns the *first* match, which on a feed or a results page is one card rather than the list of them — measured at 13.7% of the page on a DuckDuckGo results page.
+    // Repeated sibling `article` elements are the signature of that shape, so climb to the ancestor that holds them, the way Readability resolves the same case by walking to the common ancestor of its close-scoring candidates.
     let root = clone.querySelector('main, [role="main"]');
     if (!root) {
         const articles = Array.from(clone.querySelectorAll('article'));
@@ -1332,38 +1329,47 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
     if (!root) root = clone;
 
     const lines = [];
+    // Parallel to `lines`: whether that line is a bullet a nested `li` already emitted.
+    // A list item folds its children onto one line, and it has to fold only its *own* text — re-folding a sub-list's bullets would put their `- ` markers mid-sentence.
+    // Tracked as a flag rather than sniffed back out of the string, because a text node may legitimately begin with `- `.
+    const isBullet = [];
+    function emit(line, bullet) { lines.push(line); isBullet.push(bullet === true); }
+    // `article` earns a blank line for the same reason `section` does, and it matters more now that root selection can resolve to a container of sibling cards: feed entries that carry no heading of their own would otherwise run together into one undifferentiated block.
+    const BLOCK = ['p','div','section','tr','article'];
     function walk(node) {
         if (node.nodeType === 3) {
             const t = node.textContent.trim();
-            if (t) lines.push(t);
+            if (t) emit(t);
             return;
         }
         if (node.nodeType !== 1) return;
         const tag = node.tagName.toLowerCase();
         if (['h1','h2','h3','h4','h5','h6'].includes(tag)) {
             const level = '#'.repeat(parseInt(tag[1]));
-            lines.push('\n' + level + ' ' + node.textContent.trim());
+            emit('\n' + level + ' ' + node.textContent.trim());
             return;
         }
         if (tag === 'a' && node.href && node.textContent.trim()) {
-            lines.push('[' + node.textContent.trim() + '](' + node.href + ')');
+            emit('[' + node.textContent.trim() + '](' + node.href + ')');
             return;
         }
         if (tag === 'li') {
-            // Recurse rather than flattening to `textContent`: returning here dropped the
-            // destination of every link inside a list item, which on a Wikipedia article is
-            // 1100 of 1723 links and on a results page is all of them. Children are folded
-            // back onto one line so a bullet still reads as a bullet.
+            // Recurse rather than flattening to `textContent`: returning here dropped the destination of every link inside a list item, which on a Wikipedia article is 1100 of 1723 links and on a results page is all of them.
+            // The item's own text folds back onto one line so a bullet still reads as a bullet, while bullets from a nested list stay on their own lines and gain a level of indent.
             const start = lines.length;
             for (const child of node.childNodes) walk(child);
-            const inner = lines.splice(start).join(' ').replace(/\s+/g, ' ').trim();
-            if (inner) lines.push('- ' + inner);
+            const produced = lines.splice(start);
+            const flags = isBullet.splice(start);
+            const own = produced.filter((_, i) => !flags[i]).join(' ').replace(/\s+/g, ' ').trim();
+            const nested = produced.filter((_, i) => flags[i]);
+            if (own) emit('- ' + own, true);
+            for (const n of nested) emit('  ' + n, true);
             return;
         }
-        if (tag === 'br') { lines.push(''); return; }
-        if (['p','div','section','tr'].includes(tag)) lines.push('');
+        if (tag === 'br') { emit(''); return; }
+        if (BLOCK.includes(tag)) emit('');
         for (const child of node.childNodes) walk(child);
-        if (['p','div','section','tr'].includes(tag)) lines.push('');
+        if (BLOCK.includes(tag)) emit('');
     }
     walk(root);
 
@@ -1601,9 +1607,91 @@ mod tests {
         );
     }
 
+    /// A sub-list keeps its own bullets instead of being folded into its parent's line.
+    ///
+    /// Folding a list item's children onto one line is what lets a bullet still read as a bullet, but a nested `li` has already emitted its own `- ` by the time the outer one folds — so folding everything produced `- Fruits - Apple - Banana`, with markers mid-sentence that read as list items or as a numeric range on text like `- Price - 5 - 10`.
+    /// Ported from the JS the script runs, because the traversal itself needs a live DOM.
+    #[test]
+    fn test_nested_lists_keep_their_own_bullets() {
+        /// One list item: its own text, plus any sub-list beneath it.
+        struct Item {
+            text: &'static str,
+            subs: Vec<Item>,
+        }
+        fn item(text: &'static str, subs: Vec<Item>) -> Item {
+            Item { text, subs }
+        }
+
+        /// The `li` branch's fold: own text onto one line, a sub-list's bullets kept and indented.
+        fn render(item: &Item) -> Vec<String> {
+            let (mut lines, mut flags): (Vec<String>, Vec<bool>) = (vec![], vec![]);
+            if !item.text.is_empty() {
+                lines.push(item.text.to_string());
+                flags.push(false);
+            }
+            for sub in &item.subs {
+                for line in render(sub) {
+                    lines.push(line);
+                    flags.push(true);
+                }
+            }
+            let own: Vec<&str> = lines
+                .iter()
+                .zip(&flags)
+                .filter(|(_, nested)| !**nested)
+                .map(|(l, _)| l.as_str())
+                .collect();
+            let own = own.join(" ");
+            let nested: Vec<String> = lines
+                .iter()
+                .zip(&flags)
+                .filter(|(_, nested)| **nested)
+                .map(|(l, _)| format!("  {l}"))
+                .collect();
+
+            let mut out = Vec::new();
+            if !own.is_empty() {
+                out.push(format!("- {own}"));
+            }
+            out.extend(nested);
+            out
+        }
+
+        assert_eq!(
+            render(&item(
+                "Fruits",
+                vec![item("Apple", vec![]), item("Banana", vec![])]
+            )),
+            vec!["- Fruits", "  - Apple", "  - Banana"],
+            "a sub-list must stay a sub-list rather than collapsing into its parent's line"
+        );
+        assert_eq!(
+            render(&item("A", vec![item("B", vec![item("C", vec![])])])),
+            vec!["- A", "  - B", "    - C"],
+            "each level of nesting earns one level of indent"
+        );
+        // The flat case the fold exists for is unchanged.
+        assert_eq!(
+            render(&item("Just an item", vec![])),
+            vec!["- Just an item"]
+        );
+    }
+
+    /// Feed entries must be separated from one another.
+    ///
+    /// Root selection can now resolve to the container of several sibling `<article>` cards, and an entry that carries no heading of its own emits no separator — so consecutive cards ran together into one undifferentiated block, which works against covering the feed in the first place.
+    #[test]
+    fn test_article_earns_a_block_separator() {
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("'tr','article'"),
+            "an article is a block, like the section and div beside it in that list"
+        );
+    }
+
     /// Root selection must not stop at the first `article` when a page has several.
     ///
-    /// `querySelector('main, article, …')` returned the first match, which on a results page is one card — 13.7% of the page. Readability resolves the same case by climbing to the common ancestor of its close-scoring candidates.
+    /// `querySelector('main, article, …')` returned the first match, which on a results page is one card — 13.7% of the page.
+    /// Readability resolves the same case by climbing to the common ancestor of its close-scoring candidates.
     #[test]
     fn test_root_selection_climbs_past_repeated_articles() {
         assert!(

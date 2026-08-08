@@ -4,4 +4,4 @@ Clicking the text was not a fallback for those: 408 of the 1,100 do not resolve 
 The branch now recurses and folds its children back onto one line, so a bullet still renders as a bullet and the links inside it keep their identity.
 Root selection used `querySelector('main, article, [role="main"], .content, #content')`, which returns the *first* match — on a page built from sibling `<article>` cards that is one card, measured at 13.7% of a DuckDuckGo results page.
 Selection now climbs to the ancestor holding repeated sibling `article` elements, the way Readability resolves the same shape by walking to the common ancestor of its close-scoring candidates.
-A page with a `main` or `[role="main"]` landmark is unaffected, and a page with a single `article` still selects it (#6624) (@nevgenov)
+A page with a `main` or `[role="main"]` landmark is unaffected, and a page with a single `article` still selects it (#6624, #6745) (@nevgenov)
