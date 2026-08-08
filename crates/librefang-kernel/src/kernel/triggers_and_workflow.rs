@@ -338,6 +338,31 @@ impl LibreFangKernel {
             triggered.push(wake);
         }
 
+        // Tell the reconcile ladder that these agents have just been woken
+        // about this task, so the floor does not second-guess an activation
+        // that is still resolving.
+        //
+        // Without this the two paths cannot see each other: the event wake is
+        // fire-and-forget, the ladder is only written by the reconcile itself,
+        // and its first check for an unseen assignee is seeded to fire
+        // immediately — so an activation that outlives `pending_grace_secs`
+        // (one LLM turn with a few tool calls before it reaches `task_claim`,
+        // which 60s does not comfortably cover) earns a second wake telling
+        // the agent about work it may have just finished.
+        //
+        // Stored triggers are stamped too, not just the synthesized wake: an
+        // operator's own `TaskPosted` trigger suppresses the synthesized one,
+        // so covering only the built-in path would leave exactly the
+        // installations that configured a trigger exposed to the double wake.
+        if let librefang_types::event::EventPayload::System(
+            librefang_types::event::SystemEvent::TaskPosted { task_id, .. },
+        ) = &event.payload
+        {
+            for m in triggered.iter().filter(|m| m.workflow_id.is_none()) {
+                self.note_task_wake_dispatched(m.agent_id, task_id);
+            }
+        }
+
         // Capture event.timestamp before the bus move — the trigger
         // dispatcher below uses it as the deterministic fire instant for
         // `SessionId::for_trigger_fire`. audit: trigger-new-session-non-deterministic.
@@ -691,6 +716,39 @@ impl LibreFangKernel {
                 spawn_logged("trigger_dispatch", task);
             }
         }
+    }
+
+    /// Record that `agent_id` has just been woken about `task_id`, so the
+    /// reconcile floor gives that activation room before stepping in.
+    ///
+    /// Writes the same ladder the reconcile keeps, which is what lets the two
+    /// paths see each other at all. The rung is *set* to at least one rather
+    /// than incremented: a burst of posts is one situation, not N escalating
+    /// failures, and incrementing would push the floor exponentially further
+    /// out precisely when a backlog makes it most useful. One rung means the
+    /// floor waits `pending_grace_secs` doubled — long enough for an ordinary
+    /// turn to reach `task_claim`, and still bounded, so a wake that achieved
+    /// nothing is followed by a real one rather than by silence.
+    ///
+    /// `woken_for` records the task so the reconcile's progress check can see
+    /// it disappear from `pending` and reset the ladder on the next tick.
+    fn note_task_wake_dispatched(&self, agent_id: AgentId, task_id: &str) {
+        use crate::kernel::subsystems::governance::AssigneeWakeState;
+        use std::collections::BTreeSet;
+
+        let now = chrono::Utc::now();
+        let mut state = self
+            .governance
+            .assignee_wake_state
+            .entry(agent_id)
+            .or_insert_with(|| AssigneeWakeState {
+                last_wake: now,
+                ineffective_wakes: 0,
+                woken_for: BTreeSet::new(),
+            });
+        state.last_wake = now;
+        state.ineffective_wakes = state.ineffective_wakes.max(1);
+        state.woken_for.insert(task_id.to_string());
     }
 
     /// Level-triggered floor under Task Board delivery (issue #6728): wake the
@@ -1913,6 +1971,140 @@ mod task_board_reconcile_tests {
             matches[0].message.contains('2'),
             "the prompt must report the full backlog count: {}",
             matches[0].message
+        );
+    }
+
+    /// The two paths must be able to see each other: an activation started by
+    /// the event path is given room before the floor concludes nothing
+    /// happened.
+    ///
+    /// Without the ladder stamp the floor fires at the first tick past
+    /// `pending_grace_secs`, so a turn that takes longer than 60s to reach
+    /// `task_claim` — one LLM call with a few tool calls ahead of it — earns a
+    /// second activation telling the agent about work it may have just
+    /// finished.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fresh_event_wake_defers_the_floor() {
+        let (kernel, _tmp) = boot("reconcile-defer", |c| {
+            c.task_board.pending_grace_secs = 60;
+        });
+        // No `set_self_handle`: dispatch stays inert, so these tests exercise
+        // the wake decision without an LLM behind `send_message_full`. The
+        // ladder stamp happens before dispatch, which is the part under test.
+        let agent = kernel
+            .spawn_agent_inner(worker("worker"), None, None, None)
+            .expect("spawn");
+        let task = kernel
+            .memory
+            .substrate
+            .task_post("in flight", "body", Some(&agent.to_string()), None)
+            .await
+            .expect("post");
+
+        // The event path wakes the agent and records it.
+        let woken = kernel
+            .publish_event(
+                super::super::super::triggers::tests_support_task_posted_event(
+                    &task,
+                    &agent.to_string(),
+                ),
+            )
+            .await;
+        assert_eq!(woken.len(), 1, "the event path must wake the assignee");
+
+        // The task ages past the grace window while that activation is still
+        // resolving.
+        backdate(&kernel, &task, 120).await;
+        let reconciled = kernel.reconcile_pending_task_wakes().await;
+
+        assert!(
+            reconciled.is_empty(),
+            "the floor must not wake an agent it just woke through the event path"
+        );
+    }
+
+    /// ...but the deferral is a delay, not an amnesty. Once the doubled window
+    /// passes with the task still pending, the floor fires — which is the whole
+    /// point of having a floor when an activation dies silently.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_floor_still_fires_once_the_deferral_expires() {
+        let (kernel, _tmp) = boot("reconcile-defer-expiry", |c| {
+            c.task_board.pending_grace_secs = 60;
+        });
+        // No `set_self_handle`: dispatch stays inert, so these tests exercise
+        // the wake decision without an LLM behind `send_message_full`. The
+        // ladder stamp happens before dispatch, which is the part under test.
+        let agent = kernel
+            .spawn_agent_inner(worker("worker"), None, None, None)
+            .expect("spawn");
+        let task = kernel
+            .memory
+            .substrate
+            .task_post("never claimed", "body", Some(&agent.to_string()), None)
+            .await
+            .expect("post");
+        kernel
+            .publish_event(
+                super::super::super::triggers::tests_support_task_posted_event(
+                    &task,
+                    &agent.to_string(),
+                ),
+            )
+            .await;
+        backdate(&kernel, &task, 600).await;
+
+        // Age the recorded wake past `pending_grace_secs` doubled.
+        if let Some(mut state) = kernel.governance.assignee_wake_state.get_mut(&agent) {
+            state.last_wake = chrono::Utc::now() - chrono::Duration::seconds(600);
+        }
+
+        let reconciled = kernel.reconcile_pending_task_wakes().await;
+
+        assert_eq!(
+            reconciled.len(),
+            1,
+            "an activation that achieved nothing must still be followed by the floor"
+        );
+        assert_eq!(reconciled[0].agent_id, agent);
+    }
+
+    /// The deferral has to outlast one `pending_grace_secs`, which is the
+    /// scenario that motivated it: an activation that takes longer than 60s to
+    /// reach `task_claim`. Recording the wake without advancing the rung would
+    /// leave the floor firing exactly one grace window later — still inside the
+    /// turn it is meant to be waiting for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_deferral_outlasts_a_single_grace_window() {
+        let (kernel, _tmp) = boot("reconcile-defer-rung", |c| {
+            c.task_board.pending_grace_secs = 60;
+        });
+        let agent = kernel
+            .spawn_agent_inner(worker("worker"), None, None, None)
+            .expect("spawn");
+        let task = kernel
+            .memory
+            .substrate
+            .task_post("slow turn", "body", Some(&agent.to_string()), None)
+            .await
+            .expect("post");
+        kernel
+            .publish_event(
+                super::super::super::triggers::tests_support_task_posted_event(
+                    &task,
+                    &agent.to_string(),
+                ),
+            )
+            .await;
+        backdate(&kernel, &task, 600).await;
+
+        // 90s after the wake: past one grace window, inside the doubled one.
+        if let Some(mut state) = kernel.governance.assignee_wake_state.get_mut(&agent) {
+            state.last_wake = chrono::Utc::now() - chrono::Duration::seconds(90);
+        }
+
+        assert!(
+            kernel.reconcile_pending_task_wakes().await.is_empty(),
+            "90s after an event wake the activation may still be running; the floor waits"
         );
     }
 }

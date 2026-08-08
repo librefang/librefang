@@ -1500,6 +1500,25 @@ fn agent_identity_filter_matches(
     }
 }
 
+/// Build a `TaskPosted` event for tests in sibling modules.
+///
+/// Lives here rather than in the test module that uses it because
+/// `EventPayload::System` construction is otherwise repeated verbatim in three
+/// files, and a drift in the shape should break one place, not three.
+#[cfg(test)]
+pub(crate) fn tests_support_task_posted_event(task_id: &str, assigned_to: &str) -> Event {
+    Event::new(
+        AgentId::new(),
+        librefang_types::event::EventTarget::Broadcast,
+        EventPayload::System(SystemEvent::TaskPosted {
+            task_id: task_id.to_string(),
+            title: "test task".to_string(),
+            assigned_to: Some(assigned_to.to_string()),
+            created_by: None,
+        }),
+    )
+}
+
 /// Create a human-readable description of an event for use in prompts.
 fn describe_event(event: &Event) -> String {
     match &event.payload {
