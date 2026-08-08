@@ -1,10 +1,6 @@
 //! RBAC M5 — admin-only audit query and export endpoints.
 //!
-//! All audit endpoints are deliberately gated to `UserRole::Admin+` with an
-//! actual credential because audit access leaks
-//! sensitive identity / action data — the role check happens in-handler
-//! (the global auth middleware only enforces "is this a recognised
-//! token", not "may this caller see audit").
+//! All audit endpoints are deliberately gated to `UserRole::Admin+` with an actual credential because audit access leaks sensitive identity / action data — the role check happens in-handler (the global auth middleware only enforces "is this a recognised token", not "may this caller see audit").
 //!
 //! Filtering is done at the SQLite layer with parameterised queries —
 //! all filter values come straight from the URL and are bound through
@@ -85,14 +81,10 @@ const MAX_AUDIT_QUERY_LIMIT: u32 = 5000;
 
 /// Reject the request unless the caller is an authenticated `Admin`+.
 ///
-/// **Anonymous callers are rejected outright.** For trusted loopback /
-/// `LIBREFANG_ALLOW_NO_AUTH=1` requests, the middleware injects both a
-/// synthetic Owner and a `TrustedNoAuthCaller` marker. Low-value endpoints
-/// accept that compatibility identity, but the hash-chained audit log carries
-/// every past attribution and detail string and is too sensitive for that
-/// blanket trust — a co-resident process at `127.0.0.1` would otherwise be
-/// able to exfiltrate the entire chain. Operators that want audit access in a
-/// no-auth deployment must configure at least one user with an admin api_key.
+/// **Anonymous callers are rejected outright.**
+/// For trusted loopback / `LIBREFANG_ALLOW_NO_AUTH=1` requests, the middleware injects both a synthetic Owner and a `TrustedNoAuthCaller` marker.
+/// Low-value endpoints accept that compatibility identity, but the hash-chained audit log carries every past attribution and detail string and is too sensitive for that blanket trust — a co-resident process at `127.0.0.1` would otherwise be able to exfiltrate the entire chain.
+/// Operators that want audit access in a no-auth deployment must configure at least one user with an admin api_key.
 ///
 /// Returns `Some(response)` when the request should be aborted with 403.
 fn require_admin(

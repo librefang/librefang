@@ -1,6 +1,5 @@
-//! Cross-user authorization coverage for agent, session, observability, and
-//! trigger routes. Requests run through the real domain routers and auth
-//! middleware so `AuthenticatedApiUser` extraction is exercised end to end.
+//! Cross-user authorization coverage for agent, session, observability, and trigger routes.
+//! Requests run through the real domain routers and auth middleware so `AuthenticatedApiUser` extraction is exercised end to end.
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};

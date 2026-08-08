@@ -125,10 +125,9 @@ pub(crate) fn resolve_lang(lang: Option<&axum::Extension<RequestLanguage>>) -> &
 
 /// Whether the current API principal may access an agent-scoped resource.
 ///
-/// Admin and Owner roles can inspect every agent. Lower roles are limited to
-/// agents whose manifest author matches their authenticated name. `None`
-/// remains allowed for the explicitly trusted loopback/no-auth deployment
-/// mode, matching the existing API compatibility contract.
+/// Admin and Owner roles can inspect every agent.
+/// Lower roles are limited to agents whose manifest author matches their authenticated name.
+/// `None` remains allowed for the explicitly trusted loopback/no-auth deployment mode, matching the existing API compatibility contract.
 pub(crate) fn can_access_agent(
     state: &AppState,
     agent_id: librefang_types::agent::AgentId,

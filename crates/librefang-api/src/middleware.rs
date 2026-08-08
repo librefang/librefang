@@ -203,10 +203,8 @@ pub struct AuthenticatedApiUser {
     pub user_id: UserId,
 }
 
-/// Marks requests admitted solely by the explicitly trusted loopback/no-auth
-/// deployment mode. Most routes treat these as Owner-equivalent for local
-/// single-user compatibility, while especially sensitive handlers (notably
-/// the audit ledger) can still require an actual credential.
+/// Marks requests admitted solely by the explicitly trusted loopback/no-auth deployment mode.
+/// Most routes treat these as Owner-equivalent for local single-user compatibility, while especially sensitive handlers (notably the audit ledger) can still require an actual credential.
 #[derive(Clone, Copy, Debug)]
 pub struct TrustedNoAuthCaller;
 
