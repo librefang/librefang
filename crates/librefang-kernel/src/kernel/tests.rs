@@ -6755,14 +6755,38 @@ fn workflow_step_dispatch_enters_agent_call_depth_scope() {
         out
     };
 
+    // Counted, not `contains`. There are two step-dispatch closures in this
+    // file — `run_workflow::send_message` and its operator-resume twin in
+    // `KernelOperatorResumeDriver::drive_operator_timeout` — and a single
+    // containment check passes with either one wrapped, which is exactly how
+    // the resume twin was missed. The semaphore sentinel above counts for the
+    // same reason.
+    let dispatches = stripped.matches("send_message_full(").count();
+    let wrapped = stripped.matches("with_agent_call_depth(").count();
     assert!(
-        stripped.contains("with_agent_call_depth(self.send_message_full("),
-        "expected the `run_workflow` step dispatch in triggers_and_workflow.rs \
-         to wrap `send_message_full` in \
-         `librefang_runtime::tool_runner::with_agent_call_depth`. Without it a \
-         workflow step's agent turn runs at the caller's depth, so a workflow \
-         that re-runs itself through a step target's `workflow_run` recurses \
-         unbounded and overflows the worker stack (refs #6659)."
+        wrapped >= 2,
+        "expected BOTH step-dispatch closures in triggers_and_workflow.rs to \
+         wrap `send_message_full` in \
+         `librefang_runtime::tool_runner::with_agent_call_depth` — \
+         `run_workflow::send_message` and the operator-resume twin in \
+         `drive_operator_timeout` — but found {wrapped}. Without it a workflow \
+         step's agent turn runs at the caller's depth, so a workflow that \
+         re-runs itself through a step target's `workflow_run` recurses \
+         unbounded and overflows the worker stack (refs #6659). An \
+         operator-timeout resume drives the remaining steps through the twin, \
+         so leaving it unwrapped gives that path one extra stacked turn of \
+         budget."
+    );
+    assert_eq!(
+        dispatches - wrapped,
+        1,
+        "exactly one `send_message_full` call in triggers_and_workflow.rs is \
+         expected to run outside a depth scope: the trigger dispatch path, \
+         which STARTS a chain on its own task rather than nesting inside one, \
+         so depth 0 is correct there. Found {dispatches} dispatches and \
+         {wrapped} wrapped. If a new inline dispatch was added it needs the \
+         wrapper; if the trigger path was changed, update this sentinel \
+         deliberately rather than adjusting the number."
     );
     assert!(
         stripped.contains("cfg.max_agent_call_depth"),
