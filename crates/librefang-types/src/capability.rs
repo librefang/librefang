@@ -222,6 +222,13 @@ pub fn glob_matches(pattern: &str, value: &str) -> bool {
     if pattern == value {
         return true;
     }
+    // Wildcard grants must never manufacture access through filesystem
+    // traversal components, even when the pattern itself has no separator
+    // and would otherwise take the legacy matcher path. Bare `*` above is
+    // the documented universal grant; an exact grant above remains explicit.
+    if has_path_traversal_segment(value) {
+        return false;
+    }
 
     // If the pattern contains a path separator we apply segment-aware
     // matching so that a single `*` cannot cross a separator.  Both `/`
@@ -307,13 +314,14 @@ fn glob_matches_path(pattern: &str, value: &str) -> bool {
     const SEPS: &[char] = &['/', '\\'];
     let pat_segs: Vec<&str> = pattern.split(SEPS).collect();
     let val_segs: Vec<&str> = value.split(SEPS).collect();
-    if val_segs
-        .iter()
-        .any(|segment| matches!(*segment, "." | ".."))
-    {
-        return false;
-    }
     glob_match_segments(&pat_segs, &val_segs)
+}
+
+fn has_path_traversal_segment(value: &str) -> bool {
+    const SEPS: &[char] = &['/', '\\'];
+    value
+        .split(SEPS)
+        .any(|segment| matches!(segment, "." | ".."))
 }
 
 /// Recursive segment-by-segment matcher.
@@ -646,6 +654,22 @@ mod tests {
             glob_matches("data/**", "data/.env"),
             "ordinary dot-prefixed names are not traversal segments"
         );
+    }
+
+    #[test]
+    fn test_separator_free_globs_reject_path_traversal_values() {
+        for (pattern, value) in [
+            ("**", ".."),
+            ("**", "data/../../etc/passwd"),
+            ("data*", "data/../secret"),
+            ("*passwd", "data/../etc/passwd"),
+            ("C:*", "C:\\data\\..\\Windows\\secret"),
+        ] {
+            assert!(
+                !glob_matches(pattern, value),
+                "separator-free glob {pattern:?} must reject traversal value {value:?}"
+            );
+        }
     }
 
     /// URL capability patterns: `*` in the host portion must NOT match an
