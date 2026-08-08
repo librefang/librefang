@@ -788,13 +788,16 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             },
             ToolDefinition {
                 name: tool_name::MEDIA_TRANSCRIBE.to_string(),
-                description: "Transcribe audio to text using speech-to-text. Auto-selects the best available provider (Groq Whisper or OpenAI Whisper). Also accepts video containers — the audio track is extracted server-side and the video is discarded. Returns the transcript.".to_string(),
+                description: "Transcribe audio to text using speech-to-text. Auto-selects the best available provider (Groq Whisper or OpenAI Whisper). Also accepts video containers — the audio track is extracted server-side and the video is discarded. Returns the transcript.\n\nFor a recording longer than a few minutes, transcribe it in windows and write to a file: pass `max_secs` (and `out_path`), then repeat with `start_sec` = the `next_start_sec` from the response while `has_more` is true. A whole long recording returned in one result is too large to reach you intact.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": format!("Path to the audio or video file (relative to workspace). Audio: {SUPPORTED_AUDIO_EXTS_DOC}. Video (audio track extracted, video discarded): {SUPPORTED_VIDEO_EXTS_DOC}.") },
                         "language": { "type": "string", "description": "Optional ISO-639-1 language code (e.g., 'en', 'es', 'ja'). Improves accuracy when known; the provider auto-detects when omitted." },
-                        "prompt": { "type": "string", "description": "Optional context to guide transcription — domain vocabulary, proper nouns, or acronyms likely to appear. Also improves punctuation and casing on long recordings." }
+                        "prompt": { "type": "string", "description": "Optional context to guide transcription — domain vocabulary, proper nouns, or acronyms likely to appear. Also improves punctuation and casing on long recordings." },
+                        "start_sec": { "type": "number", "description": "Start of the window to transcribe, in seconds from the beginning of the recording. Defaults to 0. Pass the previous response's `next_start_sec` to continue." },
+                        "max_secs": { "type": "number", "description": "Length of the window to transcribe, in seconds of media. Defaults to 600 (10 minutes) when either window field is given. Setting only this transcribes the first window. Lower it if transcription times out — the request is bounded by wall-clock, and how much media fits depends on provider speed." },
+                        "out_path": { "type": "string", "description": "Workspace-relative path to write the transcript to as UTF-8. The transcript then does NOT appear in the result — you get the path, byte count, sha256 and a 200-character preview instead. Windows append to the same file (a window starting at 0 begins a new one), so repeated calls assemble one transcript. Use this for anything long: an inline transcript above ~16 KB does not reach you intact." }
                     },
                     "required": ["path"]
                 }),

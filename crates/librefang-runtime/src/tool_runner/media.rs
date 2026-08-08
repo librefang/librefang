@@ -206,7 +206,25 @@ async fn build_transcription_attachment(
     })
 }
 
+/// Default window length, in seconds of media, when `max_secs` is omitted (#6748).
+///
+/// Ten minutes is the largest round number that stays inside the tool-result budget on ordinary speech: a 600 s window measured ~16.8 KB of transcript against a 16 KB `spill_threshold_bytes`, so the inline path is already at its limit here and anything longer reliably spills.
+/// It is deliberately not larger for the timeout's sake either — the same window took ~72 s against a self-hosted endpoint, which is already past the 60 s transcription timeout, so a caller on slow provider hardware wants `max_secs` *below* this default rather than above it.
+const DEFAULT_WINDOW_SECS: f64 = 600.0;
+
+/// Characters of transcript echoed back when the result went to a file.
+///
+/// Enough to confirm the right recording and the right offset at a glance, short enough that a caller looping over a long recording never accumulates a meaningful amount of it in context — which is the entire point of writing to a file.
+const OUT_PATH_PREVIEW_CHARS: usize = 200;
+
 /// Transcribe audio (or a video container's audio track) to text.
+///
+/// Two mechanisms bound what reaches the agent's context, and long recordings need both (#6748):
+///
+/// - `start_sec` / `max_secs` bound the *request*, so one call transcribes one window rather than a recording of unknown length, and the response carries `has_more` / `next_start_sec` to walk the rest.
+/// - `out_path` bounds the *result*, writing the transcript to a workspace file and returning only path, byte count, sha256 and a short preview — the same contract `web_fetch_to_file` established, and for the same reason.
+///
+/// Windowing alone is not enough: window size varies with how much people said, so a fixed window straddles the spill threshold rather than staying under it.
 pub(super) async fn tool_media_transcribe(
     input: &serde_json::Value,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
@@ -229,12 +247,210 @@ pub(super) async fn tool_media_transcribe(
     let attachment = build_transcription_attachment(&resolved, &ext).await?;
     let language = input["language"].as_str();
     let prompt = input["prompt"].as_str();
+    let window = parse_window(input)?;
 
-    let understanding = engine
-        .transcribe_audio(&attachment, language, prompt)
+    let outcome = engine
+        .transcribe_audio_window(&attachment, language, prompt, window)
         .await
         .map_err(ToolError::upstream_msg)?;
-    Ok(serde_json::to_string_pretty(&understanding)?)
+
+    let mut response = serde_json::json!({
+        "provider": outcome.understanding.provider,
+        "model": outcome.understanding.model,
+    });
+
+    // Continuation fields only when a window was requested. Emitting them for
+    // a whole-file call would invite a caller to loop on a transcript that is
+    // already complete.
+    if let Some(window) = window {
+        // Advance by what ffmpeg actually produced, never by what was asked
+        // for: a seek lands on a keyframe and a window overlapping the end is
+        // short, so an assumed edge drifts and eventually skips audio.
+        // Falling back to the requested length when the granule position is
+        // unreadable keeps the walk moving rather than stalling it — at worst
+        // it repeats or skips one window, which the caller can see in the
+        // transcript, whereas a stall is silent.
+        let consumed = outcome.consumed_secs.unwrap_or(window.max_secs);
+        // A window is "full" only within a tolerance: the produced stream ends
+        // on a packet boundary, so an exactly-covered window still lands a few
+        // milliseconds short and a strict comparison would call every window
+        // the last one.
+        let has_more = consumed >= window.max_secs - WINDOW_COMPLETE_TOLERANCE_SECS;
+        response["window"] = serde_json::json!({
+            "start_sec": window.start_sec,
+            "max_secs": window.max_secs,
+            "consumed_secs": consumed,
+        });
+        response["has_more"] = serde_json::json!(has_more);
+        if has_more {
+            response["next_start_sec"] = serde_json::json!(window.start_sec + consumed);
+        }
+    }
+
+    let transcript = &outcome.understanding.description;
+    match input["out_path"].as_str() {
+        None => {
+            response["transcript"] = serde_json::json!(transcript);
+        }
+        Some(out_path) => {
+            let written = write_transcript(
+                out_path,
+                transcript,
+                // A window starting at zero begins a fresh transcript; every
+                // later window continues the same file. Without this a caller
+                // walking a recording would either overwrite each chunk with
+                // the next or have to invent its own assembly step.
+                window.is_some_and(|w| w.start_sec > 0.0),
+                workspace_root,
+                additional_roots,
+            )
+            .await?;
+            response["written_to"] = serde_json::json!(written.path);
+            response["bytes_written"] = serde_json::json!(written.bytes);
+            response["sha256"] = serde_json::json!(written.sha256);
+            response["chars"] = serde_json::json!(transcript.chars().count());
+            response["preview"] = serde_json::json!(preview_of(transcript));
+        }
+    }
+
+    Ok(serde_json::to_string_pretty(&response)?)
+}
+
+/// How short of `max_secs` a produced window may fall and still count as full.
+///
+/// Opus packets are 20 ms by default, so a window that covers its whole span still ends up to one packet short; without slack `has_more` would read every window as the last and truncate the recording after the first call.
+const WINDOW_COMPLETE_TOLERANCE_SECS: f64 = 0.25;
+
+/// Read `start_sec` / `max_secs` into a window, or `None` for a whole-file call.
+///
+/// A call that names neither stays on the unwindowed path exactly as before, so nothing about existing callers changes.
+/// Naming either one opts into windowing, with the other taking its default — asking for "the first ten minutes" should not require also spelling out that it starts at zero.
+fn parse_window(
+    input: &serde_json::Value,
+) -> Result<Option<crate::media_understanding::MediaWindow>, ToolError> {
+    let start = input.get("start_sec").filter(|v| !v.is_null());
+    let max = input.get("max_secs").filter(|v| !v.is_null());
+    if start.is_none() && max.is_none() {
+        return Ok(None);
+    }
+
+    let as_secs = |v: Option<&serde_json::Value>, name: &'static str| -> Result<_, ToolError> {
+        match v {
+            None => Ok(None),
+            Some(v) => {
+                let n = v.as_f64().ok_or(ToolError::InvalidParameter {
+                    name,
+                    reason: "must be a number of seconds".to_string(),
+                })?;
+                if !n.is_finite() || n < 0.0 {
+                    return Err(ToolError::InvalidParameter {
+                        name,
+                        reason: format!(
+                            "must be a non-negative, finite number of seconds, got {n}"
+                        ),
+                    });
+                }
+                Ok(Some(n))
+            }
+        }
+    };
+
+    let start_sec = as_secs(start, "start_sec")?.unwrap_or(0.0);
+    let max_secs = as_secs(max, "max_secs")?.unwrap_or(DEFAULT_WINDOW_SECS);
+    if max_secs == 0.0 {
+        return Err(ToolError::InvalidParameter {
+            name: "max_secs",
+            reason: "must be greater than zero — a zero-length window transcribes nothing"
+                .to_string(),
+        });
+    }
+
+    Ok(Some(crate::media_understanding::MediaWindow {
+        start_sec,
+        max_secs,
+    }))
+}
+
+/// First [`OUT_PATH_PREVIEW_CHARS`] characters of `text`, counted in characters rather than bytes so a multi-byte script is never cut mid-codepoint.
+fn preview_of(text: &str) -> String {
+    let mut out: String = text.chars().take(OUT_PATH_PREVIEW_CHARS).collect();
+    if text.chars().nth(OUT_PATH_PREVIEW_CHARS).is_some() {
+        out.push('…');
+    }
+    out
+}
+
+/// Outcome of persisting a transcript, as reported back to the agent.
+struct WrittenTranscript {
+    path: String,
+    bytes: u64,
+    sha256: String,
+}
+
+/// Write (or append) a transcript to a workspace-relative path.
+///
+/// Resolution goes through [`crate::workspace_sandbox::resolve_sandbox_path_ext`] — the same call `web_fetch_to_file` and `file_write` use — so a transcript cannot be written outside the agent's roots and `..` is rejected.
+///
+/// `append` exists because assembling a long recording is the normal case: each window continues the file the previous one started.
+/// The reported `bytes` and `sha256` describe the **whole file** after the write, not just this window's share, so a caller that has walked five windows can verify the artefact it ends up with rather than the last fragment of it.
+async fn write_transcript(
+    out_path: &str,
+    transcript: &str,
+    append: bool,
+    workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
+) -> Result<WrittenTranscript, ToolError> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+
+    let root = workspace_root.ok_or_else(|| ToolError::InvalidParameter {
+        name: "out_path",
+        reason: "workspace sandbox is not configured, so there is no root to write under"
+            .to_string(),
+    })?;
+    let resolved =
+        crate::workspace_sandbox::resolve_sandbox_path_ext(out_path, root, additional_roots)
+            .map_err(|reason| ToolError::InvalidParameter {
+                name: "out_path",
+                reason,
+            })?;
+
+    if let Some(parent) = resolved.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            ToolError::upstream_msg(format!("Failed to create parent directories: {e}"))
+        })?;
+    }
+
+    // Appended rather than rewritten: holding every prior window in memory to
+    // rewrite the file whole would reintroduce, on disk, exactly the
+    // proportional-to-recording-length cost this parameter exists to remove.
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(append)
+        .truncate(!append)
+        .open(&resolved)
+        .await
+        .map_err(|e| ToolError::upstream_msg(format!("Failed to open '{out_path}': {e}")))?;
+    file.write_all(transcript.as_bytes())
+        .await
+        .map_err(|e| ToolError::upstream_msg(format!("Failed to write '{out_path}': {e}")))?;
+    file.flush()
+        .await
+        .map_err(|e| ToolError::upstream_msg(format!("Failed to flush '{out_path}': {e}")))?;
+    drop(file);
+
+    let whole = tokio::fs::read(&resolved)
+        .await
+        .map_err(|e| ToolError::upstream_msg(format!("Failed to re-read '{out_path}': {e}")))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&whole);
+
+    Ok(WrittenTranscript {
+        path: resolved.display().to_string(),
+        bytes: whole.len() as u64,
+        sha256: format!("{:x}", hasher.finalize()),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,4 +1258,148 @@ pub(super) async fn tool_speech_to_text(
     });
 
     Ok(serde_json::to_string_pretty(&response)?)
+}
+
+#[cfg(test)]
+mod transcribe_window_tests {
+    use super::*;
+
+    fn input(json: serde_json::Value) -> serde_json::Value {
+        json
+    }
+
+    /// A call that names no window field stays on the whole-file path, so
+    /// every pre-#6748 caller keeps its exact behaviour and gains no ffmpeg hop.
+    #[test]
+    fn absent_window_fields_mean_no_window() {
+        assert!(parse_window(&input(serde_json::json!({"path": "a.mp3"})))
+            .unwrap()
+            .is_none());
+        assert!(
+            parse_window(&input(
+                serde_json::json!({"start_sec": null, "max_secs": null})
+            ))
+            .unwrap()
+            .is_none(),
+            "explicit nulls must read as absent, not as zero"
+        );
+    }
+
+    /// Naming one field opts into windowing with the other defaulted — asking
+    /// for "the first ten minutes" should not require spelling out that it
+    /// starts at zero.
+    #[test]
+    fn either_field_alone_opts_into_windowing() {
+        let only_max = parse_window(&input(serde_json::json!({"max_secs": 120})))
+            .unwrap()
+            .expect("max_secs alone must produce a window");
+        assert_eq!(only_max.start_sec, 0.0);
+        assert_eq!(only_max.max_secs, 120.0);
+
+        let only_start = parse_window(&input(serde_json::json!({"start_sec": 30})))
+            .unwrap()
+            .expect("start_sec alone must produce a window");
+        assert_eq!(only_start.start_sec, 30.0);
+        assert_eq!(
+            only_start.max_secs, DEFAULT_WINDOW_SECS,
+            "an unspecified length must fall back to the documented default"
+        );
+    }
+
+    #[test]
+    fn rejects_windows_that_cannot_describe_a_span() {
+        for bad in [
+            serde_json::json!({"start_sec": -1}),
+            serde_json::json!({"max_secs": -0.5}),
+            serde_json::json!({"max_secs": 0}),
+            serde_json::json!({"start_sec": "0"}),
+        ] {
+            assert!(
+                parse_window(&input(bad.clone())).is_err(),
+                "must reject {bad}"
+            );
+        }
+    }
+
+    /// The preview is counted in characters, not bytes: a byte-based cut would
+    /// split a multi-byte codepoint and produce invalid output for exactly the
+    /// non-Latin recordings this feature is aimed at.
+    #[test]
+    fn preview_truncates_on_character_boundaries() {
+        let cyrillic: String = "я".repeat(OUT_PATH_PREVIEW_CHARS + 50);
+        let preview = preview_of(&cyrillic);
+        assert_eq!(preview.chars().count(), OUT_PATH_PREVIEW_CHARS + 1);
+        assert!(preview.ends_with('…'));
+
+        let short = "short transcript";
+        assert_eq!(preview_of(short), short, "no ellipsis when nothing was cut");
+    }
+
+    /// Windows assemble into one artefact: the first truncates, later ones
+    /// append, and the reported size and digest describe the whole file rather
+    /// than the last fragment — otherwise a caller could not verify what it
+    /// ended up with.
+    #[tokio::test]
+    async fn windows_append_into_one_transcript() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let first = write_transcript("t.txt", "first. ", false, Some(root.path()), &[])
+            .await
+            .expect("initial write must succeed");
+        let second = write_transcript("t.txt", "second.", true, Some(root.path()), &[])
+            .await
+            .expect("append must succeed");
+
+        let on_disk = tokio::fs::read_to_string(root.path().join("t.txt"))
+            .await
+            .expect("file must exist");
+        assert_eq!(on_disk, "first. second.");
+        assert_eq!(second.bytes, on_disk.len() as u64);
+        assert!(
+            second.bytes > first.bytes,
+            "the appended write must report the whole file, not its own share"
+        );
+        assert_ne!(first.sha256, second.sha256);
+    }
+
+    /// A restart of the walk (`start_sec = 0`) must not leave the previous
+    /// run's tail behind it, which is what makes re-running a failed
+    /// transcription safe.
+    #[tokio::test]
+    async fn a_fresh_window_truncates_the_previous_transcript() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write_transcript(
+            "t.txt",
+            "stale content that must not survive",
+            false,
+            Some(root.path()),
+            &[],
+        )
+        .await
+        .expect("write");
+        write_transcript("t.txt", "new.", false, Some(root.path()), &[])
+            .await
+            .expect("write");
+
+        let on_disk = tokio::fs::read_to_string(root.path().join("t.txt"))
+            .await
+            .expect("file must exist");
+        assert_eq!(on_disk, "new.");
+    }
+
+    /// `out_path` goes through the same sandbox resolution as `file_write` and
+    /// `web_fetch_to_file`; a transcript must not be writable outside the
+    /// agent's roots.
+    #[tokio::test]
+    async fn out_path_cannot_escape_the_workspace() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let escaped =
+            write_transcript("../escaped.txt", "nope", false, Some(root.path()), &[]).await;
+        assert!(escaped.is_err(), "traversal must be rejected");
+
+        let unsandboxed = write_transcript("t.txt", "nope", false, None, &[]).await;
+        assert!(
+            unsandboxed.is_err(),
+            "without a workspace root there is no root to write under"
+        );
+    }
 }
