@@ -301,8 +301,7 @@ pub struct PendingListQuery {
 /// `workspaces/hands/`).
 ///
 /// Contract:
-/// - non-empty, ≤ 64 chars for skill names; ≤ 128 for hand ids to
-///   match `librefang_hands`' canonical `MAX_HAND_ID_LEN`
+/// - non-empty, ≤ 64 chars for skill names; ≤ 128 for hand ids to match `librefang_hands`' canonical `MAX_HAND_ID_LEN`
 /// - characters limited to `[A-Za-z0-9_-]` — the strictest project
 ///   convention; cannot contain `..`, `/`, `\`, or any platform
 ///   path separator
