@@ -1383,15 +1383,26 @@ fn matches_pattern(
 /// - `filter == None` → always matches (legacy fire-for-all).
 /// - `filter == Some("unassigned")` → matches exactly the tasks no agent owns,
 ///   which is both the `None` candidate and the empty string. Both spellings
-///   occur in practice: `task_post` stores whatever it was handed and does not
-///   normalise `assigned_to`, while the stuck-task sweeper writes the empty
-///   string when it releases a claim (`UPDATE task_queue SET ... assigned_to = ''`
-///   on both the retry and the retries-exhausted path in
-///   `librefang_memory::substrate`). A filter that only understood `None` would
-///   therefore go quiet the moment a task had ever been claimed, which is the
-///   opposite of what a "pick up unowned work" trigger is for. This arm must be
-///   tested BEFORE the `candidate == None` early-exit below, or it is
-///   unreachable for the `None` half.
+///   reach the event because neither entry point normalises `assigned_to`:
+///   `tool_task_post` reads `input["assigned_to"].as_str()`
+///   (`librefang_runtime::tool_runner::task`) and `POST /api/tasks` reads
+///   `body["assigned_to"].as_str()`
+///   (`librefang_api::routes::task_queue`), and both hand the result straight
+///   to `task_post`, which copies it into `SystemEvent::TaskPosted` verbatim.
+///   `title` and `description` are checked for emptiness at both entry points;
+///   `assigned_to` is not. So a model or an API client that sends
+///   `"assigned_to": ""` — semantically "nobody", literally not `None` —
+///   produces `Some("")`, and a filter that only understood `None` would miss
+///   it. This arm must be tested BEFORE the `candidate == None` early-exit
+///   below, or it is unreachable for the `None` half.
+///
+///   Note this is about what the *event* carries, not about what is in the
+///   database. The stuck-task sweeper does write `assigned_to = ''` when it
+///   releases a claim, but it publishes no event at all — its only caller
+///   (`spawn_task_board_sweep_task`) logs the reset ids and stops — so a task
+///   it releases never reaches this predicate. Releasing a stuck claim
+///   therefore does not wake an `assignee_match = "unassigned"` trigger, which
+///   is a real gap, but a separate one; see #6728.
 /// - `candidate == None` → never matches any other non-`None` filter (the task
 ///   field isn't set, so any identity predicate is definitionally false).
 /// - `filter == Some("self")` → matches when `candidate` equals the

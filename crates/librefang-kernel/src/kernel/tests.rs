@@ -698,6 +698,112 @@ fn test_spawn_agent_applies_local_default_model_override() {
     kernel.shutdown();
 }
 
+/// Source-shape sentinel for the #6732 diagnostic wiring.
+///
+/// `warn_invalid_group_trigger_patterns` returns nothing and only emits a
+/// `warn!`, so a test that calls it — or calls the validator underneath it —
+/// proves the validator works without proving anything is wired to it. Delete
+/// all four call sites and every behavioural assertion in this file still
+/// passes, which is precisely the hole this closes.
+///
+/// This is a shape check, not a behavioural one, and is labelled as such: it
+/// cannot tell you the warning reached a subscriber, only that the manifest is
+/// still handed to the diagnostic on each of the four paths that accept one.
+/// Exercising all four behaviourally means driving a spawn, two `agent_state`
+/// transitions and a boot-time restore against a real kernel with tracing
+/// captured; that is worth doing and is not done here.
+///
+/// The boot-restore site is the one that matters most in production: after a
+/// daemon's first run every agent arrives through it, so a manifest whose
+/// pattern silently never matches is re-loaded on every restart with no
+/// diagnostic at all if that call is dropped.
+#[test]
+fn group_trigger_pattern_diagnostic_is_wired_into_every_manifest_path() {
+    // Comments are stripped so a leftover doc reference cannot satisfy the
+    // assertion after the call itself is removed.
+    //
+    // The open/close scan loops within a line rather than handling one
+    // delimiter per line. A single-line `/* … */` — `boot.rs` has one at the
+    // sqlite match arm — would otherwise leave the stripper stuck in
+    // block-comment state and silently swallow the entire rest of the file,
+    // including the call this test exists to find.
+    let strip = |src: &str| -> String {
+        let mut out = String::with_capacity(src.len());
+        let mut in_block = false;
+        for line in src.lines() {
+            let mut s = line.to_string();
+            loop {
+                if in_block {
+                    match s.find("*/") {
+                        Some(end) => {
+                            s = s.split_at(end + 2).1.to_string();
+                            in_block = false;
+                        }
+                        None => {
+                            s.clear();
+                            break;
+                        }
+                    }
+                }
+                // A `//` before any `/*` ends the line — the `/*` is inside it.
+                let line_comment = s.find("//");
+                match s.find("/*") {
+                    Some(idx) if line_comment.is_none_or(|lc| idx < lc) => {
+                        out.push_str(&s[..idx]);
+                        s = s.split_at(idx + 2).1.to_string();
+                        in_block = true;
+                    }
+                    _ => break,
+                }
+            }
+            if let Some(idx) = s.find("//") {
+                s.truncate(idx);
+            }
+            out.push_str(&s);
+            out.push('\n');
+        }
+        out
+    };
+
+    const CALL: &str = "warn_invalid_group_trigger_patterns(";
+    for (path, src, why) in [
+        (
+            "kernel/spawn.rs",
+            strip(include_str!("spawn.rs")),
+            "a freshly spawned agent",
+        ),
+        (
+            "kernel/agent_state.rs",
+            strip(include_str!("agent_state.rs")),
+            "an agent reloaded or updated from disk",
+        ),
+        (
+            "kernel/boot.rs",
+            strip(include_str!("boot.rs")),
+            "an agent restored at boot — the route every agent takes after the daemon's first run",
+        ),
+    ] {
+        assert!(
+            src.contains(CALL),
+            "{path} no longer calls `{CALL}`, so {why} can declare a \
+             `group_trigger_patterns` entry that never matches and get no \
+             diagnostic (#6732). The helper only emits a `warn!`, so nothing \
+             else in the test suite notices it going missing."
+        );
+    }
+
+    // agent_state.rs carries two independent paths — the disk manifest and the
+    // replacement manifest — and a single `contains` would pass with either one
+    // wired.
+    let agent_state = strip(include_str!("agent_state.rs"));
+    assert_eq!(
+        agent_state.matches(CALL).count(),
+        2,
+        "expected both `agent_state.rs` manifest paths (the on-disk manifest \
+         and the replacement) to run the #6732 diagnostic"
+    );
+}
+
 /// #6732: a mis-escaped `group_trigger_patterns` entry is a diagnostic, not a rejection.
 ///
 /// The whole point of the new check is that the operator's alias silently never matches; failing

@@ -2367,9 +2367,20 @@ pub fn validate_group_trigger_patterns(patterns: &[String]) -> Vec<String> {
         // Report every control character, not just the first, so an operator who wrote both
         // `\b` anchors sees that both ends are broken.
         for c in pattern.chars().filter(|c| c.is_control()) {
+            // Tab, newline and carriage return DO occur in chat messages, so a
+            // pattern carrying one can still match — on the literal whitespace
+            // rather than on the anchor the operator meant. Claiming it "never
+            // matches" would be wrong, and the silent-wrong-match case is the
+            // harder one to debug of the two.
+            let effect = if matches!(c, '\t' | '\n' | '\r') {
+                "so this pattern matches a literal control character instead of the anchor you intended — \
+                 and unlike the other escapes this one can still fire, on whitespace"
+            } else {
+                "so this pattern compiles but never matches"
+            };
             diagnostics.push(format!(
                 "group_trigger_patterns[{idx}] contains U+{:04X} ({}): in a TOML basic (double-quoted) string \
-                 `\\{}` is the {} escape, not a regex escape, so this pattern compiles but never matches. \
+                 `\\{}` is the {} escape, not a regex escape, {effect}. \
                  Use a TOML literal (single-quoted) string — group_trigger_patterns = ['(?i)\\bvivi\\b'] — \
                  or double every backslash: \"(?i)\\\\bvivi\\\\b\"",
                 c as u32,
@@ -8522,6 +8533,32 @@ mod tests {
             assert!(d.contains("backspace"), "{d}");
             // The message must prescribe the fix, not just name the problem.
             assert!(d.contains("literal (single-quoted) string"), "{d}");
+        }
+
+        // Backspace cannot appear in a chat message, so "never matches" is
+        // accurate there.
+        assert!(backspaced[0].contains("never matches"), "{}", backspaced[0]);
+
+        // Tab, newline and CR are different: they DO occur in chat text, so
+        // such a pattern can still fire — on literal whitespace rather than on
+        // the anchor the operator meant. Telling them it never matches would
+        // send them looking for the wrong failure, and a wrong match is the
+        // harder of the two to spot.
+        for (c, name) in [
+            ('\t', "tab"),
+            ('\n', "line feed"),
+            ('\r', "carriage return"),
+        ] {
+            let d = validate_group_trigger_patterns(&[format!("(?i){c}vivi{c}")]);
+            assert_eq!(d.len(), 2, "got {d:?}");
+            assert!(d[0].contains(name), "{}", d[0]);
+            assert!(
+                !d[0].contains("never matches"),
+                "a control character that occurs in real messages must not be \
+                 described as unmatchable: {}",
+                d[0]
+            );
+            assert!(d[0].contains("can still fire"), "{}", d[0]);
         }
 
         // A pattern that fails to compile is reported once, not also for its control chars —
