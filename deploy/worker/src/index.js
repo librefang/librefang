@@ -2,21 +2,25 @@ const FLY_API = 'https://api.machines.dev/v1';
 const DOCKER_IMAGE = 'ghcr.io/librefang/librefang:latest';
 const REGION = 'nrt';
 
-export default {
-  async fetch(request) {
-    const url = new URL(request.url);
+export function createWorker(fetchImpl = globalThis.fetch) {
+  return {
+    async fetch(request) {
+      const url = new URL(request.url);
 
-    if (url.pathname === '/api/deploy' && request.method === 'POST') {
-      return handleDeploy(request);
-    }
+      if (url.pathname === '/api/deploy' && request.method === 'POST') {
+        return handleDeploy(request, fetchImpl);
+      }
 
-    return new Response(HTML, {
-      headers: { 'Content-Type': 'text/html; charset=utf-8' },
-    });
-  },
-};
+      return new Response(HTML, {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      });
+    },
+  };
+}
 
-async function handleDeploy(request) {
+export default createWorker();
+
+async function handleDeploy(request, fetchImpl) {
   try {
     const body = await request.json();
     const { token, openrouterApiKey } = body;
@@ -34,14 +38,14 @@ async function handleDeploy(request) {
     };
 
     // 1. Verify token
-    const orgsRes = await fetch(`${FLY_API}/apps`, { headers });
+    const orgsRes = await fetchImpl(`${FLY_API}/apps`, { headers });
     if (!orgsRes.ok) {
       return json({ error: 'Invalid API Token. Please check and try again.' }, 401);
     }
 
     // 2. Create app
     const appName = `librefang-${randomHex(6)}`;
-    const appRes = await fetch(`${FLY_API}/apps`, {
+    const appRes = await fetchImpl(`${FLY_API}/apps`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ app_name: appName, org_slug: 'personal' }),
@@ -55,14 +59,14 @@ async function handleDeploy(request) {
     const flyGraphQL = 'https://api.fly.io/graphql';
     const gqlHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 
-    await fetch(flyGraphQL, {
+    await fetchImpl(flyGraphQL, {
       method: 'POST',
       headers: gqlHeaders,
       body: JSON.stringify({
         query: `mutation { allocateIPAddress(input: { appId: "${appName}", type: shared_v4 }) { ipAddress { address type } } }`,
       }),
     });
-    await fetch(flyGraphQL, {
+    await fetchImpl(flyGraphQL, {
       method: 'POST',
       headers: gqlHeaders,
       body: JSON.stringify({
@@ -71,7 +75,7 @@ async function handleDeploy(request) {
     });
 
     // 4. Create volume
-    const volRes = await fetch(`${FLY_API}/apps/${appName}/volumes`, {
+    const volRes = await fetchImpl(`${FLY_API}/apps/${appName}/volumes`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ name: 'librefang_data', region: REGION, size_gb: 1 }),
@@ -89,7 +93,7 @@ async function handleDeploy(request) {
     };
 
     // 6. Create machine
-    const machineRes = await fetch(`${FLY_API}/apps/${appName}/machines`, {
+    const machineRes = await fetchImpl(`${FLY_API}/apps/${appName}/machines`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -116,8 +120,12 @@ async function handleDeploy(request) {
     });
 
     if (!machineRes.ok) {
-      const err = await machineRes.text();
-      return json({ error: `Failed to create machine: ${err}` }, 500);
+      // This request contains the caller's provider key. Never reflect Fly's
+      // raw validation body because it may echo the submitted machine config.
+      return json(
+        { error: 'Failed to create machine. Check your Fly configuration and try again.' },
+        500,
+      );
     }
 
     const machine = await machineRes.json();

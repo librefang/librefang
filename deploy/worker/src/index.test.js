@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import worker from './index.js';
+import worker, { createWorker } from './index.js';
 
 function successfulFlyFetches(onMachineRequest = () => {}) {
   return async (url, options = {}) => {
@@ -14,35 +14,27 @@ function successfulFlyFetches(onMachineRequest = () => {}) {
 }
 
 test('deploy uses the caller OpenRouter key and never the worker shared key', async () => {
-  const originalFetch = globalThis.fetch;
   let machinePayload;
-  globalThis.fetch = successfulFlyFetches((payload) => {
+  const testWorker = createWorker(successfulFlyFetches((payload) => {
     machinePayload = payload;
+  }));
+
+  const request = new Request('https://deploy.librefang.ai/api/deploy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      token: 'fly-user-token',
+      openrouterApiKey: 'user-openrouter-key',
+    }),
   });
+  const response = await testWorker.fetch(request);
 
-  try {
-    const request = new Request('https://deploy.librefang.ai/api/deploy', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        token: 'fly-user-token',
-        openrouterApiKey: 'user-openrouter-key',
-      }),
-    });
-    const response = await worker.fetch(request, {
-      OPENROUTER_API_KEY: 'worker-shared-key-must-not-leak',
-    });
-
-    assert.equal(response.status, 200);
-    assert.ok(!(await response.text()).includes('user-openrouter-key'));
-    assert.equal(
-      machinePayload.config.env.OPENROUTER_API_KEY,
-      'user-openrouter-key',
-    );
-    assert.ok(!JSON.stringify(machinePayload).includes('worker-shared-key-must-not-leak'));
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  assert.equal(response.status, 200);
+  assert.ok(!(await response.text()).includes('user-openrouter-key'));
+  assert.equal(
+    machinePayload.config.env.OPENROUTER_API_KEY,
+    'user-openrouter-key',
+  );
 });
 
 test('deploy page collects and submits the caller OpenRouter key', async () => {
@@ -57,28 +49,45 @@ test('deploy page collects and submits the caller OpenRouter key', async () => {
 });
 
 test('deploy rejects a missing caller OpenRouter key before contacting Fly', async () => {
-  const originalFetch = globalThis.fetch;
   let fetchCount = 0;
-  globalThis.fetch = async () => {
+  const testWorker = createWorker(async () => {
     fetchCount += 1;
     return new Response('{}', { status: 200 });
-  };
+  });
 
-  try {
-    const request = new Request('https://deploy.librefang.ai/api/deploy', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: 'fly-user-token' }),
-    });
-    const response = await worker.fetch(request, {
-      OPENROUTER_API_KEY: 'worker-shared-key-must-not-be-a-fallback',
-    });
-    const body = await response.json();
+  const request = new Request('https://deploy.librefang.ai/api/deploy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: 'fly-user-token' }),
+  });
+  const response = await testWorker.fetch(request);
+  const body = await response.json();
 
-    assert.equal(response.status, 400);
-    assert.match(body.error, /OpenRouter API Key is required/);
-    assert.equal(fetchCount, 0);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  assert.equal(response.status, 400);
+  assert.match(body.error, /OpenRouter API Key is required/);
+  assert.equal(fetchCount, 0);
+});
+
+test('machine creation errors never reflect the caller OpenRouter key', async () => {
+  const callerKey = 'user-openrouter-key-must-not-return';
+  const testWorker = createWorker(async (url) => {
+    if (String(url).endsWith('/machines')) {
+      return new Response(`invalid env OPENROUTER_API_KEY=${callerKey}`, {
+        status: 400,
+      });
+    }
+    return new Response('{}', { status: 200 });
+  });
+  const request = new Request('https://deploy.librefang.ai/api/deploy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: 'fly-user-token', openrouterApiKey: callerKey }),
+  });
+
+  const response = await testWorker.fetch(request);
+  const responseText = await response.text();
+
+  assert.equal(response.status, 500);
+  assert.ok(!responseText.includes(callerKey));
+  assert.ok(!responseText.includes('OPENROUTER_API_KEY='));
 });
