@@ -3479,21 +3479,14 @@ impl LibreFangKernel {
                     .running_tasks
                     .insert((agent_id, effective_session_id), new_task)
                 {
-                    // This was `debug!`, i.e. invisible under the default filter, even though it
-                    // silently discards a turn's worth of work — including any tool side effects
-                    // already committed. The operator's only symptom was a reply that never
-                    // arrived.
+                    // This was `debug!`, i.e. invisible under the default filter, even though it silently discards a turn's worth of work — including any tool side effects already committed.
+                    // The operator's only symptom was a reply that never arrived.
                     //
-                    // The blast radius is much wider than "the same conversation": the abort key
-                    // is `(AgentId, SessionId)`, and for a group channel the session is the whole
-                    // CHANNEL, not the thread. `SessionId::for_sender_scope(agent_id,
-                    // scope_channel, ctx.chat_id)` is derived from `chat_id`, which the sidecar
-                    // adapters set to the channel id, and `thread_id` is not part of the scope.
-                    // So a message from ANY user in ANY thread of that channel aborts whatever
-                    // turn is in flight for that agent there.
+                    // The blast radius is much wider than "the same conversation": the abort key is `(AgentId, SessionId)`, and for a group channel the session is the whole CHANNEL, not the thread.
+                    // `SessionId::for_sender_scope(agent_id, scope_channel, ctx.chat_id)` is derived from `chat_id`, which the sidecar adapters set to the channel id, and `thread_id` is not part of the scope.
+                    // So a message from ANY user in ANY thread of that channel aborts whatever turn is in flight for that agent there.
                     //
-                    // Logging only — the supersede policy itself (abort-newest-wins vs queueing)
-                    // is unchanged.
+                    // Logging only — the supersede policy itself (abort-newest-wins vs queueing) is unchanged.
                     tracing::warn!(
                         agent_id = %agent_id,
                         session_id = %effective_session_id,

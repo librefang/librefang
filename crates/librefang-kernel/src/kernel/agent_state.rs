@@ -290,9 +290,8 @@ impl LibreFangKernel {
         // the previous (validated) manifest stays in effect.
         validate_manifest_module_path(&disk_manifest, &entry.name)?;
 
-        // #6732: hot-reload is how an operator iterates on a broken alias, so it is the path
-        // where the diagnostic is most useful. Report-only — a bad pattern must not reject the
-        // reload and strand the agent on its previous manifest.
+        // #6732: hot-reload is how an operator iterates on a broken alias, so it is the path where the diagnostic is most useful.
+        // Report-only — a bad pattern must not reject the reload and strand the agent on its previous manifest.
         warn_invalid_group_trigger_patterns(&disk_manifest, &entry.name);
 
         // Preserve workspace if TOML leaves it unset — workspace is
@@ -408,8 +407,7 @@ impl LibreFangKernel {
         // swap a running agent's `module` to an arbitrary host script.
         validate_manifest_module_path(&new_manifest, &entry.name)?;
 
-        // #6732: same report-only diagnostic as spawn and hot-reload, so an alias pushed through
-        // the API surface is checked too rather than only one written to disk.
+        // #6732: same report-only diagnostic as spawn and hot-reload, so an alias pushed through the API surface is checked too rather than only one written to disk.
         warn_invalid_group_trigger_patterns(&new_manifest, &entry.name);
 
         // Preserve invariants that the registry indices depend on.

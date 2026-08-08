@@ -2336,23 +2336,16 @@ fn compile_group_trigger_patterns(patterns: &[String]) -> Arc<CompiledGroupTrigg
 
 /// Eagerly diagnose `group_trigger_patterns` so a broken declaration is loud at spawn time (#6732).
 ///
-/// `compile_group_trigger_patterns` cannot serve this purpose: it is lazy (it only runs when a
-/// group message actually arrives), memoised on `patterns.join("\u{1f}")` so its `error!` fires at
-/// most once per distinct pattern set per process, and — critically — it does not consider the
-/// dominant failure mode a problem at all.
+/// `compile_group_trigger_patterns` cannot serve this purpose: it is lazy (it only runs when a group message actually arrives), memoised on `patterns.join("\u{1f}")` so its `error!` fires at most once per distinct pattern set per process, and — critically — it does not consider the dominant failure mode a problem at all.
 ///
-/// That failure mode is TOML escaping. In a TOML *basic* (double-quoted) string `\b` is the
-/// backspace escape, so `group_trigger_patterns = ["(?i)\bvivi\b"]` reaches the kernel as
-/// `(?i)<U+0008>vivi<U+0008>` rather than a word-boundary anchored regex. The regex crate accepts
-/// a bare control character as a verbatim literal, so the pattern *compiles* and simply never
-/// matches any real message — no error, no match, no reply. See
-/// `group_trigger_pattern_with_backspace_compiles_but_never_matches_6732`, which pins that
-/// behaviour so this validator's control-character arm can be dropped if regex-syntax ever starts
-/// rejecting such patterns.
+/// That failure mode is TOML escaping.
+/// In a TOML *basic* (double-quoted) string `\b` is the backspace escape, so `group_trigger_patterns = ["(?i)\bvivi\b"]` reaches the kernel as `(?i)<U+0008>vivi<U+0008>` rather than a word-boundary anchored regex.
+/// The regex crate accepts a bare control character as a verbatim literal, so the pattern *compiles* and simply never matches any real message — no error, no match, no reply.
+/// See `group_trigger_pattern_with_backspace_compiles_but_never_matches_6732`, which pins that behaviour so this validator's control-character arm can be dropped if regex-syntax ever starts rejecting such patterns.
 ///
 /// Returns one human-readable diagnostic per problem pattern, empty when every pattern is sound.
-/// This is a reporting helper only — it never rejects. Callers WARN; a mis-escaped alias must not
-/// stop an agent from spawning.
+/// This is a reporting helper only — it never rejects.
+/// Callers WARN; a mis-escaped alias must not stop an agent from spawning.
 pub fn validate_group_trigger_patterns(patterns: &[String]) -> Vec<String> {
     let mut diagnostics = Vec::new();
     for (idx, pattern) in patterns.iter().enumerate() {

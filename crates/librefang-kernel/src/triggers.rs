@@ -113,14 +113,12 @@ pub enum TriggerPattern {
     ///
     /// `assignee_match` narrows the match to tasks assigned to a specific
     /// agent:
-    /// - `Some("self")` — only fire for tasks assigned to the trigger-owning
-    ///   agent. Accepts both the agent's UUID and its display name.
-    /// - `Some("unassigned")` — only fire for tasks no agent owns. Matches both
-    ///   an absent `assigned_to` and the empty string, because the stuck-task
-    ///   sweeper releases a claim by writing `assigned_to = ''` rather than NULL.
-    /// - `Some("<uuid>"|"<name>")` — only fire for tasks assigned to that
-    ///   specific agent. `"self"` and `"unassigned"` are keywords, so an agent
-    ///   named either must be addressed by UUID.
+    /// - `Some("self")` — only fire for tasks assigned to the trigger-owning agent.
+    ///   Accepts both the agent's UUID and its display name.
+    /// - `Some("unassigned")` — only fire for tasks no agent owns.
+    ///   Matches both an absent `assigned_to` and the empty string, because the stuck-task sweeper releases a claim by writing `assigned_to = ''` rather than NULL.
+    /// - `Some("<uuid>"|"<name>")` — only fire for tasks assigned to that specific agent.
+    ///   `"self"` and `"unassigned"` are keywords, so an agent named either must be addressed by UUID.
     /// - `None` — fire for every `TaskPosted` event (legacy behavior).
     ///
     /// The field is `#[serde(default)]` so legacy triggers persisted or
@@ -134,15 +132,12 @@ pub enum TriggerPattern {
     ///
     /// `creator_match` narrows the match to tasks originally posted by a
     /// specific agent (mirror of `TaskPosted`'s `assignee_match`):
-    /// - `Some("self")` — only fire for tasks posted by the trigger-owning
-    ///   agent. Accepts both the agent's UUID and its display name.
-    /// - `Some("unassigned")` — accepted because the identity filter is shared
-    ///   with `assignee_match`, and here means "no recorded creator" (absent or
-    ///   empty `created_by`). Unlike `assigned_to`, nothing in the system
-    ///   currently writes an empty `created_by`, so this is a consequence of the
-    ///   shared helper rather than a designed filter — treat it as reserved.
-    /// - `Some("<uuid>"|"<name>")` — only fire for tasks posted by that
-    ///   specific agent. `"self"` and `"unassigned"` are keywords.
+    /// - `Some("self")` — only fire for tasks posted by the trigger-owning agent.
+    ///   Accepts both the agent's UUID and its display name.
+    /// - `Some("unassigned")` — accepted because the identity filter is shared with `assignee_match`, and here means "no recorded creator" (absent or empty `created_by`).
+    ///   Unlike `assigned_to`, nothing in the system currently writes an empty `created_by`, so this is a consequence of the shared helper rather than a designed filter — treat it as reserved.
+    /// - `Some("<uuid>"|"<name>")` — only fire for tasks posted by that specific agent.
+    ///   `"self"` and `"unassigned"` are keywords.
     /// - `None` — fire for every `TaskClaimed` event (legacy behavior).
     ///
     /// The field is `#[serde(default)]` so legacy triggers persisted or
@@ -156,15 +151,12 @@ pub enum TriggerPattern {
     ///
     /// `creator_match` narrows the match to tasks originally posted by a
     /// specific agent (mirror of `TaskPosted`'s `assignee_match`):
-    /// - `Some("self")` — only fire for tasks posted by the trigger-owning
-    ///   agent. Accepts both the agent's UUID and its display name.
-    /// - `Some("unassigned")` — accepted because the identity filter is shared
-    ///   with `assignee_match`, and here means "no recorded creator" (absent or
-    ///   empty `created_by`). Unlike `assigned_to`, nothing in the system
-    ///   currently writes an empty `created_by`, so this is a consequence of the
-    ///   shared helper rather than a designed filter — treat it as reserved.
-    /// - `Some("<uuid>"|"<name>")` — only fire for tasks posted by that
-    ///   specific agent. `"self"` and `"unassigned"` are keywords.
+    /// - `Some("self")` — only fire for tasks posted by the trigger-owning agent.
+    ///   Accepts both the agent's UUID and its display name.
+    /// - `Some("unassigned")` — accepted because the identity filter is shared with `assignee_match`, and here means "no recorded creator" (absent or empty `created_by`).
+    ///   Unlike `assigned_to`, nothing in the system currently writes an empty `created_by`, so this is a consequence of the shared helper rather than a designed filter — treat it as reserved.
+    /// - `Some("<uuid>"|"<name>")` — only fire for tasks posted by that specific agent.
+    ///   `"self"` and `"unassigned"` are keywords.
     /// - `None` — fire for every `TaskCompleted` event (legacy behavior).
     ///
     /// The field is `#[serde(default)]` so legacy triggers persisted or
@@ -445,12 +437,8 @@ impl TriggerEngine {
         Ok(())
     }
 
-    /// Returns `true` if `agent_id` already has a trigger with this exact pattern,
-    /// **regardless of whether that trigger is enabled** — the body matches on
-    /// `pattern` only and never reads `enabled`.
-    /// That is deliberate for the caller: this exists to skip duplicate registration of
-    /// proactive triggers on restart, and re-registering a pattern the operator has
-    /// explicitly disabled would silently resurrect it.
+    /// Returns `true` if `agent_id` already has a trigger with this exact pattern, **regardless of whether that trigger is enabled** — the body matches on `pattern` only and never reads `enabled`.
+    /// That is deliberate for the caller: this exists to skip duplicate registration of proactive triggers on restart, and re-registering a pattern the operator has explicitly disabled would silently resurrect it.
     /// Do not read the name as "has an *active* trigger".
     pub fn agent_has_pattern(&self, agent_id: AgentId, pattern: &TriggerPattern) -> bool {
         let Some(ids) = self.agent_triggers.get(&agent_id) else {
@@ -1381,38 +1369,20 @@ fn matches_pattern(
 /// `creator_match` (`TaskClaimed` / `TaskCompleted`) have byte-identical
 /// semantics:
 /// - `filter == None` → always matches (legacy fire-for-all).
-/// - `filter == Some("unassigned")` → matches exactly the tasks no agent owns,
-///   which is both the `None` candidate and the empty string. Both spellings
-///   reach the event because neither entry point normalises `assigned_to`:
-///   `tool_task_post` reads `input["assigned_to"].as_str()`
-///   (`librefang_runtime::tool_runner::task`) and `POST /api/tasks` reads
-///   `body["assigned_to"].as_str()`
-///   (`librefang_api::routes::task_queue`), and both hand the result straight
-///   to `task_post`, which copies it into `SystemEvent::TaskPosted` verbatim.
-///   `title` and `description` are checked for emptiness at both entry points;
-///   `assigned_to` is not. So a model or an API client that sends
-///   `"assigned_to": ""` — semantically "nobody", literally not `None` —
-///   produces `Some("")`, and a filter that only understood `None` would miss
-///   it. This arm must be tested BEFORE the `candidate == None` early-exit
-///   below, or it is unreachable for the `None` half.
+/// - `filter == Some("unassigned")` → matches exactly the tasks no agent owns, which is both the `None` candidate and the empty string.
+///   Both spellings reach the event because neither entry point normalises `assigned_to`: `tool_task_post` reads `input["assigned_to"].as_str()` (`librefang_runtime::tool_runner::task`) and `POST /api/tasks` reads `body["assigned_to"].as_str()` (`librefang_api::routes::task_queue`), and both hand the result straight to `task_post`, which copies it into `SystemEvent::TaskPosted` verbatim.
+///   `title` and `description` are checked for emptiness at both entry points; `assigned_to` is not.
+///   So a model or an API client that sends `"assigned_to": ""` — semantically "nobody", literally not `None` — produces `Some("")`, and a filter that only understood `None` would miss it.
+///   This arm must be tested BEFORE the `candidate == None` early-exit below, or it is unreachable for the `None` half.
 ///
-///   Note this is about what the *event* carries, not about what is in the
-///   database. The stuck-task sweeper does write `assigned_to = ''` when it
-///   releases a claim, but it publishes no event at all — its only caller
-///   (`spawn_task_board_sweep_task`) logs the reset ids and stops — so a task
-///   it releases never reaches this predicate. Releasing a stuck claim
-///   therefore does not wake an `assignee_match = "unassigned"` trigger, which
-///   is a real gap, but a separate one; see #6728.
-/// - `candidate == None` → never matches any other non-`None` filter (the task
-///   field isn't set, so any identity predicate is definitionally false).
-/// - `filter == Some("self")` → matches when `candidate` equals the
-///   trigger-owner's UUID **or** display name (via the resolver-supplied
-///   `owner` tuple).
-/// - `filter == Some("<uuid>"|"<name>")` → exact string match against
-///   `candidate`.
+///   Note this is about what the *event* carries, not about what is in the database.
+///   The stuck-task sweeper does write `assigned_to = ''` when it releases a claim, but it publishes no event at all — its only caller (`spawn_task_board_sweep_task`) logs the reset ids and stops — so a task it releases never reaches this predicate.
+///   Releasing a stuck claim therefore does not wake an `assignee_match = "unassigned"` trigger, which is a real gap, but a separate one; see #6728.
+/// - `candidate == None` → never matches any other non-`None` filter (the task field isn't set, so any identity predicate is definitionally false).
+/// - `filter == Some("self")` → matches when `candidate` equals the trigger-owner's UUID **or** display name (via the resolver-supplied `owner` tuple).
+/// - `filter == Some("<uuid>"|"<name>")` → exact string match against `candidate`.
 ///
-/// `"self"` and `"unassigned"` are keywords, so an agent whose display name is
-/// one of those two cannot be addressed by name here — use its UUID.
+/// `"self"` and `"unassigned"` are keywords, so an agent whose display name is one of those two cannot be addressed by name here — use its UUID.
 fn agent_identity_filter_matches(
     filter: &Option<String>,
     candidate: Option<&str>,

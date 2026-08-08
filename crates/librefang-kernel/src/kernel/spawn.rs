@@ -77,8 +77,7 @@ impl LibreFangKernel {
             return Err(KernelError::LibreFang(reason));
         }
 
-        // #6732: report-only, deliberately AFTER the rejecting checks and never
-        // `?`-propagated — a mis-escaped group trigger pattern must not block a spawn.
+        // #6732: report-only, deliberately AFTER the rejecting checks and never `?`-propagated — a mis-escaped group trigger pattern must not block a spawn.
         warn_invalid_group_trigger_patterns(manifest, name);
 
         if let Some(override_kind) = manifest.tool_exec_backend {
