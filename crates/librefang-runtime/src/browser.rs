@@ -1321,18 +1321,27 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
     //
     // Searched over the whole tree rather than climbed from the first article's ancestors, because the container is not always an ancestor of the article that happens to come first in the document.
     // A featured card above a grid — `<div><article/></div>` followed by a sibling `<div>` of three more — puts the first article in a branch the grid is not under, so a climb never examines the grid at all and falls through to the very first-match query this exists to replace.
-    // The deepest qualifying node wins, so a page whose feed sits beside unrelated single-article widgets selects the feed rather than their common ancestor.
+    // Between candidates, one that contains another is the wider shape and loses to it, so a feed flanked by single-article widgets selects the feed rather than the ancestor holding all three.
+    // Between candidates that do not contain one another, the one with the most article-carrying children wins: they are independent clusters, and depth says nothing about which is the page's subject — a three-card widget nested deep and placed before the feed would otherwise beat a twenty-card feed for being deeper.
+    // One post-order pass counts articles per subtree and collects candidates from those counts, rather than asking each child whether it contains an article, which would rescan the subtree once per child.
     let root = clone.querySelector('main, [role="main"]');
     if (!root) {
-        const carriesArticle = el => el.tagName === 'ARTICLE' || el.querySelector('article');
-        function cardContainer(node) {
+        const candidates = [];
+        function scan(node) {
+            let count = node.tagName === 'ARTICLE' ? 1 : 0;
+            let carriers = 0;
             for (const child of node.children) {
-                const found = cardContainer(child);
-                if (found) return found;
+                const sub = scan(child);
+                if (sub > 0) carriers++;
+                count += sub;
             }
-            return Array.from(node.children).filter(carriesArticle).length >= 3 ? node : null;
+            if (carriers >= 3) candidates.push({ node, carriers });
+            return count;
         }
-        if (clone.querySelectorAll('article').length >= 3) root = cardContainer(clone);
+        if (scan(clone) >= 3 && candidates.length) {
+            const innermost = candidates.filter(c => !candidates.some(o => o !== c && c.node.contains(o.node)));
+            root = innermost.reduce((best, c) => (c.carriers > best.carriers ? c : best)).node;
+        }
     }
     if (!root) root = clone.querySelector('article, .content, #content');
     if (!root) root = clone;
@@ -1737,21 +1746,37 @@ mod tests {
 
         /// The chosen root's name, or `None` when selection falls through to the single-article path.
         ///
-        /// The same depth-first search the script runs: children before the node itself, so the deepest qualifying node wins, and document order breaks ties between branches at the same depth.
+        /// The same rule the script runs: collect every node whose direct children carry at least three articles between them, drop any that contains another candidate, and take the one with the most carriers from what is left.
         fn chosen(page: &Node) -> Option<&'static str> {
             if count_articles(page) < 3 {
                 return None;
             }
-            fn deepest(n: &Node) -> Option<&'static str> {
+            /// `(name, carriers, names below it that also qualify)`, in post-order.
+            fn collect(n: &Node, out: &mut Vec<(&'static str, usize, Vec<&'static str>)>) {
+                let before = out.len();
                 for k in &n.kids {
-                    if let Some(found) = deepest(k) {
-                        return Some(found);
-                    }
+                    collect(k, out);
                 }
                 let carriers = n.kids.iter().filter(|k| has_article(k)).count();
-                (carriers >= 3).then_some(n.name)
+                if carriers >= 3 {
+                    let below = out[before..].iter().map(|(name, _, _)| *name).collect();
+                    out.push((n.name, carriers, below));
+                }
             }
-            deepest(page)
+            let mut candidates = Vec::new();
+            collect(page, &mut candidates);
+            // Folded rather than `max_by_key`, which keeps the *last* of equal maxima where the script's reduce keeps the first.
+            candidates
+                .iter()
+                .filter(|(_, _, below)| below.is_empty())
+                .fold(
+                    None,
+                    |best: Option<&(&str, usize, Vec<&str>)>, c| match best {
+                        Some(b) if b.1 >= c.1 => Some(b),
+                        _ => Some(c),
+                    },
+                )
+                .map(|(name, _, _)| *name)
         }
 
         // The shape the change exists for: a results page of sibling cards.
@@ -1842,6 +1867,53 @@ mod tests {
             Some("feed"),
             "scattered single-article widgets must not widen selection to the whole page"
         );
+
+        // Two independent clusters at different depths: a small widget nested deep and placed *before* the feed in the document.
+        // Depth is not evidence of being the page's subject, so the larger cluster wins.
+        let widget_first = el(
+            "body",
+            "body",
+            vec![
+                el(
+                    "div",
+                    "sidebar",
+                    vec![el(
+                        "div",
+                        "wrap",
+                        vec![el(
+                            "div",
+                            "widget",
+                            vec![article("w1"), article("w2"), article("w3")],
+                        )],
+                    )],
+                ),
+                el("div", "feed", (0..20).map(|_| article("card")).collect()),
+            ],
+        );
+        assert_eq!(
+            chosen(&widget_first),
+            Some("feed"),
+            "a deeper three-card widget must not beat the feed it happens to precede"
+        );
+
+        // Two clusters of equal size: the first in document order, so the choice is stable rather than arbitrary.
+        let two_feeds = el(
+            "body",
+            "body",
+            vec![
+                el(
+                    "div",
+                    "first",
+                    vec![article("a"), article("b"), article("c")],
+                ),
+                el(
+                    "div",
+                    "second",
+                    vec![article("d"), article("e"), article("f")],
+                ),
+            ],
+        );
+        assert_eq!(chosen(&two_feeds), Some("first"));
     }
 
     /// The truncation marker counts against the cap rather than overshooting it.
