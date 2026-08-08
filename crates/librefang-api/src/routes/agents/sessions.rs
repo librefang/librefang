@@ -25,6 +25,7 @@ pub struct GetAgentSessionQuery {
 )]
 pub async fn get_agent_session(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     query: Result<Query<GetAgentSessionQuery>, axum::extract::rejection::QueryRejection>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -55,6 +56,11 @@ pub async fn get_agent_session(
                 .into_response();
         }
     };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+            .with_code("agent_not_found")
+            .into_response();
+    }
 
     // Callers (e.g. the dashboard tab with `?sessionId=` pinned) can override
     // the canonical-active session for this request. The returned messages
@@ -401,6 +407,7 @@ pub struct SessionContextResponse {
 )]
 pub async fn get_agent_session_context(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     query: Result<Query<GetAgentSessionQuery>, axum::extract::rejection::QueryRejection>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -431,6 +438,11 @@ pub async fn get_agent_session_context(
                 .into_response();
         }
     };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+            .with_code("agent_not_found")
+            .into_response();
+    }
     let model = entry.manifest.model.model.clone();
 
     // A dashboard tab can pin a non-active session via `?session_id=`. Validate
@@ -520,6 +532,7 @@ pub async fn get_agent_session_context(
 )]
 pub async fn attach_session_stream(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path((id, session_id_str)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> axum::response::Response {
@@ -558,6 +571,11 @@ pub async fn attach_session_stream(
                 .into_response();
         }
     };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+            .with_code("agent_not_found")
+            .into_response();
+    }
 
     // Validate the session belongs to this agent. Two acceptable shapes:
     //   1. The session has been persisted (one or more turns ran) and its
@@ -836,6 +854,7 @@ pub async fn switch_agent_session(
 )]
 pub async fn export_session(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path((id, session_id_str)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -849,6 +868,12 @@ pub async fn export_session(
             )
         }
     };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     let session_id = match session_id_str.parse::<uuid::Uuid>() {
         Ok(uuid) => librefang_types::agent::SessionId(uuid),
         Err(_) => {
@@ -901,6 +926,7 @@ pub async fn export_session(
 )]
 pub async fn export_session_trajectory(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path((id, session_id_str)): Path<(String, String)>,
     Query(params): Query<HashMap<String, String>>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -936,6 +962,13 @@ pub async fn export_session_trajectory(
                 .into_response();
         }
     };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": err_not_found})),
+        )
+            .into_response();
+    }
 
     // Parse session ID.
     let session_id = match session_id_str.parse::<uuid::Uuid>() {

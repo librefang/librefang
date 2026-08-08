@@ -625,6 +625,7 @@ pub async fn send_message_stream(
 )]
 pub async fn get_agent_deliveries(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Query(params): Query<HashMap<String, String>>,
@@ -645,6 +646,12 @@ pub async fn get_agent_deliveries(
             }
         }
     };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
 
     let limit = params
         .get("limit")
