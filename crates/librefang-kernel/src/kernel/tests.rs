@@ -6755,12 +6755,9 @@ fn workflow_step_dispatch_enters_agent_call_depth_scope() {
         out
     };
 
-    // Counted, not `contains`. There are two step-dispatch closures in this
-    // file — `run_workflow::send_message` and its operator-resume twin in
-    // `KernelOperatorResumeDriver::drive_operator_timeout` — and a single
-    // containment check passes with either one wrapped, which is exactly how
-    // the resume twin was missed. The semaphore sentinel above counts for the
-    // same reason.
+    // Counted, not `contains`.
+    // There are two step-dispatch closures in this file — `run_workflow::send_message` and its operator-resume twin in `KernelOperatorResumeDriver::drive_operator_timeout` — and a single containment check passes with either one wrapped, which is exactly how the resume twin was missed.
+    // The semaphore sentinel above counts for the same reason.
     let dispatches = stripped.matches("send_message_full(").count();
     let wrapped = stripped.matches("with_agent_call_depth(").count();
     assert!(

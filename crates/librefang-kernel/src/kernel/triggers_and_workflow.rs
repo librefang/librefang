@@ -1033,7 +1033,8 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
                         }
                     };
                     // Account for the nesting, exactly as `run_workflow::send_message` does (refs #6659).
-                    // This closure is the twin of that one — same per-agent semaphore, same whole-agent-turn dispatch — and an operator-timeout resume drives the run's remaining steps through it. Left unwrapped, those steps ran at depth 0 while every other path charged them at 1, so a timed-out HITL workflow got a budget of one extra stacked agent turn and the boxing that keeps each level to a pointer did not apply.
+                    // This closure is the twin of that one — same per-agent semaphore, same whole-agent-turn dispatch — and an operator-timeout resume drives the run's remaining steps through it.
+                    // Left unwrapped, those steps ran at depth 0 while every other path charged them at 1, so a timed-out HITL workflow got a budget of one extra stacked agent turn and the boxing that keeps each level to a pointer did not apply.
                     librefang_runtime::tool_runner::with_agent_call_depth(k.send_message_full(
                         agent_id,
                         &message,
