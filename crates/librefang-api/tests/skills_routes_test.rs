@@ -618,6 +618,31 @@ async fn skills_install_path_traversal_hand_rejected_400() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn skillhub_install_path_traversal_hand_rejected_400() {
+    // Skillhub has its own install handler. Reject traversal before the
+    // hand directory existence probe so an attacker cannot escape the
+    // workspace root (or use the response as a filesystem oracle).
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/skillhub/install",
+        Some(serde_json::json!({"slug": "anything", "hand": "../../x"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("hand"),
+        "error must scope the rejection to the bad `hand` field: {body:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/skills/uninstall — error path only.
 // ---------------------------------------------------------------------------
