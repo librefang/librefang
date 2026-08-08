@@ -415,10 +415,7 @@ fn spawn_cron_job(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cron_and_schedule_routes_enforce_owner_read() {
-    // #6753 follow-up: `/api/cron/jobs*` and `/api/schedules*` carry the same
-    // cross-owner disclosure class (user-authored `message`/`prompt_template`
-    // content) this PR closed for `/api/triggers/*`, but the GET handlers had
-    // no `can_access_agent` check at all.
+    // #6753 follow-up: `/api/cron/jobs*` and `/api/schedules*` carry the same cross-owner disclosure class (user-authored `message`/`prompt_template` content) this PR closed for `/api/triggers/*`, but the GET handlers had no `can_access_agent` check at all.
     let h = boot().await;
     let agent_id = spawn_authored(&h.state, "Alice");
     let job_id = spawn_cron_job(&h.state, agent_id, "owner-scope-cron-job");

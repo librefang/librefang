@@ -5,13 +5,8 @@ use super::*;
 // ---------------------------------------------------------------------------
 /// GET /api/cron/jobs — List all cron jobs, optionally filtered by agent_id.
 ///
-/// Owner-scoping (#6753 follow-up): non-admins can't see cron jobs for
-/// agents they don't author — same leak class this PR closed for
-/// `/api/triggers`, since `JobMeta`/`CronJob` carries `prompt_template` and
-/// other user-authored content. Mirrors `list_triggers` in `triggers.rs`:
-/// an explicit `?agent_id=` for an unowned agent returns an empty list
-/// rather than 404 (avoids leaking existence), and an unfiltered list is
-/// post-filtered down to jobs on agents the caller authors.
+/// Owner-scoping (#6753 follow-up): non-admins can't see cron jobs for agents they don't author — same leak class this PR closed for `/api/triggers`, since `JobMeta`/`CronJob` carries `prompt_template` and other user-authored content.
+/// Mirrors `list_triggers` in `triggers.rs`: an explicit `?agent_id=` for an unowned agent returns an empty list rather than 404 (avoids leaking existence), and an unfiltered list is post-filtered down to jobs on agents the caller authors.
 #[utoipa::path(get, path = "/api/cron/jobs", tag = "workflows", responses((status = 200, description = "List cron jobs", body = Vec<serde_json::Value>)))]
 pub async fn list_cron_jobs(
     State(state): State<Arc<AppState>>,

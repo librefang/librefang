@@ -19,8 +19,7 @@ pub async fn list_schedules(
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let jobs = state.kernel.cron().list_all_jobs();
-    // Owner-scoping (#6753 follow-up): same cross-owner read leak as
-    // `/api/cron/jobs` — post-filter to jobs on agents the caller authors.
+    // Owner-scoping (#6753 follow-up): same cross-owner read leak as `/api/cron/jobs` — post-filter to jobs on agents the caller authors.
     // Mirrors `list_triggers` / `list_cron_jobs`.
     let restrict_to: Option<String> = match api_user.as_ref() {
         Some(u) if u.0.role < crate::middleware::UserRole::Admin => Some(u.0.name.clone()),
