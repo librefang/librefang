@@ -1314,15 +1314,21 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
 
     // `querySelector` returns the *first* match, which on a feed or a results page is one card rather than the list of them — measured at 13.7% of the page on a DuckDuckGo results page.
     // Repeated sibling `article` elements are the signature of that shape, so climb to the ancestor that holds them, the way Readability resolves the same case by walking to the common ancestor of its close-scoring candidates.
+    // The test is on the ancestor's *direct children*: at least three of them must each carry an article of their own.
+    // Merely containing three articles somewhere below is not the same shape and climbs too far — an ordinary post page whose "related posts" widget is built out of `article` clears that bar, and the climb then runs to the top of the document and pulls the widget in beside the post.
+    // Counting article-carrying children instead sees two there, one for the post and one for the widget, so selection falls through to the single-article path that page always had.
+    // Counting the articles themselves as direct children would be the narrower rule and would miss a feed whose cards each sit in a wrapper, which is the common shape.
     let root = clone.querySelector('main, [role="main"]');
     if (!root) {
         const articles = Array.from(clone.querySelectorAll('article'));
         if (articles.length >= 3) {
             let anc = articles[0].parentElement;
-            while (anc && anc !== clone && articles.filter(a => anc.contains(a)).length < 3) {
+            while (anc) {
+                const carriers = Array.from(anc.children).filter(c => c.tagName === 'ARTICLE' || c.querySelector('article'));
+                if (carriers.length >= 3) { root = anc; break; }
+                if (anc === clone) break;
                 anc = anc.parentElement;
             }
-            root = anc;
         }
     }
     if (!root) root = clone.querySelector('article, .content, #content');
@@ -1703,6 +1709,100 @@ mod tests {
             EXTRACT_CONTENT_JS_TEMPLATE.contains("articles.length >= 3"),
             "repeated sibling articles are the signal to climb to their container"
         );
+    }
+
+    /// The climb stops at a container of repeated cards, and does not run past it on a page that merely has articles in more than one place.
+    ///
+    /// Ported from the JS the script runs, because the climb needs a live DOM.
+    /// Counting *contained* articles rather than article-carrying children climbs to the top of the document on an ordinary post page whose "related posts" widget is built out of `article`, taking the widget along with the post.
+    #[test]
+    fn test_root_climb_stops_at_a_container_of_repeated_cards() {
+        struct Node {
+            tag: &'static str,
+            name: &'static str,
+            kids: Vec<Node>,
+        }
+        fn el(tag: &'static str, name: &'static str, kids: Vec<Node>) -> Node {
+            Node { tag, name, kids }
+        }
+        fn article(name: &'static str) -> Node {
+            el("article", name, vec![])
+        }
+        fn has_article(n: &Node) -> bool {
+            n.tag == "article" || n.kids.iter().any(has_article)
+        }
+        fn count_articles(n: &Node) -> usize {
+            usize::from(n.tag == "article") + n.kids.iter().map(count_articles).sum::<usize>()
+        }
+
+        /// The chosen root's name, or `None` when selection falls through to the single-article path.
+        ///
+        /// The script climbs from the first article upwards; walking down and taking the deepest ancestor that qualifies reaches the same node, since an ancestor of a qualifying node cannot qualify with fewer carriers.
+        fn chosen(page: &Node) -> Option<&'static str> {
+            if count_articles(page) < 3 {
+                return None;
+            }
+            fn deepest(n: &Node) -> Option<&'static str> {
+                for k in &n.kids {
+                    if let Some(found) = deepest(k) {
+                        return Some(found);
+                    }
+                }
+                let carriers = n.kids.iter().filter(|k| has_article(k)).count();
+                (carriers >= 3).then_some(n.name)
+            }
+            deepest(page)
+        }
+
+        // The shape the change exists for: a results page of sibling cards.
+        let results = el(
+            "body",
+            "body",
+            vec![el(
+                "div",
+                "results",
+                (0..11).map(|_| article("card")).collect(),
+            )],
+        );
+        assert_eq!(chosen(&results), Some("results"));
+
+        // The same shape with each card in a wrapper, which is at least as common.
+        let feed = el(
+            "body",
+            "body",
+            vec![el(
+                "div",
+                "feed",
+                (0..5)
+                    .map(|_| el("div", "card", vec![article("post")]))
+                    .collect(),
+            )],
+        );
+        assert_eq!(chosen(&feed), Some("feed"));
+
+        // The over-reach case: one post plus a related-posts widget also built out of `article`.
+        // Three articles are present, but only two children carry them, so this must not resolve to the document.
+        let blog = el(
+            "body",
+            "body",
+            vec![
+                el("div", "content", vec![article("the post")]),
+                el("div", "related", vec![article("rel 1"), article("rel 2")]),
+            ],
+        );
+        assert_eq!(
+            chosen(&blog),
+            None,
+            "a post page with a related-posts widget must stay on the post, not climb to the document"
+        );
+
+        // Below the threshold entirely.
+        let single = el(
+            "body",
+            "body",
+            vec![el("div", "content", vec![article("only")])],
+        );
+        assert_eq!(chosen(&single), None);
     }
 
     /// The truncation marker counts against the cap rather than overshooting it.
