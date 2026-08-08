@@ -718,14 +718,22 @@ impl LibreFangKernel {
     /// Wakes that leave the pending set unchanged back off exponentially to
     /// `wake_backoff_max_secs`, so an agent that cannot make progress does not
     /// burn a turn every tick; any task leaving `pending` resets the ladder.
-    pub(crate) async fn reconcile_pending_task_wakes(&self) {
+    /// Returns the wakes it produced, which is the seam the tests assert on:
+    /// dispatch itself needs an LLM behind `send_message_full`, while the
+    /// decision of *whom* to wake and *which* task to name is the part worth
+    /// pinning. The sweeper ignores the value.
+    pub(crate) async fn reconcile_pending_task_wakes(&self) -> Vec<crate::triggers::TriggerMatch> {
+        /// One assignee's overdue tasks, newest-first until sorted, each paired
+        /// with the `created_at` that decides which one the wake names.
+        type OverdueTasks = Vec<(chrono::DateTime<chrono::Utc>, String)>;
+
         use crate::triggers::{TriggerMatch, TriggerMatchSource};
         use std::collections::{BTreeSet, HashMap};
 
         let cfg = self.config.load();
         let grace_secs = cfg.task_board.pending_grace_secs;
         if grace_secs == 0 {
-            return;
+            return Vec::new();
         }
         let global_wake = cfg.task_board.assignee_wake;
         let backoff_cap = cfg.task_board.wake_backoff_max_secs.max(grace_secs);
@@ -734,7 +742,7 @@ impl LibreFangKernel {
             Ok(tasks) => tasks,
             Err(e) => {
                 warn!(error = %e, "Task board reconcile: failed to list pending tasks");
-                return;
+                return Vec::new();
             }
         };
         if pending.is_empty() {
@@ -742,7 +750,7 @@ impl LibreFangKernel {
             // backlog starts from the fast end rather than inheriting a
             // penalty earned by tasks that are long gone.
             self.governance.assignee_wake_state.clear();
-            return;
+            return Vec::new();
         }
 
         let now = chrono::Utc::now();
@@ -751,7 +759,11 @@ impl LibreFangKernel {
         // Group the overdue tasks by resolved assignee. Sorted before
         // dispatch below: `AgentId` is not `Ord`, and hash order would make
         // *which* agents win the trigger lane differ between ticks.
-        let mut by_agent: HashMap<AgentId, BTreeSet<String>> = HashMap::new();
+        // Values carry `created_at` alongside the id: task ids are random v4
+        // UUIDs (`substrate::task_post`), so ordering them lexicographically
+        // says nothing about age, and both the log field and the prompt claim
+        // to name the task that has waited longest.
+        let mut by_agent: HashMap<AgentId, OverdueTasks> = HashMap::new();
         for task in &pending {
             let Some(task_id) = task["id"].as_str() else {
                 continue;
@@ -794,10 +806,13 @@ impl LibreFangKernel {
             if !can_claim_tasks(&entry.manifest) {
                 continue; // reported at post time; re-warning every tick would be noise
             }
-            by_agent
-                .entry(entry.id)
-                .or_default()
-                .insert(task_id.to_string());
+            // An unparsable stamp sorts oldest: it is already being treated as
+            // overdue above, and letting it read as brand new would hide it
+            // behind every other task when the wake names one.
+            by_agent.entry(entry.id).or_default().push((
+                created_at.unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC),
+                task_id.to_string(),
+            ));
         }
 
         // Drop ladders for agents with nothing outstanding, so a later backlog
@@ -806,11 +821,15 @@ impl LibreFangKernel {
             .assignee_wake_state
             .retain(|agent_id, _| by_agent.contains_key(agent_id));
 
-        let mut ordered: Vec<(AgentId, BTreeSet<String>)> = by_agent.into_iter().collect();
+        let mut ordered: Vec<(AgentId, OverdueTasks)> = by_agent.into_iter().collect();
         ordered.sort_by_key(|(agent_id, _)| agent_id.0);
 
         let mut matches: Vec<TriggerMatch> = Vec::new();
-        for (agent_id, overdue) in ordered {
+        for (agent_id, mut overdue) in ordered {
+            // Oldest first, ties broken by id so the reported task is stable
+            // across ticks when two were posted in the same instant.
+            overdue.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+            let overdue_ids: BTreeSet<String> = overdue.iter().map(|(_, id)| id.clone()).collect();
             let due = {
                 let mut state = self
                     .governance
@@ -829,7 +848,7 @@ impl LibreFangKernel {
                 // Progress check: anything we previously woke for that is no
                 // longer pending means the agent is working, so the ladder
                 // resets even if new tasks arrived in the meantime.
-                let picked_up = state.woken_for.iter().any(|id| !overdue.contains(id));
+                let picked_up = state.woken_for.iter().any(|id| !overdue_ids.contains(id));
                 if picked_up {
                     state.ineffective_wakes = 0;
                 }
@@ -845,15 +864,19 @@ impl LibreFangKernel {
 
                 state.last_wake = now;
                 state.ineffective_wakes = state.ineffective_wakes.saturating_add(1);
-                state.woken_for = overdue.clone();
+                state.woken_for = overdue_ids.clone();
                 true
             };
             if !due {
                 continue;
             }
 
-            // Oldest overdue task addresses the wake and keys its session id.
-            let oldest = overdue.iter().next().cloned().unwrap_or_default();
+            // Genuinely the longest-waiting task, now that the list is sorted
+            // by `created_at` — it addresses the wake and keys its session id.
+            let oldest = overdue
+                .first()
+                .map(|(_, id)| id.clone())
+                .unwrap_or_default();
             warn!(
                 agent_id = %agent_id,
                 pending = overdue.len(),
@@ -877,6 +900,7 @@ impl LibreFangKernel {
         if !matches.is_empty() {
             self.dispatch_trigger_matches(&matches, now);
         }
+        matches
     }
 
     /// Synthesize the built-in Task Board wake for a `TaskPosted` event whose assignee no stored trigger currently covers (issue #6728).
@@ -1789,5 +1813,106 @@ mod task_board_reconcile_tests {
         kernel.reconcile_pending_task_wakes().await;
 
         assert!(kernel.governance.assignee_wake_state.is_empty());
+    }
+
+    /// Multi-tenant safety on the level path, with three agents that could all
+    /// claim: a reconcile must wake the addressee and nobody else.
+    /// Every other reconcile test runs one agent, so "wake anyone who can
+    /// claim" would pass all of them while handing one agent's task to another.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconcile_wakes_only_the_addressed_agent() {
+        let (kernel, _tmp) = boot("reconcile-isolation", |c| {
+            c.task_board.pending_grace_secs = 60;
+        });
+        let addressed = kernel
+            .spawn_agent_inner(worker("addressed"), None, None, None)
+            .expect("spawn");
+        let bystander = kernel
+            .spawn_agent_inner(worker("bystander"), None, None, None)
+            .expect("spawn");
+        let third = kernel
+            .spawn_agent_inner(worker("third"), None, None, None)
+            .expect("spawn");
+
+        let task = kernel
+            .memory
+            .substrate
+            .task_post("addressed only", "body", Some(&addressed.to_string()), None)
+            .await
+            .expect("post");
+        backdate(&kernel, &task, 120).await;
+
+        let matches = kernel.reconcile_pending_task_wakes().await;
+
+        assert_eq!(matches.len(), 1, "exactly one agent may be woken");
+        assert_eq!(matches[0].agent_id, addressed);
+        assert!(kernel
+            .governance
+            .assignee_wake_state
+            .get(&bystander)
+            .is_none());
+        assert!(kernel.governance.assignee_wake_state.get(&third).is_none());
+    }
+
+    /// The wake names the task that has actually waited longest.
+    ///
+    /// Task ids are random v4 UUIDs, so ordering them as strings says nothing
+    /// about age — a set-order pick would name an arbitrary task while the log
+    /// field and the prompt both call it "the oldest". For an issue whose whole
+    /// thesis is that a silent failure went unnoticed, a diagnostic that
+    /// asserts something untrue is worth a test of its own.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconcile_names_the_longest_waiting_task() {
+        let (kernel, _tmp) = boot("reconcile-oldest", |c| {
+            c.task_board.pending_grace_secs = 60;
+        });
+        let agent = kernel
+            .spawn_agent_inner(worker("worker"), None, None, None)
+            .expect("spawn");
+
+        let newer = kernel
+            .memory
+            .substrate
+            .task_post("newer", "body", Some(&agent.to_string()), None)
+            .await
+            .expect("post");
+        let older = kernel
+            .memory
+            .substrate
+            .task_post("older", "body", Some(&agent.to_string()), None)
+            .await
+            .expect("post");
+        // Force age and id order to disagree, rather than hoping two random
+        // UUIDs happen to. The lexicographically *smaller* id is made the
+        // younger task, so a set-order pick names it and the assertions below
+        // fail; only a `created_at`-ordered pick names the other one.
+        let (younger, older) = if newer < older {
+            (newer.clone(), older.clone())
+        } else {
+            (older.clone(), newer.clone())
+        };
+        backdate(&kernel, &younger, 120).await;
+        backdate(&kernel, &older, 6000).await;
+
+        let matches = kernel.reconcile_pending_task_wakes().await;
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].source,
+            crate::triggers::TriggerMatchSource::TaskBoardAssigneeWake {
+                task_id: older.clone()
+            },
+            "the wake must be keyed on the longest-waiting task, not the smallest id"
+        );
+        assert!(
+            matches[0].message.contains(&older) && !matches[0].message.contains(&younger),
+            "the prompt must name the oldest task: {}",
+            matches[0].message
+        );
+        assert!(
+            matches[0].message.contains('2'),
+            "the prompt must report the full backlog count: {}",
+            matches[0].message
+        );
     }
 }

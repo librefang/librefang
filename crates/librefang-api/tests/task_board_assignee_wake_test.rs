@@ -13,6 +13,7 @@
 //! 8. `unrestricted_agent_is_woken` — an empty `capabilities.tools` means unrestricted, not "no tools".
 //! 9. `agent_denied_task_claim_by_list_is_not_woken` — `tool_allowlist` / `tool_blocklist` withhold it just as effectively.
 //! 10. `unassigned_task_wakes_nobody` — pool tasks are claimable, not routed.
+//! 11. `only_the_addressed_agent_is_woken` — with several eligible agents present, the wake reaches the assignee and nobody else.
 //!
 //! The seam is `publish_typed_event`'s return value: it is the exact list the dispatcher consumes, so asserting on it tests the wake without needing an LLM behind `send_message_full`.
 
@@ -390,4 +391,49 @@ async fn unassigned_task_wakes_nobody() {
             "an unassigned task must wake nobody (assigned_to = {assigned_to:?})"
         );
     }
+}
+
+/// The property this feature is riskiest on, with more than one eligible agent
+/// in the registry: a wake must reach the assignee and nobody else.
+///
+/// Every other test here runs with a single agent, so a routing mistake that
+/// woke "some agent that can claim" rather than "the addressed agent" would
+/// pass all of them. On a shared board that mistake is not a missed
+/// notification — it hands one tenant's task to another tenant's agent, which
+/// then claims it.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_addressed_agent_is_woken() {
+    let test = TestAppState::with_builder(MockKernelBuilder::new());
+    let addressed = test
+        .state
+        .kernel
+        .spawn_agent_typed(worker_manifest("addressed"))
+        .expect("spawn must succeed");
+    let bystander = test
+        .state
+        .kernel
+        .spawn_agent_typed(worker_manifest("bystander"))
+        .expect("spawn must succeed");
+    // A third agent that is equally able to claim, to make "wake anyone who
+    // can claim" fail rather than accidentally pass with two.
+    let third = test
+        .state
+        .kernel
+        .spawn_agent_typed(worker_manifest("third"))
+        .expect("spawn must succeed");
+
+    let matches = test
+        .state
+        .kernel
+        .publish_typed_event(task_posted(Some(&addressed.to_string())))
+        .await;
+
+    assert_eq!(matches.len(), 1, "exactly one agent may be woken");
+    assert_eq!(matches[0].agent_id, addressed);
+    assert!(
+        !matches
+            .iter()
+            .any(|m| m.agent_id == bystander || m.agent_id == third),
+        "an agent that was not addressed must never be woken for someone else's task"
+    );
 }
