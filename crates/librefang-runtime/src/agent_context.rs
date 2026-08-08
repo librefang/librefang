@@ -46,12 +46,19 @@ fn cache() -> &'static Mutex<HashMap<PathBuf, String>> {
 ///
 /// Prefers `{workspace}/.identity/context.md` (new layout) and falls back to
 /// `{workspace}/context.md` (legacy / unmigrated workspaces). The first
-/// candidate that exists on disk wins — even if it is empty or unreadable —
-/// so callers can detect and report the canonical location's failures rather
-/// than silently picking up a stale legacy file.
+/// candidate wins only when it is a regular file. Symlinks and other special
+/// entries fall through to the legacy file instead of shadowing it.
 fn resolve_context_path(workspace: &Path) -> PathBuf {
-    let identity_path = workspace.join(".identity").join(CONTEXT_FILENAME);
-    if identity_path.exists() {
+    let identity_dir = workspace.join(".identity");
+    let identity_path = identity_dir.join(CONTEXT_FILENAME);
+    let identity_dir_meta = fs::symlink_metadata(&identity_dir);
+    let identity_meta = fs::symlink_metadata(&identity_path);
+    let regular_identity = matches!(&identity_dir_meta, Ok(meta) if meta.is_dir())
+        && matches!(&identity_meta, Ok(meta) if meta.is_file());
+    let unsafe_identity = identity_dir_meta.is_ok()
+        && (!matches!(&identity_dir_meta, Ok(meta) if meta.is_dir())
+            || matches!(&identity_meta, Ok(meta) if !meta.is_file()));
+    if regular_identity || (unsafe_identity && get_cached(&identity_path).is_some()) {
         return identity_path;
     }
     workspace.join(CONTEXT_FILENAME)
@@ -106,7 +113,7 @@ pub fn load_context_md(workspace: &Path, cache_context: bool) -> Option<String> 
 }
 
 /// Async variant of [`load_context_md`] that performs the per-turn disk
-/// read off the tokio worker thread via `tokio::fs`. Use this from any
+/// read off the Tokio worker thread via `spawn_blocking`. Use this from any
 /// `async fn` running on the runtime — it matches the sync version's
 /// behaviour byte-for-byte (same cache, same symlink rejection, same
 /// UTF-8 trim and size cap) but never parks the executor on the read.
@@ -154,66 +161,31 @@ pub async fn load_context_md_async(workspace: &Path, cache_context: bool) -> Opt
 }
 
 async fn resolve_context_path_async(workspace: &Path) -> PathBuf {
-    let identity_path = workspace.join(".identity").join(CONTEXT_FILENAME);
-    if matches!(tokio::fs::try_exists(&identity_path).await, Ok(true)) {
+    let identity_dir = workspace.join(".identity");
+    let identity_path = identity_dir.join(CONTEXT_FILENAME);
+    let identity_dir_meta = tokio::fs::symlink_metadata(&identity_dir).await;
+    let identity_meta = tokio::fs::symlink_metadata(&identity_path).await;
+    let regular_identity = matches!(&identity_dir_meta, Ok(meta) if meta.is_dir())
+        && matches!(&identity_meta, Ok(meta) if meta.is_file());
+    let unsafe_identity = identity_dir_meta.is_ok()
+        && (!matches!(&identity_dir_meta, Ok(meta) if meta.is_dir())
+            || matches!(&identity_meta, Ok(meta) if !meta.is_file()));
+    if regular_identity || (unsafe_identity && get_cached(&identity_path).is_some()) {
         return identity_path;
     }
     workspace.join(CONTEXT_FILENAME)
 }
 
-/// Async mirror of [`read_capped`]. Behaviour and limits are identical;
-/// only the I/O primitives change to `tokio::fs` so the runtime worker
-/// is free during the read.
+/// Async mirror of [`read_capped`]. The blocking-pool hop keeps filesystem I/O
+/// off Tokio workers while reusing the exact same no-follow open primitive.
 async fn read_capped_async(path: &Path) -> io::Result<Option<String>> {
-    use tokio::io::AsyncReadExt;
-
-    // SECURITY: see `read_capped` — symlink targets are explicitly refused.
-    let meta = match tokio::fs::symlink_metadata(path).await {
-        Ok(m) => m,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    if meta.file_type().is_symlink() {
-        warn!(
-            path = %path.display(),
-            "Refusing to read context.md: target is a symlink"
-        );
-        return Ok(None);
+    let path = path.to_path_buf();
+    match tokio::task::spawn_blocking(move || read_capped(&path)).await {
+        Ok(result) => result,
+        Err(error) => Err(io::Error::other(format!(
+            "context.md blocking read task failed: {error}"
+        ))),
     }
-    if !meta.is_file() {
-        return Ok(None);
-    }
-
-    let cap = (MAX_CONTEXT_BYTES as usize).saturating_add(4);
-    let mut bytes = Vec::with_capacity(cap.min((meta.len() as usize).saturating_add(1)));
-    tokio::fs::File::open(path)
-        .await?
-        .take(cap as u64)
-        .read_to_end(&mut bytes)
-        .await?;
-
-    let valid_up_to = match std::str::from_utf8(&bytes) {
-        Ok(_) => bytes.len(),
-        Err(e) => e.valid_up_to(),
-    };
-    if valid_up_to == 0 && !bytes.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "context.md contains no valid UTF-8 prefix",
-        ));
-    }
-    bytes.truncate(valid_up_to);
-    let content = String::from_utf8(bytes).expect("trimmed to valid UTF-8 boundary above");
-
-    if content.trim().is_empty() {
-        return Ok(None);
-    }
-
-    if meta.len() > MAX_CONTEXT_BYTES {
-        let truncated = crate::str_utils::safe_truncate_str(&content, MAX_CONTEXT_BYTES as usize);
-        return Ok(Some(truncated.to_string()));
-    }
-    Ok(Some(content))
 }
 
 fn get_cached(path: &Path) -> Option<String> {
@@ -229,6 +201,100 @@ fn store_cached(path: &Path, content: &str) {
     }
 }
 
+#[cfg(unix)]
+fn open_context_file(path: &Path) -> io::Result<fs::File> {
+    use std::ffi::{CString, OsStr};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    fn open_dir(path: &Path) -> io::Result<OwnedFd> {
+        let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "context path contains NUL")
+        })?;
+        // SAFETY: `path` is a live NUL-terminated C string; no mode argument
+        // is needed because O_CREAT is absent. The returned fd is owned below.
+        let fd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is a fresh successful `open` result and ownership is
+        // transferred exactly once into OwnedFd.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    fn open_at(dir: &OwnedFd, name: &OsStr, directory: bool) -> io::Result<OwnedFd> {
+        let name = CString::new(name.as_bytes()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "context path contains NUL")
+        })?;
+        let mut flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+        if directory {
+            flags |= libc::O_DIRECTORY;
+        }
+        // SAFETY: `dir` remains open for the call and `name` is a live
+        // NUL-terminated relative component. The returned fd is owned below.
+        let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is a fresh successful `openat` result and ownership is
+        // transferred exactly once into OwnedFd.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "context path has no parent"))?;
+    let (workspace, identity_relative) = if parent.file_name() == Some(OsStr::new(".identity")) {
+        (
+            parent.parent().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "identity path has no workspace",
+                )
+            })?,
+            true,
+        )
+    } else {
+        (parent, false)
+    };
+    let workspace = open_dir(workspace)?;
+    let context_dir = if identity_relative {
+        open_at(&workspace, OsStr::new(".identity"), true)?
+    } else {
+        workspace
+    };
+    let filename = path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "context path has no filename")
+    })?;
+    let file = open_at(&context_dir, filename, false)?;
+    Ok(fs::File::from(file))
+}
+
+#[cfg(windows)]
+fn open_context_file(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    use std::os::windows::fs::OpenOptionsExt;
+    // Open the reparse point itself rather than following it. Reading a
+    // symlink handle is refused by the regular-file check below.
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    options.open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_context_file(_path: &Path) -> io::Result<fs::File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "secure no-follow context reads are unsupported on this platform",
+    ))
+}
+
 /// Read the file, returning `Ok(None)` if it is missing or empty, and
 /// `Ok(Some(...))` if it has usable content. Oversized files are truncated to
 /// [`MAX_CONTEXT_BYTES`] so prompt size remains bounded.
@@ -238,25 +304,19 @@ fn store_cached(path: &Path, content: &str) {
 fn read_capped(path: &Path) -> io::Result<Option<String>> {
     use std::io::Read;
 
-    // SECURITY: use symlink_metadata so we can refuse symlinks. Without
-    // this, an attacker (e.g. via prompt injection that lets the agent
-    // create files in its workspace) could point `.identity/context.md`
-    // at `/etc/passwd` and have its contents injected into the LLM
-    // prompt on the next turn.
-    let meta = match fs::symlink_metadata(path) {
-        Ok(m) => m,
+    // SECURITY: the no-follow flag and metadata check apply to the same open
+    // handle. A path swap cannot redirect this read to a symlink target.
+    let file = match open_context_file(path) {
+        Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    if meta.file_type().is_symlink() {
-        warn!(
-            path = %path.display(),
-            "Refusing to read context.md: target is a symlink"
-        );
-        return Ok(None);
-    }
+    let meta = file.metadata()?;
     if !meta.is_file() {
-        return Ok(None);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "context.md is not a regular file",
+        ));
     }
 
     // Cap the read at MAX_CONTEXT_BYTES + 4 (max UTF-8 char length) so we
@@ -264,9 +324,7 @@ fn read_capped(path: &Path) -> io::Result<Option<String>> {
     // back to the last valid UTF-8 boundary if the cap landed mid-codepoint.
     let cap = (MAX_CONTEXT_BYTES as usize).saturating_add(4);
     let mut bytes = Vec::with_capacity(cap.min((meta.len() as usize).saturating_add(1)));
-    fs::File::open(path)?
-        .take(cap as u64)
-        .read_to_end(&mut bytes)?;
+    file.take(cap as u64).read_to_end(&mut bytes)?;
 
     // Trim to the last valid UTF-8 boundary, in case the cap split a
     // multi-byte character. Any bytes beyond that point are dropped.
@@ -445,6 +503,103 @@ mod tests {
             "symlinked context.md must be refused, got {loaded:?}"
         );
 
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_file_opener_does_not_follow_symlinks() {
+        let ws = fresh_workspace("nofollow_open");
+        let real = ws.join("real.md");
+        let link = ws.join(CONTEXT_FILENAME);
+        fs::write(&real, "secret target").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        assert!(
+            open_context_file(&link).is_err(),
+            "the file open operation itself must reject a symlink"
+        );
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_symlink_falls_back_to_regular_root_context() {
+        let ws = fresh_workspace("identity_symlink_fallback");
+        let identity_dir = ws.join(".identity");
+        fs::create_dir_all(&identity_dir).unwrap();
+        let target = ws.join("untrusted-target.md");
+        fs::write(&target, "must not load").unwrap();
+        std::os::unix::fs::symlink(&target, identity_dir.join(CONTEXT_FILENAME)).unwrap();
+        fs::write(ws.join(CONTEXT_FILENAME), "trusted root context").unwrap();
+
+        assert_eq!(
+            load_context_md(&ws, false).as_deref(),
+            Some("trusted root context")
+        );
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_directory_symlink_falls_back_to_regular_root_context() {
+        let ws = fresh_workspace("identity_dir_symlink_fallback");
+        let target_dir = ws.join("untrusted-identity");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(target_dir.join(CONTEXT_FILENAME), "must not load").unwrap();
+        std::os::unix::fs::symlink(&target_dir, ws.join(".identity")).unwrap();
+        fs::write(ws.join(CONTEXT_FILENAME), "trusted root context").unwrap();
+
+        assert_eq!(
+            load_context_md(&ws, false).as_deref(),
+            Some("trusted root context")
+        );
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_replacement_falls_back_to_cached_context() {
+        let ws = fresh_workspace("symlink_cache_fallback");
+        let context = ws.join(CONTEXT_FILENAME);
+        let target = ws.join("untrusted-target.md");
+        fs::write(&context, "cached good context").unwrap();
+        assert_eq!(
+            load_context_md(&ws, false).as_deref(),
+            Some("cached good context")
+        );
+        fs::write(&target, "must not load").unwrap();
+        fs::remove_file(&context).unwrap();
+        std::os::unix::fs::symlink(&target, &context).unwrap();
+
+        assert_eq!(
+            load_context_md(&ws, false).as_deref(),
+            Some("cached good context")
+        );
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_symlink_replacement_falls_back_to_cached_context() {
+        let ws = fresh_workspace("identity_symlink_cache_fallback");
+        let identity_dir = ws.join(".identity");
+        let context = identity_dir.join(CONTEXT_FILENAME);
+        let target = ws.join("untrusted-target.md");
+        fs::create_dir_all(&identity_dir).unwrap();
+        fs::write(&context, "cached good identity context").unwrap();
+        assert_eq!(
+            load_context_md(&ws, false).as_deref(),
+            Some("cached good identity context")
+        );
+        fs::write(&target, "must not load").unwrap();
+        fs::remove_file(&context).unwrap();
+        std::os::unix::fs::symlink(&target, &context).unwrap();
+
+        assert_eq!(
+            load_context_md(&ws, false).as_deref(),
+            Some("cached good identity context")
+        );
         let _ = fs::remove_dir_all(&ws);
     }
 
