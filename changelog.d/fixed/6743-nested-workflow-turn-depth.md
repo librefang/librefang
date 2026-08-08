@@ -5,5 +5,6 @@ A run entered too deep is refused as a policy error before the run record is cre
 Two hops between the kernel and the agent were flattening that refusal into a generic server error, so the agent was told its workflow had crashed rather than that it had hit a limit.
 It now arrives as a permission denial, which also stops a capped agent from losing its whole turn to a repeated-failure abort.
 The daemon and the desktop app's embedded server also raise their tokio worker stack from tokio's 2 MiB default to 8 MiB: an agent turn is a chain of very large futures and a nested turn restacks it, so overflowing it aborted the whole process — with only two workers that took the HTTP API and every cron job down together.
+The CLI TUI's in-process kernel mode runs the same turn chain on its own long-lived runtime and on the dedicated thread that streams a turn's events, so both get the same 8 MiB stack.
 The stack change is headroom rather than a bound, and neither change is proven to be the cause of the crash reported in #6659, whose original report is unrecoverable; the next occurrence on the larger stack is what will tell unbounded recursion apart from bounded depth with fat frames.
 (#6743) (@houko)
