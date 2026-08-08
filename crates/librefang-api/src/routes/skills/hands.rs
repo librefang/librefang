@@ -1072,12 +1072,8 @@ pub async fn set_hand_secret(
         }
     };
 
-    // Resolve the stable requirement key (`r.key`, as exposed by the single-hand
-    // detail endpoint) to the actual environment-variable name (`r.check_value`,
-    // as exposed by `list_hands`'s "key" field). Accepting either alias as input
-    // but persisting under whatever string the client sent would silently write
-    // the secret under a name `check_requirement` never reads, so a save could
-    // return 200 OK while leaving the requirement permanently unsatisfied.
+    // Resolve the stable requirement key (`r.key`, as exposed by the single-hand detail endpoint) to the actual environment-variable name (`r.check_value`, as exposed by `list_hands`'s "key" field).
+    // Accepting either alias as input but persisting under whatever string the client sent would silently write the secret under a name `check_requirement` never reads, so a save could return 200 OK while leaving the requirement permanently unsatisfied.
     let env_key = {
         let defs = state.kernel.hands().list_definitions();
         defs.iter().find(|d| d.id == hand_id).and_then(|def| {

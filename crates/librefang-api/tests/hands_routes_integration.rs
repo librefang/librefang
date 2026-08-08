@@ -1059,12 +1059,8 @@ system_prompt = "Test prompt"
 
 #[tokio::test(flavor = "multi_thread")]
 async fn set_hand_secret_resolves_stable_requirement_key_to_env_var_name() {
-    // The single-hand detail endpoint (GET /api/hands/{id}) exposes both the
-    // stable requirement "key" and the actual env var "check_value" as
-    // separate fields, so a client can plausibly submit either one to this
-    // endpoint. Both must resolve to the same persisted env var name —
-    // submitting the stable key must not write a secret under a name
-    // `check_requirement` never reads.
+    // The single-hand detail endpoint (GET /api/hands/{id}) exposes both the stable requirement "key" and the actual env var "check_value" as separate fields, so a client can plausibly submit either one to this endpoint.
+    // Both must resolve to the same persisted env var name — submitting the stable key must not write a secret under a name `check_requirement` never reads.
     const ENV_KEY: &str = "LIBREFANG_HAND_SECRET_STABLE_KEY_ALIAS_TEST";
     const STABLE_KEY: &str = "stable-key-alias-test";
     const VALUE: &str = "stable-alias-value";
@@ -1124,8 +1120,7 @@ system_prompt = "Test prompt"
     librefang_api::secrets_env::remove_env_var_guarded(STABLE_KEY).await;
 
     assert_eq!(save_status, StatusCode::OK, "save body: {save_body}");
-    // The response must report the resolved env var name, not the stable
-    // key the client submitted.
+    // The response must report the resolved env var name, not the stable key the client submitted.
     assert_eq!(save_body["key"].as_str(), Some(ENV_KEY), "{save_body}");
 
     let requirement = list_body["items"]
