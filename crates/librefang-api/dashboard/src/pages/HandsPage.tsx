@@ -350,13 +350,10 @@ function RequirementsForm({ handId, requirements }: { handId: string; requiremen
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const setSecret = useSetHandSecret();
-  const [values, setValues] = useState<Record<string, string>>(() => {
-    const init: Record<string, string> = {};
-    for (const r of requirements ?? []) {
-      if (r.key && r.current_value) init[r.key] = r.current_value;
-    }
-    return init;
-  });
+  // The API never returns the value of a satisfied requirement (redacted for
+  // secret safety), so this form always starts empty — there is nothing to
+  // pre-fill from `requirements`.
+  const [values, setValues] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState<string | null>(null);
 
   if (!requirements || requirements.length === 0) return null;
