@@ -65,12 +65,8 @@ const MEDIA_PROVIDER_KEY_VARS: &[&str] = &[
 fn clear_media_provider_env() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        // SAFETY: runs inside `Once::call_once`, which guarantees this body
-        // executes exactly once and completes before any other caller of
-        // `clear_media_provider_env` proceeds — including the first `boot()`,
-        // which is the only place any test in this file spawns work that
-        // reads the environment. No other thread reads or writes these vars
-        // concurrently with this block.
+        // SAFETY: runs inside `Once::call_once`, which guarantees this body executes exactly once and completes before any other caller of `clear_media_provider_env` proceeds — including the first `boot()`, which is the only place any test in this file spawns work that reads the environment.
+        // No other thread reads or writes these vars concurrently with this block.
         unsafe {
             for var in MEDIA_PROVIDER_KEY_VARS {
                 std::env::remove_var(var);
