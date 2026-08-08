@@ -1,9 +1,6 @@
-//! [`kernel_handle::ApprovalGate`] — tool-approval policy + RBAC gate. Holds
-//! the synchronous "does this tool require approval?" predicates and the
-//! async request/submit/resolve flow used by the agent loop. Hand-tagged
-//! agents (curated trusted packages) auto-approve on the context-carrying
-//! non-blocking path unless per-user policy demanded human approval
-//! (RBAC M3, #3054).
+//! [`kernel_handle::ApprovalGate`] — tool-approval policy + RBAC gate.
+//! Holds the synchronous "does this tool require approval?" predicates and the async request/submit/resolve flow used by the agent loop.
+//! Hand-tagged agents (curated trusted packages) auto-approve on the context-carrying non-blocking path unless per-user policy demanded human approval (RBAC M3, #3054).
 
 use std::sync::Arc;
 
@@ -104,9 +101,8 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         use librefang_types::approval::ApprovalRequest as TypedRequest;
 
         // The blocking trait carries neither sender identity nor `force_human`.
-        // It therefore cannot prove that per-user policy allowed a hand-agent
-        // carve-out. Always queue a real approval on this context-free path;
-        // context-carrying hand execution uses `submit_tool_approval` below.
+        // It therefore cannot prove that per-user policy allowed a hand-agent carve-out.
+        // Always queue a real approval on this context-free path; context-carrying hand execution uses `submit_tool_approval` below.
 
         let policy = self.governance.approval_manager.policy();
         let risk_level = crate::approval::ApprovalManager::classify_risk(tool_name);
