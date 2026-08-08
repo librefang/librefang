@@ -1808,15 +1808,21 @@ mod tests {
         assert_eq!(default_vision_model("unknown"), "unknown");
     }
 
+    /// Same latent dependency as `test_transcribe_audio_no_provider` above: `describe_image` resolves the provider (`config.image_provider`, else `detect_vision_provider()`, which reads vision-capable keys from the process) BEFORE it reads the file.
+    /// With no explicit `image_provider` set, a machine with a vision-capable key exported resolves a real provider here; only a guaranteed-absent input path keeps the call from proceeding to a real, billable description request.
     #[tokio::test]
     async fn test_describe_image_no_provider_configured() {
-        // With no API keys set and no explicit provider, should fail with provider error.
+        // With no API keys set, should fail with provider error.
+        // With a key set, provider resolution succeeds instead and the call must still stop at the guaranteed-absent file read, never reaching a real description request.
         let engine = MediaEngine::new(MediaConfig::default());
+        let missing = std::env::temp_dir()
+            .join("librefang-nonexistent-describe-no-provider")
+            .join("test.png");
         let attachment = MediaAttachment {
             media_type: MediaType::Image,
             mime_type: "image/png".into(),
             source: MediaSource::FilePath {
-                path: "test.png".into(),
+                path: missing.to_string_lossy().into_owned(),
             },
             size_bytes: 1024,
         };
@@ -1922,15 +1928,22 @@ mod tests {
         assert!(result.unwrap_err().contains("Expected audio"));
     }
 
+    /// Same latent dependency `transcribe_audio_accepts_video_type` above was fixed for: `transcribe_audio` resolves the provider (`config.audio_provider`, else `detect_audio_provider()`, which reads STT keys from the process) BEFORE it reads the file.
+    /// With no explicit `audio_provider` set, a machine with an STT key exported resolves a real provider here; the only thing that then kept this test off the network was the input path happening not to exist at the process's working directory.
+    /// A guaranteed-absent path removes that assumption instead of relying on it — see #5716 on not depending on incidental filesystem state in tests.
     #[tokio::test]
     async fn test_transcribe_audio_no_provider() {
-        // With no API keys set, should fail with provider error
+        // With no API keys set, should fail with provider error.
+        // With a key set, provider resolution succeeds instead and the call must still stop at the guaranteed-absent file read, never reaching a real transcription request.
         let engine = MediaEngine::new(MediaConfig::default());
+        let missing = std::env::temp_dir()
+            .join("librefang-nonexistent-transcribe-no-provider")
+            .join("test.webm");
         let attachment = MediaAttachment {
             media_type: MediaType::Audio,
             mime_type: "audio/webm".into(),
             source: MediaSource::FilePath {
-                path: "test.webm".into(),
+                path: missing.to_string_lossy().into_owned(),
             },
             size_bytes: 1024,
         };
