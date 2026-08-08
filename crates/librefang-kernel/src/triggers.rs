@@ -2610,6 +2610,133 @@ mod tests {
     }
 
     #[test]
+    fn task_claimed_creator_match_unassigned_matches_none_and_empty_string() {
+        // `creator_match = "unassigned"` is accepted on `TaskClaimed` because the identity
+        // filter is shared with `TaskPosted`'s `assignee_match`, and here means "no recorded
+        // creator" — either an absent `created_by` or the empty string a legacy writer left behind.
+        // This mirrors `task_posted_assignee_match_unassigned_matches_none_and_empty_string`
+        // but exercises the `TaskClaimed` variant directly, since the shared helper being
+        // correct for `TaskPosted` does not prove it is wired correctly for this variant too.
+        let engine = TriggerEngine::new();
+        let owner = AgentId::new();
+        let other = AgentId::new();
+
+        engine
+            .register(
+                owner,
+                TriggerPattern::TaskClaimed {
+                    creator_match: Some("unassigned".to_string()),
+                },
+                "notify {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let claimed = |task_id: &str, created_by: Option<String>| {
+            Event::new(
+                other,
+                EventTarget::Broadcast,
+                EventPayload::System(SystemEvent::TaskClaimed {
+                    task_id: task_id.to_string(),
+                    claimed_by: other.to_string(),
+                    created_by,
+                }),
+            )
+        };
+        let reset_cooldown = || {
+            for mut entry in engine.triggers.iter_mut() {
+                entry.cooldown_secs = Some(0);
+            }
+        };
+
+        let (matches, _) = engine.evaluate_with_resolver(&claimed("t-1", None), |_| None);
+        assert_eq!(
+            matches.len(),
+            1,
+            "creator_match:unassigned must fire when created_by is absent"
+        );
+
+        reset_cooldown();
+        let (matches, _) =
+            engine.evaluate_with_resolver(&claimed("t-2", Some(String::new())), |_| None);
+        assert_eq!(
+            matches.len(),
+            1,
+            "creator_match:unassigned must fire when created_by is the empty string"
+        );
+
+        reset_cooldown();
+        let (matches, _) =
+            engine.evaluate_with_resolver(&claimed("t-3", Some(owner.to_string())), |_| None);
+        assert!(
+            matches.is_empty(),
+            "creator_match:unassigned must reject a claim whose task has a recorded creator"
+        );
+    }
+
+    #[test]
+    fn task_completed_creator_match_unassigned_matches_none_and_empty_string() {
+        // Same gap as `TaskClaimed` above: `creator_match = "unassigned"` reaches
+        // `TaskCompleted` through the same shared helper and needs its own direct coverage.
+        let engine = TriggerEngine::new();
+        let owner = AgentId::new();
+        let other = AgentId::new();
+
+        engine
+            .register(
+                owner,
+                TriggerPattern::TaskCompleted {
+                    creator_match: Some("unassigned".to_string()),
+                },
+                "notify {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let completed = |task_id: &str, created_by: Option<String>| {
+            Event::new(
+                other,
+                EventTarget::Broadcast,
+                EventPayload::System(SystemEvent::TaskCompleted {
+                    task_id: task_id.to_string(),
+                    completed_by: other.to_string(),
+                    result: "done".to_string(),
+                    created_by,
+                }),
+            )
+        };
+        let reset_cooldown = || {
+            for mut entry in engine.triggers.iter_mut() {
+                entry.cooldown_secs = Some(0);
+            }
+        };
+
+        let (matches, _) = engine.evaluate_with_resolver(&completed("t-1", None), |_| None);
+        assert_eq!(
+            matches.len(),
+            1,
+            "creator_match:unassigned must fire when created_by is absent"
+        );
+
+        reset_cooldown();
+        let (matches, _) =
+            engine.evaluate_with_resolver(&completed("t-2", Some(String::new())), |_| None);
+        assert_eq!(
+            matches.len(),
+            1,
+            "creator_match:unassigned must fire when created_by is the empty string"
+        );
+
+        reset_cooldown();
+        let (matches, _) =
+            engine.evaluate_with_resolver(&completed("t-3", Some(owner.to_string())), |_| None);
+        assert!(
+            matches.is_empty(),
+            "creator_match:unassigned must reject a completion whose task has a recorded creator"
+        );
+    }
+
+    #[test]
     fn task_completed_creator_match_explicit_uuid_filters() {
         // #5960 — an explicit `creator_match` UUID on `TaskCompleted` scopes the
         // fire to completions of tasks that specific agent posted.
