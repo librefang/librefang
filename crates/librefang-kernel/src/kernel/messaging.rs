@@ -2433,6 +2433,67 @@ impl LibreFangKernel {
         );
         let mut manifest = entry.manifest.clone();
 
+        // Resolve "default" provider/model to the effective default.
+        // Mirrors the resolution in `execute_llm_agent` so the streaming
+        // path (WebUI, Telegram, forks) and the non-streaming path stay in
+        // sync. Without this, agents spawned post-boot with
+        // provider="default"/model="default" reach the LLM API with
+        // the literal sentinel values still in place.
+        {
+            let cfg = self.config.load();
+            let is_default_provider =
+                manifest.model.provider.is_empty() || manifest.model.provider == "default";
+            let is_default_model =
+                manifest.model.model.is_empty() || manifest.model.model == "default";
+            let is_auto_spawned = entry.name == "assistant"
+                && manifest
+                    .description
+                    .starts_with("General-purpose assistant");
+            if (is_default_provider && is_default_model) || is_auto_spawned {
+                let override_guard = self
+                    .llm
+                    .default_model_override
+                    .read()
+                    .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                let dm = override_guard.as_ref().unwrap_or(&cfg.default_model);
+                if !dm.provider.is_empty() {
+                    manifest.model.provider = dm.provider.clone();
+                }
+                if !dm.model.is_empty() {
+                    manifest.model.model = dm.model.clone();
+                }
+                if !dm.api_key_env.is_empty() && manifest.model.api_key_env.is_none() {
+                    manifest.model.api_key_env = Some(dm.api_key_env.clone());
+                }
+                if dm.base_url.is_some() && manifest.model.base_url.is_none() {
+                    manifest.model.base_url.clone_from(&dm.base_url);
+                }
+                for (key, value) in &dm.extra_params {
+                    manifest
+                        .model
+                        .extra_params
+                        .entry(key.clone())
+                        .or_insert(value.clone());
+                }
+            }
+        }
+
+        // Stamp sender_chat_id into the manifest so tool dispatch
+        // (agent_send, defer, approval-resume) can thread the
+        // conversation context through async task registration.
+        // Mirrors the identical block in send_message_full_inner so
+        // the streaming and non-streaming paths stay in sync.
+        if let Some(ref ctx) = sender_context {
+            if let Some(ref cid) = ctx.chat_id {
+                if !cid.is_empty() {
+                    manifest.metadata.insert(
+                        "sender_chat_id".to_string(),
+                        serde_json::Value::String(cid.clone()),
+                    );
+                }
+            }
+        }
+
         // Apply per-session model override (#4898) before any manifest field is
         // read downstream (model catalog lookup, system prompt build, billing).
         // The pre-lock session snapshot already carries model_override; the
@@ -2726,21 +2787,11 @@ impl LibreFangKernel {
                     serde_json::Value::String(ctx.channel.clone()),
                 );
             }
-            // Approval-flow group-chat support: stamp the raw chat_id
-            // alongside sender_channel + sender_user_id so the
-            // runtime's tool dispatch can thread it into
-            // `DeferredToolExecution.chat_id` for the bridge's
-            // approval listener to route `[Approve] [Deny]` keyboards
-            // back to the originating conversation (group or DM)
-            // instead of always to the human's DM with the bot.
-            if let Some(ref cid) = ctx.chat_id {
-                if !cid.is_empty() {
-                    manifest.metadata.insert(
-                        "sender_chat_id".to_string(),
-                        serde_json::Value::String(cid.clone()),
-                    );
-                }
-            }
+            // sender_chat_id is already stamped earlier in this function (right
+            // after default-model resolution) so it is present before any
+            // downstream manifest read; the approval-flow group-chat routing
+            // (threading it into `DeferredToolExecution.chat_id`) relies on that
+            // single stamp.
             // #6443: stamp the bot account / tenant the turn arrived on so the
             // runtime can reject a cross-account (cross-tenant) `channel_send`.
             // Empty account ids are dropped — an empty stamp would disable the

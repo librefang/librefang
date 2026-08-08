@@ -1018,12 +1018,33 @@ fn build_channel_section(
         }
     }
 
-    // Tell the agent it can send rich media via channel_send when the tool is available.
+    // Tell the agent it can send rich media via channel_send when the tool
+    // is available AND the channel is a real messaging adapter (not a kernel
+    // system channel like "webui" / "cron" / "autonomous"). System channels
+    // deliver files and media through the normal response stream — telling
+    // the agent to use channel_send to "webui" with a client IP as recipient
+    // would fail (no adapter) and push the agent to fall back to Telegram.
+    let is_system_channel = matches!(channel, "webui" | "cron" | "autonomous");
     let has_channel_send = granted_tools
         .iter()
         .any(|t| t == "channel_send" || t == "*");
     if has_channel_send {
-        if let Some(id) = sender_id {
+        if is_system_channel {
+            if channel == "webui" {
+                section.push_str(
+                    "\n\nYou are on the LibreFang web interface. Files, images, and media you \
+                     generate are shown to the user automatically in your response — do NOT use \
+                     `channel_send`.",
+                );
+            } else {
+                section.push_str(
+                    "\n\nThis is a background run (no interactive chat is attached, so there is no \
+                     live user watching this response). `channel_send` cannot reach this system \
+                     channel — do NOT use it here. To reach a person, target a real messaging \
+                     channel/recipient explicitly, or use `notify_owner` if available.",
+                );
+            }
+        } else if let Some(id) = sender_id {
             section.push_str(&format!(
                 "\n\nTo send images, files, polls, or other media to the user, use the `channel_send` tool \
                  with channel=\"{channel}\" and recipient=\"{id}\". Set `image_url` for photos, \
