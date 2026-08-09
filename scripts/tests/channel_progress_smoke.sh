@@ -52,7 +52,8 @@ SPAWNED_AGENT=""
 cleanup() {
   if [[ -n "$SPAWNED_AGENT" ]]; then
     echo "[smoke] removing temporary agent $SPAWNED_AGENT"
-    curl -fsS -X DELETE "$API_BASE/agents/${SPAWNED_AGENT}" >/dev/null 2>&1 || true
+    curl -fsS --max-time 5 -X DELETE \
+      "$API_BASE/agents/${SPAWNED_AGENT}" >/dev/null 2>&1 || true
   fi
   echo "[smoke] cleaning up daemon"
   "$BIN" stop 2>/dev/null || true
@@ -123,7 +124,7 @@ tools = ["web_search"]
 print(json.dumps({"manifest_toml": manifest}))
 PY
 )
-AGENT_ID=$(curl -fsS -X POST "$API_BASE/agents" \
+AGENT_ID=$(curl -fsS --max-time 30 -X POST "$API_BASE/agents" \
   -H "Content-Type: application/json" \
   -d "$SPAWN_BODY" \
   | python3 -c "import sys,json; print(json.load(sys.stdin).get('agent_id', ''))")
@@ -134,9 +135,8 @@ fi
 SPAWNED_AGENT="$AGENT_ID"
 echo "[smoke] spawned temporary agent $AGENT_ID ($SPAWN_NAME, $PROVIDER/$MODEL)"
 
-# Send a message likely to trigger web_search. Result body itself is not
-# the assertion — we ALSO check the agent's last conversation log for the
-# 🔧 marker, which is what gets injected into channel replies.
+# Send a message likely to trigger web_search. The response text is not the
+# assertion; the persisted structured tool record is.
 echo "[smoke] sending message"
 curl -fsS -m 60 -X POST "$API_BASE/agents/${AGENT_ID}/message" \
   -H "Content-Type: application/json" \
@@ -145,11 +145,41 @@ curl -fsS -m 60 -X POST "$API_BASE/agents/${AGENT_ID}/message" \
 
 # The /message endpoint returns the cleaned final text, while the session keeps
 # the structured tool event that channel progress renderers consume.
-SESSION_LOG=$(curl -fsS "$API_BASE/agents/${AGENT_ID}/session")
-if grep -q '"tool_use"' <<< "$SESSION_LOG"; then
-  echo "[smoke] kernel emitted tool_use events"
+SESSION_LOG=$(curl -fsS --max-time 10 "$API_BASE/agents/${AGENT_ID}/session")
+if python3 -c '
+import json
+import sys
+
+try:
+    session = json.load(sys.stdin)
+except (json.JSONDecodeError, OSError) as exc:
+    print(f"ERROR: invalid session response: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+messages = session.get("messages", [])
+if not isinstance(messages, list):
+    print("ERROR: session response messages is not an array", file=sys.stderr)
+    sys.exit(2)
+
+def has_web_search(message):
+    if not isinstance(message, dict):
+        return False
+    tools = message.get("tools", [])
+    return isinstance(tools, list) and any(
+        isinstance(tool, dict) and tool.get("name") == "web_search"
+        for tool in tools
+    )
+
+found = any(has_web_search(message) for message in messages)
+sys.exit(0 if found else 1)
+' <<< "$SESSION_LOG"; then
+  echo "[smoke] kernel persisted a web_search tool record"
 else
-  echo "ERROR: no tool_use observed — channel progress cannot be rendered" >&2
+  session_check_status=$?
+  if [[ "$session_check_status" -eq 2 ]]; then
+    exit 1
+  fi
+  echo "ERROR: no web_search tool record observed — channel progress cannot be rendered" >&2
   echo "       rerun with a model that reliably follows tool-use instructions" >&2
   exit 1
 fi
