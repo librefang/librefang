@@ -156,6 +156,9 @@ except (json.JSONDecodeError, OSError) as exc:
     print(f"ERROR: invalid session response: {exc}", file=sys.stderr)
     sys.exit(2)
 
+if not isinstance(session, dict):
+    print("ERROR: session response is not an object", file=sys.stderr)
+    sys.exit(2)
 messages = session.get("messages", [])
 if not isinstance(messages, list):
     print("ERROR: session response messages is not an array", file=sys.stderr)
