@@ -11,6 +11,12 @@ use serde_json::{json, Value};
 const PARSE_MODE_HTML: &str = "HTML";
 /// Bot API caption hard limit (per <https://core.telegram.org/bots/api#sendphoto>). Captions longer than this are truncated to fit before we hit the wire — Telegram rejects oversize captions with `MESSAGE_CAPTION_TOO_LONG` and there is no graceful fallback.
 const CAPTION_LIMIT_UTF16: usize = 1024;
+
+fn parse_message_id(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()))
+}
 /// Maximum FileData byte count we'll accept on the wire before erroring. Sized at 64 MiB — comfortably above cloud Bot API's 50 MB document ceiling and well below any plausible RAM exhaustion budget. Anything larger is either a producer bug or an attempt to OOM the sidecar.
 const FILE_DATA_BYTE_CAP: usize = 64 * 1024 * 1024;
 
@@ -424,9 +430,12 @@ pub async fn dispatch_content(
         "EditInteractive" => {
             let message_id = payload
                 .get("message_id")
-                .and_then(Value::as_str)
-                .and_then(|s| s.parse::<i64>().ok())
-                .ok_or_else(|| Error::Other("EditInteractive.message_id missing".into()))?;
+                .and_then(parse_message_id)
+                .ok_or_else(|| {
+                    Error::Other(
+                        "EditInteractive.message_id must be an integer or decimal string".into(),
+                    )
+                })?;
             let text = payload.get("text").and_then(Value::as_str).unwrap_or("");
             let keyboard = build_inline_keyboard(payload);
             let formatted = format_and_sanitize(text);
@@ -453,9 +462,12 @@ pub async fn dispatch_content(
         "DeleteMessage" => {
             let message_id = payload
                 .get("message_id")
-                .and_then(Value::as_str)
-                .and_then(|s| s.parse::<i64>().ok())
-                .ok_or_else(|| Error::Other("DeleteMessage.message_id missing".into()))?;
+                .and_then(parse_message_id)
+                .ok_or_else(|| {
+                    Error::Other(
+                        "DeleteMessage.message_id must be an integer or decimal string".into(),
+                    )
+                })?;
             client.delete_message(chat_id, message_id).await?;
         }
         "MediaGroup" => {
@@ -661,5 +673,15 @@ mod tests {
             let error = required_coordinate(&malformed, "lat").expect_err("invalid latitude");
             assert!(error.to_string().contains("Location.lat"));
         }
+    }
+
+    #[test]
+    fn message_id_accepts_integer_or_decimal_string() {
+        assert_eq!(parse_message_id(&json!(12345)), Some(12345));
+        assert_eq!(parse_message_id(&json!("12345")), Some(12345));
+        assert_eq!(parse_message_id(&json!(-7)), Some(-7));
+        assert_eq!(parse_message_id(&json!(12.5)), None);
+        assert_eq!(parse_message_id(&json!("9223372036854775808")), None);
+        assert_eq!(parse_message_id(&Value::Null), None);
     }
 }
