@@ -31,6 +31,7 @@ dependencies = []
 dev = [
     "pytest",
     "pytest-asyncio",
+    "setuptools>=61.0",
 ]
 
 [project.urls]
