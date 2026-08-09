@@ -159,9 +159,10 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<String> {
 
     while !remaining.is_empty() {
         let carry_units = utf16_len(&carry);
-        // Degenerate: carry alone is too big. Emit it on its own and reset; in practice this never happens because tag prefixes are short.
+        // Degenerate: carry is formatting-only and cannot fit by itself.
+        // Drop it rather than violating the caller's hard wire limit.
         if carry_units >= limit {
-            out.push(std::mem::take(&mut carry));
+            carry.clear();
             continue;
         }
         if carry_units + utf16_len(remaining) <= limit {
@@ -197,9 +198,10 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<String> {
         let trimmed = adjust_html_entity_boundary(trimmed);
         let trimmed_len = trimmed.len();
         // Choose what to emit: either the entity/tag-trimmed combined slice (normal path) or, if that left no progress to make on `remaining`, the carry plus one forced unit of input. Either way we run the SAME tag-rebalancing on the emitted text so open tags from `carry` get matching close tags appended and propagate forward via `next_carry`.
-        let emitted_text: String;
-        let consumed_from_input: usize;
-        if trimmed_len <= carry.len() {
+        let mut emitted_text: String;
+        let mut consumed_from_input: usize;
+        let degenerate_progress = trimmed_len <= carry.len();
+        if degenerate_progress {
             // Degenerate: budget too small for any safe progress. If `remaining` starts with `<` AND the matching `>` is within `limit` UTF-16 units, consume the whole tag so the next chunk reopens cleanly — emitting a bare leading `<` would produce HTML Telegram cannot parse. If the tag is unmatched (no `>`) or runs past `limit` UTF-16 units (a degenerate or adversarial mega-attribute), fall back to forcing one Unicode scalar of progress; the chunk will be unbalanced and the parse-entities fallback will rescue delivery as plain text.
             //
             // Comparison must be in UTF-16 code units, not bytes — for ASCII tag content they coincide but `<tg-emoji emoji-id="…">` can carry non-ASCII attrs that make the byte count exceed the UTF-16 unit count.
@@ -228,13 +230,51 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<String> {
             emitted_text = trimmed.to_string();
             consumed_from_input = trimmed_len - carry.len();
         }
-        let stack = unclosed_tags(&emitted_text);
-        let close_suffix: String = stack.iter().rev().map(|(n, _)| format!("</{n}>")).collect();
-        let next_carry: String = stack.iter().map(|(_, full)| full.clone()).collect();
+        let mut stack = unclosed_tags(&emitted_text);
+        let mut close_suffix: String = stack.iter().rev().map(|(n, _)| format!("</{n}>")).collect();
+        let mut next_carry: String = stack.iter().map(|(_, full)| full.clone()).collect();
+        while utf16_len(&emitted_text).saturating_add(utf16_len(&close_suffix)) > limit {
+            // NEW_TAG_RESERVE is only a first-pass heuristic. Recompute the
+            // exact suffix for the selected prefix, then shrink the input
+            // until both the body and its balancing closes fit. Removing a
+            // closing tag can itself increase the required suffix, so repeat
+            // until the exact tag stack stabilizes within the limit.
+            let previous_consumed = consumed_from_input;
+            let available_input = limit
+                .saturating_sub(utf16_len(&carry))
+                .saturating_sub(utf16_len(&close_suffix));
+            let reduced = truncate_to_utf16_limit(&remaining[..previous_consumed], available_input);
+            let mut combined = String::with_capacity(carry.len() + reduced.len());
+            combined.push_str(&carry);
+            combined.push_str(reduced);
+            let reduced = adjust_html_entity_boundary(strip_mid_tag(&combined));
+            let reduced_consumed = reduced.len().saturating_sub(carry.len());
+
+            if reduced_consumed == 0 || reduced_consumed >= previous_consumed {
+                // Carry plus its exact close suffix can consume the whole
+                // budget at tiny/adversarial limits. Formatting cannot be
+                // represented there, so retain progress and fall back to the
+                // selected input's plain text rather than emitting oversized
+                // wire data or looping forever.
+                let plain = RE_TAG.replace_all(&remaining[..previous_consumed], "");
+                emitted_text = truncate_to_utf16_limit(&plain, limit).to_string();
+                close_suffix.clear();
+                next_carry.clear();
+                break;
+            }
+
+            emitted_text = reduced.to_string();
+            consumed_from_input = reduced_consumed;
+            stack = unclosed_tags(&emitted_text);
+            close_suffix = stack.iter().rev().map(|(n, _)| format!("</{n}>")).collect();
+            next_carry = stack.iter().map(|(_, full)| full.clone()).collect();
+        }
         let mut emit = String::with_capacity(emitted_text.len() + close_suffix.len());
         emit.push_str(&emitted_text);
         emit.push_str(&close_suffix);
-        out.push(emit);
+        if !emit.is_empty() {
+            out.push(emit);
+        }
         carry = next_carry;
         remaining = &remaining[consumed_from_input..];
     }
@@ -333,7 +373,9 @@ mod tests {
     fn tag_carry_preserves_anchor_href_with_attributes() {
         // Anchor with attributes — the carry must preserve `href="..."` verbatim when reopening.
         let s = format!("<a href=\"https://example.com\">{}</a>", "x".repeat(40));
-        let chunks = split_to_utf16_chunks(&s, 30);
+        // The opening tag (30 units) plus its required `</a>` suffix must fit
+        // before the chunker can preserve formatting.
+        let chunks = split_to_utf16_chunks(&s, 40);
         assert!(chunks.len() >= 2);
         assert!(
             chunks[0].ends_with("</a>"),
@@ -409,6 +451,44 @@ mod tests {
                 &c[..c.len().min(80)]
             );
         }
+    }
+
+    #[test]
+    fn long_tag_close_suffixes_are_counted_exactly() {
+        let inner = "x".repeat(4090);
+        let s = format!(
+            "<tg-emoji emoji-id=\"1\"><tg-emoji emoji-id=\"2\">{inner}</tg-emoji></tg-emoji>"
+        );
+        let chunks = split_to_utf16_chunks(&s, TELEGRAM_MSG_LIMIT);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(
+                utf16_len(chunk) <= TELEGRAM_MSG_LIMIT,
+                "chunk exceeded Telegram limit: {}",
+                utf16_len(chunk)
+            );
+        }
+        let reconstructed = chunks
+            .iter()
+            .map(|chunk| RE_TAG.replace_all(chunk, ""))
+            .collect::<String>();
+        assert_eq!(reconstructed, inner);
+    }
+
+    #[test]
+    fn degenerate_complete_tag_never_exceeds_limit_after_balancing() {
+        let limit = 16;
+        let chunks = split_to_utf16_chunks("<code class=\"\">xx", limit);
+        assert!(
+            chunks.iter().all(|chunk| utf16_len(chunk) <= limit),
+            "oversized chunks: {chunks:?}"
+        );
+    }
+
+    #[test]
+    fn scalar_wider_than_limit_is_consumed_without_oversized_emit() {
+        let chunks = split_to_utf16_chunks("😀😀", 1);
+        assert!(chunks.is_empty());
     }
 
     #[test]
