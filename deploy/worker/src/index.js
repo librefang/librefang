@@ -120,8 +120,8 @@ async function handleDeploy(request, fetchImpl) {
     });
 
     if (!machineRes.ok) {
-      // This request contains the caller's provider key. Never reflect Fly's
-      // raw validation body because it may echo the submitted machine config.
+      // This request contains the caller's provider key.
+      // Never reflect Fly's raw validation body because it may echo the submitted machine config.
       return json(
         { error: 'Failed to create machine. Check your Fly configuration and try again.' },
         500,
