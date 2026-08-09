@@ -215,6 +215,17 @@ mod tests {
         assert!(is_private_url("http://[2002:7f00:1::]/admin"));
         assert!(is_private_url("http://2130706433/admin"));
         assert!(is_private_url("http://0x7f000001/admin"));
+        assert!(is_private_url("http://0177.0.0.1/admin"));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_ipv6_unique_local_and_link_local() {
+        // fc00::/7 (ULA, RFC 4193) and fe80::/10 (link-local) are matched by
+        // `crate::web_fetch::is_private_ip`'s IPv6 branch.
+        assert!(is_private_url("http://[fc00::1]/admin"));
+        assert!(is_private_url("http://[fdff:ffff:ffff:ffff::1]/admin"));
+        assert!(is_private_url("http://[fe80::1]/admin"));
+        assert!(!is_private_url("http://[2001:4860:4860::8888]/admin")); // public (Google DNS)
     }
 
     #[test]
