@@ -33,9 +33,9 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		id, ok := librefang.ToMap(agent)["id"].(string)
+		id, ok := librefang.ToMap(agent)["agent_id"].(string)
 		if !ok || id == "" {
-			log.Fatal("spawned agent response is missing a valid id")
+			log.Fatal("spawned agent response is missing a valid agent_id")
 		}
 		agentID = id
 		fmt.Println("Created agent:", agentID)
