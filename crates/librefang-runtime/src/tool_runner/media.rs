@@ -1387,10 +1387,8 @@ mod transcribe_window_tests {
     /// than the last fragment — otherwise a caller could not verify what it
     /// ended up with.
     ///
-    /// The separator is the load-bearing part. A window boundary lands
-    /// mid-sentence by design and each window arrives already trimmed, so
-    /// without it the last word of one window fuses to the first of the next
-    /// at every boundary — the common case, not an edge case.
+    /// The separator is the load-bearing part.
+    /// A window boundary lands mid-sentence by design and each window arrives already trimmed, so without it the last word of one window fuses to the first of the next at every boundary — the common case, not an edge case.
     #[tokio::test]
     async fn windows_append_into_one_transcript() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1442,9 +1440,8 @@ mod transcribe_window_tests {
         assert_eq!(on_disk, "resumed");
     }
 
-    /// Walk termination, table-driven. These are the branches that decide
-    /// whether a caller stops, loops, or silently skips audio, and none of
-    /// them is reachable through the tool without a live provider.
+    /// Walk termination, table-driven.
+    /// These are the branches that decide whether a caller stops, loops, or silently skips audio, and none of them is reachable through the tool without a live provider.
     #[test]
     fn window_continuation_decides_when_the_walk_stops() {
         let w = |max_secs| crate::media_understanding::MediaWindow {

@@ -2522,10 +2522,8 @@ mod tests {
 
     // ── windowed transcription (#6748) ──────────────────────────────────
     //
-    // These pin the two facts a caller walks a long recording on: the window
-    // ffmpeg cut, and how much of the recording it actually covered. Both are
-    // read back out of the produced bytes rather than assumed, because a seek
-    // lands on a keyframe and a window past the end of the media is short.
+    // These pin the two facts a caller walks a long recording on: the window ffmpeg cut, and how much of the recording it actually covered.
+    // Both are read back out of the produced bytes rather than assumed, because a seek lands on a keyframe and a window past the end of the media is short.
 
     /// Generate `secs` seconds of tone as an Ogg/Opus stream at the same
     /// 48 kHz mono target the extraction paths produce.
