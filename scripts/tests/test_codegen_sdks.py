@@ -63,6 +63,7 @@ def main():
     assert_in("async invokeTool(name, data, query)", js, "js-invoke_tool-sig")
     assert_in("InvokeTool(name string, data map[string]interface{}, query map[string]string)", go, "go-invoke_tool-sig")
     assert_in("pub async fn invoke_tool(&self, name: &str, data: Value, agent_id: Option<&str>)", rs, "rust-invoke_tool-sig")
+    assert_in('#[tokio::main(flavor = "current_thread")]', rs, "rust-doc-current-thread-runtime")
 
     # Stream correctness
     assert_in("bufio.NewReaderSize", go, "go-bufio-reader")
