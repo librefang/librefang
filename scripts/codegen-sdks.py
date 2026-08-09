@@ -726,7 +726,7 @@ _RUST_LIB_HEADER = """\
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -741,6 +741,9 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
 async fn do_req(
     client: &Client,
     base_url: &str,
@@ -750,7 +753,9 @@ async fn do_req(
     query: &[(&str, Option<&str>)],
 ) -> Result<Value> {
     let url = format!("{}{}", base_url, path);
-    let req = client.request(method, &url);
+    let req = client
+        .request(method, &url)
+        .timeout(DEFAULT_REQUEST_TIMEOUT);
     let filtered: Vec<(&str, &str)> = query
         .iter()
         .filter_map(|(k, v)| v.map(|vv| (*k, vv)))
@@ -873,7 +878,10 @@ def gen_rust(tag_ops: dict) -> str:
     out += "impl LibreFang {\n"
     out += "    pub fn new(base_url: impl Into<String>) -> Self {\n"
     out += "        let base_url = base_url.into().trim_end_matches('/').to_string();\n"
-    out += "        let client = Client::new();\n"
+    out += "        let client = Client::builder()\n"
+    out += "            .connect_timeout(DEFAULT_CONNECT_TIMEOUT)\n"
+    out += "            .build()\n"
+    out += '            .expect("failed to build HTTP client");\n'
     out += "        Self {\n"
     for tag in tags:
         attr = _tag_attr(tag)

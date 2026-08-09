@@ -70,6 +70,8 @@ def main():
     assert_in("Vec<u8>", rs, "rust-byte-buffer")
     assert_not_in("from_utf8_lossy(&chunk)", rs, "rust-no-lossy-chunk")
     assert_in('"status": status', rs, "rust-error-event-status")
+    assert_in(".connect_timeout(DEFAULT_CONNECT_TIMEOUT)", rs, "rust-connect-timeout")
+    assert_in(".timeout(DEFAULT_REQUEST_TIMEOUT)", rs, "rust-request-timeout")
     assert_in('"status": resp.StatusCode', go, "go-error-event-status")
 
     # SSE line-size cap
