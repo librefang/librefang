@@ -4,7 +4,7 @@
 //!
 //! ```ignore
 //! use async_trait::async_trait;
-//! use librefang_sidecar::{run_stdio, EmitFn, SendCommand, SidecarAdapter, events};
+//! use librefang_sidecar::{run_stdio, SendCommand, SidecarAdapter};
 //!
 //! struct MyAdapter;
 //!
