@@ -504,9 +504,9 @@ export const serializeManifestForm = (
     const body: string[] = [];
     writeNumberScalar(body, "max_iterations", parseInteger(form.autonomous.max_iterations));
     writeNumberScalar(body, "max_restarts", parseInteger(form.autonomous.max_restarts));
-    writeNumberScalar(body, "heartbeat_interval_secs", parseInteger(form.autonomous.heartbeat_interval_secs));
+    writeIntegerScalar(body, "heartbeat_interval_secs", parseUnsignedTomlInteger(form.autonomous.heartbeat_interval_secs));
     writeNumberScalar(body, "heartbeat_timeout_secs", parseInteger(form.autonomous.heartbeat_timeout_secs));
-    writeNumberScalar(body, "heartbeat_keep_recent", parseInteger(form.autonomous.heartbeat_keep_recent));
+    writeIntegerScalar(body, "heartbeat_keep_recent", parseUnsignedTomlInteger(form.autonomous.heartbeat_keep_recent));
     writeStringScalar(body, "heartbeat_channel", form.autonomous.heartbeat_channel.trim());
     writeStringScalar(body, "quiet_hours", form.autonomous.quiet_hours.trim());
     lines.push("", "[autonomous]", ...body);
@@ -608,7 +608,7 @@ const renderSchedule = (s: ManifestFormState["schedule"]): string => {
     case "proactive":
       return `schedule = { proactive = { conditions = ${tomlArray(s.conditions)} } }`;
     case "continuous": {
-      const interval = parseInteger(s.check_interval_secs) ?? Number(SCHEDULE_DEFAULT_INTERVAL);
+      const interval = parseUnsignedTomlInteger(s.check_interval_secs) ?? SCHEDULE_DEFAULT_INTERVAL;
       return `schedule = { continuous = { check_interval_secs = ${interval} } }`;
     }
   }
@@ -748,6 +748,12 @@ const asStringArray = (v: unknown): string[] => {
   if (!Array.isArray(v)) return [];
   return v.filter((x): x is string => typeof x === "string");
 };
+const containsBigInt = (value: unknown): boolean => {
+  if (typeof value === "bigint") return true;
+  if (Array.isArray(value)) return value.some(containsBigInt);
+  if (isTomlTable(value)) return Object.values(value).some(containsBigInt);
+  return false;
+};
 const asEnum = <T extends readonly string[]>(
   v: unknown,
   allowed: T,
@@ -768,6 +774,17 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
       return { ok: false, message: e.message, line: e.line, column: e.column };
     }
     return { ok: false, message: e instanceof Error ? e.message : String(e) };
+  }
+
+  if (
+    isTomlTable(parsed.response_format) &&
+    asString(parsed.response_format.type) === "json_schema" &&
+    containsBigInt(parsed.response_format.schema)
+  ) {
+    return {
+      ok: false,
+      message: "json_schema_unsafe_integer",
+    };
   }
 
   const form = emptyManifestForm();

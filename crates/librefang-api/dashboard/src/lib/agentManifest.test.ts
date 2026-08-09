@@ -452,6 +452,42 @@ max_network_bytes_per_hour = 9223372036854775807
     expect(reparsed.form.resources).toMatchObject(parsed.form.resources);
   });
 
+  it("preserves large continuous and autonomous interval values", () => {
+    const source = `name = "a"
+schedule = { continuous = { check_interval_secs = 9007199254740993 } }
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+
+[autonomous]
+heartbeat_interval_secs = 9223372036854775807
+heartbeat_keep_recent = 9007199254740994
+`;
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const serialized = serializeManifestForm(parsed.form, parsed.extras);
+    expect(serialized).toContain("check_interval_secs = 9007199254740993");
+    expect(serialized).toContain("heartbeat_interval_secs = 9223372036854775807");
+    expect(serialized).toContain("heartbeat_keep_recent = 9007199254740994");
+  });
+
+  it("fails closed when a JSON schema contains an unsafe BigInt", () => {
+    const parsed = parseManifestToml(`name = "a"
+response_format = { type = "json_schema", name = "score", schema = { maximum = 9007199254740993 } }
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+`);
+
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.message).toBe("json_schema_unsafe_integer");
+  });
+
   it("rejects negative and out-of-range integers in number fields", () => {
     // Codex P2 regression: parseInteger used to accept any JS number,
     // including negatives (which u32/u64 deserializers reject) and
