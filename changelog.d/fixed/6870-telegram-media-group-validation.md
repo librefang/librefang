@@ -1,0 +1,1 @@
+- Rejected malformed non-object Telegram media-group entries instead of silently dropping them from the outgoing group. (@houko)

@@ -545,9 +545,9 @@ pub async fn dispatch_content(
 fn build_media_group(items: &[Value]) -> Result<Value> {
     let mut out: Vec<Value> = Vec::new();
     for item in items {
-        let Some(obj) = item.as_object() else {
-            continue;
-        };
+        let obj = item
+            .as_object()
+            .ok_or_else(|| Error::Other("MediaGroup item is not a JSON object".into()))?;
         if obj.len() != 1 {
             return Err(Error::Other(format!(
                 "MediaGroup item must be a single-key externally-tagged object, got {} keys",
@@ -646,6 +646,19 @@ fn looks_like_ogg_opus(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_group_rejects_non_object_items() {
+        let error = build_media_group(&[
+            json!({"Image": {"url": "https://example.com/one.jpg"}}),
+            json!("not-an-object"),
+        ])
+        .expect_err("malformed media group item must fail");
+
+        assert!(error
+            .to_string()
+            .contains("MediaGroup item is not a JSON object"));
+    }
 
     #[test]
     fn location_coordinates_are_required_numbers() {
