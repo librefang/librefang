@@ -144,7 +144,7 @@ impl Content {
         question: impl Into<String>,
         options: Vec<String>,
         is_quiz: bool,
-        correct_option_id: Option<u32>,
+        correct_option_id: Option<u8>,
         explanation: Option<String>,
     ) -> Value {
         let mut p = json!({"question": question.into(), "options": options, "is_quiz": is_quiz});
@@ -157,7 +157,7 @@ impl Content {
         json!({"Poll": p})
     }
 
-    pub fn poll_answer(poll_id: impl Into<String>, option_ids: Vec<i64>) -> Value {
+    pub fn poll_answer(poll_id: impl Into<String>, option_ids: Vec<u8>) -> Value {
         json!({"PollAnswer": {"poll_id": poll_id.into(), "option_ids": option_ids}})
     }
 
