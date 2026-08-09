@@ -148,10 +148,9 @@ fn copy_guest_memory(ptr: u32, len: u32) -> Option<Vec<u8>> {
         return Some(Vec::new());
     }
 
-    // SAFETY: the host contract returns memory obtained from this module's
-    // `alloc` export. The checked range is non-null and wholly contained in
-    // current linear memory. The bytes are copied before this function
-    // returns, so no reference escapes or survives memory growth.
+    // SAFETY: the host contract returns memory obtained from this module's `alloc` export.
+    // The checked range is non-null and wholly contained in current linear memory.
+    // The bytes are copied before this function returns, so no reference escapes or survives memory growth.
     Some(unsafe { core::slice::from_raw_parts(range.start as *const u8, range.len()).to_vec() })
 }
 
@@ -263,9 +262,8 @@ pub fn host_call(method: &str, params: Value) -> Result<Value, HostError> {
 pub fn log(level: LogLevel, message: &str) {
     #[cfg(target_arch = "wasm32")]
     unsafe {
-        // SAFETY: `message` is a live `&str` whose backing bytes remain valid
-        // for this synchronous call. The host copies the bytes and does not
-        // retain the pointer.
+        // SAFETY: `message` is a live `&str` whose backing bytes remain valid for this synchronous call.
+        // The host copies the bytes and does not retain the pointer.
         imports::host_log(level as i32, message.as_ptr() as i32, message.len() as i32);
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -401,9 +399,8 @@ pub mod __rt {
             let input = if range.is_empty() {
                 &[]
             } else {
-                // SAFETY: the range is non-null and contained in the current
-                // linear memory. The host initialized it immediately before
-                // this synchronous `execute` call.
+                // SAFETY: the range is non-null and contained in the current linear memory.
+                // The host initialized it immediately before this synchronous `execute` call.
                 unsafe { core::slice::from_raw_parts(range.start as *const u8, range.len()) }
             };
             let output = run(input, handler);
