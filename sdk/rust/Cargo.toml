@@ -1,5 +1,10 @@
 [workspace]
 
+[features]
+default = ["default-tls"]
+default-tls = ["reqwest/default-tls"]
+rustls-tls = ["reqwest/rustls-tls"]
+
 [package]
 name = "librefang"
 version = "2026.7.31"
@@ -11,7 +16,7 @@ keywords = ["librefang", "agent", "ai"]
 authors = ["LibreFang Team"]
 
 [dependencies]
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "charset", "http2", "system-proxy"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 thiserror = "1"
