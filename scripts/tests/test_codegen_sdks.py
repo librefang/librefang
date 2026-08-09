@@ -63,6 +63,8 @@ def main():
     assert_in("async invokeTool(name, data, query)", js, "js-invoke_tool-sig")
     assert_in("InvokeTool(name string, data map[string]interface{}, query map[string]string)", go, "go-invoke_tool-sig")
     assert_in("pub async fn invoke_tool(&self, name: &str, data: Value, agent_id: Option<&str>)", rs, "rust-invoke_tool-sig")
+    assert_in("Self::with_client(base_url, Client::new())", rs, "rust-default-client-delegation")
+    assert_in("pub fn with_client(base_url: impl Into<String>, client: Client) -> Self", rs, "rust-custom-client-constructor")
 
     # Stream correctness
     assert_in("bufio.NewReaderSize", go, "go-bufio-reader")
