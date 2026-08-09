@@ -370,6 +370,7 @@
       "preview_markdown": "Markdown",
       "switch_to_toml": "Przełącz na TOML →",
       "toml_parse_error": "Błąd parsowania TOML: {{msg}}",
+      "json_schema_unsafe_integer": "Liczb całkowitych schematu JSON, których wartość bezwzględna przekracza 9 007 199 254 740 991, nie można bezpiecznie edytować w trybie wizualnym. Pozostaw ten manifest w trybie TOML.",
       "copy": "Skopiuj do schowka",
       "copied": "Skopiowano do schowka",
       "module": "Moduł",

@@ -370,6 +370,7 @@
       "preview_markdown": "Markdown",
       "switch_to_toml": "切换到 TOML →",
       "toml_parse_error": "TOML 解析错误：{{msg}}",
+      "json_schema_unsafe_integer": "JSON schema 中绝对值超过 9,007,199,254,740,991 的整数无法在可视化模式下安全编辑。请将此清单保持在 TOML 模式。",
       "copy": "复制到剪贴板",
       "copied": "已复制",
       "module": "模块",
