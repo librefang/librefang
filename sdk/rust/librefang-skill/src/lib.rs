@@ -106,6 +106,12 @@ pub fn unpack(packed: i64) -> (u32, u32) {
     ((packed >> 32) as u32, packed as u32)
 }
 
+/// Bytes per WASM linear-memory page, per the wasm spec (fixed, not
+/// configurable). Used to convert `memory_size` (page count) into a byte
+/// length for bounds checks.
+#[cfg(target_arch = "wasm32")]
+const WASM_PAGE_SIZE: usize = 64 * 1024;
+
 #[cfg(any(target_arch = "wasm32", test))]
 fn checked_guest_memory_range(
     ptr: u32,
@@ -140,8 +146,6 @@ fn checked_signed_guest_memory_range(
 
 #[cfg(target_arch = "wasm32")]
 fn copy_guest_memory(ptr: u32, len: u32) -> Option<Vec<u8>> {
-    const WASM_PAGE_SIZE: usize = 64 * 1024;
-
     let memory_len = core::arch::wasm32::memory_size::<0>().checked_mul(WASM_PAGE_SIZE)?;
     let range = checked_guest_memory_range(ptr, len, memory_len)?;
     if range.is_empty() {
@@ -391,7 +395,7 @@ pub mod __rt {
         #[cfg(target_arch = "wasm32")]
         {
             let memory_len = core::arch::wasm32::memory_size::<0>()
-                .checked_mul(64 * 1024)
+                .checked_mul(super::WASM_PAGE_SIZE)
                 .unwrap_or(0);
             let Some(range) = super::checked_signed_guest_memory_range(ptr, len, memory_len) else {
                 return pack(0, 0);
