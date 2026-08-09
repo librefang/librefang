@@ -33,16 +33,45 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+fn build_url<'a>(
+    client: &Client,
+    base_url: &str,
+    path_segments: impl IntoIterator<Item = &'a str>,
+) -> Result<reqwest::Url> {
+    let path_segments: Vec<&str> = path_segments.into_iter().collect();
+    if let Some(segment) = path_segments
+        .iter()
+        .copied()
+        .find(|segment| matches!(*segment, "." | ".."))
+    {
+        return Err(Error::Api {
+            status: 0,
+            body: format!("invalid path segment: {}", segment),
+        });
+    }
+    let mut url = client.get(base_url).build()?.url().clone();
+    url.set_query(None);
+    url.set_fragment(None);
+    let mut segments = url.path_segments_mut().map_err(|_| Error::Api {
+        status: 0,
+        body: "base URL cannot contain path segments".to_string(),
+    })?;
+    segments.pop_if_empty();
+    segments.extend(path_segments);
+    drop(segments);
+    Ok(url)
+}
+
 async fn do_req(
     client: &Client,
     base_url: &str,
     method: reqwest::Method,
-    path: &str,
+    path_segments: &[&str],
     body: Option<Value>,
     query: &[(&str, Option<&str>)],
 ) -> Result<Value> {
-    let url = format!("{}{}", base_url, path);
-    let req = client.request(method, &url);
+    let url = build_url(client, base_url, path_segments.iter().copied())?;
+    let req = client.request(method, url);
     let filtered: Vec<(&str, &str)> = query
         .iter()
         .filter_map(|(k, v)| v.map(|vv| (*k, vv)))
@@ -72,16 +101,29 @@ async fn do_req(
 fn do_stream(
     client: Client,
     base_url: String,
-    path: String,
+    path_segments: Vec<String>,
     method: reqwest::Method,
     body: Option<Value>,
     query: Vec<(String, Option<String>)>,
 ) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
-        let url = format!("{}{}", base_url, path);
+        let url = match build_url(&client, &base_url, path_segments.iter().map(String::as_str)) {
+            Ok(url) => url,
+            Err(e) => {
+                let error = match e {
+                    Error::Api { status: 0, body } => body,
+                    other => other.to_string(),
+                };
+                let _ = tx.send(serde_json::json!({
+                    "error": error,
+                    "status": 0,
+                }));
+                return;
+            }
+        };
         let req = client
-            .request(method, &url)
+            .request(method, url)
             .header("Accept", "text/event-stream");
         let filtered: Vec<(String, String)> = query
             .into_iter()
@@ -251,7 +293,7 @@ impl A2AResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/a2a/agents".to_string(),
+            &["api", "a2a", "agents"],
             None,
             &[],
         )
@@ -263,7 +305,7 @@ impl A2AResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/a2a/agents/{}", id),
+            &["api", "a2a", "agents", id],
             None,
             &[],
         )
@@ -275,7 +317,7 @@ impl A2AResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/a2a/agents/{}/approve", id),
+            &["api", "a2a", "agents", id, "approve"],
             None,
             &[],
         )
@@ -287,7 +329,7 @@ impl A2AResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/a2a/discover".to_string(),
+            &["api", "a2a", "discover"],
             Some(data),
             &[],
         )
@@ -299,7 +341,7 @@ impl A2AResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/a2a/send".to_string(),
+            &["api", "a2a", "send"],
             Some(data),
             &[],
         )
@@ -311,7 +353,7 @@ impl A2AResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/a2a/tasks/{}/status", id),
+            &["api", "a2a", "tasks", id, "status"],
             None,
             &[("url", url)],
         )
@@ -345,7 +387,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/agents".to_string(),
+            &["api", "agents"],
             None,
             &[
                 ("q", q),
@@ -364,7 +406,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/agents".to_string(),
+            &["api", "agents"],
             Some(data),
             &[],
         )
@@ -376,7 +418,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/agents/bulk".to_string(),
+            &["api", "agents", "bulk"],
             Some(data),
             &[],
         )
@@ -388,7 +430,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &"/api/agents/bulk".to_string(),
+            &["api", "agents", "bulk"],
             None,
             &[],
         )
@@ -400,7 +442,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/agents/bulk/start".to_string(),
+            &["api", "agents", "bulk", "start"],
             Some(data),
             &[],
         )
@@ -412,7 +454,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/agents/bulk/stop".to_string(),
+            &["api", "agents", "bulk", "stop"],
             Some(data),
             &[],
         )
@@ -424,7 +466,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/agents/identities".to_string(),
+            &["api", "agents", "identities"],
             None,
             &[],
         )
@@ -436,7 +478,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/agents/identities/{}/reset", name),
+            &["api", "agents", "identities", name, "reset"],
             None,
             &[("confirm", confirm)],
         )
@@ -448,7 +490,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}", id),
+            &["api", "agents", id],
             None,
             &[],
         )
@@ -460,7 +502,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/agents/{}", id),
+            &["api", "agents", id],
             None,
             &[("confirm", confirm)],
         )
@@ -472,7 +514,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PATCH,
-            &format!("/api/agents/{}", id),
+            &["api", "agents", id],
             Some(data),
             &[],
         )
@@ -484,7 +526,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/channels", id),
+            &["api", "agents", id, "channels"],
             None,
             &[],
         )
@@ -496,7 +538,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/agents/{}/channels", id),
+            &["api", "agents", id, "channels"],
             Some(data),
             &[],
         )
@@ -508,7 +550,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/agents/{}/clone", id),
+            &["api", "agents", id, "clone"],
             Some(data),
             &[],
         )
@@ -520,7 +562,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PATCH,
-            &format!("/api/agents/{}/config", id),
+            &["api", "agents", id, "config"],
             Some(data),
             &[],
         )
@@ -532,7 +574,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/deliveries", id),
+            &["api", "agents", id, "deliveries"],
             None,
             &[],
         )
@@ -544,7 +586,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/events", id),
+            &["api", "agents", id, "events"],
             None,
             &[("limit", limit)],
         )
@@ -556,7 +598,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/files", id),
+            &["api", "agents", id, "files"],
             None,
             &[],
         )
@@ -568,7 +610,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/files/{}", id, filename),
+            &["api", "agents", id, "files", filename],
             None,
             &[],
         )
@@ -580,7 +622,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/agents/{}/files/{}", id, filename),
+            &["api", "agents", id, "files", filename],
             Some(data),
             &[],
         )
@@ -592,7 +634,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/agents/{}/files/{}", id, filename),
+            &["api", "agents", id, "files", filename],
             None,
             &[],
         )
@@ -604,7 +646,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/agents/{}/hand-runtime-config", id),
+            &["api", "agents", id, "hand-runtime-config"],
             None,
             &[],
         )
@@ -616,7 +658,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PATCH,
-            &format!("/api/agents/{}/hand-runtime-config", id),
+            &["api", "agents", id, "hand-runtime-config"],
             Some(data),
             &[],
         )
@@ -628,7 +670,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/agents/{}/history", id),
+            &["api", "agents", id, "history"],
             None,
             &[],
         )
@@ -640,7 +682,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PATCH,
-            &format!("/api/agents/{}/identity", id),
+            &["api", "agents", id, "identity"],
             Some(data),
             &[],
         )
@@ -652,7 +694,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/agents/{}/inject", id),
+            &["api", "agents", id, "inject"],
             Some(data),
             &[],
         )
@@ -670,7 +712,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/logs", id),
+            &["api", "agents", id, "logs"],
             None,
             &[("n", n), ("level", level), ("offset", offset)],
         )
@@ -682,7 +724,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/mcp_servers", id),
+            &["api", "agents", id, "mcp_servers"],
             None,
             &[],
         )
@@ -694,7 +736,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/agents/{}/mcp_servers", id),
+            &["api", "agents", id, "mcp_servers"],
             Some(data),
             &[],
         )
@@ -706,7 +748,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/agents/{}/message", id),
+            &["api", "agents", id, "message"],
             Some(data),
             &[],
         )
@@ -721,7 +763,13 @@ impl AgentsResource {
         do_stream(
             self.client.clone(),
             self.base_url.clone(),
-            format!("/api/agents/{}/message/stream", id),
+            vec![
+                "api".to_string(),
+                "agents".to_string(),
+                id.to_string(),
+                "message".to_string(),
+                "stream".to_string(),
+            ],
             reqwest::Method::POST,
             Some(data),
             Vec::new(),
@@ -733,7 +781,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/metrics", id),
+            &["api", "agents", id, "metrics"],
             None,
             &[],
         )
@@ -745,7 +793,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/agents/{}/mode", id),
+            &["api", "agents", id, "mode"],
             Some(data),
             &[],
         )
@@ -757,7 +805,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/agents/{}/model", id),
+            &["api", "agents", id, "model"],
             Some(data),
             &[],
         )
@@ -769,7 +817,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/agents/{}/push", id),
+            &["api", "agents", id, "push"],
             Some(data),
             &[],
         )
@@ -781,7 +829,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/agents/{}/reload", id),
+            &["api", "agents", id, "reload"],
             None,
             &[],
         )
@@ -793,7 +841,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/agents/{}/resume", id),
+            &["api", "agents", id, "resume"],
             None,
             &[],
         )
@@ -805,7 +853,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/runtime", id),
+            &["api", "agents", id, "runtime"],
             None,
             &[],
         )
@@ -817,7 +865,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/session", id),
+            &["api", "agents", id, "session"],
             None,
             &[("session_id", session_id)],
         )
@@ -829,7 +877,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/agents/{}/session/compact", id),
+            &["api", "agents", id, "session", "compact"],
             None,
             &[],
         )
@@ -845,7 +893,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/session/context", id),
+            &["api", "agents", id, "session", "context"],
             None,
             &[("session_id", session_id)],
         )
@@ -857,7 +905,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/agents/{}/session/reboot", id),
+            &["api", "agents", id, "session", "reboot"],
             None,
             &[],
         )
@@ -869,7 +917,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/agents/{}/session/reset", id),
+            &["api", "agents", id, "session", "reset"],
             None,
             &[],
         )
@@ -881,7 +929,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/sessions", id),
+            &["api", "agents", id, "sessions"],
             None,
             &[],
         )
@@ -893,7 +941,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/agents/{}/sessions", id),
+            &["api", "agents", id, "sessions"],
             Some(data),
             &[],
         )
@@ -905,7 +953,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/agents/{}/sessions/import", id),
+            &["api", "agents", id, "sessions", "import"],
             Some(data),
             &[],
         )
@@ -917,7 +965,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/sessions/{}/export", id, session_id),
+            &["api", "agents", id, "sessions", session_id, "export"],
             None,
             &[],
         )
@@ -929,7 +977,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/agents/{}/sessions/{}/stop", id, session_id),
+            &["api", "agents", id, "sessions", session_id, "stop"],
             None,
             &[],
         )
@@ -944,7 +992,14 @@ impl AgentsResource {
         do_stream(
             self.client.clone(),
             self.base_url.clone(),
-            format!("/api/agents/{}/sessions/{}/stream", id, session_id),
+            vec![
+                "api".to_string(),
+                "agents".to_string(),
+                id.to_string(),
+                "sessions".to_string(),
+                session_id.to_string(),
+                "stream".to_string(),
+            ],
             reqwest::Method::GET,
             None,
             Vec::new(),
@@ -956,7 +1011,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/agents/{}/sessions/{}/switch", id, session_id),
+            &["api", "agents", id, "sessions", session_id, "switch"],
             None,
             &[],
         )
@@ -973,7 +1028,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/sessions/{}/trajectory", id, session_id),
+            &["api", "agents", id, "sessions", session_id, "trajectory"],
             None,
             &[("format", format)],
         )
@@ -985,7 +1040,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/skills", id),
+            &["api", "agents", id, "skills"],
             None,
             &[],
         )
@@ -997,7 +1052,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/agents/{}/skills", id),
+            &["api", "agents", id, "skills"],
             Some(data),
             &[],
         )
@@ -1009,7 +1064,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/stats", id),
+            &["api", "agents", id, "stats"],
             None,
             &[],
         )
@@ -1021,7 +1076,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/agents/{}/stop", id),
+            &["api", "agents", id, "stop"],
             None,
             &[],
         )
@@ -1033,7 +1088,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/agents/{}/suspend", id),
+            &["api", "agents", id, "suspend"],
             None,
             &[],
         )
@@ -1045,7 +1100,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/tools", id),
+            &["api", "agents", id, "tools"],
             None,
             &[],
         )
@@ -1057,7 +1112,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/agents/{}/tools", id),
+            &["api", "agents", id, "tools"],
             Some(data),
             &[],
         )
@@ -1069,7 +1124,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/traces", id),
+            &["api", "agents", id, "traces"],
             None,
             &[],
         )
@@ -1081,7 +1136,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/agents/{}/upload", id),
+            &["api", "agents", id, "upload"],
             Some(data),
             &[],
         )
@@ -1093,7 +1148,7 @@ impl AgentsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/uploads/{}", file_id),
+            &["api", "uploads", file_id],
             None,
             &[],
         )
@@ -1119,7 +1174,7 @@ impl ApprovalsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/approvals".to_string(),
+            &["api", "approvals"],
             None,
             &[("limit", limit), ("offset", offset)],
         )
@@ -1131,7 +1186,7 @@ impl ApprovalsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/approvals".to_string(),
+            &["api", "approvals"],
             Some(data),
             &[],
         )
@@ -1149,7 +1204,7 @@ impl ApprovalsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/approvals/audit".to_string(),
+            &["api", "approvals", "audit"],
             None,
             &[
                 ("limit", limit),
@@ -1166,7 +1221,7 @@ impl ApprovalsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/approvals/batch".to_string(),
+            &["api", "approvals", "batch"],
             Some(data),
             &[],
         )
@@ -1178,7 +1233,7 @@ impl ApprovalsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/approvals/count".to_string(),
+            &["api", "approvals", "count"],
             None,
             &[],
         )
@@ -1190,7 +1245,7 @@ impl ApprovalsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/approvals/session/{}", session_id),
+            &["api", "approvals", "session", session_id],
             None,
             &[],
         )
@@ -1202,7 +1257,7 @@ impl ApprovalsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/approvals/session/{}/approve_all", session_id),
+            &["api", "approvals", "session", session_id, "approve_all"],
             Some(data),
             &[],
         )
@@ -1214,7 +1269,7 @@ impl ApprovalsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/approvals/session/{}/reject_all", session_id),
+            &["api", "approvals", "session", session_id, "reject_all"],
             None,
             &[],
         )
@@ -1226,7 +1281,7 @@ impl ApprovalsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/approvals/{}", id),
+            &["api", "approvals", id],
             None,
             &[],
         )
@@ -1238,7 +1293,7 @@ impl ApprovalsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/approvals/{}/approve", id),
+            &["api", "approvals", id, "approve"],
             Some(data),
             &[],
         )
@@ -1250,7 +1305,7 @@ impl ApprovalsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/approvals/{}/modify", id),
+            &["api", "approvals", id, "modify"],
             Some(data),
             &[],
         )
@@ -1262,7 +1317,7 @@ impl ApprovalsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/approvals/{}/reject", id),
+            &["api", "approvals", id, "reject"],
             None,
             &[],
         )
@@ -1288,7 +1343,7 @@ impl AuthResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/auth/callback".to_string(),
+            &["api", "auth", "callback"],
             None,
             &[],
         )
@@ -1300,7 +1355,7 @@ impl AuthResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/auth/callback".to_string(),
+            &["api", "auth", "callback"],
             Some(data),
             &[],
         )
@@ -1312,7 +1367,7 @@ impl AuthResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/auth/change-password".to_string(),
+            &["api", "auth", "change-password"],
             Some(data),
             &[],
         )
@@ -1324,7 +1379,7 @@ impl AuthResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/auth/dashboard-check".to_string(),
+            &["api", "auth", "dashboard-check"],
             None,
             &[],
         )
@@ -1336,7 +1391,7 @@ impl AuthResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/auth/dashboard-login".to_string(),
+            &["api", "auth", "dashboard-login"],
             Some(data),
             &[],
         )
@@ -1348,7 +1403,7 @@ impl AuthResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/auth/introspect".to_string(),
+            &["api", "auth", "introspect"],
             Some(data),
             &[],
         )
@@ -1360,7 +1415,7 @@ impl AuthResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/auth/login".to_string(),
+            &["api", "auth", "login"],
             None,
             &[],
         )
@@ -1372,7 +1427,7 @@ impl AuthResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/auth/login/{}", provider),
+            &["api", "auth", "login", provider],
             None,
             &[],
         )
@@ -1384,7 +1439,7 @@ impl AuthResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/auth/logout".to_string(),
+            &["api", "auth", "logout"],
             None,
             &[],
         )
@@ -1396,7 +1451,7 @@ impl AuthResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/auth/passkey/authentication-options".to_string(),
+            &["api", "auth", "passkey", "authentication-options"],
             Some(data),
             &[],
         )
@@ -1408,7 +1463,7 @@ impl AuthResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/auth/passkey/authentication-verify".to_string(),
+            &["api", "auth", "passkey", "authentication-verify"],
             Some(data),
             &[],
         )
@@ -1420,7 +1475,7 @@ impl AuthResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/auth/passkey/credentials".to_string(),
+            &["api", "auth", "passkey", "credentials"],
             None,
             &[],
         )
@@ -1432,7 +1487,7 @@ impl AuthResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/auth/passkey/credentials/{}", id),
+            &["api", "auth", "passkey", "credentials", id],
             None,
             &[],
         )
@@ -1444,7 +1499,7 @@ impl AuthResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/auth/passkey/registration-options".to_string(),
+            &["api", "auth", "passkey", "registration-options"],
             Some(data),
             &[],
         )
@@ -1456,7 +1511,7 @@ impl AuthResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/auth/passkey/registration-verify".to_string(),
+            &["api", "auth", "passkey", "registration-verify"],
             Some(data),
             &[],
         )
@@ -1468,7 +1523,7 @@ impl AuthResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/auth/providers".to_string(),
+            &["api", "auth", "providers"],
             None,
             &[],
         )
@@ -1480,7 +1535,7 @@ impl AuthResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/auth/refresh".to_string(),
+            &["api", "auth", "refresh"],
             Some(data),
             &[],
         )
@@ -1492,7 +1547,7 @@ impl AuthResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/auth/userinfo".to_string(),
+            &["api", "auth", "userinfo"],
             None,
             &[],
         )
@@ -1518,7 +1573,7 @@ impl AutoDreamResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/auto-dream/agents/{}/abort", id),
+            &["api", "auto-dream", "agents", id, "abort"],
             None,
             &[],
         )
@@ -1530,7 +1585,7 @@ impl AutoDreamResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/auto-dream/agents/{}/enabled", id),
+            &["api", "auto-dream", "agents", id, "enabled"],
             Some(data),
             &[],
         )
@@ -1542,7 +1597,7 @@ impl AutoDreamResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/auto-dream/agents/{}/trigger", id),
+            &["api", "auto-dream", "agents", id, "trigger"],
             None,
             &[],
         )
@@ -1554,7 +1609,7 @@ impl AutoDreamResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/auto-dream/status".to_string(),
+            &["api", "auto-dream", "status"],
             None,
             &[],
         )
@@ -1580,7 +1635,7 @@ impl BudgetResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/budget".to_string(),
+            &["api", "budget"],
             None,
             &[],
         )
@@ -1592,7 +1647,7 @@ impl BudgetResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &"/api/budget".to_string(),
+            &["api", "budget"],
             Some(data),
             &[],
         )
@@ -1604,7 +1659,7 @@ impl BudgetResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/budget/agents".to_string(),
+            &["api", "budget", "agents"],
             None,
             &[],
         )
@@ -1616,7 +1671,7 @@ impl BudgetResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/budget/agents/{}", id),
+            &["api", "budget", "agents", id],
             None,
             &[],
         )
@@ -1628,7 +1683,7 @@ impl BudgetResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/budget/agents/{}", id),
+            &["api", "budget", "agents", id],
             Some(data),
             &[],
         )
@@ -1640,7 +1695,7 @@ impl BudgetResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/budget/providers".to_string(),
+            &["api", "budget", "providers"],
             None,
             &[],
         )
@@ -1652,7 +1707,7 @@ impl BudgetResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/budget/providers/{}", provider_id),
+            &["api", "budget", "providers", provider_id],
             Some(data),
             &[],
         )
@@ -1664,7 +1719,7 @@ impl BudgetResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/budget/users".to_string(),
+            &["api", "budget", "users"],
             None,
             &[("limit", limit)],
         )
@@ -1676,7 +1731,7 @@ impl BudgetResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/budget/users/{}", user_id),
+            &["api", "budget", "users", user_id],
             None,
             &[],
         )
@@ -1688,7 +1743,7 @@ impl BudgetResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/budget/users/{}", user_id),
+            &["api", "budget", "users", user_id],
             Some(data),
             &[],
         )
@@ -1700,7 +1755,7 @@ impl BudgetResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/budget/users/{}", user_id),
+            &["api", "budget", "users", user_id],
             None,
             &[],
         )
@@ -1712,7 +1767,7 @@ impl BudgetResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/usage".to_string(),
+            &["api", "usage"],
             None,
             &[],
         )
@@ -1724,7 +1779,7 @@ impl BudgetResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/usage/by-model".to_string(),
+            &["api", "usage", "by-model"],
             None,
             &[],
         )
@@ -1736,7 +1791,7 @@ impl BudgetResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/usage/by-model/performance".to_string(),
+            &["api", "usage", "by-model", "performance"],
             None,
             &[],
         )
@@ -1748,7 +1803,7 @@ impl BudgetResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/usage/daily".to_string(),
+            &["api", "usage", "daily"],
             None,
             &[],
         )
@@ -1760,7 +1815,7 @@ impl BudgetResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/usage/summary".to_string(),
+            &["api", "usage", "summary"],
             None,
             &[],
         )
@@ -1786,7 +1841,7 @@ impl ChannelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/channels".to_string(),
+            &["api", "channels"],
             None,
             &[],
         )
@@ -1798,7 +1853,7 @@ impl ChannelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/channels/registry".to_string(),
+            &["api", "channels", "registry"],
             None,
             &[],
         )
@@ -1810,7 +1865,7 @@ impl ChannelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/channels/reload".to_string(),
+            &["api", "channels", "reload"],
             None,
             &[],
         )
@@ -1822,7 +1877,7 @@ impl ChannelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/channels/sidecar/{}", name),
+            &["api", "channels", "sidecar", name],
             None,
             &[],
         )
@@ -1834,7 +1889,7 @@ impl ChannelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/channels/sidecar/{}/configure", name),
+            &["api", "channels", "sidecar", name, "configure"],
             Some(data),
             &[],
         )
@@ -1846,7 +1901,7 @@ impl ChannelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/channels/{}/qr", name),
+            &["api", "channels", name, "qr"],
             None,
             &[],
         )
@@ -1872,7 +1927,7 @@ impl ExtensionsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/extensions".to_string(),
+            &["api", "extensions"],
             None,
             &[],
         )
@@ -1884,7 +1939,7 @@ impl ExtensionsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/extensions/install".to_string(),
+            &["api", "extensions", "install"],
             Some(data),
             &[],
         )
@@ -1896,7 +1951,7 @@ impl ExtensionsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/extensions/uninstall".to_string(),
+            &["api", "extensions", "uninstall"],
             Some(data),
             &[],
         )
@@ -1908,7 +1963,7 @@ impl ExtensionsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/extensions/{}", name),
+            &["api", "extensions", name],
             None,
             &[],
         )
@@ -1934,7 +1989,7 @@ impl GoalsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/goals/templates".to_string(),
+            &["api", "goals", "templates"],
             None,
             &[],
         )
@@ -1960,7 +2015,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/hands".to_string(),
+            &["api", "hands"],
             None,
             &[],
         )
@@ -1972,7 +2027,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/hands/active".to_string(),
+            &["api", "hands", "active"],
             None,
             &[],
         )
@@ -1984,7 +2039,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/hands/install".to_string(),
+            &["api", "hands", "install"],
             Some(data),
             &[],
         )
@@ -1996,7 +2051,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/hands/instances/{}", id),
+            &["api", "hands", "instances", id],
             None,
             &[],
         )
@@ -2008,7 +2063,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/hands/instances/{}/browser", id),
+            &["api", "hands", "instances", id, "browser"],
             None,
             &[],
         )
@@ -2020,7 +2075,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/hands/instances/{}/pause", id),
+            &["api", "hands", "instances", id, "pause"],
             None,
             &[],
         )
@@ -2032,7 +2087,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/hands/instances/{}/resume", id),
+            &["api", "hands", "instances", id, "resume"],
             None,
             &[],
         )
@@ -2044,7 +2099,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/hands/instances/{}/stats", id),
+            &["api", "hands", "instances", id, "stats"],
             None,
             &[],
         )
@@ -2056,7 +2111,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/hands/marketplace/install".to_string(),
+            &["api", "hands", "marketplace", "install"],
             Some(data),
             &[],
         )
@@ -2068,7 +2123,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/hands/reload".to_string(),
+            &["api", "hands", "reload"],
             None,
             &[],
         )
@@ -2080,7 +2135,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/hands/{}", hand_id),
+            &["api", "hands", hand_id],
             None,
             &[],
         )
@@ -2092,7 +2147,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/hands/{}", hand_id),
+            &["api", "hands", hand_id],
             None,
             &[],
         )
@@ -2104,7 +2159,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/hands/{}/activate", hand_id),
+            &["api", "hands", hand_id, "activate"],
             Some(data),
             &[],
         )
@@ -2116,7 +2171,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/hands/{}/check-deps", hand_id),
+            &["api", "hands", hand_id, "check-deps"],
             None,
             &[],
         )
@@ -2128,7 +2183,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/hands/{}/install-deps", hand_id),
+            &["api", "hands", hand_id, "install-deps"],
             None,
             &[],
         )
@@ -2140,7 +2195,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/hands/{}/manifest", hand_id),
+            &["api", "hands", hand_id, "manifest"],
             None,
             &[],
         )
@@ -2152,7 +2207,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/hands/{}/manifest", hand_id),
+            &["api", "hands", hand_id, "manifest"],
             Some(data),
             &[],
         )
@@ -2164,7 +2219,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/hands/{}/secret", hand_id),
+            &["api", "hands", hand_id, "secret"],
             Some(data),
             &[],
         )
@@ -2176,7 +2231,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/hands/{}/settings", hand_id),
+            &["api", "hands", hand_id, "settings"],
             None,
             &[],
         )
@@ -2188,7 +2243,7 @@ impl HandsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/hands/{}/settings", hand_id),
+            &["api", "hands", hand_id, "settings"],
             Some(data),
             &[],
         )
@@ -2214,7 +2269,7 @@ impl InboxResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/inbox/status".to_string(),
+            &["api", "inbox", "status"],
             None,
             &[],
         )
@@ -2240,7 +2295,7 @@ impl McpResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/mcp/catalog".to_string(),
+            &["api", "mcp", "catalog"],
             None,
             &[],
         )
@@ -2252,7 +2307,7 @@ impl McpResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/mcp/catalog/{}", id),
+            &["api", "mcp", "catalog", id],
             None,
             &[],
         )
@@ -2264,7 +2319,7 @@ impl McpResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/mcp/health".to_string(),
+            &["api", "mcp", "health"],
             None,
             &[],
         )
@@ -2276,7 +2331,7 @@ impl McpResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/mcp/reload".to_string(),
+            &["api", "mcp", "reload"],
             None,
             &[],
         )
@@ -2288,7 +2343,7 @@ impl McpResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/mcp/servers".to_string(),
+            &["api", "mcp", "servers"],
             None,
             &[],
         )
@@ -2300,7 +2355,7 @@ impl McpResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/mcp/servers".to_string(),
+            &["api", "mcp", "servers"],
             Some(data),
             &[],
         )
@@ -2312,7 +2367,7 @@ impl McpResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/mcp/servers/{}", name),
+            &["api", "mcp", "servers", name],
             None,
             &[],
         )
@@ -2324,7 +2379,7 @@ impl McpResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/mcp/servers/{}", name),
+            &["api", "mcp", "servers", name],
             Some(data),
             &[],
         )
@@ -2336,7 +2391,7 @@ impl McpResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/mcp/servers/{}", name),
+            &["api", "mcp", "servers", name],
             None,
             &[],
         )
@@ -2348,7 +2403,7 @@ impl McpResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/mcp/servers/{}/auth/revoke", name),
+            &["api", "mcp", "servers", name, "auth", "revoke"],
             None,
             &[],
         )
@@ -2360,7 +2415,7 @@ impl McpResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/mcp/servers/{}/auth/start", name),
+            &["api", "mcp", "servers", name, "auth", "start"],
             None,
             &[],
         )
@@ -2372,7 +2427,7 @@ impl McpResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/mcp/servers/{}/auth/status", name),
+            &["api", "mcp", "servers", name, "auth", "status"],
             None,
             &[],
         )
@@ -2384,7 +2439,7 @@ impl McpResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/mcp/servers/{}/reconnect", name),
+            &["api", "mcp", "servers", name, "reconnect"],
             None,
             &[],
         )
@@ -2396,7 +2451,7 @@ impl McpResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PATCH,
-            &format!("/api/mcp/servers/{}/taint", name),
+            &["api", "mcp", "servers", name, "taint"],
             Some(data),
             &[],
         )
@@ -2408,7 +2463,7 @@ impl McpResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/mcp/taint-rules".to_string(),
+            &["api", "mcp", "taint-rules"],
             None,
             &[],
         )
@@ -2434,7 +2489,7 @@ impl MemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/memory/export", id),
+            &["api", "agents", id, "memory", "export"],
             None,
             &[],
         )
@@ -2446,7 +2501,7 @@ impl MemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/agents/{}/memory/import", id),
+            &["api", "agents", id, "memory", "import"],
             Some(data),
             &[],
         )
@@ -2458,7 +2513,7 @@ impl MemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/memory/agents/{}/kv", id),
+            &["api", "memory", "agents", id, "kv"],
             None,
             &[],
         )
@@ -2470,7 +2525,7 @@ impl MemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/memory/agents/{}/kv/{}", id, key),
+            &["api", "memory", "agents", id, "kv", key],
             None,
             &[],
         )
@@ -2482,7 +2537,7 @@ impl MemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/memory/agents/{}/kv/{}", id, key),
+            &["api", "memory", "agents", id, "kv", key],
             Some(data),
             &[],
         )
@@ -2494,7 +2549,7 @@ impl MemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/memory/agents/{}/kv/{}", id, key),
+            &["api", "memory", "agents", id, "kv", key],
             None,
             &[],
         )
@@ -2506,7 +2561,7 @@ impl MemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/memory/config".to_string(),
+            &["api", "memory", "config"],
             None,
             &[],
         )
@@ -2518,7 +2573,7 @@ impl MemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PATCH,
-            &"/api/memory/config".to_string(),
+            &["api", "memory", "config"],
             Some(data),
             &[],
         )
@@ -2544,7 +2599,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/catalog/status".to_string(),
+            &["api", "catalog", "status"],
             None,
             &[],
         )
@@ -2556,7 +2611,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/catalog/update".to_string(),
+            &["api", "catalog", "update"],
             None,
             &[],
         )
@@ -2568,7 +2623,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/credential-pools".to_string(),
+            &["api", "credential-pools"],
             None,
             &[],
         )
@@ -2580,7 +2635,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/models".to_string(),
+            &["api", "models"],
             None,
             &[],
         )
@@ -2592,7 +2647,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/models/aliases".to_string(),
+            &["api", "models", "aliases"],
             None,
             &[],
         )
@@ -2604,7 +2659,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/models/aliases".to_string(),
+            &["api", "models", "aliases"],
             Some(data),
             &[],
         )
@@ -2616,7 +2671,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/models/aliases/{}", alias),
+            &["api", "models", "aliases", alias],
             None,
             &[],
         )
@@ -2628,7 +2683,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/models/custom".to_string(),
+            &["api", "models", "custom"],
             Some(data),
             &[],
         )
@@ -2640,7 +2695,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/models/custom/{}", id),
+            &["api", "models", "custom", id],
             None,
             &[],
         )
@@ -2652,7 +2707,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/models/{}", id),
+            &["api", "models", id],
             None,
             &[],
         )
@@ -2664,7 +2719,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/providers".to_string(),
+            &["api", "providers"],
             None,
             &[],
         )
@@ -2676,7 +2731,14 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/providers/github-copilot/oauth/poll/{}", poll_id),
+            &[
+                "api",
+                "providers",
+                "github-copilot",
+                "oauth",
+                "poll",
+                poll_id,
+            ],
             None,
             &[],
         )
@@ -2688,7 +2750,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/providers/github-copilot/oauth/start".to_string(),
+            &["api", "providers", "github-copilot", "oauth", "start"],
             None,
             &[],
         )
@@ -2700,7 +2762,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/providers/{}", name),
+            &["api", "providers", name],
             None,
             &[],
         )
@@ -2712,7 +2774,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/providers/{}/default", name),
+            &["api", "providers", name, "default"],
             Some(data),
             &[],
         )
@@ -2724,7 +2786,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/providers/{}/discovery", name),
+            &["api", "providers", name, "discovery"],
             Some(data),
             &[],
         )
@@ -2736,7 +2798,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/providers/{}/enable", name),
+            &["api", "providers", name, "enable"],
             None,
             &[],
         )
@@ -2748,7 +2810,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/providers/{}/key", name),
+            &["api", "providers", name, "key"],
             Some(data),
             &[],
         )
@@ -2760,7 +2822,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/providers/{}/key", name),
+            &["api", "providers", name, "key"],
             None,
             &[],
         )
@@ -2772,7 +2834,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/providers/{}/test", name),
+            &["api", "providers", name, "test"],
             None,
             &[],
         )
@@ -2784,7 +2846,7 @@ impl ModelsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/providers/{}/url", name),
+            &["api", "providers", name, "url"],
             Some(data),
             &[],
         )
@@ -2810,7 +2872,7 @@ impl NetworkResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/comms/events".to_string(),
+            &["api", "comms", "events"],
             None,
             &[("limit", limit)],
         )
@@ -2821,7 +2883,12 @@ impl NetworkResource {
         do_stream(
             self.client.clone(),
             self.base_url.clone(),
-            "/api/comms/events/stream".to_string(),
+            vec![
+                "api".to_string(),
+                "comms".to_string(),
+                "events".to_string(),
+                "stream".to_string(),
+            ],
             reqwest::Method::GET,
             None,
             Vec::new(),
@@ -2833,7 +2900,7 @@ impl NetworkResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/comms/send".to_string(),
+            &["api", "comms", "send"],
             Some(data),
             &[],
         )
@@ -2845,7 +2912,7 @@ impl NetworkResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/comms/task".to_string(),
+            &["api", "comms", "task"],
             Some(data),
             &[],
         )
@@ -2857,7 +2924,7 @@ impl NetworkResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/comms/topology".to_string(),
+            &["api", "comms", "topology"],
             None,
             &[],
         )
@@ -2869,7 +2936,7 @@ impl NetworkResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/network/status".to_string(),
+            &["api", "network", "status"],
             None,
             &[],
         )
@@ -2881,7 +2948,7 @@ impl NetworkResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/network/trusted-peers".to_string(),
+            &["api", "network", "trusted-peers"],
             None,
             &[],
         )
@@ -2893,7 +2960,7 @@ impl NetworkResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/peers".to_string(),
+            &["api", "peers"],
             None,
             &[("offset", offset), ("limit", limit)],
         )
@@ -2905,7 +2972,7 @@ impl NetworkResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/peers/{}", id),
+            &["api", "peers", id],
             None,
             &[],
         )
@@ -2931,7 +2998,7 @@ impl PairingResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/pairing/complete".to_string(),
+            &["api", "pairing", "complete"],
             Some(data),
             &[],
         )
@@ -2943,7 +3010,7 @@ impl PairingResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/pairing/devices".to_string(),
+            &["api", "pairing", "devices"],
             None,
             &[],
         )
@@ -2955,7 +3022,7 @@ impl PairingResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/pairing/devices/{}", id),
+            &["api", "pairing", "devices", id],
             None,
             &[],
         )
@@ -2967,7 +3034,7 @@ impl PairingResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/pairing/notify".to_string(),
+            &["api", "pairing", "notify"],
             Some(data),
             &[],
         )
@@ -2979,7 +3046,7 @@ impl PairingResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/pairing/request".to_string(),
+            &["api", "pairing", "request"],
             None,
             &[],
         )
@@ -3005,7 +3072,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/context-engine/chain".to_string(),
+            &["api", "context-engine", "chain"],
             None,
             &[],
         )
@@ -3017,7 +3084,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/context-engine/config".to_string(),
+            &["api", "context-engine", "config"],
             None,
             &[],
         )
@@ -3029,7 +3096,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/context-engine/health".to_string(),
+            &["api", "context-engine", "health"],
             None,
             &[],
         )
@@ -3041,7 +3108,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/context-engine/metrics".to_string(),
+            &["api", "context-engine", "metrics"],
             None,
             &[],
         )
@@ -3053,7 +3120,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/context-engine/sandbox-policy".to_string(),
+            &["api", "context-engine", "sandbox-policy"],
             None,
             &[],
         )
@@ -3065,7 +3132,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/context-engine/traces".to_string(),
+            &["api", "context-engine", "traces"],
             None,
             &[],
         )
@@ -3077,7 +3144,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/plugins".to_string(),
+            &["api", "plugins"],
             None,
             &[],
         )
@@ -3089,7 +3156,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/plugins/doctor".to_string(),
+            &["api", "plugins", "doctor"],
             None,
             &[],
         )
@@ -3101,7 +3168,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/plugins/install".to_string(),
+            &["api", "plugins", "install"],
             Some(data),
             &[],
         )
@@ -3113,7 +3180,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/plugins/registries".to_string(),
+            &["api", "plugins", "registries"],
             None,
             &[],
         )
@@ -3125,7 +3192,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/plugins/scaffold".to_string(),
+            &["api", "plugins", "scaffold"],
             Some(data),
             &[],
         )
@@ -3137,7 +3204,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/plugins/uninstall".to_string(),
+            &["api", "plugins", "uninstall"],
             Some(data),
             &[],
         )
@@ -3149,7 +3216,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/plugins/{}", name),
+            &["api", "plugins", name],
             None,
             &[],
         )
@@ -3161,7 +3228,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/plugins/{}/advanced-config", name),
+            &["api", "plugins", name, "advanced-config"],
             None,
             &[],
         )
@@ -3173,7 +3240,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/plugins/{}/disable", name),
+            &["api", "plugins", name, "disable"],
             None,
             &[],
         )
@@ -3185,7 +3252,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/plugins/{}/enable", name),
+            &["api", "plugins", name, "enable"],
             None,
             &[],
         )
@@ -3197,7 +3264,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/plugins/{}/env", name),
+            &["api", "plugins", name, "env"],
             None,
             &[],
         )
@@ -3209,7 +3276,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/plugins/{}/install-deps", name),
+            &["api", "plugins", name, "install-deps"],
             None,
             &[],
         )
@@ -3221,7 +3288,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/plugins/{}/lint", name),
+            &["api", "plugins", name, "lint"],
             None,
             &[],
         )
@@ -3233,7 +3300,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/plugins/{}/prewarm", name),
+            &["api", "plugins", name, "prewarm"],
             None,
             &[],
         )
@@ -3245,7 +3312,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/plugins/{}/reload", name),
+            &["api", "plugins", name, "reload"],
             None,
             &[],
         )
@@ -3257,7 +3324,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/plugins/{}/sign", name),
+            &["api", "plugins", name, "sign"],
             None,
             &[],
         )
@@ -3269,7 +3336,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/plugins/{}/status", name),
+            &["api", "plugins", name, "status"],
             None,
             &[],
         )
@@ -3281,7 +3348,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/plugins/{}/test-hook", name),
+            &["api", "plugins", name, "test-hook"],
             Some(data),
             &[],
         )
@@ -3293,7 +3360,7 @@ impl PluginsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/plugins/{}/upgrade", name),
+            &["api", "plugins", name, "upgrade"],
             Some(data),
             &[],
         )
@@ -3324,7 +3391,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/memory".to_string(),
+            &["api", "memory"],
             None,
             &[("category", category), ("offset", offset), ("limit", limit)],
         )
@@ -3336,7 +3403,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/memory".to_string(),
+            &["api", "memory"],
             Some(data),
             &[],
         )
@@ -3354,7 +3421,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/memory/agents/{}", id),
+            &["api", "memory", "agents", id],
             None,
             &[("category", category), ("offset", offset), ("limit", limit)],
         )
@@ -3366,7 +3433,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/memory/agents/{}", id),
+            &["api", "memory", "agents", id],
             None,
             &[],
         )
@@ -3378,7 +3445,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/memory/agents/{}/consolidate", id),
+            &["api", "memory", "agents", id, "consolidate"],
             None,
             &[],
         )
@@ -3390,7 +3457,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/memory/agents/{}/count", id),
+            &["api", "memory", "agents", id, "count"],
             None,
             &[("level", level)],
         )
@@ -3402,7 +3469,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/memory/agents/{}/duplicates", id),
+            &["api", "memory", "agents", id, "duplicates"],
             None,
             &[],
         )
@@ -3414,7 +3481,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/memory/agents/{}/export", id),
+            &["api", "memory", "agents", id, "export"],
             None,
             &[],
         )
@@ -3426,7 +3493,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/memory/agents/{}/import", id),
+            &["api", "memory", "agents", id, "import"],
             Some(data),
             &[],
         )
@@ -3438,7 +3505,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/memory/agents/{}/level/{}", id, level),
+            &["api", "memory", "agents", id, "level", level],
             None,
             &[],
         )
@@ -3456,7 +3523,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/memory/agents/{}/relations", id),
+            &["api", "memory", "agents", id, "relations"],
             None,
             &[
                 ("source", source),
@@ -3472,7 +3539,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/memory/agents/{}/relations", id),
+            &["api", "memory", "agents", id, "relations"],
             Some(data),
             &[],
         )
@@ -3489,7 +3556,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/memory/agents/{}/search", id),
+            &["api", "memory", "agents", id, "search"],
             None,
             &[("q", q), ("limit", limit)],
         )
@@ -3501,7 +3568,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/memory/agents/{}/stats", id),
+            &["api", "memory", "agents", id, "stats"],
             None,
             &[],
         )
@@ -3513,7 +3580,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/memory/bulk-delete".to_string(),
+            &["api", "memory", "bulk-delete"],
             Some(data),
             &[],
         )
@@ -3525,7 +3592,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/memory/cleanup".to_string(),
+            &["api", "memory", "cleanup"],
             None,
             &[],
         )
@@ -3537,7 +3604,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/memory/decay".to_string(),
+            &["api", "memory", "decay"],
             None,
             &[],
         )
@@ -3549,7 +3616,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/memory/items/{}", memory_id),
+            &["api", "memory", "items", memory_id],
             Some(data),
             &[],
         )
@@ -3561,7 +3628,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/memory/items/{}", memory_id),
+            &["api", "memory", "items", memory_id],
             None,
             &[],
         )
@@ -3573,7 +3640,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/memory/items/{}/history", memory_id),
+            &["api", "memory", "items", memory_id, "history"],
             None,
             &[],
         )
@@ -3585,7 +3652,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/memory/search".to_string(),
+            &["api", "memory", "search"],
             None,
             &[("q", q), ("limit", limit)],
         )
@@ -3597,7 +3664,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/memory/stats".to_string(),
+            &["api", "memory", "stats"],
             None,
             &[],
         )
@@ -3609,7 +3676,7 @@ impl ProactiveMemoryResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/memory/user/{}", user_id),
+            &["api", "memory", "user", user_id],
             None,
             &[],
         )
@@ -3635,7 +3702,7 @@ impl SessionsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/agents/{}/sessions/by-label/{}", id, label),
+            &["api", "agents", id, "sessions", "by-label", label],
             None,
             &[],
         )
@@ -3647,7 +3714,7 @@ impl SessionsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/sessions".to_string(),
+            &["api", "sessions"],
             None,
             &[("limit", limit), ("offset", offset)],
         )
@@ -3659,7 +3726,7 @@ impl SessionsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/sessions/cleanup".to_string(),
+            &["api", "sessions", "cleanup"],
             None,
             &[],
         )
@@ -3677,7 +3744,7 @@ impl SessionsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/sessions/search".to_string(),
+            &["api", "sessions", "search"],
             None,
             &[
                 ("q", q),
@@ -3694,7 +3761,7 @@ impl SessionsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/sessions/{}", id),
+            &["api", "sessions", id],
             None,
             &[],
         )
@@ -3706,7 +3773,7 @@ impl SessionsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/sessions/{}", id),
+            &["api", "sessions", id],
             None,
             &[],
         )
@@ -3718,7 +3785,7 @@ impl SessionsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/sessions/{}/label", id),
+            &["api", "sessions", id, "label"],
             Some(data),
             &[],
         )
@@ -3730,7 +3797,7 @@ impl SessionsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PATCH,
-            &format!("/api/sessions/{}/model", id),
+            &["api", "sessions", id, "model"],
             Some(data),
             &[],
         )
@@ -3756,7 +3823,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/clawhub/browse".to_string(),
+            &["api", "clawhub", "browse"],
             None,
             &[("q", q)],
         )
@@ -3768,7 +3835,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/clawhub/install".to_string(),
+            &["api", "clawhub", "install"],
             Some(data),
             &[],
         )
@@ -3780,7 +3847,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/clawhub/search".to_string(),
+            &["api", "clawhub", "search"],
             None,
             &[("q", q)],
         )
@@ -3792,7 +3859,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/clawhub/skill/{}", slug),
+            &["api", "clawhub", "skill", slug],
             None,
             &[],
         )
@@ -3804,7 +3871,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/clawhub/skill/{}/code", slug),
+            &["api", "clawhub", "skill", slug, "code"],
             None,
             &[],
         )
@@ -3816,7 +3883,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/marketplace/search".to_string(),
+            &["api", "marketplace", "search"],
             None,
             &[("q", q)],
         )
@@ -3828,7 +3895,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/skills".to_string(),
+            &["api", "skills"],
             None,
             &[],
         )
@@ -3840,7 +3907,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/skills/create".to_string(),
+            &["api", "skills", "create"],
             Some(data),
             &[],
         )
@@ -3852,7 +3919,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/skills/install".to_string(),
+            &["api", "skills", "install"],
             Some(data),
             &[],
         )
@@ -3864,7 +3931,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/skills/pending".to_string(),
+            &["api", "skills", "pending"],
             None,
             &[("agent", agent)],
         )
@@ -3876,7 +3943,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/skills/pending/{}", id),
+            &["api", "skills", "pending", id],
             None,
             &[],
         )
@@ -3888,7 +3955,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/skills/pending/{}/approve", id),
+            &["api", "skills", "pending", id, "approve"],
             None,
             &[],
         )
@@ -3900,7 +3967,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/skills/pending/{}/propose-to-registry", id),
+            &["api", "skills", "pending", id, "propose-to-registry"],
             None,
             &[],
         )
@@ -3912,7 +3979,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/skills/pending/{}/reject", id),
+            &["api", "skills", "pending", id, "reject"],
             None,
             &[],
         )
@@ -3924,7 +3991,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/skills/registry".to_string(),
+            &["api", "skills", "registry"],
             None,
             &[],
         )
@@ -3936,7 +4003,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/skills/reload".to_string(),
+            &["api", "skills", "reload"],
             None,
             &[],
         )
@@ -3948,7 +4015,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/skills/uninstall".to_string(),
+            &["api", "skills", "uninstall"],
             Some(data),
             &[],
         )
@@ -3960,7 +4027,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/skills/{}", name),
+            &["api", "skills", name],
             None,
             &[],
         )
@@ -3972,7 +4039,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/skills/{}/evolve/delete", name),
+            &["api", "skills", name, "evolve", "delete"],
             None,
             &[],
         )
@@ -3984,7 +4051,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/skills/{}/evolve/file", name),
+            &["api", "skills", name, "evolve", "file"],
             Some(data),
             &[],
         )
@@ -3996,7 +4063,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/skills/{}/evolve/file", name),
+            &["api", "skills", name, "evolve", "file"],
             None,
             &[("path", path)],
         )
@@ -4008,7 +4075,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/skills/{}/evolve/patch", name),
+            &["api", "skills", name, "evolve", "patch"],
             Some(data),
             &[],
         )
@@ -4020,7 +4087,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/skills/{}/evolve/rollback", name),
+            &["api", "skills", name, "evolve", "rollback"],
             None,
             &[],
         )
@@ -4032,7 +4099,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/skills/{}/evolve/update", name),
+            &["api", "skills", name, "evolve", "update"],
             Some(data),
             &[],
         )
@@ -4044,7 +4111,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/skills/{}/file", name),
+            &["api", "skills", name, "file"],
             None,
             &[("path", path)],
         )
@@ -4056,7 +4123,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/skills/{}/propose", name),
+            &["api", "skills", name, "propose"],
             None,
             &[],
         )
@@ -4068,7 +4135,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/tools".to_string(),
+            &["api", "tools"],
             None,
             &[],
         )
@@ -4080,7 +4147,7 @@ impl SkillsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/tools/{}", name),
+            &["api", "tools", name],
             None,
             &[],
         )
@@ -4116,7 +4183,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/audit/export".to_string(),
+            &["api", "audit", "export"],
             None,
             &[
                 ("format", format),
@@ -4146,7 +4213,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/audit/query".to_string(),
+            &["api", "audit", "query"],
             None,
             &[
                 ("user", user),
@@ -4166,7 +4233,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/audit/recent".to_string(),
+            &["api", "audit", "recent"],
             None,
             &[],
         )
@@ -4178,7 +4245,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/audit/verify".to_string(),
+            &["api", "audit", "verify"],
             None,
             &[],
         )
@@ -4195,7 +4262,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/authz/check".to_string(),
+            &["api", "authz", "check"],
             None,
             &[("user", user), ("action", action), ("channel", channel)],
         )
@@ -4207,7 +4274,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/authz/effective/{}", user_id),
+            &["api", "authz", "effective", user_id],
             None,
             &[],
         )
@@ -4219,7 +4286,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/backup".to_string(),
+            &["api", "backup"],
             None,
             &[],
         )
@@ -4231,7 +4298,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/backups".to_string(),
+            &["api", "backups"],
             None,
             &[],
         )
@@ -4243,7 +4310,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/backups/{}", filename),
+            &["api", "backups", filename],
             None,
             &[],
         )
@@ -4255,7 +4322,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/bindings".to_string(),
+            &["api", "bindings"],
             None,
             &[],
         )
@@ -4267,7 +4334,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/bindings".to_string(),
+            &["api", "bindings"],
             Some(data),
             &[],
         )
@@ -4279,7 +4346,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/bindings/{}", index),
+            &["api", "bindings", index],
             None,
             &[],
         )
@@ -4291,7 +4358,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/commands".to_string(),
+            &["api", "commands"],
             None,
             &[],
         )
@@ -4303,7 +4370,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/commands/{}", name),
+            &["api", "commands", name],
             None,
             &[],
         )
@@ -4315,7 +4382,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/config".to_string(),
+            &["api", "config"],
             None,
             &[],
         )
@@ -4327,7 +4394,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/config/export".to_string(),
+            &["api", "config", "export"],
             None,
             &[],
         )
@@ -4339,7 +4406,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/config/reload".to_string(),
+            &["api", "config", "reload"],
             None,
             &[],
         )
@@ -4351,7 +4418,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/config/schema".to_string(),
+            &["api", "config", "schema"],
             None,
             &[],
         )
@@ -4363,7 +4430,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/config/set".to_string(),
+            &["api", "config", "set"],
             Some(data),
             &[],
         )
@@ -4375,7 +4442,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/config/status".to_string(),
+            &["api", "config", "status"],
             None,
             &[],
         )
@@ -4387,7 +4454,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/health".to_string(),
+            &["api", "health"],
             None,
             &[],
         )
@@ -4399,7 +4466,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/health/detail".to_string(),
+            &["api", "health", "detail"],
             None,
             &[],
         )
@@ -4411,7 +4478,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/init".to_string(),
+            &["api", "init"],
             None,
             &[],
         )
@@ -4422,7 +4489,7 @@ impl SystemResource {
         do_stream(
             self.client.clone(),
             self.base_url.clone(),
-            "/api/logs/stream".to_string(),
+            vec!["api".to_string(), "logs".to_string(), "stream".to_string()],
             reqwest::Method::GET,
             None,
             Vec::new(),
@@ -4434,7 +4501,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/metrics".to_string(),
+            &["api", "metrics"],
             None,
             &[],
         )
@@ -4446,7 +4513,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/migrate".to_string(),
+            &["api", "migrate"],
             Some(data),
             &[],
         )
@@ -4458,7 +4525,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/migrate/detect".to_string(),
+            &["api", "migrate", "detect"],
             None,
             &[],
         )
@@ -4470,7 +4537,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/migrate/scan".to_string(),
+            &["api", "migrate", "scan"],
             Some(data),
             &[],
         )
@@ -4482,7 +4549,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/profiles".to_string(),
+            &["api", "profiles"],
             None,
             &[],
         )
@@ -4494,7 +4561,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/profiles/{}", name),
+            &["api", "profiles", name],
             None,
             &[],
         )
@@ -4506,7 +4573,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/queue/status".to_string(),
+            &["api", "queue", "status"],
             None,
             &[],
         )
@@ -4518,7 +4585,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/ready".to_string(),
+            &["api", "ready"],
             None,
             &[],
         )
@@ -4530,7 +4597,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/restore".to_string(),
+            &["api", "restore"],
             Some(data),
             &[],
         )
@@ -4542,7 +4609,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/security".to_string(),
+            &["api", "security"],
             None,
             &[],
         )
@@ -4554,7 +4621,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/shutdown".to_string(),
+            &["api", "shutdown"],
             None,
             &[],
         )
@@ -4566,7 +4633,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/status".to_string(),
+            &["api", "status"],
             None,
             &[],
         )
@@ -4578,7 +4645,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/templates".to_string(),
+            &["api", "templates"],
             None,
             &[],
         )
@@ -4590,7 +4657,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/templates/{}", name),
+            &["api", "templates", name],
             None,
             &[],
         )
@@ -4602,7 +4669,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/templates/{}/toml", name),
+            &["api", "templates", name, "toml"],
             None,
             &[],
         )
@@ -4614,7 +4681,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/version".to_string(),
+            &["api", "version"],
             None,
             &[],
         )
@@ -4626,7 +4693,7 @@ impl SystemResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/versions".to_string(),
+            &["api", "versions"],
             None,
             &[],
         )
@@ -4657,7 +4724,7 @@ impl ToolsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/tools/{}/invoke", name),
+            &["api", "tools", name, "invoke"],
             Some(data),
             &[("agent_id", agent_id)],
         )
@@ -4683,7 +4750,7 @@ impl UsersResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/users".to_string(),
+            &["api", "users"],
             None,
             &[],
         )
@@ -4695,7 +4762,7 @@ impl UsersResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/users".to_string(),
+            &["api", "users"],
             Some(data),
             &[],
         )
@@ -4707,7 +4774,7 @@ impl UsersResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/users/import".to_string(),
+            &["api", "users", "import"],
             Some(data),
             &[],
         )
@@ -4719,7 +4786,7 @@ impl UsersResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/users/{}", name),
+            &["api", "users", name],
             None,
             &[],
         )
@@ -4731,7 +4798,7 @@ impl UsersResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/users/{}", name),
+            &["api", "users", name],
             Some(data),
             &[],
         )
@@ -4743,7 +4810,7 @@ impl UsersResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/users/{}", name),
+            &["api", "users", name],
             None,
             &[],
         )
@@ -4755,7 +4822,7 @@ impl UsersResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/users/{}/policy", name),
+            &["api", "users", name, "policy"],
             None,
             &[],
         )
@@ -4767,7 +4834,7 @@ impl UsersResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/users/{}/policy", name),
+            &["api", "users", name, "policy"],
             Some(data),
             &[],
         )
@@ -4779,7 +4846,7 @@ impl UsersResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/users/{}/provider-keys", name),
+            &["api", "users", name, "provider-keys"],
             None,
             &[],
         )
@@ -4796,7 +4863,7 @@ impl UsersResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/users/{}/provider-keys/{}", name, provider),
+            &["api", "users", name, "provider-keys", provider],
             Some(data),
             &[],
         )
@@ -4808,7 +4875,7 @@ impl UsersResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/users/{}/provider-keys/{}", name, provider),
+            &["api", "users", name, "provider-keys", provider],
             None,
             &[],
         )
@@ -4820,7 +4887,7 @@ impl UsersResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/users/{}/rotate-key", name),
+            &["api", "users", name, "rotate-key"],
             None,
             &[],
         )
@@ -4846,7 +4913,7 @@ impl WebhooksResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/hooks/agent".to_string(),
+            &["api", "hooks", "agent"],
             Some(data),
             &[],
         )
@@ -4858,7 +4925,7 @@ impl WebhooksResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/hooks/wake".to_string(),
+            &["api", "hooks", "wake"],
             Some(data),
             &[],
         )
@@ -4884,7 +4951,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/cron/jobs".to_string(),
+            &["api", "cron", "jobs"],
             None,
             &[],
         )
@@ -4896,7 +4963,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/cron/jobs".to_string(),
+            &["api", "cron", "jobs"],
             Some(data),
             &[],
         )
@@ -4908,7 +4975,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/cron/jobs/{}", id),
+            &["api", "cron", "jobs", id],
             None,
             &[],
         )
@@ -4920,7 +4987,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/cron/jobs/{}", id),
+            &["api", "cron", "jobs", id],
             Some(data),
             &[],
         )
@@ -4932,7 +4999,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/cron/jobs/{}", id),
+            &["api", "cron", "jobs", id],
             None,
             &[],
         )
@@ -4944,7 +5011,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/cron/jobs/{}/enable", id),
+            &["api", "cron", "jobs", id, "enable"],
             Some(data),
             &[],
         )
@@ -4956,7 +5023,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/cron/jobs/{}/status", id),
+            &["api", "cron", "jobs", id, "status"],
             None,
             &[],
         )
@@ -4968,7 +5035,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/schedules".to_string(),
+            &["api", "schedules"],
             None,
             &[],
         )
@@ -4980,7 +5047,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/schedules".to_string(),
+            &["api", "schedules"],
             Some(data),
             &[],
         )
@@ -4992,7 +5059,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/schedules/{}", id),
+            &["api", "schedules", id],
             None,
             &[],
         )
@@ -5004,7 +5071,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/schedules/{}", id),
+            &["api", "schedules", id],
             Some(data),
             &[],
         )
@@ -5016,7 +5083,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/schedules/{}", id),
+            &["api", "schedules", id],
             None,
             &[],
         )
@@ -5028,7 +5095,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/schedules/{}/run", id),
+            &["api", "schedules", id, "run"],
             None,
             &[],
         )
@@ -5040,7 +5107,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/triggers".to_string(),
+            &["api", "triggers"],
             None,
             &[("agent_id", agent_id)],
         )
@@ -5052,7 +5119,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/triggers".to_string(),
+            &["api", "triggers"],
             Some(data),
             &[],
         )
@@ -5064,7 +5131,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/triggers/{}", id),
+            &["api", "triggers", id],
             None,
             &[],
         )
@@ -5076,7 +5143,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/triggers/{}", id),
+            &["api", "triggers", id],
             None,
             &[],
         )
@@ -5088,7 +5155,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PATCH,
-            &format!("/api/triggers/{}", id),
+            &["api", "triggers", id],
             Some(data),
             &[],
         )
@@ -5104,7 +5171,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/workflow-templates".to_string(),
+            &["api", "workflow-templates"],
             None,
             &[("q", q), ("category", category)],
         )
@@ -5116,7 +5183,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/workflow-templates/{}", id),
+            &["api", "workflow-templates", id],
             None,
             &[],
         )
@@ -5128,7 +5195,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/workflow-templates/{}/instantiate", id),
+            &["api", "workflow-templates", id, "instantiate"],
             Some(data),
             &[],
         )
@@ -5140,7 +5207,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &"/api/workflows".to_string(),
+            &["api", "workflows"],
             None,
             &[],
         )
@@ -5152,7 +5219,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &"/api/workflows".to_string(),
+            &["api", "workflows"],
             Some(data),
             &[],
         )
@@ -5164,7 +5231,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/workflows/runs/{}", run_id),
+            &["api", "workflows", "runs", run_id],
             None,
             &[],
         )
@@ -5176,7 +5243,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/workflows/runs/{}/cancel", run_id),
+            &["api", "workflows", "runs", run_id, "cancel"],
             None,
             &[],
         )
@@ -5188,7 +5255,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/workflows/runs/{}/operator", run_id),
+            &["api", "workflows", "runs", run_id, "operator"],
             Some(data),
             &[],
         )
@@ -5200,7 +5267,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/workflows/runs/{}/pause", run_id),
+            &["api", "workflows", "runs", run_id, "pause"],
             Some(data),
             &[],
         )
@@ -5212,7 +5279,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/workflows/runs/{}/rerun", run_id),
+            &["api", "workflows", "runs", run_id, "rerun"],
             None,
             &[],
         )
@@ -5224,7 +5291,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/workflows/runs/{}/resume", run_id),
+            &["api", "workflows", "runs", run_id, "resume"],
             Some(data),
             &[],
         )
@@ -5236,7 +5303,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/workflows/{}", id),
+            &["api", "workflows", id],
             None,
             &[],
         )
@@ -5248,7 +5315,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
-            &format!("/api/workflows/{}", id),
+            &["api", "workflows", id],
             Some(data),
             &[],
         )
@@ -5260,7 +5327,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::DELETE,
-            &format!("/api/workflows/{}", id),
+            &["api", "workflows", id],
             None,
             &[],
         )
@@ -5272,7 +5339,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/workflows/{}/dry-run", id),
+            &["api", "workflows", id, "dry-run"],
             Some(data),
             &[],
         )
@@ -5284,7 +5351,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/workflows/{}/run", id),
+            &["api", "workflows", id, "run"],
             Some(data),
             &[],
         )
@@ -5296,7 +5363,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
-            &format!("/api/workflows/{}/runs", id),
+            &["api", "workflows", id, "runs"],
             None,
             &[],
         )
@@ -5308,7 +5375,7 @@ impl WorkflowsResource {
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
-            &format!("/api/workflows/{}/save-as-template", id),
+            &["api", "workflows", id, "save-as-template"],
             None,
             &[],
         )
