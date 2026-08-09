@@ -57,6 +57,15 @@ def get_body(msg):
             return payload.decode("utf-8", errors="ignore")
     return ""
 
+
+def quote_imap_search_value(value):
+    """Encode a value as an IMAP quoted string without command injection."""
+    if any(char in value for char in ("\r", "\n", "\x00")):
+        raise ValueError("IMAP quoted strings cannot contain CR, LF, or NUL")
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def search_folder(mail, folder, sender):
     """Search a folder for emails from sender. Returns list of IDs."""
     try:
@@ -64,7 +73,7 @@ def search_folder(mail, folder, sender):
         if result != "OK":
             return []
         if sender:
-            _, msgs = mail.search(None, f'FROM "{sender}"')
+            _, msgs = mail.search(None, f"FROM {quote_imap_search_value(sender)}")
         else:
             _, msgs = mail.search(None, "ALL")
         ids = msgs[0].split() if msgs[0] else []
@@ -85,6 +94,13 @@ def main():
     if not password:
         print("ERROR: EMAIL_PASSWORD not set", file=sys.stderr)
         sys.exit(1)
+
+    if sender:
+        try:
+            quote_imap_search_value(sender)
+        except ValueError as e:
+            print(f"ERROR: invalid sender search value: {e}", file=sys.stderr)
+            sys.exit(1)
 
     try:
         mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
