@@ -997,6 +997,17 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<&str> {
         }
         // Try to split at a newline near the boundary (UTF-8 safe)
         let safe_end = librefang_types::truncate_str(remaining, max_len).len();
+        // A byte limit can fall before the end of the first UTF-8 character.
+        // Consume that complete character so every iteration makes progress;
+        // the public contract is character-based, so this remains one char.
+        let safe_end = if safe_end == 0 {
+            remaining
+                .char_indices()
+                .nth(1)
+                .map_or(remaining.len(), |(index, _)| index)
+        } else {
+            safe_end
+        };
         // Avoid splitting inside an HTML entity (`&...;`).  Walk backwards
         // from safe_end: if we find `&` without a subsequent `;` before the
         // boundary, move the split point to just before that `&`.
@@ -1118,8 +1129,9 @@ fn retreat_past_html_tag(text: &str, pos: usize) -> usize {
         }
     }
 
-    // If there are unclosed tags, retreat to the most recent unclosed opening `<`.
-    if let Some(&(_, lt_pos)) = opens.last() {
+    // Retreat to the outermost unclosed tag so an entire nested block moves
+    // to the next chunk instead of leaving its outer tag behind.
+    if let Some(&(_, lt_pos)) = opens.first() {
         lt_pos
     } else {
         pos
@@ -1318,9 +1330,25 @@ mod tests {
     }
 
     #[test]
-    fn test_nested_unclosed_tags_retreat_to_most_recent_open() {
-        let text = "<b><i>text";
-        assert_eq!(retreat_past_html_tag(text, text.len()), 3);
+    fn test_multibyte_character_larger_than_limit_makes_progress() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            tx.send(split_message("😀x", 1)).unwrap();
+        });
+
+        let chunks = rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("split_message must consume at least one UTF-8 character");
+        assert_eq!(chunks, vec!["😀", "x"]);
+    }
+
+    #[test]
+    fn test_nested_tags_stay_balanced_across_chunks() {
+        let text = "0123456789<b><i>abc</i></b>";
+        assert_eq!(
+            split_message(text, 17),
+            vec!["0123456789", "<b><i>abc</i></b>"]
+        );
     }
 
     #[test]
