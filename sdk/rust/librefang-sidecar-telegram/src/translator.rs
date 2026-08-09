@@ -338,6 +338,9 @@ pub async fn message_event(client: &BotClient, msg: &Message, edited: bool) -> O
     // `channel` posts have separate semantics (no sender user, broadcast-only); treat them as DM-like for routing, matching the Python adapter.
     let is_group = matches!(msg.chat.chat_type.as_str(), "group" | "supergroup");
     let metadata = build_metadata(msg, &sender, edited);
+    // Populate the canonical top-level id too, matching `message_event` and the
+    // Python adapter's callback path. Without it the daemon synthesises a random
+    // UUID for `platform_message_id`, which cannot address a Telegram message.
     let mut builder = MessageBuilder::new(chat_id.clone(), sender.name.clone())
         .content(content_to_value(&content))
         .channel_id(chat_id)
@@ -494,34 +497,28 @@ pub enum TgContent {
 /// callback_query update → ButtonCallback content event.
 pub fn callback_event(cq: &CallbackQuery) -> Option<Value> {
     let user = cq.from.as_ref()?;
+    let message = cq.message.as_ref()?;
+    if message.chat.id == 0 {
+        return None;
+    }
     let action = cq.data.clone().unwrap_or_default();
-    let message_text = cq.message.as_ref().and_then(|m| m.text.clone());
+    let message_text = message.text.clone();
     let content = TgContent::ButtonCallback {
         action,
         message_text,
     };
     let sender = sender_from_user(user);
-    let chat_id = cq
-        .message
-        .as_ref()
-        .map(|m| m.chat.id.to_string())
-        .unwrap_or_default();
+    let chat_id = message.chat.id.to_string();
     // Without is_group, a group-button callback looks like a DM and mis-routes the agent reply (DM session instead of group session).
-    let is_group = cq
-        .message
-        .as_ref()
-        .map(|m| matches!(m.chat.chat_type.as_str(), "group" | "supergroup"))
-        .unwrap_or(false);
+    let is_group = matches!(message.chat.chat_type.as_str(), "group" | "supergroup");
     // Same string contract as `build_metadata` (#6564). Read once and reused
     // below for the top-level slot, rather than matching on `cq.message` twice.
-    let message_id = cq.message.as_ref().map(|m| m.message_id.to_string());
+    let message_id = message.message_id.to_string();
     let mut metadata = serde_json::Map::new();
     metadata.insert("chat_id".into(), json!(chat_id.clone()));
     metadata.insert("platform".into(), json!("telegram"));
     metadata.insert("callback_query_id".into(), json!(cq.id.clone()));
-    if let Some(id) = &message_id {
-        metadata.insert("message_id".into(), json!(id));
-    }
+    metadata.insert("message_id".into(), json!(message_id.clone()));
     metadata.insert("sender_user_id".into(), json!(sender.user_id.clone()));
     if let Some(uname) = &sender.username {
         metadata.insert("sender_username".into(), json!(uname));
@@ -531,13 +528,8 @@ pub fn callback_event(cq: &CallbackQuery) -> Option<Value> {
         .channel_id(chat_id)
         .platform("telegram")
         .is_group(is_group)
+        .message_id(message_id)
         .metadata(metadata);
-    // Populate the canonical top-level id too, matching `message_event` and the
-    // Python adapter's callback path. Without it the daemon synthesises a random
-    // UUID for `platform_message_id`, which cannot address a Telegram message.
-    if let Some(id) = message_id {
-        builder = builder.message_id(id);
-    }
     if let Some(uname) = sender.username {
         builder = builder.username(uname);
     }
@@ -761,6 +753,32 @@ mod tests {
             "got {:?}",
             params["metadata"]["message_id"]
         );
+    }
+
+    #[test]
+    fn callback_event_requires_chat_context() {
+        let mut cq = CallbackQuery {
+            id: "cbq-without-message".into(),
+            from: Some(User {
+                id: 42,
+                is_bot: false,
+                first_name: "Ada".into(),
+                last_name: None,
+                username: Some("ada".into()),
+            }),
+            message: None,
+            chat_instance: "ci".into(),
+            data: Some("prov:deepseek".into()),
+        };
+
+        assert_eq!(callback_event(&cq), None);
+
+        cq.message = Some(Message {
+            message_id: 1,
+            chat: Chat::default(),
+            ..Default::default()
+        });
+        assert_eq!(callback_event(&cq), None);
     }
 
     #[test]
