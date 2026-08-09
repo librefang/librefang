@@ -70,6 +70,9 @@ def main():
     assert_in("Vec<u8>", rs, "rust-byte-buffer")
     assert_not_in("from_utf8_lossy(&chunk)", rs, "rust-no-lossy-chunk")
     assert_in('"status": status', rs, "rust-error-event-status")
+    assert_in("mpsc::channel(STREAM_CHANNEL_CAPACITY)", rs, "rust-bounded-stream-channel")
+    assert_not_in("mpsc::unbounded_channel()", rs, "rust-no-unbounded-stream-channel")
+    assert rs.count("_ = tx.closed() => return") == 3, "all stream network waits must cancel on receiver drop"
     assert_in('"status": resp.StatusCode', go, "go-error-event-status")
 
     # SSE line-size cap

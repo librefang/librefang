@@ -773,8 +773,9 @@ fn do_stream(
     method: reqwest::Method,
     body: Option<Value>,
     query: Vec<(String, Option<String>)>,
-) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+) -> tokio::sync::mpsc::Receiver<Value> {
+    const STREAM_CHANNEL_CAPACITY: usize = 256;
+    let (tx, rx) = tokio::sync::mpsc::channel(STREAM_CHANNEL_CAPACITY);
     tokio::spawn(async move {
         let url = format!("{}{}", base_url, path);
         let req = client.request(method, &url).header("Accept", "text/event-stream");
@@ -784,23 +785,29 @@ fn do_stream(
             .collect();
         let req = if filtered.is_empty() { req } else { req.query(&filtered) };
         let req = if let Some(b) = body { req.json(&b) } else { req };
-        let res = match req.send().await {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = tx.send(serde_json::json!({
-                    "error": e.to_string(),
-                    "status": 0,
-                }));
-                return;
+        let res = tokio::select! {
+            _ = tx.closed() => return,
+            result = req.send() => match result {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(serde_json::json!({
+                        "error": e.to_string(),
+                        "status": 0,
+                    })).await;
+                    return;
+                }
             }
         };
         if !res.status().is_success() {
             let status = res.status().as_u16();
-            let body = res.text().await.unwrap_or_default();
+            let body = tokio::select! {
+                _ = tx.closed() => return,
+                body = res.text() => body.unwrap_or_default(),
+            };
             let _ = tx.send(serde_json::json!({
                 "error": format!("HTTP {}: {}", status, body),
                 "status": status,
-            }));
+            })).await;
             return;
         }
         // Accumulate raw bytes so multi-byte UTF-8 codepoints are not split
@@ -810,13 +817,20 @@ fn do_stream(
         const MAX_SSE_LINE: usize = 8 * 1024 * 1024;
         let mut stream = res.bytes_stream();
         let mut buffer: Vec<u8> = Vec::new();
-        while let Some(Ok(chunk)) = stream.next().await {
+        loop {
+            let chunk = tokio::select! {
+                _ = tx.closed() => return,
+                next = stream.next() => match next {
+                    Some(Ok(chunk)) => chunk,
+                    _ => break,
+                },
+            };
             buffer.extend_from_slice(&chunk);
             if buffer.len() > MAX_SSE_LINE {
                 let _ = tx.send(serde_json::json!({
                     "error": format!("SSE line exceeded {} bytes", MAX_SSE_LINE),
                     "status": 0,
-                }));
+                })).await;
                 return;
             }
             while let Some(pos) = buffer.iter().position(|&b| b == b'\\n') {
@@ -824,19 +838,25 @@ fn do_stream(
                 let line = match std::str::from_utf8(&line_bytes) {
                     Ok(s) => s.trim(),
                     Err(e) => {
-                        let _ = tx.send(serde_json::json!({
+                        if tx.send(serde_json::json!({
                             "error": format!("invalid utf-8 in SSE line at byte {}", e.valid_up_to()),
                             "status": 0,
-                        }));
+                        })).await.is_err() {
+                            return;
+                        }
                         continue;
                     }
                 };
                 if let Some(data) = line.strip_prefix("data: ") {
                     if data == "[DONE]" { return; }
                     match serde_json::from_str::<Value>(data) {
-                        Ok(v) => { let _ = tx.send(v); }
+                        Ok(v) => {
+                            if tx.send(v).await.is_err() { return; }
+                        }
                         Err(_) => {
-                            let _ = tx.send(serde_json::json!({"raw": data}));
+                            if tx.send(serde_json::json!({"raw": data})).await.is_err() {
+                                return;
+                            }
                         }
                     }
                 }
@@ -935,7 +955,7 @@ def gen_rust(tag_ops: dict) -> str:
                     query_arg = f"vec![{q_items}]"
                 else:
                     query_arg = "Vec::new()"
-                out += f"\n    pub fn {op_id}({sig}) -> tokio::sync::mpsc::UnboundedReceiver<Value> {{\n"
+                out += f"\n    pub fn {op_id}({sig}) -> tokio::sync::mpsc::Receiver<Value> {{\n"
                 out += f"        do_stream(self.client.clone(), self.base_url.clone(), {path_expr}, {method_const}, {body_arg}, {query_arg})\n"
                 out += "    }\n"
             else:
