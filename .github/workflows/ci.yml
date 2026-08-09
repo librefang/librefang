@@ -32,6 +32,17 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # The registry signing key is duplicated across the daemon and three worker
+  # surfaces. Keep this build-free guard unconditional: a worker-only config
+  # change does not enter the Rust quality lane, but must still prove lockstep.
+  pubkey-lockstep:
+    name: Registry Pubkey Lockstep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Check registry public keys
+        run: bash scripts/check-pubkey-lockstep.sh
+
   # ── Detect changes + compute affected crate subset ─────────────────────────────
   # PR lane: Linux only. Selective by default (test just the crates the PR
   #   touches — no downstream fan-out, main catches cross-crate breakage on
@@ -1114,6 +1125,7 @@ jobs:
     name: CI Gate
     if: always()
     needs:
+      - pubkey-lockstep
       - changes
       - no-build-artifacts
       - quality
