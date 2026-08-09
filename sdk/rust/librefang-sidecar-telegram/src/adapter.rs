@@ -7,7 +7,7 @@ use crate::dispatcher::{
     dispatch_content, is_message_not_modified, is_parse_entities_error, send_text,
 };
 use crate::reaction::map_reaction;
-use crate::translator::{extract_sender, sender_from_user, update_to_event};
+use crate::translator::{extract_sender, sender_from_user, update_to_event, Sender};
 use async_trait::async_trait;
 use librefang_sidecar::{Command, EmitFn, SendCommand, SidecarAdapter};
 use serde_json::{json, Value};
@@ -40,6 +40,17 @@ fn trace(args: std::fmt::Arguments<'_>) {
 
 macro_rules! tg_trace {
     ($($arg:tt)*) => { trace(format_args!($($arg)*)) };
+}
+
+/// Apply the configured identity boundary to an extracted Telegram sender.
+/// Missing identity is compatible only with an explicitly open allowlist;
+/// restricted deployments fail closed instead of relying on the translator to
+/// reject every sender-less update variant independently.
+fn sender_passes_allowlist(allowlist: &AllowList, sender: Option<&Sender>) -> bool {
+    match sender {
+        Some(sender) => allowlist.permits(&sender.user_id, sender.username.as_deref()),
+        None => allowlist.is_open(),
+    }
 }
 
 /// Whether the streaming send path is advertised as a capability.
@@ -424,18 +435,20 @@ impl SidecarAdapter for TelegramAdapter {
                         } else {
                             None
                         };
-                        if let Some(sender) = sender {
-                            if !self
-                                .allowlist
-                                .permits(&sender.user_id, sender.username.as_deref())
-                            {
+                        if !sender_passes_allowlist(&self.allowlist, sender.as_ref()) {
+                            if let Some(sender) = &sender {
                                 tg_trace!(
                                     "update {} {kind} dropped by allowlist user={}",
                                     upd.update_id,
                                     sender.user_id
                                 );
-                                continue;
+                            } else {
+                                tg_trace!(
+                                    "update {} {kind} dropped by allowlist (missing sender)",
+                                    upd.update_id
+                                );
                             }
+                            continue;
                         }
                         if let Some(event) = update_to_event(&self.client, upd).await {
                             tg_trace!("emit {kind} update_id={}", upd.update_id);
@@ -470,6 +483,22 @@ impl SidecarAdapter for TelegramAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_sender_is_denied_unless_allowlist_is_open() {
+        let restricted = AllowList::from_env_value(Some("12345"));
+        assert!(!sender_passes_allowlist(&restricted, None));
+
+        let open = AllowList::from_env_value(None);
+        assert!(sender_passes_allowlist(&open, None));
+
+        let allowed = crate::translator::Sender {
+            user_id: "12345".into(),
+            name: "Allowed".into(),
+            username: None,
+        };
+        assert!(sender_passes_allowlist(&restricted, Some(&allowed)));
+    }
 
     /// Restores `TELEGRAM_STREAMING` to its pre-test value on drop, so the mutation stays contained even if an assertion panics mid-test.
     struct EnvGuard(Option<String>);
