@@ -74,25 +74,10 @@ fn load_cargo_metadata(root: &Path) -> Result<serde_json::Value, Box<dyn std::er
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 
-fn check_cargo_deny(root: &Path, denied: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-    // Try cargo-deny first
-    let deny_check = Command::new("cargo").args(["deny", "--version"]).output();
-
-    if deny_check.is_ok() && deny_check.unwrap().status.success() {
-        println!("Using cargo-deny...");
-        let status = Command::new("cargo")
-            .args(["deny", "check", "licenses"])
-            .current_dir(root)
-            .status()?;
-        if !status.success() {
-            return Err("cargo deny check failed".into());
-        }
-        return Ok(());
-    }
-
-    // Fallback: use cargo metadata
-    println!("cargo-deny not found, using cargo metadata fallback...");
-    let metadata = load_cargo_metadata(root)?;
+fn check_metadata_license_policy(
+    metadata: &serde_json::Value,
+    denied: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut violations = Vec::new();
     let mut unverified = Vec::new();
     let mut checked = 0;
@@ -162,6 +147,52 @@ fn check_cargo_deny(root: &Path, denied: &[&str]) -> Result<(), Box<dyn std::err
     }
 
     Ok(())
+}
+
+fn check_rust_licenses_with_tools<RunCargoDeny, LoadMetadata>(
+    denied: &[&str],
+    cargo_deny_available: bool,
+    run_cargo_deny: RunCargoDeny,
+    load_metadata: LoadMetadata,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    RunCargoDeny: FnOnce() -> Result<(), Box<dyn std::error::Error>>,
+    LoadMetadata: FnOnce() -> Result<serde_json::Value, Box<dyn std::error::Error>>,
+{
+    if cargo_deny_available {
+        println!("Using cargo-deny...");
+        run_cargo_deny()?;
+        println!("Applying the explicit denied-license policy...");
+    } else {
+        println!("cargo-deny not found, using cargo metadata fallback...");
+    }
+
+    let metadata = load_metadata()?;
+    check_metadata_license_policy(&metadata, denied)
+}
+
+fn check_cargo_deny(root: &Path, denied: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    let cargo_deny_available = matches!(
+        Command::new("cargo").args(["deny", "--version"]).output(),
+        Ok(output) if output.status.success()
+    );
+
+    check_rust_licenses_with_tools(
+        denied,
+        cargo_deny_available,
+        || {
+            let status = Command::new("cargo")
+                .args(["deny", "check", "licenses"])
+                .current_dir(root)
+                .status()?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err("cargo deny check failed".into())
+            }
+        },
+        || load_cargo_metadata(root),
+    )
 }
 
 fn check_web_licenses(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -252,5 +283,58 @@ mod tests {
     #[test]
     fn custom_license_refs_fail_closed_when_required() {
         assert!(license_expression_is_denied("MIT AND LicenseRef-Proprietary", &[]).unwrap());
+    }
+
+    #[test]
+    fn custom_deny_policy_runs_after_successful_cargo_deny() {
+        let cargo_deny_ran = std::cell::Cell::new(false);
+        let metadata = serde_json::json!({
+            "packages": [{
+                "name": "custom-denied",
+                "license": "MIT"
+            }]
+        });
+
+        let result = check_rust_licenses_with_tools(
+            &["MIT"],
+            true,
+            || {
+                cargo_deny_ran.set(true);
+                Ok(())
+            },
+            || Ok(metadata),
+        );
+
+        assert!(
+            cargo_deny_ran.get(),
+            "the repository cargo-deny policy must still run"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("1 license violation"),
+            "a successful cargo-deny run must not bypass the custom deny list"
+        );
+    }
+
+    #[test]
+    fn cargo_deny_failure_stops_before_the_custom_policy() {
+        let metadata_loaded = std::cell::Cell::new(false);
+        let result = check_rust_licenses_with_tools(
+            &["MIT"],
+            true,
+            || Err("cargo-deny rejected the graph".into()),
+            || {
+                metadata_loaded.set(true);
+                Ok(serde_json::json!({ "packages": [] }))
+            },
+        );
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "cargo-deny rejected the graph"
+        );
+        assert!(!metadata_loaded.get());
     }
 }
