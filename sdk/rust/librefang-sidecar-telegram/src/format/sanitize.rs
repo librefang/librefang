@@ -25,8 +25,13 @@ const ALLOWED_TAGS: &[&str] = &[
 const ALLOWED_HREF_SCHEMES: &[&str] = &["https:", "http:", "mailto:", "tg:"];
 
 static RE_TAG: Lazy<Regex> = Lazy::new(|| {
-    // Match either an opening tag `<name attrs>` or a closing tag `</name>` or a self-closing variant.
-    Regex::new(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)([^>]*)>").expect("tag regex")
+    // Match either an opening tag `<name attrs>` or a closing tag `</name>`
+    // or a self-closing variant. Quoted attribute values are matched as whole
+    // units so a literal `>` inside either quote style cannot terminate the
+    // surrounding tag early. The final `[^>]` fallback deliberately accepts
+    // an unmatched quote up to the first `>` so malformed input still goes
+    // through the safe attribute rebuild instead of leaking as a raw tag.
+    Regex::new(r#"<(/?)([a-zA-Z][a-zA-Z0-9-]*)((?:"[^"]*"|'[^']*'|[^>])*)>"#).expect("tag regex")
 });
 
 static RE_ATTR: Lazy<Regex> = Lazy::new(|| {
@@ -171,6 +176,27 @@ mod tests {
     fn accepts_safe_href() {
         let s = sanitize_telegram_html("<a href=\"https://example.com\">x</a>");
         assert!(s.contains("<a href=\"https://example.com\">"));
+    }
+
+    #[test]
+    fn greater_than_inside_quoted_attributes_does_not_end_tag() {
+        let href = sanitize_telegram_html("<a href=\"https://example.com/a>b\">x</a>");
+        assert_eq!(href, "<a href=\"https://example.com/a&gt;b\">x</a>");
+
+        let class = sanitize_telegram_html("<code class='a>b'>x</code>");
+        assert_eq!(class, "<code class=\"a&gt;b\">x</code>");
+    }
+
+    #[test]
+    fn unterminated_attribute_quotes_fall_back_to_safe_tag_rebuild() {
+        let double = sanitize_telegram_html("<code class=\"unterminated>after");
+        assert_eq!(double, "<code>after</code>");
+
+        let single = sanitize_telegram_html("<code class='unterminated>after");
+        assert_eq!(single, "<code>after</code>");
+
+        let disallowed = sanitize_telegram_html("<script data=\"unterminated>bad");
+        assert_eq!(disallowed, "bad");
     }
 
     #[test]
