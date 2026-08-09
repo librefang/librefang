@@ -102,25 +102,56 @@ fi
 # in the date don't get interpreted as wildcards (BSD awk has no gensub).
 HEADING="## [${DATE}]"
 if ! EXTRACTED="$(awk -v h="${HEADING}" '
-    function fence_marker(line, trimmed) {
-        trimmed = line
-        sub(/^[[:space:]]*/, "", trimmed)
-        if (trimmed ~ /^```/) return "`"
-        if (trimmed ~ /^~~~/) return "~"
-        return ""
+    function trim_fence_indent(line, spaces) {
+        spaces = 0
+        while (substr(line, 1, 1) == " ") {
+            spaces++
+            line = substr(line, 2)
+        }
+        if (spaces > 3) return ""
+        return line
+    }
+
+    function opening_fence_length(line, trimmed, char, run, rest) {
+        trimmed = trim_fence_indent(line)
+        if (trimmed == "") return 0
+        char = substr(trimmed, 1, 1)
+        if (char != "`" && char != "~") return 0
+        run = 0
+        while (substr(trimmed, run + 1, 1) == char) run++
+        if (run < 3) return 0
+        rest = substr(trimmed, run + 1)
+        if (char == "`" && index(rest, "`") != 0) return 0
+        opening_char = char
+        return run
+    }
+
+    function is_closing_fence(line, expected_char, minimum_run,
+                              trimmed, run, rest) {
+        trimmed = trim_fence_indent(line)
+        if (trimmed == "" || substr(trimmed, 1, 1) != expected_char) return 0
+        run = 0
+        while (substr(trimmed, run + 1, 1) == expected_char) run++
+        if (run < minimum_run) return 0
+        rest = substr(trimmed, run + 1)
+        return rest ~ /^[[:space:]]*$/
     }
 
     {
-        marker = fence_marker($0)
-        if (!in_fence && marker != "") {
+        fence_line = 0
+        if (!in_fence && (opening_length = opening_fence_length($0)) > 0) {
             in_fence = 1
-            fence = marker
-        } else if (in_fence && marker == fence) {
+            fence_char = opening_char
+            fence_length = opening_length
+            fence_line = 1
+        } else if (in_fence && is_closing_fence($0, fence_char, fence_length)) {
             in_fence = 0
-            fence = ""
+            fence_char = ""
+            fence_length = 0
+            fence_line = 1
         }
 
-        if (!found && !in_fence && marker == "" && index($0, h) == 1 &&
+        if (!found && !in_fence && !fence_line && index($0, h) == 1 &&
             substr($0, length(h) + 1) ~ /^([[:space:]]|$)/) {
             found = 1
             print "HEADING\t" $0
@@ -128,7 +159,7 @@ if ! EXTRACTED="$(awk -v h="${HEADING}" '
         }
 
         if (found) {
-            if (!in_fence && marker == "" && /^## \[/) exit
+            if (!in_fence && !fence_line && /^## \[/) exit
             print "BODY\t" $0
         }
     }
