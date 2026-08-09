@@ -19,6 +19,8 @@ from urllib.request import urlopen, Request
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 
+DEFAULT_TIMEOUT = 30.0
+
 
 class LibreFangError(Exception):
     def __init__(self, message: str, status: int = 0, body: str = ""):
@@ -35,8 +37,9 @@ class _Resource:
 class LibreFang:
     """LibreFang REST API client. Zero dependencies — uses only stdlib urllib."""
 
-    def __init__(self, base_url: str, headers: Optional[Dict[str, str]] = None):
+    def __init__(self, base_url: str, headers: Optional[Dict[str, str]] = None, timeout: float = DEFAULT_TIMEOUT):
         self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
         self._headers = {"Content-Type": "application/json"}
         if headers:
             self._headers.update(headers)
@@ -76,7 +79,7 @@ class LibreFang:
         data = json.dumps(body).encode() if body is not None else None
         req = Request(url, data=data, headers=self._headers, method=method)
         try:
-            with urlopen(req) as resp:
+            with urlopen(req, timeout=self.timeout) as resp:
                 ct = resp.headers.get("content-type", "")
                 text = resp.read().decode()
                 if "application/json" in ct:
@@ -98,7 +101,7 @@ class LibreFang:
         headers["Accept"] = "text/event-stream"
         req = Request(url, data=data, headers=headers, method=method)
         try:
-            resp = urlopen(req)
+            resp = urlopen(req, timeout=self.timeout)
         except HTTPError as e:
             body_text = e.read().decode() if e.fp else ""
             raise LibreFangError(f"HTTP {e.code}: {body_text}", e.code, body_text) from e
