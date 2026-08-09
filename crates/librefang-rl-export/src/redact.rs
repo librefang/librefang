@@ -12,8 +12,10 @@
 //!
 //! The regex set mirrors `librefang_kernel::trajectory::RedactionPolicy`'s
 //! default policy (`crates/librefang-kernel/src/trajectory/mod.rs`):
-//! `api_key`-shaped strings, JWT tokens, and long base64 blobs. The
-//! two must change together — but they are duplicated rather than
+//! `api_key`-shaped strings, JWT tokens, and long base64 blobs. The exporter
+//! adds well-known short credential formats that do not meet the baseline
+//! blob threshold. The shared baseline patterns must change together, but
+//! they are duplicated rather than
 //! imported because pulling `librefang-kernel` into a leaf egress
 //! crate would invert the dependency layer (the kernel must not
 //! depend on `librefang-rl-export`, and a kernel dep here drags in
@@ -50,6 +52,10 @@ const JWT_PATTERN: &str = r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za
 const API_KEY_PATTERN: &str =
     r"(?i)\b(?:sk|api[_-]?key|key|token|secret|bearer)[_\-=:\s]+[A-Za-z0-9_\-]{16,}\b";
 
+/// Well-known credential formats whose complete tokens are shorter than the
+/// broad opaque-blob threshold.
+const KNOWN_CREDENTIAL_PATTERN: &str = r"\b(?:AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|xox[baprs]-[A-Za-z0-9-]{10,}|[psr]k_(?:live|test)_[A-Za-z0-9]{16,})\b";
+
 /// Long opaque base64 blobs (>= 40 chars). Word-bounded.
 /// Mirrors `librefang_kernel::trajectory::CompiledPatterns::long_b64`.
 const LONG_B64_PATTERN: &str = r"\b[A-Za-z0-9+/=]{40,}\b";
@@ -58,6 +64,7 @@ const LONG_B64_PATTERN: &str = r"\b[A-Za-z0-9+/=]{40,}\b";
 /// `librefang_kernel::trajectory::CompiledPatterns` — see module
 /// docs for the rationale on duplication.
 struct CompiledPatterns {
+    known_credential: Regex,
     api_key: Regex,
     jwt: Regex,
     long_b64: Regex,
@@ -67,6 +74,8 @@ impl CompiledPatterns {
     fn get() -> &'static CompiledPatterns {
         static PATTERNS: OnceLock<CompiledPatterns> = OnceLock::new();
         PATTERNS.get_or_init(|| CompiledPatterns {
+            known_credential: Regex::new(KNOWN_CREDENTIAL_PATTERN)
+                .expect("known credential regex must compile"),
             api_key: Regex::new(API_KEY_PATTERN).expect("api_key regex must compile"),
             jwt: Regex::new(JWT_PATTERN).expect("jwt regex must compile"),
             long_b64: Regex::new(LONG_B64_PATTERN).expect("long_b64 regex must compile"),
@@ -81,6 +90,10 @@ impl CompiledPatterns {
 fn redact_string(input: &str) -> String {
     let p = CompiledPatterns::get();
     let mut out = p.jwt.replace_all(input, "<REDACTED:JWT>").into_owned();
+    out = p
+        .known_credential
+        .replace_all(&out, "<REDACTED:CREDENTIAL>")
+        .into_owned();
     out = p
         .api_key
         .replace_all(&out, "<REDACTED:CREDENTIAL>")
@@ -120,6 +133,48 @@ mod tests {
             s.contains("<REDACTED:CREDENTIAL>"),
             "placeholder missing: {s}"
         );
+    }
+
+    #[test]
+    fn redacts_well_known_credential_formats_below_blob_threshold() {
+        let credentials = [
+            ("AK", "IAIOSFODNN7EXAMPLE"),
+            ("gh", "p_abcdefghijklmnopqrstuvwxyz0123456789"),
+            ("gh", "s_abcdefghijklmnopqrstuvwxyz0123456789"),
+            ("xo", "xb-123456789012-123456789012-abcdefghijklmnop"),
+            ("xo", "xp-123456789012-123456789012-abcdefghijklmnop"),
+            ("rk", "_live_abcdefghijklmnopqrstuvwx"),
+            ("pk", "_live_abcdefghijklmnopqrstuvwx"),
+        ];
+        for (prefix, suffix) in credentials {
+            let credential = format!("{prefix}{suffix}");
+            let redacted = redact_metadata(&Value::String(format!("credential={credential}")));
+            let rendered = redacted.as_str().unwrap();
+            assert!(
+                !rendered.contains(&credential),
+                "known credential format leaked: {rendered}"
+            );
+            assert!(
+                rendered.contains("<REDACTED:CREDENTIAL>"),
+                "credential placeholder missing: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn leaves_near_miss_credential_shapes_intact() {
+        let near_misses = [
+            ("AK", "IAIOSFODNN7EXAMPL"),
+            ("gh", "p_abcdefghijklmnopqrstuvwxyz012345678"),
+            ("xo", "xb-123456789"),
+            ("pk", "_live_abcdefghijklmno"),
+            ("prefixAK", "IAIOSFODNN7EXAMPLE"),
+        ];
+        for (prefix, suffix) in near_misses {
+            let input = format!("{prefix}{suffix}");
+            let redacted = redact_metadata(&Value::String(input.clone()));
+            assert_eq!(redacted, Value::String(input));
+        }
     }
 
     #[test]
