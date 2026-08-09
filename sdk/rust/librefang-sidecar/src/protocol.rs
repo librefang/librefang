@@ -587,8 +587,14 @@ pub enum Command {
 #[derive(Deserialize)]
 struct Envelope {
     method: String,
-    #[serde(default)]
-    params: Value,
+}
+
+fn take_params(value: &mut Value) -> Value {
+    value
+        .as_object_mut()
+        .and_then(|object| object.remove("params"))
+        .filter(|params| !params.is_null())
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()))
 }
 
 /// Parse one stdin line into a typed [`Command`].
@@ -598,29 +604,23 @@ struct Envelope {
 ///
 /// Unknown `method` strings become [`Command::Unknown`] rather than an error, so a newer daemon can introduce a method without breaking an older adapter.
 pub fn parse_command(line: &str) -> Result<Command, serde_json::Error> {
-    let v: Value = serde_json::from_str(line)?;
+    let mut v: Value = serde_json::from_str(line)?;
     if !v.is_object() {
         // Mirror Python's behavior: surface as a JSON error so the runtime can react identically across implementations.
         return Err(serde::de::Error::custom("expected a JSON object"));
     }
-    let env: Envelope = serde_json::from_value(v.clone())?;
-    let params = env.params;
-    let params_or_empty = if params.is_null() {
-        Value::Object(serde_json::Map::new())
-    } else {
-        params
-    };
+    let env = Envelope::deserialize(&v)?;
     let cmd = match env.method.as_str() {
-        "send" => Command::Send(serde_json::from_value(params_or_empty)?),
+        "send" => Command::Send(serde_json::from_value(take_params(&mut v))?),
         "ready_ack" => Command::ReadyAck,
         "shutdown" => Command::Shutdown,
         "heartbeat" => Command::Heartbeat,
-        "typing" => Command::Typing(serde_json::from_value(params_or_empty)?),
-        "reaction" => Command::Reaction(serde_json::from_value(params_or_empty)?),
-        "interactive" => Command::Interactive(serde_json::from_value(params_or_empty)?),
-        "stream_start" => Command::StreamStart(serde_json::from_value(params_or_empty)?),
-        "stream_delta" => Command::StreamDelta(serde_json::from_value(params_or_empty)?),
-        "stream_end" => Command::StreamEnd(serde_json::from_value(params_or_empty)?),
+        "typing" => Command::Typing(serde_json::from_value(take_params(&mut v))?),
+        "reaction" => Command::Reaction(serde_json::from_value(take_params(&mut v))?),
+        "interactive" => Command::Interactive(serde_json::from_value(take_params(&mut v))?),
+        "stream_start" => Command::StreamStart(serde_json::from_value(take_params(&mut v))?),
+        "stream_delta" => Command::StreamDelta(serde_json::from_value(take_params(&mut v))?),
+        "stream_end" => Command::StreamEnd(serde_json::from_value(take_params(&mut v))?),
         other => Command::Unknown(UnknownCommand {
             method: other.to_string(),
             raw: v,
