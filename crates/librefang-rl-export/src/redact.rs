@@ -24,14 +24,18 @@
 //! Only string values are rewritten — JSON keys are left intact (tool
 //! input keys carry no secret material in practice and rewriting them
 //! would corrupt schemas the upstream may rely on). Nested objects /
-//! arrays are walked recursively so a credential inside
+//! arrays are walked recursively up to 128 container levels so a credential inside
 //! `{"tool_result": {"stdout": "API_KEY=sk-..."}}` is caught at any
-//! depth.
+//! normal depth. A deeper container is replaced wholesale with
+//! `<REDACTED:TOO_DEEP>` instead of risking a stack overflow.
 
 use std::sync::OnceLock;
 
 use regex::Regex;
 use serde_json::Value;
+
+const MAX_METADATA_DEPTH: usize = 128;
+const TOO_DEEP_SENTINEL: &str = "<REDACTED:TOO_DEEP>";
 
 // Pattern source strings. Lifted to module-level `const`s so the
 // parity-snapshot test (`tests::regex_set_matches_kernel_snapshot`)
@@ -89,20 +93,71 @@ fn redact_string(input: &str) -> String {
     out
 }
 
-/// Walk a `serde_json::Value` and rewrite every string in-place. Keys
-/// are not touched (see module docs).
-pub(crate) fn redact_metadata(value: &Value) -> Value {
-    match value {
-        Value::String(s) => Value::String(redact_string(s)),
-        Value::Array(arr) => Value::Array(arr.iter().map(redact_metadata).collect()),
-        Value::Object(map) => {
-            let mut out = serde_json::Map::with_capacity(map.len());
-            for (k, v) in map {
-                out.insert(k.clone(), redact_metadata(v));
+/// Consume a `serde_json::Value` and rewrite every string. Keys are not
+/// touched (see module docs). An explicit work stack avoids recursive walk
+/// and drop glue on adversarially deep caller-constructed values.
+pub(crate) fn redact_metadata(value: Value) -> Value {
+    enum Work {
+        Visit(Value, usize),
+        FinishArray(usize),
+        FinishObject(Vec<String>),
+    }
+
+    let mut work = vec![Work::Visit(value, 0)];
+    let mut output = Vec::new();
+    while let Some(item) = work.pop() {
+        match item {
+            Work::Visit(Value::String(value), _) => {
+                output.push(Value::String(redact_string(&value)));
             }
-            Value::Object(out)
+            Work::Visit(value @ (Value::Array(_) | Value::Object(_)), depth)
+                if depth >= MAX_METADATA_DEPTH =>
+            {
+                drop_value_iteratively(value);
+                output.push(Value::String(TOO_DEEP_SENTINEL.to_string()));
+            }
+            Work::Visit(Value::Array(values), depth) => {
+                let len = values.len();
+                work.push(Work::FinishArray(len));
+                work.extend(
+                    values
+                        .into_iter()
+                        .rev()
+                        .map(|value| Work::Visit(value, depth + 1)),
+                );
+            }
+            Work::Visit(Value::Object(map), depth) => {
+                let (keys, values): (Vec<_>, Vec<_>) = map.into_iter().unzip();
+                work.push(Work::FinishObject(keys));
+                work.extend(
+                    values
+                        .into_iter()
+                        .rev()
+                        .map(|value| Work::Visit(value, depth + 1)),
+                );
+            }
+            Work::Visit(value, _) => output.push(value),
+            Work::FinishArray(len) => {
+                let values = output.split_off(output.len() - len);
+                output.push(Value::Array(values));
+            }
+            Work::FinishObject(keys) => {
+                let values = output.split_off(output.len() - keys.len());
+                output.push(Value::Object(keys.into_iter().zip(values).collect()));
+            }
         }
-        other => other.clone(),
+    }
+    output.pop().expect("redaction always produces one value")
+}
+
+fn drop_value_iteratively(value: Value) {
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::Array(values) => pending.extend(values),
+            Value::Object(map) => pending.extend(map.into_values()),
+            _ => {}
+        }
     }
 }
 
@@ -113,7 +168,7 @@ mod tests {
     #[test]
     fn redacts_api_key_in_value() {
         let v = serde_json::json!("API_KEY=sk-live-DO_NOT_LEAK_1234567890");
-        let red = redact_metadata(&v);
+        let red = redact_metadata(v);
         let s = red.as_str().expect("string value");
         assert!(!s.contains("sk-live-DO_NOT_LEAK"), "credential leaked: {s}");
         assert!(
@@ -130,7 +185,7 @@ mod tests {
         let token =
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
         let v = serde_json::json!({"tool_result": {"stdout": format!("auth: {token}")}});
-        let red = redact_metadata(&v);
+        let red = redact_metadata(v);
         let rendered = red.to_string();
         assert!(!rendered.contains(token), "JWT leaked: {rendered}");
         assert!(
@@ -148,7 +203,7 @@ mod tests {
                 {"level2": {"level3": "secret token=ABCDEFGHIJ1234567890XYZ"}}
             ]
         });
-        let red = redact_metadata(&v);
+        let red = redact_metadata(v);
         let rendered = red.to_string();
         assert!(
             !rendered.contains("ABCDEFGHIJ1234567890XYZ"),
@@ -157,11 +212,33 @@ mod tests {
     }
 
     #[test]
+    fn replaces_metadata_beyond_the_depth_budget() {
+        let mut within_budget = Value::String(["token=", "ABCDEFGHIJKLMNOP"].concat());
+        for _ in 0..MAX_METADATA_DEPTH {
+            within_budget = Value::Array(vec![within_budget]);
+        }
+        let within_budget = redact_metadata(within_budget).to_string();
+        assert!(within_budget.contains("<REDACTED:CREDENTIAL>"));
+        assert!(!within_budget.contains("ABCDEFGHIJKLMNOP"));
+
+        let mut value = Value::String("leaf".to_string());
+        for _ in 0..50_000 {
+            value = Value::Array(vec![value]);
+        }
+
+        let redacted = redact_metadata(value);
+        assert!(
+            redacted.to_string().contains("<REDACTED:TOO_DEEP>"),
+            "over-depth metadata must be replaced with a sentinel"
+        );
+    }
+
+    #[test]
     fn leaves_keys_intact() {
         // Keys are not secret in practice and rewriting them would
         // corrupt the upstream schema. Pin that they pass through.
         let v = serde_json::json!({"api_key_field_name": "harmless"});
-        let red = redact_metadata(&v);
+        let red = redact_metadata(v);
         let obj = red.as_object().expect("object");
         assert!(
             obj.contains_key("api_key_field_name"),
@@ -177,7 +254,7 @@ mod tests {
             "tools": ["shell", "fetch"],
             "description": "rollout for tenant A",
         });
-        let red = redact_metadata(&v);
+        let red = redact_metadata(v);
         let rendered = red.to_string();
         assert!(rendered.contains("shell"));
         assert!(rendered.contains("rollout for tenant A"));

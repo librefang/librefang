@@ -91,8 +91,9 @@ pub(crate) async fn export_to_wandb_with_base(
     entity: &str,
     run_id_hint: Option<&str>,
     api_key: &str,
-    export: RlTrajectoryExport,
+    mut export: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
+    crate::normalize_export_metadata(&mut export);
     if api_key.is_empty() {
         return Err(ExportError::InvalidConfig(
             "W&B api_key is empty".to_string(),
@@ -121,10 +122,7 @@ pub(crate) async fn export_to_wandb_with_base(
     // forwards `metadata` to the run page verbatim, so a tool result
     // containing a stray credential would otherwise land in a
     // third-party UI.
-    let scrubbed_metadata = export
-        .toolset_metadata
-        .as_ref()
-        .map(crate::redact::redact_metadata);
+    let scrubbed_metadata = export.toolset_metadata.take();
 
     // Disable redirect following: the SSRF allowlist validates only the
     // initial base URL, so a redirect-following client would let an

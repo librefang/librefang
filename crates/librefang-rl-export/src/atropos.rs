@@ -131,8 +131,9 @@ pub(crate) async fn export_to_atropos_with_base(
     base: &str,
     project: &str,
     tuning: AtroposTuning,
-    export: RlTrajectoryExport,
+    mut export: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
+    crate::normalize_export_metadata(&mut export);
     if project.is_empty() {
         return Err(ExportError::InvalidConfig(
             "Atropos project (desired_name) is empty".to_string(),

@@ -133,8 +133,9 @@ pub(crate) async fn export_to_tinker_with_base(
     base: &str,
     project: &str,
     api_key: &str,
-    export: RlTrajectoryExport,
+    mut export: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
+    crate::normalize_export_metadata(&mut export);
     if api_key.is_empty() {
         return Err(ExportError::InvalidConfig(
             "Tinker api_key is empty".to_string(),
@@ -152,10 +153,7 @@ pub(crate) async fn export_to_tinker_with_base(
     // pins the value to the session's `user_metadata` (visible on
     // Tinker's session inspection surface), so a stray credential in
     // a tool result would otherwise leak.
-    let scrubbed_metadata = export
-        .toolset_metadata
-        .as_ref()
-        .map(crate::redact::redact_metadata);
+    let scrubbed_metadata = export.toolset_metadata.take();
 
     // Disable redirect following: the SSRF allowlist validates only the
     // initial base URL, so a redirect-following client would let an
