@@ -30,6 +30,18 @@ def decode_str(s, enc=None):
         return s.decode(enc or "utf-8", errors="ignore")
     return s or ""
 
+
+def decode_payload(payload, part):
+    """Decode MIME payload bytes using the part's declared charset."""
+    charset = part.get_content_charset() or "utf-8"
+    try:
+        return payload.decode(charset, errors="ignore")
+    except LookupError:
+        # Malformed or vendor-specific charset labels should not abort the
+        # whole mailbox read; retain the historical UTF-8 fallback.
+        return payload.decode("utf-8", errors="ignore")
+
+
 def get_body(msg):
     """Extract plain text body from email message."""
     if msg.is_multipart():
@@ -39,7 +51,7 @@ def get_body(msg):
             if ct == "text/plain" and "attachment" not in cd:
                 payload = part.get_payload(decode=True)
                 if payload:
-                    return payload.decode("utf-8", errors="ignore")
+                    return decode_payload(payload, part)
         # Fallback to HTML if no plain text
         for part in msg.walk():
             ct = part.get_content_type()
@@ -47,14 +59,14 @@ def get_body(msg):
             if ct == "text/html" and "attachment" not in cd:
                 payload = part.get_payload(decode=True)
                 if payload:
-                    text = payload.decode("utf-8", errors="ignore")
+                    text = decode_payload(payload, part)
                     text = re.sub(r'<[^>]+>', ' ', text)
                     text = re.sub(r'\s+', ' ', text).strip()
                     return text
     else:
         payload = msg.get_payload(decode=True)
         if payload:
-            return payload.decode("utf-8", errors="ignore")
+            return decode_payload(payload, msg)
     return ""
 
 def search_folder(mail, folder, sender):
