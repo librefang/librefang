@@ -44,10 +44,9 @@ fn cache() -> &'static Mutex<HashMap<PathBuf, String>> {
 
 /// Resolve which `context.md` to read for the workspace.
 ///
-/// Prefers `{workspace}/.identity/context.md` (new layout) and falls back to
-/// `{workspace}/context.md` (legacy / unmigrated workspaces). The first
-/// candidate wins only when it is a regular file. Symlinks and other special
-/// entries fall through to the legacy file instead of shadowing it.
+/// Prefers `{workspace}/.identity/context.md` (new layout) and falls back to `{workspace}/context.md` (legacy / unmigrated workspaces).
+/// The first candidate wins only when it is a regular file.
+/// Symlinks and other special entries fall through to the legacy file instead of shadowing it.
 fn resolve_context_path(workspace: &Path) -> PathBuf {
     let identity_dir = workspace.join(".identity");
     let identity_path = identity_dir.join(CONTEXT_FILENAME);
@@ -112,11 +111,8 @@ pub fn load_context_md(workspace: &Path, cache_context: bool) -> Option<String> 
     }
 }
 
-/// Async variant of [`load_context_md`] that performs the per-turn disk
-/// read off the Tokio worker thread via `spawn_blocking`. Use this from any
-/// `async fn` running on the runtime — it matches the sync version's
-/// behaviour byte-for-byte (same cache, same symlink rejection, same
-/// UTF-8 trim and size cap) but never parks the executor on the read.
+/// Async variant of [`load_context_md`] that performs the per-turn disk read off the Tokio worker thread via `spawn_blocking`.
+/// Use this from any `async fn` running on the runtime — it matches the sync version's behaviour byte-for-byte (same cache, same symlink rejection, same UTF-8 trim and size cap) but never parks the executor on the read.
 ///
 /// The sync [`load_context_md`] is retained for the streaming entry
 /// point (`send_message_streaming_with_sender_and_opts`) which is itself
@@ -176,8 +172,8 @@ async fn resolve_context_path_async(workspace: &Path) -> PathBuf {
     workspace.join(CONTEXT_FILENAME)
 }
 
-/// Async mirror of [`read_capped`]. The blocking-pool hop keeps filesystem I/O
-/// off Tokio workers while reusing the exact same no-follow open primitive.
+/// Async mirror of [`read_capped`].
+/// The blocking-pool hop keeps filesystem I/O off Tokio workers while reusing the exact same no-follow open primitive.
 async fn read_capped_async(path: &Path) -> io::Result<Option<String>> {
     let path = path.to_path_buf();
     match tokio::task::spawn_blocking(move || read_capped(&path)).await {
@@ -206,9 +202,8 @@ fn windows_path_is_beneath(root: &[u16], candidate: &[u16]) -> bool {
     if candidate.len() <= root.len() || !candidate.starts_with(root) {
         return false;
     }
-    // Compare the normalized handle paths exactly. Windows can enable
-    // per-directory case sensitivity, where `Foo` and `foo` are distinct
-    // siblings; a case-insensitive prefix check would escape the root.
+    // Compare the normalized handle paths exactly.
+    // Windows can enable per-directory case sensitivity, where `Foo` and `foo` are distinct siblings; a case-insensitive prefix check would escape the root.
     root.last()
         .is_some_and(|c| *c == b'\\' as u16 || *c == b'/' as u16)
         || matches!(candidate.get(root.len()), Some(c) if *c == b'\\' as u16 || *c == b'/' as u16)
@@ -224,8 +219,8 @@ fn open_context_file(path: &Path) -> io::Result<fs::File> {
         let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidInput, "context path contains NUL")
         })?;
-        // SAFETY: `path` is a live NUL-terminated C string; no mode argument
-        // is needed because O_CREAT is absent. The returned fd is owned below.
+        // SAFETY: `path` is a live NUL-terminated C string; no mode argument is needed because O_CREAT is absent.
+        // The returned fd is owned below.
         let fd = unsafe {
             libc::open(
                 path.as_ptr(),
@@ -235,8 +230,7 @@ fn open_context_file(path: &Path) -> io::Result<fs::File> {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
-        // SAFETY: `fd` is a fresh successful `open` result and ownership is
-        // transferred exactly once into OwnedFd.
+        // SAFETY: `fd` is a fresh successful `open` result and ownership is transferred exactly once into OwnedFd.
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
@@ -248,18 +242,17 @@ fn open_context_file(path: &Path) -> io::Result<fs::File> {
         if directory {
             flags |= libc::O_DIRECTORY;
         } else {
-            // Opening a FIFO read-only blocks before we can reject it via
-            // fstat. Regular files ignore O_NONBLOCK.
+            // Opening a FIFO read-only blocks before we can reject it via fstat.
+            // Regular files ignore O_NONBLOCK.
             flags |= libc::O_NONBLOCK;
         }
-        // SAFETY: `dir` remains open for the call and `name` is a live
-        // NUL-terminated relative component. The returned fd is owned below.
+        // SAFETY: `dir` remains open for the call and `name` is a live NUL-terminated relative component.
+        // The returned fd is owned below.
         let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
-        // SAFETY: `fd` is a fresh successful `openat` result and ownership is
-        // transferred exactly once into OwnedFd.
+        // SAFETY: `fd` is a fresh successful `openat` result and ownership is transferred exactly once into OwnedFd.
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
@@ -319,8 +312,7 @@ fn open_context_file(path: &Path) -> io::Result<fs::File> {
     fn final_path(file: &fs::File) -> io::Result<Vec<u16>> {
         let mut buffer = vec![0_u16; 512];
         loop {
-            // SAFETY: the file handle remains live and `buffer` provides the
-            // writable capacity reported to the Windows API.
+            // SAFETY: the file handle remains live and `buffer` provides the writable capacity reported to the Windows API.
             let len = unsafe {
                 GetFinalPathNameByHandleW(
                     file.as_raw_handle().cast(),
@@ -385,9 +377,8 @@ fn open_context_file(path: &Path) -> io::Result<fs::File> {
         ));
     }
 
-    // The final path comes from the already-opened handle. If an intermediate
-    // directory was swapped for a junction, this resolves outside the opened
-    // workspace and is rejected before any bytes are read.
+    // The final path comes from the already-opened handle.
+    // If an intermediate directory was swapped for a junction, this resolves outside the opened workspace and is rejected before any bytes are read.
     let workspace_path = final_path(&workspace_handle)?;
     let file_path = final_path(&file)?;
     if !windows_path_is_beneath(&workspace_path, &file_path) {
@@ -417,8 +408,8 @@ fn open_context_file(_path: &Path) -> io::Result<fs::File> {
 fn read_capped(path: &Path) -> io::Result<Option<String>> {
     use std::io::Read;
 
-    // SECURITY: the no-follow flag and metadata check apply to the same open
-    // handle. A path swap cannot redirect this read to a symlink target.
+    // SECURITY: the no-follow flag and metadata check apply to the same open handle.
+    // A path swap cannot redirect this read to a symlink target.
     let file = match open_context_file(path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -596,12 +587,8 @@ mod tests {
         let _ = fs::remove_dir_all(&ws);
     }
 
-    /// Regression test for the prompt-injection exfil vector caught in
-    /// review: a symlinked context.md must NOT be followed, even when the
-    /// target is a regular readable file. Without a no-follow open bound to
-    /// the subsequent handle checks, an attacker who can drop a symlink into
-    /// the agent workspace could point context.md at /etc/passwd and have its
-    /// contents injected into the LLM prompt.
+    /// Regression test for the prompt-injection exfil vector caught in review: a symlinked context.md must NOT be followed, even when the target is a regular readable file.
+    /// Without a no-follow open bound to the subsequent handle checks, an attacker who can drop a symlink into the agent workspace could point context.md at /etc/passwd and have its contents injected into the LLM prompt.
     #[cfg(unix)]
     #[test]
     fn rejects_symlink_context_file() {
@@ -659,16 +646,15 @@ mod tests {
         let ws = fresh_workspace("nofollow_fifo");
         let fifo = ws.join(CONTEXT_FILENAME);
         let fifo_c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
-        // SAFETY: `fifo_c` is a live NUL-terminated path and the mode contains
-        // only ordinary permission bits.
+        // SAFETY: `fifo_c` is a live NUL-terminated path and the mode contains only ordinary permission bits.
         assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
 
         let (tx, rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
             let _ = tx.send(read_capped(&fifo).map(|_| ()));
         });
-        // Wait for the actual completion event. The deadline is only a failure
-        // bound proving that a FIFO open did not block waiting for a writer.
+        // Wait for the actual completion event.
+        // The deadline is only a failure bound proving that a FIFO open did not block waiting for a writer.
         let result = rx
             .recv_timeout(Duration::from_secs(2))
             .expect("opening a FIFO must not wait for a writer");
@@ -685,9 +671,8 @@ mod tests {
         let link = ws.join(CONTEXT_FILENAME);
         fs::write(&target, "must not load").unwrap();
         if let Err(error) = std::os::windows::fs::symlink_file(&target, &link) {
-            // Windows requires Developer Mode or SeCreateSymbolicLinkPrivilege
-            // for this fixture. The production check remains compiled even on
-            // hosts where the test account cannot create reparse points.
+            // Windows requires Developer Mode or SeCreateSymbolicLinkPrivilege for this fixture.
+            // The production check remains compiled even on hosts where the test account cannot create reparse points.
             if error.kind() == io::ErrorKind::PermissionDenied {
                 let _ = fs::remove_dir_all(&ws);
                 return;
