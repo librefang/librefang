@@ -28,6 +28,10 @@
 #   - routes/mod.rs — AppState.kernel field, same blocker as channel_bridge.
 #   - routes/providers.rs — attach_probe_result needs model_catalog_update,
 #                    not yet on the trait.
+#   - acp_uds.rs / acp_pipe.rs — the ACP transport adapter still takes the
+#                    concrete kernel on Unix and Windows.
+#   - routes/agents/config.rs — the inert-tool diagnostic shares the kernel's
+#                    concrete self-evolution-tool predicate.
 # Any file NOT in the allowlist that introduces a new direct LibreFangKernel
 # reference will fail CI.
 #
@@ -45,26 +49,36 @@ if [[ ! -d "${SRC_DIR}" ]]; then
     exit 2
 fi
 
+TMP_IMPORTS="$(mktemp)"
+TMP_LFK="$(mktemp)"
+cleanup() {
+    rm -f -- "${TMP_IMPORTS}" "${TMP_LFK}"
+}
+trap cleanup EXIT
+
 echo "=== Section 1: librefang_kernel::<internal> import surface ==="
 echo "Scanning: ${SRC_DIR}"
 echo
 
 # Prefer ripgrep when available; fall back to grep -R.
 if command -v rg >/dev/null 2>&1; then
-    SCAN=(rg -n 'librefang_kernel::' "${SRC_DIR}")
-    SCAN_LFK=(rg -n 'LibreFangKernel' "${SRC_DIR}")
+    SCAN=(rg -n --type rust 'librefang_kernel::' "${SRC_DIR}")
+    SCAN_LFK=(rg -n --type rust 'LibreFangKernel' "${SRC_DIR}")
 else
-    SCAN=(grep -RIn 'librefang_kernel::' "${SRC_DIR}")
+    SCAN=(grep -RIn 'librefang_kernel::' "${SRC_DIR}" --include='*.rs')
     SCAN_LFK=(grep -RIn 'LibreFangKernel' "${SRC_DIR}" --include='*.rs')
 fi
 
-# Strip comments and the LibreFangKernel root re-export.
-"${SCAN[@]}" \
-    | grep -v ':[0-9]*://' \
+# Strip line-comment tails, then retain only code that still contains the
+# internal path. Both the scanner and grep legitimately return 1 when the
+# migration reaches zero references; those empty stages are success.
+{ "${SCAN[@]}" || true; } \
+    | sed 's|//.*$||' \
+    | { grep 'librefang_kernel::' || true; } \
     | sort \
-    | tee /tmp/api-kernel-imports.txt
+    | tee "${TMP_IMPORTS}"
 
-count=$(wc -l < /tmp/api-kernel-imports.txt | tr -d '[:space:]')
+count=$(wc -l < "${TMP_IMPORTS}" | tr -d '[:space:]')
 
 echo
 echo "Total: ${count} non-comment refs to librefang_kernel::<internal> in librefang-api/src"
@@ -79,15 +93,77 @@ echo
 echo "=== Section 2: direct LibreFangKernel type references (hard gate #3744) ==="
 echo
 
-# Files explicitly allowlisted while widening is in progress (2/N).
+# Files explicitly allowlisted while widening is in progress.
 ALLOWLIST=(
     "server.rs"
     "channel_bridge.rs"
     "routes/mod.rs"
     "routes/providers.rs"
+    "acp_uds.rs"
+    "acp_pipe.rs"
+    "routes/agents/config.rs"
 )
 
 fail=0
+
+# Return success when a source line belongs to an item guarded by a standalone
+# `#[cfg(test)]` attribute. Rustfmt puts the attribute on its own line; the
+# brace counter then follows the guarded module/function without hiding a
+# production line merely because it contains a particular function name.
+line_is_cfg_test() {
+    local filepath="$1"
+    local target_line="$2"
+
+    awk -v target_line="${target_line}" '
+        function brace_delta(line, opens, closes) {
+            # Braces in ordinary strings and line comments do not delimit the
+            # Rust item. This intentionally stays a small lexical filter for
+            # rustfmt-shaped cfg(test) modules rather than a Rust parser.
+            gsub(/"([^"\\]|\\.)*"/, "", line)
+            sub(/\/\/.*/, "", line)
+            opens = gsub(/{/, "{", line)
+            closes = gsub(/}/, "}", line)
+            return opens - closes
+        }
+
+        BEGIN {
+            pending_test = 0
+            in_test = 0
+            depth = 0
+            target_is_test = 0
+        }
+
+        {
+            code = $0
+            sub(/\/\/.*/, "", code)
+
+            if (!in_test && code ~ /^[[:space:]]*#\[cfg\(test\)\][[:space:]]*$/) {
+                pending_test = 1
+                if (FNR == target_line) target_is_test = 1
+                next
+            }
+
+            if (pending_test) {
+                in_test = 1
+                pending_test = 0
+                depth = brace_delta($0)
+            } else if (in_test) {
+                depth += brace_delta($0)
+            }
+
+            if (FNR == target_line) {
+                target_is_test = in_test
+                exit
+            }
+
+            if (in_test && depth <= 0) {
+                in_test = 0
+            }
+        }
+
+        END { exit(target_is_test ? 0 : 1) }
+    ' "${filepath}"
+}
 
 # Collect all non-comment lines referencing LibreFangKernel, skip test modules.
 #
@@ -104,14 +180,18 @@ fail=0
 "${SCAN_LFK[@]}" \
     | sed 's|//.*$||' \
     | grep 'LibreFangKernel' \
-    | grep -v '#\[cfg(test' \
-    | grep -v 'boot_with_config' \
-    > /tmp/api-lfk-refs.txt 2>/dev/null || true
+    > "${TMP_LFK}" 2>/dev/null || true
 
 while IFS= read -r line; do
     # Extract filename relative to SRC_DIR.
     filepath="${line%%:*}"
-    relpath="${filepath#${SRC_DIR}/}"
+    location="${line#*:}"
+    line_number="${location%%:*}"
+    relpath="${filepath#"${SRC_DIR}"/}"
+
+    if line_is_cfg_test "${filepath}" "${line_number}"; then
+        continue
+    fi
 
     # Check if this file is in the allowlist.
     allowed=0
@@ -127,7 +207,7 @@ while IFS= read -r line; do
         echo "  ${line}"
         fail=1
     fi
-done < /tmp/api-lfk-refs.txt
+done < "${TMP_LFK}"
 
 if [[ "${fail}" -eq 1 ]]; then
     echo
