@@ -13,6 +13,7 @@ regex = "1"
 chrono = "0.4"
 base64 = { workspace = true }
 sha2 = { workspace = true }
+spdx = "0.13.5"
 # Host probe (RAM / CPU) for `LIBREFANG_LOCAL_CHECK_MODE` auto-throttle (#3301).
 # Kept xtask-local; not promoted to workspace.dependencies because no
 # production crate consumes it. Default features are disabled — we only need
