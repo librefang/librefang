@@ -1,0 +1,1 @@
+- Prevented self-closing and void HTML tags from leaking into Telegram chunk carry state. (@houko)

@@ -126,6 +126,10 @@ fn strip_mid_tag(chunk: &str) -> &str {
 
 static RE_TAG: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)([^>]*)>").expect("tag regex"));
+const VOID_TAGS: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
 
 /// Walk `chunk` and return the stack of tags left unclosed at end-of-chunk. Each entry is `(name, full_open_tag_with_attrs)` so the caller can both close (`</name>`) at the end of this chunk and reopen with the original attributes at the start of the next chunk.
 fn unclosed_tags(chunk: &str) -> Vec<(String, String)> {
@@ -134,11 +138,14 @@ fn unclosed_tags(chunk: &str) -> Vec<(String, String)> {
         let closing = !caps.get(1).unwrap().as_str().is_empty();
         let name = caps.get(2).unwrap().as_str().to_ascii_lowercase();
         let full = caps.get(0).unwrap().as_str().to_string();
+        let self_closing = caps
+            .get(3)
+            .is_some_and(|attrs| attrs.as_str().trim_end().ends_with('/'));
         if closing {
             if let Some(pos) = stack.iter().rposition(|(n, _)| *n == name) {
                 stack.truncate(pos);
             }
-        } else {
+        } else if !self_closing && !VOID_TAGS.contains(&name.as_str()) {
             stack.push((name, full));
         }
     }
@@ -252,6 +259,14 @@ mod tests {
         assert_eq!(utf16_len("hi"), 2);
         assert_eq!(utf16_len(""), 0);
         assert_eq!(utf16_len("a\u{1F600}"), 3); // 'a' + emoji surrogate pair
+    }
+
+    #[test]
+    fn self_closing_and_void_tags_do_not_enter_the_carry_stack() {
+        assert!(unclosed_tags("<code/>after").is_empty());
+        assert!(unclosed_tags("<tg-emoji emoji-id=\"42\" />after").is_empty());
+        assert!(unclosed_tags("before<br>after").is_empty());
+        assert_eq!(unclosed_tags("<b>after")[0].0, "b");
     }
 
     #[test]
