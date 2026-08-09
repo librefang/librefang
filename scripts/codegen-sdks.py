@@ -766,6 +766,32 @@ async fn do_req(
     Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
 }
 
+fn process_sse_line(
+    line_bytes: &[u8],
+    tx: &tokio::sync::mpsc::UnboundedSender<Value>,
+) -> bool {
+    let line = match std::str::from_utf8(line_bytes) {
+        Ok(s) => s.trim(),
+        Err(e) => {
+            let _ = tx.send(serde_json::json!({
+                "error": format!("invalid utf-8 in SSE line at byte {}", e.valid_up_to()),
+                "status": 0,
+            }));
+            return true;
+        }
+    };
+    if let Some(data) = line.strip_prefix("data: ") {
+        if data == "[DONE]" { return false; }
+        match serde_json::from_str::<Value>(data) {
+            Ok(v) => { let _ = tx.send(v); }
+            Err(_) => {
+                let _ = tx.send(serde_json::json!({"raw": data}));
+            }
+        }
+    }
+    true
+}
+
 fn do_stream(
     client: Client,
     base_url: String,
@@ -810,7 +836,12 @@ fn do_stream(
         const MAX_SSE_LINE: usize = 8 * 1024 * 1024;
         let mut stream = res.bytes_stream();
         let mut buffer: Vec<u8> = Vec::new();
-        while let Some(Ok(chunk)) = stream.next().await {
+        loop {
+            let chunk = match stream.next().await {
+                Some(Ok(chunk)) => chunk,
+                Some(Err(_)) => return,
+                None => break,
+            };
             buffer.extend_from_slice(&chunk);
             if buffer.len() > MAX_SSE_LINE {
                 let _ = tx.send(serde_json::json!({
@@ -821,26 +852,11 @@ fn do_stream(
             }
             while let Some(pos) = buffer.iter().position(|&b| b == b'\\n') {
                 let line_bytes: Vec<u8> = buffer.drain(..=pos).collect();
-                let line = match std::str::from_utf8(&line_bytes) {
-                    Ok(s) => s.trim(),
-                    Err(e) => {
-                        let _ = tx.send(serde_json::json!({
-                            "error": format!("invalid utf-8 in SSE line at byte {}", e.valid_up_to()),
-                            "status": 0,
-                        }));
-                        continue;
-                    }
-                };
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if data == "[DONE]" { return; }
-                    match serde_json::from_str::<Value>(data) {
-                        Ok(v) => { let _ = tx.send(v); }
-                        Err(_) => {
-                            let _ = tx.send(serde_json::json!({"raw": data}));
-                        }
-                    }
-                }
+                if !process_sse_line(&line_bytes, &tx) { return; }
             }
+        }
+        if !buffer.is_empty() {
+            let _ = process_sse_line(&buffer, &tx);
         }
     });
     rx

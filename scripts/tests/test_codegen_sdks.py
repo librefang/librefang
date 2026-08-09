@@ -71,6 +71,9 @@ def main():
     assert_not_in("from_utf8_lossy(&chunk)", rs, "rust-no-lossy-chunk")
     assert_in('"status": status', rs, "rust-error-event-status")
     assert_in('"status": resp.StatusCode', go, "go-error-event-status")
+    assert_in("fn process_sse_line(", rs, "rust-shared-sse-line-parser")
+    assert_in("if !buffer.is_empty()", rs, "rust-flush-trailing-sse-line")
+    assert_in("process_sse_line(&buffer, &tx)", rs, "rust-parse-trailing-sse-line")
 
     # SSE line-size cap
     assert_in("MAX_SSE_LINE", rs, "rust-max-sse")
