@@ -46,6 +46,48 @@ fn escape_attr_value(v: &str) -> String {
         .replace('"', "&quot;")
 }
 
+fn entity_len(text: &str) -> Option<usize> {
+    let semicolon = text
+        .as_bytes()
+        .iter()
+        .take(13)
+        .position(|byte| *byte == b';')?;
+    if semicolon == 0 || semicolon > 12 {
+        return None;
+    }
+    let body = &text[1..semicolon];
+    let valid = matches!(body, "amp" | "lt" | "gt" | "quot")
+        || body.strip_prefix('#').is_some_and(|number| {
+            number.strip_prefix(['x', 'X']).map_or_else(
+                || !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()),
+                |hex| !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()),
+            )
+        });
+    valid.then_some(semicolon + 1)
+}
+
+fn push_escaped_literal(out: &mut String, text: &str) {
+    let mut cursor = 0;
+    while cursor < text.len() {
+        let tail = &text[cursor..];
+        let ch = tail.chars().next().expect("cursor is before end");
+        match ch {
+            '&' => {
+                if let Some(len) = entity_len(tail) {
+                    out.push_str(&tail[..len]);
+                    cursor += len;
+                    continue;
+                }
+                out.push_str("&amp;");
+            }
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+        cursor += ch.len_utf8();
+    }
+}
+
 fn rebuild_attrs(tag_name: &str, attr_str: &str) -> Option<String> {
     let mut kept = Vec::new();
     for caps in RE_ATTR.captures_iter(attr_str) {
@@ -84,7 +126,7 @@ pub fn sanitize_telegram_html(text: &str) -> String {
     for m in RE_TAG.find_iter(text) {
         // Append any literal text between the last cursor and this tag.
         if m.start() > cursor {
-            out.push_str(&text[cursor..m.start()]);
+            push_escaped_literal(&mut out, &text[cursor..m.start()]);
         }
         cursor = m.end();
 
@@ -97,7 +139,7 @@ pub fn sanitize_telegram_html(text: &str) -> String {
         let attrs = captures.get(3).map(|s| s.as_str()).unwrap_or("");
 
         if !ALLOWED_TAGS.contains(&tag.as_str()) {
-            // Drop the tag entirely (no inline escape — the surrounding text already had its `<` / `>` HTML-escaped by the caller / markdown converter).
+            // Drop the tag entirely. Literal segments are escaped independently.
             continue;
         }
 
@@ -131,7 +173,7 @@ pub fn sanitize_telegram_html(text: &str) -> String {
 
     // Trailing literal text.
     if cursor < text.len() {
-        out.push_str(&text[cursor..]);
+        push_escaped_literal(&mut out, &text[cursor..]);
     }
 
     // Auto-close anything still open.
@@ -183,5 +225,19 @@ mod tests {
     fn keeps_code_class() {
         let s = sanitize_telegram_html("<code class=\"rust\">x</code>");
         assert!(s.contains("class=\"rust\""));
+    }
+
+    #[test]
+    fn escapes_literal_text_nodes_without_double_escaping_entities() {
+        let s = sanitize_telegram_html("a < b & c<b>d > e &amp; f</b>g &lt; h");
+        assert_eq!(s, "a &lt; b &amp; c<b>d &gt; e &amp; f</b>g &lt; h");
+    }
+
+    #[test]
+    fn many_bare_ampersands_are_processed_linearly() {
+        let input = "&".repeat(512 * 1024);
+        let output = sanitize_telegram_html(&input);
+        assert_eq!(output.len(), input.len() * "&amp;".len());
+        assert!(output.starts_with("&amp;&amp;"));
     }
 }
