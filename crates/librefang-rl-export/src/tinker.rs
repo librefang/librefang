@@ -34,8 +34,9 @@
 //! module should switch to it; until then the telemetry-event path is
 //! what the upstream actually accepts. See the PR body for sign-off.
 //!
-//! All HTTP traffic flows through `librefang_http::proxied_client()` so
-//! the operator's `[proxy]` config and TLS fallback apply uniformly.
+//! All HTTP traffic uses `librefang_http::proxied_client_builder()` with
+//! redirect following disabled, while retaining the operator's `[proxy]`
+//! config and TLS fallback.
 
 use base64::Engine;
 use chrono::Utc;
@@ -163,10 +164,7 @@ pub(crate) async fn export_to_tinker_with_base(
     // metadata), replaying the `x-api-key` header on 307/308. A finished
     // upload never needs to follow a redirect; a 3xx must surface as an
     // error. Mirrors `librefang_http::oauth_client_builder`.
-    let client = librefang_http::proxied_client_builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap_or_else(|_| librefang_http::proxied_client());
+    let client = crate::build_export_http_client()?;
 
     // Step 1: register the session on Tinker. Sort tags for byte-
     // identical wire output (refs #3298 prompt-cache determinism).

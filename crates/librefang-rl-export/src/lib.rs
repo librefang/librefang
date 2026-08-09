@@ -32,12 +32,14 @@
 //!
 //! # HTTP client
 //!
-//! All outbound HTTP flows through
-//! [`librefang_http::proxied_client`], the workspace's shared
-//! reqwest client. This is non-negotiable per the
+//! All outbound HTTP clients start from
+//! [`librefang_http::proxied_client_builder`], the workspace's shared
+//! reqwest client configuration. This is non-negotiable per the
 //! `librefang-extensions` AGENTS.md ("no bespoke `reqwest::Client`"):
-//! the shared client carries the configured proxy, TLS fallback
-//! roots, and `User-Agent: librefang/<version>`.
+//! the shared builder carries the configured proxy, TLS fallback
+//! roots, and `User-Agent: librefang/<version>`. Exporters additionally
+//! disable redirects before building the client and fail closed if that
+//! secure client cannot be constructed.
 
 #![deny(missing_docs)]
 
@@ -52,6 +54,19 @@ mod wandb;
 pub use error::ExportError;
 
 use chrono::{DateTime, Utc};
+
+fn build_export_http_client_with(
+    builder: reqwest::ClientBuilder,
+) -> Result<reqwest::Client, ExportError> {
+    builder
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(ExportError::from)
+}
+
+fn build_export_http_client() -> Result<reqwest::Client, ExportError> {
+    build_export_http_client_with(librefang_http::proxied_client_builder())
+}
 
 /// Target service to export a trajectory to.
 ///
@@ -340,6 +355,15 @@ pub(crate) fn resolve_env_secret(env_var: &str, field_label: &str) -> Result<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_client_build_failure_is_not_replaced_by_a_default_client() {
+        let invalid_builder = reqwest::Client::builder().user_agent("invalid\nuser-agent");
+        let error = build_export_http_client_with(invalid_builder)
+            .expect_err("an invalid secure client must fail closed");
+
+        assert!(matches!(error, ExportError::NetworkError(_)));
+    }
 
     /// `*_env` indirection: an empty env-var name fails fast with
     /// `InvalidConfig` (no env probe) so a caller that accidentally
