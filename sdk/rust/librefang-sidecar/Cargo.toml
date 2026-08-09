@@ -16,6 +16,13 @@ keywords = ["librefang", "sidecar", "channel", "agent", "ai"]
 categories = ["api-bindings", "asynchronous"]
 readme = "README.md"
 rust-version = "1.80"
+include = [
+    "src/**",
+    "examples/**",
+    "tests/**",
+    "README.md",
+    "Cargo.toml",
+]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
