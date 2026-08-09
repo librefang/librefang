@@ -558,7 +558,11 @@ func (c *Client) stream(method, path string, body interface{}, query map[string]
 \t\t\tb, _ := json.Marshal(body)
 \t\t\tbodyBytes = b
 \t\t}
-\t\treq, _ := http.NewRequest(method, urlStr, bytes.NewReader(bodyBytes))
+\t\treq, err := http.NewRequest(method, urlStr, bytes.NewReader(bodyBytes))
+\t\tif err != nil {
+\t\t\tch <- map[string]interface{}{"error": fmt.Sprintf("new request: %v", err), "status": 0}
+\t\t\treturn
+\t\t}
 \t\tfor k, v := range c.Headers {
 \t\t\treq.Header.Set(k, v)
 \t\t}

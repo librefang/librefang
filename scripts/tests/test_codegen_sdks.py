@@ -71,6 +71,8 @@ def main():
     assert_not_in("from_utf8_lossy(&chunk)", rs, "rust-no-lossy-chunk")
     assert_in('"status": status', rs, "rust-error-event-status")
     assert_in('"status": resp.StatusCode', go, "go-error-event-status")
+    assert_in('"error": fmt.Sprintf("new request: %v", err)', go, "go-stream-request-error")
+    assert_not_in("req, _ := http.NewRequest", go, "go-no-discarded-stream-request-error")
 
     # SSE line-size cap
     assert_in("MAX_SSE_LINE", rs, "rust-max-sse")
