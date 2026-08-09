@@ -161,6 +161,28 @@ async def test_invalid_json_emits_error_and_continues():
     assert any(s.text == "after" for s in adapter.sends)
 
 
+async def test_non_object_command_params_emit_error_and_continue():
+    adapter = RecordingAdapter()
+    emitted = await _drive(adapter, [
+        '{"method":"send","params":["not","an","object"]}',
+        '{"method":"send","params":{"channel_id":"c","text":"after","user":{}}}',
+    ])
+
+    assert any(e["method"] == "error" for e in emitted)
+    assert [send.text for send in adapter.sends] == ["after"]
+
+
+async def test_non_string_command_method_emits_error_and_continues():
+    adapter = RecordingAdapter()
+    emitted = await _drive(adapter, [
+        '{"method":[],"params":{}}',
+        '{"method":"send","params":{"channel_id":"c","text":"after","user":{}}}',
+    ])
+
+    assert any(e["method"] == "error" for e in emitted)
+    assert [send.text for send in adapter.sends] == ["after"]
+
+
 async def test_producer_emits_inbound_messages():
     class Producer(SidecarAdapter):
         async def on_send(self, cmd):  # unused here
