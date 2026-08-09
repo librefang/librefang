@@ -73,6 +73,17 @@ def search_folder(mail, folder, sender):
         print(f"WARNING: failed to search {folder}: {e}", file=sys.stderr)
         return []
 
+
+def fetched_message_bytes(data):
+    """Return RFC822 bytes from the expected IMAP FETCH response shape."""
+    if not data or not isinstance(data[0], tuple) or len(data[0]) < 2:
+        raise ValueError("malformed IMAP FETCH response")
+    message_bytes = data[0][1]
+    if not isinstance(message_bytes, bytes):
+        raise ValueError("malformed IMAP FETCH response")
+    return message_bytes
+
+
 def main():
     sender = sys.argv[1] if len(sys.argv) > 1 else ""
     password = os.environ.get("EMAIL_PASSWORD", "")
@@ -122,7 +133,7 @@ def main():
     # Fetch the latest email
     try:
         _, data = mail.fetch(found_ids[-1], "(RFC822)")
-        msg = email.message_from_bytes(data[0][1])
+        msg = email.message_from_bytes(fetched_message_bytes(data))
     except Exception as e:
         print(f"ERROR: fetch failed: {e}", file=sys.stderr)
         mail.logout()
