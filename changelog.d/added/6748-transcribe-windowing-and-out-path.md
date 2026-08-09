@@ -5,4 +5,5 @@ Both are reached around ten minutes of speech, at roughly 2.5 MB of extracted au
 Windows starting at `0` begin a new file and later windows append, so repeated calls assemble one transcript without any of it passing through the agent's context.
 Both mechanisms are needed rather than either alone: window size varies with how much was said, so a fixed window straddles the spill threshold instead of staying under it, and `out_path` is what makes the outcome independent of that.
 Callers advance by the produced window length rather than the requested one, read back from the Ogg granule position — a seek lands on a keyframe and a window overlapping the end of the recording is short, so an assumed edge drifts and eventually skips audio.
-A call that names neither window field keeps its previous behaviour exactly, including adding no ffmpeg pass. (#6748) (@nevgenov)
+Consecutive windows are separated by a newline: a boundary lands mid-sentence by design and each window's transcript arrives trimmed, so concatenating them directly would fuse the last word of one window to the first of the next at every boundary.
+A call that names neither window field keeps its previous behaviour exactly, including adding no ffmpeg pass. (#6748, #6773) (@nevgenov)

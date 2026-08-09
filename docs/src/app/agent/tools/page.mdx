@@ -227,7 +227,8 @@ media_transcribe(path="meeting.mp4", start_sec=600, max_secs=600, out_path="meet
 A window starting at `0` begins a new file; later windows append to it, so the calls assemble one transcript without the agent holding any of it.
 Advance by `next_start_sec` rather than by `max_secs`: a seek lands on a keyframe and the final window is short, so the produced length is the only edge that does not drift.
 
-Lower `max_secs` if a call times out. How much media fits in one request depends on provider speed, and a self-hosted endpoint can be an order of magnitude slower than a hosted one.
+Lower `max_secs` if a call times out.
+How much media fits in one request depends on provider speed, and a self-hosted endpoint can be an order of magnitude slower than a hosted one.
 
 ---
 

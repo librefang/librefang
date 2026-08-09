@@ -259,31 +259,19 @@ pub(super) async fn tool_media_transcribe(
         "model": outcome.understanding.model,
     });
 
-    // Continuation fields only when a window was requested. Emitting them for
-    // a whole-file call would invite a caller to loop on a transcript that is
-    // already complete.
+    // Continuation fields only when a window was requested.
+    // Emitting them for a whole-file call would invite a caller to loop on a transcript that is already complete.
     if let Some(window) = window {
-        // Advance by what ffmpeg actually produced, never by what was asked
-        // for: a seek lands on a keyframe and a window overlapping the end is
-        // short, so an assumed edge drifts and eventually skips audio.
-        // Falling back to the requested length when the granule position is
-        // unreadable keeps the walk moving rather than stalling it — at worst
-        // it repeats or skips one window, which the caller can see in the
-        // transcript, whereas a stall is silent.
-        let consumed = outcome.consumed_secs.unwrap_or(window.max_secs);
-        // A window is "full" only within a tolerance: the produced stream ends
-        // on a packet boundary, so an exactly-covered window still lands a few
-        // milliseconds short and a strict comparison would call every window
-        // the last one.
-        let has_more = consumed >= window.max_secs - WINDOW_COMPLETE_TOLERANCE_SECS;
+        let continuation = window_continuation(window, outcome.consumed_secs);
         response["window"] = serde_json::json!({
             "start_sec": window.start_sec,
             "max_secs": window.max_secs,
-            "consumed_secs": consumed,
+            // Null rather than a substituted number when the produced stream carried no readable duration: the caller can see that the walk stopped because the edge was unknown, not because the recording ended.
+            "consumed_secs": outcome.consumed_secs,
         });
-        response["has_more"] = serde_json::json!(has_more);
-        if has_more {
-            response["next_start_sec"] = serde_json::json!(window.start_sec + consumed);
+        response["has_more"] = serde_json::json!(continuation.has_more);
+        if let Some(next) = continuation.next_start_sec {
+            response["next_start_sec"] = serde_json::json!(next);
         }
     }
 
@@ -296,20 +284,20 @@ pub(super) async fn tool_media_transcribe(
             let written = write_transcript(
                 out_path,
                 transcript,
-                // A window starting at zero begins a fresh transcript; every
-                // later window continues the same file. Without this a caller
-                // walking a recording would either overwrite each chunk with
-                // the next or have to invent its own assembly step.
+                // A window starting at zero begins a fresh transcript; every later window continues the same file.
+                // Without this a caller walking a recording would either overwrite each chunk with the next or have to invent its own assembly step.
                 window.is_some_and(|w| w.start_sec > 0.0),
                 workspace_root,
                 additional_roots,
             )
             .await?;
             response["written_to"] = serde_json::json!(written.path);
-            response["bytes_written"] = serde_json::json!(written.bytes);
-            response["sha256"] = serde_json::json!(written.sha256);
-            response["chars"] = serde_json::json!(transcript.chars().count());
-            response["preview"] = serde_json::json!(preview_of(transcript));
+            // Deliberately distinct scopes, named so: the file fields describe the artefact as it now stands on disk (every window so far), while the window fields describe only what this call produced.
+            // A caller assembling a recording needs both — one to verify the artefact, one to see this step's contribution.
+            response["file_bytes"] = serde_json::json!(written.bytes);
+            response["file_sha256"] = serde_json::json!(written.sha256);
+            response["window_chars"] = serde_json::json!(transcript.chars().count());
+            response["window_preview"] = serde_json::json!(preview_of(transcript));
         }
     }
 
@@ -320,6 +308,42 @@ pub(super) async fn tool_media_transcribe(
 ///
 /// Opus packets are 20 ms by default, so a window that covers its whole span still ends up to one packet short; without slack `has_more` would read every window as the last and truncate the recording after the first call.
 const WINDOW_COMPLETE_TOLERANCE_SECS: f64 = 0.25;
+
+/// Whether the walk continues after this window, and where it resumes.
+#[derive(Debug, PartialEq)]
+struct WindowContinuation {
+    has_more: bool,
+    next_start_sec: Option<f64>,
+}
+
+/// Decide whether a recording has more after `window`, given how much of it the extraction actually produced.
+///
+/// Extracted rather than left inline so the two boundary cases that decide whether a walk terminates — a window that came back exactly full, and one whose duration could not be read — are unit-testable without a live provider.
+///
+/// Advancing uses the produced length, never the requested one: a seek lands on a keyframe and a window overlapping the end of the recording is short, so an assumed edge drifts and eventually skips audio.
+///
+/// `consumed_secs: None` **stops** the walk.
+/// That case means the produced stream carried no readable granule position, and the shape most likely to produce it is a window cut at or past the true end of the recording — where ffmpeg emits header-only or truncated output.
+/// Treating unknown as "assume the full window was consumed" would advance by `max_secs` and ask again, get the same unreadable shape, and never terminate.
+/// Stopping instead costs at most a short read the caller can see in the transcript, which is strictly better than a walk that cannot end.
+fn window_continuation(
+    window: crate::media_understanding::MediaWindow,
+    consumed_secs: Option<f64>,
+) -> WindowContinuation {
+    let Some(consumed) = consumed_secs else {
+        return WindowContinuation {
+            has_more: false,
+            next_start_sec: None,
+        };
+    };
+    // A window is "full" only within a tolerance: the produced stream ends on a packet boundary, so an exactly-covered window still lands a few milliseconds short and a strict comparison would call every window the last one.
+    let has_more = consumed >= window.max_secs - WINDOW_COMPLETE_TOLERANCE_SECS;
+    WindowContinuation {
+        has_more,
+        // A window that produced nothing cannot advance the cursor; treating it as progress would spin on the same offset.
+        next_start_sec: (has_more && consumed > 0.0).then_some(window.start_sec + consumed),
+    }
+}
 
 /// Read `start_sec` / `max_secs` into a window, or `None` for a whole-file call.
 ///
@@ -380,6 +404,12 @@ fn preview_of(text: &str) -> String {
     out
 }
 
+/// Written between consecutive windows in an assembled transcript.
+///
+/// A newline rather than a space so the boundary is visible to whoever reads the file, and because a window edge frequently lands mid-sentence — a line break reads as "the recording continues here", where a space would silently imply the two fragments are one phrase.
+/// Nothing that was not spoken is inserted: no timestamps, no markers, so the file stays a transcript rather than a rendering of one.
+const WINDOW_SEPARATOR: &str = "\n";
+
 /// Outcome of persisting a transcript, as reported back to the agent.
 struct WrittenTranscript {
     path: String,
@@ -393,6 +423,13 @@ struct WrittenTranscript {
 ///
 /// `append` exists because assembling a long recording is the normal case: each window continues the file the previous one started.
 /// The reported `bytes` and `sha256` describe the **whole file** after the write, not just this window's share, so a caller that has walked five windows can verify the artefact it ends up with rather than the last fragment of it.
+///
+/// Appended windows are separated by [`WINDOW_SEPARATOR`], because a window boundary lands mid-sentence by design and the provider path trims each transcript's surrounding whitespace (`media_understanding.rs`, right after dispatch).
+/// Concatenating the trimmed pieces directly would fuse the last word of one window to the first word of the next at *every* boundary, not occasionally.
+///
+/// A failed write is not rolled back, and for the append case it cannot be cheaply: buffering the assembled transcript to rewrite it atomically would restore, on disk, the proportional-to-recording-length cost this whole parameter exists to remove.
+/// What the caller gets instead is detection — `bytes` and `sha256` describe the file as it now stands, so a short or corrupted artefact is visible rather than silent.
+/// Recovery is to restart the walk from `start_sec = 0`, which truncates; retrying only the failed window would append after the partial bytes.
 async fn write_transcript(
     out_path: &str,
     transcript: &str,
@@ -421,9 +458,7 @@ async fn write_transcript(
         })?;
     }
 
-    // Appended rather than rewritten: holding every prior window in memory to
-    // rewrite the file whole would reintroduce, on disk, exactly the
-    // proportional-to-recording-length cost this parameter exists to remove.
+    // Appended rather than rewritten: holding every prior window in memory to rewrite the file whole would reintroduce, on disk, exactly the proportional-to-recording-length cost this parameter exists to remove.
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -432,6 +467,18 @@ async fn write_transcript(
         .open(&resolved)
         .await
         .map_err(|e| ToolError::upstream_msg(format!("Failed to open '{out_path}': {e}")))?;
+    // Only between windows, and only when there is something to separate from — a separator ahead of the first window would put a stray newline at the head of every transcript.
+    let needs_separator = append
+        && tokio::fs::metadata(&resolved)
+            .await
+            .is_ok_and(|m| m.len() > 0);
+    if needs_separator {
+        file.write_all(WINDOW_SEPARATOR.as_bytes())
+            .await
+            .map_err(|e| {
+                ToolError::upstream_msg(format!("Failed to write separator to '{out_path}': {e}"))
+            })?;
+    }
     file.write_all(transcript.as_bytes())
         .await
         .map_err(|e| ToolError::upstream_msg(format!("Failed to write '{out_path}': {e}")))?;
@@ -1339,26 +1386,100 @@ mod transcribe_window_tests {
     /// append, and the reported size and digest describe the whole file rather
     /// than the last fragment — otherwise a caller could not verify what it
     /// ended up with.
+    ///
+    /// The separator is the load-bearing part. A window boundary lands
+    /// mid-sentence by design and each window arrives already trimmed, so
+    /// without it the last word of one window fuses to the first of the next
+    /// at every boundary — the common case, not an edge case.
     #[tokio::test]
     async fn windows_append_into_one_transcript() {
         let root = tempfile::tempdir().expect("tempdir");
-        let first = write_transcript("t.txt", "first. ", false, Some(root.path()), &[])
+        let first = write_transcript("t.txt", "and then we", false, Some(root.path()), &[])
             .await
             .expect("initial write must succeed");
-        let second = write_transcript("t.txt", "second.", true, Some(root.path()), &[])
-            .await
-            .expect("append must succeed");
+        let second = write_transcript(
+            "t.txt",
+            "discussed the budget",
+            true,
+            Some(root.path()),
+            &[],
+        )
+        .await
+        .expect("append must succeed");
 
         let on_disk = tokio::fs::read_to_string(root.path().join("t.txt"))
             .await
             .expect("file must exist");
-        assert_eq!(on_disk, "first. second.");
+        assert_eq!(on_disk, "and then we\ndiscussed the budget");
+        assert!(
+            !on_disk.contains("wediscussed"),
+            "consecutive windows must not fuse into one word: {on_disk:?}"
+        );
+        assert!(
+            !on_disk.starts_with(WINDOW_SEPARATOR),
+            "the first window must not be preceded by a separator"
+        );
         assert_eq!(second.bytes, on_disk.len() as u64);
         assert!(
             second.bytes > first.bytes,
             "the appended write must report the whole file, not its own share"
         );
         assert_ne!(first.sha256, second.sha256);
+    }
+
+    /// An append onto a file that does not exist yet (a caller resuming a walk
+    /// whose artefact was cleaned up) must not open with a stray separator.
+    #[tokio::test]
+    async fn append_to_a_missing_file_does_not_lead_with_a_separator() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write_transcript("t.txt", "resumed", true, Some(root.path()), &[])
+            .await
+            .expect("append must create the file");
+
+        let on_disk = tokio::fs::read_to_string(root.path().join("t.txt"))
+            .await
+            .expect("file must exist");
+        assert_eq!(on_disk, "resumed");
+    }
+
+    /// Walk termination, table-driven. These are the branches that decide
+    /// whether a caller stops, loops, or silently skips audio, and none of
+    /// them is reachable through the tool without a live provider.
+    #[test]
+    fn window_continuation_decides_when_the_walk_stops() {
+        let w = |max_secs| crate::media_understanding::MediaWindow {
+            start_sec: 100.0,
+            max_secs,
+        };
+
+        // Full window → more to come, resuming at the produced edge.
+        let full = window_continuation(w(600.0), Some(600.0));
+        assert!(full.has_more);
+        assert_eq!(full.next_start_sec, Some(700.0));
+
+        // Short by less than one Opus packet still counts as full: the stream
+        // ends on a packet boundary, so a strict comparison would call every
+        // window the last one.
+        let nearly_full = window_continuation(w(600.0), Some(599.9));
+        assert!(nearly_full.has_more);
+        assert_eq!(nearly_full.next_start_sec, Some(699.9));
+
+        // Genuinely short → the recording ended inside this window.
+        let short = window_continuation(w(600.0), Some(340.0));
+        assert!(!short.has_more);
+        assert_eq!(short.next_start_sec, None);
+
+        // Unknown duration stops the walk rather than assuming a full window.
+        // Assuming would advance past the end, get the same unreadable shape
+        // again, and never terminate.
+        let unknown = window_continuation(w(600.0), None);
+        assert!(!unknown.has_more);
+        assert_eq!(unknown.next_start_sec, None);
+
+        // A window that produced nothing cannot advance the cursor; without
+        // this the walk would spin on one offset forever.
+        let empty = window_continuation(w(0.1), Some(0.0));
+        assert_eq!(empty.next_start_sec, None);
     }
 
     /// A restart of the walk (`start_sec = 0`) must not leave the previous

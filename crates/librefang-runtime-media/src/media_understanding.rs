@@ -195,7 +195,8 @@ impl MediaEngine {
     /// ElevenLabs, …). There is no runtime cascade; a provider failure
     /// surfaces as `Err` to the caller.
     ///
-    /// Transcribes the whole file. Callers that need to bound the request — anything driven by a recording whose length they do not control — want [`Self::transcribe_audio_window`] instead (#6748).
+    /// Transcribes the whole file.
+    /// Callers that need to bound the request — anything driven by a recording whose length they do not control — want [`Self::transcribe_audio_window`] instead (#6748).
     pub async fn transcribe_audio(
         &self,
         attachment: &MediaAttachment,
@@ -291,11 +292,8 @@ impl MediaEngine {
             source_ext.clone().unwrap_or_else(|| "wav".to_string())
         });
 
-        // Windowed call (#6748): one ffmpeg pass cuts the requested span and
-        // lands it on the same Ogg/Opus target the two branches below produce,
-        // so neither has anything left to do. Handled first for that reason —
-        // running either of them before this would decode the whole recording
-        // just to throw most of it away.
+        // Windowed call (#6748): one ffmpeg pass cuts the requested span and lands it on the same Ogg/Opus target the two branches below produce, so neither has anything left to do.
+        // Handled first for that reason — running either of them before this would decode the whole recording just to throw most of it away.
         let mut consumed_secs = None;
         if let Some(window) = window {
             let cut = extract_media_window(&audio_bytes, window)
@@ -1327,7 +1325,8 @@ pub struct TranscriptionOutcome {
 pub struct MediaWindow {
     /// Offset of the window from the start of the media.
     pub start_sec: f64,
-    /// Requested length. The produced window is shorter when the media ends first, which is how the end of the recording is detected.
+    /// Requested length.
+    /// The produced window is shorter when the media ends first, which is how the end of the recording is detected.
     pub max_secs: f64,
 }
 
@@ -1383,9 +1382,8 @@ fn ogg_opus_duration_secs(ogg: &[u8]) -> Option<f64> {
     const CAPTURE: &[u8; 4] = b"OggS";
     const OPUS_SAMPLE_RATE: f64 = 48_000.0;
 
-    // Pre-skip lives at bytes 10..12 of the OpusHead packet, which is the
-    // first page's payload. Absent it, a stream reports a few milliseconds
-    // more than it plays; that is small, but it accumulates across chunks.
+    // Pre-skip lives at bytes 10..12 of the OpusHead packet, which is the first page's payload.
+    // Absent it, a stream reports a few milliseconds more than it plays; that is small, but it accumulates across chunks.
     let pre_skip = ogg
         .windows(8)
         .position(|w| w == b"OpusHead")
@@ -1393,9 +1391,7 @@ fn ogg_opus_duration_secs(ogg: &[u8]) -> Option<f64> {
         .map(|b| u16::from_le_bytes([b[0], b[1]]) as f64)
         .unwrap_or(0.0);
 
-    // Scan forward for the last capture pattern rather than seeking back from
-    // the end: page sizes vary with the segment table, so the final page's
-    // offset cannot be computed, only found.
+    // Scan forward for the last capture pattern rather than seeking back from the end: page sizes vary with the segment table, so the final page's offset cannot be computed, only found.
     let mut last_granule: Option<u64> = None;
     let mut at = 0usize;
     while let Some(found) = ogg[at..]
@@ -1403,16 +1399,14 @@ fn ogg_opus_duration_secs(ogg: &[u8]) -> Option<f64> {
         .position(|w| w == CAPTURE)
         .map(|p| at + p)
     {
-        // Header is 27 bytes before the segment table; granule position sits
-        // at bytes 6..14, little-endian.
+        // Header is 27 bytes before the segment table; granule position sits at bytes 6..14, little-endian.
         let granule = ogg.get(found + 6..found + 14)?;
         last_granule = Some(u64::from_le_bytes(granule.try_into().ok()?));
         at = found + CAPTURE.len();
     }
 
     let granule = last_granule?;
-    // `u64::MAX` is the "no packet finishes on this page" sentinel, not a
-    // length; a stream ending on one carries no usable duration.
+    // `u64::MAX` is the "no packet finishes on this page" sentinel, not a length; a stream ending on one carries no usable duration.
     if granule == u64::MAX {
         return None;
     }
