@@ -95,6 +95,7 @@ pub fn sanitize_telegram_html(text: &str) -> String {
             .unwrap_or(false);
         let tag = captures.get(2).unwrap().as_str().to_ascii_lowercase();
         let attrs = captures.get(3).map(|s| s.as_str()).unwrap_or("");
+        let self_closing = attrs.trim_end().ends_with('/');
 
         if !ALLOWED_TAGS.contains(&tag.as_str()) {
             // Drop the tag entirely (no inline escape — the surrounding text already had its `<` / `>` HTML-escaped by the caller / markdown converter).
@@ -121,7 +122,13 @@ pub fn sanitize_telegram_html(text: &str) -> String {
                 out.push_str(&tag);
                 out.push_str(&rebuilt);
                 out.push('>');
-                stack.push(tag);
+                if self_closing {
+                    out.push_str("</");
+                    out.push_str(&tag);
+                    out.push('>');
+                } else {
+                    stack.push(tag);
+                }
             }
             None => {
                 // Tag's required attribute (e.g. <a href>) failed the safety check → drop the tag.
@@ -183,5 +190,14 @@ mod tests {
     fn keeps_code_class() {
         let s = sanitize_telegram_html("<code class=\"rust\">x</code>");
         assert!(s.contains("class=\"rust\""));
+    }
+
+    #[test]
+    fn self_closing_allowed_tag_does_not_wrap_following_text() {
+        assert_eq!(sanitize_telegram_html("<code/>after"), "<code></code>after");
+        assert_eq!(
+            sanitize_telegram_html("<tg-emoji emoji-id=\"42\" />after"),
+            "<tg-emoji emoji-id=\"42\"></tg-emoji>after"
+        );
     }
 }
