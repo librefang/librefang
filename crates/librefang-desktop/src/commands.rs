@@ -288,8 +288,7 @@ fn parse_windows_command_line(command_line: &str) -> Result<Vec<std::ffi::OsStri
         .chain(std::iter::once(0))
         .collect();
     let mut argc = 0_i32;
-    // SAFETY: `wide` is writable, NUL-terminated storage that remains live
-    // for the call; `argc` is a valid out pointer.
+    // SAFETY: `wide` is writable, NUL-terminated storage that remains live for the call, and `argc` is a valid out pointer.
     let argv = unsafe { CommandLineToArgvW(wide.as_mut_ptr(), &mut argc) };
     if argv.is_null() {
         return Err(format!(
@@ -301,8 +300,7 @@ fn parse_windows_command_line(command_line: &str) -> Result<Vec<std::ffi::OsStri
     struct LocalArgv(*mut windows_sys::core::PWSTR);
     impl Drop for LocalArgv {
         fn drop(&mut self) {
-            // SAFETY: CommandLineToArgvW allocated this pointer with LocalAlloc
-            // and ownership is released exactly once here.
+            // SAFETY: CommandLineToArgvW allocated this pointer with LocalAlloc, and ownership is released exactly once here.
             unsafe {
                 LocalFree(self.0.cast());
             }
@@ -318,8 +316,7 @@ fn parse_windows_command_line(command_line: &str) -> Result<Vec<std::ffi::OsStri
     let mut parsed = Vec::with_capacity(pointers.len());
     for &pointer in pointers {
         let mut len = 0;
-        // SAFETY: every returned argv element is NUL-terminated and remains
-        // live until the LocalArgv guard is dropped.
+        // SAFETY: every returned argv element is NUL-terminated and remains live until the LocalArgv guard is dropped.
         while unsafe { *pointer.add(len) } != 0 {
             len += 1;
         }
@@ -366,8 +363,8 @@ pub async fn uninstall_app(app: tauri::AppHandle) -> Result<(), String> {
         let argv = parse_windows_command_line(command_line)?;
         let (program, args) = uninstall_process_from_argv(argv)?;
 
-        // Execute the parsed program directly. Shell metacharacters from a
-        // malformed registry value remain ordinary argv entries.
+        // Execute the parsed program directly.
+        // Shell metacharacters from a malformed registry value remain ordinary argv entries.
         std::process::Command::new(program)
             .args(args)
             .spawn()
