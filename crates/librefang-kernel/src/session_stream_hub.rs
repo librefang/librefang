@@ -65,7 +65,11 @@ impl SessionStreamHub {
     /// Subscribe to events for a session. Creates an empty channel on demand
     /// so attach calls before any producer has published still succeed.
     pub fn subscribe(&self, session_id: SessionId) -> broadcast::Receiver<StreamEvent> {
-        self.sender(session_id).subscribe()
+        let entry = self
+            .senders
+            .entry(session_id)
+            .or_insert_with(|| broadcast::channel(SESSION_BROADCAST_CAPACITY).0);
+        entry.subscribe()
     }
 
     /// Drop entries with no active receivers or forwarders — bounded memory
@@ -75,7 +79,7 @@ impl SessionStreamHub {
         let stale: Vec<SessionId> = self
             .senders
             .iter()
-            .filter(|e| e.value().receiver_count() == 0 && e.value().strong_count() == 1)
+            .filter(|e| e.value().strong_count() == 1 && e.value().receiver_count() == 0)
             .map(|e| *e.key())
             .collect();
         let mut count = 0;
@@ -86,7 +90,11 @@ impl SessionStreamHub {
             if self
                 .senders
                 .remove_if(&id, |_, sender| {
-                    sender.receiver_count() == 0 && sender.strong_count() == 1
+                    // Order is synchronization-critical. A sender clone can
+                    // become a receiver between these two reads. Checking
+                    // senders first means either the clone is observed, or
+                    // the subsequent receiver count observes its receiver.
+                    sender.strong_count() == 1 && sender.receiver_count() == 0
                 })
                 .is_some()
             {
