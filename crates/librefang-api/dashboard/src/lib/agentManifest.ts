@@ -325,6 +325,19 @@ const parseInteger = (raw: string): number | null => {
   return n;
 };
 
+const TOML_INTEGER_MAX = 9_223_372_036_854_775_807n;
+
+// Resource byte/time/token quotas are u64 in Rust, but TOML integers are
+// signed 64-bit values. Keep their decimal form as a string so values beyond
+// JavaScript's safe integer range survive the visual-editor round-trip.
+const parseUnsignedTomlInteger = (raw: string): string | null => {
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const value = BigInt(trimmed);
+  if (value > TOML_INTEGER_MAX) return null;
+  return value.toString();
+};
+
 const parseFloatish = (raw: string): number | null => {
   const trimmed = raw.trim();
   if (!trimmed) return null;
@@ -339,6 +352,10 @@ const writeStringScalar = (lines: string[], key: string, value: string): void =>
   lines.push(`${key} = ${escapeTomlString(value)}`);
 };
 const writeNumberScalar = (lines: string[], key: string, value: number | null): void => {
+  if (value === null) return;
+  lines.push(`${key} = ${value}`);
+};
+const writeIntegerScalar = (lines: string[], key: string, value: string | null): void => {
   if (value === null) return;
   lines.push(`${key} = ${value}`);
 };
@@ -445,14 +462,14 @@ export const serializeManifestForm = (
 
   // [resources]
   const resourceBody: string[] = [];
-  writeNumberScalar(resourceBody, "max_llm_tokens_per_hour", parseInteger(form.resources.max_llm_tokens_per_hour));
+  writeIntegerScalar(resourceBody, "max_llm_tokens_per_hour", parseUnsignedTomlInteger(form.resources.max_llm_tokens_per_hour));
   writeNumberScalar(resourceBody, "max_tool_calls_per_minute", parseInteger(form.resources.max_tool_calls_per_minute));
   writeNumberScalar(resourceBody, "max_cost_per_hour_usd", parseFloatish(form.resources.max_cost_per_hour_usd));
   writeNumberScalar(resourceBody, "max_cost_per_day_usd", parseFloatish(form.resources.max_cost_per_day_usd));
   writeNumberScalar(resourceBody, "max_cost_per_month_usd", parseFloatish(form.resources.max_cost_per_month_usd));
-  writeNumberScalar(resourceBody, "max_memory_bytes", parseInteger(form.resources.max_memory_bytes));
-  writeNumberScalar(resourceBody, "max_cpu_time_ms", parseInteger(form.resources.max_cpu_time_ms));
-  writeNumberScalar(resourceBody, "max_network_bytes_per_hour", parseInteger(form.resources.max_network_bytes_per_hour));
+  writeIntegerScalar(resourceBody, "max_memory_bytes", parseUnsignedTomlInteger(form.resources.max_memory_bytes));
+  writeIntegerScalar(resourceBody, "max_cpu_time_ms", parseUnsignedTomlInteger(form.resources.max_cpu_time_ms));
+  writeIntegerScalar(resourceBody, "max_network_bytes_per_hour", parseUnsignedTomlInteger(form.resources.max_network_bytes_per_hour));
   const resourceExtras = renderExtraScalars(safeResourceExtras);
   if (resourceBody.length || resourceExtras.length) {
     lines.push("", "[resources]", ...resourceBody, ...resourceExtras);
@@ -745,7 +762,7 @@ const asEnum = <T extends readonly string[]>(
 export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   let parsed: TomlTable;
   try {
-    parsed = parse(toml);
+    parsed = parse(toml, { integersAsBigInt: "asNeeded" });
   } catch (e) {
     if (e instanceof TomlError) {
       return { ok: false, message: e.message, line: e.line, column: e.column };
