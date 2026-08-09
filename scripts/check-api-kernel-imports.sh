@@ -49,12 +49,16 @@ if [[ ! -d "${SRC_DIR}" ]]; then
     exit 2
 fi
 
-TMP_IMPORTS="$(mktemp)"
-TMP_LFK="$(mktemp)"
+TMP_DIR="$(mktemp -d)"
+TMP_IMPORTS="${TMP_DIR}/imports"
+TMP_LFK="${TMP_DIR}/lfk-refs"
 cleanup() {
     rm -f -- "${TMP_IMPORTS}" "${TMP_LFK}"
+    rmdir -- "${TMP_DIR}"
 }
 trap cleanup EXIT
+: > "${TMP_IMPORTS}"
+: > "${TMP_LFK}"
 
 echo "=== Section 1: librefang_kernel::<internal> import surface ==="
 echo "Scanning: ${SRC_DIR}"
@@ -106,66 +110,9 @@ ALLOWLIST=(
 
 fail=0
 
-# Return success when a source line belongs to an item guarded by a standalone
-# `#[cfg(test)]` attribute. Rustfmt puts the attribute on its own line; the
-# brace counter then follows the guarded module/function without hiding a
-# production line merely because it contains a particular function name.
-line_is_cfg_test() {
-    local filepath="$1"
-    local target_line="$2"
-
-    awk -v target_line="${target_line}" '
-        function brace_delta(line, opens, closes) {
-            # Braces in ordinary strings and line comments do not delimit the
-            # Rust item. This intentionally stays a small lexical filter for
-            # rustfmt-shaped cfg(test) modules rather than a Rust parser.
-            gsub(/"([^"\\]|\\.)*"/, "", line)
-            sub(/\/\/.*/, "", line)
-            opens = gsub(/{/, "{", line)
-            closes = gsub(/}/, "}", line)
-            return opens - closes
-        }
-
-        BEGIN {
-            pending_test = 0
-            in_test = 0
-            depth = 0
-            target_is_test = 0
-        }
-
-        {
-            code = $0
-            sub(/\/\/.*/, "", code)
-
-            if (!in_test && code ~ /^[[:space:]]*#\[cfg\(test\)\][[:space:]]*$/) {
-                pending_test = 1
-                if (FNR == target_line) target_is_test = 1
-                next
-            }
-
-            if (pending_test) {
-                in_test = 1
-                pending_test = 0
-                depth = brace_delta($0)
-            } else if (in_test) {
-                depth += brace_delta($0)
-            }
-
-            if (FNR == target_line) {
-                target_is_test = in_test
-                exit
-            }
-
-            if (in_test && depth <= 0) {
-                in_test = 0
-            }
-        }
-
-        END { exit(target_is_test ? 0 : 1) }
-    ' "${filepath}"
-}
-
-# Collect all non-comment lines referencing LibreFangKernel, skip test modules.
+# Collect every non-comment line referencing LibreFangKernel. Test-only callers
+# use `routes::boot_test_kernel`, so this gate needs no ad-hoc Rust parser or
+# test-scope exclusion that could accidentally hide production references.
 #
 # Stripping comments via `sed 's|//.*$||'` rather than `grep -v '//.*LibreFangKernel'`:
 # the latter would also drop legitimate production lines that happen to carry
@@ -185,13 +132,7 @@ line_is_cfg_test() {
 while IFS= read -r line; do
     # Extract filename relative to SRC_DIR.
     filepath="${line%%:*}"
-    location="${line#*:}"
-    line_number="${location%%:*}"
     relpath="${filepath#"${SRC_DIR}"/}"
-
-    if line_is_cfg_test "${filepath}" "${line_number}"; then
-        continue
-    fi
 
     # Check if this file is in the allowlist.
     allowed=0
