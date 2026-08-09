@@ -596,6 +596,8 @@ struct Envelope {
 /// Returns `Err` on malformed JSON, on a JSON value that is not an object (a bare number/array), AND on a typed-params variant whose `params` shape does not deserialize.
 /// The reader loop in [`crate::runtime::run`] catches all three, emits a protocol-level `error` event with the deserialization message, and continues — so a wire-shape skew is surfaced instead of silently degrading the affected command to default values.
 ///
+/// Unlike the Python SDK's legacy parser, the Rust SDK intentionally rejects missing required fields instead of replacing them with empty strings or default structs. This prevents a malformed daemon frame from reaching adapter business logic as an apparently valid command. Fields marked optional in the wire protocol retain their explicit `#[serde(default)]` behavior.
+///
 /// Unknown `method` strings become [`Command::Unknown`] rather than an error, so a newer daemon can introduce a method without breaking an older adapter.
 pub fn parse_command(line: &str) -> Result<Command, serde_json::Error> {
     let v: Value = serde_json::from_str(line)?;
