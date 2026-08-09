@@ -35,6 +35,7 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLDivElement>(null);
   const isConfirmingRef = useRef(false);
+  const confirmationGenerationRef = useRef(0);
   const [isConfirming, setIsConfirming] = useState(false);
   const onCloseRef = useRef(onClose);
   const onConfirmRef = useRef(onConfirm);
@@ -51,13 +52,16 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
 
   const requestConfirm = useCallback(() => {
     if (isConfirmingRef.current) return;
+    const generation = ++confirmationGenerationRef.current;
     isConfirmingRef.current = true;
     setIsConfirming(true);
     void (async () => {
       try {
         await onConfirmRef.current();
+        if (confirmationGenerationRef.current !== generation) return;
         onCloseRef.current();
       } catch {
+        if (confirmationGenerationRef.current !== generation) return;
         isConfirmingRef.current = false;
         setIsConfirming(false);
       }
@@ -65,10 +69,15 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
   }, []);
 
   useEffect(() => {
-    if (isOpen) {
-      isConfirmingRef.current = false;
-      setIsConfirming(false);
-    }
+    const openGeneration = confirmationGenerationRef.current + 1;
+    confirmationGenerationRef.current = openGeneration;
+    isConfirmingRef.current = false;
+    setIsConfirming(false);
+    return () => {
+      // At most one request can exist for this open generation. Advance past
+      // both its open and request tokens so a late settlement is always stale.
+      confirmationGenerationRef.current = openGeneration + 2;
+    };
   }, [isOpen]);
 
   useEffect(() => {

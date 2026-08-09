@@ -1696,7 +1696,7 @@ export function HandsPage() {
   const [confirmDialog, setConfirmDialog] = useState<{
     title: string;
     message: string;
-    onConfirm: () => void;
+    onConfirm: () => void | Promise<void>;
     tone?: "destructive";
   } | null>(null);
   const navigate = useNavigate();
