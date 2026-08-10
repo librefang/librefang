@@ -978,8 +978,13 @@ pub trait ChannelAdapter: Send + Sync {
 /// (e.g. `<code>`, `<pre>`, `<b>`, `<i>`, `<u>`, `<s>`, `<a>`).
 ///
 /// Shared utility used by Telegram, Discord, and Slack adapters.
+/// A zero limit is treated as invalid and returns the original text as one
+/// chunk rather than entering a non-progressing split loop.
 #[inline]
 pub fn split_message(text: &str, max_len: usize) -> Vec<&str> {
+    if max_len == 0 {
+        return vec![text];
+    }
     if text.len() <= max_len {
         return vec![text];
     }
@@ -992,10 +997,28 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<&str> {
         }
         // Try to split at a newline near the boundary (UTF-8 safe)
         let safe_end = librefang_types::truncate_str(remaining, max_len).len();
+        // A byte limit can fall before the end of the first UTF-8 character.
+        // Consume that complete character so every iteration makes progress;
+        // the public contract is character-based, so this remains one char.
+        let safe_end = if safe_end == 0 {
+            remaining
+                .char_indices()
+                .nth(1)
+                .map_or(remaining.len(), |(index, _)| index)
+        } else {
+            safe_end
+        };
         // Avoid splitting inside an HTML entity (`&...;`).  Walk backwards
         // from safe_end: if we find `&` without a subsequent `;` before the
         // boundary, move the split point to just before that `&`.
-        let safe_end = retreat_past_html_entity(remaining, safe_end);
+        let safe_end = {
+            let retreated = retreat_past_html_entity(remaining, safe_end);
+            if retreated == 0 {
+                safe_end
+            } else {
+                retreated
+            }
+        };
         // Avoid splitting inside an unclosed Telegram HTML tag (e.g. `<code>`).
         // If there is an unclosed tag at the boundary, retreat to just before
         // its opening `<`.  Fall back to safe_end if retreating would produce
@@ -1106,7 +1129,8 @@ fn retreat_past_html_tag(text: &str, pos: usize) -> usize {
         }
     }
 
-    // If there are unclosed tags, retreat to the earliest unclosed opening `<`.
+    // Retreat to the outermost unclosed tag so an entire nested block moves
+    // to the next chunk instead of leaving its outer tag behind.
     if let Some(&(_, lt_pos)) = opens.first() {
         lt_pos
     } else {
@@ -1284,6 +1308,47 @@ mod tests {
         let chunks = split_message(text, 8);
         let rebuilt: String = chunks.concat();
         assert_eq!(rebuilt, text);
+    }
+
+    #[test]
+    fn test_incomplete_entity_at_chunk_start_makes_progress() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            tx.send(split_message("&amp text", 4)).unwrap();
+        });
+
+        let chunks = rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("split_message must consume input instead of spinning");
+        assert_eq!(chunks.concat(), "&amp text");
+        assert!(chunks.iter().all(|chunk| !chunk.is_empty()));
+    }
+
+    #[test]
+    fn test_zero_limit_fails_closed_without_spinning() {
+        assert_eq!(split_message("hello", 0), vec!["hello"]);
+    }
+
+    #[test]
+    fn test_multibyte_character_larger_than_limit_makes_progress() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            tx.send(split_message("😀x", 1)).unwrap();
+        });
+
+        let chunks = rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("split_message must consume at least one UTF-8 character");
+        assert_eq!(chunks, vec!["😀", "x"]);
+    }
+
+    #[test]
+    fn test_nested_tags_stay_balanced_across_chunks() {
+        let text = "0123456789<b><i>abc</i></b>";
+        assert_eq!(
+            split_message(text, 17),
+            vec!["0123456789", "<b><i>abc</i></b>"]
+        );
     }
 
     #[test]

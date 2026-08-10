@@ -1,0 +1,1 @@
+- Simplified the Rust sidecar SDK quick-start imports so the minimal adapter example lists only the APIs it uses. (@houko)

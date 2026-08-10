@@ -123,7 +123,17 @@ fn do_stream(
         const MAX_SSE_LINE: usize = 8 * 1024 * 1024;
         let mut stream = res.bytes_stream();
         let mut buffer: Vec<u8> = Vec::new();
-        while let Some(Ok(chunk)) = stream.next().await {
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = match chunk_result {
+                Ok(chunk) => chunk,
+                Err(e) => {
+                    let _ = tx.send(serde_json::json!({
+                        "error": format!("stream error: {}", e),
+                        "status": 0,
+                    }));
+                    return;
+                }
+            };
             buffer.extend_from_slice(&chunk);
             if buffer.len() > MAX_SSE_LINE {
                 let _ = tx.send(serde_json::json!({

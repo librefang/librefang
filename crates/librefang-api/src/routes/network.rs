@@ -2265,7 +2265,7 @@ mod tests {
             data_dir: home_dir.join("data"),
             ..KernelConfig::default()
         };
-        let kernel = Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).unwrap());
+        let kernel = Arc::new(crate::routes::boot_test_kernel(config));
 
         // No OFP node => registry is None at AppState-build time.
         assert!(kernel.peer_registry_ref().is_none());

@@ -305,8 +305,46 @@ const WEB_SEARCH_MODES = ["off", "auto", "always"] as const;
 const INJECTION_POSITIONS = ["system", "before_user", "after_reset"] as const;
 const EXEC_SHORTHANDS = ["allow", "deny", "full", "allowlist"] as const;
 
-const escapeTomlString = (value: string): string =>
-  `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")}"`;
+const escapeTomlString = (value: string): string => {
+  let escaped = "";
+  for (const character of value) {
+    switch (character) {
+      case "\\":
+        escaped += "\\\\";
+        break;
+      case '"':
+        escaped += '\\"';
+        break;
+      case "\b":
+        escaped += "\\b";
+        break;
+      case "\t":
+        escaped += "\\t";
+        break;
+      case "\n":
+        escaped += "\\n";
+        break;
+      case "\f":
+        escaped += "\\f";
+        break;
+      case "\r":
+        escaped += "\\r";
+        break;
+      default: {
+        const codeUnit = character.charCodeAt(0);
+        if (character.length === 1 && codeUnit >= 0xd800 && codeUnit <= 0xdfff) {
+          escaped += "\ufffd";
+        } else if (codeUnit <= 0x1f || character === "\u007f") {
+          escaped += `\\u${codeUnit.toString(16).padStart(4, "0")}`;
+        } else {
+          escaped += character;
+        }
+        break;
+      }
+    }
+  }
+  return `"${escaped}"`;
+};
 
 const tomlArray = (values: string[]): string =>
   `[${values.map(escapeTomlString).join(", ")}]`;
