@@ -39,6 +39,35 @@ describe("agentManifest serializer", () => {
     expect(toml).toContain('system_prompt = "Line 1\\nLine 2"');
   });
 
+  it("round-trips TOML control characters in strings", () => {
+    const form = emptyManifestForm();
+    form.name = "control-characters";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.system_prompt = "prefix\r\t\0\b\v\f\u001f\u007fsuffix";
+
+    const toml = serializeManifestForm(form);
+    const parsed = parseManifestToml(toml);
+
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.system_prompt).toBe(form.model.system_prompt);
+  });
+
+  it("preserves Unicode scalars and replaces isolated UTF-16 surrogates", () => {
+    const form = emptyManifestForm();
+    form.name = "unicode-boundaries";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.system_prompt = "emoji 😀, high \ud800, low \udc00";
+
+    const parsed = parseManifestToml(serializeManifestForm(form));
+
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.system_prompt).toBe("emoji 😀, high �, low �");
+  });
+
   it("omits empty numeric fields and emits valid ones", () => {
     const form = emptyManifestForm();
     form.name = "agent";

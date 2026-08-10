@@ -839,6 +839,22 @@ fn test_prune_heartbeat_turns_removes_no_reply() {
 }
 
 #[test]
+fn test_prune_heartbeat_turns_tracks_only_removals_before_boundary() {
+    let mut messages = vec![
+        Message::assistant("[no reply needed]"),
+        Message::user("current turn"),
+        Message::assistant("[no reply needed]"),
+    ];
+
+    let removed_before = prune_heartbeat_turns_tracking_boundary(&mut messages, 0, 1);
+
+    assert_eq!(removed_before, 1);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].role, Role::User);
+    assert_eq!(messages[0].content.text_content(), "current turn");
+}
+
+#[test]
 fn test_prune_heartbeat_preserves_recent() {
     let mut messages = vec![
         Message::user("ping"),

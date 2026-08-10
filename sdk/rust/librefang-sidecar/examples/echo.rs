@@ -91,7 +91,7 @@ impl SidecarAdapter for EchoAdapter {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // `run_stdio_main` handles the daemon's `--describe` discovery contract (emit schema JSON + return) before touching any platform-side state, and only constructs the adapter via the builder closure when not in discovery mode — important for adapters whose `new()` reads env vars that are not yet configured at boot.
     // The builder closure returns `Result<EchoAdapter, DynError>` so a real adapter that validates env vars in `new()` can fail cleanly with a structured error instead of `expect()`-panicking; echo has nothing to fail on so it just wraps in `Ok`.
