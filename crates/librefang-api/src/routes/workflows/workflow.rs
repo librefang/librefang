@@ -529,6 +529,9 @@ fn spawn_background_run(state: Arc<AppState>, run_id: WorkflowRunId) {
                       session_mode_override: Option<librefang_types::agent::SessionMode>| {
                     let sc = state_for_sender.clone();
                     async move {
+                        // NOTE (refs #6659): unlike the kernel's own workflow driver, this one does not enter `tool_runner::with_agent_call_depth` around the step's agent turn — `librefang-runtime` is only a dev-dependency of this crate.
+                        // It is safe today because `spawn_background_run` always starts from a fresh `tokio::spawn`, so the depth task-local is unset and every step here runs at depth 0; a step target that nests another workflow still goes through `LibreFangKernel::run_workflow`, which does check and increment.
+                        // If this driver ever gains a caller that is already inside an agent turn, its steps must be wrapped the same way the kernel's are.
                         sc.kernel
                             .send_message_with_session_mode(
                                 agent_id,

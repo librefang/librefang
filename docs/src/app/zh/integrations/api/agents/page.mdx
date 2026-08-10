@@ -592,7 +592,14 @@ curl 'http://127.0.0.1:4545/api/agents/$AGENT/sessions/$SESSION/trajectory?forma
 `assignee_match` 接受：
 
 - `"self"` — 仅当 `task.assignee_id == agent.id` 触发。"我应该处理分配给我的任务" 类 agent 用这个。
-- `"any"`（默认） — 旧行为；任何 `task_posted` 事件都触发，不看 assignee。
+- `"unassigned"` — 仅对无人认领的工作触发。
+  事件里两种"无归属"的写法都能匹配：assignee 缺失，以及 assignee 为空字符串 —— `task_post` 工具和 `POST /api/tasks` 都不会规范化这个字段。
+- 不设置 `assignee_match`（或显式传 `null`） — 旧行为；任何 `task_posted` 事件都触发，不看 assignee。
+  字符串字面量 `"any"` 在这里**不是**关键字，与 `"self"`、`"unassigned"` 不同：传 `"assignee_match": "any"` 会落入精确字符串匹配分支，只对真正分配给名为 `"any"` 的 agent 的任务触发。
+  要拿到"任何事件都触发"的默认行为，请完全省略这个字段。
+
+注意 `"unassigned"` 响应的是任务**发布**时就没有归属，而不是之后变成无归属。
+卡住任务清扫器释放认领时不发布任何事件，所以不会唤醒这个触发器 —— 见 #6728。
 
 ### GET /api/triggers
 

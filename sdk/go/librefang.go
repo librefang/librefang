@@ -160,10 +160,18 @@ func (c *Client) stream(method, path string, body interface{}, query map[string]
 		urlStr := c.BaseURL + c.withQuery(path, query)
 		var bodyBytes []byte
 		if body != nil {
-			b, _ := json.Marshal(body)
+			b, err := json.Marshal(body)
+			if err != nil {
+				ch <- map[string]interface{}{"error": fmt.Sprintf("marshal: %v", err), "status": 0}
+				return
+			}
 			bodyBytes = b
 		}
-		req, _ := http.NewRequest(method, urlStr, bytes.NewReader(bodyBytes))
+		req, err := http.NewRequest(method, urlStr, bytes.NewReader(bodyBytes))
+		if err != nil {
+			ch <- map[string]interface{}{"error": fmt.Sprintf("new request: %v", err), "status": 0}
+			return
+		}
 		for k, v := range c.Headers {
 			req.Header.Set(k, v)
 		}
