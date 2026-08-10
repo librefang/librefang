@@ -2141,6 +2141,7 @@
     "map_empty": "暂无条目 — 点击添加创建",
     "map_key": "键",
     "map_value": "值",
+    "duplicate_key": "重复键",
     "list_empty": "暂无项目 — 点击添加创建",
     "add_row": "添加",
     "add_item": "添加",

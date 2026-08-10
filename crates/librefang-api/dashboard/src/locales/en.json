@@ -2175,6 +2175,7 @@
     "map_empty": "No entries — click Add to create one",
     "map_key": "key",
     "map_value": "value",
+    "duplicate_key": "Duplicate key",
     "list_empty": "No items — click Add to create one",
     "add_row": "Add",
     "add_item": "Add",

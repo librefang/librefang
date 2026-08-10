@@ -2175,6 +2175,7 @@
     "map_empty": "항목 없음 - 항목을 만들려면 추가를 클릭하세요.",
     "map_key": "열쇠",
     "map_value": "값",
+    "duplicate_key": "중복 키",
     "list_empty": "항목 없음 - 항목을 만들려면 추가를 클릭하세요.",
     "add_row": "추가하다",
     "add_item": "추가하다",

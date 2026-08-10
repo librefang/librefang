@@ -2177,6 +2177,7 @@
     "map_empty": "Brak wpisów — kliknij Dodaj, aby utworzyć",
     "map_key": "klucz",
     "map_value": "wartość",
+    "duplicate_key": "Zduplikowany klucz",
     "list_empty": "Brak elementów — kliknij Dodaj, aby utworzyć",
     "add_row": "Dodaj",
     "add_item": "Dodaj",
