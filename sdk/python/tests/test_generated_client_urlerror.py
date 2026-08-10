@@ -11,7 +11,7 @@ import librefang.librefang_client as generated_client
 def test_urlerror_is_wrapped_as_librefang_error(monkeypatch, stream):
     failure = URLError("name resolution failed")
 
-    def fail_urlopen(_request):
+    def fail_urlopen(_request, **_kwargs):
         raise failure
 
     monkeypatch.setattr(generated_client, "urlopen", fail_urlopen)

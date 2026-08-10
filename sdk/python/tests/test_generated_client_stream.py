@@ -28,7 +28,7 @@ def test_stream_closes_response_when_done_marker_returns(monkeypatch):
     response = FakeStreamResponse([
         b'data: {"content":"hello"}\n\ndata: [DONE]\n\n',
     ])
-    monkeypatch.setattr(client_module, "urlopen", lambda _request: response)
+    monkeypatch.setattr(client_module, "urlopen", lambda _request, **_kwargs: response)
 
     events = list(LibreFang("http://example.test")._stream("GET", "/events"))
 
@@ -40,7 +40,7 @@ def test_stream_closes_response_when_consumer_stops_early(monkeypatch):
     response = FakeStreamResponse([
         b'data: {"content":"first"}\n\ndata: {"content":"second"}\n\n',
     ])
-    monkeypatch.setattr(client_module, "urlopen", lambda _request: response)
+    monkeypatch.setattr(client_module, "urlopen", lambda _request, **_kwargs: response)
     stream = LibreFang("http://example.test")._stream("GET", "/events")
 
     assert next(stream) == {"content": "first"}
@@ -54,7 +54,7 @@ def test_stream_closes_response_when_read_raises(monkeypatch):
         b'data: {"content":"first"}\n\n',
         OSError("socket failed"),
     ])
-    monkeypatch.setattr(client_module, "urlopen", lambda _request: response)
+    monkeypatch.setattr(client_module, "urlopen", lambda _request, **_kwargs: response)
     stream = LibreFang("http://example.test")._stream("GET", "/events")
 
     assert next(stream) == {"content": "first"}
@@ -69,7 +69,7 @@ def test_stream_preserves_read_error_when_close_also_fails(monkeypatch):
         [OSError("read failed")],
         close_error=RuntimeError("close failed"),
     )
-    monkeypatch.setattr(client_module, "urlopen", lambda _request: response)
+    monkeypatch.setattr(client_module, "urlopen", lambda _request, **_kwargs: response)
     stream = LibreFang("http://example.test")._stream("GET", "/events")
 
     with pytest.raises(OSError, match="read failed"):
@@ -83,7 +83,7 @@ def test_stream_consumer_close_ignores_response_close_error(monkeypatch):
         [b'data: {"content":"first"}\n\n'],
         close_error=RuntimeError("close failed"),
     )
-    monkeypatch.setattr(client_module, "urlopen", lambda _request: response)
+    monkeypatch.setattr(client_module, "urlopen", lambda _request, **_kwargs: response)
     stream = LibreFang("http://example.test")._stream("GET", "/events")
 
     assert next(stream) == {"content": "first"}
