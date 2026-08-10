@@ -143,10 +143,18 @@ pub(super) async fn tool_workflow_run(
     })?;
 
     let kh = require_kernel_typed(kernel)?;
+    // A nesting-depth refusal arrives as `CapabilityDenied` (refs #6659) and must stay a policy error rather than becoming `Upstream`.
+    // Two reasons, the same ones spelled out in `tool_agent_send`: `Upstream` lifts to a 5xx-class `ToolExecution` that reads as a downstream crash to retry logic, and `PermissionDenied` classifies as `ToolExecutionStatus::Denied` — a soft failure — so a capped agent that keeps trying does not burn through `MAX_CONSECUTIVE_ALL_FAILED` and lose the turn to an abort.
+    // Every other kernel failure stays `Upstream`.
     let (run_id, output) = kh
         .run_workflow(workflow_id, &input_str)
         .await
-        .map_err(ToolError::upstream)?;
+        .map_err(|e| match e {
+            librefang_types::error::LibreFangError::CapabilityDenied(msg) => {
+                ToolError::PermissionDenied(msg)
+            }
+            other => ToolError::upstream(other),
+        })?;
 
     // Fetch the structured run summary so the caller gets {step_outputs,
     // output_json?} alongside the final output string (#4982 — gap 3 /

@@ -2194,12 +2194,14 @@ mod tests {
 
     /// The repo's own `CHANGELOG.md`, with a populated `## [Unreleased]`.
     ///
-    /// Mid-cycle that is the file verbatim. On a `chore/bump-version-*` branch
-    /// `cargo xtask release` has already drained `[Unreleased]` into the dated
-    /// section it just cut, so the file's own `[Unreleased]` is empty and a test
-    /// that needs real hand-written prose to chew on would assert nothing. The
-    /// prose is not gone though — it is sitting in the newest dated section, so
-    /// move it back to reconstitute the pre-release shape.
+    /// Mid-cycle that is the file verbatim when `[Unreleased]` already contains
+    /// a multi-line bullet. On a `chore/bump-version-*` branch `cargo xtask
+    /// release` has drained that prose into the dated section it just cut, and
+    /// immediately after a release `[Unreleased]` may contain only a new
+    /// single-line bullet. In either shape a test of whole-block preservation
+    /// would assert nothing. The multi-line prose is not gone though — it is
+    /// sitting in the newest dated section, so move it back to reconstitute the
+    /// pre-release shape.
     ///
     /// This keeps the real-file coverage on release branches instead of skipping
     /// it there, which is what the v2026.7.31 release PR (#6688) exposed: both
@@ -2211,7 +2213,11 @@ mod tests {
             .expect("xtask/ has a parent directory");
         let real = fs::read_to_string(repo.join("CHANGELOG.md")).unwrap();
 
-        if !drain_unreleased(&real).bullets.is_empty() {
+        if drain_unreleased(&real)
+            .bullets
+            .iter()
+            .any(|bullet| bullet.lines().count() > 1)
+        {
             return real;
         }
 
