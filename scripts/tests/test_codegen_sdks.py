@@ -63,6 +63,7 @@ def main():
     assert_in("async invokeTool(name, data, query)", js, "js-invoke_tool-sig")
     assert_in("InvokeTool(name string, data map[string]interface{}, query map[string]string)", go, "go-invoke_tool-sig")
     assert_in("pub async fn invoke_tool(&self, name: &str, data: Value, agent_id: Option<&str>)", rs, "rust-invoke_tool-sig")
+    assert_in('#[tokio::main(flavor = "current_thread")]', rs, "rust-doc-current-thread-runtime")
     assert_in("Self::with_client(base_url, Client::new())", rs, "rust-default-client-delegation")
     assert_in("pub fn with_client(base_url: impl Into<String>, client: Client) -> Self", rs, "rust-custom-client-constructor")
 
@@ -80,6 +81,8 @@ def main():
     assert_in('lines = buffer.split(b"\\n")', py, "python-byte-line-split")
     assert_in("line = line.decode().strip()", py, "python-decode-complete-line")
     assert_not_in("buffer += chunk.decode()", py, "python-no-per-chunk-decode")
+    assert_in('"error": fmt.Sprintf("marshal: %v", err)', go, "go-stream-marshal-error")
+    assert_not_in("b, _ := json.Marshal(body)", go, "go-no-discarded-stream-marshal-error")
     assert_in("from urllib.error import HTTPError, URLError", py, "python-urlerror-import")
     assert py.count("except URLError as e:") == 2, "both Python request paths must wrap connection failures"
     assert_in("active_error = sys.exc_info()[0] is not None", py, "python-stream-close-finally")

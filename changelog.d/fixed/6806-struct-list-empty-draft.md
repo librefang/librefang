@@ -1,0 +1,1 @@
+- Keep an empty structured-list textarea as an uncommitted JSON draft and restore its last valid item on blur instead of silently replacing that item with an empty object. (@TechWizard9999)
