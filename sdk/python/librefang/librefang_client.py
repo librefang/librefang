@@ -14,6 +14,7 @@ Usage:
 """
 
 import json
+import sys
 from typing import Any, Dict, Generator, Optional
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError, URLError
@@ -107,25 +108,32 @@ class LibreFang:
         except URLError as e:
             raise LibreFangError(f"Connection error: {e.reason}") from e
 
-        buffer = ""
-        while True:
-            chunk = resp.read(4096)
-            if not chunk:
-                break
-            buffer += chunk.decode()
-            lines = buffer.split("\n")
-            buffer = lines.pop()
-            for line in lines:
-                line = line.strip()
-                if line.startswith("data: "):
-                    data_str = line[6:]
-                    if data_str == "[DONE]":
-                        return
-                    try:
-                        yield json.loads(data_str)
-                    except json.JSONDecodeError:
-                        yield {"raw": data_str}
-        resp.close()
+        try:
+            buffer = ""
+            while True:
+                chunk = resp.read(4096)
+                if not chunk:
+                    break
+                buffer += chunk.decode()
+                lines = buffer.split("\n")
+                buffer = lines.pop()
+                for line in lines:
+                    line = line.strip()
+                    if line.startswith("data: "):
+                        data_str = line[6:]
+                        if data_str == "[DONE]":
+                            return
+                        try:
+                            yield json.loads(data_str)
+                        except json.JSONDecodeError:
+                            yield {"raw": data_str}
+        finally:
+            active_error = sys.exc_info()[0] is not None
+            try:
+                resp.close()
+            except Exception:
+                if not active_error:
+                    raise
 
 
 # ── A2A Resource ───────────────────────────────────────────────

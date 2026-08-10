@@ -18,6 +18,7 @@
 //!   (d) user policy says NeedsApproval (User role + no allow-list) →
 //!       NeedsApproval
 
+use librefang_kernel::GovernanceSubsystemApi;
 use librefang_kernel::LibreFangKernel;
 use librefang_kernel::SecuritySubsystemApi;
 use librefang_runtime::kernel_handle::prelude::*;
@@ -379,6 +380,92 @@ async fn submit_tool_approval_hand_agent_force_human_skips_auto_approve() {
             panic!("RBAC M3 (#3054): force_human=true on a hand-tagged agent MUST NOT auto-approve")
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn blocking_hand_approval_does_not_bypass_enabled_rbac() {
+    use librefang_types::agent::AgentManifest;
+    use librefang_types::approval::ApprovalDecision;
+
+    let kernel = boot(vec![user("Bob", "user", "111", None, None)], vec![]);
+    let manifest = AgentManifest {
+        name: format!("blocking-hand-rbac-{}", uuid::Uuid::new_v4()),
+        is_hand: true,
+        tags: vec!["hand:test".to_string()],
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn hand agent");
+    let kh: &dyn KernelHandle = &*kernel;
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        kh.request_approval(&agent_id.0.to_string(), "shell_exec", "summary", None),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "blocking hand approval must wait for a human when RBAC is enabled, got {result:?}"
+    );
+
+    let pending = kernel.approvals().list_pending();
+    let request = pending
+        .iter()
+        .find(|request| request.agent_id == agent_id.0.to_string())
+        .expect("blocking approval must be queued");
+    kernel
+        .approvals()
+        .resolve(
+            request.id,
+            ApprovalDecision::Denied,
+            Some("test-cleanup".to_string()),
+            false,
+            None,
+        )
+        .expect("clean up pending approval");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn blocking_hand_approval_without_rbac_context_still_requires_human() {
+    use librefang_types::agent::AgentManifest;
+    use librefang_types::approval::ApprovalDecision;
+
+    let kernel = boot(vec![], vec![]);
+    let manifest = AgentManifest {
+        name: format!("blocking-hand-single-user-{}", uuid::Uuid::new_v4()),
+        is_hand: true,
+        tags: vec!["hand:test".to_string()],
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn hand agent");
+    let kh: &dyn KernelHandle = &*kernel;
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        kh.request_approval(&agent_id.0.to_string(), "shell_exec", "summary", None),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "context-free blocking hand approval must wait for a human, got {result:?}"
+    );
+
+    let pending = kernel.approvals().list_pending();
+    let request = pending
+        .iter()
+        .find(|request| request.agent_id == agent_id.0.to_string())
+        .expect("blocking approval must be queued");
+    kernel
+        .approvals()
+        .resolve(
+            request.id,
+            ApprovalDecision::Denied,
+            Some("test-cleanup".to_string()),
+            false,
+            None,
+        )
+        .expect("clean up pending approval");
 }
 
 #[tokio::test(flavor = "multi_thread")]

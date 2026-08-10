@@ -1,0 +1,1 @@
+- Prevented Telegram's degenerate HTML chunking path from emitting chunks above the configured UTF-16 limit. (@houko)

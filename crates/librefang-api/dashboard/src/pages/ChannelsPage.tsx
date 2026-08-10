@@ -758,10 +758,10 @@ export function ChannelsPage() {
   const handleCardRemove = useCallback((ch: Channel) => {
     setRemoveChannel(ch);
   }, []);
-  const confirmRemove = () => {
+  const confirmRemove = async () => {
     if (!removeChannel) return;
     const name = removeChannel.name;
-    removeMut.mutate(name, {
+    await removeMut.mutateAsync(name, {
       onSuccess: () => {
         setRemoveChannel(null);
         addToast(t("channels.remove_success", { defaultValue: "Channel removed" }), "success");

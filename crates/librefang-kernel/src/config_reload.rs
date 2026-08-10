@@ -559,6 +559,24 @@ pub fn build_reload_plan_with_caps(
         );
     }
 
+    // `[task_board]` was classified restart-required, but no consumer has
+    // ever needed a restart to see it: the stuck-task sweeper re-reads
+    // `claim_ttl_secs`, `sweep_interval_secs` and `max_retries` from the
+    // ArcSwap config on every tick (`kernel/accessors.rs`,
+    // `spawn_task_board_sweep_task`, whose doc comment states the live read
+    // is deliberate), and `assignee_wake` is read per `TaskPosted` at the
+    // synthesis site. Reporting "restart required" for a change that has
+    // already taken effect trains operators to restart for nothing — and
+    // would have been a second false statement once `assignee_wake` landed
+    // under the same classification (#6728).
+    if field_changed(&old.task_board, &new.task_board) {
+        plan.noop_changes.push(
+            "task_board config changed (effective immediately — the sweeper re-reads its \
+             knobs each tick and assignee_wake is read per task post)"
+                .to_string(),
+        );
+    }
+
     // (M6 had a separate `ReloadUsers` action here; collapsed into M3's
     // `ReloadAuth` above since `auth.reload(&users, &tool_groups)` does
     // the strict superset of what `replace_users` did.)
@@ -778,10 +796,6 @@ pub fn build_reload_plan_with_caps(
             "context_engine",
         );
         restart_if_changed(field_changed(&old.session, &new.session), "session");
-        restart_if_changed(
-            field_changed(&old.task_board, &new.task_board),
-            "task_board",
-        );
         restart_if_changed(field_changed(&old.broadcast, &new.broadcast), "broadcast");
         restart_if_changed(
             field_changed(&old.auto_reply, &new.auto_reply),

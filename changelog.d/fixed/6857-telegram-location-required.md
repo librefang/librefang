@@ -1,0 +1,1 @@
+- Rejected Telegram location payloads with missing or non-numeric coordinates instead of silently sending `(0, 0)`. (@houko)

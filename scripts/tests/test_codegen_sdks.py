@@ -63,6 +63,8 @@ def main():
     assert_in("async invokeTool(name, data, query)", js, "js-invoke_tool-sig")
     assert_in("InvokeTool(name string, data map[string]interface{}, query map[string]string)", go, "go-invoke_tool-sig")
     assert_in("pub async fn invoke_tool(&self, name: &str, data: Value, agent_id: Option<&str>)", rs, "rust-invoke_tool-sig")
+    assert_in("Self::with_client(base_url, Client::new())", rs, "rust-default-client-delegation")
+    assert_in("pub fn with_client(base_url: impl Into<String>, client: Client) -> Self", rs, "rust-custom-client-constructor")
 
     # Stream correctness
     assert_in("bufio.NewReaderSize", go, "go-bufio-reader")
@@ -70,9 +72,13 @@ def main():
     assert_in("Vec<u8>", rs, "rust-byte-buffer")
     assert_not_in("from_utf8_lossy(&chunk)", rs, "rust-no-lossy-chunk")
     assert_in('"status": status', rs, "rust-error-event-status")
+    assert_in("while let Some(chunk_result) = stream.next().await", rs, "rust-stream-result-loop")
+    assert_in('"error": format!("stream error: {}", e)', rs, "rust-stream-transport-error")
+    assert_not_in("while let Some(Ok(chunk))", rs, "rust-no-silent-stream-error")
     assert_in('"status": resp.StatusCode', go, "go-error-event-status")
     assert_in("from urllib.error import HTTPError, URLError", py, "python-urlerror-import")
     assert py.count("except URLError as e:") == 2, "both Python request paths must wrap connection failures"
+    assert_in("active_error = sys.exc_info()[0] is not None", py, "python-stream-close-finally")
 
     # SSE line-size cap
     assert_in("MAX_SSE_LINE", rs, "rust-max-sse")
