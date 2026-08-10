@@ -270,8 +270,8 @@ function CandidateRow({ candidate }: { candidate: PendingCandidate }) {
       <ConfirmDialog
         isOpen={confirmReject}
         onClose={() => setConfirmReject(false)}
-        onConfirm={() => {
-          reject.mutate(
+        onConfirm={async () => {
+          await reject.mutateAsync(
             { id: candidate.id },
             { onSuccess: () => setConfirmReject(false) },
           );

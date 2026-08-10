@@ -31,6 +31,8 @@ dependencies = []
 dev = [
     "pytest",
     "pytest-asyncio",
+    "setuptools>=61.0",
+    "wheel",
 ]
 
 [project.urls]
@@ -46,7 +48,7 @@ exclude = ["examples*"]
 [tool.setuptools.package-data]
 # `sidecar/template/*` ships the adapter scaffold the sidecar docs tell
 # users to copy — without this it is absent from the installed wheel.
-librefang = ["py.typed", "sidecar/template/*"]
+librefang = ["sidecar/template/*"]
 
 # `python_files = ["*.py"]` made pytest import every example *script*
 # as a test module (they target the legacy flat `librefang_sdk`

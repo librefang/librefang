@@ -2418,6 +2418,80 @@ fn test_assistant_route_key_scopes_sender_and_thread() {
     assert_ne!(with_sender, without_sender);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_only_reads_canonical_thread_scoped_cache_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).unwrap();
+    let assistant_id = kernel.agents.registry.find_by_name("assistant").unwrap().id;
+    let coder_id = kernel
+        .spawn_agent(test_manifest("coder", "A coding specialist", vec![]))
+        .unwrap();
+    let sender = SenderContext {
+        channel: "telegram".to_string(),
+        user_id: "user-123".to_string(),
+        thread_id: Some("thread-9".to_string()),
+        auto_route: AutoRouteStrategy::ExplicitOnly,
+        ..Default::default()
+    };
+    let route_key = LibreFangKernel::assistant_route_key(assistant_id, Some(&sender));
+    kernel.events.assistant_routes.insert(
+        route_key,
+        (
+            AssistantRouteTarget::Specialist("coder".to_string()),
+            std::time::Instant::now(),
+        ),
+    );
+
+    let resolved = kernel
+        .resolve_assistant_target(
+            assistant_id,
+            "Please handle this deliberately generic but sufficiently long request.",
+            Some(&sender),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved, coder_id);
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_only_cache_miss_never_falls_through_to_classification() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).unwrap();
+    let assistant_id = kernel.agents.registry.find_by_name("assistant").unwrap().id;
+    kernel
+        .spawn_agent(test_manifest("coder", "A coding specialist", vec![]))
+        .unwrap();
+    let sender = SenderContext {
+        channel: "telegram".to_string(),
+        user_id: "user-123".to_string(),
+        thread_id: Some("thread-9".to_string()),
+        auto_route: AutoRouteStrategy::ExplicitOnly,
+        ..Default::default()
+    };
+
+    let resolved = kernel
+        .resolve_assistant_target(
+            assistant_id,
+            "请实现一个新的 Rust API 并补丁修复它",
+            Some(&sender),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved, assistant_id);
+    kernel.shutdown();
+}
+
 #[test]
 fn test_boot_spawns_assistant_as_default_agent() {
     let tmp = tempfile::tempdir().unwrap();

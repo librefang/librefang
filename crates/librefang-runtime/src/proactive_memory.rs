@@ -519,16 +519,14 @@ impl LlmMemoryExtractor {
             if !content.is_empty() {
                 conversation_text.push_str(&format!("{role}: {content}\n"));
                 if conversation_text.len() > MAX_EXTRACTION_CHARS {
-                    if let Some(last_newline) =
-                        conversation_text[..MAX_EXTRACTION_CHARS].rfind('\n')
-                    {
+                    let mut safe_end = MAX_EXTRACTION_CHARS;
+                    while safe_end > 0 && !conversation_text.is_char_boundary(safe_end) {
+                        safe_end -= 1;
+                    }
+                    if let Some(last_newline) = conversation_text[..safe_end].rfind('\n') {
                         conversation_text.truncate(last_newline);
                     } else {
-                        let mut safe = MAX_EXTRACTION_CHARS;
-                        while safe > 0 && !conversation_text.is_char_boundary(safe) {
-                            safe -= 1;
-                        }
-                        conversation_text.truncate(safe);
+                        conversation_text.truncate(safe_end);
                     }
                     break;
                 }
@@ -1804,6 +1802,29 @@ mod tests {
         assert!(ctx.contains("based on my memory"));
         // But the memory content itself should appear as a bullet, not as a recitation
         assert!(ctx.contains("- test"));
+    }
+
+    #[tokio::test]
+    async fn extraction_truncates_at_utf8_boundary_before_searching_for_newline() {
+        let extractor = LlmMemoryExtractor::new(
+            Arc::new(CannedLlmDriver {
+                response: r#"{"memories":[],"relations":[]}"#.to_string(),
+            }),
+            "test-model".to_string(),
+        );
+        // `user: ` is six bytes. Include an earlier newline, then put the
+        // four-byte emoji at byte 7,999 so the 8,000-byte extraction boundary
+        // falls inside its encoding before `rfind('\n')` can run.
+        let content = format!("line\n{}😀tail", "a".repeat(7_988));
+        let messages = vec![serde_json::json!({
+            "role": "user",
+            "content": content,
+        })];
+
+        let result = extractor
+            .extract_with_model(&messages, "test-model", &[])
+            .await;
+        assert!(result.is_ok(), "UTF-8 truncation must not panic or fail");
     }
 
     /// H4 regression: even a runaway list of fat memories must not push
