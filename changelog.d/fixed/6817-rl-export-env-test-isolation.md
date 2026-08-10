@@ -1,0 +1,3 @@
+Stop RL exporter tests from mutating the process-wide environment while exercising secret indirection and the public SSRF dispatch. (@houko)
+The tests previously called `set_var` and `remove_var` while Rust's test harness was free to run other cases on parallel threads, making outcomes dependent on shared process state and creating a future Rust 2024 safety blocker.
+Production still resolves configured secret names through `std::env::var`; the crate-private dispatcher now accepts the lookup function so tests can supply deterministic values and missing-variable errors without touching the real environment.
