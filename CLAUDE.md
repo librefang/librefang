@@ -510,6 +510,25 @@ When clearing more than ~10 PRs:
   Leave runs whose branch no longer exists alone — a deleted branch means the PR already merged or closed, and its checks are nobody's gate.
 - **A stalled queue is not a CI failure.** Before diagnosing a PR as broken, confirm jobs are actually executing. `runner_name` empty across the board (`gh api repos/librefang/librefang/actions/runs/<id>/jobs --jq '.jobs[].runner_name'`) means unassigned, i.e. starved for capacity, not failing.
 
+### Two green PRs can still break `main` together
+
+The `main` ruleset does not set `strict_required_status_checks_policy`, so a PR merges on the CI it ran against **its own base**, which may be many commits behind.
+Two PRs that touch the same file on the same stale base are each validated in isolation and neither result says anything about the combination.
+
+This is not hypothetical, and text-level conflict detection does not catch it — git sees edits to different lines and merges cleanly:
+
+> #6814 added two `redact_metadata(&Value::String(…))` call sites while the function still took a reference.
+> #6815 changed the signature to take the value by owner and updated the call sites *it* could see.
+> Both branched from `37937950b`, both were fully green, and they were merged two seconds apart.
+> The result did not compile, and because the break sits in `#[cfg(test)]` code it only surfaced on the one lane that builds test targets — turning `Build / Linux aarch64` red on `main` and failing the CI Gate of 30+ open PRs that had nothing to do with it.
+
+So when merging several PRs in one sweep:
+
+- **Group by file, not just by conflict status.** Before starting, map changed files to PRs (`gh pr view <n> --json files`) and treat any file touched by more than one PR as a serialization point: merge one, let the others pick up the new `main`, and re-check.
+- **Second and later PRs in a group need a fresh check run, not just a clean merge.** `MERGEABLE` only means git can splice the text. Push the branch onto current `main` (or use the update-branch API) so CI re-runs against the combination that will actually land.
+- **Watch for a signature or contract change anywhere in the group.** A PR that changes a function's parameters, return type, or ownership is the dangerous side of the pair — any *other* PR in the batch that calls it was written against the old contract.
+- **After a batch, verify `main` itself rather than assuming.** Green on each PR does not imply green on the merge result; check the CI Gate on the new `main` HEAD before starting the next batch.
+
 ### Issue / PR comment etiquette
 
 - **At most two follow-up comments** on the same thread without human
