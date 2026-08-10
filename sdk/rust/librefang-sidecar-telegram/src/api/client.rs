@@ -8,6 +8,7 @@
 
 use super::error::{Error, Result};
 use super::types::{ApiResponse, GetFileResult, PollResult, SendMessageResult, UpdatesResponse};
+use bytes::Bytes;
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -472,11 +473,15 @@ impl BotClient {
         thread_id: Option<i64>,
     ) -> Result<Value> {
         let url = format!("{}/{method}", self.api_root);
+        let bytes = shared_upload_bytes(bytes);
         let request_timeout = multipart_timeout(bytes.len());
-        // reqwest::multipart::Form consumes its parts when sent. To support the rare 429 retry without keeping a streamable body, we clone `bytes` for each attempt; the trade-off is ~1 extra Vec<u8> heap copy on the happy path in exchange for a working retry path without async-body rewinding.
+        let byte_len = bytes.len() as u64;
+        // Forms consume their parts. Bytes is reference-counted, so rebuilding
+        // a part for the rare 429 retry shares the upload allocation instead of
+        // copying the full attachment on every attempt.
         for attempt in 0..2 {
-            let mut part =
-                reqwest::multipart::Part::bytes(bytes.clone()).file_name(filename.clone());
+            let mut part = reqwest::multipart::Part::stream_with_length(bytes.clone(), byte_len)
+                .file_name(filename.clone());
             if let Some(mt) = mime_type.as_ref() {
                 part = part
                     .mime_str(mt)
@@ -545,6 +550,10 @@ impl BotClient {
     }
 }
 
+fn shared_upload_bytes(bytes: Vec<u8>) -> Bytes {
+    Bytes::from(bytes)
+}
+
 fn multipart_timeout(byte_len: usize) -> Duration {
     let transfer_secs = u64::try_from(byte_len / MULTIPART_BYTES_PER_SECOND).unwrap_or(u64::MAX);
     Duration::from_secs(SEND_TIMEOUT_SECS.saturating_add(transfer_secs))
@@ -561,6 +570,14 @@ fn resp_retry_after_default(body: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multipart_retry_bytes_share_the_same_allocation() {
+        let upload = shared_upload_bytes(vec![1_u8; 1024]);
+        let retry = upload.clone();
+        assert_eq!(upload.as_ptr(), retry.as_ptr());
+        assert_eq!(upload.len(), retry.len());
+    }
 
     #[test]
     fn multipart_timeout_scales_with_payload_size() {
