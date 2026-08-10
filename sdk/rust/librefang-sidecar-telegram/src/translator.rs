@@ -245,6 +245,17 @@ pub async fn extract_content(client: &BotClient, msg: &Message) -> Option<TgCont
     None
 }
 
+fn photo_reply_upgrade(content: &TgContent, prefix: &str, url: String) -> Option<TgContent> {
+    let TgContent::Text(text) = content else {
+        return None;
+    };
+    Some(TgContent::Image {
+        url,
+        caption: Some(format!("{prefix}{text}")),
+        mime_type: Some("image/jpeg".into()),
+    })
+}
+
 /// Reply context: prefix `[Replying to <sender>: "..."]` to a text-shaped TgContent. If the replied-to message is itself a photo AND the current content is plain Text, the function upgrades it to an Image carrying the replied photo's URL — without this the agent never sees the photo the user is reacting to. Mirrors the Python adapter's `_apply_reply` behaviour.
 pub async fn apply_reply(client: &BotClient, content: TgContent, msg: &Message) -> TgContent {
     let Some(reply) = msg.reply_to_message.as_ref() else {
@@ -266,14 +277,9 @@ pub async fn apply_reply(client: &BotClient, content: TgContent, msg: &Message) 
     if matches!(&content, TgContent::Text(_)) {
         if let Some(photo) = reply.photo.last() {
             if let Some(url) = file_url(client, &photo.file_id).await {
-                let TgContent::Text(t) = content else {
-                    unreachable!("matched above")
-                };
-                return TgContent::Image {
-                    url,
-                    caption: Some(format!("{prefix}{t}")),
-                    mime_type: Some("image/jpeg".into()),
-                };
+                if let Some(upgraded) = photo_reply_upgrade(&content, &prefix, url) {
+                    return upgraded;
+                }
             }
         }
     }
@@ -649,6 +655,32 @@ mod tests {
         assert!(!line.contains('\u{1b}'));
         assert!(line.contains("\\r\\n"));
         assert!(line.contains("\\u{1b}"));
+    }
+
+    #[test]
+    fn photo_reply_upgrade_is_explicitly_text_only() {
+        let upgraded = photo_reply_upgrade(
+            &TgContent::Text("answer".into()),
+            "[Reply]\n",
+            "https://example.com/photo.jpg".into(),
+        )
+        .expect("text reply upgrades to image");
+        match upgraded {
+            TgContent::Image { url, caption, .. } => {
+                assert_eq!(url, "https://example.com/photo.jpg");
+                assert_eq!(caption.as_deref(), Some("[Reply]\nanswer"));
+            }
+            _ => panic!("expected image upgrade"),
+        }
+
+        assert!(photo_reply_upgrade(
+            &TgContent::Sticker {
+                file_id: "sticker".into()
+            },
+            "[Reply]\n",
+            "https://example.com/photo.jpg".into(),
+        )
+        .is_none());
     }
 
     fn cmd_msg(text: &str, length: i64) -> Message {
