@@ -287,7 +287,7 @@ pub enum ChannelContent {
     /// A poll or quiz sent to the user (outbound).
     Poll {
         question: String,
-        /// Answer option texts (1–12 options for Telegram).
+        /// Answer option texts (2–10 options for Telegram).
         options: Vec<String>,
         /// When true, sent as a quiz (one correct answer).
         #[serde(default)]

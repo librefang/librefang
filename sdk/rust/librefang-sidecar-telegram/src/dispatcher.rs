@@ -43,9 +43,9 @@ fn validated_poll(payload: &Value) -> Result<(Vec<Value>, bool, Option<u32>)> {
         .get("options")
         .and_then(Value::as_array)
         .ok_or_else(|| Error::Other("Poll.options missing or not a JSON array".into()))?;
-    if !(1..=12).contains(&raw_options.len()) {
+    if !(2..=10).contains(&raw_options.len()) {
         return Err(Error::Other(
-            "Poll.options must contain between 1 and 12 answers".into(),
+            "Poll.options must contain between 2 and 10 answers".into(),
         ));
     }
     let options = raw_options
@@ -698,8 +698,12 @@ mod tests {
         for malformed in [
             json!({}),
             json!({"options": []}),
+            // Telegram's Bot API requires at least 2 options; a single-option poll must be
+            // rejected locally rather than forwarded to a request Telegram will 400 on.
+            json!({"options": ["only"]}),
             json!({"options": ["a", 2]}),
-            json!({"options": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]}),
+            // Telegram's Bot API caps options at 10; 11 must be rejected.
+            json!({"options": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"]}),
             json!({"options": ["only"], "is_quiz": true}),
             json!({"options": ["a", "b"], "is_quiz": true, "correct_option_id": 2}),
             json!({"options": ["a", "b"], "is_quiz": true, "correct_option_id": "1"}),
@@ -718,8 +722,17 @@ mod tests {
         assert!(is_quiz);
         assert_eq!(correct, Some(1));
 
+        // Exactly 10 options (the upper bound) and exactly 2 (the lower bound) must both
+        // pass local validation as regular (non-quiz) polls.
+        let ten_options: Vec<String> = (1..=10).map(|n| n.to_string()).collect();
+        let (options, is_quiz, correct) =
+            validated_poll(&json!({"options": ten_options})).expect("valid regular poll (max)");
+        assert_eq!(options.len(), 10);
+        assert!(!is_quiz);
+        assert_eq!(correct, None);
+
         let (_, is_quiz, correct) =
-            validated_poll(&json!({"options": ["a"]})).expect("valid regular poll");
+            validated_poll(&json!({"options": ["a", "b"]})).expect("valid regular poll (min)");
         assert!(!is_quiz);
         assert_eq!(correct, None);
     }
