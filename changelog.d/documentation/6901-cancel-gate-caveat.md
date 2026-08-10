@@ -1,3 +1,0 @@
-Document that cancelling a live CI run whose `head_sha` is its branch's tip leaves `CI Gate` permanently red, because the gate fails on `cancelled` exactly as it does on `failure` and never re-evaluates when the lane is later re-run.
-Cancelling live runs to reclaim capacity left 25 healthy PRs each showing `CI Gate: one or more lanes failed or were cancelled` as their only red check, with nothing wrong in the diff, and each needing a fresh push to clear.
-The batch-merging guidance now states that boundary explicitly, and notes that a red `CI Gate` with every lane green is a stale verdict to clear by re-running CI, not a defect to debug (#6901) (@houko)
