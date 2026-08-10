@@ -115,6 +115,13 @@ fn file_lookup_error_log(file_id: &str, error: &impl std::fmt::Display) -> Strin
     format!("[telegram] getFile failed for file_id {file_id:?}: {rendered_error:?}")
 }
 
+fn callback_ack_error_log(callback_id: &str, error: &impl std::fmt::Display) -> String {
+    let rendered_error = error.to_string();
+    format!(
+        "[telegram] answerCallbackQuery failed for callback_id {callback_id:?}: {rendered_error:?}"
+    )
+}
+
 pub async fn file_url(client: &BotClient, file_id: &str) -> Option<String> {
     match client.get_file(file_id).await {
         Ok(res) => res.file_path.map(|p| client.file_url(&p)),
@@ -625,7 +632,9 @@ pub async fn update_to_event(client: &BotClient, update: &Update) -> Option<Valu
         let client = client.clone();
         let cq_id = cq.id.clone();
         tokio::spawn(async move {
-            let _ = client.answer_callback_query(&cq_id).await;
+            if let Err(error) = client.answer_callback_query(&cq_id).await {
+                eprintln!("{}", callback_ack_error_log(&cq_id, &error));
+            }
         });
         return callback_event(cq);
     }
@@ -655,6 +664,19 @@ mod tests {
         assert!(!line.contains('\u{1b}'));
         assert!(line.contains("\\r\\n"));
         assert!(line.contains("\\u{1b}"));
+    }
+
+    #[test]
+    fn callback_ack_error_log_is_identifiable_and_control_escaped() {
+        let error = crate::api::Error::Other("timeout\r\nforged\u{1b}[31m".into());
+        let line = callback_ack_error_log("callback\nspoof", &error);
+        assert_eq!(
+            line,
+            "[telegram] answerCallbackQuery failed for callback_id \"callback\\nspoof\": \"timeout\\r\\nforged\\u{1b}[31m\""
+        );
+        assert!(!line.contains('\n'));
+        assert!(!line.contains('\r'));
+        assert!(!line.contains('\u{1b}'));
     }
 
     #[test]
