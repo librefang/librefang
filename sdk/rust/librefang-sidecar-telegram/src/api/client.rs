@@ -539,10 +539,8 @@ impl BotClient {
     }
 }
 
-/// Resolve any 429 delay using HTTP delta-seconds first, then Telegram's JSON
-/// value, then the conservative local default. A syntactically numeric header
-/// that overflows `u64` is saturated so the caller's flood-wait cap rejects it;
-/// unsupported HTTP-date/non-numeric forms fall through to the JSON value.
+/// Resolve any 429 delay using HTTP delta-seconds first, then Telegram's JSON value, then the conservative local default.
+/// A syntactically numeric header that overflows `u64` is saturated so the caller's flood-wait cap rejects it; unsupported HTTP-date/non-numeric forms fall through to the JSON value.
 fn resolve_retry_after(header: Option<&HeaderValue>, body_retry_after: Option<u64>) -> u64 {
     let header_retry_after = header
         .and_then(|value| value.to_str().ok())
