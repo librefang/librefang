@@ -757,16 +757,47 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+fn build_url<'a>(
+    client: &Client,
+    base_url: &str,
+    path_segments: impl IntoIterator<Item = &'a str>,
+) -> Result<reqwest::Url> {
+    let path_segments: Vec<&str> = path_segments.into_iter().collect();
+    if let Some(segment) = path_segments
+        .iter()
+        .copied()
+        .find(|segment| matches!(*segment, "." | ".."))
+    {
+        return Err(Error::Api {
+            status: 0,
+            body: format!("invalid path segment: {}", segment),
+        });
+    }
+    let mut url = client.get(base_url).build()?.url().clone();
+    url.set_query(None);
+    url.set_fragment(None);
+    let mut segments = url
+        .path_segments_mut()
+        .map_err(|_| Error::Api {
+            status: 0,
+            body: "base URL cannot contain path segments".to_string(),
+        })?;
+    segments.pop_if_empty();
+    segments.extend(path_segments);
+    drop(segments);
+    Ok(url)
+}
+
 async fn do_req(
     client: &Client,
     base_url: &str,
     method: reqwest::Method,
-    path: &str,
+    path_segments: &[&str],
     body: Option<Value>,
     query: &[(&str, Option<&str>)],
 ) -> Result<Value> {
-    let url = format!("{}{}", base_url, path);
-    let req = client.request(method, &url);
+    let url = build_url(client, base_url, path_segments.iter().copied())?;
+    let req = client.request(method, url);
     let filtered: Vec<(&str, &str)> = query
         .iter()
         .filter_map(|(k, v)| v.map(|vv| (*k, vv)))
@@ -785,7 +816,7 @@ async fn do_req(
 fn do_stream(
     client: Client,
     base_url: String,
-    path: String,
+    path_segments: Vec<String>,
     method: reqwest::Method,
     body: Option<Value>,
     query: Vec<(String, Option<String>)>,
@@ -793,8 +824,21 @@ fn do_stream(
     const STREAM_CHANNEL_CAPACITY: usize = 256;
     let (tx, rx) = tokio::sync::mpsc::channel(STREAM_CHANNEL_CAPACITY);
     tokio::spawn(async move {
-        let url = format!("{}{}", base_url, path);
-        let req = client.request(method, &url).header("Accept", "text/event-stream");
+        let url = match build_url(&client, &base_url, path_segments.iter().map(String::as_str)) {
+            Ok(url) => url,
+            Err(e) => {
+                let error = match e {
+                    Error::Api { status: 0, body } => body,
+                    other => other.to_string(),
+                };
+                let _ = tx.send(serde_json::json!({
+                    "error": error,
+                    "status": 0,
+                })).await;
+                return;
+            }
+        };
+        let req = client.request(method, url).header("Accept", "text/event-stream");
         let filtered: Vec<(String, String)> = query
             .into_iter()
             .filter_map(|(k, v)| v.map(|vv| (k, vv)))
@@ -894,9 +938,19 @@ fn do_stream(
 _RUST_OLD_MODS = ["agents", "models", "providers", "skills", "tools"]
 
 
-def _rust_path_fmt(path: str) -> str:
-    """'/api/agents/{id}' → '/api/agents/{}' (Rust format! style)"""
-    return re.sub(r"\{[^}]+\}", "{}", path)
+def _rust_path_segments(path: str, *, owned: bool) -> str:
+    """Render an endpoint path as safely appended URL segments."""
+    rendered = []
+    for segment in path.strip("/").split("/"):
+        param = re.fullmatch(r"\{([^}]+)\}", segment)
+        if param:
+            value = _rust_safe(param.group(1))
+            rendered.append(f"{value}.to_string()" if owned else value)
+        else:
+            literal = json.dumps(segment)
+            rendered.append(f"{literal}.to_string()" if owned else literal)
+    collection = f"[{', '.join(rendered)}]"
+    return f"vec!{collection}" if owned else f"&{collection}"
 
 
 def gen_rust(tag_ops: dict) -> str:
@@ -964,18 +1018,11 @@ def gen_rust(tag_ops: dict) -> str:
                 rust_params.append(f"{_rust_safe(qp)}: Option<&str>")
             sig = ", ".join(["&self"] + rust_params)
 
-            fmt_path = _rust_path_fmt(path)
-            fmt_args = "".join(f", {_rust_safe(p)}" for p in params)
-            path_expr = (
-                f'format!("{fmt_path}"{fmt_args})'
-                if params
-                else f'"{path}".to_string()'
-            )
-
             method_const = f"reqwest::Method::{http}"
             body_arg = "Some(data)" if has_body else "None"
 
             if is_stream:
+                path_arg = _rust_path_segments(path, owned=True)
                 if query_params:
                     q_items = ", ".join(
                         f'("{qp}".to_string(), {_rust_safe(qp)}.map(|s| s.to_string()))'
@@ -985,9 +1032,10 @@ def gen_rust(tag_ops: dict) -> str:
                 else:
                     query_arg = "Vec::new()"
                 out += f"\n    pub fn {op_id}({sig}) -> tokio::sync::mpsc::Receiver<Value> {{\n"
-                out += f"        do_stream(self.client.clone(), self.base_url.clone(), {path_expr}, {method_const}, {body_arg}, {query_arg})\n"
+                out += f"        do_stream(self.client.clone(), self.base_url.clone(), {path_arg}, {method_const}, {body_arg}, {query_arg})\n"
                 out += "    }\n"
             else:
+                path_arg = _rust_path_segments(path, owned=False)
                 if query_params:
                     q_items = ", ".join(
                         f'("{qp}", {_rust_safe(qp)})' for qp in query_params
@@ -996,7 +1044,7 @@ def gen_rust(tag_ops: dict) -> str:
                 else:
                     query_arg = "&[]"
                 out += f"\n    pub async fn {op_id}({sig}) -> Result<Value> {{\n"
-                out += f"        do_req(&self.client, &self.base_url, {method_const}, &{path_expr}, {body_arg}, {query_arg}).await\n"
+                out += f"        do_req(&self.client, &self.base_url, {method_const}, {path_arg}, {body_arg}, {query_arg}).await\n"
                 out += "    }\n"
 
         out += "}\n\n"
