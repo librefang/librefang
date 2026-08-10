@@ -484,6 +484,32 @@ session burns turns without producing information.
   unless a maintainer has explicitly asked you to ping them. Maintainers
   pull work into their queue; AI agents do not push it onto theirs.
 
+### Batch merging: the Actions runner pool is the bottleneck, not the merge
+
+The `librefang` org is on the **free** GitHub plan and every job targets the hosted `ubuntu-latest` pool, so concurrent runners are capped org-wide.
+Every push to `main` re-triggers the full workflow set, and so does every push to a PR branch.
+Merging a backlog back-to-back therefore spends the whole concurrency budget on runs nobody will ever read: after 86 consecutive merges the queue held 657 jobs with **zero** executing, the oldest waiting 67 minutes, and the only run whose result mattered — CI Gate on the current `main` HEAD — was stuck behind 85 superseded ones.
+
+When clearing more than ~10 PRs:
+
+- **Merge in batches and let the queue drain between them.**
+  Check `gh api 'repos/librefang/librefang/actions/runs?status=in_progress&per_page=1' --jq .total_count` — if it reads 0 while jobs are queued, the pool is saturated and nothing will progress until something is cancelled or times out.
+- **Cancel superseded runs rather than waiting them out.**
+  A queued run is dead weight when its `head_sha` is no longer its branch's tip: on a PR branch a newer commit has replaced it, and on `main` only HEAD's checks are ever consulted.
+  Resolve tips with `git ls-remote origin` and compare, rather than assuming the newest run per branch is the live one.
+
+  ```bash
+  # Queued runs whose head_sha is no longer the branch tip, cancelled.
+  gh api --paginate 'repos/librefang/librefang/actions/runs?status=queued&per_page=100' \
+    --jq '.workflow_runs[] | "\(.id)\t\(.head_branch)\t\(.head_sha)"' > /tmp/q.tsv
+  git ls-remote origin | awk '$2 ~ /^refs\/heads\//{sub("refs/heads/","",$2); print $2"\t"$1}' > /tmp/tips.tsv
+  awk -F'\t' 'NR==FNR{tip[$1]=$2; next} ($2 in tip) && tip[$2]!=$3 {print $1}' /tmp/tips.tsv /tmp/q.tsv \
+    | while read id; do gh api -X POST "repos/librefang/librefang/actions/runs/$id/cancel" >/dev/null; done
+  ```
+
+  Leave runs whose branch no longer exists alone — a deleted branch means the PR already merged or closed, and its checks are nobody's gate.
+- **A stalled queue is not a CI failure.** Before diagnosing a PR as broken, confirm jobs are actually executing. `runner_name` empty across the board (`gh api repos/librefang/librefang/actions/runs/<id>/jobs --jq '.jobs[].runner_name'`) means unassigned, i.e. starved for capacity, not failing.
+
 ### Issue / PR comment etiquette
 
 - **At most two follow-up comments** on the same thread without human
