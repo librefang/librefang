@@ -1060,9 +1060,8 @@ fn default_memory_acl(role: UserRole) -> UserMemoryAccess {
     }
 }
 
-/// Gate decision for an unrecognised sender. Mirrors design decision #2
-/// (default-allow with minimal perms): allow only passive local inspection,
-/// and require approval for network access or capability discovery.
+/// Gate decision for an unrecognised sender.
+/// Mirrors design decision #2 (default-allow with minimal perms): allow only passive local inspection, and require approval for network access or capability discovery.
 fn guest_gate(tool_name: &str) -> UserToolGate {
     const READ_ONLY_TOOLS: &[&str] = &[
         "file_read",
