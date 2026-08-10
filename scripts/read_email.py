@@ -27,8 +27,16 @@ except ValueError:
 
 def decode_str(s, enc=None):
     if isinstance(s, bytes):
-        return s.decode(enc or "utf-8", errors="ignore")
+        try:
+            return s.decode(enc or "utf-8", errors="ignore")
+        except LookupError:
+            return s.decode("utf-8", errors="ignore")
     return s or ""
+
+
+def decode_subject(raw_subject):
+    """Decode every plain and RFC 2047-encoded segment in a subject."""
+    return "".join(decode_str(part, enc) for part, enc in decode_header(raw_subject or ""))
 
 
 def decode_payload(payload, part):
@@ -69,6 +77,15 @@ def get_body(msg):
             return decode_payload(payload, msg)
     return ""
 
+
+def quote_imap_search_value(value):
+    """Encode a value as an IMAP quoted string without command injection."""
+    if any(char in value for char in ("\r", "\n", "\x00")):
+        raise ValueError("IMAP quoted strings cannot contain CR, LF, or NUL")
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def search_folder(mail, folder, sender):
     """Search a folder for emails from sender. Returns list of IDs."""
     try:
@@ -76,7 +93,7 @@ def search_folder(mail, folder, sender):
         if result != "OK":
             return []
         if sender:
-            _, msgs = mail.search(None, f'FROM "{sender}"')
+            _, msgs = mail.search(None, f"FROM {quote_imap_search_value(sender)}")
         else:
             _, msgs = mail.search(None, "ALL")
         ids = msgs[0].split() if msgs[0] else []
@@ -84,6 +101,16 @@ def search_folder(mail, folder, sender):
     except Exception as e:
         print(f"WARNING: failed to search {folder}: {e}", file=sys.stderr)
         return []
+
+
+def fetched_message_bytes(data):
+    """Return RFC822 bytes from the expected IMAP FETCH response shape."""
+    if not data or not isinstance(data[0], tuple) or len(data[0]) < 2:
+        raise ValueError("malformed IMAP FETCH response")
+    message_bytes = data[0][1]
+    if not isinstance(message_bytes, bytes):
+        raise ValueError("malformed IMAP FETCH response")
+    return message_bytes
 
 
 def logout_quietly(mail):
@@ -106,6 +133,13 @@ def main():
     if not password:
         print("ERROR: EMAIL_PASSWORD not set", file=sys.stderr)
         sys.exit(1)
+
+    if sender:
+        try:
+            quote_imap_search_value(sender)
+        except ValueError as e:
+            print(f"ERROR: invalid sender search value: {e}", file=sys.stderr)
+            sys.exit(1)
 
     mail = None
     try:
@@ -146,14 +180,12 @@ def main():
         # Fetch the latest email
         try:
             _, data = mail.fetch(found_ids[-1], "(RFC822)")
-            msg = email.message_from_bytes(data[0][1])
+            msg = email.message_from_bytes(fetched_message_bytes(data))
         except Exception as e:
             print(f"ERROR: fetch failed: {e}", file=sys.stderr)
             sys.exit(1)
 
-        raw_subject = msg["Subject"] or ""
-        subject_raw, enc = decode_header(raw_subject)[0]
-        subject = decode_str(subject_raw, enc)
+        subject = decode_subject(msg["Subject"])
         body = get_body(msg)
 
         print(f"SUBJECT: {subject}")
