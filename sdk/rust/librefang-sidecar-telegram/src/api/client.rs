@@ -17,8 +17,7 @@ use std::time::Duration;
 pub const DEFAULT_LONGPOLL_TIMEOUT_SECS: u64 = 30;
 pub const SEND_TIMEOUT_SECS: u64 = 30;
 /// Conservative throughput floor used to extend multipart request deadlines.
-/// The fixed send timeout remains the connection/base budget; uploads receive
-/// one extra second per 64 KiB of payload.
+/// The fixed send timeout remains the connection/base budget; uploads receive one extra second per 64 KiB of payload.
 const MULTIPART_BYTES_PER_SECOND: usize = 64_000;
 /// Extra buffer added to the long-poll server-side timeout to derive the reqwest per-request deadline. Telegram sometimes returns a few hundred milliseconds after the server timeout elapses.
 pub const LONGPOLL_CLIENT_BUFFER_SECS: u64 = 5;
@@ -476,9 +475,8 @@ impl BotClient {
         let bytes = shared_upload_bytes(bytes);
         let request_timeout = multipart_timeout(bytes.len());
         let byte_len = bytes.len() as u64;
-        // Forms consume their parts. Bytes is reference-counted, so rebuilding
-        // a part for the rare 429 retry shares the upload allocation instead of
-        // copying the full attachment on every attempt.
+        // Forms consume their parts.
+        // Bytes is reference-counted, so rebuilding a part for the rare 429 retry shares the upload allocation instead of copying the full attachment on every attempt.
         for attempt in 0..2 {
             let mut part = reqwest::multipart::Part::stream_with_length(bytes.clone(), byte_len)
                 .file_name(filename.clone());
