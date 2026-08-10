@@ -19,7 +19,7 @@ name = "librefang-sidecar-telegram"
 path = "src/main.rs"
 
 [dependencies]
-librefang-sidecar = { path = "../librefang-sidecar" }
+librefang-sidecar = { path = "../librefang-sidecar", version = "0.1.0" }
 tokio = { version = "1", features = ["io-std", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
