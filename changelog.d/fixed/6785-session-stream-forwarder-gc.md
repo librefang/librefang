@@ -1,0 +1,1 @@
+Session stream garbage collection now retains broadcast channels while a turn forwarder is active, so reconnecting and late-attaching clients continue receiving in-flight events instead of joining an orphan replacement channel (#6785) (@houko)

@@ -6,12 +6,17 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default)]
 pub struct UpdatesResponse {
     pub ok: bool,
+    #[serde(default)]
     pub result: Vec<Update>,
+    #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
     pub error_code: Option<i32>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    // Parsed for Telegram error envelopes; getUpdates currently reports only code/description.
     pub parameters: Option<ResponseParameters>,
 }
 
@@ -22,40 +27,67 @@ pub struct ResponseParameters {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default)]
 pub struct Update {
     pub update_id: i64,
+    #[serde(default)]
     pub message: Option<Message>,
+    #[serde(default)]
     pub edited_message: Option<Message>,
+    #[serde(default)]
     pub callback_query: Option<CallbackQuery>,
+    #[serde(default)]
     pub poll_answer: Option<PollAnswer>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default)]
 pub struct Message {
     pub message_id: i64,
+    #[serde(default)]
     pub message_thread_id: Option<i64>,
+    #[serde(default)]
     pub from: Option<User>,
+    #[serde(default)]
     pub sender_chat: Option<Chat>,
+    #[allow(dead_code)]
+    // Required by Telegram's Message contract even though translation does not expose the timestamp.
     pub date: i64,
+    #[serde(default)]
     pub edit_date: Option<i64>,
     pub chat: Chat,
+    #[serde(default)]
     pub reply_to_message: Option<Box<Message>>,
+    #[serde(default)]
     pub text: Option<String>,
+    #[serde(default)]
     pub entities: Vec<MessageEntity>,
+    #[serde(default)]
     pub caption: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    // Retained for wire completeness; captions currently use plain text only.
     pub caption_entities: Vec<MessageEntity>,
+    #[serde(default)]
     pub photo: Vec<PhotoSize>,
+    #[serde(default)]
     pub document: Option<Document>,
+    #[serde(default)]
     pub audio: Option<Audio>,
+    #[serde(default)]
     pub voice: Option<Voice>,
+    #[serde(default)]
     pub animation: Option<Animation>,
+    #[serde(default)]
     pub video: Option<Video>,
+    #[serde(default)]
     pub video_note: Option<VideoNote>,
+    #[serde(default)]
     pub sticker: Option<Sticker>,
+    #[serde(default)]
     pub location: Option<Location>,
+    #[serde(default)]
     pub contact: Option<Contact>,
+    #[serde(default)]
+    #[allow(dead_code)] // Validated for compatibility; routing uses message_thread_id.
     pub is_topic_message: bool,
 }
 
@@ -255,4 +287,44 @@ pub struct InlineKeyboardButton {
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callback_data: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn required_update_identity_fields_fail_closed() {
+        assert!(serde_json::from_value::<UpdatesResponse>(json!({"result": []})).is_err());
+        assert!(serde_json::from_value::<Update>(json!({})).is_err());
+        assert!(serde_json::from_value::<Message>(json!({
+            "message_id": 1,
+            "date": 2
+        }))
+        .is_err());
+
+        let error_response: UpdatesResponse = serde_json::from_value(json!({
+            "ok": false,
+            "error_code": 429,
+            "description": "retry later"
+        }))
+        .expect("Telegram error envelopes may omit result");
+        assert!(error_response.result.is_empty());
+
+        let response: UpdatesResponse = serde_json::from_value(json!({
+            "ok": true,
+            "result": [{
+                "update_id": 42,
+                "message": {
+                    "message_id": 7,
+                    "date": 123,
+                    "chat": {"id": 9, "type": "private"}
+                }
+            }]
+        }))
+        .expect("optional update and message fields may be absent");
+        assert_eq!(response.result[0].update_id, 42);
+        assert_eq!(response.result[0].message.as_ref().unwrap().chat.id, 9);
+    }
 }
