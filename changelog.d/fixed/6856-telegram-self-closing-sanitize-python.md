@@ -1,0 +1,2 @@
+Prevented self-closing Telegram HTML tags from being emitted as literal `<tag/>` markup in the Python sidecar's sanitizer, matching the Rust sanitizer's fix.
+Telegram's HTML subset has no self-closing-tag syntax, so a literal `<tag/>` risked either an "Unclosed start tag" error from the Bot API or the tag staying open for the rest of the message; self-closing input is now rebuilt as a balanced `<tag></tag>` pair instead. (#6856) (@houko)

@@ -82,6 +82,16 @@ def test_sanitize_telegram_html():
     assert s(once) == once
     # tg-spoiler / tg-emoji allowed
     assert s("<tg-spoiler>x</tg-spoiler>") == "<tg-spoiler>x</tg-spoiler>"
+    # self-closing allowed tag does not wrap all following text
+    # (matches telegram.rs's self_closing_allowed_tag_does_not_wrap_following_text)
+    assert s("<code/>after") == "<code></code>after"
+    assert s('<tg-emoji emoji-id="42" />after') == (
+        '<tg-emoji emoji-id="42"></tg-emoji>after')
+    # self-closing tag nested inside an open tag does not leak onto the
+    # enclosing tag's stack entry (matches telegram.rs's
+    # self_closing_tag_nested_inside_open_tag_does_not_leak_onto_stack)
+    assert s("<b>before<code/>after</b>tail") == (
+        "<b>before<code></code>after</b>tail")
 
 
 # ---- chunker: vs crate::message_truncator -------------------------
