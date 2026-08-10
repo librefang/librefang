@@ -247,7 +247,7 @@ pub struct PollAnswer {
 
 // ── Response envelopes for "send" endpoints ─────────────────────────
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ApiResponse<T> {
     pub ok: bool,
@@ -255,6 +255,18 @@ pub struct ApiResponse<T> {
     pub description: Option<String>,
     pub error_code: Option<i32>,
     pub parameters: Option<ResponseParameters>,
+}
+
+impl<T> Default for ApiResponse<T> {
+    fn default() -> Self {
+        Self {
+            ok: false,
+            result: None,
+            description: None,
+            error_code: None,
+            parameters: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -293,6 +305,18 @@ pub struct InlineKeyboardButton {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    struct NoDefault;
+
+    #[test]
+    fn api_response_default_does_not_require_result_default() {
+        let response = ApiResponse::<NoDefault>::default();
+        assert!(!response.ok);
+        assert!(response.result.is_none());
+        assert!(response.description.is_none());
+        assert!(response.error_code.is_none());
+        assert!(response.parameters.is_none());
+    }
 
     #[test]
     fn required_update_identity_fields_fail_closed() {
