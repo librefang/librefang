@@ -1,0 +1,1 @@
+- Rejected malformed Telegram update payloads that omit required response, update, or message identity fields instead of silently defaulting their IDs. (@houko)

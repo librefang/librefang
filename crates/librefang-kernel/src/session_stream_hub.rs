@@ -16,9 +16,9 @@
 //! start receiving events from the moment they connect.
 //!
 //! Hub entries are created lazily on first publish or first subscribe and
-//! pruned when no live receivers remain (`gc_idle`). Lossiness is intentional:
-//! a slow attacher (including the originating caller) lags rather than
-//! backpressuring the producer or starving other attachers.
+//! pruned when no live receivers or forwarders remain (`gc_idle`). Lossiness
+//! is intentional: a slow attacher (including the originating caller) lags
+//! rather than backpressuring the producer or starving other attachers.
 
 use dashmap::DashMap;
 use librefang_llm_driver::StreamEvent;
@@ -49,9 +49,8 @@ impl SessionStreamHub {
 
     /// Get (or create) the broadcast sender for a session.
     ///
-    /// Always returns a sender — entries are created on first publish so that
-    /// late attachers can also call `subscribe(session_id)` before any turn
-    /// has run for that session and still receive future events.
+    /// Always returns a sender — entries are created lazily on first publish
+    /// or first subscribe.
     pub fn sender(&self, session_id: SessionId) -> broadcast::Sender<StreamEvent> {
         if let Some(existing) = self.senders.get(&session_id) {
             return existing.clone();
@@ -66,24 +65,41 @@ impl SessionStreamHub {
     /// Subscribe to events for a session. Creates an empty channel on demand
     /// so attach calls before any producer has published still succeed.
     pub fn subscribe(&self, session_id: SessionId) -> broadcast::Receiver<StreamEvent> {
-        self.sender(session_id).subscribe()
+        let entry = self
+            .senders
+            .entry(session_id)
+            .or_insert_with(|| broadcast::channel(SESSION_BROADCAST_CAPACITY).0);
+        entry.subscribe()
     }
 
-    /// Drop entries with no active receivers — bounded memory under churn
-    /// (lots of one-shot sessions). Cheap to call periodically; safe to skip.
+    /// Drop entries with no active receivers or forwarders — bounded memory
+    /// under churn (lots of one-shot sessions). Cheap to call periodically;
+    /// safe to skip.
     pub fn gc_idle(&self) -> usize {
         let stale: Vec<SessionId> = self
             .senders
             .iter()
-            .filter(|e| e.value().receiver_count() == 0)
+            .filter(|e| e.value().strong_count() == 1 && e.value().receiver_count() == 0)
             .map(|e| *e.key())
             .collect();
-        let count = stale.len();
+        let mut count = 0;
         for id in stale {
-            // Re-check under the entry lock: a subscriber may have appeared
-            // between the snapshot above and this remove. DashMap's
-            // remove_if covers that race.
-            self.senders.remove_if(&id, |_, v| v.receiver_count() == 0);
+            // Re-check under the entry lock: a receiver or sender clone may
+            // have appeared between the snapshot above and this remove.
+            // Forwarder tasks retain a sender clone for their whole lifetime.
+            if self
+                .senders
+                .remove_if(&id, |_, sender| {
+                    // Order is synchronization-critical. A sender clone can
+                    // become a receiver between these two reads. Checking
+                    // senders first means either the clone is observed, or
+                    // the subsequent receiver count observes its receiver.
+                    sender.strong_count() == 1 && sender.receiver_count() == 0
+                })
+                .is_some()
+            {
+                count += 1;
+            }
         }
         count
     }
@@ -220,6 +236,35 @@ mod tests {
             .unwrap();
         let received = subscriber.recv().await.unwrap();
         assert!(matches!(received, StreamEvent::ContentComplete { .. }));
+    }
+
+    #[tokio::test]
+    async fn gc_keeps_active_forwarder_for_late_subscribers() {
+        let hub = Arc::new(SessionStreamHub::new());
+        let session = fresh_session();
+        let (producer_tx, mut caller_rx) = install_stream_fanout(&hub, session);
+
+        assert_eq!(
+            hub.gc_idle(),
+            0,
+            "an active turn must retain its broadcast entry without subscribers"
+        );
+        assert_eq!(hub.active_session_count(), 1);
+
+        let mut late_subscriber = hub.subscribe(session);
+        producer_tx.send(delta("late")).await.unwrap();
+        let received =
+            tokio::time::timeout(std::time::Duration::from_secs(1), late_subscriber.recv())
+                .await
+                .expect("active forwarder should deliver promptly")
+                .unwrap();
+        assert!(matches!(received, StreamEvent::TextDelta { text } if text == "late"));
+
+        drop(late_subscriber);
+        drop(producer_tx);
+        while caller_rx.recv().await.is_some() {}
+        assert_eq!(hub.gc_idle(), 1);
+        assert_eq!(hub.active_session_count(), 0);
     }
 
     #[tokio::test]

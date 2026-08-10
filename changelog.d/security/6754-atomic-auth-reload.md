@@ -1,0 +1,1 @@
+Publish hot-reloaded users, channel bindings, tool groups, and role caches as one atomic authorization snapshot, preventing concurrent requests from briefly entering guest mode and bypassing RBAC while configuration is reloaded (#6754) (@houko)

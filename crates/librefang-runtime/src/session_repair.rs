@@ -1105,8 +1105,19 @@ fn strip_injection_markers(content: &str) -> String {
 /// from session history. Keeps the last `keep_recent` messages intact to avoid
 /// pruning recent context.
 pub fn prune_heartbeat_turns(messages: &mut Vec<Message>, keep_recent: usize) {
+    prune_heartbeat_turns_tracking_boundary(messages, keep_recent, 0);
+}
+
+/// Prune heartbeat turns while reporting how many removed messages preceded
+/// an index captured before pruning. Callers that retain an index into the
+/// message list must subtract this count to keep it pointing at the same turn.
+pub(crate) fn prune_heartbeat_turns_tracking_boundary(
+    messages: &mut Vec<Message>,
+    keep_recent: usize,
+    boundary: usize,
+) -> usize {
     if messages.len() <= keep_recent {
-        return;
+        return 0;
     }
     let prune_end = messages.len() - keep_recent;
     let mut to_remove = Vec::new();
@@ -1134,12 +1145,13 @@ pub fn prune_heartbeat_turns(messages: &mut Vec<Message>, keep_recent: usize) {
     }
 
     if to_remove.is_empty() {
-        return;
+        return 0;
     }
 
     to_remove.sort_unstable();
     to_remove.dedup();
     let pruned = to_remove.len();
+    let pruned_before_boundary = to_remove.partition_point(|&idx| idx < boundary);
     for idx in to_remove.into_iter().rev() {
         messages.remove(idx);
     }
@@ -1147,6 +1159,7 @@ pub fn prune_heartbeat_turns(messages: &mut Vec<Message>, keep_recent: usize) {
         pruned,
         "Pruned heartbeat NO_REPLY turns from session history"
     );
+    pruned_before_boundary
 }
 
 /// In-place coalesce: if the block list contains runs of `ContentBlock::Text`,

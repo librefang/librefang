@@ -326,7 +326,7 @@ export function AgentsPage() {
   const [confirmDialog, setConfirmDialog] = useState<{
     title: string;
     message: string;
-    onConfirm: () => void;
+    onConfirm: () => void | Promise<void>;
     tone?: "default" | "destructive";
   } | null>(null);
   // Clone dialog state (#6566). `POST /api/agents/{id}/clone` requires `new_name` with no serde default, so the button has to collect a name before firing — it previously posted `{}` and 422'd on every click.
@@ -398,23 +398,30 @@ export function AgentsPage() {
   const qc = useQueryClient();
 
   const rawDeleteMutation = useDeleteAgent();
+  const handleDeleteSuccess = (agentId: string) => {
+    if (detailAgent?.id === agentId) {
+      setDetailAgent(null);
+      setDetailDrawerOpen(false);
+    } else {
+      setDetailAgent(prev => prev);
+    }
+    addToast(t("agents.delete_success", { defaultValue: "Agent deleted" }), "success");
+  };
+  const handleDeleteError = (e: Error) =>
+    addToast(
+      e?.message || t("agents.delete_failed", { defaultValue: "Failed to delete agent" }),
+      "error",
+    );
   const deleteMutation = {
     mutate: (agentId: string) =>
       rawDeleteMutation.mutate(agentId, {
-        onSuccess: () => {
-          if (detailAgent?.id === agentId) {
-            setDetailAgent(null);
-            setDetailDrawerOpen(false);
-          } else {
-            setDetailAgent(prev => prev);
-          }
-          addToast(t("agents.delete_success", { defaultValue: "Agent deleted" }), "success");
-        },
-        onError: (e: Error) =>
-          addToast(
-            e?.message || t("agents.delete_failed", { defaultValue: "Failed to delete agent" }),
-            "error",
-          ),
+        onSuccess: () => handleDeleteSuccess(agentId),
+        onError: handleDeleteError,
+      }),
+    mutateAsync: (agentId: string) =>
+      rawDeleteMutation.mutateAsync(agentId, {
+        onSuccess: () => handleDeleteSuccess(agentId),
+        onError: handleDeleteError,
       }),
   };
 
@@ -2900,7 +2907,9 @@ export function AgentsPage() {
                         title: t("agents.delete_title", { defaultValue: "Delete agent?" }),
                         message: t("agents.delete_confirm", { name: detailAgent.name }),
                         tone: "destructive",
-                        onConfirm: () => deleteMutation.mutate(detailAgent.id),
+                        onConfirm: async () => {
+                          await deleteMutation.mutateAsync(detailAgent.id);
+                        },
                       })
                     }
                   >
