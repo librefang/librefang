@@ -332,15 +332,9 @@ pub fn inject_attachments_into_session(
 /// content blocks ready to inject into a session. Non-image attachments
 /// and download failures are skipped with a warning.
 ///
-/// SSRF defence: every URL is run through
-/// [`crate::webhook_store::validate_webhook_url_resolved`] before the
-/// fetch — this rejects loopback, RFC 1918, link-local, IPv6 ULA, the
-/// cloud-metadata literals, and any hostname whose DNS resolves to one
-/// of those families. For domain URLs we then pin reqwest to the
-/// validated `SocketAddr` via `.resolve(host, addr)` so a DNS-rebind
-/// flip between validation and the eventual HTTP connect cannot reroute
-/// the fetch onto an internal IP. Mirrors the webhook fire-time pattern
-/// at `webhooks.rs:738-744` (issue #3701).
+/// SSRF defence: every URL is run through [`crate::webhook_store::validate_webhook_url_resolved`] before the fetch — this rejects loopback, RFC 1918, link-local, IPv6 ULA, the cloud-metadata literals, and any hostname whose DNS resolves to one of those families.
+/// For domain URLs we then pin reqwest to the validated `SocketAddr` on a direct/no-proxy client so a DNS-rebind flip between validation and the eventual HTTP connect cannot reroute the fetch onto an internal IP.
+/// Mirrors the webhook fire-time pattern at `webhooks.rs:798-808` (issue #3701).
 pub async fn resolve_url_attachments(
     attachments: &[librefang_types::comms::Attachment],
 ) -> Vec<librefang_types::message::ContentBlock> {
@@ -380,16 +374,14 @@ pub async fn resolve_url_attachments(
             }
         };
 
-        // Build a per-attachment client and pin DNS to the IP we just
-        // validated. Without the pin, reqwest performs its own
-        // independent lookup before connecting — a low-TTL record can
-        // flip to a private IP between our validation and reqwest's
-        // resolver call (DNS rebind, #3701).
-        let mut builder = librefang_kernel::http_client::proxied_client_builder()
+        // Build a direct per-attachment client and pin DNS to the IP we just validated.
+        // Proxies are disabled because proxy-side DNS would bypass the local override.
+        // Without the pin, reqwest performs its own independent lookup before connecting — a low-TTL record can flip to a private IP between our validation and reqwest's resolver call (DNS rebind, #3701).
+        let mut builder = librefang_kernel::http_client::direct_client_builder()
             .timeout(std::time::Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none());
         if let Some((ref host, addr)) = pinned_host {
-            builder = builder.resolve(host, addr);
+            builder = builder.resolve_to_addrs(host, &[addr]);
         }
         let client = match builder.build() {
             Ok(c) => c,

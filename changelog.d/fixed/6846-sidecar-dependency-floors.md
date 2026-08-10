@@ -1,0 +1,1 @@
+- Declared the Rust sidecar SDK's tested serde, serde_json, and Tokio version floors instead of accepting untested early 1.x releases. (@houko)

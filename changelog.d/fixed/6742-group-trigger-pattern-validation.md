@@ -1,0 +1,9 @@
+Report a mis-declared `channel_overrides.group_trigger_patterns` entry when an agent's manifest is accepted, because the usual mistake is invisible by construction and cost a reporter hours.
+Writing the natural `group_trigger_patterns = ["(?i)\bvivi\b"]` in a TOML basic string does not produce a word-boundary regex: `\b` is TOML's *backspace* escape, so the kernel receives `(?i)<U+0008>vivi<U+0008>`, and the regex crate accepts a bare control character as a verbatim literal.
+The pattern therefore compiles — the bridge's existing "invalid regex" error never fires — and then matches nothing, so the agent simply never answers to its own alias in group chats and every message is dropped as `mention_only_no_mention`.
+The new check names the offending codepoint and prescribes the fix (a TOML literal single-quoted string, or doubled backslashes), and runs at spawn, hand-role activation, on-disk hot-reload, `update_manifest` and boot-time restore from persistent storage, so an operator iterating on a broken alias sees it on the next reload rather than never.
+The restore path is the load-bearing one: it registers a persisted agent without going through the spawn path, so on any daemon past its first run it is the only route the diagnostic could fire on at boot.
+It warns and never rejects: an unreachable alias is a typo, and failing the spawn would turn a cosmetic mistake into a missing agent.
+The bridge's own compile path could not serve this purpose — it is lazy, memoised per distinct pattern set, and does not consider the control-character case an error at all.
+The channels and agent-overrides docs gain the escaping rule and the previously undocumented `group_trigger_patterns` field, and no longer claim `MentionOnly` is what an unset `group_policy` does, which #6445 made false.
+(#6742) (@houko)

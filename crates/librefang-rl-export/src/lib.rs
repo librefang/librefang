@@ -36,10 +36,11 @@
 //! [`librefang_http::proxied_client_builder`], the workspace's shared
 //! reqwest client configuration. This is non-negotiable per the
 //! `librefang-extensions` AGENTS.md ("no bespoke `reqwest::Client`"):
-//! the shared builder carries the configured proxy, TLS fallback
-//! roots, and `User-Agent: librefang/<version>`. Exporters additionally
-//! disable redirects before building the client and fail closed if that
-//! secure client cannot be constructed.
+//! the shared builder carries TLS fallback roots, timeouts, and
+//! `User-Agent: librefang/<version>`. Exporters additionally disable
+//! redirects and proxies, then pin domain names to the complete set of
+//! addresses already checked by the SSRF policy. A proxy cannot preserve
+//! that check-to-connect DNS invariant, so proxy-only deployments fail closed.
 
 #![deny(missing_docs)]
 
@@ -57,15 +58,21 @@ use chrono::{DateTime, Utc};
 
 fn build_export_http_client_with(
     builder: reqwest::ClientBuilder,
+    resolution: &ssrf::ResolvedEgress,
 ) -> Result<reqwest::Client, ExportError> {
-    builder
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(ExportError::from)
+    let mut builder = builder
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none());
+    if let Some(hostname) = &resolution.hostname {
+        builder = builder.resolve_to_addrs(hostname, &resolution.addresses);
+    }
+    builder.build().map_err(ExportError::from)
 }
 
-fn build_export_http_client() -> Result<reqwest::Client, ExportError> {
-    build_export_http_client_with(librefang_http::proxied_client_builder())
+fn build_export_http_client(
+    resolution: &ssrf::ResolvedEgress,
+) -> Result<reqwest::Client, ExportError> {
+    build_export_http_client_with(librefang_http::proxied_client_builder(), resolution)
 }
 
 /// Target service to export a trajectory to.
@@ -281,11 +288,25 @@ pub async fn export(
             api_key_env,
         } => {
             let api_key = resolve_env_secret(&api_key_env, "W&B api_key_env")?;
+            wandb::validate_config(&project, &entity, &api_key)?;
             // SSRF gate: the public dispatch always validates the
-            // outbound base URL before any I/O. W&B is a cloud service —
+            // outbound base URL before any outbound HTTP. W&B is a cloud service —
             // loopback / private / link-local destinations are rejected.
-            ssrf::validate_egress_url(wandb::DEFAULT_WANDB_BASE, ssrf::EgressMode::Public)?;
-            wandb::export_to_wandb(&project, &entity, run_id.as_deref(), &api_key, payload).await
+            let resolution = ssrf::resolve_and_validate_egress_url(
+                wandb::DEFAULT_WANDB_BASE,
+                ssrf::EgressMode::Public,
+            )
+            .await?;
+            let client = build_export_http_client(&resolution)?;
+            wandb::export_to_wandb(
+                &project,
+                &entity,
+                run_id.as_deref(),
+                &api_key,
+                client,
+                payload,
+            )
+            .await
         }
         ExportTarget::Tinker {
             api_key_env,
@@ -293,13 +314,16 @@ pub async fn export(
             base_url,
         } => {
             let api_key = resolve_env_secret(&api_key_env, "Tinker api_key_env")?;
+            tinker::validate_config(&project, &api_key)?;
             // SSRF gate. Tinker is a public cloud service even when an
             // operator overrides `base_url` for a self-hosted control
             // plane (still a public DNS name); loopback / private /
             // link-local destinations are rejected.
             let base = base_url.as_deref().unwrap_or(tinker::DEFAULT_TINKER_BASE);
-            ssrf::validate_egress_url(base, ssrf::EgressMode::Public)?;
-            tinker::export_to_tinker(&project, &api_key, base_url.as_deref(), payload).await
+            let resolution =
+                ssrf::resolve_and_validate_egress_url(base, ssrf::EgressMode::Public).await?;
+            let client = build_export_http_client(&resolution)?;
+            tinker::export_to_tinker(&project, &api_key, base_url.as_deref(), client, payload).await
         }
         ExportTarget::Atropos {
             project,
@@ -308,10 +332,16 @@ pub async fn export(
             group_size,
             weight,
         } => {
+            atropos::validate_config(&project, &base_url, &payload)?;
             // SSRF gate. Atropos is a local-only microservice — only
             // loopback / RFC-1918 destinations are accepted; public
             // destinations and link-local / IMDS are rejected.
-            ssrf::validate_egress_url(&base_url, ssrf::EgressMode::LoopbackOrPrivate)?;
+            let resolution = ssrf::resolve_and_validate_egress_url(
+                &base_url,
+                ssrf::EgressMode::LoopbackOrPrivate,
+            )
+            .await?;
+            let client = build_export_http_client(&resolution)?;
             atropos::export_to_atropos(
                 &project,
                 &base_url,
@@ -320,6 +350,7 @@ pub async fn export(
                     group_size,
                     weight,
                 },
+                client,
                 payload,
             )
             .await
@@ -327,7 +358,7 @@ pub async fn export(
     }
 }
 
-fn normalize_export_metadata(export: &mut RlTrajectoryExport) {
+pub(crate) fn normalize_export_metadata(export: &mut RlTrajectoryExport) {
     if let Some(metadata) = export.toolset_metadata.take() {
         export.toolset_metadata = Some(redact::redact_metadata(metadata));
     }
@@ -362,14 +393,57 @@ pub(crate) fn resolve_env_secret(env_var: &str, field_label: &str) -> Result<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::{matchers::path, Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn export_client_build_failure_is_not_replaced_by_a_default_client() {
         let invalid_builder = reqwest::Client::builder().user_agent("invalid\nuser-agent");
-        let error = build_export_http_client_with(invalid_builder)
+        let resolution = ssrf::ResolvedEgress {
+            hostname: None,
+            addresses: Vec::new(),
+        };
+        let error = build_export_http_client_with(invalid_builder, &resolution)
             .expect_err("an invalid secure client must fail closed");
 
         assert!(matches!(error, ExportError::NetworkError(_)));
+    }
+
+    #[tokio::test]
+    async fn export_client_uses_only_pinned_dns_and_bypasses_proxies() {
+        let target = MockServer::start().await;
+        Mock::given(path("/pinned"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&target)
+            .await;
+
+        let proxy = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&proxy)
+            .await;
+
+        let resolution = ssrf::ResolvedEgress {
+            hostname: Some("rebind.invalid".to_string()),
+            // Keep a reachable address first and a sentinel second. Repeated
+            // `resolve` calls overwrite each other in reqwest, so an
+            // implementation that failed to retain the full set would hit
+            // the sentinel and return 502 instead.
+            addresses: vec![*target.address(), *proxy.address()],
+        };
+        let builder = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(proxy.uri()).expect("valid proxy URL"));
+        let client = build_export_http_client_with(builder, &resolution)
+            .expect("validated pinned client should build");
+
+        let response = client
+            .get("http://rebind.invalid/pinned")
+            .send()
+            .await
+            .expect("the pinned target should receive the request");
+
+        assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+        assert_eq!(target.received_requests().await.unwrap().len(), 1);
+        assert!(proxy.received_requests().await.unwrap().is_empty());
     }
 
     /// `*_env` indirection: an empty env-var name fails fast with

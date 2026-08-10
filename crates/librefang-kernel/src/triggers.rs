@@ -113,10 +113,12 @@ pub enum TriggerPattern {
     ///
     /// `assignee_match` narrows the match to tasks assigned to a specific
     /// agent:
-    /// - `Some("self")` — only fire for tasks assigned to the trigger-owning
-    ///   agent. Accepts both the agent's UUID and its display name.
-    /// - `Some("<uuid>"|"<name>")` — only fire for tasks assigned to that
-    ///   specific agent.
+    /// - `Some("self")` — only fire for tasks assigned to the trigger-owning agent.
+    ///   Accepts both the agent's UUID and its display name.
+    /// - `Some("unassigned")` — only fire for tasks no agent owns.
+    ///   Matches both an absent `assigned_to` and the empty string, because the stuck-task sweeper releases a claim by writing `assigned_to = ''` rather than NULL.
+    /// - `Some("<uuid>"|"<name>")` — only fire for tasks assigned to that specific agent.
+    ///   `"self"` and `"unassigned"` are keywords, so an agent named either must be addressed by UUID.
     /// - `None` — fire for every `TaskPosted` event (legacy behavior).
     ///
     /// The field is `#[serde(default)]` so legacy triggers persisted or
@@ -130,10 +132,12 @@ pub enum TriggerPattern {
     ///
     /// `creator_match` narrows the match to tasks originally posted by a
     /// specific agent (mirror of `TaskPosted`'s `assignee_match`):
-    /// - `Some("self")` — only fire for tasks posted by the trigger-owning
-    ///   agent. Accepts both the agent's UUID and its display name.
-    /// - `Some("<uuid>"|"<name>")` — only fire for tasks posted by that
-    ///   specific agent.
+    /// - `Some("self")` — only fire for tasks posted by the trigger-owning agent.
+    ///   Accepts both the agent's UUID and its display name.
+    /// - `Some("unassigned")` — accepted because the identity filter is shared with `assignee_match`, and here means "no recorded creator" (absent or empty `created_by`).
+    ///   Unlike `assigned_to`, nothing in the system currently writes an empty `created_by`, so this is a consequence of the shared helper rather than a designed filter — treat it as reserved.
+    /// - `Some("<uuid>"|"<name>")` — only fire for tasks posted by that specific agent.
+    ///   `"self"` and `"unassigned"` are keywords.
     /// - `None` — fire for every `TaskClaimed` event (legacy behavior).
     ///
     /// The field is `#[serde(default)]` so legacy triggers persisted or
@@ -147,10 +151,12 @@ pub enum TriggerPattern {
     ///
     /// `creator_match` narrows the match to tasks originally posted by a
     /// specific agent (mirror of `TaskPosted`'s `assignee_match`):
-    /// - `Some("self")` — only fire for tasks posted by the trigger-owning
-    ///   agent. Accepts both the agent's UUID and its display name.
-    /// - `Some("<uuid>"|"<name>")` — only fire for tasks posted by that
-    ///   specific agent.
+    /// - `Some("self")` — only fire for tasks posted by the trigger-owning agent.
+    ///   Accepts both the agent's UUID and its display name.
+    /// - `Some("unassigned")` — accepted because the identity filter is shared with `assignee_match`, and here means "no recorded creator" (absent or empty `created_by`).
+    ///   Unlike `assigned_to`, nothing in the system currently writes an empty `created_by`, so this is a consequence of the shared helper rather than a designed filter — treat it as reserved.
+    /// - `Some("<uuid>"|"<name>")` — only fire for tasks posted by that specific agent.
+    ///   `"self"` and `"unassigned"` are keywords.
     /// - `None` — fire for every `TaskCompleted` event (legacy behavior).
     ///
     /// The field is `#[serde(default)]` so legacy triggers persisted or
@@ -490,6 +496,7 @@ impl TriggerEngine {
         })
     }
 
+    /// Register a new trigger.
     pub fn register(
         &self,
         agent_id: AgentId,
@@ -1473,13 +1480,20 @@ fn matches_pattern(
 /// `creator_match` (`TaskClaimed` / `TaskCompleted`) have byte-identical
 /// semantics:
 /// - `filter == None` → always matches (legacy fire-for-all).
-/// - `candidate == None` → never matches a non-`None` filter (the task field
-///   isn't set, so any identity predicate is definitionally false).
-/// - `filter == Some("self")` → matches when `candidate` equals the
-///   trigger-owner's UUID **or** display name (via the resolver-supplied
-///   `owner` tuple).
-/// - `filter == Some("<uuid>"|"<name>")` → exact string match against
-///   `candidate`.
+/// - `filter == Some("unassigned")` → matches exactly the tasks no agent owns, which is both the `None` candidate and the empty string.
+///   Both spellings reach the event because neither entry point normalises `assigned_to`: `tool_task_post` reads `input["assigned_to"].as_str()` (`librefang_runtime::tool_runner::task`) and `POST /api/tasks` reads `body["assigned_to"].as_str()` (`librefang_api::routes::task_queue`), and both hand the result straight to `task_post`, which copies it into `SystemEvent::TaskPosted` verbatim.
+///   `title` and `description` are checked for emptiness at both entry points; `assigned_to` is not.
+///   So a model or an API client that sends `"assigned_to": ""` — semantically "nobody", literally not `None` — produces `Some("")`, and a filter that only understood `None` would miss it.
+///   This arm must be tested BEFORE the `candidate == None` early-exit below, or it is unreachable for the `None` half.
+///
+///   Note this is about what the *event* carries, not about what is in the database.
+///   The stuck-task sweeper does write `assigned_to = ''` when it releases a claim, but it publishes no event at all — its only caller (`spawn_task_board_sweep_task`) logs the reset ids and stops — so a task it releases never reaches this predicate.
+///   Releasing a stuck claim therefore does not wake an `assignee_match = "unassigned"` trigger, which is a real gap, but a separate one; see #6728.
+/// - `candidate == None` → never matches any other non-`None` filter (the task field isn't set, so any identity predicate is definitionally false).
+/// - `filter == Some("self")` → matches when `candidate` equals the trigger-owner's UUID **or** display name (via the resolver-supplied `owner` tuple).
+/// - `filter == Some("<uuid>"|"<name>")` → exact string match against `candidate`.
+///
+/// `"self"` and `"unassigned"` are keywords, so an agent whose display name is one of those two cannot be addressed by name here — use its UUID.
 fn agent_identity_filter_matches(
     filter: &Option<String>,
     candidate: Option<&str>,
@@ -1488,6 +1502,10 @@ fn agent_identity_filter_matches(
     let Some(filter) = filter else {
         return true;
     };
+    // Before the `candidate == None` early-exit: "unassigned" is the one filter for which an absent candidate is a MATCH, not a miss.
+    if filter == "unassigned" {
+        return candidate.is_none_or(|c| c.is_empty());
+    }
     let Some(candidate) = candidate else {
         return false;
     };
@@ -2548,6 +2566,88 @@ mod tests {
     }
 
     #[test]
+    fn task_posted_assignee_match_unassigned_matches_none_and_empty_string() {
+        // `assignee_match = "unassigned"` is the "pick up unowned work" filter, so it must match BOTH spellings of unowned that the system actually produces: `None` (task_post never set the field) and `""` (the stuck-task sweeper releases a claim with `SET assigned_to = ''`).
+        // Missing the empty-string half would make the trigger go permanently quiet for any task that had ever been claimed.
+        let engine = TriggerEngine::new();
+        let worker = AgentId::new();
+        let delegator = AgentId::new();
+
+        engine
+            .register(
+                worker,
+                TriggerPattern::TaskPosted {
+                    assignee_match: Some("unassigned".to_string()),
+                },
+                "claim {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let resolver = |id: AgentId| {
+            if id == worker {
+                Some("worker".to_string())
+            } else {
+                None
+            }
+        };
+        let posted = |task_id: &str, assigned_to: Option<String>| {
+            Event::new(
+                delegator,
+                EventTarget::Broadcast,
+                EventPayload::System(SystemEvent::TaskPosted {
+                    task_id: task_id.to_string(),
+                    title: "Open work".to_string(),
+                    assigned_to,
+                    created_by: Some(delegator.to_string()),
+                }),
+            )
+        };
+        // Each `evaluate_with_resolver` below needs the cooldown cleared, since a previous match would otherwise suppress the next one.
+        let reset_cooldown = || {
+            for mut entry in engine.triggers.iter_mut() {
+                entry.cooldown_secs = Some(0);
+            }
+        };
+
+        // `None` — no assignee field at all.
+        let (matches, _) = engine.evaluate_with_resolver(&posted("t-1", None), resolver);
+        assert_eq!(
+            matches.len(),
+            1,
+            "unassigned must fire when assigned_to is absent"
+        );
+
+        // `Some("")` — the sweeper-released form.
+        // This is the case that requires the `unassigned` arm to sit BEFORE the `candidate == None` early-exit AND to treat the empty string as unowned.
+        reset_cooldown();
+        let (matches, _) =
+            engine.evaluate_with_resolver(&posted("t-2", Some(String::new())), resolver);
+        assert_eq!(
+            matches.len(),
+            1,
+            "unassigned must fire when assigned_to is the empty string the sweeper writes"
+        );
+
+        // An addressed task must NOT match, whether addressed to the trigger owner or anyone else — "unassigned" is not a wildcard.
+        reset_cooldown();
+        let (matches, _) =
+            engine.evaluate_with_resolver(&posted("t-3", Some(worker.to_string())), resolver);
+        assert!(
+            matches.is_empty(),
+            "unassigned must reject a task addressed to the trigger owner"
+        );
+
+        reset_cooldown();
+        let (matches, _) =
+            engine.evaluate_with_resolver(&posted("t-4", Some(delegator.to_string())), resolver);
+        assert!(
+            matches.is_empty(),
+            "unassigned must reject a task addressed to another agent"
+        );
+    }
+
+    #[test]
     fn task_claimed_creator_match_self_filters_by_uuid_and_name() {
         // #5960 — `{"task_claimed":{"creator_match":"self"}}` must only fire for
         // claims of tasks the trigger-owning (orchestrator) agent originally
@@ -2636,6 +2736,133 @@ mod tests {
             matches.len(),
             1,
             "creator_match:self must accept the owner's display name too"
+        );
+    }
+
+    #[test]
+    fn task_claimed_creator_match_unassigned_matches_none_and_empty_string() {
+        // `creator_match = "unassigned"` is accepted on `TaskClaimed` because the identity
+        // filter is shared with `TaskPosted`'s `assignee_match`, and here means "no recorded
+        // creator" — either an absent `created_by` or the empty string a legacy writer left behind.
+        // This mirrors `task_posted_assignee_match_unassigned_matches_none_and_empty_string`
+        // but exercises the `TaskClaimed` variant directly, since the shared helper being
+        // correct for `TaskPosted` does not prove it is wired correctly for this variant too.
+        let engine = TriggerEngine::new();
+        let owner = AgentId::new();
+        let other = AgentId::new();
+
+        engine
+            .register(
+                owner,
+                TriggerPattern::TaskClaimed {
+                    creator_match: Some("unassigned".to_string()),
+                },
+                "notify {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let claimed = |task_id: &str, created_by: Option<String>| {
+            Event::new(
+                other,
+                EventTarget::Broadcast,
+                EventPayload::System(SystemEvent::TaskClaimed {
+                    task_id: task_id.to_string(),
+                    claimed_by: other.to_string(),
+                    created_by,
+                }),
+            )
+        };
+        let reset_cooldown = || {
+            for mut entry in engine.triggers.iter_mut() {
+                entry.cooldown_secs = Some(0);
+            }
+        };
+
+        let (matches, _) = engine.evaluate_with_resolver(&claimed("t-1", None), |_| None);
+        assert_eq!(
+            matches.len(),
+            1,
+            "creator_match:unassigned must fire when created_by is absent"
+        );
+
+        reset_cooldown();
+        let (matches, _) =
+            engine.evaluate_with_resolver(&claimed("t-2", Some(String::new())), |_| None);
+        assert_eq!(
+            matches.len(),
+            1,
+            "creator_match:unassigned must fire when created_by is the empty string"
+        );
+
+        reset_cooldown();
+        let (matches, _) =
+            engine.evaluate_with_resolver(&claimed("t-3", Some(owner.to_string())), |_| None);
+        assert!(
+            matches.is_empty(),
+            "creator_match:unassigned must reject a claim whose task has a recorded creator"
+        );
+    }
+
+    #[test]
+    fn task_completed_creator_match_unassigned_matches_none_and_empty_string() {
+        // Same gap as `TaskClaimed` above: `creator_match = "unassigned"` reaches
+        // `TaskCompleted` through the same shared helper and needs its own direct coverage.
+        let engine = TriggerEngine::new();
+        let owner = AgentId::new();
+        let other = AgentId::new();
+
+        engine
+            .register(
+                owner,
+                TriggerPattern::TaskCompleted {
+                    creator_match: Some("unassigned".to_string()),
+                },
+                "notify {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let completed = |task_id: &str, created_by: Option<String>| {
+            Event::new(
+                other,
+                EventTarget::Broadcast,
+                EventPayload::System(SystemEvent::TaskCompleted {
+                    task_id: task_id.to_string(),
+                    completed_by: other.to_string(),
+                    result: "done".to_string(),
+                    created_by,
+                }),
+            )
+        };
+        let reset_cooldown = || {
+            for mut entry in engine.triggers.iter_mut() {
+                entry.cooldown_secs = Some(0);
+            }
+        };
+
+        let (matches, _) = engine.evaluate_with_resolver(&completed("t-1", None), |_| None);
+        assert_eq!(
+            matches.len(),
+            1,
+            "creator_match:unassigned must fire when created_by is absent"
+        );
+
+        reset_cooldown();
+        let (matches, _) =
+            engine.evaluate_with_resolver(&completed("t-2", Some(String::new())), |_| None);
+        assert_eq!(
+            matches.len(),
+            1,
+            "creator_match:unassigned must fire when created_by is the empty string"
+        );
+
+        reset_cooldown();
+        let (matches, _) =
+            engine.evaluate_with_resolver(&completed("t-3", Some(owner.to_string())), |_| None);
+        assert!(
+            matches.is_empty(),
+            "creator_match:unassigned must reject a completion whose task has a recorded creator"
         );
     }
 
