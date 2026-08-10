@@ -167,7 +167,11 @@ func (c *Client) stream(method, path string, body interface{}, query map[string]
 			}
 			bodyBytes = b
 		}
-		req, _ := http.NewRequest(method, urlStr, bytes.NewReader(bodyBytes))
+		req, err := http.NewRequest(method, urlStr, bytes.NewReader(bodyBytes))
+		if err != nil {
+			ch <- map[string]interface{}{"error": fmt.Sprintf("new request: %v", err), "status": 0}
+			return
+		}
 		for k, v := range c.Headers {
 			req.Header.Set(k, v)
 		}
