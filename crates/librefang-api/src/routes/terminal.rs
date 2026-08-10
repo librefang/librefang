@@ -1929,7 +1929,7 @@ mod hash_only_terminal_auth_tests {
             api_key_hash: hash.clone(),
             ..KernelConfig::default()
         };
-        let kernel = Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).unwrap());
+        let kernel = Arc::new(crate::routes::boot_test_kernel(config));
         let master_key = Arc::new(crate::middleware::MasterKeyState::new(home_dir.clone()));
         master_key.set_blocking(String::new(), hash);
 

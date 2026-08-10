@@ -764,6 +764,9 @@ fn redacted_config_json(
         "claim_ttl_secs": config.task_board.claim_ttl_secs,
         "sweep_interval_secs": config.task_board.sweep_interval_secs,
         "max_retries": config.task_board.max_retries,
+        "assignee_wake": config.task_board.assignee_wake,
+        "pending_grace_secs": config.task_board.pending_grace_secs,
+        "wake_backoff_max_secs": config.task_board.wake_backoff_max_secs,
     });
 
     // ── tool_policy (rules + groups, no secrets) ──

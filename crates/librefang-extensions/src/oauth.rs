@@ -256,89 +256,12 @@ pub async fn run_pkce_flow(oauth: &OAuthTemplate, client_id: &str) -> ExtensionR
     let code_tx = Arc::new(Mutex::new(Some(code_tx)));
 
     // Spawn callback handler
-    let server = axum::Router::new().route(
-        "/callback",
-        axum::routing::get({
-            let code_tx = code_tx.clone();
-            let expected_provider = expected_provider.clone();
-            let expected_client_id = expected_client_id.clone();
-            let expected_redirect_uri = expected_redirect_uri.clone();
-            let expected_nonce = expected_nonce.clone();
-            move |query: axum::extract::Query<CallbackParams>| {
-                let code_tx = code_tx.clone();
-                let expected_provider = expected_provider.clone();
-                let expected_client_id = expected_client_id.clone();
-                let expected_redirect_uri = expected_redirect_uri.clone();
-                let expected_nonce = expected_nonce.clone();
-                async move {
-                    // #3791: verify the HMAC-signed state binds back to this
-                    // exact flow's (provider, client_id, redirect_uri) tuple
-                    // and a non-expired payload.
-                    let payload = match verify_signed_state(
-                        &query.state,
-                        &expected_provider,
-                        &expected_client_id,
-                        &expected_redirect_uri,
-                    ) {
-                        Ok(p) => p,
-                        Err(reason) => {
-                            warn!(reason, "OAuth callback state verification failed");
-                            return axum::response::Html(
-                                "<h1>Error</h1><p>Invalid state parameter. Possible CSRF attack.</p>"
-                                    .to_string(),
-                            );
-                        }
-                    };
-                    // Redundant w/ HMAC (covers `nonce`); kept in case a future refactor drops fields.
-                    if !bool::from(payload.nonce.as_bytes().ct_eq(expected_nonce.as_bytes())) {
-                        warn!("OAuth callback nonce mismatch");
-                        return axum::response::Html(
-                            "<h1>Error</h1><p>Invalid state parameter. Possible CSRF attack.</p>"
-                                .to_string(),
-                        );
-                    }
-                    if let Some(ref error) = query.error {
-                        // Provider denied / errored (state already verified
-                        // above). Signal the waiter so it fails fast with this
-                        // error instead of hanging until the 5-minute timeout.
-                        if let Some(tx) = code_tx.lock().await.take() {
-                            let _ = tx.send(Err(format!("OAuth error: {error}")));
-                        }
-                        return axum::response::Html(format!(
-                            "<h1>Error</h1><p>OAuth error: {error}</p>"
-                        ));
-                    }
-                    if let Some(ref code) = query.code {
-                        // #3791: only the first valid callback wins; subsequent
-                        // hits on the same listener are rejected explicitly so
-                        // a replay against the live channel cannot succeed.
-                        let mut guard = code_tx.lock().await;
-                        if let Some(tx) = guard.take() {
-                            let _ = tx.send(Ok(code.clone()));
-                            axum::response::Html(
-                                "<h1>Success!</h1><p>Authorization complete. You can close this tab.</p><script>window.close()</script>"
-                                    .to_string(),
-                            )
-                        } else {
-                            axum::response::Html(
-                                "<h1>Gone</h1><p>This callback was already redeemed.</p>"
-                                    .to_string(),
-                            )
-                        }
-                    } else {
-                        // Callback arrived with neither `code` nor `error`
-                        // (state already verified). Signal so the waiter doesn't
-                        // hang until the timeout.
-                        if let Some(tx) = code_tx.lock().await.take() {
-                            let _ = tx.send(Err("No authorization code received".to_string()));
-                        }
-                        axum::response::Html(
-                            "<h1>Error</h1><p>No authorization code received.</p>".to_string(),
-                        )
-                    }
-                }
-            }
-        }),
+    let server = build_callback_router(
+        code_tx.clone(),
+        expected_provider.clone(),
+        expected_client_id.clone(),
+        expected_redirect_uri.clone(),
+        expected_nonce.clone(),
     );
 
     // Serve with timeout
@@ -407,6 +330,132 @@ struct CallbackParams {
     error: Option<String>,
 }
 
+/// Shared slot the callback handler fills exactly once with the
+/// authorization code (or an error) received from the provider.
+type CallbackCodeSender = Arc<Mutex<Option<oneshot::Sender<Result<String, String>>>>>;
+
+/// Build the localhost OAuth callback router.
+///
+/// Extracted out of `run_pkce_flow` so the handler can be exercised
+/// directly by `#[tokio::test]`s (real HTTP request against a real
+/// listener) instead of only unit-testing the string-formatting helpers
+/// it calls into.
+fn build_callback_router(
+    code_tx: CallbackCodeSender,
+    expected_provider: String,
+    expected_client_id: String,
+    expected_redirect_uri: String,
+    expected_nonce: String,
+) -> axum::Router {
+    axum::Router::new().route(
+        "/callback",
+        axum::routing::get(move |query: axum::extract::Query<CallbackParams>| {
+            handle_oauth_callback(
+                query,
+                code_tx.clone(),
+                expected_provider.clone(),
+                expected_client_id.clone(),
+                expected_redirect_uri.clone(),
+                expected_nonce.clone(),
+            )
+        }),
+    )
+}
+
+/// Handle a single hit on the localhost `/callback` endpoint.
+///
+/// `error`, `state`, and any other provider-controlled query params are
+/// untrusted input reflected back into an HTML response rendered in the
+/// user's browser; every value that reaches the response body MUST go
+/// through `escape_html_text` (see `oauth_error_html`).
+async fn handle_oauth_callback(
+    query: axum::extract::Query<CallbackParams>,
+    code_tx: CallbackCodeSender,
+    expected_provider: String,
+    expected_client_id: String,
+    expected_redirect_uri: String,
+    expected_nonce: String,
+) -> axum::response::Html<String> {
+    // #3791: verify the HMAC-signed state binds back to this
+    // exact flow's (provider, client_id, redirect_uri) tuple
+    // and a non-expired payload.
+    let payload = match verify_signed_state(
+        &query.state,
+        &expected_provider,
+        &expected_client_id,
+        &expected_redirect_uri,
+    ) {
+        Ok(p) => p,
+        Err(reason) => {
+            warn!(reason, "OAuth callback state verification failed");
+            return axum::response::Html(
+                "<h1>Error</h1><p>Invalid state parameter. Possible CSRF attack.</p>".to_string(),
+            );
+        }
+    };
+    // Redundant w/ HMAC (covers `nonce`); kept in case a future refactor drops fields.
+    if !bool::from(payload.nonce.as_bytes().ct_eq(expected_nonce.as_bytes())) {
+        warn!("OAuth callback nonce mismatch");
+        return axum::response::Html(
+            "<h1>Error</h1><p>Invalid state parameter. Possible CSRF attack.</p>".to_string(),
+        );
+    }
+    if let Some(ref error) = query.error {
+        // Provider denied / errored (state already verified
+        // above). Signal the waiter so it fails fast with this
+        // error instead of hanging until the 5-minute timeout.
+        if let Some(tx) = code_tx.lock().await.take() {
+            let _ = tx.send(Err(format!("OAuth error: {error}")));
+        }
+        return axum::response::Html(oauth_error_html(error));
+    }
+    if let Some(ref code) = query.code {
+        // #3791: only the first valid callback wins; subsequent
+        // hits on the same listener are rejected explicitly so
+        // a replay against the live channel cannot succeed.
+        let mut guard = code_tx.lock().await;
+        if let Some(tx) = guard.take() {
+            let _ = tx.send(Ok(code.clone()));
+            axum::response::Html(
+                "<h1>Success!</h1><p>Authorization complete. You can close this tab.</p><script>window.close()</script>"
+                    .to_string(),
+            )
+        } else {
+            axum::response::Html(
+                "<h1>Gone</h1><p>This callback was already redeemed.</p>".to_string(),
+            )
+        }
+    } else {
+        // Callback arrived with neither `code` nor `error`
+        // (state already verified). Signal so the waiter doesn't
+        // hang until the timeout.
+        if let Some(tx) = code_tx.lock().await.take() {
+            let _ = tx.send(Err("No authorization code received".to_string()));
+        }
+        axum::response::Html("<h1>Error</h1><p>No authorization code received.</p>".to_string())
+    }
+}
+
+fn oauth_error_html(error: &str) -> String {
+    let error = escape_html_text(error);
+    format!("<h1>Error</h1><p>OAuth error: {error}</p>")
+}
+
+fn escape_html_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 /// Simple percent-encoding for URL parameters.
 fn urlencoding_encode(s: &str) -> String {
     let mut result = String::with_capacity(s.len() * 3);
@@ -468,6 +517,14 @@ mod tests {
         assert!(!pkce.challenge.is_empty());
         // Verifier and challenge should be different
         assert_ne!(pkce.verifier.as_str(), &pkce.challenge);
+    }
+
+    #[test]
+    fn oauth_error_html_escapes_untrusted_callback_value() {
+        let html = oauth_error_html(r#"<script>alert("xss")</script>&'"#);
+
+        assert!(!html.contains("<script>"), "{html}");
+        assert!(html.contains("&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;&amp;&#39;"));
     }
 
     #[test]
@@ -596,5 +653,52 @@ mod tests {
         assert_eq!(ids["github"], "librefang-github-client-id"); // default
         assert_eq!(ids["microsoft"], "my-msft-id");
         assert_eq!(ids["slack"], "librefang-slack-client-id"); // default
+    }
+
+    /// Hits the real localhost `/callback` route (real TCP listener, real
+    /// HTTP request) with a `<script>` payload in the provider `error` query
+    /// param and asserts the HTML that comes back over the wire is escaped.
+    /// This is the injection-site counterpart to
+    /// `oauth_error_html_escapes_untrusted_callback_value`, which only
+    /// exercises the pure formatting helper.
+    #[tokio::test]
+    async fn callback_route_escapes_xss_payload_in_error_query_param() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind localhost");
+        let port = listener.local_addr().expect("local_addr").port();
+        let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+
+        let (state, nonce) = build_signed_state("https://idp/auth", "client-1", &redirect_uri);
+        let (code_tx, _code_rx) = oneshot::channel::<Result<String, String>>();
+        let code_tx = Arc::new(Mutex::new(Some(code_tx)));
+
+        let router = build_callback_router(
+            code_tx,
+            "https://idp/auth".to_string(),
+            "client-1".to_string(),
+            redirect_uri,
+            nonce,
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+
+        let payload = r#"<script>alert("xss")</script>&'"#;
+        let resp = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}/callback"))
+            .query(&[("state", state.as_str()), ("error", payload)])
+            .send()
+            .await
+            .expect("request to local callback listener");
+        let body = resp.text().await.expect("response body");
+
+        server.abort();
+
+        assert!(!body.contains("<script>"), "raw payload leaked: {body}");
+        assert!(
+            body.contains("&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;&amp;&#39;"),
+            "expected escaped payload, got: {body}"
+        );
     }
 }

@@ -70,7 +70,11 @@ def main():
     assert_in("Vec<u8>", rs, "rust-byte-buffer")
     assert_not_in("from_utf8_lossy(&chunk)", rs, "rust-no-lossy-chunk")
     assert_in('"status": status', rs, "rust-error-event-status")
+    assert_in("while let Some(chunk_result) = stream.next().await", rs, "rust-stream-result-loop")
+    assert_in('"error": format!("stream error: {}", e)', rs, "rust-stream-transport-error")
+    assert_not_in("while let Some(Ok(chunk))", rs, "rust-no-silent-stream-error")
     assert_in('"status": resp.StatusCode', go, "go-error-event-status")
+    assert_in("active_error = sys.exc_info()[0] is not None", py, "python-stream-close-finally")
 
     # SSE line-size cap
     assert_in("MAX_SSE_LINE", rs, "rust-max-sse")

@@ -1271,7 +1271,10 @@
       "default": {
         "claim_ttl_secs": 600,
         "sweep_interval_secs": 30,
-        "max_retries": 0
+        "max_retries": 0,
+        "assignee_wake": true,
+        "pending_grace_secs": 60,
+        "wake_backoff_max_secs": 900
       },
       "allOf": [
         {
@@ -6855,9 +6858,14 @@
       ]
     },
     "TaskBoardConfig": {
-      "description": "Task-board (shared-task-queue) safety knobs.\n\nWhen a worker agent calls `task_claim` the task transitions to `in_progress` and `claimed_at` is stamped. If the worker's LLM stalls (empty response, crash, timeout) it will never call `task_complete` and the task would otherwise stay `in_progress` forever — no retry, no external signal, no way for the delegator to know something broke (issues #2923, #2926).\n\nThe sweeper runs in the kernel and flips stuck tasks back to `pending` so they can be reclaimed, clearing `assigned_to` in the process.\n\nConfigure in config.toml: ```toml [task_board] claim_ttl_secs = 600         # 10 minutes — auto-reset after this sweep_interval_secs = 30     # how often the sweeper runs ```\n\nSetting `claim_ttl_secs = 0` disables the sweeper entirely — useful for long-running human-in-the-loop tasks where a 10 minute reset would be wrong.",
+      "description": "Task-board (shared-task-queue) safety knobs.\n\nWhen a worker agent calls `task_claim` the task transitions to `in_progress` and `claimed_at` is stamped. If the worker's LLM stalls (empty response, crash, timeout) it will never call `task_complete` and the task would otherwise stay `in_progress` forever — no retry, no external signal, no way for the delegator to know something broke (issues #2923, #2926).\n\nThe sweeper runs in the kernel and flips stuck tasks back to `pending` so they can be reclaimed, clearing `assigned_to` in the process.\n\nConfigure in config.toml: ```toml [task_board] claim_ttl_secs = 600         # 10 minutes — auto-reset after this sweep_interval_secs = 30     # how often the sweeper runs assignee_wake = true         # wake the assignee even with no trigger declared ```\n\nSetting `claim_ttl_secs = 0` disables the sweeper entirely — useful for long-running human-in-the-loop tasks where a 10 minute reset would be wrong.\n\nEvery field is re-read live by its consumer — the sweeper re-reads its three knobs on each tick, and `assignee_wake` is read at the synthesis site on each `TaskPosted` — so the whole struct is hot-reloadable (`config_reload::build_reload_plan`).",
       "type": "object",
       "properties": {
+        "assignee_wake": {
+          "description": "Wake the assignee of a `TaskPosted` event even when no stored trigger covers them (issue #6728). Default: `true`.\n\nA task addressed to an agent used to reach that agent only if an operator had separately registered a matching `TaskPosted` trigger; with none, the task sat `pending` indefinitely and nothing said so. When this is enabled the kernel synthesizes the wake itself, so delivery no longer depends on out-of-band operator setup.\n\nThe synthesized wake defers to a stored trigger whenever one can currently fire for that assignee, so an operator who declared their own wake keeps full control of its prompt, session mode and routing. Set to `false` (globally here, or per agent via the manifest's `assignee_wake`) to opt out entirely — that flag is the only suppression; a disabled or fire-exhausted trigger is not one.",
+          "default": true,
+          "type": "boolean"
+        },
         "claim_ttl_secs": {
           "description": "How long an `in_progress` task may stay claimed before the sweeper resets it to `pending`. Default: 600 s (10 minutes). 0 disables.",
           "default": 600,
@@ -6872,9 +6880,23 @@
           "format": "uint32",
           "minimum": 0.0
         },
+        "pending_grace_secs": {
+          "description": "How long a task may sit `pending` before the sweeper's reconcile wakes its assignee, in seconds. Default: 60.\n\nThe event-driven wake is the fast path; this is the floor under it, so the grace window is what keeps the two from racing. A task younger than this is assumed to be in the hands of the wake its own `TaskPosted` event produced.\n\nLower means work lost by a dropped event is recovered sooner; higher means fewer redundant activations while an agent is mid-turn. `0` disables the reconcile, leaving delivery purely event-driven — which is the behaviour this floor exists to correct, so prefer the per-agent `assignee_wake` opt-out for one noisy agent.",
+          "default": 60,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "sweep_interval_secs": {
           "description": "How often the sweeper scans for stuck tasks. Default: 30 s.",
           "default": 30,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "wake_backoff_max_secs": {
+          "description": "Upper bound, in seconds, on the exponential backoff applied when reconcile wakes do not move an agent's pending tasks. Default: 900.\n\nEach wake that leaves the agent's pending set unchanged doubles the delay from `pending_grace_secs` up to this cap; any task leaving `pending` resets it. Without the cap, an agent that cannot act on its tasks — a failing provider, a missing `task_claim` capability — would be woken on every tick forever.",
+          "default": 900,
           "type": "integer",
           "format": "uint64",
           "minimum": 0.0

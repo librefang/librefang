@@ -1,0 +1,1 @@
+Schema migration now fails closed when SQLite cannot read `PRAGMA user_version`, preventing a live database from being mistaken for a fresh version-zero schema and routed through destructive historical migrations (#6783) (@houko)
