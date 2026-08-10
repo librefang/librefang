@@ -249,6 +249,23 @@ pub(super) async fn tool_media_transcribe(
     let prompt = input["prompt"].as_str();
     let window = parse_window(input)?;
 
+    // Resolved before the provider call, not inside the write below.
+    // Transcription costs an ffmpeg pass and a billed request, and on this
+    // branch the transcript exists nowhere else — it is not put in the
+    // response when a destination was named — so a path rejected afterwards
+    // destroys work that was already paid for and makes the caller pay again
+    // for the retry.
+    // `web_fetch_to_file` orders it the same way, resolving its destination
+    // ahead of the SSRF check and the fetch.
+    let out_dest = match input["out_path"].as_str() {
+        Some(out_path) => Some(resolve_transcript_dest(
+            out_path,
+            workspace_root,
+            additional_roots,
+        )?),
+        None => None,
+    };
+
     let outcome = engine
         .transcribe_audio_window(&attachment, language, prompt, window)
         .await
@@ -276,19 +293,17 @@ pub(super) async fn tool_media_transcribe(
     }
 
     let transcript = &outcome.understanding.description;
-    match input["out_path"].as_str() {
+    match out_dest {
         None => {
             response["transcript"] = serde_json::json!(transcript);
         }
-        Some(out_path) => {
+        Some(dest) => {
             let written = write_transcript(
-                out_path,
+                &dest,
                 transcript,
                 // A window starting at zero begins a fresh transcript; every later window continues the same file.
                 // Without this a caller walking a recording would either overwrite each chunk with the next or have to invent its own assembly step.
                 window.is_some_and(|w| w.start_sec > 0.0),
-                workspace_root,
-                additional_roots,
             )
             .await?;
             response["written_to"] = serde_json::json!(written.path);
@@ -436,27 +451,33 @@ struct WrittenTranscript {
 /// A failed write is not rolled back, and for the append case it cannot be cheaply: buffering the assembled transcript to rewrite it atomically would restore, on disk, the proportional-to-recording-length cost this whole parameter exists to remove.
 /// What the caller gets instead is detection — `bytes` and `sha256` describe the file as it now stands, so a short or corrupted artefact is visible rather than silent.
 /// Recovery is to restart the walk from `start_sec = 0`, which truncates; retrying only the failed window would append after the partial bytes.
-async fn write_transcript(
+fn resolve_transcript_dest(
     out_path: &str,
-    transcript: &str,
-    append: bool,
     workspace_root: Option<&Path>,
     additional_roots: &[&Path],
-) -> Result<WrittenTranscript, ToolError> {
-    use sha2::{Digest, Sha256};
-    use tokio::io::AsyncWriteExt;
-
+) -> Result<std::path::PathBuf, ToolError> {
     let root = workspace_root.ok_or_else(|| ToolError::InvalidParameter {
         name: "out_path",
         reason: "workspace sandbox is not configured, so there is no root to write under"
             .to_string(),
     })?;
-    let resolved =
-        crate::workspace_sandbox::resolve_sandbox_path_ext(out_path, root, additional_roots)
-            .map_err(|reason| ToolError::InvalidParameter {
-                name: "out_path",
-                reason,
-            })?;
+    crate::workspace_sandbox::resolve_sandbox_path_ext(out_path, root, additional_roots).map_err(
+        |reason| ToolError::InvalidParameter {
+            name: "out_path",
+            reason,
+        },
+    )
+}
+
+async fn write_transcript(
+    resolved: &Path,
+    transcript: &str,
+    append: bool,
+) -> Result<WrittenTranscript, ToolError> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+
+    let out_path = resolved.display();
 
     if let Some(parent) = resolved.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|e| {
@@ -470,12 +491,12 @@ async fn write_transcript(
         .write(true)
         .append(append)
         .truncate(!append)
-        .open(&resolved)
+        .open(resolved)
         .await
         .map_err(|e| ToolError::upstream_msg(format!("Failed to open '{out_path}': {e}")))?;
     // Only between windows, and only when there is something to separate from — a separator ahead of the first window would put a stray newline at the head of every transcript.
     let needs_separator = append
-        && tokio::fs::metadata(&resolved)
+        && tokio::fs::metadata(resolved)
             .await
             .is_ok_and(|m| m.len() > 0);
     if needs_separator {
@@ -493,7 +514,7 @@ async fn write_transcript(
         .map_err(|e| ToolError::upstream_msg(format!("Failed to flush '{out_path}': {e}")))?;
     drop(file);
 
-    let whole = tokio::fs::read(&resolved)
+    let whole = tokio::fs::read(resolved)
         .await
         .map_err(|e| ToolError::upstream_msg(format!("Failed to re-read '{out_path}': {e}")))?;
     let mut hasher = Sha256::new();
@@ -1389,18 +1410,12 @@ mod transcribe_window_tests {
     #[tokio::test]
     async fn windows_append_into_one_transcript() {
         let root = tempfile::tempdir().expect("tempdir");
-        let first = write_transcript("t.txt", "and then we", false, Some(root.path()), &[])
+        let first = write_transcript(&root.path().join("t.txt"), "and then we", false)
             .await
             .expect("initial write must succeed");
-        let second = write_transcript(
-            "t.txt",
-            "discussed the budget",
-            true,
-            Some(root.path()),
-            &[],
-        )
-        .await
-        .expect("append must succeed");
+        let second = write_transcript(&root.path().join("t.txt"), "discussed the budget", true)
+            .await
+            .expect("append must succeed");
 
         let on_disk = tokio::fs::read_to_string(root.path().join("t.txt"))
             .await
@@ -1426,7 +1441,7 @@ mod transcribe_window_tests {
     #[tokio::test]
     async fn append_to_a_missing_file_does_not_lead_with_a_separator() {
         let root = tempfile::tempdir().expect("tempdir");
-        write_transcript("t.txt", "resumed", true, Some(root.path()), &[])
+        write_transcript(&root.path().join("t.txt"), "resumed", true)
             .await
             .expect("append must create the file");
 
@@ -1522,15 +1537,13 @@ mod transcribe_window_tests {
     async fn a_fresh_window_truncates_the_previous_transcript() {
         let root = tempfile::tempdir().expect("tempdir");
         write_transcript(
-            "t.txt",
+            &root.path().join("t.txt"),
             "stale content that must not survive",
             false,
-            Some(root.path()),
-            &[],
         )
         .await
         .expect("write");
-        write_transcript("t.txt", "new.", false, Some(root.path()), &[])
+        write_transcript(&root.path().join("t.txt"), "new.", false)
             .await
             .expect("write");
 
@@ -1541,17 +1554,23 @@ mod transcribe_window_tests {
     }
 
     /// `out_path` goes through the same sandbox resolution as `file_write` and `web_fetch_to_file`; a transcript must not be writable outside the agent's roots.
-    #[tokio::test]
-    async fn out_path_cannot_escape_the_workspace() {
+    ///
+    /// Resolution happens before the provider call, so a rejected path costs
+    /// nothing; the test drives the resolver directly for that reason.
+    #[test]
+    fn out_path_cannot_escape_the_workspace() {
         let root = tempfile::tempdir().expect("tempdir");
-        let escaped =
-            write_transcript("../escaped.txt", "nope", false, Some(root.path()), &[]).await;
-        assert!(escaped.is_err(), "traversal must be rejected");
-
-        let unsandboxed = write_transcript("t.txt", "nope", false, None, &[]).await;
         assert!(
-            unsandboxed.is_err(),
+            resolve_transcript_dest("../escaped.txt", Some(root.path()), &[]).is_err(),
+            "traversal must be rejected"
+        );
+        assert!(
+            resolve_transcript_dest("t.txt", None, &[]).is_err(),
             "without a workspace root there is no root to write under"
+        );
+        assert!(
+            resolve_transcript_dest("t.txt", Some(root.path()), &[]).is_ok(),
+            "an ordinary workspace-relative path must resolve"
         );
     }
 }

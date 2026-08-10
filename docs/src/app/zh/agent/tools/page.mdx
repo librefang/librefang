@@ -200,7 +200,7 @@ agent 不能硬删除已调度的任务:`schedule_delete` / `cron_cancel` 只会
 | `image_analyze(image, question)` | 对已有图像做 vision Q&A。 |
 | `media_describe(image_or_video)` | 给已有媒体素材生成 caption / 描述。 |
 | `media_transcribe(audio_or_video, language?, prompt?, start_sec?, max_secs?, out_path?)` | 音频转文本；也接受视频容器,服务端会提取其中的音轨。无法识别的扩展名会被拒绝。`start_sec` / `max_secs` 只转写一个时间窗口,并在响应中返回 `has_more` / `next_start_sec` 以便继续；`out_path` 会把转写结果写入工作区文件,只返回路径、字节数、sha256 和一段预览。长录音两者都需要,详见下文。 |
-| `speech_to_text(audio_or_video, language?, prompt?)` | 支持的提供商和视频容器与 `media_transcribe` 相同;遇到无法识别的扩展名时不拒绝,而是退回一个宽松的猜测 MIME 类型。 |
+| `speech_to_text(audio_or_video, language?, prompt?)` | 支持的提供商和视频容器与 `media_transcribe` 相同;遇到无法识别的扩展名时不拒绝,而是退回一个宽松的猜测 MIME 类型。不支持时间窗口和 `out_path`,因此需要其中任何一项的长录音应改用 `media_transcribe`。 |
 | `text_to_speech(text, voice?)` | TTS 合成。 |
 | `music_generate(prompt, lyrics?)` | 音乐生成(Suno / Replicate)。 |
 | `video_generate(prompt, duration_secs?)` | 提交视频生成任务,返回 `task_id`。 |

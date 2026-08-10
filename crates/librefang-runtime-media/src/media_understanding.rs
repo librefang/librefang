@@ -296,9 +296,25 @@ impl MediaEngine {
         // Handled first for that reason — running either of them before this would decode the whole recording just to throw most of it away.
         let mut consumed_secs = None;
         if let Some(window) = window {
-            let cut = extract_media_window(&audio_bytes, window)
+            let Some(cut) = extract_media_window(&audio_bytes, window)
                 .await
-                .map_err(|e| format!("ffmpeg window extraction failed: {e}"))?;
+                .map_err(|e| format!("ffmpeg window extraction failed: {e}"))?
+            else {
+                // Overshoot: the window began past the end of the recording.
+                // Reported as a zero-length window rather than an error, so the
+                // caller's loop ends on `has_more: false` the way the tool
+                // description tells it to, instead of on a failure it has no
+                // way to distinguish from a broken file.
+                return Ok(TranscriptionOutcome {
+                    understanding: MediaUnderstanding {
+                        media_type: MediaType::Audio,
+                        description: String::new(),
+                        provider: provider.to_string(),
+                        model: String::new(),
+                    },
+                    consumed_secs: Some(0.0),
+                });
+            };
             let produced = ogg_opus_duration_secs(&cut);
             info!(
                 original_size = audio_bytes.len(),
@@ -433,6 +449,27 @@ impl MediaEngine {
 
         let transcription = transcription.trim().to_string();
         if transcription.is_empty() {
+            // A whole file that transcribes to nothing is a failure worth
+            // surfacing. One *window* of a recording that transcribes to
+            // nothing is ordinary — a pause, a silent stretch, a gap between
+            // speakers — and erroring there would abort the walk with no
+            // resume point, stranding the rest of the recording behind a
+            // silence.
+            if window.is_some() {
+                info!(
+                    provider,
+                    "Window transcribed to no speech — continuing the walk"
+                );
+                return Ok(TranscriptionOutcome {
+                    understanding: MediaUnderstanding {
+                        media_type: MediaType::Audio,
+                        description: String::new(),
+                        provider: provider.to_string(),
+                        model: model.to_string(),
+                    },
+                    consumed_secs,
+                });
+            }
             let e = "Transcription returned empty text".to_string();
             record_media_understanding_failure("audio", provider, model, &e);
             return Err(e);
@@ -1339,7 +1376,12 @@ pub struct MediaWindow {
 ///
 /// A seek lands on the nearest keyframe, so the real window edge can differ from the requested one by a keyframe interval — recordings with a broken index (meeting exporters produce these routinely) seek especially coarsely.
 /// That is why the caller advances by the *produced* duration from [`ogg_opus_duration_secs`] rather than by `max_secs`: an assumed edge would drift and eventually skip audio.
-async fn extract_media_window(input_bytes: &[u8], window: MediaWindow) -> Result<Vec<u8>, String> {
+///
+/// `Ok(None)` means the window carried no audio and started past the opening of the recording — an overshoot, which ends the walk rather than failing it.
+async fn extract_media_window(
+    input_bytes: &[u8],
+    window: MediaWindow,
+) -> Result<Option<Vec<u8>>, String> {
     let staged = ScopedTempFile::write(input_bytes, "media").await?;
     let input_path = staged.path().to_string_lossy().into_owned();
     let start = format!("{:.3}", window.start_sec.max(0.0));
@@ -1374,22 +1416,25 @@ async fn extract_media_window(input_bytes: &[u8], window: MediaWindow) -> Result
     )
     .await?;
 
-    // Same defence in depth as the video path, and needed for an additional
-    // reason here: a window that starts past the end of the recording is a
-    // legitimate request (a caller can overshoot) and produces headers with no
-    // audio, which is indistinguishable at the byte level from the failed-demux
-    // artefact.
-    // Rejecting both keeps an empty window from being uploaded and charged for.
+    // Same defence in depth as the video path: a demux that fails for want of
+    // a seek still exits 0 and still emits a headers-only container, so
+    // neither guard in `run_ffmpeg_pipe` catches it.
+    //
+    // Unlike that path, an empty result here is not always a failure.
+    // A window at or past the end of the recording is a legitimate request — the walk reaches one by itself whenever a recording's length is close to a multiple of `max_secs` — and it produces exactly the same headers-only bytes.
+    // The two are indistinguishable at the byte level, so they are told apart by where the window starts: a request beyond the opening of the recording that came back empty is an overshoot and ends the walk, while an empty window at the very start means the input itself could not be decoded.
     if !ogg_contains_audio(&out) {
+        if window.start_sec > 0.0 {
+            return Ok(None);
+        }
         return Err(format!(
             "ffmpeg produced an Ogg stream with no audio packets ({} bytes) — \
-             the window at {start}s is past the end of the recording, or its \
-             audio track could not be decoded",
+             the audio track could not be decoded",
             out.len()
         ));
     }
 
-    Ok(out)
+    Ok(Some(out))
 }
 
 /// Playable duration of an Ogg/Opus stream, read from the granule position of its final page.
@@ -1434,16 +1479,37 @@ fn ogg_opus_duration_secs(ogg: &[u8]) -> Option<f64> {
             break;
         }
         // Granule position sits at bytes 6..14 of the header, little-endian.
-        let granule = u64::from_le_bytes(ogg.get(at + 6..at + 14)?.try_into().ok()?);
+        let Some(granule_bytes) = ogg.get(at + 6..at + 14) else {
+            break;
+        };
+        let Ok(granule_bytes) = <[u8; 8]>::try_from(granule_bytes) else {
+            break;
+        };
+        let granule = u64::from_le_bytes(granule_bytes);
         // Page length is the header, the segment table, and the sum of the
         // table's entries — following it is what keeps payload bytes from
         // being mistaken for the next header.
         let segments = ogg[at + 26] as usize;
-        let table = ogg.get(at + HEADER_LEN..at + HEADER_LEN + segments)?;
+        // A truncated tail must not discard what was already read — the guard
+        // above says so and this is the other half of it: a stream that stops
+        // inside the segment table or mid-payload leaves the granules of every
+        // complete page before it perfectly usable, and `?` here would throw
+        // them away along with the incomplete one.
+        let Some(table) = ogg.get(at + HEADER_LEN..at + HEADER_LEN + segments) else {
+            break;
+        };
         let payload: usize = table.iter().map(|&n| n as usize).sum();
+        let page_end = at + HEADER_LEN + segments + payload;
+        // The granule is only meaningful once the page it describes has
+        // actually arrived: accepting it from a page whose payload was cut off
+        // would report audio the caller never received, and the caller would
+        // advance past it.
+        if page_end > ogg.len() {
+            break;
+        }
 
         last_granule = Some(granule);
-        at += HEADER_LEN + segments + payload;
+        at = page_end;
     }
 
     let granule = last_granule?;
@@ -2613,7 +2679,12 @@ mod tests {
             let got = ogg_opus_duration_secs(&ogg)
                 .unwrap_or_else(|| panic!("duration must parse for a {expected}s stream"));
             assert!(
-                (got - expected).abs() < 0.05,
+                // Tight on purpose: granule arithmetic is exact, and the pre-skip
+                // subtraction this pins is worth only ~0.0065 s.
+                // A 0.05 s bar is seven times wider than the effect, so dropping
+                // the subtraction passed — the assertion has to be narrower than
+                // the thing it guards.
+                (got - expected).abs() < 0.002,
                 "expected ~{expected}s, got {got}s"
             );
         }
@@ -2670,6 +2741,54 @@ mod tests {
         assert_eq!(ogg_opus_duration_secs(b""), None);
     }
 
+    /// A stream that stops inside a page must still report the granules of the
+    /// complete pages before it — the walk's own comment promises exactly that,
+    /// and an early `?` used to discard them, stopping a caller's walk short of
+    /// the recording's end.
+    #[test]
+    fn ogg_opus_duration_keeps_what_it_read_when_the_tail_is_truncated() {
+        fn page(granule: u64, payload: &[u8]) -> Vec<u8> {
+            let mut p = Vec::new();
+            p.extend_from_slice(b"OggS");
+            p.push(0);
+            p.push(0);
+            p.extend_from_slice(&granule.to_le_bytes());
+            p.extend_from_slice(&[0u8; 4]);
+            p.extend_from_slice(&[0u8; 4]);
+            p.extend_from_slice(&[0u8; 4]);
+            p.push(1);
+            p.push(payload.len() as u8);
+            p.extend_from_slice(payload);
+            p
+        }
+
+        let mut whole = page(
+            0,
+            b"OpusHead\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        );
+        whole.extend(page(48_000, &[7u8; 32]));
+        let complete_len = whole.len();
+        whole.extend(page(96_000, &[7u8; 32]));
+
+        // Cut inside the third page's header, its segment table, and its
+        // payload in turn. Every one of those leaves the 1 s of complete pages
+        // before it intact, so every one must report 1 s rather than nothing.
+        for cut in [complete_len + 4, complete_len + 27, complete_len + 30] {
+            let truncated = &whole[..cut];
+            assert_eq!(
+                ogg_opus_duration_secs(truncated),
+                Some(1.0),
+                "a tail cut at byte {cut} must still report the last complete page"
+            );
+        }
+
+        // And the granule of a page whose payload never arrived must not be
+        // accepted: reporting 2 s here would advance the caller past audio it
+        // never received.
+        let mid_payload = &whole[..whole.len() - 8];
+        assert_eq!(ogg_opus_duration_secs(mid_payload), Some(1.0));
+    }
+
     #[tokio::test]
     async fn extract_media_window_cuts_the_requested_span() {
         if !ffmpeg_available() {
@@ -2686,7 +2805,8 @@ mod tests {
             },
         )
         .await
-        .expect("window extraction must succeed");
+        .expect("window extraction must succeed")
+        .expect("a window inside the recording must carry audio");
         assert_eq!(&cut[..4], b"OggS", "output must be an Ogg container");
         let got = ogg_opus_duration_secs(&cut).expect("window duration must parse");
         assert!(
@@ -2712,7 +2832,8 @@ mod tests {
             },
         )
         .await
-        .expect("a window overlapping the end must still produce audio");
+        .expect("a window overlapping the end must still produce audio")
+        .expect("a window that overlaps the end still carries its tail");
         let got = ogg_opus_duration_secs(&cut).expect("window duration must parse");
         assert!(
             got < 600.0 && (got - 2.0).abs() < 0.25,
