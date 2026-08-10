@@ -38,10 +38,38 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ inputs.tag }}
 
 jobs:
+  validate_release_tag:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Validate release tag format
+        run: |
+          if ! printf '%s\n' "$RELEASE_TAG" | grep -qE '^v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(-(beta|rc)\.?[0-9]+|-lts)?$'; then
+            echo "::error::tag '$RELEASE_TAG' does not match expected CalVer pattern"
+            exit 1
+          fi
+      - name: Verify release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if ! ACTUAL_TAG=$(gh release view "$RELEASE_TAG" --json tagName --jq '.tagName'); then
+            echo "::error::release '$RELEASE_TAG' does not exist"
+            exit 1
+          fi
+          if [ "$ACTUAL_TAG" != "$RELEASE_TAG" ]; then
+            echo "::error::release lookup returned '$ACTUAL_TAG' instead of '$RELEASE_TAG'"
+            exit 1
+          fi
+
   build_dashboard:
     name: Build Dashboard
+    needs: [validate_release_tag]
     runs-on: ubuntu-latest
     environment: release-cli
     steps:
@@ -120,7 +148,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for attempt in $(seq 1 5); do
-            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}.* --clobber; then
+            if gh release upload "$RELEASE_TAG" librefang-${{ matrix.target }}.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
               exit 0
             fi
@@ -193,7 +221,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for attempt in $(seq 1 5); do
-            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}.* --clobber; then
+            if gh release upload "$RELEASE_TAG" librefang-${{ matrix.target }}.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
               exit 0
             fi
@@ -240,7 +268,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for attempt in $(seq 1 5); do
-            if gh release upload "${{ inputs.tag }}" librefang-aarch64-linux-android.* --clobber; then
+            if gh release upload "$RELEASE_TAG" librefang-aarch64-linux-android.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
               exit 0
             fi
@@ -289,7 +317,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for attempt in $(seq 1 5); do
-            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}-mini.* --clobber; then
+            if gh release upload "$RELEASE_TAG" librefang-${{ matrix.target }}-mini.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
               exit 0
             fi
@@ -361,7 +389,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for attempt in $(seq 1 5); do
-            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}.* --clobber; then
+            if gh release upload "$RELEASE_TAG" librefang-${{ matrix.target }}.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
               exit 0
             fi
@@ -417,7 +445,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for attempt in $(seq 1 5); do
-            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}.* --clobber; then
+            if gh release upload "$RELEASE_TAG" librefang-${{ matrix.target }}.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
               exit 0
             fi
@@ -468,7 +496,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for attempt in $(seq 1 5); do
-            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}-mini.* --clobber; then
+            if gh release upload "$RELEASE_TAG" librefang-${{ matrix.target }}-mini.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
               exit 0
             fi
@@ -516,7 +544,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for attempt in $(seq 1 5); do
-            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}-mini.* --clobber; then
+            if gh release upload "$RELEASE_TAG" librefang-${{ matrix.target }}-mini.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
               exit 0
             fi
@@ -555,11 +583,11 @@ jobs:
         run: |
           mkdir -p sums
           cd sums
-          gh release view "${{ inputs.tag }}" --json assets \
+          gh release view "$RELEASE_TAG" --json assets \
             --jq '.assets[].name | select(endswith(".sha256")) | select(. != "SHA256SUMS")' \
             > asset-list.txt
           if [ ! -s asset-list.txt ]; then
-            echo "::error::no *.sha256 sibling files attached to release ${{ inputs.tag }}"
+            echo "::error::no *.sha256 sibling files attached to release $RELEASE_TAG"
             exit 1
           fi
           # Same EXPECTED_PLATFORMS gate as release.yml — change in lockstep.
@@ -572,7 +600,7 @@ jobs:
           fi
           while IFS= read -r name; do
             echo "Fetching $name"
-            gh release download "${{ inputs.tag }}" --pattern "$name" --clobber
+            gh release download "$RELEASE_TAG" --pattern "$name" --clobber
           done < asset-list.txt
           ls *.sha256 | sort | xargs awk 1 > ../SHA256SUMS
           cd ..
@@ -600,7 +628,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${{ inputs.tag }}" \
+          gh release upload "$RELEASE_TAG" \
             SHA256SUMS \
             SHA256SUMS.sig \
             SHA256SUMS.pem \

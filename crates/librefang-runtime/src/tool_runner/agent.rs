@@ -2,7 +2,9 @@
 //! `agent_list`, `agent_kill`.
 
 use super::error::{ToolError, ToolResult};
-use super::{check_taint_outbound_text, require_kernel_typed, AGENT_CALL_DEPTH};
+use super::{
+    check_taint_outbound_text, current_agent_depth, require_kernel_typed, with_agent_call_depth,
+};
 use crate::kernel_handle::prelude::*;
 use librefang_types::taint::TaintSink;
 use std::fmt::Write;
@@ -99,7 +101,7 @@ pub(super) async fn tool_agent_send(
     // crash. Lifting to 5xx would mislead caller retry logic into treating a
     // self-imposed limit as a transient infra failure.
     let max_depth = kh.max_agent_call_depth();
-    let current_depth = AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0);
+    let current_depth = current_agent_depth();
     if current_depth >= max_depth {
         return Err(ToolError::PermissionDenied(format!(
             "Inter-agent call depth exceeded (max {max_depth}). \
@@ -150,24 +152,26 @@ pub(super) async fn tool_agent_send(
         });
     }
 
-    AGENT_CALL_DEPTH
-        .scope(std::cell::Cell::new(current_depth + 1), async {
-            // When we know the caller, use the cascade-aware entry so a
-            // parent `/stop` propagates into the callee (issue #3044).
-            // System-initiated calls (caller_agent_id = None) fall back to
-            // the legacy path.
-            match (caller_agent_id, conversation_key) {
-                (Some(parent), Some(key)) => {
-                    kh.send_to_agent_as_with_key(agent_id, message, parent, key)
-                        .await
-                }
-                (Some(parent), None) => kh.send_to_agent_as(agent_id, message, parent).await,
-                (None, Some(key)) => kh.send_to_agent_with_key(agent_id, message, key).await,
-                (None, None) => kh.send_to_agent(agent_id, message).await,
+    // `with_agent_call_depth` boxes the callee turn's future before entering the scope.
+    // The nested turn is an enormous state machine, and inlining it here stacked another full copy of it per A->B->C level — the same stack hazard `held_agent_locks::scope` boxes to avoid (refs #6659).
+    // It is also the single definition of "one level deeper", shared with the kernel's workflow-step dispatch so both charge the same quota.
+    with_agent_call_depth(async {
+        // When we know the caller, use the cascade-aware entry so a
+        // parent `/stop` propagates into the callee (issue #3044).
+        // System-initiated calls (caller_agent_id = None) fall back to
+        // the legacy path.
+        match (caller_agent_id, conversation_key) {
+            (Some(parent), Some(key)) => {
+                kh.send_to_agent_as_with_key(agent_id, message, parent, key)
+                    .await
             }
-        })
-        .await
-        .map_err(ToolError::upstream)
+            (Some(parent), None) => kh.send_to_agent_as(agent_id, message, parent).await,
+            (None, Some(key)) => kh.send_to_agent_with_key(agent_id, message, key).await,
+            (None, None) => kh.send_to_agent(agent_id, message).await,
+        }
+    })
+    .await
+    .map_err(ToolError::upstream)
 }
 
 /// Build agent manifest TOML from parsed parameters.

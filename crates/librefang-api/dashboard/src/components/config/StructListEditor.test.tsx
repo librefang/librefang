@@ -59,4 +59,20 @@ describe("StructListEditor", () => {
     expect(screen.getByRole("textbox")).toBe(textarea);
     expect(screen.getByText("second")).toBeInTheDocument();
   });
+
+  it("keeps an empty textarea as a draft instead of replacing the item with an object", () => {
+    const onChange = vi.fn();
+    render(<StructListEditor value={[{ name: "before" }]} onChange={onChange} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand" }));
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "" } });
+
+    expect(textarea).toHaveValue("");
+    expect(onChange).not.toHaveBeenCalled();
+
+    fireEvent.blur(textarea);
+    expect(textarea).toHaveValue('{\n  "name": "before"\n}');
+    expect(onChange).not.toHaveBeenCalled();
+  });
 });

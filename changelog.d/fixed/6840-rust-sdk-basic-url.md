@@ -1,0 +1,1 @@
+- Made the Rust SDK basic example honor `LIBREFANG_URL`, while retaining the local daemon URL as its default. (@houko)
