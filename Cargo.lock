@@ -5055,6 +5055,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "serial_test",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -9140,6 +9141,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "spdx"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "081670c233dfbed55690cc0cd38424e0e24ac1b2673d0b408b3f7b684738dfa9"
+dependencies = [
+ "smallvec",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12672,6 +12682,7 @@ dependencies = [
  "regex",
  "serde_json",
  "sha2 0.10.9",
+ "spdx",
  "sysinfo",
  "toml_edit 0.25.13+spec-1.1.0",
 ]
