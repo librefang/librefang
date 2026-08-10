@@ -1237,6 +1237,30 @@ impl LibreFangKernel {
         input: String,
     ) -> KernelResult<(WorkflowRunId, String)> {
         let cfg = self.config.load_full();
+
+        // Bound nested workflow runs (refs #6659).
+        // The `workflow_run` tool executes the whole target workflow inline on the calling task, and the `send_message` closure below nests a complete agent turn per step.
+        // So an agent whose workflow step targets an agent that runs a workflow again recursed with no depth accounting at all — the only bound was the wall-clock `triggers.max_workflow_secs`, by which point the worker thread's stack is already gone.
+        //
+        // Charge workflow nesting to the same budget inter-agent `agent_send` hops already use (`max_agent_call_depth`) instead of inventing a second counter: `A --agent_send--> B --workflow--> C` stacks turns exactly as `A -> B -> C` does, so one operator knob should cap both.
+        //
+        // `CapabilityDenied` rather than `Internal`, matching the precedent in `tool_agent_send`: this is a self-imposed kernel-policy quota, so a capped chain records a policy refusal (HTTP 403) on the step instead of an opaque 5xx that would read as a downstream crash to retry logic.
+        // Checked before `create_run` so a refusal leaves no orphan `Pending` run behind.
+        // `>=` with no lower clamp, matching `tool_agent_send` byte for byte (`tool_runner/agent.rs`).
+        // At the legal value `max_agent_call_depth = 0` that refuses a nested `workflow_run` outright, which is the same thing `agent_send` has always done at 0 — the knob means "permit no nesting", and honouring it on only one of the two paths it now governs would defeat the point of sharing it.
+        // Before this change `workflow_run` ignored the knob entirely, so an operator running 0 could nest workflows while `agent_send` was blocked; that inconsistency is what goes away here.
+        let max_depth = cfg.max_agent_call_depth;
+        let current_depth = librefang_runtime::tool_runner::current_agent_depth();
+        if current_depth >= max_depth {
+            return Err(KernelError::LibreFang(LibreFangError::CapabilityDenied(
+                format!(
+                    "Nested workflow run depth exceeded (max {max_depth}); this run is already \
+                     {current_depth} agent turns deep. Start the workflow asynchronously \
+                     (workflow_start) instead of nesting it inside the current turn."
+                ),
+            )));
+        }
+
         let run_id = self
             .workflows
             .engine
@@ -1297,7 +1321,10 @@ impl LibreFangKernel {
                         ))
                     }
                 };
-                self.send_message_full(
+                // Account for the nesting (refs #6659).
+                // A workflow step runs a whole agent turn inline on this task, so it belongs one level deeper in the same chain `agent_send` tracks — that is what makes the `max_agent_call_depth` check at the top of `run_workflow` bound a workflow that re-runs itself through a step target's `workflow_run`.
+                // The helper also boxes the turn's future, so each nesting level costs a pointer rather than another inlined copy of the agent-loop state machine.
+                librefang_runtime::tool_runner::with_agent_call_depth(self.send_message_full(
                     agent_id,
                     &message,
                     self.kernel_handle(),
@@ -1306,7 +1333,7 @@ impl LibreFangKernel {
                     session_mode_override,
                     None,
                     None,
-                )
+                ))
                 .await
                 .map(|r| {
                     (
@@ -1498,7 +1525,10 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
                         ))
                         }
                     };
-                    k.send_message_full(
+                    // Account for the nesting, exactly as `run_workflow::send_message` does (refs #6659).
+                    // This closure is the twin of that one — same per-agent semaphore, same whole-agent-turn dispatch — and an operator-timeout resume drives the run's remaining steps through it.
+                    // Left unwrapped, those steps ran at depth 0 while every other path charged them at 1, so a timed-out HITL workflow got a budget of one extra stacked agent turn and the boxing that keeps each level to a pointer did not apply.
+                    librefang_runtime::tool_runner::with_agent_call_depth(k.send_message_full(
                         agent_id,
                         &message,
                         k.kernel_handle(),
@@ -1507,7 +1537,7 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
                         session_mode_override,
                         None,
                         None,
-                    )
+                    ))
                     .await
                     .map(|r| {
                         (
