@@ -17,7 +17,7 @@ use std::time::Duration;
 pub const DEFAULT_LONGPOLL_TIMEOUT_SECS: u64 = 30;
 pub const SEND_TIMEOUT_SECS: u64 = 30;
 /// Conservative throughput floor used to extend multipart request deadlines.
-/// The fixed send timeout remains the connection/base budget; uploads receive one extra second per 64 KiB of payload.
+/// The fixed send timeout remains the connection/base budget; uploads receive one extra second per 64 KB of payload.
 const MULTIPART_BYTES_PER_SECOND: usize = 64_000;
 /// Extra buffer added to the long-poll server-side timeout to derive the reqwest per-request deadline. Telegram sometimes returns a few hundred milliseconds after the server timeout elapses.
 pub const LONGPOLL_CLIENT_BUFFER_SECS: u64 = 5;
