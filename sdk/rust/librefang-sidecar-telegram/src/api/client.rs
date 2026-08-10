@@ -32,18 +32,27 @@ pub struct BotClient {
 impl BotClient {
     pub fn new(token: impl Into<String>) -> Result<Self> {
         let token = token.into();
+        let api_root = format!("https://api.telegram.org/bot{token}");
+        let file_root = format!("https://api.telegram.org/file/bot{token}");
+        Self::with_roots(token, api_root, file_root)
+    }
+
+    pub(crate) fn with_roots(
+        token: impl Into<String>,
+        api_root: impl Into<String>,
+        file_root: impl Into<String>,
+    ) -> Result<Self> {
+        let token = token.into();
         if token.trim().is_empty() {
             return Err(Error::Other("TELEGRAM_BOT_TOKEN is empty".into()));
         }
         let http = Client::builder()
             .timeout(Duration::from_secs(SEND_TIMEOUT_SECS))
             .build()?;
-        let api_root = format!("https://api.telegram.org/bot{token}");
-        let file_root = format!("https://api.telegram.org/file/bot{token}");
         Ok(Self {
             http,
-            api_root,
-            file_root,
+            api_root: api_root.into(),
+            file_root: file_root.into(),
             token,
         })
     }
