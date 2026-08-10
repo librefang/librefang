@@ -154,7 +154,7 @@ per-trigger `New`:
 max_concurrent_invocations = 4   # clamped to 1 — WARN at first dispatch
 
 [[agents.researcher.triggers]]
-event = "task_posted"
+pattern = { task_posted = {} }
 session_mode = "new"             # isolates each fire, but does NOT lift the cap
 ```
 
@@ -169,9 +169,14 @@ session_mode = "new"             # manifest default — clamp does not fire
 max_concurrent_invocations = 4   # honored: up to 4 fires run in parallel
 
 [[agents.researcher.triggers]]
-event = "task_posted"
+pattern = { task_posted = { assignee_match = "self" } }
 # inherits manifest "new"; no per-trigger override needed for parallelism
 ```
+
+**The trigger key is `pattern`, not `event`.**
+`ManifestTrigger` derives `#[serde(default)]`, so an unrecognised key like `event = "task_posted"` is silently dropped, `pattern` falls back to JSON `Null`, and `reconcile_manifest_triggers` fails to deserialise it into a `TriggerPattern` and skips the entry with a `WARN` — a manifest that parses cleanly and registers no trigger at all.
+The value is the externally-tagged `TriggerPattern` enum, so the variant name is the table key and its fields go inside: `pattern = { task_posted = {} }` fires for every posted task, while `pattern = { task_posted = { assignee_match = "self" } }` fires only for tasks addressed to this agent.
+`assignee_match` also accepts `"unassigned"` (tasks no agent owns) or an explicit agent name / UUID.
 
 If you genuinely want most fires `Persistent` but one trigger parallel,
 that is **not** expressible today: the per-agent cap is a manifest-wide
