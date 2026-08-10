@@ -134,8 +134,14 @@ impl TelegramAdapter {
         channel_id.parse::<i64>().ok()
     }
 
-    fn parse_thread_id(thread: Option<&str>) -> Option<i64> {
-        thread.and_then(|s| s.parse::<i64>().ok())
+    fn parse_thread_id(thread: Option<&str>) -> Result<Option<i64>, String> {
+        match thread {
+            Some(value) => value
+                .parse::<i64>()
+                .map(Some)
+                .map_err(|_| format!("non-numeric thread_id: {value}")),
+            None => Ok(None),
+        }
     }
 
     /// Edit a streaming message with HTML formatting and a plain-text fallback on `can't parse entities`. The plain fallback is derived from `html_body` via `dispatcher::html_to_plain` so the user sees readable prose (matching `send_text`'s fallback shape) rather than literal markdown / HTML markup. `message is not modified` is treated as success on both paths. Other failures are logged; token-bearing errors are already redacted at the BotClient layer.
@@ -261,7 +267,8 @@ impl SidecarAdapter for TelegramAdapter {
         let Some(chat_id) = Self::parse_chat_id(&cmd.channel_id) else {
             return Err(format!("non-numeric channel_id: {}", cmd.channel_id).into());
         };
-        let thread_id = Self::parse_thread_id(cmd.thread_id.as_deref());
+        let thread_id = Self::parse_thread_id(cmd.thread_id.as_deref())
+            .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
 
         if let Some(content) = cmd.content {
             let tag = content
@@ -292,18 +299,19 @@ impl SidecarAdapter for TelegramAdapter {
         match cmd {
             Command::Send(s) => self.on_send(s).await,
             Command::Typing(t) => {
-                if let Some(chat_id) = Self::parse_chat_id(&t.channel_id) {
-                    tg_trace!("on_command Typing chat={chat_id}");
-                    let _ = self.client.send_chat_action(chat_id, "typing").await;
-                }
+                let Some(chat_id) = Self::parse_chat_id(&t.channel_id) else {
+                    return Err(format!("non-numeric channel_id: {}", t.channel_id).into());
+                };
+                tg_trace!("on_command Typing chat={chat_id}");
+                let _ = self.client.send_chat_action(chat_id, "typing").await;
                 Ok(())
             }
             Command::Reaction(r) => {
                 let Some(chat_id) = Self::parse_chat_id(&r.channel_id) else {
-                    return Ok(());
+                    return Err(format!("non-numeric channel_id: {}", r.channel_id).into());
                 };
                 let Ok(message_id) = r.message_id.parse::<i64>() else {
-                    return Ok(());
+                    return Err(format!("non-numeric message_id: {}", r.message_id).into());
                 };
                 tg_trace!(
                     "on_command Reaction chat={chat_id} msg={message_id} reaction={}",
@@ -322,7 +330,7 @@ impl SidecarAdapter for TelegramAdapter {
             }
             Command::Interactive(i) => {
                 let Some(chat_id) = Self::parse_chat_id(&i.channel_id) else {
-                    return Ok(());
+                    return Err(format!("non-numeric channel_id: {}", i.channel_id).into());
                 };
                 tg_trace!("on_command Interactive chat={chat_id}");
                 let payload = serde_json::to_value(&i.message)?;
@@ -334,9 +342,11 @@ impl SidecarAdapter for TelegramAdapter {
             }
             Command::StreamStart(s) => {
                 let Some(chat_id) = Self::parse_chat_id(&s.channel_id) else {
-                    return Ok(());
+                    return Err(format!("non-numeric channel_id: {}", s.channel_id).into());
                 };
-                let thread_id = Self::parse_thread_id(s.thread_id.as_deref());
+                let thread_id = Self::parse_thread_id(s.thread_id.as_deref()).map_err(
+                    |error| -> Box<dyn std::error::Error + Send + Sync> { error.into() },
+                )?;
                 tg_trace!(
                     "on_command StreamStart chat={chat_id} stream_id={}",
                     s.stream_id
@@ -530,6 +540,71 @@ impl SidecarAdapter for TelegramAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn commands_reject_non_numeric_channel_ids_consistently() {
+        let adapter = test_adapter();
+        let invalid_channel = "telegram:not-a-number".to_string();
+        let commands = [
+            Command::Typing(librefang_sidecar::TypingCmd {
+                channel_id: invalid_channel.clone(),
+            }),
+            Command::Reaction(librefang_sidecar::Reaction {
+                channel_id: invalid_channel.clone(),
+                message_id: "1".into(),
+                reaction: "👍".into(),
+                ..Default::default()
+            }),
+            Command::Interactive(librefang_sidecar::Interactive {
+                channel_id: invalid_channel.clone(),
+                message: Default::default(),
+            }),
+            Command::StreamStart(librefang_sidecar::StreamStart {
+                channel_id: invalid_channel,
+                stream_id: "stream-1".into(),
+                thread_id: None,
+            }),
+        ];
+
+        for command in commands {
+            let error = adapter
+                .on_command(command)
+                .await
+                .expect_err("invalid channel id must fail");
+            assert!(error.to_string().contains("non-numeric channel_id"));
+        }
+
+        let error = adapter
+            .on_command(Command::Reaction(librefang_sidecar::Reaction {
+                channel_id: "42".into(),
+                message_id: "not-a-number".into(),
+                reaction: "👍".into(),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("invalid reaction message id must fail");
+        assert!(error.to_string().contains("non-numeric message_id"));
+
+        let error = adapter
+            .on_send(SendCommand {
+                channel_id: "42".into(),
+                thread_id: Some("not-a-number".into()),
+                ..Default::default()
+            })
+            .await
+            .expect_err("invalid send thread id must fail before the request");
+        assert!(error.to_string().contains("non-numeric thread_id"));
+
+        let error = adapter
+            .on_command(Command::StreamStart(librefang_sidecar::StreamStart {
+                channel_id: "42".into(),
+                stream_id: "stream-with-bad-thread".into(),
+                thread_id: Some("not-a-number".into()),
+            }))
+            .await
+            .expect_err("invalid stream thread id must fail before the request");
+        assert!(error.to_string().contains("non-numeric thread_id"));
+    }
 
     fn stream_state(last_activity: Instant) -> StreamState {
         StreamState {
