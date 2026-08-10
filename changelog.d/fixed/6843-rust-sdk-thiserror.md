@@ -1,0 +1,1 @@
+- Aligned the Rust SDK with the workspace's thiserror 2 dependency, avoiding duplicate major versions in monorepo builds. (@houko)
