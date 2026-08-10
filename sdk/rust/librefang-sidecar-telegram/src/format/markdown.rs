@@ -397,6 +397,15 @@ mod tests {
     }
 
     #[test]
+    fn non_consecutive_quote_lines_stay_in_separate_blockquotes() {
+        let html = markdown_to_telegram_html("> first\n\n> second");
+        assert_eq!(
+            html,
+            "<blockquote>first</blockquote>\n\n<blockquote>second</blockquote>\n"
+        );
+    }
+
+    #[test]
     fn unordered_list_bullets() {
         let html = markdown_to_telegram_html("- one\n- two");
         assert!(html.contains("• one"));
