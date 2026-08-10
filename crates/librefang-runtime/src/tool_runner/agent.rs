@@ -4,6 +4,7 @@
 use super::error::{ToolError, ToolResult};
 use super::{
     check_taint_outbound_text, current_agent_depth, require_kernel_typed, with_agent_call_depth,
+    AGENT_CALL_DEPTH,
 };
 use crate::kernel_handle::prelude::*;
 use librefang_types::taint::TaintSink;
