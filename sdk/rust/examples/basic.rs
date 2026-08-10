@@ -24,7 +24,7 @@ fn expected_array_len(response: &Value, key: &str) -> Result<usize, Error> {
         })
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_url = resolve_base_url(std::env::var("LIBREFANG_URL"))?;
     let client = LibreFang::new(base_url);
