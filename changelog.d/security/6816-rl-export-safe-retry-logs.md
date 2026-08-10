@@ -1,0 +1,3 @@
+Keep RL exporter retry logs free of upstream response bodies, transport messages, and credential-bearing URLs. (@houko)
+Both the warning emitted before a retry and the debug event emitted when giving up previously formatted the complete `ExportError`; transient 429/5xx errors include up to 4 KiB of upstream-controlled body text, while network errors can include sensitive URL components, sending those values into centralized operational logs.
+Retry events now record only a fixed error category and the HTTP status code when one exists. The original error is still returned unchanged to the caller, but is never passed to the tracing macros.

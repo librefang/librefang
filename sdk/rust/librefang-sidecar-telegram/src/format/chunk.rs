@@ -126,6 +126,10 @@ fn strip_mid_tag(chunk: &str) -> &str {
 
 static RE_TAG: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)([^>]*)>").expect("tag regex"));
+const VOID_TAGS: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
 
 /// Walk `chunk` and return the stack of tags left unclosed at end-of-chunk. Each entry is `(name, full_open_tag_with_attrs)` so the caller can both close (`</name>`) at the end of this chunk and reopen with the original attributes at the start of the next chunk.
 fn unclosed_tags(chunk: &str) -> Vec<(String, String)> {
@@ -134,11 +138,14 @@ fn unclosed_tags(chunk: &str) -> Vec<(String, String)> {
         let closing = !caps.get(1).unwrap().as_str().is_empty();
         let name = caps.get(2).unwrap().as_str().to_ascii_lowercase();
         let full = caps.get(0).unwrap().as_str().to_string();
+        let self_closing = caps
+            .get(3)
+            .is_some_and(|attrs| attrs.as_str().trim_end().ends_with('/'));
         if closing {
             if let Some(pos) = stack.iter().rposition(|(n, _)| *n == name) {
                 stack.truncate(pos);
             }
-        } else {
+        } else if !self_closing && !VOID_TAGS.contains(&name.as_str()) {
             stack.push((name, full));
         }
     }
@@ -233,6 +240,41 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<String> {
         let mut stack = unclosed_tags(&emitted_text);
         let mut close_suffix: String = stack.iter().rev().map(|(n, _)| format!("</{n}>")).collect();
         let mut next_carry: String = stack.iter().map(|(_, full)| full.clone()).collect();
+        if degenerate_progress
+            && utf16_len(&emitted_text).saturating_add(utf16_len(&close_suffix)) > limit
+        {
+            // The whole-tag progress escape hatch above is bounded only by the
+            // input tag itself. Carry + generated closing tags can still push
+            // the actual wire chunk over Telegram's limit. Drop formatting
+            // carry for this rare malformed/deeply-nested boundary and consume
+            // one scalar as plain text; the dispatcher's parse-entities fallback
+            // preserves delivery while guaranteeing forward progress.
+            if let Some(tag_end) = remaining
+                .starts_with('<')
+                .then(|| remaining.find('>'))
+                .flatten()
+            {
+                // The markup itself cannot fit once balanced. Consume it
+                // without emitting it and continue with plain content.
+                emitted_text.clear();
+                consumed_from_input = tag_end + 1;
+            } else {
+                let forced = remaining
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| i)
+                    .unwrap_or(remaining.len());
+                let scalar = &remaining[..forced];
+                emitted_text = if utf16_len(scalar) <= limit {
+                    scalar.to_string()
+                } else {
+                    String::new()
+                };
+                consumed_from_input = forced;
+            }
+            close_suffix.clear();
+            next_carry.clear();
+        }
         while utf16_len(&emitted_text).saturating_add(utf16_len(&close_suffix)) > limit {
             // NEW_TAG_RESERVE is only a first-pass heuristic. Recompute the
             // exact suffix for the selected prefix, then shrink the input
@@ -292,6 +334,14 @@ mod tests {
         assert_eq!(utf16_len("hi"), 2);
         assert_eq!(utf16_len(""), 0);
         assert_eq!(utf16_len("a\u{1F600}"), 3); // 'a' + emoji surrogate pair
+    }
+
+    #[test]
+    fn self_closing_and_void_tags_do_not_enter_the_carry_stack() {
+        assert!(unclosed_tags("<code/>after").is_empty());
+        assert!(unclosed_tags("<tg-emoji emoji-id=\"42\" />after").is_empty());
+        assert!(unclosed_tags("before<br>after").is_empty());
+        assert_eq!(unclosed_tags("<b>after")[0].0, "b");
     }
 
     #[test]
@@ -375,7 +425,7 @@ mod tests {
         let s = format!("<a href=\"https://example.com\">{}</a>", "x".repeat(40));
         // The opening tag (30 units) plus its required `</a>` suffix must fit
         // before the chunker can preserve formatting.
-        let chunks = split_to_utf16_chunks(&s, 40);
+        let chunks = split_to_utf16_chunks(&s, 45);
         assert!(chunks.len() >= 2);
         assert!(
             chunks[0].ends_with("</a>"),
@@ -425,6 +475,24 @@ mod tests {
                 "empty tag span produced by chunker: {c:?}",
             );
         }
+    }
+
+    #[test]
+    fn degenerate_whole_tag_progress_counts_carry_and_close_suffix() {
+        let chunks = split_to_utf16_chunks("<b>xxxxx<tg-emoji>z</tg-emoji></b>", 16);
+        assert!(chunks.len() > 1);
+        for chunk in chunks {
+            assert!(
+                utf16_len(&chunk) <= 16,
+                "degenerate emit exceeded limit: {chunk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn impossible_single_unit_astral_limit_never_emits_an_oversized_chunk() {
+        let chunks = split_to_utf16_chunks("😀😀", 1);
+        assert!(chunks.iter().all(|chunk| utf16_len(chunk) <= 1));
     }
 
     #[test]

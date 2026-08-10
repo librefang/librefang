@@ -92,9 +92,81 @@ fn is_void_tag(name: &str) -> bool {
     VOID_TAGS.contains(&name)
 }
 
+fn decode_url_html_entities(value: &str) -> String {
+    let mut decoded = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < value.len() {
+        let rest = &value[index..];
+        if let Some(numeric) = rest.strip_prefix("&#") {
+            let (radix, digits) = if let Some(hex) = numeric
+                .strip_prefix('x')
+                .or_else(|| numeric.strip_prefix('X'))
+            {
+                (16, hex)
+            } else {
+                (10, numeric)
+            };
+            let digit_len = digits
+                .bytes()
+                .take_while(|byte| (*byte as char).is_digit(radix))
+                .count();
+            if digit_len > 0 {
+                let number = &digits[..digit_len];
+                if let Ok(codepoint) = u32::from_str_radix(number, radix) {
+                    if let Some(ch) = char::from_u32(codepoint) {
+                        decoded.push(ch);
+                        index += 2
+                            + usize::from(radix == 16)
+                            + digit_len
+                            + usize::from(digits[digit_len..].starts_with(';'));
+                        continue;
+                    }
+                }
+            }
+        }
+        let named_entity_end = rest.strip_prefix('&').and_then(|_| {
+            rest.as_bytes()
+                .iter()
+                .take(17)
+                .position(|byte| *byte == b';')
+        });
+        if let Some(end) = named_entity_end {
+            let entity = &rest[1..end].to_ascii_lowercase();
+            let replacement = match entity.as_str() {
+                "amp" => Some('&'),
+                "apos" => Some('\''),
+                "colon" => Some(':'),
+                "gt" => Some('>'),
+                "lt" => Some('<'),
+                "newline" => Some('\n'),
+                "quot" => Some('"'),
+                "tab" => Some('\t'),
+                _ => None,
+            };
+            if let Some(ch) = replacement {
+                decoded.push(ch);
+                index += end + 1;
+                continue;
+            }
+        }
+
+        // `rest` is non-empty here (loop guard: `index < value.len()`), but avoid `expect()`/`unwrap()` on data derived from agent-supplied HTML — fail closed by stopping the decode rather than asserting an invariant on untrusted input.
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        decoded.push(ch);
+        index += ch.len_utf8();
+    }
+    decoded
+}
+
 fn is_safe_url(url: &str) -> bool {
     let trimmed = url.trim().trim_matches(|c| c == '"' || c == '\'');
-    let lower = trimmed.to_lowercase();
+    let decoded = decode_url_html_entities(trimmed);
+    if decoded.chars().any(|ch| ch.is_ascii_control()) {
+        return false;
+    }
+    let lower = decoded.trim_matches(|ch| ch <= '\u{20}').to_lowercase();
     if lower.starts_with("javascript:") || lower.starts_with("vbscript:") {
         return false;
     }
@@ -104,7 +176,6 @@ fn is_safe_url(url: &str) -> bool {
             "data:image/jpeg;",
             "data:image/gif;",
             "data:image/webp;",
-            "data:image/svg+xml;",
         ];
         return safe_prefixes.iter().any(|p| lower.starts_with(p));
     }
@@ -412,6 +483,52 @@ pub(super) async fn tool_canvas_present(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitizer_rejects_mutation_xss_url_encodings() {
+        for html in [
+            r#"<a href="&#106;avascript:alert(1)">x</a>"#,
+            r#"<a href="&#106avascript:alert(1)">x</a>"#,
+            r#"<a href="&#x6a;avascript:alert(1)">x</a>"#,
+            r#"<a href="jav&#x61;script&#58;alert(1)">x</a>"#,
+            r#"<a href="javascript&colon;alert(1)">x</a>"#,
+            r#"<a href="&#32;javascript:alert(1)">x</a>"#,
+            r#"<a href="&#x20;javascript:alert(1)">x</a>"#,
+            r#"<a href="java&Tab;script:alert(1)">x</a>"#,
+            "<a href=\"java\tscript:alert(1)\">x</a>",
+            "<a href=\"java\nscript:alert(1)\">x</a>",
+            "<a href=\"java\rscript:alert(1)\">x</a>",
+            "<a href=\"java\0script:alert(1)\">x</a>",
+            r#"<a href="JaVaScRiPt:alert(1)">x</a>"#,
+            r#"<img src="data:image/svg+xml;base64,PHN2Zz48c2NyaXB0PmFsZXJ0KDEpPC9zY3JpcHQ+PC9zdmc+">"#,
+            r#"<img src="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">"#,
+        ] {
+            let sanitized = sanitize_canvas_html(html, 512 * 1024).expect("sanitize");
+            assert!(
+                !sanitized.to_ascii_lowercase().contains("href=")
+                    && !sanitized.to_ascii_lowercase().contains("src="),
+                "dangerous URL attribute survived: input={html:?}, output={sanitized:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitizer_preserves_safe_http_and_raster_urls() {
+        let html = concat!(
+            r#"<a href="https://example.com/a b?a=1&amp;b=2">link</a>"#,
+            "<a href=\"https://example.com/a\u{2002}b\">unicode space</a>",
+            r#"<img src="data:image/png;base64,AA==">"#,
+        );
+        let sanitized = sanitize_canvas_html(html, 512 * 1024).expect("sanitize");
+        assert!(sanitized.contains("href="), "{sanitized}");
+        assert!(sanitized.contains("src="), "{sanitized}");
+    }
+
+    #[test]
+    fn entity_decoder_handles_large_ampersand_input_linearly() {
+        let value = "&".repeat(512 * 1024);
+        assert_eq!(decode_url_html_entities(&value), value);
+    }
 
     #[tokio::test]
     async fn canvas_present_missing_html_is_missing_parameter() {

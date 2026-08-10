@@ -214,6 +214,15 @@ pub async fn skillhub_install(
     State(state): State<Arc<AppState>>,
     Json(req): Json<crate::types::ClawHubInstallRequest>,
 ) -> impl IntoResponse {
+    if let Some(ref hand_id) = req.hand {
+        if let Err(reason) = validate_skill_identifier(hand_id, "hand") {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": reason})),
+            );
+        }
+    }
+
     let home = state.kernel.home_dir();
     let skills_dir = if let Some(ref hand_id) = req.hand {
         let hand_dir = home.join("workspaces").join("hands").join(hand_id);

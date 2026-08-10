@@ -234,6 +234,79 @@ async fn list_hands_response_is_application_json() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn list_hands_does_not_expose_satisfied_environment_variable_values() {
+    let h = boot_router_open().await;
+    let process_path = std::env::var("PATH").expect("test process must have PATH");
+    let toml = r#"
+id = "secret-redaction-test"
+name = "Secret Redaction Test"
+description = "Verifies that requirement status never exposes values."
+category = "other"
+
+[[requires]]
+key = "process-path"
+label = "Process PATH"
+requirement_type = "env_var"
+check_value = "PATH"
+
+[agent]
+name = "secret-redaction-agent"
+description = "Test hand agent"
+system_prompt = "Test prompt"
+"#;
+
+    let (install_status, install_body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/install",
+        Some(serde_json::json!({
+            "toml_content": toml,
+            "skill_content": "# Test skill\n",
+        })),
+    )
+    .await;
+    assert_eq!(
+        install_status,
+        StatusCode::OK,
+        "install_hand body: {install_body}"
+    );
+
+    let (status, body) = get_json(&h.app, "/api/hands").await;
+    assert_eq!(status, StatusCode::OK);
+    let hand = body["items"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["id"] == "secret-redaction-test")
+        })
+        .unwrap_or_else(|| panic!("installed hand missing from list response: {body}"));
+    let requirement = hand["requirements"]
+        .as_array()
+        .and_then(|requirements| requirements.first())
+        .unwrap_or_else(|| panic!("installed hand requirement missing from list response: {hand}"));
+
+    assert_eq!(
+        requirement["satisfied"].as_bool(),
+        Some(true),
+        "{requirement}"
+    );
+    assert_eq!(requirement["key"].as_str(), Some("PATH"), "{requirement}");
+    assert!(
+        requirement.get("check_value").is_none(),
+        "list response must preserve the existing requirement shape: {requirement}"
+    );
+    assert!(
+        requirement.get("current_value").is_none(),
+        "requirement status must not expose environment variable values: {requirement}"
+    );
+    assert!(
+        !body.to_string().contains(&process_path),
+        "list response must not contain the resolved environment variable value"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/hands/active — list active hand instances
 // ---------------------------------------------------------------------------
@@ -875,6 +948,207 @@ system_prompt = "Test prompt"
 // ---------------------------------------------------------------------------
 // POST /api/hands/{hand_id}/secret — input validation
 // ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_hand_secret_accepts_the_key_returned_by_list_hands() {
+    const ENV_KEY: &str = "LIBREFANG_HAND_SECRET_CANONICAL_ENV_TEST";
+    const STABLE_KEY: &str = "canonical-env-test";
+    const VALUE: &str = "canonical-value";
+
+    let h = boot_router_open().await;
+    librefang_api::secrets_env::remove_env_var_guarded(ENV_KEY).await;
+    librefang_api::secrets_env::remove_env_var_guarded(STABLE_KEY).await;
+
+    let toml = format!(
+        r#"
+id = "stable-secret-key-test"
+name = "Stable Secret Key Test"
+description = "Verifies stable requirement keys resolve to env var names."
+category = "other"
+
+[[requires]]
+key = "{STABLE_KEY}"
+label = "Canonical environment variable"
+requirement_type = "env_var"
+check_value = "{ENV_KEY}"
+
+[agent]
+name = "stable-secret-key-agent"
+description = "Test hand agent"
+system_prompt = "Test prompt"
+"#
+    );
+    let (install_status, install_body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/install",
+        Some(serde_json::json!({
+            "toml_content": toml,
+            "skill_content": "# Test skill\n",
+        })),
+    )
+    .await;
+    assert_eq!(
+        install_status,
+        StatusCode::OK,
+        "install_hand body: {install_body}"
+    );
+
+    let (_, initial_list_body) = get_json(&h.app, "/api/hands").await;
+    let initial_requirement = initial_list_body["items"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["id"] == "stable-secret-key-test")
+        })
+        .and_then(|hand| hand["requirements"].as_array())
+        .and_then(|requirements| requirements.first())
+        .unwrap_or_else(|| panic!("installed requirement missing: {initial_list_body}"));
+    let listed_key = initial_requirement["key"]
+        .as_str()
+        .expect("listed requirement must have a key");
+    assert_eq!(listed_key, ENV_KEY, "{initial_requirement}");
+    assert_eq!(
+        initial_requirement["satisfied"].as_bool(),
+        Some(false),
+        "{initial_requirement}"
+    );
+
+    let (save_status, save_body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/stable-secret-key-test/secret",
+        Some(serde_json::json!({"key": listed_key, "value": VALUE})),
+    )
+    .await;
+    let (_, list_body) = get_json(&h.app, "/api/hands").await;
+    let persisted = std::fs::read_to_string(h._tmp.path().join("secrets.env"))
+        .expect("secret must be persisted");
+
+    librefang_api::secrets_env::remove_env_var_guarded(ENV_KEY).await;
+    librefang_api::secrets_env::remove_env_var_guarded(STABLE_KEY).await;
+
+    assert_eq!(save_status, StatusCode::OK, "save body: {save_body}");
+    assert_eq!(save_body["key"].as_str(), Some(ENV_KEY), "{save_body}");
+    let requirement = list_body["items"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["id"] == "stable-secret-key-test")
+        })
+        .and_then(|hand| hand["requirements"].as_array())
+        .and_then(|requirements| requirements.first())
+        .unwrap_or_else(|| panic!("installed requirement missing: {list_body}"));
+    assert_eq!(
+        requirement["satisfied"].as_bool(),
+        Some(true),
+        "{requirement}"
+    );
+
+    assert!(
+        persisted.contains(&format!("{ENV_KEY}={VALUE}")),
+        "{persisted}"
+    );
+    assert!(
+        !persisted.contains(&format!("{STABLE_KEY}=")),
+        "{persisted}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_hand_secret_resolves_stable_requirement_key_to_env_var_name() {
+    // The single-hand detail endpoint (GET /api/hands/{id}) exposes both the stable requirement "key" and the actual env var "check_value" as separate fields, so a client can plausibly submit either one to this endpoint.
+    // Both must resolve to the same persisted env var name — submitting the stable key must not write a secret under a name `check_requirement` never reads.
+    const ENV_KEY: &str = "LIBREFANG_HAND_SECRET_STABLE_KEY_ALIAS_TEST";
+    const STABLE_KEY: &str = "stable-key-alias-test";
+    const VALUE: &str = "stable-alias-value";
+
+    let h = boot_router_open().await;
+    librefang_api::secrets_env::remove_env_var_guarded(ENV_KEY).await;
+    librefang_api::secrets_env::remove_env_var_guarded(STABLE_KEY).await;
+
+    let toml = format!(
+        r#"
+id = "stable-secret-key-alias-test"
+name = "Stable Secret Key Alias Test"
+description = "Verifies the stable requirement key resolves to the env var name."
+category = "other"
+
+[[requires]]
+key = "{STABLE_KEY}"
+label = "Canonical environment variable"
+requirement_type = "env_var"
+check_value = "{ENV_KEY}"
+
+[agent]
+name = "stable-secret-key-alias-agent"
+description = "Test hand agent"
+system_prompt = "Test prompt"
+"#
+    );
+    let (install_status, install_body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/install",
+        Some(serde_json::json!({
+            "toml_content": toml,
+            "skill_content": "# Test skill\n",
+        })),
+    )
+    .await;
+    assert_eq!(
+        install_status,
+        StatusCode::OK,
+        "install_hand body: {install_body}"
+    );
+
+    // Submit the stable requirement key (`STABLE_KEY`), not the env var name.
+    let (save_status, save_body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/stable-secret-key-alias-test/secret",
+        Some(serde_json::json!({"key": STABLE_KEY, "value": VALUE})),
+    )
+    .await;
+    let (_, list_body) = get_json(&h.app, "/api/hands").await;
+    let persisted = std::fs::read_to_string(h._tmp.path().join("secrets.env"))
+        .expect("secret must be persisted");
+
+    librefang_api::secrets_env::remove_env_var_guarded(ENV_KEY).await;
+    librefang_api::secrets_env::remove_env_var_guarded(STABLE_KEY).await;
+
+    assert_eq!(save_status, StatusCode::OK, "save body: {save_body}");
+    // The response must report the resolved env var name, not the stable key the client submitted.
+    assert_eq!(save_body["key"].as_str(), Some(ENV_KEY), "{save_body}");
+
+    let requirement = list_body["items"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["id"] == "stable-secret-key-alias-test")
+        })
+        .and_then(|hand| hand["requirements"].as_array())
+        .and_then(|requirements| requirements.first())
+        .unwrap_or_else(|| panic!("installed requirement missing: {list_body}"));
+    assert_eq!(
+        requirement["satisfied"].as_bool(),
+        Some(true),
+        "requirement must be satisfied once the secret is persisted under the \
+         actual env var name: {requirement}"
+    );
+
+    assert!(
+        persisted.contains(&format!("{ENV_KEY}={VALUE}")),
+        "secret must be persisted under the env var name, not the stable key: {persisted}"
+    );
+    assert!(
+        !persisted.contains(&format!("{STABLE_KEY}=")),
+        "secret must not be persisted under the stable requirement key: {persisted}"
+    );
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn set_hand_secret_missing_key_returns_400() {

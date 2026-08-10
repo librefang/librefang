@@ -105,20 +105,22 @@ pub(crate) fn classify_status(status: u16, body: String) -> ExportError {
     }
 }
 
-/// Read an error response body, truncating to [`MAX_ERROR_BODY_BYTES`].
-/// Lossy UTF-8 decoding so any upstream that returns non-text bytes
-/// still surfaces *something*.
-pub(crate) async fn read_body_truncated(resp: reqwest::Response) -> String {
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(e) => return format!("<error reading body: {e}>"),
-    };
-    let slice = if bytes.len() > MAX_ERROR_BODY_BYTES {
-        &bytes[..MAX_ERROR_BODY_BYTES]
-    } else {
-        &bytes[..]
-    };
-    String::from_utf8_lossy(slice).into_owned()
+/// Read at most [`MAX_ERROR_BODY_BYTES`] from an error response, then stop
+/// consuming the stream. Lossy UTF-8 decoding ensures an upstream that
+/// returns non-text bytes still surfaces *something* without buffering its
+/// complete body first.
+pub(crate) async fn read_body_truncated(mut resp: reqwest::Response) -> String {
+    let mut bytes = Vec::with_capacity(MAX_ERROR_BODY_BYTES);
+    while bytes.len() < MAX_ERROR_BODY_BYTES {
+        let chunk = match resp.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(e) => return format!("<error reading body: {e}>"),
+        };
+        let remaining = MAX_ERROR_BODY_BYTES - bytes.len();
+        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// Classify a `reqwest::Error` raised by [`reqwest::Response::json`].
@@ -141,5 +143,56 @@ pub(crate) fn classify_response_decode_error(err: reqwest::Error, context: &str)
         ExportError::MalformedResponse(format!("{context}: {err}"))
     } else {
         ExportError::NetworkError(err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn truncated_body_returns_without_buffering_the_declared_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\n\
+                      Content-Length: 1000000000\r\n\
+                      Connection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            stream
+                .write_all(&vec![b'x'; MAX_ERROR_BODY_BYTES + 1])
+                .await
+                .unwrap();
+            stream.flush().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/oversized"))
+            .send()
+            .await
+            .unwrap();
+        let body = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            read_body_truncated(response),
+        )
+        .await
+        .expect("the cap must stop reading before the declared body completes");
+
+        server.abort();
+        let _ = server.await;
+        assert_eq!(body.len(), MAX_ERROR_BODY_BYTES);
+        assert!(body.bytes().all(|byte| byte == b'x'));
     }
 }

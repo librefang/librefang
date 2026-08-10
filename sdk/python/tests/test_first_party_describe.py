@@ -19,6 +19,10 @@ def test_telegram_describe_contract():
     assert keys["TELEGRAM_BOT_TOKEN"]["type"] == "secret"
     assert keys["TELEGRAM_BOT_TOKEN"]["required"] is True
     assert keys["ALLOWED_USERS"]["type"] == "list"
+    placeholder = keys["ALLOWED_USERS"]["placeholder"]
+    assert "empty" in placeholder
+    assert "ALL users" in placeholder
+    assert "insecure" in placeholder
     assert keys["TELEGRAM_CLEAR_DONE_REACTION"]["type"] == "bool"
 
 

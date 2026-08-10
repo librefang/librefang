@@ -246,7 +246,10 @@ agent 级 `[channel_overrides]` 仍优先于这些按通道设置的值，且这
 
 几个 adapter 可以贴一个反应到用户消息表示"我在处理"，发送回复时移除。各通道独立：
 
-- **Slack** — `reactions_enabled` 开关（环境变量 `SLACK_REACTIONS`，默认 `true`）。收消息加 👀，回复时换成 ✅。`already_reacted` / `no_reaction` 错误静默忽略（fail-open）。
+- **Slack** — `reactions_enabled` 开关（环境变量 `SLACK_REACTIONS`，默认 `true`）。对话开始时加 👀，成功换成 ✅，失败换成 ❌。
+  由守护进程的对话生命周期驱动，而不是由"收到消息"驱动，所以守护进程决定不回答的消息（mention-only 群组门禁、限流、bridge 自己处理的斜杠命令）什么都不会加上，而不是留下一个没人会清掉的 👀。
+  多步任务进度卡片是独立指示器，由 `SLACK_PROGRESS_CARD` 单独控制，默认跟随 `SLACK_REACTIONS`。
+  `already_reacted` / `no_reaction` 错误静默忽略（fail-open）。
 - **Feishu** — 收消息加 `Typing` reaction，回复发送时移除。两个调用都 fire-and-forget；API 失败 `warn!` 但绝不阻塞消息处理。
 
 要在自定义 adapter 上加同样能力，把 reaction 调用 `tokio::spawn` 出去，把 `(reaction_id, message_id)` 存在按 chat id 索引的 map 里。
