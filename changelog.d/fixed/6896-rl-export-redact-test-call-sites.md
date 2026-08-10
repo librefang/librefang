@@ -1,0 +1,1 @@
+Fixed the `librefang-rl-export` test call sites that still passed `&Value` to `redact_metadata` after it became by-value, which broke `cargo check --all-targets` on the aarch64 lane and blocked every open PR behind a red CI Gate. (#6896) (@houko)
