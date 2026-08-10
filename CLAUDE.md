@@ -484,6 +484,51 @@ session burns turns without producing information.
   unless a maintainer has explicitly asked you to ping them. Maintainers
   pull work into their queue; AI agents do not push it onto theirs.
 
+### Batch merging: the Actions runner pool is the bottleneck, not the merge
+
+The `librefang` org is on the **free** GitHub plan and every job targets the hosted `ubuntu-latest` pool, so concurrent runners are capped org-wide.
+Every push to `main` re-triggers the full workflow set, and so does every push to a PR branch.
+Merging a backlog back-to-back therefore spends the whole concurrency budget on runs nobody will ever read: after 86 consecutive merges the queue held 657 jobs with **zero** executing, the oldest waiting 67 minutes, and the only run whose result mattered — CI Gate on the current `main` HEAD — was stuck behind 85 superseded ones.
+
+When clearing more than ~10 PRs:
+
+- **Merge in batches and let the queue drain between them.**
+  Check `gh api 'repos/librefang/librefang/actions/runs?status=in_progress&per_page=1' --jq .total_count` — if it reads 0 while jobs are queued, the pool is saturated and nothing will progress until something is cancelled or times out.
+- **Cancel superseded runs rather than waiting them out.**
+  A queued run is dead weight when its `head_sha` is no longer its branch's tip: on a PR branch a newer commit has replaced it, and on `main` only HEAD's checks are ever consulted.
+  Resolve tips with `git ls-remote origin` and compare, rather than assuming the newest run per branch is the live one.
+
+  ```bash
+  # Queued runs whose head_sha is no longer the branch tip, cancelled.
+  gh api --paginate 'repos/librefang/librefang/actions/runs?status=queued&per_page=100' \
+    --jq '.workflow_runs[] | "\(.id)\t\(.head_branch)\t\(.head_sha)"' > /tmp/q.tsv
+  git ls-remote origin | awk '$2 ~ /^refs\/heads\//{sub("refs/heads/","",$2); print $2"\t"$1}' > /tmp/tips.tsv
+  awk -F'\t' 'NR==FNR{tip[$1]=$2; next} ($2 in tip) && tip[$2]!=$3 {print $1}' /tmp/tips.tsv /tmp/q.tsv \
+    | while read id; do gh api -X POST "repos/librefang/librefang/actions/runs/$id/cancel" >/dev/null; done
+  ```
+
+  Leave runs whose branch no longer exists alone — a deleted branch means the PR already merged or closed, and its checks are nobody's gate.
+- **A stalled queue is not a CI failure.** Before diagnosing a PR as broken, confirm jobs are actually executing. `runner_name` empty across the board (`gh api repos/librefang/librefang/actions/runs/<id>/jobs --jq '.jobs[].runner_name'`) means unassigned, i.e. starved for capacity, not failing.
+
+### Two green PRs can still break `main` together
+
+The `main` ruleset does not set `strict_required_status_checks_policy`, so a PR merges on the CI it ran against **its own base**, which may be many commits behind.
+Two PRs that touch the same file on the same stale base are each validated in isolation and neither result says anything about the combination.
+
+This is not hypothetical, and text-level conflict detection does not catch it — git sees edits to different lines and merges cleanly:
+
+> #6814 added two `redact_metadata(&Value::String(…))` call sites while the function still took a reference.
+> #6815 changed the signature to take the value by owner and updated the call sites *it* could see.
+> Both branched from `37937950b`, both were fully green, and they were merged two seconds apart.
+> The result did not compile, and because the break sits in `#[cfg(test)]` code it only surfaced on the one lane that builds test targets — turning `Build / Linux aarch64` red on `main` and failing the CI Gate of 30+ open PRs that had nothing to do with it.
+
+So when merging several PRs in one sweep:
+
+- **Group by file, not just by conflict status.** Before starting, map changed files to PRs (`gh pr view <n> --json files`) and treat any file touched by more than one PR as a serialization point: merge one, let the others pick up the new `main`, and re-check.
+- **Second and later PRs in a group need a fresh check run, not just a clean merge.** `MERGEABLE` only means git can splice the text. Push the branch onto current `main` (or use the update-branch API) so CI re-runs against the combination that will actually land.
+- **Watch for a signature or contract change anywhere in the group.** A PR that changes a function's parameters, return type, or ownership is the dangerous side of the pair — any *other* PR in the batch that calls it was written against the old contract.
+- **After a batch, verify `main` itself rather than assuming.** Green on each PR does not imply green on the merge result; check the CI Gate on the new `main` HEAD before starting the next batch.
+
 ### Issue / PR comment etiquette
 
 - **At most two follow-up comments** on the same thread without human

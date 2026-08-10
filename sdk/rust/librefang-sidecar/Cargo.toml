@@ -25,17 +25,17 @@ include = [
 ]
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 # Tokio feature set the runtime actually uses.
 # io-std + io-util: stdin/stdout reader + write_all. rt + macros: spawn +
 # tokio::select!. sync: mpsc + watch + Mutex. time: backoff and ready
 # re-announcement. The runtime does not require work-stealing or signals.
-tokio = { version = "1", features = ["io-std", "io-util", "rt", "macros", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["io-std", "io-util", "rt", "macros", "sync", "time"] }
 async-trait = "0.1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full", "test-util"] }
+tokio = { version = "1.53.1", features = ["full", "test-util"] }
 
 [[example]]
 name = "echo"

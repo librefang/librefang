@@ -689,7 +689,7 @@ trusted_manifest_signers   = []
 | `max_upload_size_bytes` | usize | `10485760`(10 MiB) | 单文件上传上限。 |
 | `max_request_body_bytes` | usize | `16777216`(16 MiB) | 整个 HTTP 请求体上限。 |
 | `max_concurrent_bg_llm` | usize | `8` | 后台 LLM 调用并发数(compaction、summarise、dream 等)。 |
-| `max_agent_call_depth` | u32 | `5` | Agent 间调用深度(防 `agent_send` 递归炸弹)。 |
+| `max_agent_call_depth` | u32 | `5` | Agent 间调用深度(防 `agent_send` 递归炸弹);嵌套的 `workflow_run` 调用也计入同一份预算。 |
 | `local_probe_interval_secs` | u64 | `60` | 本地 provider(Ollama / vLLM / LM Studio)的复探周期。 |
 | `strict_config` | bool | `false` | `true` 时配置里有未知字段就启动失败(否则 warn 后继续)。 |
 | `update_channel` | enum | `"stable"` | `librefang upgrade` 看哪个发布通道。 |
