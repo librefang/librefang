@@ -280,6 +280,17 @@ pub async fn export(
     mut payload: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
     normalize_export_metadata(&mut payload);
+    export_with_secret_resolver(target, payload, |name| std::env::var(name)).await
+}
+
+async fn export_with_secret_resolver<F>(
+    target: ExportTarget,
+    payload: RlTrajectoryExport,
+    lookup_secret: F,
+) -> Result<ExportReceipt, ExportError>
+where
+    F: Fn(&str) -> Result<String, std::env::VarError>,
+{
     match target {
         ExportTarget::WandB {
             project,
@@ -287,7 +298,7 @@ pub async fn export(
             run_id,
             api_key_env,
         } => {
-            let api_key = resolve_env_secret(&api_key_env, "W&B api_key_env")?;
+            let api_key = resolve_env_secret_with(&api_key_env, "W&B api_key_env", &lookup_secret)?;
             wandb::validate_config(&project, &entity, &api_key)?;
             // SSRF gate: the public dispatch always validates the
             // outbound base URL before any outbound HTTP. W&B is a cloud service —
@@ -313,7 +324,8 @@ pub async fn export(
             project,
             base_url,
         } => {
-            let api_key = resolve_env_secret(&api_key_env, "Tinker api_key_env")?;
+            let api_key =
+                resolve_env_secret_with(&api_key_env, "Tinker api_key_env", &lookup_secret)?;
             tinker::validate_config(&project, &api_key)?;
             // SSRF gate. Tinker is a public cloud service even when an
             // operator overrides `base_url` for a self-hosted control
@@ -373,13 +385,20 @@ pub(crate) fn normalize_export_metadata(export: &mut RlTrajectoryExport) {
 /// `"W&B api_key_env"`) and is woven into the error so the operator
 /// can locate the offending entry in `config.toml`. The actual env-var
 /// name is also echoed — it's not a secret, only its value is.
-pub(crate) fn resolve_env_secret(env_var: &str, field_label: &str) -> Result<String, ExportError> {
+fn resolve_env_secret_with<F>(
+    env_var: &str,
+    field_label: &str,
+    lookup: F,
+) -> Result<String, ExportError>
+where
+    F: FnOnce(&str) -> Result<String, std::env::VarError>,
+{
     if env_var.is_empty() {
         return Err(ExportError::InvalidConfig(format!(
             "{field_label} is empty (expected the NAME of an environment variable holding the secret, not the secret itself)"
         )));
     }
-    match std::env::var(env_var) {
+    match lookup(env_var) {
         Ok(v) if !v.is_empty() => Ok(v),
         Ok(_) => Err(ExportError::InvalidConfig(format!(
             "{field_label} points at env var '{env_var}', which is set but empty"
@@ -453,7 +472,10 @@ mod tests {
     /// a downstream 401.
     #[test]
     fn resolve_env_secret_rejects_empty_var_name() {
-        let err = resolve_env_secret("", "test").expect_err("empty env var name must be rejected");
+        let err = resolve_env_secret_with("", "test", |_| {
+            panic!("an empty variable name must fail before lookup")
+        })
+        .expect_err("empty env var name must be rejected");
         assert!(matches!(err, ExportError::InvalidConfig(_)), "got {err:?}");
     }
 
@@ -462,10 +484,9 @@ mod tests {
     /// not a secret — the operator needs to see which var was missing).
     #[test]
     fn resolve_env_secret_rejects_unset_var() {
-        // Pick a deliberately-bogus var name we are confident is unset.
         let var = "LIBREFANG_RL_EXPORT_TEST_DEFINITELY_UNSET_42";
-        std::env::remove_var(var);
-        let err = resolve_env_secret(var, "test").expect_err("unset env var must be rejected");
+        let err = resolve_env_secret_with(var, "test", |_| Err(std::env::VarError::NotPresent))
+            .expect_err("unset env var must be rejected");
         match err {
             ExportError::InvalidConfig(msg) => {
                 assert!(msg.contains(var), "error must mention env var name: {msg}");
@@ -506,8 +527,6 @@ mod tests {
     /// `ExportTarget::Tinker.base_url`.
     #[tokio::test]
     async fn export_rejects_tinker_base_url_at_imds() {
-        let var = "LIBREFANG_RL_EXPORT_TEST_IMDS_KEY";
-        std::env::set_var(var, "tml-fake");
         let payload = RlTrajectoryExport {
             run_id: "rid".to_string(),
             trajectory_bytes: b"bytes".to_vec(),
@@ -516,14 +535,13 @@ mod tests {
             finished_at: chrono::Utc::now(),
         };
         let target = ExportTarget::Tinker {
-            api_key_env: var.to_string(),
+            api_key_env: "LIBREFANG_RL_EXPORT_TEST_IMDS_KEY".to_string(),
             project: "p".to_string(),
             base_url: Some("http://169.254.169.254/latest/meta-data/".to_string()),
         };
-        let err = export(target, payload)
+        let err = export_with_secret_resolver(target, payload, |_| Ok("tml-fake".to_string()))
             .await
             .expect_err("IMDS base URL must be rejected");
-        std::env::remove_var(var);
         match err {
             ExportError::InvalidConfig(msg) => {
                 assert!(

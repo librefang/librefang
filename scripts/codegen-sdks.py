@@ -567,7 +567,11 @@ func (c *Client) stream(method, path string, body interface{}, query map[string]
 \t\turlStr := c.BaseURL + c.withQuery(path, query)
 \t\tvar bodyBytes []byte
 \t\tif body != nil {
-\t\t\tb, _ := json.Marshal(body)
+\t\t\tb, err := json.Marshal(body)
+\t\t\tif err != nil {
+\t\t\t\tch <- map[string]interface{}{"error": fmt.Sprintf("marshal: %v", err), "status": 0}
+\t\t\t\treturn
+\t\t\t}
 \t\t\tbodyBytes = b
 \t\t}
 \t\treq, _ := http.NewRequest(method, urlStr, bytes.NewReader(bodyBytes))
