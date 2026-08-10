@@ -209,6 +209,27 @@ agent 不能硬删除已调度的任务:`schedule_delete` / `cron_cancel` 只会
 
 provider 间成本和延迟差别很大 —— 在 `config.toml` 里配 `[media] providers` 控制每个工具走哪个 provider。
 
+### 转写长录音
+
+整场会议的转写结果无法通过单次工具返回完整送达 agent:超过 `[tool_results] spill_threshold_bytes`(默认 16 KB)的结果会被内核转存到 artifact store,agent 只拿到一个占位;而单次转写请求受一个不随输入长度变化的挂钟超时约束。
+这两个限制远早于任何文件大小限制被触及 —— 十分钟的录音提取出来只有两三兆音频。
+
+所以要按时间窗口转写,并写入文件:
+
+```
+media_transcribe(path="meeting.mp4", max_secs=600, out_path="meeting.txt")
+→ { "written_to": "...", "file_bytes": 16831, "has_more": true, "next_start_sec": 600.0, "window_preview": "..." }
+
+media_transcribe(path="meeting.mp4", start_sec=600, max_secs=600, out_path="meeting.txt")
+→ ... 只要 has_more 为 true 就继续
+```
+
+`start_sec` 为 0 的窗口会新建文件,后续窗口以换行分隔追加到同一个文件,因此多次调用会拼装成一份完整转写,而其内容始终不进入 agent 的上下文。
+推进时请使用 `next_start_sec` 而不是自行加 `max_secs`:seek 会落到关键帧上,且最后一个窗口偏短,所以只有实际产出的长度才是不会漂移的边界。
+
+如果调用超时,就调小 `max_secs`。
+一次请求能容纳多少媒体取决于 provider 的速度,自托管端点可能比托管服务慢一个数量级。
+
 ---
 
 ## Owner 通知

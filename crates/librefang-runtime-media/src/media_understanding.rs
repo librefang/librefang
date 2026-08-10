@@ -1332,15 +1332,20 @@ pub struct MediaWindow {
 
 /// Cut `[start_sec, start_sec + max_secs)` out of any container ffmpeg can open and re-encode it to the same Ogg/Opus target [`extract_video_audio_track`] produces (#6748).
 ///
-/// `-ss` is placed **before** `-i` so ffmpeg seeks rather than decoding and discarding everything ahead of the window; on a 45-minute recording that is the difference between a constant-time seek and re-decoding the whole file for every chunk.
+/// The input is staged to a file for the same reason that path does it (#6747): a pipe cannot seek, `mp4` / `mov` keep their index in a trailing `moov` atom, and a demux that fails for want of a backward seek still exits 0 and still emits a headers-only Ogg.
+/// Seeking is doubly load-bearing here — `-ss` before `-i` is what makes a window a seek rather than a decode of everything ahead of it, which on a 45-minute recording is the difference between constant time and re-decoding the whole file for every chunk.
+///
 /// The video stream is dropped unconditionally (`-vn`), so this subsumes the video-extraction path for windowed calls and needs no branch on media type.
 ///
-/// Note that a seek lands on the nearest keyframe, so the real window edge can differ from the requested one by a keyframe interval — recordings with a broken index (meeting exporters produce these routinely) seek especially coarsely.
+/// A seek lands on the nearest keyframe, so the real window edge can differ from the requested one by a keyframe interval — recordings with a broken index (meeting exporters produce these routinely) seek especially coarsely.
 /// That is why the caller advances by the *produced* duration from [`ogg_opus_duration_secs`] rather than by `max_secs`: an assumed edge would drift and eventually skip audio.
 async fn extract_media_window(input_bytes: &[u8], window: MediaWindow) -> Result<Vec<u8>, String> {
+    let staged = ScopedTempFile::write(input_bytes, "media").await?;
+    let input_path = staged.path().to_string_lossy().into_owned();
     let start = format!("{:.3}", window.start_sec.max(0.0));
     let dur = format!("{:.3}", window.max_secs.max(0.0));
-    run_ffmpeg_pipe(
+
+    let out = run_ffmpeg_pipe(
         &[
             "-hide_banner",
             "-loglevel",
@@ -1348,7 +1353,7 @@ async fn extract_media_window(input_bytes: &[u8], window: MediaWindow) -> Result
             "-ss",
             &start,
             "-i",
-            "pipe:0",
+            &input_path,
             "-t",
             &dur,
             "-vn",
@@ -1364,10 +1369,27 @@ async fn extract_media_window(input_bytes: &[u8], window: MediaWindow) -> Result
             "ogg",
             "pipe:1",
         ],
-        input_bytes,
+        None,
         "transcribe a time window of a recording",
     )
-    .await
+    .await?;
+
+    // Same defence in depth as the video path, and needed for an additional
+    // reason here: a window that starts past the end of the recording is a
+    // legitimate request (a caller can overshoot) and produces headers with no
+    // audio, which is indistinguishable at the byte level from the failed-demux
+    // artefact.
+    // Rejecting both keeps an empty window from being uploaded and charged for.
+    if !ogg_contains_audio(&out) {
+        return Err(format!(
+            "ffmpeg produced an Ogg stream with no audio packets ({} bytes) — \
+             the window at {start}s is past the end of the recording, or its \
+             audio track could not be decoded",
+            out.len()
+        ));
+    }
+
+    Ok(out)
 }
 
 /// Playable duration of an Ogg/Opus stream, read from the granule position of its final page.
@@ -1378,9 +1400,15 @@ async fn extract_media_window(input_bytes: &[u8], window: MediaWindow) -> Result
 /// An Opus stream's granule position counts samples at a fixed 48 kHz regardless of the encoder's own rate (RFC 7845 §4), and the last page's value is the end of the stream, so duration is that value less the pre-skip the header declares.
 ///
 /// Returns `None` for input that is not a parseable Ogg/Opus stream, leaving the caller to fall back rather than fabricating a number.
+///
+/// Pages are walked by following each page's own length rather than by scanning for the next `OggS`.
+/// A raw scan would accept a coincidental `4F 67 67 53` inside an entropy-coded Opus payload as a page header and read eight bytes of compressed audio as a granule position — producing a plausible-looking but wrong duration, which is exactly the "windows drift and audio is skipped" failure the produced-duration contract exists to prevent.
+/// Walking the chain instead means a candidate is only accepted if the previous page's declared length lands on it, so payload bytes are never interpreted as a header.
 fn ogg_opus_duration_secs(ogg: &[u8]) -> Option<f64> {
     const CAPTURE: &[u8; 4] = b"OggS";
     const OPUS_SAMPLE_RATE: f64 = 48_000.0;
+    /// Bytes before the segment table: capture, version, flags, granule, serial, sequence, CRC, and the segment count itself.
+    const HEADER_LEN: usize = 27;
 
     // Pre-skip lives at bytes 10..12 of the OpusHead packet, which is the first page's payload.
     // Absent it, a stream reports a few milliseconds more than it plays; that is small, but it accumulates across chunks.
@@ -1391,18 +1419,31 @@ fn ogg_opus_duration_secs(ogg: &[u8]) -> Option<f64> {
         .map(|b| u16::from_le_bytes([b[0], b[1]]) as f64)
         .unwrap_or(0.0);
 
-    // Scan forward for the last capture pattern rather than seeking back from the end: page sizes vary with the segment table, so the final page's offset cannot be computed, only found.
+    // A well-formed stream starts on a page boundary; anything else is not one.
+    if ogg.len() < HEADER_LEN || &ogg[..CAPTURE.len()] != CAPTURE {
+        return None;
+    }
+
     let mut last_granule: Option<u64> = None;
     let mut at = 0usize;
-    while let Some(found) = ogg[at..]
-        .windows(CAPTURE.len())
-        .position(|w| w == CAPTURE)
-        .map(|p| at + p)
-    {
-        // Header is 27 bytes before the segment table; granule position sits at bytes 6..14, little-endian.
-        let granule = ogg.get(found + 6..found + 14)?;
-        last_granule = Some(u64::from_le_bytes(granule.try_into().ok()?));
-        at = found + CAPTURE.len();
+    loop {
+        if ogg.len() < at + HEADER_LEN || &ogg[at..at + CAPTURE.len()] != CAPTURE {
+            // The chain stopped landing on page boundaries: the stream is
+            // truncated or malformed past this point.
+            // Whatever was read up to here is still a real granule, so report that rather than discarding a usable answer.
+            break;
+        }
+        // Granule position sits at bytes 6..14 of the header, little-endian.
+        let granule = u64::from_le_bytes(ogg.get(at + 6..at + 14)?.try_into().ok()?);
+        // Page length is the header, the segment table, and the sum of the
+        // table's entries — following it is what keeps payload bytes from
+        // being mistaken for the next header.
+        let segments = ogg[at + 26] as usize;
+        let table = ogg.get(at + HEADER_LEN..at + HEADER_LEN + segments)?;
+        let payload: usize = table.iter().map(|&n| n as usize).sum();
+
+        last_granule = Some(granule);
+        at += HEADER_LEN + segments + payload;
     }
 
     let granule = last_granule?;
@@ -2525,8 +2566,7 @@ mod tests {
     // These pin the two facts a caller walks a long recording on: the window ffmpeg cut, and how much of the recording it actually covered.
     // Both are read back out of the produced bytes rather than assumed, because a seek lands on a keyframe and a window past the end of the media is short.
 
-    /// Generate `secs` seconds of tone as an Ogg/Opus stream at the same
-    /// 48 kHz mono target the extraction paths produce.
+    /// Generate `secs` seconds of tone as an Ogg/Opus stream at the same 48 kHz mono target the extraction paths produce.
     async fn synth_ogg_opus(secs: f64) -> Vec<u8> {
         let gen = tokio::process::Command::new("ffmpeg")
             .args([
@@ -2579,8 +2619,51 @@ mod tests {
         }
     }
 
-    /// Guards the fallback contract: input that is not an Ogg stream yields
-    /// `None` rather than a fabricated number the caller would then advance by.
+    /// A page payload that happens to contain the bytes `OggS` must not be read as a page header.
+    /// Opus payloads are entropy-coded, so the sequence occurs by chance; taking eight bytes of compressed audio as a granule position would yield a plausible but wrong duration, and the caller advances by that number.
+    /// Walking the page chain by its declared lengths is what prevents it — a raw scan for the magic cannot.
+    #[test]
+    fn ogg_opus_duration_ignores_page_magic_inside_a_payload() {
+        /// One Ogg page: 27-byte header, a one-entry segment table, then the payload.
+        fn page(granule: u64, payload: &[u8]) -> Vec<u8> {
+            let mut p = Vec::new();
+            p.extend_from_slice(b"OggS");
+            p.push(0); // version
+            p.push(0); // header type
+            p.extend_from_slice(&granule.to_le_bytes());
+            p.extend_from_slice(&[0u8; 4]); // serial
+            p.extend_from_slice(&[0u8; 4]); // sequence
+            p.extend_from_slice(&[0u8; 4]); // crc
+            p.push(1); // one segment
+            p.push(payload.len() as u8);
+            p.extend_from_slice(payload);
+            p
+        }
+
+        // The decoy is `OggS` followed by bytes that read as a granule of one
+        // hour if this position is mistaken for a page header, plus enough
+        // trailing bytes that a naive reader finds a whole header's worth of
+        // data here rather than stopping short of the end.
+        let mut decoy = b"OggS".to_vec();
+        decoy.extend_from_slice(&[0, 0]);
+        decoy.extend_from_slice(&(48_000u64 * 3600).to_le_bytes());
+        decoy.extend_from_slice(&[0u8; 40]);
+
+        let mut stream = page(
+            0,
+            b"OpusHead\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        );
+        stream.extend(page(48_000, &decoy));
+
+        let secs = ogg_opus_duration_secs(&stream)
+            .expect("a well-formed chain must parse even with a decoy in the payload");
+        assert!(
+            (secs - 1.0).abs() < 0.01,
+            "must report the real final granule (1s), not the payload's bytes, got {secs}s"
+        );
+    }
+
+    /// Guards the fallback contract: input that is not an Ogg stream yields `None` rather than a fabricated number the caller would then advance by.
     #[test]
     fn ogg_opus_duration_rejects_non_ogg_input() {
         assert_eq!(ogg_opus_duration_secs(&[0u8; 64]), None);
@@ -2612,9 +2695,7 @@ mod tests {
         );
     }
 
-    /// The end-of-recording signal: a window that runs past the end comes back
-    /// short, and that shortfall — not any assumption about the request — is
-    /// what tells the caller to stop.
+    /// The end-of-recording signal: a window that runs past the end comes back short, and that shortfall — not any assumption about the request — is what tells the caller to stop.
     #[tokio::test]
     async fn extract_media_window_past_the_end_returns_a_short_window() {
         if !ffmpeg_available() {

@@ -218,7 +218,7 @@ So transcribe in windows, and write to a file:
 
 ```
 media_transcribe(path="meeting.mp4", max_secs=600, out_path="meeting.txt")
-→ { "written_to": "...", "has_more": true, "next_start_sec": 600.0, "preview": "..." }
+→ { "written_to": "...", "file_bytes": 16831, "has_more": true, "next_start_sec": 600.0, "window_preview": "..." }
 
 media_transcribe(path="meeting.mp4", start_sec=600, max_secs=600, out_path="meeting.txt")
 → ... repeat while has_more is true

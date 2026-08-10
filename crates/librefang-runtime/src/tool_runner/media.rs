@@ -337,11 +337,14 @@ fn window_continuation(
         };
     };
     // A window is "full" only within a tolerance: the produced stream ends on a packet boundary, so an exactly-covered window still lands a few milliseconds short and a strict comparison would call every window the last one.
-    let has_more = consumed >= window.max_secs - WINDOW_COMPLETE_TOLERANCE_SECS;
+    //
+    // `consumed > 0.0` is part of the condition rather than only of the cursor below.
+    // For a `max_secs` under the tolerance — which `parse_window` permits, it only rejects zero — the tolerance alone would call a window that produced *nothing* full, and the caller would be told there is more with nowhere to resume from.
+    // The two fields have to agree: "there is more" is only meaningful alongside a place to continue.
+    let has_more = consumed > 0.0 && consumed >= window.max_secs - WINDOW_COMPLETE_TOLERANCE_SECS;
     WindowContinuation {
         has_more,
-        // A window that produced nothing cannot advance the cursor; treating it as progress would spin on the same offset.
-        next_start_sec: (has_more && consumed > 0.0).then_some(window.start_sec + consumed),
+        next_start_sec: has_more.then_some(window.start_sec + consumed),
     }
 }
 
@@ -1315,8 +1318,7 @@ mod transcribe_window_tests {
         json
     }
 
-    /// A call that names no window field stays on the whole-file path, so
-    /// every pre-#6748 caller keeps its exact behaviour and gains no ffmpeg hop.
+    /// A call that names no window field stays on the whole-file path, so every pre-#6748 caller keeps its exact behaviour and gains no ffmpeg hop.
     #[test]
     fn absent_window_fields_mean_no_window() {
         assert!(parse_window(&input(serde_json::json!({"path": "a.mp3"})))
@@ -1332,9 +1334,7 @@ mod transcribe_window_tests {
         );
     }
 
-    /// Naming one field opts into windowing with the other defaulted — asking
-    /// for "the first ten minutes" should not require spelling out that it
-    /// starts at zero.
+    /// Naming one field opts into windowing with the other defaulted — asking for "the first ten minutes" should not require spelling out that it starts at zero.
     #[test]
     fn either_field_alone_opts_into_windowing() {
         let only_max = parse_window(&input(serde_json::json!({"max_secs": 120})))
@@ -1368,9 +1368,7 @@ mod transcribe_window_tests {
         }
     }
 
-    /// The preview is counted in characters, not bytes: a byte-based cut would
-    /// split a multi-byte codepoint and produce invalid output for exactly the
-    /// non-Latin recordings this feature is aimed at.
+    /// The preview is counted in characters, not bytes: a byte-based cut would split a multi-byte codepoint and produce invalid output for exactly the non-Latin recordings this feature is aimed at.
     #[test]
     fn preview_truncates_on_character_boundaries() {
         let cyrillic: String = "я".repeat(OUT_PATH_PREVIEW_CHARS + 50);
@@ -1382,11 +1380,7 @@ mod transcribe_window_tests {
         assert_eq!(preview_of(short), short, "no ellipsis when nothing was cut");
     }
 
-    /// Windows assemble into one artefact: the first truncates, later ones
-    /// append, and the reported size and digest describe the whole file rather
-    /// than the last fragment — otherwise a caller could not verify what it
-    /// ended up with.
-    ///
+    /// Windows assemble into one artefact: the first truncates, later ones append, and the reported size and digest describe the whole file rather than the last fragment — otherwise a caller could not verify what it ended up with.
     /// The separator is the load-bearing part.
     /// A window boundary lands mid-sentence by design and each window arrives already trimmed, so without it the last word of one window fuses to the first of the next at every boundary — the common case, not an edge case.
     #[tokio::test]
@@ -1425,8 +1419,7 @@ mod transcribe_window_tests {
         assert_ne!(first.sha256, second.sha256);
     }
 
-    /// An append onto a file that does not exist yet (a caller resuming a walk
-    /// whose artefact was cleaned up) must not open with a stray separator.
+    /// An append onto a file that does not exist yet (a caller resuming a walk whose artefact was cleaned up) must not open with a stray separator.
     #[tokio::test]
     async fn append_to_a_missing_file_does_not_lead_with_a_separator() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1454,9 +1447,7 @@ mod transcribe_window_tests {
         assert!(full.has_more);
         assert_eq!(full.next_start_sec, Some(700.0));
 
-        // Short by less than one Opus packet still counts as full: the stream
-        // ends on a packet boundary, so a strict comparison would call every
-        // window the last one.
+        // Short by less than one Opus packet still counts as full: the stream ends on a packet boundary, so a strict comparison would call every window the last one.
         let nearly_full = window_continuation(w(600.0), Some(599.9));
         assert!(nearly_full.has_more);
         assert_eq!(nearly_full.next_start_sec, Some(699.9));
@@ -1467,21 +1458,37 @@ mod transcribe_window_tests {
         assert_eq!(short.next_start_sec, None);
 
         // Unknown duration stops the walk rather than assuming a full window.
-        // Assuming would advance past the end, get the same unreadable shape
-        // again, and never terminate.
+        // Assuming would advance past the end, get the same unreadable shape again, and never terminate.
         let unknown = window_continuation(w(600.0), None);
         assert!(!unknown.has_more);
         assert_eq!(unknown.next_start_sec, None);
 
-        // A window that produced nothing cannot advance the cursor; without
-        // this the walk would spin on one offset forever.
+        // A window that produced nothing cannot advance the cursor, and must not claim there is more either — with `max_secs` under the tolerance the comparison alone would call an empty window full, and the caller would be told to continue with nowhere to continue from.
+        // Asserting only on `next_start_sec` here is what let the two fields disagree in the first place.
         let empty = window_continuation(w(0.1), Some(0.0));
+        assert!(!empty.has_more, "an empty window is not a full one");
         assert_eq!(empty.next_start_sec, None);
+
+        // The two fields agree in every case, which is the invariant a caller relies on: `has_more` without a resume point is unactionable.
+        for (max_secs, consumed) in [
+            (600.0, Some(600.0)),
+            (600.0, Some(599.9)),
+            (600.0, Some(340.0)),
+            (600.0, None),
+            (0.1, Some(0.0)),
+            (0.1, Some(0.05)),
+            (0.2, Some(0.2)),
+        ] {
+            let c = window_continuation(w(max_secs), consumed);
+            assert_eq!(
+                c.has_more,
+                c.next_start_sec.is_some(),
+                "has_more and next_start_sec disagreed for max_secs={max_secs}, consumed={consumed:?}"
+            );
+        }
     }
 
-    /// A restart of the walk (`start_sec = 0`) must not leave the previous
-    /// run's tail behind it, which is what makes re-running a failed
-    /// transcription safe.
+    /// A restart of the walk (`start_sec = 0`) must not leave the previous run's tail behind it, which is what makes re-running a failed transcription safe.
     #[tokio::test]
     async fn a_fresh_window_truncates_the_previous_transcript() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1504,9 +1511,7 @@ mod transcribe_window_tests {
         assert_eq!(on_disk, "new.");
     }
 
-    /// `out_path` goes through the same sandbox resolution as `file_write` and
-    /// `web_fetch_to_file`; a transcript must not be writable outside the
-    /// agent's roots.
+    /// `out_path` goes through the same sandbox resolution as `file_write` and `web_fetch_to_file`; a transcript must not be writable outside the agent's roots.
     #[tokio::test]
     async fn out_path_cannot_escape_the_workspace() {
         let root = tempfile::tempdir().expect("tempdir");
