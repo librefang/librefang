@@ -98,7 +98,7 @@ fn schema() -> Schema {
     Schema::new("echo", "Echo adapter")
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     run_stdio_main(schema, || Ok(EchoAdapter)).await
 }

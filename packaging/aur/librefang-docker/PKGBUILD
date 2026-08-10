@@ -1,7 +1,7 @@
 pkgname=librefang-docker
 pkgver=2026.6.24_beta.23
 _upstream_ver=${pkgver/_/-}
-pkgrel=1
+pkgrel=2
 pkgdesc="Container-managed LibreFang Agent OS service"
 arch=('any')
 url="https://librefang.ai"
@@ -19,9 +19,9 @@ source=(
 )
 sha256sums=(
   'd4330a3004bd990da1830124b1ccccb51129ebb8b5a70a0b79d5626b7c1226a0'
-  'd50c1a023955a462032a9a469225f3553279982acff154327df82059eaed75db'
+  '4cda49f3a630072e8b57579d908e4c4a97a9fe976e3b2b735f6f3e75ffa42da6'
   'b49ff94ecd34a4b9a6edc5a7be614ecc31f9f93024434d24b771138dd4a8e0a4'
-  'a031632040d18af3a63a169a2ce5c5bb14f0533e96383a742cbb44d153bb5f58'
+  '99992ba5a6fe18d67e04e165af8b4c038c6a4db1b3510a501d655c0ccb92dc6f'
 )
 
 package() {

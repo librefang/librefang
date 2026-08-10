@@ -2338,7 +2338,7 @@ mod tests {
             ..KernelConfig::default()
         };
 
-        let kernel = Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).unwrap());
+        let kernel = Arc::new(crate::routes::boot_test_kernel(config));
         let idempotency_store: Arc<
             dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync,
         > = Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(

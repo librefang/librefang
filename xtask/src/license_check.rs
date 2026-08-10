@@ -50,6 +50,30 @@ fn has_commons_clause(license: &str) -> bool {
     lc.contains("commons clause") || lc.contains("commons-clause")
 }
 
+fn license_expression_is_denied(license: &str, denied: &[&str]) -> Result<bool, spdx::ParseError> {
+    let expression = spdx::Expression::parse(license)?;
+    let can_choose_permitted_terms = expression.evaluate(|requirement| {
+        let Some(id) = requirement.license.id() else {
+            return false;
+        };
+        !denied.iter().any(|denied_id| *denied_id == id.name)
+    });
+    Ok(!can_choose_permitted_terms)
+}
+
+fn load_cargo_metadata(root: &Path) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let output = Command::new("cargo")
+        .args(["metadata", "--format-version=1"])
+        .current_dir(root)
+        .output()?;
+
+    if !output.status.success() {
+        return Err("cargo metadata failed".into());
+    }
+
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
 fn check_cargo_deny(root: &Path, denied: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
     // Try cargo-deny first
     let deny_check = Command::new("cargo").args(["deny", "--version"]).output();
@@ -68,16 +92,7 @@ fn check_cargo_deny(root: &Path, denied: &[&str]) -> Result<(), Box<dyn std::err
 
     // Fallback: use cargo metadata
     println!("cargo-deny not found, using cargo metadata fallback...");
-    let output = Command::new("cargo")
-        .args(["metadata", "--format-version=1", "--no-deps"])
-        .current_dir(root)
-        .output()?;
-
-    if !output.status.success() {
-        return Err("cargo metadata failed".into());
-    }
-
-    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let metadata = load_cargo_metadata(root)?;
     let mut violations = Vec::new();
     let mut unverified = Vec::new();
     let mut checked = 0;
@@ -106,22 +121,31 @@ fn check_cargo_deny(root: &Path, denied: &[&str]) -> Result<(), Box<dyn std::err
                     "  {} ({}) — Commons Clause rider detected",
                     name, license
                 ));
+                continue;
             }
 
-            // Check against the explicit deny list.
-            for &deny in denied {
-                if license.contains(deny) {
-                    violations.push(format!("  {} ({}) — {}", name, license, deny));
-                    break; // one violation per crate is enough
+            // Evaluate the full SPDX expression. An OR expression is accepted
+            // when at least one branch avoids denied licenses; every term of
+            // an AND expression must be permitted.
+            match license_expression_is_denied(license, denied) {
+                Ok(true) => {
+                    violations.push(format!("  {} ({}) — denied SPDX expression", name, license));
+                }
+                Ok(false) => {}
+                Err(_) => {
+                    unverified.push(format!(
+                        "  {} ({}) — invalid or non-SPDX expression (manual review needed)",
+                        name, license
+                    ));
                 }
             }
         }
     }
 
-    println!("  Checked {} workspace crates", checked);
+    println!("  Checked {} Rust packages", checked);
 
     if !unverified.is_empty() {
-        println!("  Unverified (no license field) — manual review required:");
+        println!("  Unverified licenses — manual review required:");
         for u in &unverified {
             println!("WARN {}", u);
         }
@@ -196,4 +220,37 @@ pub fn run(args: LicenseCheckArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("License check complete.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cargo_metadata_fallback_includes_third_party_dependencies() {
+        let metadata = load_cargo_metadata(&repo_root()).unwrap();
+        let packages = metadata["packages"].as_array().unwrap();
+
+        assert!(
+            packages.iter().any(|pkg| pkg["source"].as_str().is_some()),
+            "fallback metadata omitted every third-party dependency"
+        );
+    }
+
+    #[test]
+    fn spdx_or_expression_can_choose_a_permitted_license() {
+        let denied = ["GPL-2.0-only"];
+        assert!(!license_expression_is_denied("GPL-2.0-only OR BSD-3-Clause", &denied).unwrap());
+    }
+
+    #[test]
+    fn spdx_and_expression_requires_every_license() {
+        let denied = ["GPL-2.0-only"];
+        assert!(license_expression_is_denied("MIT AND GPL-2.0-only", &denied).unwrap());
+    }
+
+    #[test]
+    fn custom_license_refs_fail_closed_when_required() {
+        assert!(license_expression_is_denied("MIT AND LicenseRef-Proprietary", &[]).unwrap());
+    }
 }

@@ -137,7 +137,14 @@ fn do_stream(
                 _ = tx.closed() => return,
                 next = stream.next() => match next {
                     Some(Ok(chunk)) => chunk,
-                    _ => break,
+                    Some(Err(e)) => {
+                        let _ = tx.send(serde_json::json!({
+                            "error": format!("stream error: {}", e),
+                            "status": 0,
+                        })).await;
+                        return;
+                    }
+                    None => break,
                 },
             };
             buffer.extend_from_slice(&chunk);
@@ -220,8 +227,15 @@ pub struct LibreFang {
 
 impl LibreFang {
     pub fn new(base_url: impl Into<String>) -> Self {
+        Self::with_client(base_url, Client::new())
+    }
+
+    /// Creates an SDK client using a caller-configured HTTP client.
+    ///
+    /// Use this to configure authentication headers, cookies, proxies,
+    /// TLS, or other [`reqwest::Client`] behavior shared by all resources.
+    pub fn with_client(base_url: impl Into<String>, client: Client) -> Self {
         let base_url = base_url.into().trim_end_matches('/').to_string();
-        let client = Client::new();
         Self {
             a2a: Arc::new(A2AResource::new(base_url.clone(), client.clone())),
             agents: Arc::new(AgentsResource::new(base_url.clone(), client.clone())),

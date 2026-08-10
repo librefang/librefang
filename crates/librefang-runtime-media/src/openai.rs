@@ -48,6 +48,16 @@ impl OpenAIMediaDriver {
     }
 }
 
+/// Whether `/images/generations` accepts a `response_format` parameter for this model.
+///
+/// The DALL·E models take `response_format` as `"url"` or `"b64_json"`.
+/// The `gpt-image-*` family rejects the parameter outright with `400 Unknown parameter: 'response_format'` and always returns base64, so sending it makes every image request fail against those models.
+///
+/// Defaulting to `true` for unrecognised names keeps third-party OpenAI-compatible endpoints on the behaviour they have today; only the family known to reject it is special-cased.
+fn image_model_accepts_response_format(model: &str) -> bool {
+    !model.starts_with("gpt-image")
+}
+
 #[async_trait]
 impl MediaDriver for OpenAIMediaDriver {
     fn capabilities(&self) -> Vec<MediaCapability> {
@@ -88,8 +98,11 @@ impl MediaDriver for OpenAIMediaDriver {
             "prompt": request.prompt,
             "n": request.count,
             "size": size,
-            "response_format": "b64_json",
         });
+
+        if image_model_accepts_response_format(model) {
+            body["response_format"] = serde_json::json!("b64_json");
+        }
 
         if let Some(ref q) = request.quality {
             body["quality"] = serde_json::json!(q);
@@ -326,8 +339,10 @@ impl MediaDriver for GenericOpenAICompatMediaDriver {
             "prompt": request.prompt,
             "n": request.count,
             "size": size,
-            "response_format": "b64_json",
         });
+        if image_model_accepts_response_format(model) {
+            body["response_format"] = serde_json::json!("b64_json");
+        }
         if let Some(ref q) = request.quality {
             body["quality"] = serde_json::json!(q);
         }
@@ -397,6 +412,27 @@ impl MediaDriver for GenericOpenAICompatMediaDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `gpt-image-*` rejects `response_format` with `400 Unknown parameter`, so sending it makes every image request against that family fail.
+    /// DALL·E requires it to get base64 back instead of an expiring URL.
+    #[test]
+    fn gpt_image_models_do_not_accept_response_format() {
+        assert!(!image_model_accepts_response_format("gpt-image-1"));
+        assert!(!image_model_accepts_response_format("gpt-image-1-mini"));
+    }
+
+    #[test]
+    fn dalle_models_still_accept_response_format() {
+        assert!(image_model_accepts_response_format("dall-e-3"));
+        assert!(image_model_accepts_response_format("dall-e-2"));
+    }
+
+    /// Unknown names keep today's behaviour so third-party OpenAI-compatible endpoints are not changed by this fix.
+    #[test]
+    fn unknown_image_models_keep_sending_response_format() {
+        assert!(image_model_accepts_response_format("flux-pro"));
+        assert!(image_model_accepts_response_format(""));
+    }
 
     #[test]
     fn test_driver_capabilities() {
