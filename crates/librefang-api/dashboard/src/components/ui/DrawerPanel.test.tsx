@@ -177,4 +177,38 @@ describe("DrawerPanel", () => {
     // applies (silent), not the external-close bubble-up.
     expect(pickerOnCloseCalls).toBe(0);
   });
+
+  it("does not close a new owner when the previous open panel unmounts", () => {
+    const { unmount } = render(
+      <DrawerPanel isOpen onClose={() => {}} title="picker">
+        <p>picker body</p>
+      </DrawerPanel>,
+    );
+
+    act(() => {
+      useDrawerStore.getState().open({
+        title: "config",
+        body: <p>config body</p>,
+      });
+    });
+    expect(useDrawerStore.getState().content?.title).toBe("config");
+
+    unmount();
+
+    expect(useDrawerStore.getState().isOpen).toBe(true);
+    expect(useDrawerStore.getState().content?.title).toBe("config");
+  });
+
+  it("clears stale content when the drawer closes", () => {
+    render(
+      <DrawerPanel isOpen onClose={() => {}} title="picker">
+        <p>picker body</p>
+      </DrawerPanel>,
+    );
+
+    act(() => useDrawerStore.getState().close());
+
+    expect(useDrawerStore.getState().isOpen).toBe(false);
+    expect(useDrawerStore.getState().content).toBeNull();
+  });
 });

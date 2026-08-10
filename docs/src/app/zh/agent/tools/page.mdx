@@ -36,7 +36,7 @@ Lazy loading 在 manifest 用 `lazy_tools = true` 按 agent 开启。关掉则�
 
 | 工具 | 参数 | 用途 |
 |---|---|---|
-| `agent_send` | `agent_id`、`message` | 给本 daemon 内别的 agent 发消息并等回复。走进程内 kernel 路由器;受 agent_call 深度上限约束。 |
+| `agent_send` | `agent_id`、`message`、可选 `async` | 给本 daemon 内别的 agent 发消息。默认非阻塞:立即返回 `task_id`,对方回复完成后投递到调用方 session。传 `async: false` 则阻塞并直接拿到回复。走进程内 kernel 路由器;受 agent_call 深度上限约束。 |
 | `agent_spawn` | `template`、可选 `name`、`goal` | 从模板 spawn 子 agent。返回新的 `agent_id`。子 agent 默认禁 `agent_spawn` 和 `agent_kill` 防止 fork 炸弹。 |
 | `agent_list` | — | 列出可访问 agent(id、name、status)。 |
 | `agent_find` | `query` | 按名字、ID 或 tag 搜 agent。 |

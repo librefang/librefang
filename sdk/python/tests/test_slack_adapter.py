@@ -32,6 +32,7 @@ def _adapter(**env):
         "SLACK_UNFURL_LINKS": "",
         "SLACK_FORCE_FLAT_REPLIES": "",
         "SLACK_REACTIONS": "",
+        "SLACK_PROGRESS_CARD": "",
         "SLACK_ACCOUNT_ID": "",
     }
     for k, v in defaults.items():
@@ -51,6 +52,7 @@ def test_default_api_base_and_tokens():
     assert a.unfurl_links is None
     assert a.force_flat_replies is False
     assert a.reactions_enabled is True
+    assert a.progress_card_enabled is True
     assert a.account_id is None
 
 
@@ -98,6 +100,19 @@ def test_reactions_default_true():
     assert a_off.reactions_enabled is False
     a_0 = _adapter(SLACK_REACTIONS="0")
     assert a_0.reactions_enabled is False
+
+
+def test_progress_card_defaults_to_following_reactions():
+    # #6730 decoupled the card from the receipt, but an operator already running SLACK_REACTIONS=false for total silence must not start receiving cards on upgrade — so the card's default follows the receipt knob rather than being an unconditional true.
+    assert _adapter().progress_card_enabled is True
+    assert _adapter(SLACK_REACTIONS="false").progress_card_enabled is False
+    # …and each is independently overridable, which is the point of #6730.
+    a_card_only = _adapter(SLACK_REACTIONS="false", SLACK_PROGRESS_CARD="true")
+    assert a_card_only.reactions_enabled is False
+    assert a_card_only.progress_card_enabled is True
+    a_receipt_only = _adapter(SLACK_PROGRESS_CARD="false")
+    assert a_receipt_only.reactions_enabled is True
+    assert a_receipt_only.progress_card_enabled is False
 
 
 def test_account_id_passthrough():
@@ -724,7 +739,7 @@ def test_finalize_pending_reaction_uses_ts(monkeypatch):
     monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
     a = _adapter()
     a._track_pending_reaction("C01", "1700000000.0", "eyes")
-    a._finalize_pending_reaction("C01", "1700000000.0")
+    a._finalize_pending_reaction("C01", "1700000000.0", "white_check_mark")
     urls = [c["url"] for c in fake.calls]
     assert urls[0].endswith("/reactions.remove")
     assert urls[1].endswith("/reactions.add")
@@ -736,8 +751,42 @@ def test_finalize_pending_reaction_disabled_noop(monkeypatch):
     fake = _FakeUrlopen([])
     monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
     a = _adapter(SLACK_REACTIONS="false")
-    a._finalize_pending_reaction("C01", "1700000000.0")
+    a._finalize_pending_reaction("C01", "1700000000.0", "white_check_mark")
     assert fake.calls == []
+
+
+def test_finalize_pending_reaction_unknown_key_is_noop(monkeypatch):
+    # #6731: the "first pending entry in this channel" fallback is gone.
+    # A miss must touch nothing — the old fallback flipped an unrelated sibling message's receipt instead, which is exactly what happened on every in-thread reply (the send hook keyed off the thread root).
+    fake = _FakeUrlopen([])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    a._track_pending_reaction("C01", "SIBLING", "eyes")
+    a._finalize_pending_reaction("C01", "MINE", "white_check_mark")
+    assert fake.calls == []
+    assert ("C01", "SIBLING") in a._pending_reactions
+
+
+def test_finalize_pending_reaction_empty_emoji_removes_only(monkeypatch):
+    # The daemon's `clear_done_reaction` knob puts an empty emoji on the terminal frame — remove the eyes, add nothing.
+    fake = _FakeUrlopen([(200, {"ok": True})])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    a._track_pending_reaction("C01", "T1", "eyes")
+    a._finalize_pending_reaction("C01", "T1", None)
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["url"].endswith("/reactions.remove")
+
+
+def test_finalize_pending_reaction_is_idempotent(monkeypatch):
+    # A repeated terminal phase must not add a second check: the first call pops the pending entry, the second finds nothing.
+    fake = _FakeUrlopen([(200, {"ok": True}), (200, {"ok": True})])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    a._track_pending_reaction("C01", "T1", "eyes")
+    a._finalize_pending_reaction("C01", "T1", "white_check_mark")
+    a._finalize_pending_reaction("C01", "T1", "white_check_mark")
+    assert len(fake.calls) == 2
 
 
 # ---- _handle_envelope state machine -------------------------------
@@ -769,9 +818,7 @@ class _FakeWs:
 
 
 def test_handle_events_api_acks_and_emits(monkeypatch):
-    # We must monkeypatch reactions urlopen because the events_api
-    # path issues `reactions.add` (eyes) synchronously after parsing.
-    fake = _FakeUrlopen([(200, {"ok": True})])
+    fake = _FakeUrlopen([])  # receiving a message issues no HTTP (#6731)
     monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
     a = _adapter()
     a.bot_user_id = "UBOT"
@@ -792,9 +839,30 @@ def test_handle_events_api_acks_and_emits(monkeypatch):
     # One emitted message event.
     assert len(emitted) == 1
     assert emitted[0]["params"]["content"] == {"Text": "hello"}
-    # Reactions.add was called.
-    assert fake.calls
-    assert fake.calls[0]["url"].endswith("/reactions.add")
+
+
+def test_receive_adds_no_reaction(monkeypatch):
+    # #6731: the eyes used to be added here, on receive.
+    # The daemon can still decline the turn afterwards (mention-only group gating, a rate limit, a slash command it handles itself), and nothing ever came back to clear it — so a declined message kept a permanent eyes.
+    # The receipt now rides the `queued` lifecycle phase instead, which only fires for a turn that is actually dispatched.
+    fake = _FakeUrlopen([])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    a.bot_user_id = "UBOT"
+    emitted = []
+    a._handle_envelope(
+        {
+            "type": "events_api",
+            "envelope_id": "env-gate",
+            "payload": {"event": _evt()},
+        },
+        ws=_FakeWs(),
+        emit=emitted.append,
+    )
+    assert len(emitted) == 1
+    assert fake.calls == []
+    # Nothing was tracked either, so there is no leaked pending entry a later message's terminal phase could accidentally flip.
+    assert a._pending_reactions == {}
 
 
 def test_handle_interactive_acks_and_emits(monkeypatch):
@@ -922,20 +990,15 @@ async def test_on_send_force_flat_replies_drops_thread_ts(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_on_send_force_flat_finalizes_correct_message(monkeypatch):
-    # Regression (#5302): in force-flat mode the *post* drops thread_ts,
-    # but reaction finalization must still target the inbound message
-    # (cmd.thread_id) instead of falling back to "first pending in the
-    # channel" — otherwise concurrent messages flip the wrong :eyes:.
+async def test_on_send_no_longer_touches_reactions(monkeypatch):
+    # #6731: the send hook used to finalize the receipt, keyed on `cmd.thread_id` — the thread ROOT ts for an in-thread reply, while the eyes was tracked under the message's own ts.
+    # The exact key missed and the deleted fallback flipped an arbitrary sibling instead.
+    # Finalization now lives on the lifecycle stream, so `on_send` posts and stops.
     fake = _FakeUrlopen([
-        (200, {"ok": True}),  # chat.postMessage
-        (200, {"ok": True}),  # reactions.remove
-        (200, {"ok": True}),  # reactions.add
+        (200, {"ok": True}),  # chat.postMessage — the only call expected
     ])
     monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
     a = _adapter(SLACK_FORCE_FLAT_REPLIES="true")
-    # Two concurrent inbound messages got :eyes: in the same channel; T0
-    # is older, so the buggy fallback would have flipped it instead of T1.
     a._track_pending_reaction("C01", "T0", "eyes")
     a._track_pending_reaction("C01", "T1", "eyes")
 
@@ -947,19 +1010,13 @@ async def test_on_send_force_flat_finalizes_correct_message(monkeypatch):
         user = {}
 
     await a.on_send(_Cmd())
-    # The post is flat (force_flat dropped thread_ts)...
+    # The post is flat (force_flat dropped thread_ts)…
     post_body = json.loads(fake.calls[0]["body_raw"])
     assert "thread_ts" not in post_body
-    # ...but finalization targets T1, not the older T0.
-    assert fake.calls[1]["url"].endswith("/reactions.remove")
-    assert fake.calls[2]["url"].endswith("/reactions.add")
-    assert json.loads(fake.calls[1]["body_raw"])["timestamp"] == "T1"
-    add_body = json.loads(fake.calls[2]["body_raw"])
-    assert add_body["timestamp"] == "T1"
-    assert add_body["name"] == "white_check_mark"
-    # T1 finalized & removed; T0 stays pending (it was a different message).
-    assert ("C01", "T1") not in a._pending_reactions
+    # …and nothing else happened: no reactions call, both entries untouched.
+    assert len(fake.calls) == 1
     assert ("C01", "T0") in a._pending_reactions
+    assert ("C01", "T1") in a._pending_reactions
 
 
 @pytest.mark.asyncio
@@ -1158,6 +1215,140 @@ def test_mrkdwn_table_becomes_code_block():
     )
 
 
+# ---- blank-line collapsing (#6730) ---------------------------------
+
+
+def test_markdown_collapses_blank_line_runs():
+    # `_convert_md_lines` is a 1:1 line mapper, so a model that pads its answer with blank lines produced a wall of whitespace in Slack.
+    assert sa._markdown_to_mrkdwn("a\n\n\n\n\nb") == "a\n\nb"
+
+
+def test_markdown_preserves_single_blank_line():
+    # One blank line is Slack's paragraph separator — collapsing it too would run paragraphs together.
+    assert sa._markdown_to_mrkdwn("a\n\nb") == "a\n\nb"
+    assert sa._markdown_to_mrkdwn("a\nb") == "a\nb"
+
+
+def test_markdown_preserves_blank_lines_inside_fenced_code():
+    # The collapse runs on the code-MASKED string, where a fenced block is a single token — a naive pre-mask `re.sub` would reflow code.
+    src = "intro\n\n```\nx = 1\n\n\n\ny = 2\n```\n\n\n\nouttro"
+    out = sa._markdown_to_mrkdwn(src)
+    assert "x = 1\n\n\n\ny = 2" in out
+    assert out.endswith("```\n\nouttro")
+
+
+def test_markdown_preserves_blank_lines_inside_an_unclosed_fence():
+    # A truncated model response ends mid-block.
+    # Slack renders an unterminated ``` as code to the end of the message, so the collapse must not reflow what the user sees as code either.
+    src = "intro\n\n\n\n```\nx = 1\n\n\n\ny = 2"
+    out = sa._markdown_to_mrkdwn(src)
+    assert "x = 1\n\n\n\ny = 2" in out
+    # Prose before the fence is still collapsed.
+    assert out.startswith("intro\n\n```")
+
+
+def test_markdown_still_collapses_inside_a_tilde_fence():
+    # `~~~` is GitHub-flavoured Markdown that Slack does not render as code, so its contents are prose and the blank-line collapse applies.
+    # Pinned so the deliberate boundary is not "fixed" into masking it.
+    src = "~~~\na\n\n\n\nb\n~~~"
+    assert "a\n\nb" in sa._markdown_to_mrkdwn(src)
+
+
+def test_markdown_collapses_run_left_by_empty_header():
+    # A content-less ATX header (hashes, a space, nothing else) emits an empty line of its own, so the converter can manufacture a blank-line run that was not in the source at all.
+    assert sa._markdown_to_mrkdwn("a\n\n## \n\nb") == "a\n\nb"
+
+
+# ---- interactive section cap (#6730) -------------------------------
+
+
+def test_build_block_kit_caps_section_text():
+    # Slack rejects a `section` over 3000 chars and `_post_message` skips its chunking when blocks are present, so a long interactive reply used to be rejected wholesale and dropped with only a log line.
+    blocks = sa._build_block_kit("x" * 9000, [[{"label": "OK", "action": "ok"}]])
+    sections = [b for b in blocks if b["type"] == "section"]
+    assert len(sections) == 3
+    for s in sections:
+        assert len(s["text"]["text"]) <= sa.SLACK_MSG_LIMIT
+    # The full text survives across the sections.
+    assert sum(len(s["text"]["text"]) for s in sections) == 9000
+    # Buttons still attach after the text.
+    assert blocks[-1]["type"] == "actions"
+
+
+def test_build_block_kit_never_exceeds_block_limit():
+    # Slack also caps a message at 50 blocks.
+    # Text is truncated to fit; the buttons — the functional payload — are never dropped.
+    buttons = [[{"label": f"B{i}", "action": f"a{i}"}] for i in range(3)]
+    blocks = sa._build_block_kit("y" * 400_000, buttons)
+    assert len(blocks) <= sa.MAX_BLOCKS_PER_MESSAGE
+    assert len([b for b in blocks if b["type"] == "actions"]) == 3
+    assert any("truncated" in b.get("text", {}).get("text", "")
+               for b in blocks if b["type"] == "section")
+
+
+def test_build_block_kit_button_rows_alone_exceed_block_cap():
+    # When the rows alone reach the cap there is no room for text, so the payload is the marker plus as many rows as still fit.
+    # The whole message must stay within the cap: Slack rejects an over-cap message, so emitting 51 blocks to "keep every button" delivers no buttons.
+    buttons = [[{"label": f"B{i}", "action": f"a{i}"}]
+               for i in range(sa.MAX_BLOCKS_PER_MESSAGE)]
+    blocks = sa._build_block_kit("some text", buttons)
+    assert len(blocks) <= sa.MAX_BLOCKS_PER_MESSAGE
+    sections = [b for b in blocks if b["type"] == "section"]
+    # No room for the text itself, just the truncation marker — never a stray real chunk of the text (the unclamped negative-slice bug).
+    assert len(sections) == 1
+    assert "truncated" in sections[0]["text"]["text"]
+    assert len([b for b in blocks if b["type"] == "actions"]) == \
+        sa.MAX_BLOCKS_PER_MESSAGE - 1
+
+
+def test_build_block_kit_keeps_text_when_rows_exactly_fill_the_budget():
+    # Regression: the marker slot used to be reserved before checking whether truncation was needed, so at exactly MAX-1 rows the real text was dropped and replaced by "_(message truncated)_" even though one section plus the rows is exactly the cap.
+    # `/agents` builds one row per agent with no cap, so a daemon with 49 agents hit this.
+    rows = sa.MAX_BLOCKS_PER_MESSAGE - 1
+    buttons = [[{"label": f"B{i}", "action": f"a{i}"}] for i in range(rows)]
+    blocks = sa._build_block_kit("Select an agent:", buttons)
+
+    assert len(blocks) == sa.MAX_BLOCKS_PER_MESSAGE
+    sections = [b for b in blocks if b["type"] == "section"]
+    assert len(sections) == 1
+    assert sections[0]["text"]["text"] == "Select an agent:"
+    assert not any("truncated" in b.get("text", {}).get("text", "")
+                   for b in blocks if b["type"] == "section")
+    assert len([b for b in blocks if b["type"] == "actions"]) == rows
+
+
+@pytest.mark.parametrize("rows", [1, 10, 47, 48, 49, 50, 60])
+def test_build_block_kit_never_exceeds_cap_for_any_row_count(rows):
+    # The cap is a hard Slack limit, so it has to hold across the whole range rather than at the two counts the other tests happen to use.
+    buttons = [[{"label": f"B{i}", "action": f"a{i}"}] for i in range(rows)]
+    blocks = sa._build_block_kit("some text", buttons)
+    assert len(blocks) <= sa.MAX_BLOCKS_PER_MESSAGE, \
+        f"{rows} rows produced {len(blocks)} blocks"
+
+
+def test_post_message_with_blocks_bounds_fallback_text(monkeypatch):
+    # With blocks, `text` is only the notification preview — the blocks carry the content.
+    # It is bounded rather than chunked, because chunking it would post the same blocks once per chunk.
+    fake = _FakeUrlopen([(200, {"ok": True})])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    long_text = "z" * 9000
+    a._post_message("C01", long_text, blocks=sa._build_block_kit(long_text, []))
+    assert len(fake.calls) == 1
+    body = json.loads(fake.calls[0]["body_raw"])
+    assert len(body["text"]) == sa.SLACK_MSG_LIMIT
+    # …while the blocks still carry all 9000 characters.
+    assert sum(len(b["text"]["text"]) for b in body["blocks"]) == 9000
+
+
+def test_build_block_kit_short_text_stays_one_section():
+    # No behaviour change for the common case.
+    blocks = sa._build_block_kit("Hello", [])
+    assert blocks == [
+        {"type": "section", "text": {"type": "mrkdwn", "text": "Hello"}},
+    ]
+
+
 @pytest.mark.asyncio
 async def test_on_send_converts_markdown_to_mrkdwn(monkeypatch):
     fake = _FakeUrlopen([(200, {"ok": True})])
@@ -1181,9 +1372,11 @@ async def test_on_send_converts_markdown_to_mrkdwn(monkeypatch):
 
 def _reaction(phase, tool_name=None, channel_id="C01", message_id="T1",
               emoji="x"):
-    """Build an AgentPhase lifecycle `reaction` command the way the
-    bridge serializes it (channel_id, message_id, emoji, phase,
-    tool_name)."""
+    """Build an AgentPhase lifecycle `reaction` command the way the bridge serializes it (channel_id, message_id, emoji, phase, tool_name).
+
+    `emoji` is the wire emoji the daemon computed for the phase.
+    Its only load-bearing value is the empty string, which is the `clear_done_reaction` signal on a terminal frame; the adapter maps every other value to a Slack emoji *name* itself, because `reactions.add` takes `white_check_mark`, not the `✅` codepoint.
+    """
     return sa.protocol.Reaction(channel_id, message_id, emoji, phase,
                                 tool_name)
 
@@ -1236,17 +1429,132 @@ def test_build_task_progress_blocks_bounds_long_step_list():
 
 @pytest.mark.asyncio
 async def test_phase_single_step_posts_no_card(monkeypatch):
-    # A turn that never runs a tool (queued → thinking → done) posts no
-    # card — single-step UX stays exactly as before (#6451).
-    fake = _FakeUrlopen([])  # no HTTP expected
+    # A turn that never runs a tool (queued → thinking → done) posts no card — single-step UX stays exactly as before (#6451).
+    # It does get the receipt reaction, which is the whole point of #6731: the eyes on `queued`, flipped on `done`.
+    fake = _FakeUrlopen([
+        (200, {"ok": True}),  # reactions.add eyes
+        (200, {"ok": True}),  # reactions.remove eyes
+        (200, {"ok": True}),  # reactions.add white_check_mark
+    ])
     monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
     a = _adapter()
     await a.on_command(_reaction("queued"))
     await a.on_command(_reaction("thinking"))
     await a.on_command(_reaction("done"))
-    assert fake.calls == []
+    urls = [c["url"] for c in fake.calls]
+    assert [u.rsplit("/", 1)[-1] for u in urls] == [
+        "reactions.add", "reactions.remove", "reactions.add",
+    ]
+    # No chat.postMessage / chat.update: no card for a single-step turn.
+    assert not any("chat." in u for u in urls)
     # State is cleaned up on the terminal phase.
     assert a._task_progress == {}
+    assert a._pending_reactions == {}
+
+
+@pytest.mark.asyncio
+async def test_queued_phase_adds_eyes(monkeypatch):
+    fake = _FakeUrlopen([(200, {"ok": True})])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_command(_reaction("queued", message_id="TS-Q"))
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["url"].endswith("/reactions.add")
+    body = json.loads(fake.calls[0]["body_raw"])
+    assert body["name"] == "eyes"
+    assert body["timestamp"] == "TS-Q"
+    # Tracked so the terminal phase can flip exactly this message.
+    assert a._pending_reactions == {("C01", "TS-Q"): "eyes"}
+    # `queued` is never rendered, so no card state was materialized —
+    # otherwise every turn would look multi-step.
+    assert a._task_progress == {}
+
+
+@pytest.mark.asyncio
+async def test_done_phase_flips_to_check(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, {"ok": True}),  # eyes
+        (200, {"ok": True}),  # remove
+        (200, {"ok": True}),  # check
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_command(_reaction("queued"))
+    await a.on_command(_reaction("done", emoji="✅"))
+    assert json.loads(fake.calls[1]["body_raw"])["name"] == "eyes"
+    assert fake.calls[1]["url"].endswith("/reactions.remove")
+    add_body = json.loads(fake.calls[2]["body_raw"])
+    assert add_body["name"] == "white_check_mark"
+    assert add_body["timestamp"] == "T1"
+
+
+@pytest.mark.asyncio
+async def test_error_phase_flips_to_x(monkeypatch):
+    # A failed turn used to leave the eyes stuck forever — the send hook never ran because there was no reply.
+    # It now gets an explicit ❌.
+    fake = _FakeUrlopen([
+        (200, {"ok": True}),  # eyes
+        (200, {"ok": True}),  # remove
+        (200, {"ok": True}),  # x
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_command(_reaction("queued"))
+    await a.on_command(_reaction("error", emoji="❌"))
+    assert json.loads(fake.calls[2]["body_raw"])["name"] == "x"
+    assert a._pending_reactions == {}
+
+
+@pytest.mark.asyncio
+async def test_done_with_empty_reaction_removes_only(monkeypatch):
+    # `clear_done_reaction = true` on the daemon side makes the Done frame carry an empty emoji.
+    # Slack must lose the eyes and gain nothing.
+    fake = _FakeUrlopen([
+        (200, {"ok": True}),  # eyes
+        (200, {"ok": True}),  # remove
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_command(_reaction("queued"))
+    await a.on_command(_reaction("done", emoji=""))
+    assert len(fake.calls) == 2
+    assert fake.calls[1]["url"].endswith("/reactions.remove")
+    assert a._pending_reactions == {}
+
+
+@pytest.mark.asyncio
+async def test_in_thread_reply_finalizes_own_message_not_a_sibling(
+    monkeypatch,
+):
+    # #6731 regression guard.
+    # Two turns in flight in one channel; the terminal phase of the second must touch only the second.
+    # The deleted "first pending entry in this channel" fallback flipped the older one.
+    fake = _FakeUrlopen([
+        (200, {"ok": True}),  # eyes on TS-A
+        (200, {"ok": True}),  # eyes on TS-B
+        (200, {"ok": True}),  # remove on TS-B
+        (200, {"ok": True}),  # check on TS-B
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_command(_reaction("queued", message_id="TS-A"))
+    await a.on_command(_reaction("queued", message_id="TS-B"))
+    await a.on_command(_reaction("done", message_id="TS-B", emoji="✅"))
+    assert len(fake.calls) == 4
+    assert json.loads(fake.calls[2]["body_raw"])["timestamp"] == "TS-B"
+    assert json.loads(fake.calls[3]["body_raw"])["timestamp"] == "TS-B"
+    # TS-A is still pending — its own turn has not finished yet.
+    assert a._pending_reactions == {("C01", "TS-A"): "eyes"}
+
+
+@pytest.mark.asyncio
+async def test_terminal_phase_without_queued_adds_nothing(monkeypatch):
+    # Defensive: an adapter that starts mid-turn (restarted sidecar) has no pending entry, so there is no eyes to flip and it must not stamp a bare check onto a message it never marked.
+    fake = _FakeUrlopen([])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_command(_reaction("done", emoji="✅"))
+    assert fake.calls == []
 
 
 @pytest.mark.asyncio
@@ -1301,15 +1609,75 @@ async def test_phase_card_force_flat_omits_thread_ts(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_phase_card_suppressed_when_reactions_disabled(monkeypatch):
-    # SLACK_REACTIONS=false silences all processing-state chatter,
-    # including the task-progress card.
+    # SLACK_REACTIONS=false still silences everything, because the card's default follows it.
+    # Both indicators off = zero HTTP.
     fake = _FakeUrlopen([])  # no HTTP expected
     monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
     a = _adapter(SLACK_REACTIONS="false")
+    await a.on_command(_reaction("queued"))
     await a.on_command(_reaction("thinking"))
     await a.on_command(_reaction("tool_use", tool_name="web_fetch"))
     await a.on_command(_reaction("done"))
     assert fake.calls == []
+
+
+@pytest.mark.asyncio
+async def test_progress_card_disabled_no_card_post(monkeypatch):
+    # #6730: SLACK_PROGRESS_CARD=false silences the card while the receipt keeps working.
+    # Before the split, the only way to stop the card was to stop the receipt too.
+    fake = _FakeUrlopen([
+        (200, {"ok": True}),  # eyes
+        (200, {"ok": True}),  # remove
+        (200, {"ok": True}),  # check
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_PROGRESS_CARD="false")
+    await a.on_command(_reaction("queued"))
+    await a.on_command(_reaction("tool_use", tool_name="web_fetch"))
+    await a.on_command(_reaction("done", emoji="✅"))
+    urls = [c["url"] for c in fake.calls]
+    assert not any("chat." in u for u in urls)
+    assert [u.rsplit("/", 1)[-1] for u in urls] == [
+        "reactions.add", "reactions.remove", "reactions.add",
+    ]
+    # No card state was ever materialized.
+    assert a._task_progress == {}
+
+
+@pytest.mark.asyncio
+async def test_reactions_disabled_still_posts_card(monkeypatch):
+    # The other half of the #6730 split: card without emoji noise.
+    fake = _FakeUrlopen([
+        (200, {"ok": True, "ts": "CARD1"}),  # tool_use -> post
+        (200, {"ok": True}),                 # done -> update
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_REACTIONS="false", SLACK_PROGRESS_CARD="true")
+    await a.on_command(_reaction("queued"))
+    await a.on_command(_reaction("tool_use", tool_name="web_fetch"))
+    await a.on_command(_reaction("done", emoji="✅"))
+    urls = [c["url"] for c in fake.calls]
+    assert urls[0].endswith("/chat.postMessage")
+    assert urls[1].endswith("/chat.update")
+    assert not any("reactions." in u for u in urls)
+
+
+@pytest.mark.asyncio
+async def test_card_disabled_still_flips_receipt_on_multi_step(monkeypatch):
+    # The receipt half must not depend on the card half's bookkeeping: a multi-step turn with the card off still gets eyes -> check.
+    fake = _FakeUrlopen([
+        (200, {"ok": True}),  # eyes
+        (200, {"ok": True}),  # remove
+        (200, {"ok": True}),  # check
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_PROGRESS_CARD="false")
+    await a.on_command(_reaction("queued"))
+    await a.on_command(_reaction("thinking"))
+    await a.on_command(_reaction("tool_use", tool_name="web_fetch"))
+    await a.on_command(_reaction("streaming"))
+    await a.on_command(_reaction("error", emoji="❌"))
+    assert json.loads(fake.calls[2]["body_raw"])["name"] == "x"
 
 
 @pytest.mark.asyncio

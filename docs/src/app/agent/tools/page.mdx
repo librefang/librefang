@@ -36,7 +36,7 @@ For talking to other agents **inside the same LibreFang daemon** (no A2A protoco
 
 | Tool | Arguments | Purpose |
 |---|---|---|
-| `agent_send` | `agent_id`, `message` | Send a message to another agent in this daemon and wait for the reply. Uses the in-process kernel router; respects the agent_call depth limit. |
+| `agent_send` | `agent_id`, `message`, optional `async` | Send a message to another agent in this daemon. Non-blocking by default: returns a `task_id` and the reply is delivered to the caller's session on completion. Pass `async: false` to block and get the reply directly. Uses the in-process kernel router; respects the agent_call depth limit. |
 | `agent_spawn` | `template`, optional `name`, `goal` | Spawn a child agent from a template. Returns the new `agent_id`. Sub-agents are denied `agent_spawn` and `agent_kill` by default to prevent fork bombs. |
 | `agent_list` | — | List accessible agents (id, name, status). |
 | `agent_find` | `query` | Search agents by name, ID, or tag. |

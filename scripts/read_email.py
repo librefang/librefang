@@ -27,8 +27,28 @@ except ValueError:
 
 def decode_str(s, enc=None):
     if isinstance(s, bytes):
-        return s.decode(enc or "utf-8", errors="ignore")
+        try:
+            return s.decode(enc or "utf-8", errors="ignore")
+        except LookupError:
+            return s.decode("utf-8", errors="ignore")
     return s or ""
+
+
+def decode_subject(raw_subject):
+    """Decode every plain and RFC 2047-encoded segment in a subject."""
+    return "".join(decode_str(part, enc) for part, enc in decode_header(raw_subject or ""))
+
+
+def decode_payload(payload, part):
+    """Decode MIME payload bytes using the part's declared charset."""
+    charset = part.get_content_charset() or "utf-8"
+    try:
+        return payload.decode(charset, errors="ignore")
+    except LookupError:
+        # Malformed or vendor-specific charset labels should not abort the
+        # whole mailbox read; retain the historical UTF-8 fallback.
+        return payload.decode("utf-8", errors="ignore")
+
 
 def get_body(msg):
     """Extract plain text body from email message."""
@@ -39,7 +59,7 @@ def get_body(msg):
             if ct == "text/plain" and "attachment" not in cd:
                 payload = part.get_payload(decode=True)
                 if payload:
-                    return payload.decode("utf-8", errors="ignore")
+                    return decode_payload(payload, part)
         # Fallback to HTML if no plain text
         for part in msg.walk():
             ct = part.get_content_type()
@@ -47,15 +67,24 @@ def get_body(msg):
             if ct == "text/html" and "attachment" not in cd:
                 payload = part.get_payload(decode=True)
                 if payload:
-                    text = payload.decode("utf-8", errors="ignore")
+                    text = decode_payload(payload, part)
                     text = re.sub(r'<[^>]+>', ' ', text)
                     text = re.sub(r'\s+', ' ', text).strip()
                     return text
     else:
         payload = msg.get_payload(decode=True)
         if payload:
-            return payload.decode("utf-8", errors="ignore")
+            return decode_payload(payload, msg)
     return ""
+
+
+def quote_imap_search_value(value):
+    """Encode a value as an IMAP quoted string without command injection."""
+    if any(char in value for char in ("\r", "\n", "\x00")):
+        raise ValueError("IMAP quoted strings cannot contain CR, LF, or NUL")
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
 
 def search_folder(mail, folder, sender):
     """Search a folder for emails from sender. Returns list of IDs."""
@@ -64,7 +93,7 @@ def search_folder(mail, folder, sender):
         if result != "OK":
             return []
         if sender:
-            _, msgs = mail.search(None, f'FROM "{sender}"')
+            _, msgs = mail.search(None, f"FROM {quote_imap_search_value(sender)}")
         else:
             _, msgs = mail.search(None, "ALL")
         ids = msgs[0].split() if msgs[0] else []
@@ -72,6 +101,25 @@ def search_folder(mail, folder, sender):
     except Exception as e:
         print(f"WARNING: failed to search {folder}: {e}", file=sys.stderr)
         return []
+
+
+def fetched_message_bytes(data):
+    """Return RFC822 bytes from the expected IMAP FETCH response shape."""
+    if not data or not isinstance(data[0], tuple) or len(data[0]) < 2:
+        raise ValueError("malformed IMAP FETCH response")
+    message_bytes = data[0][1]
+    if not isinstance(message_bytes, bytes):
+        raise ValueError("malformed IMAP FETCH response")
+    return message_bytes
+
+
+def logout_quietly(mail):
+    """Close an IMAP session without masking the original outcome."""
+    try:
+        mail.logout()
+    except Exception:
+        pass
+
 
 def main():
     sender = sys.argv[1] if len(sys.argv) > 1 else ""
@@ -86,60 +134,67 @@ def main():
         print("ERROR: EMAIL_PASSWORD not set", file=sys.stderr)
         sys.exit(1)
 
+    if sender:
+        try:
+            quote_imap_search_value(sender)
+        except ValueError as e:
+            print(f"ERROR: invalid sender search value: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    mail = None
     try:
         mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
         mail.login(username, password)
     except Exception as e:
+        if mail is not None:
+            logout_quietly(mail)
         print(f"ERROR: IMAP login failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Search across multiple folders
-    folders_to_try = [
-        "INBOX",
-        '"[Gmail]/All Mail"',
-        '"[Gmail]/Promotions"',
-        '"[Gmail]/Updates"',
-        "Promotions",
-        "Updates",
-    ]
-
-    found_ids = []
-    found_folder = None
-    for folder in folders_to_try:
-        ids = search_folder(mail, folder, sender)
-        if ids:
-            found_ids = ids
-            found_folder = folder
-            break
-
-    if not found_ids:
-        print(f"NO_EMAIL_FOUND (searched: INBOX, All Mail, Promotions, Updates)")
-        mail.logout()
-        sys.exit(0)
-
-    print(f"Found {len(found_ids)} email(s) in {found_folder}")
-
-    # Fetch the latest email
     try:
-        _, data = mail.fetch(found_ids[-1], "(RFC822)")
-        msg = email.message_from_bytes(data[0][1])
-    except Exception as e:
-        print(f"ERROR: fetch failed: {e}", file=sys.stderr)
-        mail.logout()
-        sys.exit(1)
+        # Search across multiple folders
+        folders_to_try = [
+            "INBOX",
+            '"[Gmail]/All Mail"',
+            '"[Gmail]/Promotions"',
+            '"[Gmail]/Updates"',
+            "Promotions",
+            "Updates",
+        ]
 
-    raw_subject = msg["Subject"] or ""
-    subject_raw, enc = decode_header(raw_subject)[0]
-    subject = decode_str(subject_raw, enc)
-    body = get_body(msg)
+        found_ids = []
+        found_folder = None
+        for folder in folders_to_try:
+            ids = search_folder(mail, folder, sender)
+            if ids:
+                found_ids = ids
+                found_folder = folder
+                break
 
-    print(f"SUBJECT: {subject}")
-    print(f"FROM: {msg['From']}")
-    print(f"DATE: {msg['Date']}")
-    print("---BODY---")
-    print(body[:4000])
+        if not found_ids:
+            print("NO_EMAIL_FOUND (searched: INBOX, All Mail, Promotions, Updates)")
+            sys.exit(0)
 
-    mail.logout()
+        print(f"Found {len(found_ids)} email(s) in {found_folder}")
+
+        # Fetch the latest email
+        try:
+            _, data = mail.fetch(found_ids[-1], "(RFC822)")
+            msg = email.message_from_bytes(fetched_message_bytes(data))
+        except Exception as e:
+            print(f"ERROR: fetch failed: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        subject = decode_subject(msg["Subject"])
+        body = get_body(msg)
+
+        print(f"SUBJECT: {subject}")
+        print(f"FROM: {msg['From']}")
+        print(f"DATE: {msg['Date']}")
+        print("---BODY---")
+        print(body[:4000])
+    finally:
+        logout_quietly(mail)
 
 if __name__ == "__main__":
     main()

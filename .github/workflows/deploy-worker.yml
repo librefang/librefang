@@ -21,6 +21,10 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Test Worker
+        working-directory: deploy/worker
+        run: npm test
+
       - name: Deploy Worker
         working-directory: deploy/worker
         env:

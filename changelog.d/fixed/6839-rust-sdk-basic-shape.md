@@ -1,0 +1,1 @@
+- Updated the Rust SDK basic example to report unexpected API response shapes instead of silently displaying zero items. (@houko)

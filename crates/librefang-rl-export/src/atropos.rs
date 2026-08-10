@@ -46,7 +46,8 @@
 //! See <https://github.com/NousResearch/atropos/blob/main/atroposlib/api/server.py>
 //! and `atroposlib/api/env_interaction.md` for the producer-side flow.
 //!
-//! All HTTP traffic flows through `librefang_http::proxied_client()`.
+//! All HTTP traffic uses `librefang_http::proxied_client_builder()` with
+//! redirect following disabled.
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -131,8 +132,9 @@ pub(crate) async fn export_to_atropos_with_base(
     base: &str,
     project: &str,
     tuning: AtroposTuning,
-    export: RlTrajectoryExport,
+    mut export: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
+    crate::normalize_export_metadata(&mut export);
     if project.is_empty() {
         return Err(ExportError::InvalidConfig(
             "Atropos project (desired_name) is empty".to_string(),
@@ -165,10 +167,7 @@ pub(crate) async fn export_to_atropos_with_base(
     // metadata), bypassing the guard. A finished upload never needs to
     // follow a redirect; a 3xx must surface as an error. Mirrors
     // `librefang_http::oauth_client_builder`.
-    let client = librefang_http::proxied_client_builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap_or_else(|_| librefang_http::proxied_client());
+    let client = crate::build_export_http_client()?;
 
     // Step 1: register this producer with the running Atropos trainer.
     let register_url = format!("{}/register-env", base.trim_end_matches('/'));

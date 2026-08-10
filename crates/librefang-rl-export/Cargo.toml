@@ -22,6 +22,7 @@ url = { workspace = true }
 [dev-dependencies]
 wiremock = "0.6"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

@@ -42,18 +42,22 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
       - name: Verify tag format
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           # CalVer YYYY.M.PATCH with optional -beta.N / -rc.N / -lts suffix
-          if ! echo "${{ inputs.version }}" | grep -qE '^v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(-(beta|rc)\.?[0-9]+|-lts)?$'; then
-            echo "::error::tag '${{ inputs.version }}' does not match expected CalVer pattern"
+          if ! printf '%s\n' "$VERSION" | grep -qE '^v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(-(beta|rc)\.?[0-9]+|-lts)?$'; then
+            echo "::error::tag '$VERSION' does not match expected CalVer pattern"
             exit 1
           fi
 
       - name: Verify tag matches workspace version
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           # Same gate as release.yml `create_release` — the manifest
           # section must match the tag the maintainer is requesting.
-          TAG="${{ inputs.version }}"
+          TAG="$VERSION"
           WS_VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/{ s/^version *= *"\([^"]*\)".*/\1/p }' Cargo.toml | head -1)
           if [ "${TAG#v}" != "$WS_VERSION" ]; then
             echo "::error::requested tag $TAG does not match [workspace.package].version $WS_VERSION"
@@ -62,21 +66,25 @@ jobs:
           echo "Tag $TAG matches workspace version $WS_VERSION"
 
       - name: Verify tag does not already exist
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
-          if git rev-parse "${{ inputs.version }}" >/dev/null 2>&1; then
-            echo "::error::tag '${{ inputs.version }}' already exists locally"
+          if git rev-parse --verify "refs/tags/$VERSION" >/dev/null 2>&1; then
+            echo "::error::tag '$VERSION' already exists locally"
             exit 1
           fi
-          if git ls-remote --tags origin "refs/tags/${{ inputs.version }}" | grep -q "${{ inputs.version }}"; then
-            echo "::error::tag '${{ inputs.version }}' already exists on origin"
+          if git ls-remote --tags origin "refs/tags/$VERSION" | grep -Fq -- "$VERSION"; then
+            echo "::error::tag '$VERSION' already exists on origin"
             exit 1
           fi
 
       - name: Create + push tag
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-          git tag "${{ inputs.version }}"
-          git push origin "${{ inputs.version }}"
-          echo "✓ Pushed tag ${{ inputs.version }}"
+          git tag -- "$VERSION"
+          git push origin "refs/tags/$VERSION"
+          echo "✓ Pushed tag $VERSION"
           echo "Note: this push will trigger release.yml on the tag — split workflows below are only needed if individual targets need to be re-run."
