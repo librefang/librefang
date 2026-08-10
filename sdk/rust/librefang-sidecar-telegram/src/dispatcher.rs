@@ -3,7 +3,7 @@
 //! Mirrors the Python adapter's `_dispatch_content` / `_send_*` family.
 //! All text routes go through `format_sanitize_and_chunk` → `sendMessage` (HTML parse mode), with a "can't parse entities" automatic fallback to plain text. The same fallback is applied to single-item captioned media (Image / Voice / Video / Audio / Animation) so a malformed sanitiser output never silently drops the media send. MediaGroup does NOT have a per-item fallback — it's an atomic Bot API call and a parse error on ANY item caption fails the whole group; callers that need fallback-per-item should send items individually.
 
-use crate::api::types::InlineKeyboardButton as TgButton;
+use crate::api::types::{InlineKeyboardAction as TgAction, InlineKeyboardButton as TgButton};
 use crate::api::{BotClient, Error, Result};
 use crate::format::{format_and_sanitize, format_sanitize_and_chunk};
 use serde_json::{json, Value};
@@ -104,15 +104,15 @@ fn build_inline_keyboard(message: &Value) -> Value {
                     if let Some(u) = url {
                         row_buttons.push(TgButton {
                             text: label,
-                            url: Some(u),
-                            callback_data: None,
+                            action: TgAction::Url { url: u },
                         });
                     } else if let Some(a) = action {
                         let truncated = truncate_bytes_utf8(&a, 64);
                         row_buttons.push(TgButton {
                             text: label,
-                            url: None,
-                            callback_data: Some(truncated),
+                            action: TgAction::CallbackData {
+                                callback_data: truncated,
+                            },
                         });
                     }
                 }
@@ -660,5 +660,23 @@ mod tests {
             let error = required_coordinate(&malformed, "lat").expect_err("invalid latitude");
             assert!(error.to_string().contains("Location.lat"));
         }
+    }
+
+    #[test]
+    fn inline_keyboard_builder_emits_one_action_per_button() {
+        let keyboard = build_inline_keyboard(&json!({
+            "buttons": [[
+                {"label": "Docs", "url": "https://example.com", "action": "ignored"},
+                {"label": "Run", "action": "run"},
+                {"label": "Dropped"}
+            ]]
+        }));
+        assert_eq!(
+            keyboard,
+            json!({"inline_keyboard": [[
+                {"text": "Docs", "url": "https://example.com"},
+                {"text": "Run", "callback_data": "run"}
+            ]]})
+        );
     }
 }
