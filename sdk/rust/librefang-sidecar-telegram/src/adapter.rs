@@ -19,6 +19,9 @@ use tokio::sync::Mutex;
 const ALLOWED_UPDATES: &[&str] = &["message", "edited_message", "callback_query", "poll_answer"];
 const MAX_BACKOFF_SECS: u64 = 300;
 const STREAM_EDIT_INTERVAL_MS: u64 = 1000;
+const STREAM_STATE_TTL: Duration = Duration::from_secs(10 * 60);
+const MAX_ACTIVE_STREAMS: usize = 128;
+const MAX_STREAM_BUFFER_BYTES: usize = 1024 * 1024;
 
 /// Cached state of the `TELEGRAM_LOG` env var. When non-empty AND not `"off"` / `"0"`, the adapter emits one-line happy-path traces to stderr (which the supervisor captures into the daemon's main log) for every inbound update and every outbound command. Errors always log regardless.
 static HAPPY_PATH_LOG: once_cell::sync::Lazy<bool> = once_cell::sync::Lazy::new(|| {
@@ -75,6 +78,30 @@ struct StreamState {
     thread_id: Option<i64>,
     buf: String,
     last_edit: Instant,
+    last_activity: Instant,
+}
+
+fn prune_stale_streams(streams: &mut HashMap<String, StreamState>, now: Instant) -> usize {
+    let before = streams.len();
+    streams
+        .retain(|_, state| now.saturating_duration_since(state.last_activity) < STREAM_STATE_TTL);
+    before - streams.len()
+}
+
+fn reserve_stream_slot(streams: &mut HashMap<String, StreamState>, stream_id: &str) {
+    if streams.contains_key(stream_id) {
+        return;
+    }
+    while streams.len() >= MAX_ACTIVE_STREAMS {
+        let Some(oldest) = streams
+            .iter()
+            .min_by_key(|(_, state)| state.last_activity)
+            .map(|(stream_id, _)| stream_id.clone())
+        else {
+            break;
+        };
+        streams.remove(&oldest);
+    }
 }
 
 impl TelegramAdapter {
@@ -321,6 +348,12 @@ impl SidecarAdapter for TelegramAdapter {
                     .await
                     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
                 let mut map = self.streams.lock().await;
+                let now = Instant::now();
+                let removed = prune_stale_streams(&mut map, now);
+                reserve_stream_slot(&mut map, &s.stream_id);
+                if removed > 0 {
+                    tg_trace!("evicted {removed} stale stream state(s)");
+                }
                 map.insert(
                     s.stream_id.clone(),
                     StreamState {
@@ -332,6 +365,7 @@ impl SidecarAdapter for TelegramAdapter {
                         last_edit: Instant::now()
                             .checked_sub(Duration::from_secs(2))
                             .unwrap_or_else(Instant::now),
+                        last_activity: now,
                     },
                 );
                 Ok(())
@@ -341,7 +375,16 @@ impl SidecarAdapter for TelegramAdapter {
                 let Some(state) = map.get_mut(&d.stream_id) else {
                     return Ok(());
                 };
+                if state.buf.len().saturating_add(d.text.len()) > MAX_STREAM_BUFFER_BYTES {
+                    map.remove(&d.stream_id);
+                    return Err(format!(
+                        "stream {} exceeded the {} byte buffer limit",
+                        d.stream_id, MAX_STREAM_BUFFER_BYTES
+                    )
+                    .into());
+                }
                 state.buf.push_str(&d.text);
+                state.last_activity = Instant::now();
                 let elapsed = state.last_edit.elapsed();
                 if elapsed >= Duration::from_millis(STREAM_EDIT_INTERVAL_MS) {
                     let chat_id = state.chat_id;
@@ -384,6 +427,13 @@ impl SidecarAdapter for TelegramAdapter {
         let mut offset: i64 = 0;
         let mut backoff = Duration::from_secs(1);
         loop {
+            let removed = {
+                let mut streams = self.streams.lock().await;
+                prune_stale_streams(&mut streams, Instant::now())
+            };
+            if removed > 0 {
+                tg_trace!("evicted {removed} stale stream state(s)");
+            }
             match self
                 .client
                 .get_updates(offset, DEFAULT_LONGPOLL_TIMEOUT_SECS, ALLOWED_UPDATES)
@@ -465,11 +515,73 @@ impl SidecarAdapter for TelegramAdapter {
             tokio::task::yield_now().await;
         }
     }
+
+    async fn on_shutdown(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut streams = self.streams.lock().await;
+        let removed = streams.len();
+        streams.clear();
+        if removed > 0 {
+            tg_trace!("cleared {removed} stream state(s) during shutdown");
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stream_state(last_activity: Instant) -> StreamState {
+        StreamState {
+            chat_id: 1,
+            message_id: 2,
+            thread_id: None,
+            buf: String::new(),
+            last_edit: last_activity,
+            last_activity,
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_and_excess_streams_are_evicted_and_shutdown_clears_the_rest() {
+        let stale = Instant::now();
+        let now = stale + STREAM_STATE_TTL + Duration::from_secs(1);
+        let mut streams = HashMap::new();
+        streams.insert("stale".to_string(), stream_state(stale));
+        streams.insert("fresh".to_string(), stream_state(now));
+
+        prune_stale_streams(&mut streams, now);
+        assert!(!streams.contains_key("stale"));
+        assert!(streams.contains_key("fresh"));
+
+        for index in 0..MAX_ACTIVE_STREAMS {
+            streams.insert(format!("stream-{index}"), stream_state(now));
+        }
+        reserve_stream_slot(&mut streams, "new-stream");
+        assert!(streams.len() < MAX_ACTIVE_STREAMS);
+
+        let adapter = test_adapter();
+        let mut at_limit = stream_state(now);
+        at_limit.buf = "x".repeat(MAX_STREAM_BUFFER_BYTES);
+        adapter
+            .streams
+            .lock()
+            .await
+            .insert("overflow".to_string(), at_limit);
+        let error = adapter
+            .on_command(Command::StreamDelta(librefang_sidecar::StreamDelta {
+                stream_id: "overflow".to_string(),
+                text: "x".to_string(),
+            }))
+            .await
+            .expect_err("an oversized stream must fail closed");
+        assert!(error.to_string().contains("byte buffer limit"));
+        assert!(!adapter.streams.lock().await.contains_key("overflow"));
+
+        *adapter.streams.lock().await = streams;
+        adapter.on_shutdown().await.expect("shutdown cleanup");
+        assert!(adapter.streams.lock().await.is_empty());
+    }
 
     /// Restores `TELEGRAM_STREAMING` to its pre-test value on drop, so the mutation stays contained even if an assertion panics mid-test.
     struct EnvGuard(Option<String>);

@@ -197,19 +197,15 @@ impl LibreFangKernel {
             return Ok(agent_id);
         }
 
+        let route_key = Self::assistant_route_key(agent_id, sender_context);
+
         // Per-channel auto-routing strategy gate.
         //
         // When `auto_route` is `Off` (the default for all channels), channel messages
         // bypass classification entirely — preserving legacy behaviour.
         // Other strategies allow opt-in routing with different cache semantics.
         if let Some(ctx) = sender_context {
-            let cache_key = format!(
-                "{}:{}:{}:{}",
-                agent_id,
-                ctx.channel,
-                ctx.account_id.as_deref().unwrap_or(""),
-                ctx.user_id,
-            );
+            let cache_key = route_key.clone();
             let ttl = std::time::Duration::from_secs(ctx.auto_route_ttl_minutes as u64 * 60);
 
             match ctx.auto_route {
@@ -226,8 +222,9 @@ impl LibreFangKernel {
                             }
                         }
                     }
-                    // No cached entry — fall through to LLM classification once,
-                    // then store the result.
+                    // Explicit-only means a miss stays on the configured
+                    // agent and never triggers classification.
+                    return Ok(agent_id);
                 }
 
                 AutoRouteStrategy::StickyTtl => {
@@ -312,8 +309,6 @@ impl LibreFangKernel {
                 }
             }
         }
-
-        let route_key = Self::assistant_route_key(agent_id, sender_context);
 
         if Self::should_reuse_cached_route(message) {
             if let Some(target) = self

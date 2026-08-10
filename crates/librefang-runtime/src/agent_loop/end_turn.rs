@@ -217,10 +217,18 @@ pub(super) async fn finalize_successful_end_turn(
         .and_then(|a| a.heartbeat_keep_recent)
         .unwrap_or(10);
     let before_prune_len = ctx.session.messages.len();
-    crate::session_repair::prune_heartbeat_turns(&mut ctx.session.messages, keep_recent);
+    let pruned_before_new_messages = crate::session_repair::prune_heartbeat_turns_tracking_boundary(
+        &mut ctx.session.messages,
+        keep_recent,
+        end_turn.new_messages_start,
+    );
     if ctx.session.messages.len() != before_prune_len {
         ctx.session.mark_messages_mutated();
     }
+    end_turn.new_messages_start = end_turn
+        .new_messages_start
+        .saturating_sub(pruned_before_new_messages)
+        .min(ctx.session.messages.len());
 
     // Fork and incognito turns are ephemeral — skip the persist so the
     // parent agent's canonical session history isn't polluted by
