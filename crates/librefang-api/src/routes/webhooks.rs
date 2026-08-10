@@ -795,17 +795,16 @@ pub async fn test_webhook(
 
     let payload_bytes = serde_json::to_vec(&test_payload).unwrap_or_default();
 
-    // Pin reqwest's DNS resolver to the address we validated above. Without
-    // this, reqwest does its own DNS lookup before connecting; a low-TTL
-    // record can flip between our validate call and reqwest's resolve call
-    // (DNS rebind), bypassing the SSRF check (#3701). `.resolve(host, addr)`
-    // forces the connection to go to `addr` and skips reqwest's resolver
-    // for that hostname.
-    let mut builder = librefang_kernel::http_client::proxied_client_builder()
+    // Pin a direct client's DNS resolver to the address validated above.
+    // Proxies are disabled because proxy-side DNS would bypass the local pin.
+    // Without the pin, reqwest does its own DNS lookup before connecting.
+    // A low-TTL record can flip between our validate call and reqwest's resolve call (DNS rebind), bypassing the SSRF check (#3701).
+    // `resolve_to_addrs` forces the connection to the validated address and skips reqwest's resolver for that hostname.
+    let mut builder = librefang_kernel::http_client::direct_client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none());
     if let Some((ref host, addr)) = pinned_host {
-        builder = builder.resolve(host, addr);
+        builder = builder.resolve_to_addrs(host, &[addr]);
     }
     let client = match builder.build() {
         Ok(c) => c,

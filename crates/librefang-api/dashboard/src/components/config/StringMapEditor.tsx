@@ -13,7 +13,12 @@ import { createClientId } from "../../lib/store";
 // upward only contains rows whose key trims to non-empty; duplicates
 // resolve last-write-wins (matches Object.fromEntries semantics).
 
-type Row = { id: string; key: string; value: string | number };
+type Row = {
+  id: string;
+  key: string;
+  value: string | number;
+  committedValue: string | number;
+};
 
 type Props = {
   value: Record<string, string | number> | null | undefined;
@@ -33,14 +38,19 @@ function newRowId(): string {
 
 function rowsFromValue(value: Props["value"]): Row[] {
   if (!value || typeof value !== "object") return [];
-  return Object.entries(value).map(([k, v]) => ({ id: newRowId(), key: k, value: v }));
+  return Object.entries(value).map(([k, v]) => ({
+    id: newRowId(),
+    key: k,
+    value: v,
+    committedValue: v,
+  }));
 }
 
 function commitRows(rows: Row[]): Record<string, string | number> {
   const out: Record<string, string | number> = {};
   for (const r of rows) {
     const trimmed = r.key.trim();
-    if (trimmed) out[trimmed] = r.value;
+    if (trimmed) out[trimmed] = r.committedValue;
   }
   return out;
 }
@@ -108,24 +118,45 @@ export function StringMapEditor({
   }, [emit]);
 
   const updateValue = useCallback((id: string, raw: string) => {
-    let parsed: string | number = raw;
     if (valueType === "number") {
-      if (raw === "") {
-        parsed = 0;
-      } else {
-        const n = Number(raw);
-        parsed = Number.isNaN(n) ? 0 : n;
+      const parsed = raw.trim() === "" ? null : Number(raw);
+      if (parsed === null || !Number.isFinite(parsed)) {
+        setRows((prev) => prev.map((r) => r.id === id ? { ...r, value: raw } : r));
+        return;
       }
+      emit((prev) => prev.map((r) =>
+        r.id === id ? { ...r, value: raw, committedValue: parsed } : r,
+      ));
+      return;
     }
-    emit((prev) => prev.map((r) => r.id === id ? { ...r, value: parsed } : r));
+    emit((prev) => prev.map((r) =>
+      r.id === id ? { ...r, value: raw, committedValue: raw } : r,
+    ));
   }, [emit, valueType]);
+
+  const finishValueEdit = useCallback((id: string) => {
+    if (valueType !== "number") return;
+    setRows((prev) => prev.map((r) => {
+      if (r.id !== id || typeof r.value !== "string") return r;
+      const parsed = r.value.trim() === "" ? null : Number(r.value);
+      return parsed === null || !Number.isFinite(parsed)
+        ? { ...r, value: r.committedValue }
+        : r;
+    }));
+  }, [valueType]);
 
   const removeRow = useCallback((id: string) => {
     emit((prev) => prev.filter((r) => r.id !== id));
   }, [emit]);
 
   const addRow = useCallback(() => {
-    emit((prev) => [...prev, { id: newRowId(), key: "", value: valueType === "number" ? 0 : "" }]);
+    const initialValue = valueType === "number" ? 0 : "";
+    emit((prev) => [...prev, {
+      id: newRowId(),
+      key: "",
+      value: initialValue,
+      committedValue: initialValue,
+    }]);
   }, [emit, valueType]);
 
   const inputClass =
@@ -154,6 +185,7 @@ export function StringMapEditor({
             type={valueType === "number" ? "number" : "text"}
             value={String(r.value ?? "")}
             onChange={(e) => updateValue(r.id, e.target.value)}
+            onBlur={() => finishValueEdit(r.id)}
             placeholder={valuePlaceholder ?? t("config.map_value", "value")}
             min={valueType === "number" ? min : undefined}
             max={valueType === "number" ? max : undefined}
