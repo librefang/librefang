@@ -726,7 +726,7 @@ _RUST_LIB_HEADER = """\
 //! ```rust,no_run
 //! use librefang::LibreFang;
 //!
-//! #[tokio::main]
+//! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let client = LibreFang::new("http://localhost:4545");
 //!     let health = client.system.health().await?;
