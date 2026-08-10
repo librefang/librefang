@@ -5,20 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct UpdatesResponse {
-    pub ok: bool,
-    #[serde(default)]
-    pub result: Vec<Update>,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub error_code: Option<i32>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    // Parsed for Telegram error envelopes; getUpdates currently reports only code/description.
-    pub parameters: Option<ResponseParameters>,
-}
+pub type UpdatesResponse = ApiResponse<Vec<Update>>;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
@@ -248,12 +235,15 @@ pub struct PollAnswer {
 // ── Response envelopes for "send" endpoints ─────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
 pub struct ApiResponse<T> {
     pub ok: bool,
+    #[serde(default)]
     pub result: Option<T>,
+    #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
     pub error_code: Option<i32>,
+    #[serde(default)]
     pub parameters: Option<ResponseParameters>,
 }
 
@@ -319,6 +309,22 @@ mod tests {
     }
 
     #[test]
+    fn updates_response_is_the_generic_telegram_envelope() {
+        fn as_updates(response: ApiResponse<Vec<Update>>) -> UpdatesResponse {
+            response
+        }
+
+        let response: ApiResponse<Vec<Update>> = serde_json::from_value(json!({
+            "ok": true,
+            "result": []
+        }))
+        .expect("generic update envelope");
+        let response = as_updates(response);
+        assert!(response.ok);
+        assert!(response.result.as_ref().is_some_and(Vec::is_empty));
+    }
+
+    #[test]
     fn required_update_identity_fields_fail_closed() {
         assert!(serde_json::from_value::<UpdatesResponse>(json!({"result": []})).is_err());
         assert!(serde_json::from_value::<Update>(json!({})).is_err());
@@ -334,7 +340,7 @@ mod tests {
             "description": "retry later"
         }))
         .expect("Telegram error envelopes may omit result");
-        assert!(error_response.result.is_empty());
+        assert!(error_response.result.is_none());
 
         let response: UpdatesResponse = serde_json::from_value(json!({
             "ok": true,
@@ -348,7 +354,8 @@ mod tests {
             }]
         }))
         .expect("optional update and message fields may be absent");
-        assert_eq!(response.result[0].update_id, 42);
-        assert_eq!(response.result[0].message.as_ref().unwrap().chat.id, 9);
+        let updates = response.result.expect("successful response result");
+        assert_eq!(updates[0].update_id, 42);
+        assert_eq!(updates[0].message.as_ref().unwrap().chat.id, 9);
     }
 }
