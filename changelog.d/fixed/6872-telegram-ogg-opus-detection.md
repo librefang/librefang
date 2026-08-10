@@ -1,0 +1,1 @@
+- Detected Telegram Ogg/Opus voice uploads from the Ogg page's actual first-packet offset instead of assuming a fixed header layout. (@houko)

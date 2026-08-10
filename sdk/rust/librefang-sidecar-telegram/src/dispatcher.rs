@@ -632,19 +632,81 @@ fn is_voice_filename(name: &str) -> bool {
 }
 
 fn looks_like_ogg_opus(bytes: &[u8]) -> bool {
-    if bytes.len() < 36 {
+    const OGG_FIXED_HEADER_LEN: usize = 27;
+    const OPUS_MAGIC: &[u8; 8] = b"OpusHead";
+
+    if bytes.len() < OGG_FIXED_HEADER_LEN
+        || &bytes[..4] != b"OggS"
+        || bytes[4] != 0
+        || bytes[5] & 0x01 != 0
+    {
         return false;
     }
-    if &bytes[0..4] != b"OggS" {
+
+    let segment_count = usize::from(bytes[26]);
+    let packet_start = OGG_FIXED_HEADER_LEN + segment_count;
+    if segment_count == 0 || bytes.len() < packet_start {
         return false;
     }
-    // OpusHead magic appears at byte 28 in a standard Ogg/Opus stream.
-    &bytes[28..36] == b"OpusHead"
+
+    let segment_table = &bytes[OGG_FIXED_HEADER_LEN..packet_start];
+    let page_body_len: usize = segment_table
+        .iter()
+        .map(|length| usize::from(*length))
+        .sum();
+    let Some(page_end) = packet_start.checked_add(page_body_len) else {
+        return false;
+    };
+    if bytes.len() < page_end {
+        return false;
+    }
+
+    let mut first_packet_len = 0_usize;
+    let mut first_packet_complete = false;
+    for segment_len in segment_table {
+        first_packet_len += usize::from(*segment_len);
+        if *segment_len < u8::MAX {
+            first_packet_complete = true;
+            break;
+        }
+    }
+
+    first_packet_complete
+        && first_packet_len >= OPUS_MAGIC.len()
+        && bytes[packet_start..].starts_with(OPUS_MAGIC)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ogg_page(segment_table: &[u8], body: &[u8]) -> Vec<u8> {
+        let mut page = vec![0_u8; 27];
+        page[..4].copy_from_slice(b"OggS");
+        page[26] = u8::try_from(segment_table.len()).expect("test segment count");
+        page.extend_from_slice(segment_table);
+        page.extend_from_slice(body);
+        page
+    }
+
+    #[test]
+    fn ogg_opus_detection_uses_the_first_packet_offset() {
+        let mut body = b"OpusHead".to_vec();
+        body.resize(19, 0);
+        assert!(looks_like_ogg_opus(&ogg_page(&[19], &body)));
+
+        let page = ogg_page(&[19, 0], &body);
+
+        assert!(looks_like_ogg_opus(&page));
+
+        let mut continued_packet = page.clone();
+        continued_packet[5] = 0x01;
+        assert!(!looks_like_ogg_opus(&continued_packet));
+
+        let misplaced = ogg_page(&[19], b"not-opusOpusHead....");
+        assert!(!looks_like_ogg_opus(&misplaced));
+        assert!(!looks_like_ogg_opus(&ogg_page(&[255], b"OpusHead")));
+    }
 
     #[test]
     fn location_coordinates_are_required_numbers() {
