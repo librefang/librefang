@@ -459,6 +459,11 @@ pub(crate) fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, fore
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
+        // Raise the worker/blocking thread stack from tokio's 2 MiB default (refs #6659).
+        // An agent turn is a deep chain of very large futures — `send_message_full_inner` -> `execute_llm_agent` -> `run_agent_loop` — and a tool call that dispatches to another agent (`agent_send`, a workflow step) runs the callee's entire turn inline on the same worker, stacking that chain again.
+        // Overflowing it SIGABRTs the whole process: with only 2 workers a single deep turn takes the HTTP API and every cron job down with it.
+        // The depth cap on the workflow path is the real bound; this is headroom so a legal-depth chain of fat frames does not abort before the cap can refuse it.
+        .thread_stack_size(8 * 1024 * 1024)
         .enable_all()
         .build()
         .unwrap();
