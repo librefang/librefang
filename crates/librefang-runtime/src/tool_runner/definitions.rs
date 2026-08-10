@@ -320,7 +320,7 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             },
             ToolDefinition {
                 name: tool_name::AGENT_SEND.to_string(),
-                description: "Send a message to another agent. By default this BLOCKS until the agent replies and returns their response — only use the blocking mode for quick sub-questions whose answer you need within this turn. For any delegation that may take a while (research, multi-step work), set \"async\": true so you are not blocked and don't hit the tool timeout. Accepts UUID or agent name. Use agent_find first to discover agents.".to_string(),
+                description: "Send a message to another agent. By default this is NON-BLOCKING: you get back a task_id immediately and the target's reply is delivered to your session when it finishes, so a long delegation cannot burn your turn on the tool timeout. Set \"async\": false for a quick sub-question whose answer you need within this same turn — that blocks until the agent replies and returns their response directly. Accepts UUID or agent name. Use agent_find first to discover agents.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -332,7 +332,7 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                         },
                         "async": {
                             "type": "boolean",
-                            "description": "When true, requests non-blocking delegation. On success you get back a task_id and the target agent's response is delivered to your session automatically when it finishes, so you can continue or end your turn. Async tracking needs a live caller session: on surfaces that have none (the MCP HTTP bridge, the REST tool endpoint) the delegation runs inline and you get the target's reply itself rather than a task_id — read what you receive rather than assuming a task is pending. Use this for any delegation that might take longer than a few seconds (it avoids the tool-execution timeout). Defaults to false (blocking)."
+                            "description": "Controls blocking. Omit it to get the default non-blocking delegation: you receive a task_id and the target agent's response is delivered to your session automatically when it finishes, so you can continue or end your turn. Set it to false to block until the target replies and get their response directly — appropriate only for a quick sub-question you need answered inside this turn. Async tracking needs a live caller session: on surfaces that have none (the MCP HTTP bridge, the REST tool endpoint) the delegation runs inline and you get the target's reply itself rather than a task_id — read what you receive rather than assuming a task is pending."
                         }
                     },
                     "required": ["agent_id", "message"]

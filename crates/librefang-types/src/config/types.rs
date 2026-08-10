@@ -3009,11 +3009,17 @@ impl Default for QueueConcurrencyConfig {
 /// [task_board]
 /// claim_ttl_secs = 600         # 10 minutes — auto-reset after this
 /// sweep_interval_secs = 30     # how often the sweeper runs
+/// assignee_wake = true         # wake the assignee even with no trigger declared
 /// ```
 ///
 /// Setting `claim_ttl_secs = 0` disables the sweeper entirely — useful
 /// for long-running human-in-the-loop tasks where a 10 minute reset
 /// would be wrong.
+///
+/// Every field is re-read live by its consumer — the sweeper re-reads its
+/// three knobs on each tick, and `assignee_wake` is read at the synthesis
+/// site on each `TaskPosted` — so the whole struct is hot-reloadable
+/// (`config_reload::build_reload_plan`).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TaskBoardConfig {
@@ -3025,6 +3031,38 @@ pub struct TaskBoardConfig {
     /// Maximum number of auto-resets before a stuck task is marked `failed`.
     /// Default: 0 = no limit (retry indefinitely).
     pub max_retries: u32,
+    /// Wake the assignee of a `TaskPosted` event even when no stored trigger covers them (issue #6728).
+    /// Default: `true`.
+    ///
+    /// A task addressed to an agent used to reach that agent only if an operator had separately registered a matching `TaskPosted` trigger; with none, the task sat `pending` indefinitely and nothing said so.
+    /// When this is enabled the kernel synthesizes the wake itself, so delivery no longer depends on out-of-band operator setup.
+    ///
+    /// The synthesized wake defers to a stored trigger whenever one can currently fire for that assignee, so an operator who declared their own wake keeps full control of its prompt, session mode and routing.
+    /// Set to `false` (globally here, or per agent via the manifest's `assignee_wake`) to opt out entirely — that flag is the only suppression; a disabled or fire-exhausted trigger is not one.
+    pub assignee_wake: bool,
+    /// How long a task may sit `pending` before the sweeper's reconcile
+    /// wakes its assignee, in seconds. Default: 60.
+    ///
+    /// The event-driven wake is the fast path; this is the floor under it,
+    /// so the grace window is what keeps the two from racing. A task younger
+    /// than this is assumed to be in the hands of the wake its own
+    /// `TaskPosted` event produced.
+    ///
+    /// Lower means work lost by a dropped event is recovered sooner; higher
+    /// means fewer redundant activations while an agent is mid-turn.
+    /// `0` disables the reconcile, leaving delivery purely event-driven —
+    /// which is the behaviour this floor exists to correct, so prefer the
+    /// per-agent `assignee_wake` opt-out for one noisy agent.
+    pub pending_grace_secs: u64,
+    /// Upper bound, in seconds, on the exponential backoff applied when
+    /// reconcile wakes do not move an agent's pending tasks. Default: 900.
+    ///
+    /// Each wake that leaves the agent's pending set unchanged doubles the
+    /// delay from `pending_grace_secs` up to this cap; any task leaving
+    /// `pending` resets it. Without the cap, an agent that cannot act on its
+    /// tasks — a failing provider, a missing `task_claim` capability —
+    /// would be woken on every tick forever.
+    pub wake_backoff_max_secs: u64,
 }
 
 impl Default for TaskBoardConfig {
@@ -3033,6 +3071,9 @@ impl Default for TaskBoardConfig {
             claim_ttl_secs: 600,
             sweep_interval_secs: 30,
             max_retries: 0,
+            assignee_wake: true,
+            pending_grace_secs: 60,
+            wake_backoff_max_secs: 900,
         }
     }
 }

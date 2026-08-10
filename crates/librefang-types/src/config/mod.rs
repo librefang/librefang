@@ -1925,6 +1925,8 @@ admin_role = "admin"
             max_history_messages,
             tool_exec_backend,
             rl_export,
+            // Overrides `[task_board] assignee_wake` (#6728).
+            assignee_wake,
 
             // --- OTHER: not a global-section override. -------------------
             // These are agent-only settings with no matching global
@@ -1999,6 +2001,7 @@ admin_role = "admin"
             "tool_exec",
             "tool_exec_backend",
             "rl_export",
+            "assignee_wake",
         ]
         .into_iter()
         .collect();
