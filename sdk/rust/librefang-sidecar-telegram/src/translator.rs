@@ -110,10 +110,18 @@ fn media_placeholder(label: &str, duration_secs: Option<u32>, caption: Option<&s
 }
 
 /// Best-effort file-id → public URL. Returns None on lookup failure (the caller falls back to a text placeholder).
+fn file_lookup_error_log(file_id: &str, error: &impl std::fmt::Display) -> String {
+    let rendered_error = error.to_string();
+    format!("[telegram] getFile failed for file_id {file_id:?}: {rendered_error:?}")
+}
+
 pub async fn file_url(client: &BotClient, file_id: &str) -> Option<String> {
     match client.get_file(file_id).await {
         Ok(res) => res.file_path.map(|p| client.file_url(&p)),
-        Err(_) => None,
+        Err(error) => {
+            eprintln!("{}", file_lookup_error_log(file_id, &error));
+            None
+        }
     }
 }
 
@@ -625,6 +633,23 @@ pub async fn update_to_event(client: &BotClient, update: &Update) -> Option<Valu
 mod tests {
     use super::*;
     use crate::api::types::MessageEntity;
+
+    #[test]
+    fn file_lookup_error_log_identifies_the_failed_file() {
+        let error = crate::api::Error::Other("temporary getFile failure".into());
+        assert_eq!(
+            file_lookup_error_log("telegram-file-42", &error),
+            "[telegram] getFile failed for file_id \"telegram-file-42\": \"temporary getFile failure\""
+        );
+
+        let injected = crate::api::Error::Other("bad\r\n[telegram] fake\u{1b}[31m".into());
+        let line = file_lookup_error_log("file\nspoof", &injected);
+        assert!(!line.contains('\n'));
+        assert!(!line.contains('\r'));
+        assert!(!line.contains('\u{1b}'));
+        assert!(line.contains("\\r\\n"));
+        assert!(line.contains("\\u{1b}"));
+    }
 
     fn cmd_msg(text: &str, length: i64) -> Message {
         Message {
