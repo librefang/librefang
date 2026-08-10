@@ -493,7 +493,11 @@ export function AgentManifestForm({
         </Field>
       </Section>
 
-      <CollapsibleSection title={t("agents.form.scheduling")} defaultOpen={false}>
+      <CollapsibleSection
+        title={t("agents.form.scheduling")}
+        defaultOpen={false}
+        invalid={invalidFields.has("schedule.cron")}
+      >
         <Field label={t("agents.form.schedule_mode")} hint={t("agents.form.schedule_mode_hint")}>
           <select
             value={value.schedule.mode}
@@ -513,13 +517,29 @@ export function AgentManifestForm({
           </select>
         </Field>
         {value.schedule.mode === "periodic" && (
-          <Field label={t("agents.form.cron")} hint={t("agents.form.cron_hint")}>
+          <Field
+            label={t("agents.form.cron")}
+            hint={t("agents.form.cron_hint")}
+            required
+            invalid={invalidFields.has("schedule.cron")}
+            error={t("agents.form.cron_required_error")}
+            errorId="agent-manifest-schedule-cron-error"
+          >
             <input
+              id="agent-manifest-schedule-cron"
               type="text"
               value={value.schedule.cron}
               onChange={(e) => update({ schedule: { mode: "periodic", cron: e.target.value } })}
               placeholder={t("agents.form.cron_placeholder")}
               className={inputClass}
+              aria-label={t("agents.form.cron")}
+              aria-invalid={invalidFields.has("schedule.cron") || undefined}
+              aria-required="true"
+              aria-describedby={
+                invalidFields.has("schedule.cron")
+                  ? "agent-manifest-schedule-cron-error"
+                  : undefined
+              }
             />
           </Field>
         )}
@@ -862,7 +882,11 @@ export function AgentManifestForm({
         </button>
       </CollapsibleSection>
 
-      <CollapsibleSection title={t("agents.form.response_format")} defaultOpen={false}>
+      <CollapsibleSection
+        title={t("agents.form.response_format")}
+        defaultOpen={false}
+        invalid={invalidFields.has("response_format.schema")}
+      >
         {value.response_format.mode === "text" && extras.topLevel.response_format !== undefined && (
           <ExtrasOverrideHint message={t("agents.form.response_format_extras_hint")} />
         )}
@@ -902,8 +926,15 @@ export function AgentManifestForm({
                 className={inputClass}
               />
             </Field>
-            <Field label={t("agents.form.schema_body")}>
+            <Field
+              label={t("agents.form.schema_body")}
+              required
+              invalid={invalidFields.has("response_format.schema")}
+              error={t("agents.form.schema_invalid_error")}
+              errorId="agent-manifest-response-schema-error"
+            >
               <textarea
+                id="agent-manifest-response-schema"
                 value={jsonSchemaFormat.schema}
                 onChange={(e) =>
                   update({
@@ -917,6 +948,14 @@ export function AgentManifestForm({
                 }
                 rows={6}
                 className={textareaClass}
+                aria-label={t("agents.form.schema_body")}
+                aria-invalid={invalidFields.has("response_format.schema") || undefined}
+                aria-required="true"
+                aria-describedby={
+                  invalidFields.has("response_format.schema")
+                    ? "agent-manifest-response-schema-error"
+                    : undefined
+                }
               />
             </Field>
             <Toggle
@@ -1103,20 +1142,27 @@ function CollapsibleSection({
   title,
   children,
   defaultOpen,
+  invalid,
 }: {
   title: string;
   children: React.ReactNode;
   defaultOpen?: boolean;
+  invalid?: boolean;
 }) {
   return (
     <details
       className="group rounded-xl border border-border-subtle/60 bg-surface/40 overflow-hidden"
-      open={defaultOpen}
+      open={defaultOpen || invalid}
     >
       <summary
+        aria-invalid={invalid || undefined}
         className="flex items-center justify-between p-3 cursor-pointer list-none select-none"
       >
-        <span className="text-[10px] font-bold uppercase tracking-widest text-text-dim">
+        <span
+          className={`text-[10px] font-bold uppercase tracking-widest ${
+            invalid ? "text-error" : "text-text-dim"
+          }`}
+        >
           {title}
         </span>
         <ChevronDown className="w-4 h-4 text-text-dim transition-transform group-open:rotate-180" />
@@ -1131,12 +1177,16 @@ function Field({
   hint,
   required,
   invalid,
+  error,
+  errorId,
   children,
 }: {
   label: string;
   hint?: string;
   required?: boolean;
   invalid?: boolean;
+  error?: string;
+  errorId?: string;
   children: React.ReactNode;
 }) {
   // Use a <div> wrapper rather than a <label> (#5246). A <label>
@@ -1164,6 +1214,15 @@ function Field({
         </span>
       )}
       <span className={label ? "mt-1 block" : "block"}>{children}</span>
+      {invalid && error && (
+        <span
+          id={errorId}
+          className="mt-1 block text-[10px] text-error"
+          role="alert"
+        >
+          {error}
+        </span>
+      )}
       {hint && <span className="mt-1 text-[10px] text-text-dim/70 block">{hint}</span>}
     </div>
   );
