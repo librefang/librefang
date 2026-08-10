@@ -46,8 +46,7 @@ async fn materialize_history_image(
     let digest = hasher.finalize();
     let mut file_id_bytes = [0_u8; 16];
     file_id_bytes.copy_from_slice(&digest[..16]);
-    // RFC 9562 UUIDv8 keeps the content-derived 128-bit identifier compatible
-    // with the upload route while reserving the standard version/variant bits.
+    // RFC 9562 UUIDv8 keeps the content-derived 128-bit identifier compatible with the upload route while reserving the standard version/variant bits.
     file_id_bytes[6] = (file_id_bytes[6] & 0x0f) | 0x80;
     file_id_bytes[8] = (file_id_bytes[8] & 0x3f) | 0x80;
     let file_id = uuid::Uuid::from_bytes(file_id_bytes).to_string();
