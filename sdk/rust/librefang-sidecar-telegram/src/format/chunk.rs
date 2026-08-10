@@ -570,6 +570,37 @@ mod tests {
     }
 
     #[test]
+    fn long_tag_close_suffixes_are_counted_exactly_with_astral_content() {
+        // Same shape as `long_tag_close_suffixes_are_counted_exactly` but the
+        // filler is an astral-plane emoji (surrogate pair, 2 UTF-16 units per
+        // scalar) instead of ASCII `x`, so the exact-suffix-budget shrink loop
+        // has to make progress in 2-unit steps and can never land mid-surrogate-pair.
+        let inner = "😀".repeat(2045); // 2045 * 2 == 4090 UTF-16 units, matching the ASCII-filler test's budget pressure.
+        let s = format!(
+            "<tg-emoji emoji-id=\"1\"><tg-emoji emoji-id=\"2\">{inner}</tg-emoji></tg-emoji>"
+        );
+        let chunks = split_to_utf16_chunks(&s, TELEGRAM_MSG_LIMIT);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(
+                utf16_len(chunk) <= TELEGRAM_MSG_LIMIT,
+                "chunk exceeded Telegram limit: {}",
+                utf16_len(chunk)
+            );
+            // A surrogate-pair split would produce a byte slice that does not
+            // fall on a scalar boundary; `String`'s UTF-8 invariant makes that
+            // unrepresentable, so `split_to_utf16_chunks` returning valid
+            // `String`s at all (rather than panicking on an invalid `str`
+            // slice) already proves every boundary landed on a full `😀`.
+        }
+        let reconstructed = chunks
+            .iter()
+            .map(|chunk| RE_TAG.replace_all(chunk, ""))
+            .collect::<String>();
+        assert_eq!(reconstructed, inner);
+    }
+
+    #[test]
     fn entity_prefix_trims_back_numeric() {
         assert_eq!(adjust_html_entity_boundary("abc&#39"), "abc");
         assert_eq!(adjust_html_entity_boundary("abc&#x1F"), "abc");
