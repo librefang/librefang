@@ -6828,6 +6828,215 @@ fn workflow_spawn_holds_lane_permit_across_run() {
 }
 
 // ---------------------------------------------------------------------------
+// Nested workflow runs are bounded by `max_agent_call_depth` (refs #6659).
+//
+// `workflow_run` executes the target workflow inline on the calling task, and each step nests a whole agent turn.
+// Before the fix nothing counted that nesting, so a workflow whose step target runs a workflow again recursed until the tokio worker's stack ran out (SIGABRT, taking the HTTP API and every cron job with it, since the daemon runs 2 workers).
+// ---------------------------------------------------------------------------
+
+/// Build a one-step workflow whose step targets a registry agent name that does not exist.
+/// Enough to drive `run_workflow` end-to-end: the depth check sits ahead of `create_run`, and a missing step agent makes the accepted path fail fast (`format_missing_agent_error`) without any LLM call.
+fn depth_probe_workflow() -> crate::workflow::Workflow {
+    use crate::workflow::{ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep};
+    Workflow {
+        id: WorkflowId::new(),
+        name: "depth-probe".to_string(),
+        description: "one step targeting an unregistered agent".to_string(),
+        steps: vec![WorkflowStep {
+            name: "only-step".to_string(),
+            agent: StepAgent::ByName {
+                name: "no-such-agent".to_string(),
+            },
+            prompt_template: "{{input}}".to_string(),
+            mode: StepMode::Sequential,
+            timeout_secs: 5,
+            error_mode: ErrorMode::Fail,
+            output_var: None,
+            inherit_context: None,
+            depends_on: vec![],
+            session_mode: None,
+        }],
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: Some(5),
+        input_schema: None,
+    }
+}
+
+/// A workflow run entered from inside `max_agent_call_depth` already-stacked agent turns must be refused as a policy error, and refused *before* `create_run` so no orphan `Pending` run is left behind.
+/// The same call at depth 0 must be accepted — that pairing is what proves the refusal comes from the depth quota and not from the workflow being unrunnable.
+#[tokio::test(flavor = "multi_thread")]
+async fn nested_workflow_run_past_max_agent_call_depth_is_capability_denied() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        // Keep the cap small so the test can nest to it literally rather than looping a recursive async helper.
+        // The production default is 5.
+        max_agent_call_depth: 2,
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let wf = depth_probe_workflow();
+    let wf_id = kernel.register_workflow(wf).await;
+
+    // Depth 0 — accepted.
+    // It still fails (the step's agent is not registered), but with `Internal("Workflow failed: ...")`, not the depth refusal.
+    let accepted = kernel.run_workflow(wf_id, "hello".to_string()).await;
+    if let Err(KernelError::LibreFang(LibreFangError::CapabilityDenied(msg))) = accepted {
+        panic!("a top-level workflow run must not be refused by the depth quota, got: {msg}");
+    }
+    assert_eq!(
+        kernel.workflows.engine.list_runs(None).await.len(),
+        1,
+        "the accepted run must have been created — otherwise the assertion \
+         below (no run created on refusal) proves nothing"
+    );
+
+    // Depth 2 == `max_agent_call_depth` — refused.
+    // Two nested `with_agent_call_depth` frames stand in for two stacked agent turns, which is exactly what the workflow step dispatch establishes in production.
+    let refused = librefang_runtime::tool_runner::with_agent_call_depth(
+        librefang_runtime::tool_runner::with_agent_call_depth(
+            kernel.run_workflow(wf_id, "hello".to_string()),
+        ),
+    )
+    .await;
+    match refused {
+        Err(KernelError::LibreFang(LibreFangError::CapabilityDenied(msg))) => {
+            assert!(
+                msg.contains("Nested workflow run depth exceeded"),
+                "refusal text must name the quota so an operator can raise it, got: {msg}"
+            );
+            assert!(
+                msg.contains("max 2"),
+                "refusal must report the configured cap, not a hardcoded one, got: {msg}"
+            );
+        }
+        other => panic!(
+            "expected CapabilityDenied (kernel-policy quota → HTTP 403); an \
+             Internal error here would read as a downstream crash to retry \
+             logic. Got: {other:?}"
+        ),
+    }
+    assert_eq!(
+        kernel.workflows.engine.list_runs(None).await.len(),
+        1,
+        "a refused nesting must not create a run — the depth check has to sit \
+         ahead of `create_run` or every capped attempt leaves an orphan \
+         Pending run in the engine"
+    );
+
+    // The `WorkflowRunner` trait impl is the path `workflow_run` actually takes, and it used to stringify every `KernelError` into `KernelOpError::Internal`.
+    // That erased the policy shape before the tool layer could see it, so the refusal reached the model as an opaque upstream (5xx-class) failure.
+    // Assert the variant survives the hop.
+    {
+        use librefang_runtime::kernel_handle::WorkflowRunner;
+        let wf_id_str = wf_id.to_string();
+        let via_trait = librefang_runtime::tool_runner::with_agent_call_depth(
+            librefang_runtime::tool_runner::with_agent_call_depth(WorkflowRunner::run_workflow(
+                &kernel, &wf_id_str, "hello",
+            )),
+        )
+        .await;
+        match via_trait {
+            Err(LibreFangError::CapabilityDenied(msg)) => assert!(
+                msg.contains("Nested workflow run depth exceeded"),
+                "the refusal text must survive the trait hop, got: {msg}"
+            ),
+            other => panic!(
+                "the WorkflowRunner trait impl must preserve CapabilityDenied; folding it into \
+                 Internal delivers a policy quota to the tool layer as a downstream crash. \
+                 Got: {other:?}"
+            ),
+        }
+    }
+
+    kernel.shutdown();
+}
+
+/// Source-shape sentinel for the other half of the fix, in the style of `workflow_send_message_closure_contains_per_agent_semaphore_acquire` above.
+///
+/// The behavioral test proves the quota *check* rejects a deep run.
+/// It cannot prove the step dispatch actually enters the depth scope, because observing the depth inside `send_message_full` needs a real LLM turn and this crate's tests have no driver-injection seam.
+/// Without that wrap every nesting level would read depth 0 and the check would never fire, so pin the wiring: the `run_workflow` step dispatch must call `send_message_full` through `with_agent_call_depth`.
+#[test]
+fn workflow_step_dispatch_enters_agent_call_depth_scope() {
+    let src = include_str!("triggers_and_workflow.rs");
+    // Strip line + block comments so a leftover doc reference cannot satisfy the assertion after the wiring is removed (same approach as the two sentinels above).
+    let stripped: String = {
+        let mut out = String::with_capacity(src.len());
+        let mut in_block = false;
+        for line in src.lines() {
+            let mut s = line.to_string();
+            if in_block {
+                if let Some(end) = s.find("*/") {
+                    s = s.split_at(end + 2).1.to_string();
+                    in_block = false;
+                } else {
+                    continue;
+                }
+            }
+            while let Some(start) = s.find("/*") {
+                if let Some(end_rel) = s[start..].find("*/") {
+                    let end = start + end_rel + 2;
+                    s.replace_range(start..end, "");
+                } else {
+                    s.truncate(start);
+                    in_block = true;
+                    break;
+                }
+            }
+            if let Some(idx) = s.find("//") {
+                s.truncate(idx);
+            }
+            out.push_str(&s);
+            out.push('\n');
+        }
+        out
+    };
+
+    // Counted, not `contains`.
+    // There are two step-dispatch closures in this file — `run_workflow::send_message` and its operator-resume twin in `KernelOperatorResumeDriver::drive_operator_timeout` — and a single containment check passes with either one wrapped, which is exactly how the resume twin was missed.
+    // The semaphore sentinel above counts for the same reason.
+    let dispatches = stripped.matches("send_message_full(").count();
+    let wrapped = stripped.matches("with_agent_call_depth(").count();
+    assert!(
+        wrapped >= 2,
+        "expected BOTH step-dispatch closures in triggers_and_workflow.rs to \
+         wrap `send_message_full` in \
+         `librefang_runtime::tool_runner::with_agent_call_depth` — \
+         `run_workflow::send_message` and the operator-resume twin in \
+         `drive_operator_timeout` — but found {wrapped}. Without it a workflow \
+         step's agent turn runs at the caller's depth, so a workflow that \
+         re-runs itself through a step target's `workflow_run` recurses \
+         unbounded and overflows the worker stack (refs #6659). An \
+         operator-timeout resume drives the remaining steps through the twin, \
+         so leaving it unwrapped gives that path one extra stacked turn of \
+         budget."
+    );
+    assert_eq!(
+        dispatches - wrapped,
+        1,
+        "exactly one `send_message_full` call in triggers_and_workflow.rs is \
+         expected to run outside a depth scope: the trigger dispatch path, \
+         which STARTS a chain on its own task rather than nesting inside one, \
+         so depth 0 is correct there. Found {dispatches} dispatches and \
+         {wrapped} wrapped. If a new inline dispatch was added it needs the \
+         wrapper; if the trigger path was changed, update this sentinel \
+         deliberately rather than adjusting the number."
+    );
+    assert!(
+        stripped.contains("cfg.max_agent_call_depth"),
+        "expected `run_workflow` to read the operator knob \
+         `cfg.max_agent_call_depth` for its nesting cap, so raising the limit \
+         in config.toml raises it on the workflow path too."
+    );
+}
+
+// ---------------------------------------------------------------------------
 // push_notification routing — locks the global-fallback match arm.
 //
 // `push_notification` resolves the delivery target list from

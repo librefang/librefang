@@ -876,6 +876,9 @@ async fn channel_send_cross_account_blocked_on_embedded_channel() {
 #[derive(Default)]
 struct DispatchCapture {
     calls: std::sync::Mutex<Vec<String>>,
+    /// When set, `run_workflow` answers with the nesting-depth refusal the kernel raises past `max_agent_call_depth` (refs #6659) instead of the trait's default "workflow engine unavailable".
+    /// Lets a test drive `tool_workflow_run`'s error mapping without a real kernel.
+    deny_workflow_run: bool,
 }
 
 #[async_trait::async_trait]
@@ -1119,7 +1122,25 @@ impl HandsControl for DispatchCapture {}
 impl A2ARegistry for DispatchCapture {}
 impl ChannelSender for DispatchCapture {}
 impl PromptStore for DispatchCapture {}
-impl WorkflowRunner for DispatchCapture {}
+#[async_trait::async_trait]
+impl WorkflowRunner for DispatchCapture {
+    async fn run_workflow(
+        &self,
+        _workflow_id: &str,
+        _input: &str,
+    ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
+        if self.deny_workflow_run {
+            return Err(librefang_kernel_handle::KernelOpError::CapabilityDenied(
+                "Nested workflow run depth exceeded (max 5); this run is already 5 agent turns \
+                 deep."
+                    .to_string(),
+            ));
+        }
+        Err(librefang_kernel_handle::KernelOpError::unavailable(
+            "Workflow engine",
+        ))
+    }
+}
 impl GoalControl for DispatchCapture {}
 impl ToolPolicy for DispatchCapture {}
 impl librefang_kernel_handle::CatalogQuery for DispatchCapture {}
@@ -1465,6 +1486,125 @@ async fn agent_send_depth_exceeded_is_permission_denied() {
     assert!(
         calls.is_empty(),
         "depth-exceeded must short-circuit before any send_to_agent_* arm, got: {calls:?}"
+    );
+}
+
+/// `with_agent_call_depth` is the single definition of "one level deeper" in the synchronous inter-agent call chain, shared by `agent_send` and the kernel's workflow-step dispatch (refs #6659).
+/// Each nesting level must add exactly one, and must not leak its level to the frame that resumes after it — otherwise a fan-out of sibling delegations would accumulate depth as if it were nesting and start refusing legal chains.
+#[tokio::test]
+async fn with_agent_call_depth_adds_exactly_one_level_per_nesting() {
+    use super::{current_agent_depth, with_agent_call_depth};
+
+    assert_eq!(
+        current_agent_depth(),
+        0,
+        "outside any scope the depth must read 0, not panic on the missing task-local"
+    );
+
+    with_agent_call_depth(async {
+        assert_eq!(current_agent_depth(), 1);
+        with_agent_call_depth(async {
+            assert_eq!(current_agent_depth(), 2);
+        })
+        .await;
+        assert_eq!(
+            current_agent_depth(),
+            1,
+            "an inner level must not leak into the frame that resumes after it"
+        );
+        // Sibling scope at the same nesting level, not a third level.
+        with_agent_call_depth(async {
+            assert_eq!(current_agent_depth(), 2);
+        })
+        .await;
+        assert_eq!(current_agent_depth(), 1);
+    })
+    .await;
+
+    assert_eq!(current_agent_depth(), 0, "the outermost scope must unwind");
+}
+
+/// The helper and `agent_send`'s quota read the *same* counter: a depth established by `with_agent_call_depth` (which is how a workflow step's agent turn gets its level) must be visible to the `agent_send` guard, so a workflow step's agent cannot regain a full delegation budget by hopping through the workflow path.
+#[tokio::test]
+async fn agent_send_quota_sees_depth_established_by_with_agent_call_depth() {
+    use super::error::ToolError;
+    use super::{with_agent_call_depth, AGENT_CALL_DEPTH};
+
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    let input = serde_json::json!({ "agent_id": "target", "message": "hi" });
+
+    // DispatchCapture::max_agent_call_depth() returns 10.
+    // Seed 9 directly and let the helper supply the tenth level, so the assertion fails if the helper writes to some other counter than the one the guard reads.
+    let result = AGENT_CALL_DEPTH
+        .scope(
+            std::cell::Cell::new(9),
+            with_agent_call_depth(super::agent::tool_agent_send(
+                &input,
+                Some(&kernel),
+                Some("parent-agent"),
+                None,
+                None,
+            )),
+        )
+        .await;
+
+    match result.expect_err("depth 9 + one helper level must reach the quota") {
+        ToolError::PermissionDenied(msg) => assert!(
+            msg.contains("Inter-agent call depth exceeded"),
+            "expected the depth refusal, got: {msg}"
+        ),
+        other => panic!("expected PermissionDenied from the shared depth counter, got {other:?}"),
+    }
+    assert!(
+        cap.calls.lock().unwrap().is_empty(),
+        "the refusal must short-circuit before dispatch"
+    );
+}
+
+/// The nesting-depth refusal must reach the model as a policy error, the same way `agent_send`'s does (refs #6659).
+///
+/// `tool_workflow_run` used to map *every* kernel failure through `ToolError::upstream`, which lifts to a 5xx-class `ToolExecution` that retry logic reads as a downstream crash.
+/// It also matters for turn survival: `PermissionDenied` classifies as `ToolExecutionStatus::Denied` — a soft failure — so an agent that keeps hitting the cap does not burn through `MAX_CONSECUTIVE_ALL_FAILED` and lose the whole turn to an abort.
+#[tokio::test]
+async fn workflow_run_depth_refusal_is_permission_denied_not_upstream() {
+    use super::error::ToolError;
+
+    let denying = Arc::new(DispatchCapture {
+        deny_workflow_run: true,
+        ..Default::default()
+    });
+    let kernel: Arc<dyn KernelHandle> = denying;
+    let input = serde_json::json!({ "workflow_id": "some-workflow" });
+
+    let err = super::workflow::tool_workflow_run(&input, Some(&kernel))
+        .await
+        .expect_err("a CapabilityDenied from the kernel must surface as an error");
+    match &err {
+        ToolError::PermissionDenied(msg) => assert!(
+            msg.contains("Nested workflow run depth exceeded"),
+            "the refusal text must survive so the model learns why, got: {msg}"
+        ),
+        other => panic!(
+            "expected PermissionDenied (soft Denied, 403-class); Upstream would map to 5xx and \
+             count as a hard failure toward MAX_CONSECUTIVE_ALL_FAILED. Got {other:?}"
+        ),
+    }
+    assert_eq!(
+        err.execution_status(),
+        librefang_types::tool::ToolExecutionStatus::Denied,
+        "the refusal must classify as a soft Denied, not a hard Error"
+    );
+
+    // Any other kernel failure still goes through `upstream` — the mapping is a narrow special case, not a blanket reclassification.
+    let plain = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = plain;
+    let err = super::workflow::tool_workflow_run(&input, Some(&kernel))
+        .await
+        .expect_err("the default stub reports the engine unavailable");
+    assert!(
+        matches!(err, ToolError::Upstream { .. }),
+        "non-policy kernel failures must stay Upstream, got {err:?}"
     );
 }
 
