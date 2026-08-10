@@ -338,9 +338,6 @@ pub async fn message_event(client: &BotClient, msg: &Message, edited: bool) -> O
     // `channel` posts have separate semantics (no sender user, broadcast-only); treat them as DM-like for routing, matching the Python adapter.
     let is_group = matches!(msg.chat.chat_type.as_str(), "group" | "supergroup");
     let metadata = build_metadata(msg, &sender, edited);
-    // Populate the canonical top-level id too, matching `message_event` and the
-    // Python adapter's callback path. Without it the daemon synthesises a random
-    // UUID for `platform_message_id`, which cannot address a Telegram message.
     let mut builder = MessageBuilder::new(chat_id.clone(), sender.name.clone())
         .content(content_to_value(&content))
         .channel_id(chat_id)
@@ -528,6 +525,8 @@ pub fn callback_event(cq: &CallbackQuery) -> Option<Value> {
         .channel_id(chat_id)
         .platform("telegram")
         .is_group(is_group)
+        // Populate the canonical top-level id too, matching `message_event` and the Python adapter's callback path.
+        // Without it the daemon synthesises a random UUID for `platform_message_id`, which cannot address a Telegram message.
         .message_id(message_id)
         .metadata(metadata);
     if let Some(uname) = sender.username {
