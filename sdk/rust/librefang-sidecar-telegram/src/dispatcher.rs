@@ -1,11 +1,11 @@
 //! Outbound dispatch: SDK `Content` value → Telegram Bot API call.
 //!
 //! Mirrors the Python adapter's `_dispatch_content` / `_send_*` family.
-//! All text routes go through `format_and_sanitize` → `split_to_utf16_chunks` → `sendMessage` (HTML parse mode), with a "can't parse entities" automatic fallback to plain text. The same fallback is applied to single-item captioned media (Image / Voice / Video / Audio / Animation) so a malformed sanitiser output never silently drops the media send. MediaGroup does NOT have a per-item fallback — it's an atomic Bot API call and a parse error on ANY item caption fails the whole group; callers that need fallback-per-item should send items individually.
+//! All text routes go through `format_sanitize_and_chunk` → `sendMessage` (HTML parse mode), with a "can't parse entities" automatic fallback to plain text. The same fallback is applied to single-item captioned media (Image / Voice / Video / Audio / Animation) so a malformed sanitiser output never silently drops the media send. MediaGroup does NOT have a per-item fallback — it's an atomic Bot API call and a parse error on ANY item caption fails the whole group; callers that need fallback-per-item should send items individually.
 
 use crate::api::types::InlineKeyboardButton as TgButton;
 use crate::api::{BotClient, Error, Result};
-use crate::format::{format_and_sanitize, split_to_utf16_chunks, TELEGRAM_MSG_LIMIT};
+use crate::format::{format_and_sanitize, format_sanitize_and_chunk};
 use serde_json::{json, Value};
 
 const PARSE_MODE_HTML: &str = "HTML";
@@ -51,8 +51,7 @@ pub async fn send_text(
     text: &str,
     thread_id: Option<i64>,
 ) -> Result<()> {
-    let formatted = format_and_sanitize(text);
-    for chunk in split_to_utf16_chunks(&formatted, TELEGRAM_MSG_LIMIT) {
+    for chunk in format_sanitize_and_chunk(text) {
         match client
             .send_message(chat_id, &chunk, Some(PARSE_MODE_HTML), thread_id, None)
             .await
