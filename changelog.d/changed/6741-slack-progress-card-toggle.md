@@ -1,0 +1,3 @@
+Split the Slack multi-step task-progress card from the processing-state reactions with a new `SLACK_PROGRESS_CARD` switch.
+The card was gated on `SLACK_REACTIONS`, so the only way to stop the emoji noise was to also lose the step list — the more useful of the two indicators on a long tool-using turn.
+The new switch defaults to whatever `SLACK_REACTIONS` resolves to, so an operator who set `SLACK_REACTIONS=false` for silence keeps exactly that, while `SLACK_REACTIONS=false` with `SLACK_PROGRESS_CARD=true` now gives the card without the reactions and the reverse gives the reactions without the card (#6741) (@houko)

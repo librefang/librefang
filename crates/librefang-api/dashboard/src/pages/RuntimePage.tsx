@@ -817,7 +817,7 @@ export function RuntimePage() {
         message={t("runtime.shutdown_confirm_desc")}
         confirmLabel={t("runtime.shutdown_confirm")}
         tone="destructive"
-        onConfirm={() => shutdownMutation.mutate()}
+        onConfirm={async () => { await shutdownMutation.mutateAsync(); }}
         onClose={() => setShowShutdownConfirm(false)}
       />
 
@@ -828,11 +828,10 @@ export function RuntimePage() {
         message={t("runtime.restore_confirm_desc")}
         confirmLabel={t("runtime.restore_confirm")}
         tone="destructive"
-        onConfirm={() => {
+        onConfirm={async () => {
           if (backupConfirm?.type === "restore") {
-            restoreMutation.mutate(backupConfirm.filename);
+            await restoreMutation.mutateAsync(backupConfirm.filename);
           }
-          setBackupConfirm(null);
         }}
         onClose={() => setBackupConfirm(null)}
       />
@@ -844,11 +843,10 @@ export function RuntimePage() {
         message={t("runtime.delete_backup_confirm_desc")}
         confirmLabel={t("runtime.delete_backup_confirm")}
         tone="destructive"
-        onConfirm={() => {
+        onConfirm={async () => {
           if (backupConfirm?.type === "delete") {
-            deleteBackupMutation.mutate(backupConfirm.filename);
+            await deleteBackupMutation.mutateAsync(backupConfirm.filename);
           }
-          setBackupConfirm(null);
         }}
         onClose={() => setBackupConfirm(null)}
       />

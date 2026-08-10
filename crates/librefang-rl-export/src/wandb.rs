@@ -135,8 +135,14 @@ async fn export_to_wandb_with_client(
     run_id_hint: Option<&str>,
     api_key: &str,
     client: reqwest::Client,
-    export: RlTrajectoryExport,
+    mut export: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
+    // Redact here rather than only at the `crate::export` dispatch: this is
+    // the last hop before the bytes leave the process, so every entry point
+    // — including the in-crate wiremock ones — is covered. The pass is
+    // idempotent, so the dispatch-level call is not duplicated work of
+    // consequence.
+    crate::normalize_export_metadata(&mut export);
     validate_config(project, entity, api_key)?;
     // SSRF validation is gated on `crate::export` (the public dispatch
     // entry point) rather than here, so the in-crate `wiremock` tests
@@ -148,10 +154,7 @@ async fn export_to_wandb_with_client(
     // forwards `metadata` to the run page verbatim, so a tool result
     // containing a stray credential would otherwise land in a
     // third-party UI.
-    let scrubbed_metadata = export
-        .toolset_metadata
-        .as_ref()
-        .map(crate::redact::redact_metadata);
+    let scrubbed_metadata = export.toolset_metadata.take();
 
     let auth_header = build_basic_auth(api_key);
 

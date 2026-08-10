@@ -1,10 +1,13 @@
 post_install() {
   echo "LibreFang Docker runner installed."
+  echo "Authentication is required by default: set LIBREFANG_API_KEY or LIBREFANG_DASHBOARD_USER/LIBREFANG_DASHBOARD_PASS in /etc/librefang/docker.env before first start, or the daemon will refuse to start."
   echo "Edit /etc/librefang/docker.env if you need provider API keys or a custom port."
   echo "Start the service with: systemctl enable --now librefang-docker.service"
 }
 
 post_upgrade() {
   echo "LibreFang Docker runner upgraded."
+  echo "Security: pacman preserves /etc/librefang/docker.env."
+  echo "Review any existing LIBREFANG_ALLOW_NO_AUTH=1 setting and change it to 0 unless no-auth is intentional."
   echo "Restart the service with: systemctl restart librefang-docker.service"
 }

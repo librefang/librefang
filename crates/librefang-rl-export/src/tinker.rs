@@ -164,8 +164,11 @@ async fn export_to_tinker_with_client(
     project: &str,
     api_key: &str,
     client: reqwest::Client,
-    export: RlTrajectoryExport,
+    mut export: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
+    // Redact at the last hop before egress so every entry point is covered,
+    // not just the `crate::export` dispatch. The pass is idempotent.
+    crate::normalize_export_metadata(&mut export);
     validate_config(project, api_key)?;
     // SSRF validation runs in `crate::export` before dispatch so the
     // in-crate wiremock tests can point `*_with_base` at a loopback
@@ -174,10 +177,7 @@ async fn export_to_tinker_with_client(
     // pins the value to the session's `user_metadata` (visible on
     // Tinker's session inspection surface), so a stray credential in
     // a tool result would otherwise leak.
-    let scrubbed_metadata = export
-        .toolset_metadata
-        .as_ref()
-        .map(crate::redact::redact_metadata);
+    let scrubbed_metadata = export.toolset_metadata.take();
 
     // Step 1: register the session on Tinker. Sort tags for byte-
     // identical wire output (refs #3298 prompt-cache determinism).

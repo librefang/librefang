@@ -1,6 +1,6 @@
 """Tests for librefang.sidecar.adapters.webhook.
 
-Deterministic, no network — urllib monkeypatched via _http_request.
+Deterministic, no network — DNS and the callback transport are monkeypatched.
 """
 from __future__ import annotations
 
@@ -8,12 +8,29 @@ import hashlib
 import hmac
 import json
 import os
+import socket
 import time
 
 import pytest
 
 os.environ.setdefault("WEBHOOK_SECRET", "test-secret")
 from librefang.sidecar.adapters import webhook as wh  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _public_example_dns(monkeypatch):
+    """Keep callback tests deterministic while production now resolves DNS."""
+    real_getaddrinfo = socket.getaddrinfo
+
+    def _getaddrinfo(host, port, *args, **kwargs):
+        if str(host).rstrip(".").lower() == "example.com":
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+                 ("93.184.216.34", port)),
+            ]
+        return real_getaddrinfo(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(wh.socket, "getaddrinfo", _getaddrinfo)
 
 
 def _adapter(**env):
@@ -125,6 +142,36 @@ def test_validate_callback_url_returns_none_for_public():
     assert wh.validate_callback_url("https://8.8.8.8/path") is None
 
 
+def test_validate_callback_url_rejects_any_private_dns_answer(monkeypatch):
+    monkeypatch.setattr(
+        wh.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+             ("93.184.216.34", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+             ("169.254.169.254", 443)),
+        ],
+    )
+
+    reason = wh.validate_callback_url("https://callbacks.example/in")
+
+    assert reason is not None
+    assert "169.254.169.254" in reason
+
+
+def test_validate_callback_url_rejects_dns_failure(monkeypatch):
+    def _fail(*_args, **_kwargs):
+        raise socket.gaierror("resolver unavailable")
+
+    monkeypatch.setattr(wh.socket, "getaddrinfo", _fail)
+
+    reason = wh.validate_callback_url("https://callbacks.example/in")
+
+    assert reason is not None
+    assert "DNS resolution failed" in reason
+
+
 def test_validate_callback_url_rejects_loopback_ipv4():
     assert wh.validate_callback_url("http://127.0.0.1") is not None
     assert wh.validate_callback_url("http://127.255.255.255") is not None
@@ -168,6 +215,18 @@ def test_validate_callback_url_rejects_ipv4_mapped_ipv6():
     assert wh.validate_callback_url("http://[::ffff:127.0.0.1]") is not None
 
 
+@pytest.mark.parametrize(
+    "host",
+    [
+        "::127.0.0.1",
+        "64:ff9b::7f00:1",
+        "2002:7f00:0001::",
+    ],
+)
+def test_validate_callback_url_rejects_embedded_private_ipv4(host):
+    assert wh.validate_callback_url(f"http://[{host}]") is not None
+
+
 def test_validate_callback_url_rejects_localhost_hostname():
     assert wh.validate_callback_url("http://localhost") is not None
     # FQDN trailing dot must not bypass.
@@ -192,6 +251,13 @@ def test_validate_callback_url_rejects_empty():
 
 def test_validate_callback_url_rejects_no_host():
     assert wh.validate_callback_url("http:///path-no-host") is not None
+
+
+def test_validate_callback_url_rejects_port_zero():
+    reason = wh.validate_callback_url("https://8.8.8.8:0/callback")
+
+    assert reason is not None
+    assert "port 0" in reason
 
 
 # ---- signature helpers ---------------------------------------------
@@ -586,6 +652,155 @@ def test_send_text_basic(monkeypatch):
     assert body["recipient_id"] == "user-1"
     assert body["recipient_name"] == "Alice"
     assert headers.get("X-Webhook-Signature", "").startswith("sha256=")
+
+
+def test_send_uses_the_addresses_validated_for_that_request(monkeypatch):
+    dns_answers = iter([
+        [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+          ("93.184.216.34", 443))],
+        [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+          ("93.184.216.35", 443))],
+    ])
+    monkeypatch.setattr(
+        wh.socket, "getaddrinfo", lambda *_args, **_kwargs: next(dns_answers),
+    )
+    captured: list = []
+
+    def _fake_http(url, **kwargs):
+        captured.append((url, kwargs["resolved_addresses"]))
+        return (200, {}, b"", {})
+
+    monkeypatch.setattr(wh, "_http_request", _fake_http)
+    a = _adapter(WEBHOOK_CALLBACK_URL="https://callbacks.example/in")
+
+    a._send_text("user-1", "Alice", "hello")
+
+    assert captured == [
+        (
+            "https://callbacks.example/in",
+            [(socket.AF_INET, ("93.184.216.35", 443))],
+        ),
+    ]
+
+
+def test_send_rejects_dns_rebinding_before_http(monkeypatch):
+    dns_answers = iter([
+        [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+          ("93.184.216.34", 443))],
+        [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+          ("127.0.0.1", 443))],
+    ])
+    monkeypatch.setattr(
+        wh.socket, "getaddrinfo", lambda *_args, **_kwargs: next(dns_answers),
+    )
+    calls: list = []
+    monkeypatch.setattr(
+        wh,
+        "_http_request",
+        lambda *args, **kwargs: (calls.append((args, kwargs)), (200, {}, b"", {}))[1],
+    )
+    a = _adapter(WEBHOOK_CALLBACK_URL="https://callbacks.example/in")
+
+    with pytest.raises(RuntimeError, match="SSRF guard"):
+        a._send_text("user-1", "Alice", "hello")
+
+    assert calls == []
+
+
+def test_connect_resolved_falls_back_without_dns(monkeypatch):
+    attempts: list = []
+
+    class _FakeSocket:
+        def __init__(self, family):
+            self.family = family
+
+        def settimeout(self, timeout):
+            self.timeout = timeout
+
+        def connect(self, sockaddr):
+            attempts.append((self.family, sockaddr))
+            if sockaddr[0] == "93.184.216.34":
+                raise OSError("first address unavailable")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        wh.socket,
+        "socket",
+        lambda family, _socktype, _proto: _FakeSocket(family),
+    )
+    addresses = [
+        (socket.AF_INET, ("93.184.216.34", 443)),
+        (socket.AF_INET, ("93.184.216.35", 443)),
+    ]
+
+    connected = wh._connect_resolved(addresses, 3.0)
+
+    assert connected.family == socket.AF_INET
+    assert attempts == [
+        (socket.AF_INET, ("93.184.216.34", 443)),
+        (socket.AF_INET, ("93.184.216.35", 443)),
+    ]
+
+
+def test_connect_resolved_falls_back_when_socket_family_is_unsupported(monkeypatch):
+    attempts: list = []
+
+    class _FakeSocket:
+        def settimeout(self, timeout):
+            self.timeout = timeout
+
+        def connect(self, sockaddr):
+            attempts.append(sockaddr)
+
+        def close(self):
+            pass
+
+    def _socket(family, _socktype, _proto):
+        if family == socket.AF_INET6:
+            raise OSError("IPv6 is unavailable")
+        return _FakeSocket()
+
+    monkeypatch.setattr(wh.socket, "socket", _socket)
+    addresses = [
+        (socket.AF_INET6, ("2001:4860:4860::8888", 443, 0, 0)),
+        (socket.AF_INET, ("93.184.216.34", 443)),
+    ]
+
+    connected = wh._connect_resolved(addresses, 3.0)
+
+    assert isinstance(connected, _FakeSocket)
+    assert attempts == [("93.184.216.34", 443)]
+
+
+def test_https_pinning_preserves_original_hostname_for_sni(monkeypatch):
+    raw_socket = object()
+    wrapped_socket = object()
+    calls: list = []
+    monkeypatch.setattr(
+        wh,
+        "_connect_resolved",
+        lambda addresses, timeout: raw_socket,
+    )
+
+    class _Context:
+        def wrap_socket(self, sock, *, server_hostname):
+            calls.append((sock, server_hostname))
+            return wrapped_socket
+
+    conn = wh._PinnedHTTPSConnection(
+        "callbacks.example",
+        443,
+        timeout=3.0,
+        resolved_addresses=[(socket.AF_INET, ("93.184.216.34", 443))],
+    )
+    conn._context = _Context()
+
+    conn.connect()
+
+    assert conn.sock is wrapped_socket
+    assert calls == [(raw_socket, "callbacks.example")]
 
 
 def test_send_text_chunks_long_message(monkeypatch):
