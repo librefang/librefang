@@ -181,6 +181,52 @@ def test_api_post_and_multipart_propagate_retry_after_header(monkeypatch):
     assert resp4["_retry_after_header"] == "21"
 
 
+def test_call_retrying_skips_sleep_above_retry_after_cap(monkeypatch):
+    # A flood-wait retry_after above MAX_RETRY_AFTER_SECS must not sleep
+    # (an attacker-controlled or misbehaving server returning e.g. a
+    # multi-hour delay must not hang the sidecar indefinitely) — the
+    # original 429 response is returned unmodified instead.
+    a = _adapter()
+    calls = []
+    monkeypatch.setattr(
+        a, "_call",
+        lambda method, payload: {
+            "_http": 429,
+            "parameters": {"retry_after": tg.MAX_RETRY_AFTER_SECS + 1},
+        })
+    monkeypatch.setattr(tg.time, "sleep",
+                         lambda secs: calls.append(secs))
+    resp = a._call_retrying("sendMessage", {"chat_id": 1, "text": "x"})
+    assert calls == []
+    assert resp["_http"] == 429
+
+    # A delay within the cap still sleeps and retries exactly once.
+    responses = iter([
+        {"_http": 429, "parameters": {"retry_after": 1}},
+        {"ok": True},
+    ])
+    monkeypatch.setattr(a, "_call", lambda method, payload: next(responses))
+    resp2 = a._call_retrying("sendMessage", {"chat_id": 1, "text": "x"})
+    assert calls == [1]
+    assert resp2 == {"ok": True}
+
+
+def test_send_media_upload_skips_sleep_above_retry_after_cap(monkeypatch):
+    a = _adapter()
+    calls = []
+    monkeypatch.setattr(
+        tg, "_multipart",
+        lambda *a_, **k_: {
+            "_http": 429,
+            "parameters": {"retry_after": tg.MAX_RETRY_AFTER_SECS + 1},
+        })
+    monkeypatch.setattr(tg.time, "sleep", lambda secs: calls.append(secs))
+    resp = a._send_media_upload("sendPhoto", "photo", 1, b"data", "f.png",
+                                "image/png")
+    assert calls == []
+    assert resp["_http"] == 429
+
+
 def test_truncate_utf8_callback_data():
     assert tg._truncate_utf8("abc", 64) == "abc"
     assert tg._truncate_utf8("x" * 100, 64) == "x" * 64

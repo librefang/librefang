@@ -72,6 +72,12 @@ TELEGRAM_MSG_LIMIT = 4096
 # Throttle streamed editMessageText (mirrors the Rust adapter's 1s).
 STREAM_EDIT_INTERVAL = 1.0
 RETRY_AFTER_DEFAULT_SECS = 2
+# Cap how long we will sleep on a 429 retry_after from Telegram. A
+# flood-wait can return hours; sleeping that long would stall the
+# entire produce loop with no cancellation. Anything above this skips
+# the retry and returns the original 429 response, matching
+# telegram.rs's MAX_RETRY_AFTER_SECS.
+MAX_RETRY_AFTER_SECS = 300
 # Backoff cap for the `produce()` reconnect loop on transient network
 # / DNS failures (#5111). Matches the convention every other polling
 # sidecar (bluesky / discord / line / mastodon / mattermost /
@@ -862,10 +868,18 @@ class TelegramAdapter(SidecarAdapter):
 
     def _call_retrying(self, method: str, payload: dict) -> dict:
         """`_call` + a single 429 retry honouring `retry_after`
-        (mirrors api_send_media_request)."""
+        (mirrors api_send_media_request). A flood-wait above
+        `MAX_RETRY_AFTER_SECS` skips the sleep and returns the
+        original 429 response instead of stalling the caller
+        indefinitely."""
         resp = self._call(method, payload)
         if resp.get("_http") == 429:
             delay = _extract_retry_after(resp, RETRY_AFTER_DEFAULT_SECS)
+            if delay > MAX_RETRY_AFTER_SECS:
+                log.warn("telegram rate limited; retry_after exceeds cap, "
+                         "not retrying",
+                         method=method, delay=delay)
+                return resp
             log.warn("telegram rate limited; retrying",
                      method=method, delay=delay)
             time.sleep(delay)
@@ -941,7 +955,13 @@ class TelegramAdapter(SidecarAdapter):
         resp = _multipart(url, fields, field, filename, mime, data,
                           SEND_TIMEOUT_SECS)
         if resp.get("_http") == 429:
-            time.sleep(_extract_retry_after(resp, RETRY_AFTER_DEFAULT_SECS))
+            delay = _extract_retry_after(resp, RETRY_AFTER_DEFAULT_SECS)
+            if delay > MAX_RETRY_AFTER_SECS:
+                log.warn("telegram rate limited; retry_after exceeds cap, "
+                         "not retrying",
+                         method=endpoint, delay=delay)
+                return resp
+            time.sleep(delay)
             resp = _multipart(url, fields, field, filename, mime, data,
                               SEND_TIMEOUT_SECS)
         return resp
