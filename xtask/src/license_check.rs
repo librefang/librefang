@@ -56,11 +56,7 @@ fn license_expression_is_denied(license: &str, denied: &[&str]) -> Result<bool, 
         let Some(id) = requirement.license.id() else {
             return false;
         };
-        // Case-insensitive: `denied` comes straight from `--deny` / the CLI
-        // default and is never itself run through SPDX parsing, so a custom
-        // deny entry with different casing than the canonical SPDX id (e.g.
-        // `gpl-3.0-only` vs `GPL-3.0-only`) must still match rather than
-        // silently letting the license through.
+        // Case-insensitive: `denied` comes straight from `--deny` / the CLI default and is never itself run through SPDX parsing, so a custom deny entry with different casing than the canonical SPDX id (e.g. `gpl-3.0-only` vs `GPL-3.0-only`) must still match rather than silently letting the license through.
         !denied
             .iter()
             .any(|denied_id| denied_id.eq_ignore_ascii_case(id.name))
@@ -389,9 +385,7 @@ mod tests {
 
     #[test]
     fn deny_list_matches_regardless_of_case() {
-        // `denied` is raw CLI input, never SPDX-parsed, while `id.name` is the
-        // canonical SPDX casing — a differently-cased custom `--deny` entry
-        // must still catch the license rather than silently passing it.
+        // `denied` is raw CLI input, never SPDX-parsed, while `id.name` is the canonical SPDX casing — a differently-cased custom `--deny` entry must still catch the license rather than silently passing it.
         assert!(license_expression_is_denied("GPL-3.0-only", &["gpl-3.0-only"]).unwrap());
         assert!(license_expression_is_denied("GPL-3.0-only", &["GPL-3.0-ONLY"]).unwrap());
     }
