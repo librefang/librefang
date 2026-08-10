@@ -126,6 +126,7 @@ fn command_output_with_timeout(command: &mut Command, timeout: Duration) -> Resu
     command.wrap(JobObject);
     command
         .command_mut()
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command
