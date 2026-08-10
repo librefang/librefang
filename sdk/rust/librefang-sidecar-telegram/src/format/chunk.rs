@@ -124,9 +124,8 @@ fn strip_mid_tag(chunk: &str) -> &str {
     }
 }
 
-/// Trim only a newly selected input prefix. Its returned length is therefore
-/// the exact byte count to consume from `remaining`; formatting carry is never
-/// part of the boundary calculation.
+/// Trim only a newly selected input prefix.
+/// Its returned length is therefore the exact byte count to consume from `remaining`; formatting carry is never part of the boundary calculation.
 fn trim_input_boundary(input: &str) -> &str {
     adjust_html_entity_boundary(strip_mid_tag(input))
 }
@@ -204,13 +203,11 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<String> {
         if input_chunk.is_empty() {
             input_chunk = input_prefix;
         }
-        // Trim only the new input. Inferring progress by trimming
-        // `carry + input` and subtracting carry length would couple forward
-        // progress to assumptions inside the boundary helpers.
+        // Trim only the new input.
+        // Inferring progress by trimming `carry + input` and subtracting carry length would couple forward progress to assumptions inside the boundary helpers.
         let trimmed_input = trim_input_boundary(input_chunk);
-        // Choose what to emit: either carry plus the safely trimmed input
-        // (normal path), or if no safe input remains, carry plus one forced
-        // input unit. Both paths run the same tag rebalancing below.
+        // Choose what to emit: either carry plus the safely trimmed input (normal path), or if no safe input remains, carry plus one forced input unit.
+        // Both paths run the same tag rebalancing below.
         let mut emitted_text: String;
         let mut consumed_from_input: usize;
         let degenerate_progress = trimmed_input.is_empty();
@@ -284,11 +281,9 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<String> {
             next_carry.clear();
         }
         while utf16_len(&emitted_text).saturating_add(utf16_len(&close_suffix)) > limit {
-            // NEW_TAG_RESERVE is only a first-pass heuristic. Recompute the
-            // exact suffix for the selected prefix, then shrink the input
-            // until both the body and its balancing closes fit. Removing a
-            // closing tag can itself increase the required suffix, so repeat
-            // until the exact tag stack stabilizes within the limit.
+            // NEW_TAG_RESERVE is only a first-pass heuristic.
+            // Recompute the exact suffix for the selected prefix, then shrink the input until both the body and its balancing closes fit.
+            // Removing a closing tag can itself increase the required suffix, so repeat until the exact tag stack stabilizes within the limit.
             let previous_consumed = consumed_from_input;
             let available_input = limit
                 .saturating_sub(utf16_len(&carry))
@@ -298,11 +293,8 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<String> {
             let reduced_consumed = reduced_input.len();
 
             if reduced_consumed == 0 || reduced_consumed >= previous_consumed {
-                // Carry plus its exact close suffix can consume the whole
-                // budget at tiny/adversarial limits. Formatting cannot be
-                // represented there, so retain progress and fall back to the
-                // selected input's plain text rather than emitting oversized
-                // wire data or looping forever.
+                // Carry plus its exact close suffix can consume the whole budget at tiny/adversarial limits.
+                // Formatting cannot be represented there, so retain progress and fall back to the selected input's plain text rather than emitting oversized wire data or looping forever.
                 let plain = RE_TAG.replace_all(&remaining[..previous_consumed], "");
                 emitted_text = truncate_to_utf16_limit(&plain, limit).to_string();
                 close_suffix.clear();
@@ -442,8 +434,7 @@ mod tests {
     fn tag_carry_preserves_anchor_href_with_attributes() {
         // Anchor with attributes — the carry must preserve `href="..."` verbatim when reopening.
         let s = format!("<a href=\"https://example.com\">{}</a>", "x".repeat(40));
-        // The opening tag (30 units) plus its required `</a>` suffix must fit
-        // before the chunker can preserve formatting.
+        // The opening tag (30 units) plus its required `</a>` suffix must fit before the chunker can preserve formatting.
         let chunks = split_to_utf16_chunks(&s, 45);
         assert!(chunks.len() >= 2);
         assert!(
