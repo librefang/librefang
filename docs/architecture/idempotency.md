@@ -18,11 +18,8 @@ channel webhook redelivery silently created two of something.
 | Repeat with key `K` + different body | `409 Conflict` with `code = "idempotency_key_conflict"`. |
 | Empty / oversize / non-printable key | `400 Bad Request` with `code = "idempotency_key_invalid"`. |
 
-The 24-hour replay window starts when a successful handler completes;
-it is long enough to absorb realistic dashboard / webhook redelivery
-races without retaining completed responses indefinitely. Expired
-completed rows are deleted lazily on lookup and by opportunistic pruning,
-which is limited to once per minute per shared store.
+The 24-hour replay window starts when a successful handler completes; it is long enough to absorb realistic dashboard / webhook redelivery races without retaining completed responses indefinitely.
+Expired completed rows are deleted lazily on lookup and by opportunistic pruning, which is limited to once per minute per shared store.
 
 Body identity is sha256 over the raw JSON bytes the handler received
 (not the parsed value) so a re-serialised body with reordered keys
@@ -75,7 +72,9 @@ The transaction has exactly one owner before any handler starts, so concurrent s
 Only that token's owner may complete or release the row, preventing a superseded request from modifying a replacement reservation.
 Successful handlers replace their pending row with the replayable status and body; non-success and cancelled handlers release it.
 
-Pending reservations do not use the replay TTL and are not reclaimed automatically. This keeps a handler that legitimately runs for more than 24 hours from losing its reservation to a retry. If the process exits abnormally before the guard can release the row, the key remains fail-closed until an operator verifies the original side effect and explicitly removes that orphaned pending row.
+Pending reservations do not use the replay TTL and are not reclaimed automatically.
+This keeps a handler that legitimately runs for more than 24 hours from losing its reservation to a retry.
+If the process exits abnormally before the guard can release the row, the key remains fail-closed until an operator verifies the original side effect and explicitly removes that orphaned pending row.
 
 ## Failure modes
 

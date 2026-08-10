@@ -5,18 +5,12 @@
 //! through [`run_idempotent`], which:
 //!
 //! 1. Atomically reserves `(key)` in the persistent store.
-//! 2. **Reservation acquired**: executes the inner handler, then completes
-//!    the reservation with the successful 2xx response for 24 hours.
-//!    Non-2xx responses are not cached so a transient failure (rate
-//!    limit, downstream blip) does not poison the slot — clients can
-//!    retry the same key and get a real attempt.
+//! 2. **Reservation acquired**: executes the inner handler, then completes the reservation with the successful 2xx response for 24 hours.
+//!    Non-2xx responses are not cached so a transient failure (rate limit, downstream blip) does not poison the slot — clients can retry the same key and get a real attempt.
 //! 3. **Concurrent reservation, same body**: returns 409 without running the handler.
-//! 4. **Cache hit, same body**: replays the cached `(status, body)`
-//!    without re-executing the handler.
-//! 5. **Cache hit, different body**: returns 409 Conflict. The
-//!    `Idempotency-Key` is the operator-supplied dedup token and a
-//!    different payload under the same key is a programming error
-//!    (e.g. UI accidentally reuses an old key after editing the form).
+//! 4. **Cache hit, same body**: replays the cached `(status, body)` without re-executing the handler.
+//! 5. **Cache hit, different body**: returns 409 Conflict.
+//!    The `Idempotency-Key` is the operator-supplied dedup token and a different payload under the same key is a programming error (e.g. UI accidentally reuses an old key after editing the form).
 //!
 //! Body identity is sha256 over the raw JSON bytes the handler
 //! received. We hash bytes, not parsed JSON, so a re-serialised body
@@ -194,9 +188,8 @@ where
 
     let body_hash = hash_body(body_bytes);
 
-    // Reserve before starting the handler. The SQLite implementation performs
-    // expiration cleanup, insert, and existing-row lookup under one immediate
-    // transaction, so same-key requests cannot both observe a miss.
+    // Reserve before starting the handler.
+    // The SQLite implementation performs expiration cleanup, insert, and existing-row lookup under one immediate transaction, so same-key requests cannot both observe a miss.
     let reservation = match store.reserve(key, &body_hash) {
         Ok(reservation) => reservation,
         Err(e) => {
@@ -234,17 +227,16 @@ where
             body: body.clone(),
         };
         if let Err(e) = store.complete(key, &body_hash, &guard.token, &cached) {
-            // Keep the pending row instead of making the key reusable after the
-            // side effect already happened. This remains fail-closed until an
-            // operator has verified the side effect and removes the orphan.
+            // Keep the pending row instead of making the key reusable after the side effect already happened.
+            // This remains fail-closed until an operator has verified the side effect and removes the orphan.
             guard.disarm();
             tracing::error!(key, error = %e, "idempotency completion failed");
             return store_unavailable_response();
         }
         guard.disarm();
     }
-    // A non-2xx response leaves the guard armed, releasing the reservation so
-    // the key remains retriable. Cancellation and panic take the same Drop path.
+    // A non-2xx response leaves the guard armed, releasing the reservation so the key remains retriable.
+    // Cancellation and panic take the same Drop path.
     // Opportunistic prune so the table self-trims.
     if let Err(e) = store.prune_expired() {
         tracing::debug!(error = %e, "idempotency prune_expired failed");

@@ -1481,11 +1481,9 @@ pub(crate) fn __test_only_run_v33(conn: &Connection) {
 /// `Idempotency-Key`, while `body_hash` (sha256 of the canonical JSON
 /// bytes) is the conflict detector.
 ///
-/// Completed responses use a 24-hour replay window. Pending reservations
-/// use the same schema row with status zero, but current store semantics do
-/// not expire them automatically while a handler may still own the key.
-/// Expired completed rows are reclaimed lazily on read and by the API
-/// layer's `prune_expired` hook.
+/// Completed responses use a 24-hour replay window.
+/// Pending reservations use the same schema row with status zero, but current store semantics do not expire them automatically while a handler may still own the key.
+/// Expired completed rows are reclaimed lazily on read and by the API layer's `prune_expired` hook.
 fn migrate_v34(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS idempotency_keys (

@@ -5,12 +5,9 @@
 //! shape so the API crate doesn't need to depend on `rusqlite`
 //! directly. Schema is created by migration v34 (see `migration.rs`).
 //!
-//! A status-zero row reserves a key while its handler runs, and a successful
-//! handler atomically completes that row with its replayable response.
-//! Completed responses remain replayable for 24 hours after completion. Pending
-//! reservations do not expire automatically: cancellation and non-success
-//! responses release them, while an abnormal process exit fails closed until
-//! an operator explicitly removes the orphaned reservation.
+//! A status-zero row reserves a key while its handler runs, and a successful handler atomically completes that row with its replayable response.
+//! Completed responses remain replayable for 24 hours after completion.
+//! Pending reservations do not expire automatically: cancellation and non-success responses release them, while an abnormal process exit fails closed until an operator explicitly removes the orphaned reservation.
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -216,8 +213,8 @@ impl IdempotencyStore for SqliteIdempotencyStore {
             .get()
             .inspect_err(|_| record_pool_failure("lookup"))?;
         let now = now_unix()?;
-        // Replay TTL applies only after successful completion. A pending row
-        // remains a conflict even if its legacy expires_at value is in the past.
+        // Replay TTL applies only after successful completion.
+        // A pending row remains a conflict even if its legacy expires_at value is in the past.
         conn.execute(
             "DELETE FROM idempotency_keys \
              WHERE key = ?1 AND response_status != ?2 AND expires_at <= ?3",
