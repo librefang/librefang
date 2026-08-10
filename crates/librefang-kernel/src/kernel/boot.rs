@@ -2485,6 +2485,12 @@ impl LibreFangKernel {
                         );
                         continue;
                     }
+
+                    // #6732: this boot-time restore path inserts straight into the registry and never goes through `validate_spawnable`, so it is a fourth manifest-accepting path alongside spawn, hand-role activation, hot-reload and `update_manifest`.
+                    // Without this call, every daemon restart would silently skip the diagnostic for every already-existing agent — the most common case in practice.
+                    // Report-only, same as the other three call sites.
+                    warn_invalid_group_trigger_patterns(&restored_entry.manifest, &name);
+
                     if let Err(e) = kernel.agents.registry.register(restored_entry) {
                         tracing::warn!(agent = %name, "Failed to restore agent: {e}");
                     } else {
