@@ -8,9 +8,10 @@ pub fn map_reaction(input: &str, clear_done: bool) -> Vec<String> {
     if trimmed.is_empty() {
         return Vec::new();
     }
-    match trimmed {
+    let normalized = trimmed.trim_end_matches(['\u{FE0F}', '\u{FE0E}']);
+    match normalized {
         "⏳" => vec!["👀".into()],
-        "⚙️" | "⚙" => vec!["⚡".into()],
+        "⚙" => vec!["⚡".into()],
         "✅" => {
             if clear_done {
                 Vec::new()
@@ -19,6 +20,28 @@ pub fn map_reaction(input: &str, clear_done: bool) -> Vec<String> {
             }
         }
         "❌" => vec!["👎".into()],
-        other => vec![other.into()],
+        _ => vec![trimmed.into()],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn variation_selectors_do_not_bypass_reaction_mappings() {
+        for selector in ['\u{FE0F}', '\u{FE0E}'] {
+            assert_eq!(map_reaction(&format!("⏳{selector}"), false), ["👀"]);
+            assert_eq!(map_reaction(&format!("⚙{selector}"), false), ["⚡"]);
+            assert_eq!(map_reaction(&format!("✅{selector}"), false), ["🎉"]);
+            assert_eq!(
+                map_reaction(&format!("✅{selector}"), true),
+                Vec::<String>::new()
+            );
+            assert_eq!(map_reaction(&format!("❌{selector}"), false), ["👎"]);
+        }
+
+        assert_eq!(map_reaction(" ♥️ ", false), ["♥️"]);
+        assert_eq!(map_reaction("✍️", false), ["✍️"]);
     }
 }

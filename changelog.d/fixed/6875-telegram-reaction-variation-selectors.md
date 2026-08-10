@@ -1,0 +1,1 @@
+- Normalized emoji variation selectors consistently before mapping Telegram progress reactions. (@houko)
