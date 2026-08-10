@@ -31,6 +31,22 @@ static RE_LINK: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").expect("link regex"));
 static RE_BOLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^*]+)\*\*").expect("bold regex"));
 static RE_CODE: Lazy<Regex> = Lazy::new(|| Regex::new(r"`([^`\n]+)`").expect("code regex"));
+static RE_CODE_PLACEHOLDER: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\x{E000}C([0-9]+)\x{E001}").expect("code placeholder regex"));
+
+fn restore_code_placeholders(text: &str, placeholders: &[String]) -> String {
+    RE_CODE_PLACEHOLDER
+        .replace_all(text, |caps: &regex::Captures<'_>| {
+            let original = caps.get(0).unwrap().as_str();
+            caps[1]
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| placeholders.get(index))
+                .cloned()
+                .unwrap_or_else(|| original.to_string())
+        })
+        .into_owned()
+}
 
 fn is_single_star(bytes: &[u8], index: usize) -> bool {
     bytes.get(index) == Some(&b'*')
@@ -121,13 +137,7 @@ fn render_inline_markdown(text: &str) -> String {
         })
         .to_string();
 
-    // Restore code placeholders.
-    let mut restored = with_links;
-    for (i, html) in placeholders.iter().enumerate() {
-        let placeholder = format!("{CODE_PLACEHOLDER_OPEN}C{i}{CODE_PLACEHOLDER_CLOSE}");
-        restored = restored.replace(&placeholder, html);
-    }
-    restored
+    restore_code_placeholders(&with_links, &placeholders)
 }
 
 /// Convert Markdown text to Telegram-compatible HTML.
@@ -404,6 +414,21 @@ mod tests {
         // The literal `\u{E000}C0\u{E001}` should be stripped (escape_html eats the sentinels), and only the real backtick span should render as <code>.
         assert!(html.contains("<code>x</code>"));
         assert_eq!(html.matches("<code>").count(), 1);
+    }
+
+    #[test]
+    fn restores_code_placeholders_in_one_ordered_pass() {
+        let placeholders = vec!["<code>one</code>".into(), "<code>two</code>".into()];
+        let encoded = format!(
+            "a{CODE_PLACEHOLDER_OPEN}C0{CODE_PLACEHOLDER_CLOSE}b{CODE_PLACEHOLDER_OPEN}C1{CODE_PLACEHOLDER_CLOSE}c"
+        );
+        assert_eq!(
+            restore_code_placeholders(&encoded, &placeholders),
+            "a<code>one</code>b<code>two</code>c"
+        );
+
+        let unknown = format!("{CODE_PLACEHOLDER_OPEN}C9{CODE_PLACEHOLDER_CLOSE}");
+        assert_eq!(restore_code_placeholders(&unknown, &placeholders), unknown);
     }
 
     #[test]
