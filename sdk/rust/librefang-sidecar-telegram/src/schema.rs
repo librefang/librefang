@@ -80,6 +80,7 @@ mod tests {
             .find(|f| f.key == "TELEGRAM_STREAMING")
             .expect("schema must declare TELEGRAM_STREAMING");
         assert_eq!(streaming.field_type, FieldType::Bool);
+        assert!(!streaming.required);
         assert!(streaming.advanced);
     }
 }
