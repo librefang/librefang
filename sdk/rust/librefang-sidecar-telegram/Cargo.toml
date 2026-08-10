@@ -10,7 +10,7 @@ license = "MIT"
 repository = "https://github.com/librefang/librefang"
 homepage = "https://librefang.ai"
 keywords = ["librefang", "sidecar", "telegram", "channel", "bot"]
-categories = ["api-bindings"]
+categories = ["command-line-utilities"]
 readme = "README.md"
 rust-version = "1.80"
 
