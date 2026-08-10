@@ -62,9 +62,18 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
                 })?
         };
 
+        // Preserve a policy refusal as a policy refusal (refs #6659).
+        // The nesting cap in `LibreFangKernel::run_workflow` raises `CapabilityDenied`, and folding it into `Internal` here would deliver it to `tool_workflow_run` as an opaque upstream failure — a 5xx-class shape that reads as a downstream crash and invites retry, which is exactly the confusion the comment in `tool_agent_send` argues against.
+        // `KernelOpError` *is* `LibreFangError`, so the variant survives verbatim.
+        // Everything else keeps the historical stringified `Internal` shape, including its prefix.
         let (run_id, output) = LibreFangKernel::run_workflow(self, wf_id, input.to_string())
             .await
-            .map_err(|e| KernelOpError::Internal(format!("Workflow execution failed: {e}")))?;
+            .map_err(|e| match e {
+                crate::error::KernelError::LibreFang(
+                    librefang_types::error::LibreFangError::CapabilityDenied(msg),
+                ) => KernelOpError::CapabilityDenied(msg),
+                other => KernelOpError::Internal(format!("Workflow execution failed: {other}")),
+            })?;
 
         Ok((run_id.to_string(), output))
     }

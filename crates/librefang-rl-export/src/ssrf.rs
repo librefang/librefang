@@ -13,7 +13,8 @@
 //!
 //! That helper exists and we keep its policy in step (loopback /
 //! private / link-local / IMDS / non-http schemes / userinfo /
-//! IPv4-mapped-and-NAT64 IPv6 are all rejected). But it lives behind a
+//! IPv4-mapped, IPv4-compatible, NAT64, and 6to4 IPv6 pivots are rejected).
+//! But it lives behind a
 //! Cargo dep on `librefang-runtime-mcp`, which transitively pulls
 //! `librefang-kernel-handle`, the MCP discovery surface, and a
 //! Tower-shaped middleware stack — adding ~30 crates to a leaf egress
@@ -33,12 +34,25 @@
 //!   destinations but **rejects everything else**, including public
 //!   destinations and link-local / IMDS. Atropos has no auth — exposing
 //!   the producer to the public internet is the wrong shape entirely.
+//!
+//! Hostnames are resolved once immediately before export. Every returned
+//! address must satisfy the selected mode, and the HTTP client is pinned to
+//! that complete validated set without a proxy, closing DNS-rebinding and
+//! proxy-side re-resolution gaps.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use url::Url;
 
 use crate::error::ExportError;
+
+/// DNS result retained after policy validation so the HTTP client can connect
+/// to exactly the addresses that were checked.
+#[derive(Debug)]
+pub(crate) struct ResolvedEgress {
+    pub(crate) hostname: Option<String>,
+    pub(crate) addresses: Vec<std::net::SocketAddr>,
+}
 
 /// Egress allowlist mode for an exporter's outbound base URL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +138,76 @@ pub(crate) fn validate_egress_url(url_str: &str, mode: EgressMode) -> Result<(),
     Ok(())
 }
 
+/// Resolve and validate every address for an exporter base URL.
+///
+/// Domain results are retained for reqwest DNS pinning. IP literals need no
+/// resolver override because reqwest connects to the literal address directly.
+pub(crate) async fn resolve_and_validate_egress_url(
+    url_str: &str,
+    mode: EgressMode,
+) -> Result<ResolvedEgress, ExportError> {
+    validate_egress_url(url_str, mode)?;
+
+    let parsed = Url::parse(url_str)
+        .map_err(|e| ExportError::InvalidConfig(format!("invalid base URL: {e}")))?;
+    let host = match parsed.host() {
+        Some(url::Host::Domain(host)) => host.to_string(),
+        Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) => {
+            return Ok(ResolvedEgress {
+                hostname: None,
+                addresses: Vec::new(),
+            });
+        }
+        None => {
+            return Err(ExportError::InvalidConfig(
+                "base URL has no host component".to_string(),
+            ));
+        }
+    };
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| ExportError::InvalidConfig("base URL has no known port".to_string()))?;
+    let addresses = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|e| ExportError::NetworkError(format!("DNS lookup failed for {host}: {e}")))?
+        .collect::<Vec<_>>();
+
+    validate_resolved_addresses(&host, addresses, mode)
+}
+
+fn validate_resolved_addresses(
+    host: &str,
+    addresses: Vec<std::net::SocketAddr>,
+    mode: EgressMode,
+) -> Result<ResolvedEgress, ExportError> {
+    if addresses.is_empty() {
+        return Err(ExportError::NetworkError(format!(
+            "DNS lookup for {host} returned no addresses"
+        )));
+    }
+
+    for address in &addresses {
+        let ip = address.ip();
+        let ip_text = ip.to_string();
+        let is_blocked = host_is_blocked(&ip_text);
+        let is_private_class = host_is_private_class(&ip_text);
+        let allowed = match mode {
+            EgressMode::Public => !is_blocked && !is_private_class,
+            EgressMode::LoopbackOrPrivate => is_private_class,
+        };
+        if !allowed {
+            return Err(ExportError::InvalidConfig(format!(
+                "base URL host '{host}' resolves to disallowed address {ip}"
+            )));
+        }
+    }
+
+    Ok(ResolvedEgress {
+        hostname: Some(host.to_string()),
+        addresses,
+    })
+}
+
 /// Is `host` on the broad SSRF block list (loopback / private / link-
 /// local / known internal hostnames)? Mirrors the policy of
 /// `librefang_runtime_mcp::mcp_oauth::is_ssrf_blocked_host` so both
@@ -159,8 +243,16 @@ fn host_is_blocked(host: &str) -> bool {
                         return true;
                     }
                 }
+                if let Some(v4) = ipv6_6to4(v6) {
+                    if blocked_v4(v4) {
+                        return true;
+                    }
+                }
                 let segs = v6.segments();
-                v6.is_loopback() || (segs[0] & 0xfe00) == 0xfc00 || (segs[0] & 0xffc0) == 0xfe80
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || (segs[0] & 0xfe00) == 0xfc00
+                    || (segs[0] & 0xffc0) == 0xfe80
             }
         };
     }
@@ -223,7 +315,9 @@ fn loopback_or_private_v4(v4: Ipv4Addr) -> bool {
 }
 
 fn ipv6_embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
-    if let Some(v4) = v6.to_ipv4_mapped() {
+    // `to_ipv4` covers both mapped (::ffff:a.b.c.d) and the deprecated
+    // compatible form (::a.b.c.d). NAT64 needs an explicit extraction.
+    if let Some(v4) = v6.to_ipv4() {
         return Some(v4);
     }
     let s = v6.segments();
@@ -236,6 +330,19 @@ fn ipv6_embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
         ));
     }
     None
+}
+
+fn ipv6_6to4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+    let segments = v6.segments();
+    if segments[0] != 0x2002 {
+        return None;
+    }
+    Some(Ipv4Addr::new(
+        (segments[1] >> 8) as u8,
+        (segments[1] & 0xff) as u8,
+        (segments[2] >> 8) as u8,
+        (segments[2] & 0xff) as u8,
+    ))
 }
 
 #[cfg(test)]
@@ -318,6 +425,22 @@ mod tests {
     }
 
     #[test]
+    fn public_mode_rejects_unspecified_compatible_and_6to4_ipv6() {
+        for url in [
+            "http://[::]/",
+            "http://[::7f00:1]/",
+            "http://[::a00:1]/",
+            "http://[2002:7f00:1::]/",
+            "http://[2002:a00:1::]/",
+        ] {
+            assert!(
+                validate_egress_url(url, EgressMode::Public).is_err(),
+                "Public mode must reject local or embedded-private target {url}"
+            );
+        }
+    }
+
+    #[test]
     fn loopback_mode_accepts_loopback_and_rfc1918() {
         assert!(
             validate_egress_url("http://localhost:8000/", EgressMode::LoopbackOrPrivate).is_ok()
@@ -330,6 +453,9 @@ mod tests {
         );
         assert!(
             validate_egress_url("http://192.168.1.42:8000/", EgressMode::LoopbackOrPrivate).is_ok()
+        );
+        assert!(
+            validate_egress_url("http://[::a00:1]:8000/", EgressMode::LoopbackOrPrivate).is_ok()
         );
         // The ::1 aliases are loopback-class like `localhost`, so the
         // Atropos loopback path accepts them (matching the mirror's
@@ -351,6 +477,9 @@ mod tests {
             validate_egress_url("https://api.wandb.ai/", EgressMode::LoopbackOrPrivate).is_err()
         );
         assert!(validate_egress_url("http://1.1.1.1/", EgressMode::LoopbackOrPrivate).is_err());
+        assert!(
+            validate_egress_url("http://[2002:a00:1::]/", EgressMode::LoopbackOrPrivate).is_err()
+        );
     }
 
     #[test]
@@ -359,6 +488,33 @@ mod tests {
         assert!(
             validate_egress_url("http://169.254.169.254/", EgressMode::LoopbackOrPrivate).is_err()
         );
+    }
+
+    #[test]
+    fn resolved_public_host_rejects_any_private_address() {
+        let addrs = vec![
+            "93.184.216.34:443".parse().unwrap(),
+            "127.0.0.1:443".parse().unwrap(),
+        ];
+
+        let error = validate_resolved_addresses("rebind.example", addrs, EgressMode::Public)
+            .expect_err("every resolved address must satisfy the public policy");
+
+        assert!(matches!(error, ExportError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn resolved_local_host_rejects_any_public_address() {
+        let addrs = vec![
+            "10.0.0.5:8000".parse().unwrap(),
+            "93.184.216.34:8000".parse().unwrap(),
+        ];
+
+        let error =
+            validate_resolved_addresses("trainer.example", addrs, EgressMode::LoopbackOrPrivate)
+                .expect_err("every resolved address must satisfy the local-only policy");
+
+        assert!(matches!(error, ExportError::InvalidConfig(_)));
     }
 
     #[test]
