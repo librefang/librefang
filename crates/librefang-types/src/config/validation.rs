@@ -69,6 +69,7 @@ const MANUAL_NESTED_ALIASES: &[(&str, &str)] = &[
 /// build if a newly-added field that overrides a global `KernelConfig`
 /// section is missing here (or if a stale key no longer maps to anything).
 pub(super) const PER_AGENT_OVERRIDE_KEYS: &[&str] = &[
+    "assignee_wake",
     "compaction",
     "context_engine",
     "exec_policy",

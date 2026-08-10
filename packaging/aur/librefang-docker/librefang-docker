@@ -36,6 +36,14 @@ append_known_provider_env() {
   append_env_if_set SLACK_BOT_TOKEN
   append_env_if_set SLACK_APP_TOKEN
   append_env_if_set LIBREFANG_ALLOW_NO_AUTH
+  # Auth-configuration vars the daemon itself reads at boot (see
+  # crates/librefang-api/src/server.rs: any_auth_configured /
+  # check_bind_auth_safety). Without one of these forwarded, a container
+  # started with LIBREFANG_ALLOW_NO_AUTH=0 (the default) has no way to
+  # satisfy the non-loopback-bind auth check and will refuse to start.
+  append_env_if_set LIBREFANG_API_KEY
+  append_env_if_set LIBREFANG_DASHBOARD_USER
+  append_env_if_set LIBREFANG_DASHBOARD_PASS
 }
 
 usage() {

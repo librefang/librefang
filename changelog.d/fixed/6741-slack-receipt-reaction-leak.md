@@ -1,0 +1,5 @@
+Stop the Slack adapter leaving a permanent 👀 on messages the daemon never answers.
+The reaction was added the moment the adapter received a message, but `dispatch_message` has roughly two dozen `return` paths above the first adapter-visible lifecycle signal — mention-only group gating, per-user and per-channel rate limits, RBAC, command policy, slash commands the bridge handles itself — and none of them was visible to the adapter, so the mark stayed on a message no agent ever read.
+Both halves of the receipt now ride the turn lifecycle instead: 👀 on the `queued` phase, ✅ on `done`, ❌ on `error`.
+That closes every one of those paths structurally rather than one at a time, gives a failed turn a terminal state it previously never got, and honours the daemon's `clear_done_reaction` knob on Slack for the first time.
+Keying strictly on the triggering message's own id also deletes a "pick the first pending message in this channel" fallback that fired on every in-thread reply — the send hook looked up the thread root while the 👀 was tracked under the message's own timestamp, so the ✅ landed on an unrelated sibling, sometimes one of the leaked marks (#6741) (@houko)

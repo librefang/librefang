@@ -113,6 +113,7 @@ const RELEASE_STAGED_PATHS: &[&str] = &[
     "openapi.json",
     "sdk/javascript/package.json",
     "sdk/javascript/index.js",
+    "sdk/python/pyproject.toml",
     "sdk/python/setup.py",
     "sdk/python/librefang/librefang_client.py",
     "sdk/rust/Cargo.toml",
@@ -1366,6 +1367,14 @@ mod tests {
         assert!(
             RELEASE_STAGED_PATHS.contains(&"xtask/baselines"),
             "the schema baselines must ship in the release commit alongside openapi.json"
+        );
+    }
+
+    #[test]
+    fn release_staging_includes_python_project_metadata() {
+        assert!(
+            RELEASE_STAGED_PATHS.contains(&"sdk/python/pyproject.toml"),
+            "the version-bearing Python project metadata must ship in the release commit"
         );
     }
 

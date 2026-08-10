@@ -128,7 +128,17 @@ fn do_stream(
         const MAX_SSE_LINE: usize = 8 * 1024 * 1024;
         let mut stream = res.bytes_stream();
         let mut buffer: Vec<u8> = Vec::new();
-        while let Some(Ok(chunk)) = stream.next().await {
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = match chunk_result {
+                Ok(chunk) => chunk,
+                Err(e) => {
+                    let _ = tx.send(serde_json::json!({
+                        "error": format!("stream error: {}", e),
+                        "status": 0,
+                    }));
+                    return;
+                }
+            };
             buffer.extend_from_slice(&chunk);
             if buffer.len() > MAX_SSE_LINE {
                 let _ = tx.send(serde_json::json!({
@@ -201,11 +211,19 @@ pub struct LibreFang {
 
 impl LibreFang {
     pub fn new(base_url: impl Into<String>) -> Self {
-        let base_url = base_url.into().trim_end_matches('/').to_string();
         let client = Client::builder()
             .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
             .build()
             .expect("failed to build HTTP client");
+        Self::with_client(base_url, client)
+    }
+
+    /// Creates an SDK client using a caller-configured HTTP client.
+    ///
+    /// Use this to configure authentication headers, cookies, proxies,
+    /// TLS, or other [`reqwest::Client`] behavior shared by all resources.
+    pub fn with_client(base_url: impl Into<String>, client: Client) -> Self {
+        let base_url = base_url.into().trim_end_matches('/').to_string();
         Self {
             a2a: Arc::new(A2AResource::new(base_url.clone(), client.clone())),
             agents: Arc::new(AgentsResource::new(base_url.clone(), client.clone())),
