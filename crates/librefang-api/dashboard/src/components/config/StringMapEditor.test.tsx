@@ -30,4 +30,35 @@ describe("StringMapEditor", () => {
     expect(onChange).toHaveBeenCalledTimes(1);
     expect(onChange).toHaveBeenLastCalledWith({ renamed: "old" });
   });
+
+  it("keeps an empty numeric draft while the user types a replacement", () => {
+    const onChange = vi.fn();
+    render(
+      <StringMapEditor value={{ timeout: 100 }} onChange={onChange} valueType="number" />,
+    );
+    const input = screen.getByRole("spinbutton");
+
+    fireEvent.change(input, { target: { value: "" } });
+    expect(input).toHaveValue(null);
+    expect(onChange).not.toHaveBeenCalled();
+
+    fireEvent.change(input, { target: { value: "50" } });
+    expect(input).toHaveValue(50);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenLastCalledWith({ timeout: 50 });
+  });
+
+  it("restores the last committed number when an empty draft loses focus", () => {
+    const onChange = vi.fn();
+    render(
+      <StringMapEditor value={{ timeout: 100 }} onChange={onChange} valueType="number" />,
+    );
+    const input = screen.getByRole("spinbutton");
+
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.blur(input);
+
+    expect(input).toHaveValue(100);
+    expect(onChange).not.toHaveBeenCalled();
+  });
 });

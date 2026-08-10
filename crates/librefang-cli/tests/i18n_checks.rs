@@ -234,6 +234,7 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "unhandled CLI command `{other}`",
         "Failed to draw",
         "draw failed",
+        "failed to spawn librefang-tui-stream thread",
         // Technical format strings
         "%Y-%m-%d %H:%M",
         // Hand CLI command names for require_daemon
