@@ -63,6 +63,41 @@ const MAX_ATTEMPTS: u32 = 3;
 /// exporter-latency rationale.
 const BASE_DELAY_MS: u64 = 200;
 
+#[derive(Debug)]
+struct SafeRetryLogFields {
+    error_kind: &'static str,
+    status: u16,
+}
+
+fn safe_retry_log_fields(error: &ExportError) -> SafeRetryLogFields {
+    match error {
+        ExportError::NetworkError(_) => SafeRetryLogFields {
+            error_kind: "network",
+            status: 0,
+        },
+        ExportError::AuthError => SafeRetryLogFields {
+            error_kind: "auth",
+            status: 0,
+        },
+        ExportError::UpstreamRejected { status, .. } => SafeRetryLogFields {
+            error_kind: "upstream_rejected",
+            status: *status,
+        },
+        ExportError::MalformedResponse(_) => SafeRetryLogFields {
+            error_kind: "malformed_response",
+            status: 0,
+        },
+        ExportError::InvalidConfig(_) => SafeRetryLogFields {
+            error_kind: "invalid_config",
+            status: 0,
+        },
+        ExportError::TrainerNotReady { .. } => SafeRetryLogFields {
+            error_kind: "trainer_not_ready",
+            status: 0,
+        },
+    }
+}
+
 /// Run `op` up to [`MAX_ATTEMPTS`] times, retrying transient
 /// [`ExportError`]s with exponential backoff. Returns the first
 /// non-transient error verbatim, or the final transient error after
@@ -96,12 +131,14 @@ where
         match op().await {
             Ok(v) => return Ok(v),
             Err(err) => {
+                let log_fields = safe_retry_log_fields(&err);
                 if !is_transient(&err) || attempt == MAX_ATTEMPTS {
                     tracing::debug!(
                         target = "librefang_rl_export::retry",
                         call = label,
                         attempt,
-                        ?err,
+                        error_kind = log_fields.error_kind,
+                        status = log_fields.status,
                         "giving up — non-transient or attempts exhausted",
                     );
                     return Err(err);
@@ -112,7 +149,8 @@ where
                     call = label,
                     attempt,
                     delay_ms,
-                    ?err,
+                    error_kind = log_fields.error_kind,
+                    status = log_fields.status,
                     "transient upstream error — retrying",
                 );
                 last_err = Some(err);
@@ -150,8 +188,40 @@ pub(crate) fn is_transient(err: &ExportError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for LogBuffer {
+        type Writer = LogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            LogWriter(self.0.clone())
+        }
+    }
+
+    impl LogBuffer {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
 
     #[tokio::test]
     async fn returns_immediately_on_success() {
@@ -171,6 +241,53 @@ mod tests {
             1,
             "must not retry on success"
         );
+    }
+
+    #[tokio::test]
+    async fn retry_events_never_log_error_payloads() {
+        let logs = LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .without_time()
+            .with_ansi(false)
+            .with_writer(logs.clone())
+            .finish();
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+        let mut warn_attempt = 0;
+        retry_upload("test.safe_warn", || {
+            warn_attempt += 1;
+            let attempt = warn_attempt;
+            async move {
+                if attempt == 1 {
+                    Err(ExportError::UpstreamRejected {
+                        status: 503,
+                        body: "DO_NOT_LOG_WARN_BODY".to_string(),
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        let error = retry_upload::<_, _, ()>("test.safe_debug", || async {
+            Err(ExportError::NetworkError(
+                "https://user:DO_NOT_LOG_DEBUG_URL@example.invalid".to_string(),
+            ))
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(error, ExportError::NetworkError(_)));
+
+        let rendered = logs.text();
+        assert!(!rendered.contains("DO_NOT_LOG_WARN_BODY"), "{rendered}");
+        assert!(!rendered.contains("DO_NOT_LOG_DEBUG_URL"), "{rendered}");
+        assert!(rendered.contains("error_kind=\"upstream_rejected\""));
+        assert!(rendered.contains("status=503"));
+        assert!(rendered.contains("error_kind=\"network\""));
+        assert!(rendered.contains("status=0"));
     }
 
     #[tokio::test]

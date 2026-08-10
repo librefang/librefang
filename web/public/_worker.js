@@ -20,8 +20,9 @@ const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable';
 //
 // Mirror of REGISTRY_PUBLIC_KEY in web/workers/{registry,marketplace}-worker/
 // wrangler.toml. Rotation: regenerate keypair via web/workers/keygen.mjs,
-// update both wrangler.toml files AND this constant in lockstep.
-const REGISTRY_PUBLIC_KEY = 'ClGa0Ucap8NdrKAy1rw9Tt6A9I8eg4zJ53+xIuKMuq0=';
+// update both wrangler.toml files, the daemon embedded active key, and this
+// constant in lockstep; scripts/check-pubkey-lockstep.sh enforces the set.
+const REGISTRY_PUBLIC_KEY = 'joY8IYrUbbACfKRyp2CTcEbcEty8wcBwP1MTxU+vjaM=';
 
 function addHeaders(response, url) {
   const headers = new Headers(response.headers);

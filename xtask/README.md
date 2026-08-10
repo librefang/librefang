@@ -113,7 +113,7 @@ cargo xtask sync-versions 2026.3.2214-rc1   # pre-release version
 Updates:
 - `Cargo.toml` workspace version
 - `sdk/javascript/package.json`
-- `sdk/python/setup.py` (PEP 440: `-beta1` → `b1`)
+- `sdk/python/pyproject.toml` (PEP 440: `-beta1` → `b1`)
 - `sdk/rust/Cargo.toml` + `README.md`
 - `packages/whatsapp-gateway/package.json`
 - `crates/librefang-desktop/tauri.conf.json` (MSI-compatible encoding)

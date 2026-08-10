@@ -256,6 +256,77 @@ pub fn open_logs_dir() -> Result<(), String> {
     open::that(&dir).map_err(|e| format!("Failed to open directory: {e}"))
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn parse_registry_uninstall_string(output: &str) -> Option<&str> {
+    output.lines().find_map(|line| {
+        let remainder = line.trim_start().strip_prefix("UninstallString")?;
+        let value = remainder.trim_start().strip_prefix("REG_SZ")?.trim();
+        (!value.is_empty()).then_some(value)
+    })
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn uninstall_process_from_argv(
+    argv: Vec<std::ffi::OsString>,
+) -> Result<(std::ffi::OsString, Vec<std::ffi::OsString>), String> {
+    let mut argv = argv.into_iter();
+    let program = argv
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "UninstallString contains no executable".to_string())?;
+    Ok((program, argv.collect()))
+}
+
+#[cfg(target_os = "windows")]
+fn parse_windows_command_line(command_line: &str) -> Result<Vec<std::ffi::OsString>, String> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
+
+    let mut wide: Vec<u16> = std::ffi::OsStr::new(command_line)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut argc = 0_i32;
+    // SAFETY: `wide` is writable, NUL-terminated storage that remains live for the call, and `argc` is a valid out pointer.
+    let argv = unsafe { CommandLineToArgvW(wide.as_mut_ptr(), &mut argc) };
+    if argv.is_null() {
+        return Err(format!(
+            "Failed to parse UninstallString: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    struct LocalArgv(*mut windows_sys::core::PWSTR);
+    impl Drop for LocalArgv {
+        fn drop(&mut self) {
+            // SAFETY: CommandLineToArgvW allocated this pointer with LocalAlloc, and ownership is released exactly once here.
+            unsafe {
+                LocalFree(self.0.cast());
+            }
+        }
+    }
+    let argv = LocalArgv(argv);
+    if argc <= 0 {
+        return Err("UninstallString contains no executable".to_string());
+    }
+
+    // SAFETY: CommandLineToArgvW returned an array containing `argc` pointers.
+    let pointers = unsafe { std::slice::from_raw_parts(argv.0, argc as usize) };
+    let mut parsed = Vec::with_capacity(pointers.len());
+    for &pointer in pointers {
+        let mut len = 0;
+        // SAFETY: every returned argv element is NUL-terminated and remains live until the LocalArgv guard is dropped.
+        while unsafe { *pointer.add(len) } != 0 {
+            len += 1;
+        }
+        // SAFETY: `len` was established by scanning this live argv element.
+        let value = unsafe { std::slice::from_raw_parts(pointer, len) };
+        parsed.push(std::ffi::OsString::from_wide(value));
+    }
+    Ok(parsed)
+}
+
 /// Launch the platform uninstaller and exit the app.
 ///
 /// - **Windows**: reads `UninstallString` from the NSIS registry key and runs it.
@@ -282,23 +353,24 @@ pub async fn uninstall_app(app: tauri::AppHandle) -> Result<(), String> {
             .output()
             .map_err(|e| format!("Failed to query registry: {e}"))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("UninstallString") {
-                // reg output columns are space-separated: Name    REG_SZ    Value
-                if let Some(value) = trimmed.splitn(3, "    ").nth(2) {
-                    let cmd = value.trim().to_string();
-                    std::process::Command::new("cmd")
-                        .args(["/C", &cmd])
-                        .spawn()
-                        .map_err(|e| format!("Failed to launch uninstaller: {e}"))?;
-                    app.exit(0);
-                    return Ok(());
-                }
-            }
+        if !output.status.success() {
+            return Err("Uninstaller not found in registry. The app may have been installed without the NSIS installer.".to_string());
         }
-        Err("Uninstaller not found in registry. The app may have been installed without the NSIS installer.".to_string())
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let command_line = parse_registry_uninstall_string(&stdout).ok_or_else(|| {
+            "Uninstaller not found in registry. The app may have been installed without the NSIS installer.".to_string()
+        })?;
+        let argv = parse_windows_command_line(command_line)?;
+        let (program, args) = uninstall_process_from_argv(argv)?;
+
+        // Execute the parsed program directly.
+        // Shell metacharacters from a malformed registry value remain ordinary argv entries.
+        std::process::Command::new(program)
+            .args(args)
+            .spawn()
+            .map_err(|e| format!("Failed to launch uninstaller: {e}"))?;
+        app.exit(0);
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
@@ -357,5 +429,67 @@ pub async fn uninstall_app(app: tauri::AppHandle) -> Result<(), String> {
     {
         // Mobile: uninstall through the platform app store / system settings.
         Err("Uninstall via the platform app store or system settings.".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_registry_uninstall_string, uninstall_process_from_argv};
+    use std::ffi::OsString;
+
+    #[cfg(target_os = "windows")]
+    use super::parse_windows_command_line;
+
+    #[test]
+    fn parses_uninstall_string_without_fixed_column_spacing() {
+        let output = concat!(
+            "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\LibreFang\r\n",
+            "    UninstallString\tREG_SZ\t\"C:\\Program Files\\LibreFang\\uninstall.exe\" /S\r\n",
+        );
+
+        assert_eq!(
+            parse_registry_uninstall_string(output),
+            Some(r#""C:\Program Files\LibreFang\uninstall.exe" /S"#)
+        );
+    }
+
+    #[test]
+    fn uninstall_process_keeps_shell_metacharacters_as_plain_arguments() {
+        let argv = vec![
+            OsString::from(r"C:\Program Files\LibreFang\uninstall.exe"),
+            OsString::from("/S"),
+            OsString::from("&"),
+            OsString::from("calc.exe"),
+        ];
+
+        let (program, args) = uninstall_process_from_argv(argv).unwrap();
+        assert_eq!(program, r"C:\Program Files\LibreFang\uninstall.exe");
+        assert_eq!(
+            args,
+            [
+                OsString::from("/S"),
+                OsString::from("&"),
+                OsString::from("calc.exe")
+            ]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_parser_does_not_interpret_shell_metacharacters() {
+        let argv = parse_windows_command_line(
+            r#""C:\Program Files\LibreFang\uninstall.exe" /S & calc.exe"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            argv,
+            [
+                OsString::from(r"C:\Program Files\LibreFang\uninstall.exe"),
+                OsString::from("/S"),
+                OsString::from("&"),
+                OsString::from("calc.exe"),
+            ]
+        );
     }
 }

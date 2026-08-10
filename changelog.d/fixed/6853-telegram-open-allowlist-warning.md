@@ -1,0 +1,1 @@
+- Warned in the Telegram dashboard schema that leaving `ALLOWED_USERS` empty permits all users. (@houko)

@@ -55,7 +55,7 @@ pub(super) struct EmbeddedPubkey {
 ///      hard-fail installs (the failure surfaces an actionable error
 ///      message, unlike the previous "accept forever" behaviour).
 pub(super) const EMBEDDED_REGISTRY_PUBKEYS: &[EmbeddedPubkey] = &[EmbeddedPubkey {
-    pubkey_b64: "ClGa0Ucap8NdrKAy1rw9Tt6A9I8eg4zJ53+xIuKMuq0=",
+    pubkey_b64: "joY8IYrUbbACfKRyp2CTcEbcEty8wcBwP1MTxU+vjaM=",
     expires_at: None,
 }];
 

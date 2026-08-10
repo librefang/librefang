@@ -1360,6 +1360,71 @@ async fn schedule_update_rejects_ssrf_webhook_in_delivery_targets() {
     );
 }
 
+// pre_script allowlist coverage on PUT /api/cron/jobs/{id}  (#6768)
+//
+// `add_job` validates `pre_script.argv[0]` against the `<home>/scripts/`
+// allowlist via `validate_with_home`; `update_job` used to call the
+// home-agnostic `validate(0)`, which forwards to `validate_with_home` with
+// `home_dir = None` and so skips the path-allowlist branch entirely (the
+// env-key denylist still ran). A PUT could therefore install a pre_script
+// binary anywhere on disk that the daemon's user can execute. Validation
+// now runs the same home-aware check on update; these tests pin the
+// wire-level behaviour so a future refactor can't silently drop the
+// allowlist on this route again.
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_job_update_rejects_pre_script_outside_home_scripts() {
+    let h = boot().await;
+    let id = seed_cron_job(&h).await;
+
+    let outside_script = h._test.tmp_path().join("outside.sh");
+    std::fs::write(&outside_script, "#!/bin/sh\n").expect("write outside script");
+
+    let body = serde_json::json!({
+        "action": {
+            "kind": "agent_turn",
+            "message": "run pre-processing",
+            "model_override": null,
+            "timeout_secs": null,
+            "pre_script": {"argv": [outside_script.to_string_lossy()], "env": {}}
+        }
+    });
+    let (status, response) =
+        json_request(&h, Method::PUT, &format!("/api/cron/jobs/{id}"), Some(body)).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "pre_script outside <home>/scripts/ must be rejected on update: {response:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_job_update_accepts_pre_script_inside_home_scripts() {
+    let h = boot().await;
+    let id = seed_cron_job(&h).await;
+
+    let scripts_dir = h._test.tmp_path().join("scripts");
+    std::fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+    let allowed_script = scripts_dir.join("allowed.sh");
+    std::fs::write(&allowed_script, "#!/bin/sh\n").expect("write allowed script");
+
+    let body = serde_json::json!({
+        "action": {
+            "kind": "agent_turn",
+            "message": "run pre-processing",
+            "model_override": null,
+            "timeout_secs": null,
+            "pre_script": {"argv": [allowed_script.to_string_lossy()], "env": {}}
+        }
+    });
+    let (status, response) =
+        json_request(&h, Method::PUT, &format!("/api/cron/jobs/{id}"), Some(body)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "pre_script inside <home>/scripts/ must still be accepted: {response:?}"
+    );
+}
+
 /// Regression: a workflow whose step prompt references a named
 /// placeholder (`{{challenge}}`) must resolve that placeholder from an
 /// object-shaped run `input` (the brainstorm-template repro). Before the

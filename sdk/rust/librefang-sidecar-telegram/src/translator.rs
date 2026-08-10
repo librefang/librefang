@@ -431,10 +431,7 @@ pub fn content_to_value(c: &TgContent) -> Value {
         TgContent::PollAnswer {
             poll_id,
             option_ids,
-        } => librefang_sidecar::protocol::Content::poll_answer(
-            poll_id.clone(),
-            option_ids.iter().map(|n| *n as i64).collect(),
-        ),
+        } => librefang_sidecar::protocol::Content::poll_answer(poll_id.clone(), option_ids.clone()),
     }
 }
 
@@ -490,7 +487,7 @@ pub enum TgContent {
     },
     PollAnswer {
         poll_id: String,
-        option_ids: Vec<u32>,
+        option_ids: Vec<u8>,
     },
 }
 
@@ -568,9 +565,16 @@ pub(crate) fn sender_from_user(user: &User) -> Sender {
 /// poll_answer update → PollAnswer content event.
 pub fn poll_answer_event(pa: &PollAnswer) -> Option<Value> {
     let user = pa.user.as_ref()?;
+    let option_ids = pa
+        .option_ids
+        .iter()
+        .copied()
+        .map(u8::try_from)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
     let content = TgContent::PollAnswer {
         poll_id: pa.poll_id.clone(),
-        option_ids: pa.option_ids.clone(),
+        option_ids,
     };
     let sender = sender_from_user(user);
     // Polls don't carry a chat_id on the answer; the caller doesn't have one either, so route by sender id as a synthetic chat. Daemon side falls back to per-user threading.
@@ -818,5 +822,29 @@ mod tests {
             media_placeholder("Video note", Some(8), None),
             "[Video note, 8s]",
         );
+    }
+
+    #[test]
+    fn poll_answer_option_ids_are_checked_at_the_telegram_boundary() {
+        let answer = PollAnswer {
+            poll_id: "poll-1".into(),
+            user: Some(User {
+                id: 42,
+                first_name: "Alice".into(),
+                ..Default::default()
+            }),
+            option_ids: vec![0, u8::MAX.into()],
+        };
+        let event = poll_answer_event(&answer).expect("valid poll answer");
+        assert_eq!(
+            event["params"]["content"]["PollAnswer"]["option_ids"],
+            json!([0, 255])
+        );
+
+        let out_of_range = PollAnswer {
+            option_ids: vec![u32::from(u8::MAX) + 1],
+            ..answer
+        };
+        assert!(poll_answer_event(&out_of_range).is_none());
     }
 }
