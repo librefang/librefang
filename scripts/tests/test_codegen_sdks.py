@@ -78,6 +78,8 @@ def main():
     assert_in('"status": resp.StatusCode', go, "go-error-event-status")
     assert_in('"error": fmt.Sprintf("new request: %v", err)', go, "go-stream-request-error")
     assert_not_in("req, _ := http.NewRequest", go, "go-no-discarded-stream-request-error")
+    assert_in("from urllib.error import HTTPError, URLError", py, "python-urlerror-import")
+    assert py.count("except URLError as e:") == 2, "both Python request paths must wrap connection failures"
     assert_in("active_error = sys.exc_info()[0] is not None", py, "python-stream-close-finally")
 
     # SSE line-size cap
