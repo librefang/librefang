@@ -1161,7 +1161,9 @@ async fn agent_send_no_key_no_caller_routes_to_send_to_agent() {
 async fn agent_send_no_key_with_caller_routes_to_send_to_agent_as() {
     let cap = Arc::new(DispatchCapture::default());
     let kernel: Arc<dyn KernelHandle> = cap.clone();
-    let input = serde_json::json!({ "agent_id": "target", "message": "hi" });
+    // `"async": false` is explicit because non-blocking is now the default when a caller is known.
+    // This test covers the blocking path's caller-aware routing, which still exists and is still reachable — see `agent_send_defaults_to_async_when_caller_is_known` for the new default.
+    let input = serde_json::json!({ "agent_id": "target", "message": "hi", "async": false });
 
     let result =
         super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None, None)
@@ -1179,10 +1181,12 @@ async fn agent_send_no_key_with_caller_routes_to_send_to_agent_as() {
 async fn agent_send_same_key_routes_to_as_with_key_both_calls() {
     let cap = Arc::new(DispatchCapture::default());
     let kernel: Arc<dyn KernelHandle> = cap.clone();
+    // `"async": false` throughout: this test pins the keyed BLOCKING dispatch, which non-blocking delegation does not go through.
     let input = serde_json::json!({
         "agent_id": "target",
         "message": "turn one",
         "conversation_key": "thread-abc",
+        "async": false,
     });
 
     super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None, None)
@@ -1193,6 +1197,7 @@ async fn agent_send_same_key_routes_to_as_with_key_both_calls() {
         "agent_id": "target",
         "message": "turn two",
         "conversation_key": "thread-abc",
+        "async": false,
     });
     super::agent::tool_agent_send(&input2, Some(&kernel), Some("parent-agent"), None, None)
         .await
@@ -1216,10 +1221,12 @@ async fn agent_send_distinct_keys_produce_isolated_dispatch() {
     let call = |key: &'static str| {
         let kernel = kernel.clone();
         async move {
+            // `"async": false`: distinct-key isolation is a property of the blocking keyed dispatch.
             let input = serde_json::json!({
                 "agent_id": "target",
                 "message": "msg",
                 "conversation_key": key,
+                "async": false,
             });
             super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None, None)
                 .await
@@ -1275,6 +1282,69 @@ async fn agent_send_async_routes_to_tracked_path_and_returns_task_id() {
         &[format!("async_tracked:session={}", session.0)],
         "async=true must hit the tracker path and forward the caller session, \
          not the blocking send_to_agent_as"
+    );
+}
+
+/// Omitting `async` delegates non-blockingly when a caller agent is known.
+///
+/// The blocking default made every unannotated delegation a timeout risk: the model had to predict in advance that the callee would be slow and opt in to `async`, and a wrong guess spent the turn waiting until `tool_timeout_secs` fired.
+/// Non-blocking is the safe default because an unnecessary `task_id` costs one extra turn to collect, while an unnecessary block can lose the turn entirely.
+#[tokio::test]
+async fn agent_send_defaults_to_async_when_caller_is_known() {
+    use librefang_types::agent::SessionId;
+
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    // No "async" key at all — this is what a model emits when it does not think
+    // about blocking, which is the common case.
+    let input = serde_json::json!({ "agent_id": "target", "message": "research this" });
+    let session = SessionId(uuid::Uuid::new_v4());
+
+    let out = super::agent::tool_agent_send(
+        &input,
+        Some(&kernel),
+        Some("parent-agent"),
+        Some(session),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["status"], "delegated");
+    assert_eq!(v["task_id"], "task-fake-1234");
+
+    let calls = cap.calls.lock().unwrap();
+    assert_eq!(
+        &*calls,
+        &[format!("async_tracked:session={}", session.0)],
+        "an omitted async flag with a known caller must take the tracker path, \
+         not the blocking send_to_agent_as"
+    );
+}
+
+/// Omitting `async` WITHOUT a caller agent still dispatches blocking, because the async path cannot serve a callerless send at all.
+///
+/// `tool_agent_send` rejects `async` with `InvalidParameter` when `caller_agent_id` is `None` — the tracker has nowhere to route the completion — while the blocking path has explicit `(None, Some(key))` and `(None, None)` arms for system-initiated sends.
+/// So an unconditional non-blocking default would convert every kernel-initiated `agent_send` into an error.
+/// This test is the guard against "simplifying" the conditional default into `unwrap_or(true)`.
+#[tokio::test]
+async fn agent_send_without_caller_still_defaults_to_blocking() {
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    let input = serde_json::json!({ "agent_id": "target", "message": "system notice" });
+
+    // caller_agent_id = None: a system-initiated send.
+    let out = super::agent::tool_agent_send(&input, Some(&kernel), None, None, None)
+        .await
+        .expect("a callerless send must not be rejected as an invalid async request");
+
+    assert_eq!(out, "no-key-no-parent");
+    let calls = cap.calls.lock().unwrap();
+    assert_eq!(
+        &*calls,
+        &["send_to_agent"],
+        "without a caller the tool must stay on the blocking path"
     );
 }
 

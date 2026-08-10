@@ -1,0 +1,1 @@
+- Rendered every adjacent single-star italic run in Telegram messages instead of leaving alternate runs as literal Markdown. (@houko)

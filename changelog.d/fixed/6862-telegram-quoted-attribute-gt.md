@@ -1,0 +1,1 @@
+- Preserved Telegram HTML tags containing `>` inside quoted attribute values instead of truncating and corrupting them. (@houko)

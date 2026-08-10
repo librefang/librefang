@@ -546,13 +546,11 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
                     return e;
                 }
 
-                // DNS-pinned, non-redirecting client: connect to the exact IPs
-                // we just validated for this hop.
-                let mut builder = librefang_http::proxied_client_builder()
-                    .redirect(reqwest::redirect::Policy::none());
-                for addr in &ssrf_result.resolved {
-                    builder = builder.resolve(&ssrf_result.hostname, *addr);
-                }
+                // DNS-pinned, non-redirecting, direct (no-proxy) client: connect to the exact IPs we just validated for this hop.
+                // A configured proxy would re-resolve `hostname` itself, bypassing the pin below and reopening DNS rebinding (#6761); `resolve_to_addrs` (rather than repeated `resolve()` calls, which overwrite the mapping instead of accumulating it) keeps every validated address available as a fallback.
+                let builder = librefang_http::direct_client_builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .resolve_to_addrs(&ssrf_result.hostname, &ssrf_result.resolved);
                 let client = builder.build().expect("HTTP client build");
                 let request = match current_method.as_str() {
                     "POST" => client.post(&current_url).body(current_body.clone()),

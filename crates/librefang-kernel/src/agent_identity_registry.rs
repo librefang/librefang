@@ -71,6 +71,9 @@ struct OnDisk {
 pub struct AgentIdentityRegistry {
     map: DashMap<String, AgentIdentityRecord>,
     persist_path: Option<PathBuf>,
+    /// Load failures block writes for the lifetime of this registry so an
+    /// empty recovery view cannot overwrite a recoverable on-disk file.
+    persist_blocked: Option<(std::io::ErrorKind, String)>,
     /// Serialises atomic writes so two `register` calls in flight never
     /// produce an interleaved on-disk file.
     persist_lock: Mutex<()>,
@@ -82,6 +85,7 @@ impl AgentIdentityRegistry {
         Self {
             map: DashMap::new(),
             persist_path: None,
+            persist_blocked: None,
             persist_lock: Mutex::new(()),
         }
     }
@@ -90,17 +94,18 @@ impl AgentIdentityRegistry {
     /// `agent_identities.toml`. Errors during load are logged and treated
     /// as "empty registry" — we never want to silently lose entries by
     /// returning `Err` from boot, but we also don't want a malformed file
-    /// to wipe the user's history. See [`load_from`] for the explicit form
-    /// used by tests.
+    /// to wipe the user's history. If loading fails, later persistence
+    /// remains visibly blocked for this process so mutations cannot overwrite
+    /// the original recoverable file with the empty fallback view.
     pub fn load(home_dir: &Path) -> Self {
         let persist_path = home_dir.join(FILE_NAME);
-        let map = match Self::read_file(&persist_path) {
+        let (map, persist_blocked) = match Self::read_file(&persist_path) {
             Ok(entries) => {
                 let map = DashMap::with_capacity(entries.len());
                 for (name, identity) in entries {
                     map.insert(name, identity);
                 }
-                map
+                (map, None)
             }
             Err(e) => {
                 warn!(
@@ -108,12 +113,13 @@ impl AgentIdentityRegistry {
                     error = %e,
                     "agent_identities.toml: failed to load — starting empty (existing file left intact)"
                 );
-                DashMap::new()
+                (DashMap::new(), Some((e.kind(), e.to_string())))
             }
         };
         Self {
             map,
             persist_path: Some(persist_path),
+            persist_blocked,
             persist_lock: Mutex::new(()),
         }
     }
@@ -217,6 +223,14 @@ impl AgentIdentityRegistry {
     /// Persist the current in-memory state to disk via atomic write.
     /// No-op when the registry was constructed without a persist path.
     pub fn persist(&self) -> Result<(), std::io::Error> {
+        if let Some((kind, load_error)) = &self.persist_blocked {
+            return Err(std::io::Error::new(
+                *kind,
+                format!(
+                    "agent_identities.toml: persistence blocked after load failure: {load_error}"
+                ),
+            ));
+        }
         let path = match &self.persist_path {
             Some(p) => p,
             None => return Ok(()),
@@ -337,6 +351,23 @@ mod tests {
         // the file would destroy the operator's chance to recover by hand.
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(after, original);
+    }
+
+    #[test]
+    fn mutation_after_malformed_load_preserves_original_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let original = b"this is not valid toml ===\n";
+        std::fs::write(&path, original).unwrap();
+
+        let reg = AgentIdentityRegistry::load(dir.path());
+        let uuid = AgentId::from_name("recoverable");
+        assert_eq!(reg.register_if_absent("recoverable", uuid), uuid);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let error = reg
+            .persist()
+            .expect_err("persistence must remain visibly blocked after a failed load");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

@@ -140,21 +140,22 @@ import asyncio
 import datetime
 import hashlib
 import hmac
+import http.client
 import http.server
 import ipaddress
 import json
 import os
+import socket
 import socketserver
 import threading
 import time
 import urllib.parse
-from typing import Any, Callable, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
 from .. import logging as log
 from .. import protocol
 from ..common import (
     SeenSet as _SeenSet,
-    http_request as _http_request,
     parse_retry_after as _parse_retry_after,
     split_message as _split_message,
 )
@@ -240,39 +241,27 @@ def _is_private_ipv6(addr: ipaddress.IPv6Address) -> bool:
         return True
     if addr.is_private:
         return True
-    # IPv4-mapped (::ffff:x.x.x.x) and NAT64 (64:ff9b::x.x.x.x)
-    # both deliver to an IPv4 endpoint on the wire. Check the
-    # embedded v4 against the private table.
+    # Transition formats can deliver to an IPv4 endpoint on the wire.
+    # Inspect mapped, compatible, well-known NAT64, and 6to4 embeddings.
+    embedded: List[ipaddress.IPv4Address] = []
     if addr.ipv4_mapped is not None:
-        if _is_private_ipv4(addr.ipv4_mapped):
-            return True
+        embedded.append(addr.ipv4_mapped)
+    raw = addr.packed
+    if raw[:12] == b"\x00" * 12:
+        embedded.append(ipaddress.IPv4Address(raw[12:]))
+    if raw[:12] == bytes.fromhex("0064ff9b0000000000000000"):
+        embedded.append(ipaddress.IPv4Address(raw[12:]))
+    if addr.sixtofour is not None:
+        embedded.append(addr.sixtofour)
+    if any(_is_private_ipv4(v4) for v4 in embedded):
+        return True
     return False
 
 
-def validate_callback_url(url: str) -> Optional[str]:
-    """Returns ``None`` if the URL is safe to dial, else a string
-    describing the SSRF rejection reason. Pure function — used at
-    both construction and per-send to defend in depth."""
-    if not isinstance(url, str) or not url:
-        return "URL is empty"
-    try:
-        parsed = urllib.parse.urlparse(url)
-    except Exception as e:  # noqa: BLE001
-        return f"invalid URL: {e}"
-    if parsed.scheme not in ("http", "https"):
-        return f"scheme {parsed.scheme!r} is not allowed; only http/https"
-    host = parsed.hostname
-    if not host:
-        return "URL has no host"
-    # Try IP literal first.
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        # Hostname — check the reserved list.
-        trimmed = host.rstrip(".").lower()
-        if trimmed in _PRIVATE_HOSTNAMES:
-            return f"host {host!r} is a reserved or private hostname"
-        return None
+ResolvedAddress = Tuple[int, tuple]
+
+
+def _validate_ip_address(ip: Any) -> Optional[str]:
     if isinstance(ip, ipaddress.IPv4Address):
         if _is_private_ipv4(ip):
             return f"host resolves to private/reserved IPv4 {ip}"
@@ -280,6 +269,190 @@ def validate_callback_url(url: str) -> Optional[str]:
         if _is_private_ipv6(ip):
             return f"host resolves to private/reserved IPv6 {ip}"
     return None
+
+
+def _resolve_callback_url(
+    url: str,
+) -> Tuple[Optional[str], List[ResolvedAddress]]:
+    """Validate a callback URL and resolve every address it may dial.
+
+    The returned socket addresses are passed directly to the HTTP
+    connection.  Keeping resolution and connection tied together closes
+    the DNS rebinding window that a validate-then-resolve-again flow leaves.
+    """
+    if not isinstance(url, str) or not url:
+        return "URL is empty", []
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception as e:  # noqa: BLE001
+        return f"invalid URL: {e}", []
+    if parsed.scheme not in ("http", "https"):
+        return f"scheme {parsed.scheme!r} is not allowed; only http/https", []
+    if parsed.username is not None or parsed.password is not None:
+        return "URL userinfo is not allowed", []
+    host = parsed.hostname
+    if not host:
+        return "URL has no host", []
+    try:
+        parsed_port = parsed.port
+    except ValueError as e:
+        return f"invalid URL port: {e}", []
+    if parsed_port == 0:
+        return "URL port 0 is not allowed", []
+    port = (
+        parsed_port if parsed_port is not None
+        else (443 if parsed.scheme == "https" else 80)
+    )
+    # Try IP literal first.
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # Hostname — check the reserved list.
+        trimmed = host.rstrip(".").lower()
+        if trimmed in _PRIVATE_HOSTNAMES:
+            return f"host {host!r} is a reserved or private hostname", []
+        try:
+            answers = socket.getaddrinfo(
+                host,
+                port,
+                family=socket.AF_UNSPEC,
+                type=socket.SOCK_STREAM,
+                proto=socket.IPPROTO_TCP,
+            )
+        except (OSError, UnicodeError) as e:
+            return f"DNS resolution failed for {host!r}: {e}", []
+
+        resolved: List[ResolvedAddress] = []
+        for family, _socktype, _proto, _canonname, sockaddr in answers:
+            if family not in (socket.AF_INET, socket.AF_INET6):
+                return f"DNS returned unsupported address family for {host!r}", []
+            try:
+                answer_ip = ipaddress.ip_address(sockaddr[0])
+            except ValueError:
+                return f"DNS returned an invalid address for {host!r}", []
+            reason = _validate_ip_address(answer_ip)
+            if reason is not None:
+                return reason, []
+            item = (family, sockaddr)
+            if item not in resolved:
+                resolved.append(item)
+        if not resolved:
+            return f"DNS resolution returned no addresses for {host!r}", []
+        return None, resolved
+
+    reason = _validate_ip_address(ip)
+    if reason is not None:
+        return reason, []
+    if isinstance(ip, ipaddress.IPv4Address):
+        return None, [(socket.AF_INET, (str(ip), port))]
+    return None, [(socket.AF_INET6, (str(ip), port, 0, 0))]
+
+
+def validate_callback_url(url: str) -> Optional[str]:
+    """Return ``None`` only when every address for the URL is public."""
+    reason, _resolved = _resolve_callback_url(url)
+    return reason
+
+
+def _connect_resolved(
+    addresses: List[ResolvedAddress], timeout: float,
+) -> socket.socket:
+    """Connect to one of the already-validated socket addresses."""
+    last_error: Optional[OSError] = None
+    for family, sockaddr in addresses:
+        sock: Optional[socket.socket] = None
+        try:
+            sock = socket.socket(
+                family, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+            )
+            sock.settimeout(timeout)
+            sock.connect(sockaddr)
+            return sock
+        except OSError as e:
+            last_error = e
+            if sock is not None:
+                sock.close()
+    if last_error is not None:
+        raise last_error
+    raise OSError("callback URL has no resolved addresses")
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *args: Any, resolved_addresses: List[ResolvedAddress], **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._resolved_addresses = resolved_addresses
+
+    def connect(self) -> None:
+        self.sock = _connect_resolved(self._resolved_addresses, self.timeout)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args: Any, resolved_addresses: List[ResolvedAddress], **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._resolved_addresses = resolved_addresses
+
+    def connect(self) -> None:
+        raw_sock = _connect_resolved(self._resolved_addresses, self.timeout)
+        try:
+            # `self.host` remains the URL hostname, so certificate checks and
+            # SNI are preserved even though the TCP socket is pinned to an IP.
+            self.sock = self._context.wrap_socket(
+                raw_sock, server_hostname=self.host,
+            )
+        except Exception:
+            raw_sock.close()
+            raise
+
+
+def _http_request(
+    url: str,
+    *,
+    resolved_addresses: List[ResolvedAddress],
+    method: str = "GET",
+    body: Optional[bytes] = None,
+    headers: Optional[dict] = None,
+    timeout: float = 15.0,
+) -> tuple:
+    """Make one direct, redirect-free request to validated addresses.
+
+    This deliberately bypasses urllib's proxy discovery: an HTTP/CONNECT
+    proxy would resolve the hostname independently and break DNS pinning.
+    """
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname
+    if host is None:
+        raise ValueError("callback URL has no host")
+    parsed_port = parsed.port
+    port = (
+        parsed_port if parsed_port is not None
+        else (443 if parsed.scheme == "https" else 80)
+    )
+    connection_type = (
+        _PinnedHTTPSConnection if parsed.scheme == "https"
+        else _PinnedHTTPConnection
+    )
+    conn = connection_type(
+        host,
+        port,
+        timeout=timeout,
+        resolved_addresses=resolved_addresses,
+    )
+    path = urllib.parse.urlunparse(("", "", parsed.path or "/", parsed.params,
+                                    parsed.query, ""))
+    try:
+        conn.request(method, path, body=body, headers=headers or {})
+        response = conn.getresponse()
+        raw = response.read()
+        response_headers = {k.lower(): v for k, v in response.getheaders()}
+        parsed_body = None
+        if raw:
+            try:
+                parsed_body = json.loads(raw.decode("utf-8"))
+            except (ValueError, TypeError, UnicodeDecodeError):
+                pass
+        return response.status, parsed_body, raw, response_headers
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -678,7 +851,7 @@ class WebhookAdapter(SidecarAdapter):
         # somehow rotates the env to a private URL mid-process
         # (config reload), refuse instead of leaking the signing
         # secret to localhost.
-        reason = validate_callback_url(self.callback_url)
+        reason, resolved_addresses = _resolve_callback_url(self.callback_url)
         if reason is not None:
             raise RuntimeError(
                 f"webhook send refused by SSRF guard: {reason}",
@@ -701,6 +874,7 @@ class WebhookAdapter(SidecarAdapter):
         status, _resp, raw, resp_hdrs = _http_request(
             self.callback_url, method="POST", body=body, headers=headers,
             timeout=SEND_TIMEOUT_SECS,
+            resolved_addresses=resolved_addresses,
         )
         if status == 429:
             wait = _parse_retry_after(
@@ -714,6 +888,7 @@ class WebhookAdapter(SidecarAdapter):
             status, _resp, raw, resp_hdrs = _http_request(
                 self.callback_url, method="POST", body=body, headers=headers,
                 timeout=SEND_TIMEOUT_SECS,
+                resolved_addresses=resolved_addresses,
             )
         if status < 200 or status >= 300:
             snippet = raw[:200].decode("utf-8", "replace") if raw else ""
