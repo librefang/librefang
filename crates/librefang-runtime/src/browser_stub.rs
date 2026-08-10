@@ -32,3 +32,20 @@ pub enum BrowserCommand {
     ReadPage,
     Screenshot,
 }
+
+/// Stand-in for the real renderer, so a consumer showing a page preview compiles with the feature off.
+///
+/// No extraction ever runs in this build, so there is never a link table to join; returning `content` is the whole of it.
+pub fn render_page_body(data: &serde_json::Value) -> String {
+    data["content"].as_str().unwrap_or("").to_string()
+}
+
+/// Stand-in for the preview renderer; see [`render_page_body`].
+pub fn render_page_body_within(data: &serde_json::Value, prose_chars: usize) -> String {
+    data["content"]
+        .as_str()
+        .unwrap_or("")
+        .chars()
+        .take(prose_chars)
+        .collect()
+}

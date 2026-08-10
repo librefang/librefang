@@ -683,11 +683,11 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             },
             ToolDefinition {
                 name: tool_name::BROWSER_CLICK.to_string(),
-                description: "Click an element on the current browser page by CSS selector or visible text. Returns the resulting page state.".to_string(),
+                description: "Click an element on the current browser page by link marker, CSS selector, or visible text. Returns the resulting page state. Prefer the ⟨n⟩ marker from the page's link table: it identifies one exact link, where matching on visible text picks the first element merely containing it. A marker describes the page as it was last read, so re-read the page before clicking one if the page may have changed since.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "selector": { "type": "string", "description": "CSS selector (e.g., '#submit-btn', '.add-to-cart') or visible text to click" }
+                        "selector": { "type": "string", "description": "A link marker from the page's link table (e.g., '⟨12⟩'), a CSS selector (e.g., '#submit-btn', '.add-to-cart'), or visible text to click" }
                     },
                     "required": ["selector"]
                 }),

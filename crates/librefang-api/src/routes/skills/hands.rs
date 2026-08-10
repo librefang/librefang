@@ -1397,14 +1397,9 @@ pub async fn hand_instance_browser(
             if let Some(data) = &resp.data {
                 url = data["url"].as_str().unwrap_or("").to_string();
                 title = data["title"].as_str().unwrap_or("").to_string();
-                content = data["content"].as_str().unwrap_or("").to_string();
-                // Truncate content to avoid huge payloads (UTF-8 safe)
-                if content.len() > 2000 {
-                    content = format!(
-                        "{}... (truncated)",
-                        librefang_types::truncate_str(&content, 2000)
-                    );
-                }
+                // Rendered with the link table rather than from `content` alone: the extraction emits `⟨n⟩` markers in the prose and the URLs beside it, so reading `content` by itself would show an operator markers with nothing to resolve them against, where this preview used to carry the destination inline.
+                // The payload budget applies to the prose, before the table is joined: the table runs to thousands of characters on a link-dense page, so a budget applied after the join would spend all of itself on URLs and show an operator none of the page.
+                content = librefang_kernel::browser::render_page_body_within(data, 2000);
             }
         }
         Ok(_) => {}  // Non-success: leave defaults
