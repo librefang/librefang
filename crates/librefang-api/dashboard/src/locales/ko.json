@@ -370,6 +370,7 @@
       "preview_markdown": "Markdown",
       "switch_to_toml": "TOML로 전환 →",
       "toml_parse_error": "TOML 구문 분석 오류:{{msg}}",
+      "json_schema_unsafe_integer": "절댓값이 9,007,199,254,740,991을 초과하는 JSON 스키마 정수는 비주얼 모드에서 안전하게 편집할 수 없습니다. 이 매니페스트는 TOML 모드로 유지하세요.",
       "copy": "클립보드에 복사",
       "copied": "클립보드에 복사됨",
       "module": "모듈",
