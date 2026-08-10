@@ -1,0 +1,1 @@
+- Require approval before unrecognized channel senders can use network or tool-discovery capabilities. (@houko)
