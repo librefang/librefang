@@ -1491,11 +1491,13 @@ pub async fn hand_send_message(
         .await
         {
             Ok(blocks) => blocks,
-            Err(_) => {
+            Err(denied) => {
+                tracing::warn!(file_id = %denied.file_id, "hand attachment access denied");
                 return (
                     StatusCode::FORBIDDEN,
                     Json(serde_json::json!({
-                        "error": "You are not authorized to access this upload"
+                        "error": "You are not authorized to access this upload",
+                        "code": "upload_access_denied"
                     })),
                 );
             }

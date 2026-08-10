@@ -422,7 +422,7 @@ pub async fn agent_ws(
     };
     // Mirror the HTTP middleware's no-auth attribution.
     // Uploads created by the local dashboard in this mode are owned by the synthetic root principal, so the WS path must carry the same identity when attaching them.
-    let mut authenticated_user = (!auth_required).then(&root_user);
+    let mut authenticated_user = (!auth_required).then(root_user);
     if auth_required {
         // SECURITY (#3610): Loud reject if a client still sends `?token=` in
         // the WS URL. The credential leaks into proxy access logs and browser
