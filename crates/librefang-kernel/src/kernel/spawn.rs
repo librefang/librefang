@@ -49,20 +49,14 @@ impl LibreFangKernel {
         self.spawn_agent_inner(manifest, parent, source_toml_path, None)
     }
 
-    /// Pure, side-effect-free spawn pre-checks shared by `spawn_agent_inner`
-    /// and destructive callers that must validate before mutating state.
+    /// Pure, side-effect-free spawn pre-checks shared by `spawn_agent_inner` and destructive callers that must validate before mutating state.
     ///
-    /// Runs the manifest module-path sandbox check (#3533), the reserved
-    /// agent-name namespace check (#4980), and the tool_exec backend
-    /// override check (#3332). None of these create sessions, directories,
-    /// or registry entries. Hand reactivation calls this for every role
-    /// BEFORE killing the existing agents, so a malformed hand definition is
-    /// rejected with the old agents and their cron/triggers still intact
-    /// instead of after `kill_agent` has already wiped them (#5956).
+    /// Runs the manifest module-path sandbox check (#3533), the reserved agent-name namespace check (#4980), and the tool_exec backend override check (#3332).
+    /// None of these create sessions, directories, or registry entries.
+    /// It also emits the report-only `group_trigger_patterns` diagnostic (#6732), which warns and never rejects — see `warn_invalid_group_trigger_patterns`.
+    /// Hand reactivation calls this for every role BEFORE killing the existing agents, so a malformed hand definition is rejected with the old agents and their cron/triggers still intact instead of after `kill_agent` has already wiped them (#5956).
     ///
-    /// `name` is passed separately from `manifest` so a caller can validate a
-    /// derived name (e.g. the `{hand_id}:{role}` prefix) against a manifest
-    /// whose own `name` field has not yet been rewritten.
+    /// `name` is passed separately from `manifest` so a caller can validate a derived name (e.g. the `{hand_id}:{role}` prefix) against a manifest whose own `name` field has not yet been rewritten.
     pub(crate) fn validate_spawnable(
         &self,
         manifest: &AgentManifest,
@@ -74,6 +68,9 @@ impl LibreFangKernel {
             warn!(agent = %name, %reason, "Rejecting manifest — reserved agent-name namespace");
             return Err(KernelError::LibreFang(reason));
         }
+
+        // #6732: report-only, deliberately AFTER the rejecting checks and never `?`-propagated — a mis-escaped group trigger pattern must not block a spawn.
+        warn_invalid_group_trigger_patterns(manifest, name);
 
         if let Some(override_kind) = manifest.tool_exec_backend {
             if let Err(e) = self
