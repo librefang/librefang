@@ -911,6 +911,9 @@ impl TriggerEngine {
         // first time the per-event budget is exhausted (it lands in the `warn!`
         // branch below). `ids.len()` is the same total, taken lock-free.
         let total_registered = ids.len();
+        // Set when a fire stamps a cooldown window, so the prune below runs
+        // only when there is something new to prune.
+        let mut inserted_cooldown = false;
         for id in ids {
             let Some(mut entry) = self.triggers.get_mut(&id) else {
                 continue;
@@ -1025,7 +1028,12 @@ impl TriggerEngine {
                 if subject.is_some() {
                     self.last_fired.insert((trigger.id, None), now);
                 }
-                self.prune_expired_cooldowns(now);
+                // Pruning is deferred to after the loop on purpose: `entry` is
+                // a live `RefMut` on this trigger's shard, and the prune has to
+                // read `self.triggers` to learn the longest window in use.
+                // Same-thread write-then-read on one shard is the self-deadlock
+                // this function already documents for `DashMap::len()` above.
+                inserted_cooldown = true;
 
                 debug!(
                     trigger_id = %trigger.id,
@@ -1035,6 +1043,13 @@ impl TriggerEngine {
                     "Trigger fired"
                 );
             }
+        }
+
+        // Safe here and not inside the loop: every `RefMut` taken above has
+        // been dropped, so reading `self.triggers` cannot meet a write guard
+        // this thread is still holding.
+        if inserted_cooldown {
+            self.prune_expired_cooldowns(now);
         }
 
         (matches, state_mutated)
@@ -1630,6 +1645,20 @@ fn cooldown_subject(pattern: &TriggerPattern, event: &Event) -> Option<String> {
         },
         TriggerPattern::MemoryKeyPattern { .. } => match &event.payload {
             EventPayload::MemoryUpdate(delta) => Some(delta.key.clone()),
+            _ => None,
+        },
+        // Structurally identical to `MemoryKeyPattern`: a substring/wildcard
+        // filter over a per-event identifier, which can match two distinct
+        // subjects inside one window. Two workers spawning a second apart is
+        // the same "a different thing happened" case a second task is.
+        //
+        // Keyed on the spawned agent's id rather than its name: the pattern
+        // filters on the name, but two agents may share one, and the subject
+        // here is the agent that appeared, not the label it appeared under.
+        TriggerPattern::AgentSpawned { .. } => match &event.payload {
+            EventPayload::Lifecycle(LifecycleEvent::Spawned { agent_id, .. }) => {
+                Some(agent_id.to_string())
+            }
             _ => None,
         },
         _ => None,
@@ -4271,6 +4300,141 @@ mod tests {
                 .count(),
             0,
             "no window of a removed trigger may survive"
+        );
+    }
+
+    /// Two agents appearing a second apart are two events, not one repeated —
+    /// the same shape as two tasks or two memory keys, since the pattern is a
+    /// substring filter over a per-event identifier.
+    #[test]
+    fn distinct_agent_spawns_inside_one_window_both_fire() {
+        let engine = TriggerEngine::new();
+        let watcher = AgentId::new();
+        engine
+            .register(
+                watcher,
+                TriggerPattern::AgentSpawned {
+                    name_pattern: "worker".to_string(),
+                },
+                "a worker appeared: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let spawned = |name: &str| {
+            Event::new(
+                AgentId::new(),
+                EventTarget::Broadcast,
+                EventPayload::Lifecycle(LifecycleEvent::Spawned {
+                    agent_id: AgentId::new(),
+                    name: name.to_string(),
+                }),
+            )
+        };
+
+        let (first, _) = engine.evaluate_with_resolver(&spawned("worker-1"), |_| None);
+        let (second, _) = engine.evaluate_with_resolver(&spawned("worker-2"), |_| None);
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            second.len(),
+            1,
+            "a second worker spawning is a distinct subject, not a repeat"
+        );
+    }
+
+    /// Evaluation must survive crossing the prune threshold.
+    ///
+    /// The prune reads `self.triggers` to find the longest window in use, and
+    /// the evaluation loop holds a `RefMut` on a trigger's shard while it
+    /// fires; doing both at once is a same-thread write-then-read on one
+    /// DashMap shard, which hangs rather than fails. This walks past the
+    /// threshold on real evaluations — if the prune ever moves back inside the
+    /// loop, this test stops returning.
+    #[test]
+    fn crossing_the_prune_threshold_does_not_wedge_the_evaluator() {
+        let engine = TriggerEngine::new();
+        let orchestrator = AgentId::new();
+        engine
+            .register(
+                orchestrator,
+                TriggerPattern::TaskCompleted {
+                    creator_match: None,
+                },
+                "notify: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        // Each distinct task id opens its own window, so this grows
+        // `last_fired` past PRUNE_THRESHOLD (4096).
+        let mut fired = 0usize;
+        for i in 0..4_200 {
+            let (matches, _) = engine
+                .evaluate_with_resolver(&completion_of(&format!("task-{i}"), orchestrator), |_| {
+                    None
+                });
+            fired += matches.len();
+        }
+
+        assert_eq!(fired, 4_200, "every distinct subject fires exactly once");
+    }
+
+    /// A window older than the longest cooldown any trigger could use can only
+    /// ever report "elapsed", so keeping it is pure growth. The trigger-wide
+    /// entry is exempt: it is bounded by the trigger count and backs
+    /// `last_fired_at` on disk.
+    #[test]
+    fn pruning_drops_stale_subject_windows_and_keeps_the_trigger_wide_one() {
+        let engine = TriggerEngine::new();
+        let orchestrator = AgentId::new();
+        let tid = engine
+            .register(
+                orchestrator,
+                TriggerPattern::TaskCompleted {
+                    creator_match: None,
+                },
+                "notify: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        // Seed enough stale subject windows to cross the threshold.
+        let stale = Utc::now() - chrono::Duration::seconds(3_600);
+        for i in 0..4_200 {
+            engine
+                .last_fired
+                .insert((tid, Some(format!("ancient-{i}"))), stale);
+        }
+        engine.last_fired.insert((tid, None), stale);
+
+        // One real fire triggers the prune after the loop.
+        let (matches, _) =
+            engine.evaluate_with_resolver(&completion_of("fresh", orchestrator), |_| None);
+        assert_eq!(matches.len(), 1);
+
+        assert!(
+            engine
+                .last_fired
+                .iter()
+                .filter(|e| e
+                    .key()
+                    .1
+                    .as_deref()
+                    .is_some_and(|s| s.starts_with("ancient-")))
+                .count()
+                == 0,
+            "windows that can no longer suppress anything must not accumulate"
+        );
+        assert!(
+            engine.last_fired.contains_key(&(tid, None)),
+            "the trigger-wide entry backs last_fired_at and is never pruned"
+        );
+        assert!(
+            engine
+                .last_fired
+                .contains_key(&(tid, Some("fresh".to_string()))),
+            "a window that can still suppress must survive the prune"
         );
     }
 }
