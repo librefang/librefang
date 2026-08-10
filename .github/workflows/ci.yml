@@ -308,6 +308,13 @@ jobs:
           PY
       - name: Check release workflow input safety
         run: python3 scripts/tests/test_release_tag_workflow_safety.py
+      - name: Install actionlint
+        run: |
+          mkdir -p "$RUNNER_TEMP/actionlint-bin"
+          GOBIN="$RUNNER_TEMP/actionlint-bin" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          echo "$RUNNER_TEMP/actionlint-bin" >> "$GITHUB_PATH"
+      - name: Check report workflow hardening
+        run: python3 scripts/tests/test_workflow_report_hardening.py
       - name: Check formatting
         run: cargo xtask fmt
       - name: Check API error response shape (issue #3505)
