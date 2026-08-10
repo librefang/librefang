@@ -797,11 +797,9 @@ pub async fn test_webhook(
 
     // Pin a direct client's DNS resolver to the address validated above.
     // Proxies are disabled because proxy-side DNS would bypass the local pin.
-    // Without the pin, reqwest does its own DNS lookup before connecting; a low-TTL
-    // record can flip between our validate call and reqwest's resolve call
-    // (DNS rebind), bypassing the SSRF check (#3701). `resolve_to_addrs`
-    // forces the connection to the validated address and skips reqwest's
-    // resolver for that hostname.
+    // Without the pin, reqwest does its own DNS lookup before connecting.
+    // A low-TTL record can flip between our validate call and reqwest's resolve call (DNS rebind), bypassing the SSRF check (#3701).
+    // `resolve_to_addrs` forces the connection to the validated address and skips reqwest's resolver for that hostname.
     let mut builder = librefang_kernel::http_client::direct_client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none());
