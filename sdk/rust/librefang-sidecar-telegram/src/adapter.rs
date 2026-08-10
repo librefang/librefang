@@ -442,14 +442,15 @@ impl SidecarAdapter for TelegramAdapter {
                 Ok(resp) => {
                     // Reset backoff on a successful round.
                     backoff = Duration::from_secs(1);
-                    if !resp.result.is_empty() {
+                    let updates = resp.result.as_deref().unwrap_or_default();
+                    if !updates.is_empty() {
                         tg_trace!(
                             "getUpdates -> {} updates (next offset {})",
-                            resp.result.len(),
+                            updates.len(),
                             offset
                         );
                     }
-                    for upd in &resp.result {
+                    for upd in updates {
                         offset = upd.update_id + 1;
                         let kind = if upd.message.is_some() {
                             "message"
