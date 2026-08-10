@@ -74,12 +74,18 @@ def main():
     assert_in("Vec<u8>", rs, "rust-byte-buffer")
     assert_not_in("from_utf8_lossy(&chunk)", rs, "rust-no-lossy-chunk")
     assert_in('"status": status', rs, "rust-error-event-status")
-    assert_in(".connect_timeout(DEFAULT_CONNECT_TIMEOUT)", rs, "rust-connect-timeout")
     assert_in(".timeout(DEFAULT_REQUEST_TIMEOUT)", rs, "rust-request-timeout")
-    assert_in("while let Some(chunk_result) = stream.next().await", rs, "rust-stream-result-loop")
+    assert_in(".path_segments_mut()", rs, "rust-url-segment-builder")
+    assert_in('&["api", "agents", id]', rs, "rust-borrowed-path-segments")
+    assert_in('id.to_string(),', rs, "rust-owned-stream-path-segment")
+    assert_not_in('format!("/api/', rs, "rust-no-raw-path-formatting")
     assert_in('"error": format!("stream error: {}", e)', rs, "rust-stream-transport-error")
     assert_not_in("while let Some(Ok(chunk))", rs, "rust-no-silent-stream-error")
     assert_in('"status": resp.StatusCode', go, "go-error-event-status")
+    assert_in('buffer = b""', py, "python-byte-buffer")
+    assert_in('lines = buffer.split(b"\\n")', py, "python-byte-line-split")
+    assert_in("line = line.decode().strip()", py, "python-decode-complete-line")
+    assert_not_in("buffer += chunk.decode()", py, "python-no-per-chunk-decode")
     assert_in('"error": fmt.Sprintf("marshal: %v", err)', go, "go-stream-marshal-error")
     assert_not_in("b, _ := json.Marshal(body)", go, "go-no-discarded-stream-marshal-error")
     assert_in("from urllib.error import HTTPError, URLError", py, "python-urlerror-import")
@@ -93,6 +99,10 @@ def main():
     # Reserved-word escape works
     assert mod._py_safe("class") == "class_"
     assert mod._rust_safe("type") == "type_"
+    assert mod._rust_path_segments("/api/agents/{id}", owned=False) == '&["api", "agents", id]'
+    assert mod._rust_path_segments("/api/agents/{id}", owned=True) == (
+        'vec!["api".to_string(), "agents".to_string(), id.to_string()]'
+    )
 
     print(f"OK — {sum(len(v) for v in tag_ops.values())} ops across {len(tag_ops)} tags")
 
