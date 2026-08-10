@@ -1,0 +1,1 @@
+- Added a Rust SDK constructor that accepts a configured `reqwest::Client`, enabling authenticated requests and other custom HTTP settings across all generated resources. (@houko)
