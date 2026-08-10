@@ -709,6 +709,42 @@ mod tests {
     }
 
     #[test]
+    fn ogg_opus_detection_rejects_every_truncation_without_panicking() {
+        // Malformed / short inputs that are nowhere near a valid page: must
+        // not panic on out-of-bounds slicing.
+        assert!(!looks_like_ogg_opus(&[]));
+        assert!(!looks_like_ogg_opus(b"OggS"));
+        assert!(!looks_like_ogg_opus(&[0_u8; 26]));
+        assert!(!looks_like_ogg_opus(b"RIFF....WAVEfmt "));
+
+        let mut short_header = vec![0_u8; 20];
+        short_header[..4].copy_from_slice(b"OggS");
+        assert!(!looks_like_ogg_opus(&short_header));
+
+        // Full fixed header claiming a segment table that is never
+        // actually supplied.
+        let mut truncated_segment_table = vec![0_u8; 27];
+        truncated_segment_table[..4].copy_from_slice(b"OggS");
+        truncated_segment_table[26] = 10;
+        assert!(!looks_like_ogg_opus(&truncated_segment_table));
+
+        // A network-truncated download can cut a genuine Ogg/Opus page off
+        // at any byte offset. Every prefix short of the full page must be
+        // rejected, and none of them may panic.
+        let mut body = b"OpusHead".to_vec();
+        body.resize(19, 0);
+        let full_page = ogg_page(&[19], &body);
+        for cut in 1..full_page.len() {
+            let truncated = &full_page[..full_page.len() - cut];
+            assert!(
+                !looks_like_ogg_opus(truncated),
+                "truncating the last {cut} byte(s) should not still look like a valid Opus page"
+            );
+        }
+        assert!(looks_like_ogg_opus(&full_page));
+    }
+
+    #[test]
     fn location_coordinates_are_required_numbers() {
         let valid = json!({"lat": 35.6812, "lon": 139.7671});
         assert_eq!(required_coordinate(&valid, "lat").unwrap(), 35.6812);
