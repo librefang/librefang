@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   ArrowLeft, Copy, Check, ExternalLink, ChevronDown,
@@ -467,7 +467,7 @@ function PlatformCardContent({ icon, name, desc, badge, badgeClass, demo, warnin
 
 // ---- Fly.io Deploy Form ----
 
-function FlyDeployForm({ onBack, text }: { onBack: () => void; text: DeployCopy }) {
+export function FlyDeployForm({ onBack, text }: { onBack: () => void; text: DeployCopy }) {
   const [token, setToken] = useState('')
   const [deploying, setDeploying] = useState(false)
   const [steps, setSteps] = useState<ProgressStep[]>(
@@ -476,6 +476,12 @@ function FlyDeployForm({ onBack, text }: { onBack: () => void; text: DeployCopy 
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<DeployResult | null>(null)
   const [troubleshootOpen, setTroubleshootOpen] = useState<string | null>(null)
+  const deployRequestRef = useRef<AbortController | null>(null)
+
+  useEffect(() => () => {
+    deployRequestRef.current?.abort()
+    deployRequestRef.current = null
+  }, [])
 
   const deploy = useCallback(async () => {
     const trimmed = token.trim()
@@ -493,31 +499,20 @@ function FlyDeployForm({ onBack, text }: { onBack: () => void; text: DeployCopy 
     initial[0]!.status = 'active'
     setSteps([...initial])
 
-    // Animate steps progressively
-    let currentStep = 0
-    const stepInterval = setInterval(() => {
-      if (currentStep < DEPLOY_STEP_IDS.length - 1) {
-        setSteps(prev => {
-          const next = [...prev]
-          const cur = next[currentStep]
-          if (cur) cur.status = 'done'
-          currentStep++
-          const nextStep = next[currentStep]
-          if (nextStep) nextStep.status = 'active'
-          return next
-        })
-      }
-    }, 1500)
+    deployRequestRef.current?.abort()
+    const controller = new AbortController()
+    deployRequestRef.current = controller
 
     try {
       const res = await fetch('/api/deploy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: trimmed }),
+        signal: controller.signal,
       })
 
-      clearInterval(stepInterval)
       const data = await res.json() as (DeployResult & { error?: string })
+      if (controller.signal.aborted) return
 
       if (!res.ok || data.error) {
         throw new Error(data.error || text.deployFailed)
@@ -527,10 +522,14 @@ function FlyDeployForm({ onBack, text }: { onBack: () => void; text: DeployCopy 
       setSteps(prev => prev.map(s => ({ ...s, status: 'done' as ProgressStepStatus })))
       setResult(data)
     } catch (err) {
-      clearInterval(stepInterval)
+      if (controller.signal.aborted) return
       setError(err instanceof Error ? err.message : text.deployFailed)
       setDeploying(false)
       setSteps(DEPLOY_STEP_IDS.map(id => ({ id, status: 'pending' as ProgressStepStatus })))
+    } finally {
+      if (deployRequestRef.current === controller) {
+        deployRequestRef.current = null
+      }
     }
   }, [text.deployFailed, text.tokenRequired, token])
 
@@ -665,6 +664,7 @@ function FlyDeployForm({ onBack, text }: { onBack: () => void; text: DeployCopy 
             {/* Progress steps */}
             {deploying && (
               <motion.div
+                data-testid="deploy-progress"
                 initial={{ height: 0, opacity: 0 }}
                 animate={{ height: 'auto', opacity: 1 }}
                 transition={{ duration: 0.3 }}

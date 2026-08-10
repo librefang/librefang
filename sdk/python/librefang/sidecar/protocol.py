@@ -408,13 +408,31 @@ def parse_command(line: str) -> Command:
     valid JSON that is not an object (e.g. a bare number/array) — the
     reader treats both the same: emit a protocol error and continue,
     rather than letting an ``AttributeError`` escape and wedge the
-    adapter. Unknown methods become :class:`UnknownCommand`."""
+    adapter. Known commands also require object-shaped ``params``;
+    unknown methods retain their raw shape for forward compatibility."""
     obj = json.loads(line)
     if not isinstance(obj, dict):
         raise json.JSONDecodeError(
             "expected a JSON object", line, 0)
     method = obj.get("method")
-    p = obj.get("params") or {}
+    if method is not None and not isinstance(method, str):
+        raise json.JSONDecodeError(
+            "expected command method to be a JSON string", line, 0,
+        )
+    known_methods = {
+        "send", "ready_ack", "shutdown", "typing", "reaction",
+        "interactive", "stream_start", "stream_delta", "stream_end",
+        "heartbeat",
+    }
+    if method not in known_methods:
+        return UnknownCommand(method or "", obj)
+    p = obj.get("params")
+    if p is None:
+        p = {}
+    elif not isinstance(p, dict):
+        raise json.JSONDecodeError(
+            "expected command params to be a JSON object", line, 0,
+        )
     if method == "send":
         return Send(p.get("channel_id", ""), p.get("text", ""),
                     p.get("content"), p.get("thread_id"),
@@ -440,7 +458,7 @@ def parse_command(line: str) -> Command:
         return StreamEnd(p.get("stream_id", ""))
     if method == "heartbeat":
         return Heartbeat()
-    return UnknownCommand(method or "", obj)
+    raise AssertionError("known command was not parsed")
 
 
 # ---------------------------------------------------------------------------

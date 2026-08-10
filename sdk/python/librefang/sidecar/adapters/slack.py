@@ -36,15 +36,12 @@ Behaviour parity with the Rust adapter:
 * **REST send**: ``POST /api/chat.postMessage`` with the bot token,
   optional ``thread_ts`` and ``unfurl_links``. 3 000-char chunking
   (matches the Rust ``SLACK_MSG_LIMIT``).
-* **Reactions**: ``eyes`` on receive, ``white_check_mark`` on
-  completion (opt-out via ``SLACK_REACTIONS=false``).
-* **Task progress** (#6451): the generic AgentPhase lifecycle
-  (Thinking → ToolUse{name} → Done/Error) reaches the adapter as
-  ``reaction`` commands through the declared ``reaction`` capability
-  and is rendered as an updated-in-place Block Kit step list
-  (``chat.update``) for multi-step turns. Single-step turns post no
-  card and keep just the receipt reactions. Same ``SLACK_REACTIONS``
-  opt-out.
+* **Reactions** (#6731): the receipt is driven by the daemon's AgentPhase lifecycle, not by the receive hook — ``eyes`` on ``queued``, flipped to ``white_check_mark`` on ``done`` and ``x`` on ``error``.
+  A message the daemon declines to answer (group mention-only gating, a rate-limit rejection, a slash command handled in-bridge) never reaches ``queued``, so it never gets a reaction at all instead of being left with a permanent ``eyes``.
+  Opt out via ``SLACK_REACTIONS=false``.
+* **Task progress** (#6451): the same AgentPhase lifecycle (Thinking → ToolUse{name} → Done/Error) is rendered as an updated-in-place Block Kit step list (``chat.update``) for multi-step turns.
+  Single-step turns post no card and keep just the receipt reactions.
+  Toggled independently of the receipt via ``SLACK_PROGRESS_CARD`` (#6730), which defaults to whatever ``SLACK_REACTIONS`` is set to so neither knob silently turns the other's output on.
 
 Stdlib-only: HTTPS via ``urllib.request``, WebSocket via a
 hand-rolled RFC 6455 client over ``socket`` + ``ssl`` (same pattern
@@ -62,6 +59,7 @@ Configure via ``[[sidecar_channels]]``::
     # SLACK_UNFURL_LINKS = "false"
     # SLACK_FORCE_FLAT_REPLIES = "false"
     # SLACK_REACTIONS = "true"
+    # SLACK_PROGRESS_CARD = "true"
     # SLACK_ACCOUNT_ID = "workspace-prod"
 
 Secrets via ``~/.librefang/secrets.env``: ``SLACK_APP_TOKEN`` (the
@@ -109,6 +107,9 @@ DEFAULT_API_BASE = "https://slack.com/api"
 # clients render the first 3000 cleanly; the Rust adapter used 3000
 # (`SLACK_MSG_LIMIT`) so we preserve that.
 SLACK_MSG_LIMIT = 3000
+# Slack rejects a `chat.postMessage` carrying more than 50 blocks.
+# Only the Block Kit paths (interactive replies, the task-progress card) can approach this; the plain-text path chunks into separate messages instead.
+MAX_BLOCKS_PER_MESSAGE = 50
 
 SEND_TIMEOUT_SECS = 15.0
 HANDSHAKE_TIMEOUT_SECS = 15.0
@@ -390,11 +391,11 @@ class SlackAdapter(SidecarAdapter):
     # interactions back to ``on_command``/``on_send``, ``thread`` for
     # threaded replies, and ``reaction`` so the generic AgentPhase
     # lifecycle (Queued → Thinking → ToolUse{name} → Streaming →
-    # Done/Error) reaches ``on_command`` as ``reaction`` commands. We
-    # repurpose that phase stream into an updated-in-place Block Kit
-    # task-progress card for multi-step turns (#6451) — the eyes/
-    # white_check_mark receipt reactions stay driven by the receive/send
-    # hooks, independent of the lifecycle stream.
+    # Done/Error) reaches ``on_command`` as ``reaction`` commands.
+    # That one phase stream drives BOTH adapter-side processing indicators: the eyes/white_check_mark receipt (Queued to Done/Error) and the updated-in-place Block Kit task-progress card for multi-step turns (#6451).
+    #
+    # The receipt used to be driven by the receive/send hooks instead, which is what #6731 fixed: ``_handle_envelope`` added the eyes to every message it emitted, including the ones the daemon then declined to answer (mention-only group gating and the other pre-lifecycle early returns in ``dispatch_message``), leaving a permanent eyes with no way for the adapter to learn the turn was never run.
+    # Keying off the lifecycle closes all of those paths structurally: the first adapter-visible signal of a dispatched turn is Queued, so nothing is added unless a turn actually starts, and every started turn reaches Done or Error.
     #
     # Why ``reaction`` and not a new ``task_update`` capability: the
     # generic phase lifecycle is dispatched to adapters through
@@ -433,8 +434,14 @@ class SlackAdapter(SidecarAdapter):
                   placeholder="false",
                   advanced=True),
             Field("SLACK_REACTIONS",
-                  "Show processing-state indicators (eyes/check receipt "
-                  "reactions and the multi-step task-progress card)",
+                  "Add an eyes reaction while a turn runs and flip it to "
+                  "a check / cross when it finishes",
+                  "bool",
+                  placeholder="true",
+                  advanced=True),
+            Field("SLACK_PROGRESS_CARD",
+                  "Show the multi-step task-progress card (defaults to "
+                  "following SLACK_REACTIONS)",
                   "bool",
                   placeholder="true",
                   advanced=True),
@@ -478,14 +485,21 @@ class SlackAdapter(SidecarAdapter):
         self.reactions_enabled = _bool_env(
             os.environ.get("SLACK_REACTIONS", ""), default=True,
         )
+        # The task-progress card is a separate indicator from the receipt reaction (#6730): silencing the emoji noise used to silence the card too, which was the only workaround for either.
+        # It defaults to whatever `SLACK_REACTIONS` resolved to, so an operator who already runs `SLACK_REACTIONS=false` for total silence keeps it and does not suddenly start receiving cards.
+        self.progress_card_enabled = _bool_env(
+            os.environ.get("SLACK_PROGRESS_CARD", ""),
+            default=self.reactions_enabled,
+        )
         acct = os.environ.get("SLACK_ACCOUNT_ID", "").strip()
         self.account_id = acct or None
 
         self.api_base = DEFAULT_API_BASE
         self.bot_user_id: Optional[str] = None
-        # (channel, ts) → emoji name. Cleared when the bot replies.
+        # (channel, ts) → emoji name. Cleared when the triggering turn
+        # reaches its terminal (done/error) lifecycle phase (#6731).
         # Bounded by `MAX_PENDING_REACTIONS` so a spike of receives
-        # without sends can't grow this without bound.
+        # without terminations can't grow this without bound.
         self._pending_reactions: dict[tuple[str, str], str] = {}
         self._pending_lock = threading.Lock()
         # Live task-progress cards keyed by (channel_id, triggering ts).
@@ -625,7 +639,11 @@ class SlackAdapter(SidecarAdapter):
         failures — `_http` reports the 200 status and `_post_message`
         inspects the body for `ok` (matches the Rust adapter)."""
         chunks = (
-            _split_message(text, SLACK_MSG_LIMIT) if blocks is None else [text]
+            _split_message(text, SLACK_MSG_LIMIT)
+            if blocks is None
+            # With blocks, `text` is only the notification-preview fallback (the blocks carry the rendered content, already split to fit per-section), so chunking it into several messages would post the same blocks repeatedly.
+            # Bound it instead — an unbounded notification string buys nothing and is one more length the API can reject.
+            else [text[:SLACK_MSG_LIMIT]]
         )
         for chunk in chunks:
             payload: dict[str, Any] = {"channel": channel_id, "text": chunk}
@@ -771,9 +789,7 @@ class SlackAdapter(SidecarAdapter):
                          error=err, channel=channel, name=name)
 
     def _track_pending_reaction(self, channel: str, ts: str, emoji: str) -> None:
-        """Record that we added an ``emoji`` reaction on ``channel/ts``
-        so :meth:`_finalize_pending_reaction` can flip it to
-        white_check_mark after the agent reply lands."""
+        """Record that we added an ``emoji`` reaction on ``channel/ts`` so :meth:`_finalize_pending_reaction` can flip it to the terminal emoji once the turn reaches its Done / Error phase."""
         key = (channel, ts)
         with self._pending_lock:
             if len(self._pending_reactions) >= self.MAX_PENDING_REACTIONS:
@@ -789,28 +805,25 @@ class SlackAdapter(SidecarAdapter):
             self._pending_reactions[key] = emoji
 
     def _finalize_pending_reaction(
-        self, channel: str, ts: Optional[str],
+        self, channel: str, ts: Optional[str], emoji: Optional[str],
     ) -> None:
-        """Remove the eyes (if present) and add the white_check_mark."""
-        if not self.reactions_enabled:
+        """Remove the in-progress receipt on ``channel``/``ts`` and put ``emoji`` in its place.
+        ``emoji=None`` removes only — that is the daemon's ``clear_done_reaction`` signal, which arrives as an empty emoji on the terminal phase.
+
+        Keyed strictly by ``(channel, ts)``.
+        There is deliberately no "first pending entry in this channel" fallback: the lifecycle always carries the exact triggering ``message_id``, and the old fallback flipped an unrelated sibling message's receipt whenever the exact key missed (which it did for every in-thread reply, because the send hook keyed off the thread root instead of the message's own ts).
+
+        A miss is therefore a no-op, which also makes a repeated terminal phase idempotent: the first one pops the entry, the second finds nothing and adds nothing.
+        """
+        if not self.reactions_enabled or not ts:
             return
-        emoji: Optional[str] = None
-        key: Optional[tuple[str, str]] = None
         with self._pending_lock:
-            if ts is not None:
-                key = (channel, ts)
-                emoji = self._pending_reactions.pop(key, None)
-            if emoji is None:
-                # No explicit ts → pick the first pending entry for
-                # this channel (DM context, single-message round-trip).
-                for k in list(self._pending_reactions):
-                    if k[0] == channel:
-                        emoji = self._pending_reactions.pop(k)
-                        key = k
-                        break
-        if emoji is not None and key is not None:
-            self._remove_reaction(key[0], key[1], emoji)
-            self._add_reaction(key[0], key[1], "white_check_mark")
+            pending = self._pending_reactions.pop((channel, ts), None)
+        if pending is None:
+            return
+        self._remove_reaction(channel, ts, pending)
+        if emoji:
+            self._add_reaction(channel, ts, emoji)
 
     # ---- Socket Mode loop -------------------------------------------
 
@@ -886,19 +899,8 @@ class SlackAdapter(SidecarAdapter):
             )
             if ev is None:
                 return
-            # Add the eyes reaction so the user sees the bot is
-            # working. We track (channel, ts) so the post-send hook
-            # can flip eyes → check.
-            params = ev["params"]
-            channel_id = params["user_id"]
-            ts = params.get("message_id")
-            if self.reactions_enabled and isinstance(ts, str) and ts:
-                self._track_pending_reaction(channel_id, ts, "eyes")
-                # Best-effort, fire-and-forget — _add_reaction is
-                # synchronous but Slack reactions.add returns in tens
-                # of ms; doing it inline is fine and avoids spawning
-                # a thread per inbound message.
-                self._add_reaction(channel_id, ts, "eyes")
+            # No reaction here (#6731). Receiving a message is not the same as answering it: the daemon may decline the turn for any of ~two dozen reasons (mention-only group gating, an `[allowed_channels]`-adjacent RBAC denial, a per-user rate limit, a slash command it handles itself), all of which return before any adapter-visible lifecycle signal.
+            # The receipt is added from the `queued` phase in `_on_phase` instead, which fires only for a turn that is actually run.
             emit(ev)
             return
         if env_type == "interactive":
@@ -968,9 +970,8 @@ class SlackAdapter(SidecarAdapter):
         if not channel_id:
             log.warn("slack on_send: empty channel_id, dropping")
             return
-        # The inbound thread id (post-#5302 this is the message's own ts
-        # for a top-level message, or the thread root for an in-thread
-        # reply). Used as the reaction-finalization key below.
+        # The inbound thread id (post-#5302 this is the message's own ts for a top-level message, or the thread root for an in-thread reply).
+        # Used to decide where to post, nothing else — reaction finalization moved onto the lifecycle stream in #6731, keyed by the triggering message's own ts rather than this.
         inbound_thread_id = getattr(cmd, "thread_id", None)
         # Decide thread context for *posting*: force-flat-replies mode
         # forces the reply to a top-level post (mirrors the Rust adapter's
@@ -1012,52 +1013,31 @@ class SlackAdapter(SidecarAdapter):
                 lambda: self._post_message(channel_id, text, thread_ts=thread_ts),
             )
 
-        # Flip eyes → white_check_mark for the message that triggered
-        # this reply. The Rust adapter does this synchronously on the
-        # send path; we mirror it. Finalization MUST use the inbound
-        # thread id (not the posting `thread_ts`, which is forced to None
-        # in force-flat mode) so it targets the message that actually got
-        # the :eyes: instead of falling back to "first pending in channel"
-        # and flipping the wrong message under concurrency.
-        if self.reactions_enabled:
-            await loop.run_in_executor(
-                None,
-                lambda: self._finalize_pending_reaction(
-                    channel_id, inbound_thread_id,
-                ),
-            )
-
     async def on_command(self, cmd) -> None:
-        """Route lifecycle ``reaction`` commands to the task-progress
-        display; defer everything else (``send`` → ``on_send``) to the
-        base dispatcher."""
+        """Route lifecycle ``reaction`` commands to the receipt reaction and task-progress display; defer everything else (``send`` → ``on_send``) to the base dispatcher."""
         if isinstance(cmd, protocol.Reaction):
             await self._on_phase(cmd)
             return
         await super().on_command(cmd)
 
     async def _on_phase(self, cmd) -> None:
-        """Fold one AgentPhase lifecycle ``reaction`` into a live Block
-        Kit task-progress card.
+        """Fold one AgentPhase lifecycle ``reaction`` into the receipt reaction and, for multi-step turns, a live Block Kit task-progress card.
 
-        The card is materialized lazily — only once a turn actually runs
-        a tool (a genuinely multi-step turn). Single-step turns
-        (Queued → Thinking → Done with no ToolUse) post nothing here and
-        keep the pre-#6451 UX: the eyes → white_check_mark receipt
-        reaction driven by the receive/send hooks. Called only from the
-        serialized ``on_command`` reader path, so the state map needs no
-        lock; the Slack Web API calls are offloaded to the executor.
+        Two independent indicators, one stream:
+
+        * **Receipt** (``SLACK_REACTIONS``): ``queued`` adds the eyes to the triggering message; ``done`` / ``error`` flip it to white_check_mark / x.
+          Handled BEFORE the card bookkeeping below, because a single-step turn has no card state and would otherwise hit the early-out and never finalize — leaving exactly the stuck eyes #6731 is about.
+        * **Card** (``SLACK_PROGRESS_CARD``): materialized lazily, only once a turn actually runs a tool (a genuinely multi-step turn).
+          Single-step turns (Queued → Thinking → Done with no ToolUse) post nothing and keep just the receipt.
+
+        Called only from the serialized ``on_command`` reader path, so the state map needs no lock; the Slack Web API calls are offloaded to the executor.
         """
-        # The progress card is a processing-state indicator, so it honours
-        # the same operator toggle (`SLACK_REACTIONS`) as the eyes/check
-        # receipt reactions — disabling it silences all processing chatter.
-        if not self.reactions_enabled:
+        if not self.reactions_enabled and not self.progress_card_enabled:
             return
         phase = (getattr(cmd, "phase", "") or "").strip()
         if not phase:
             # Legacy emoji-only reaction (pre-#6451 daemon): no structured
-            # phase to render, and single-step UX is already covered by
-            # the receipt reactions. Ignore.
+            # phase, so neither indicator has anything to key off. Ignore.
             return
         channel_id = cmd.channel_id
         message_id = cmd.message_id
@@ -1065,7 +1045,39 @@ class SlackAdapter(SidecarAdapter):
             return
         key = (channel_id, message_id)
         terminal = phase in ("done", "error")
+        loop = asyncio.get_event_loop()
 
+        # ---- receipt reaction (#6731) --------------------------------
+        if self.reactions_enabled and (phase == "queued" or terminal):
+            if phase == "queued":
+                self._track_pending_reaction(channel_id, message_id, "eyes")
+                await loop.run_in_executor(
+                    None,
+                    lambda: self._add_reaction(channel_id, message_id, "eyes"),
+                )
+            else:
+                # An empty emoji on the wire is the daemon's `clear_done_reaction` signal ("remove, add nothing").
+                # Every other terminal frame carries one, so only Done can be empty — see `lifecycle_reaction_emoji` in bridge.rs.
+                wire_emoji = getattr(cmd, "reaction", "") or ""
+                if phase == "error":
+                    terminal_emoji: Optional[str] = "x"
+                elif wire_emoji:
+                    terminal_emoji = "white_check_mark"
+                else:
+                    terminal_emoji = None
+                await loop.run_in_executor(
+                    None,
+                    lambda: self._finalize_pending_reaction(
+                        channel_id, message_id, terminal_emoji,
+                    ),
+                )
+        if phase == "queued":
+            # `queued` is never rendered in the card, so there is nothing left to do — and materializing card state for it would make every turn look multi-step.
+            return
+        if not self.progress_card_enabled:
+            return
+
+        # ---- task-progress card (#6451) ------------------------------
         prog = self._task_progress.get(key)
         if prog is None:
             if terminal:
@@ -1083,7 +1095,7 @@ class SlackAdapter(SidecarAdapter):
                     pass
             self._task_progress[key] = prog
 
-        # Record the step. `queued` is transient and never shown.
+        # Record the step. `queued` returned above and is never shown.
         if phase == "tool_use":
             prog.steps.append(("tool_use", getattr(cmd, "tool_name", None)))
         elif phase in ("thinking", "streaming"):
@@ -1101,7 +1113,6 @@ class SlackAdapter(SidecarAdapter):
             return
 
         text, blocks = _build_task_progress_blocks(prog.steps, phase)
-        loop = asyncio.get_event_loop()
         if prog.card_ts is None:
             thread_ts = None if self.force_flat_replies else message_id
             ts = await loop.run_in_executor(
@@ -1204,9 +1215,11 @@ def _build_task_progress_blocks(
     return text, blocks
 
 
-# Matches one code span — fenced ```...``` or inline `...`.
+# Matches one code span — fenced ```...```, an UNCLOSED ``` running to the end of the message, or inline `...`.
 # The converter masks every match with an index token before any other rule runs, then restores the spans at the end, so a bold/link span or header/bullet line that wraps around a code span is still seen whole by the regexes (the previous top-level split hid everything past the code delimiter from them).
-_CODE_SPAN_RE = re.compile(r"```.*?```|`[^`]*`", re.DOTALL)
+# The unclosed alternative is second so a closed fence always wins; it matters because a truncated model response ends mid-block, and Slack renders an unterminated ``` as code all the way to the end of the message. Without it the blank-line collapse would rewrite the interior of something the user sees as a code block.
+# Deliberately NOT covered: `~~~` fences and 4-space-indented blocks. Both are GitHub-flavoured Markdown that Slack's mrkdwn does not render as code, so their blank lines are ordinary prose whitespace and collapsing them is exactly what #6730 asks for.
+_CODE_SPAN_RE = re.compile(r"```.*?```|```.*|`[^`]*`", re.DOTALL)
 # An index token standing in for a masked code span: \x00<index>\x01.
 # Control-character delimiters guarantee no Markdown rule can match into or across a token.
 _CODE_TOKEN_RE = re.compile("\x00(\\d+)\x01")
@@ -1216,6 +1229,10 @@ _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
 _BOLD_STAR_RE = re.compile(r"\*\*([^*\n]+)\*\*")
 _BOLD_USCORE_RE = re.compile(r"__([^_\n]+)__")
 _STRIKE_RE = re.compile(r"~~([^~\n]+)~~")
+# A run of three or more newlines, i.e. two or more consecutive blank lines.
+# Collapsed to a single blank line (Slack's paragraph separator) so a model that pads its answer with blank lines does not turn a short reply into a wall of whitespace (#6730).
+# Applied to the code-MASKED string, so a fenced block's interior — already a single token by then — is untouchable.
+_BLANK_LINE_RUN_RE = re.compile(r"\n{3,}")
 # A GitHub-flavoured-Markdown table divider row: |---|:--:|---:| etc.
 # Requires ≥2 columns (≥1 internal pipe) so a lone `---` horizontal rule is not mistaken for a table.
 _TABLE_DIVIDER_RE = re.compile(r"^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)+\|?\s*$")
@@ -1346,18 +1363,25 @@ def _markdown_to_mrkdwn(text: str) -> str:
         return f"\x00{len(codes) - 1}\x01"
 
     masked = _CODE_SPAN_RE.sub(mask, text)
-    return _restore_code_spans(_convert_md_lines(masked, codes), codes)
+    converted = _convert_md_lines(masked, codes)
+    # Collapse blank-line runs while the code spans are still masked — a fenced block is one token at this point, so its interior blank lines cannot be touched.
+    # `_convert_md_lines` is a 1:1 line mapper (a content-less header even emits an extra empty line), so without this an `\n\n\n\n` run reached Slack verbatim.
+    converted = _BLANK_LINE_RUN_RE.sub("\n\n", converted)
+    return _restore_code_spans(converted, codes)
 
 
 def _build_block_kit(text: str, buttons: list) -> list:
     """Render a ``Content.interactive`` payload into Slack Block Kit
     blocks. Mirrors the Rust adapter's `api_send_interactive_message`
-    layout: one ``section`` block with the text (mrkdwn), then one
-    ``actions`` block per row of buttons."""
-    blocks: list = [{
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": text},
-    }]
+    layout: ``section`` block(s) with the text (mrkdwn), then one
+    ``actions`` block per row of buttons.
+
+    The text is split across as many sections as it needs (#6730).
+    Slack rejects a ``section`` whose text exceeds ``SLACK_MSG_LIMIT``, and ``_post_message`` deliberately skips its chunking when ``blocks`` is present, so a long interactive reply used to be rejected wholesale and dropped with nothing but a log line — the same limit ``_build_task_progress_blocks`` already guards for.
+
+    Buttons are built first and budgeted against Slack's 50-blocks-per-message cap, because they are the functional payload: truncating text degrades a reply, dropping buttons breaks the interaction.
+    """
+    action_blocks: list = []
     for row_idx, row in enumerate(buttons or []):
         if not isinstance(row, list):
             continue
@@ -1383,11 +1407,43 @@ def _build_block_kit(text: str, buttons: list) -> list:
                 element["url"] = url
             elements.append(element)
         if elements:
-            blocks.append({
+            action_blocks.append({
                 "type": "actions",
                 "block_id": f"interactive_row_{row_idx}",
                 "elements": elements,
             })
+
+    # `_split_message` cuts on newlines where it can and provably yields chunks <= the limit; an empty string comes back as [""], preserving the historical single-empty-section shape.
+    chunks = _split_message(text, SLACK_MSG_LIMIT)
+
+    # The marker costs a block, so its slot is reserved only once truncation is actually happening.
+    # Reserving it up front spends a slot that the content may not need: with 49 button rows and one chunk, one section plus 49 actions is exactly 50 blocks and fits, but an unconditional reservation left zero sections and replaced the text with the marker.
+    # `/agents` and `/models` build one row per agent / per provider with no cap, so that is reachable rather than theoretical.
+    #
+    # When the rows alone reach the cap the message cannot carry text at all, and the rows themselves have to give — Slack rejects an over-cap message outright, so "buttons are never dropped" cannot mean emitting 51 blocks; that delivers nothing at all, buttons included.
+    truncated = False
+    if len(action_blocks) >= MAX_BLOCKS_PER_MESSAGE:
+        action_blocks = action_blocks[: MAX_BLOCKS_PER_MESSAGE - 1]
+        chunks = []
+        truncated = True
+    else:
+        section_budget = MAX_BLOCKS_PER_MESSAGE - len(action_blocks)
+        if len(chunks) > section_budget:
+            truncated = True
+            # Now — and only now — the marker takes one of the slots.
+            chunks = chunks[: max(0, section_budget - 1)]
+    blocks: list = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": chunk}}
+        for chunk in chunks
+    ]
+    if truncated:
+        # Its own section, so the marker can never push a chunk over the
+        # per-section character limit.
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "_(message truncated)_"},
+        })
+    blocks.extend(action_blocks)
     return blocks
 
 

@@ -1,0 +1,3 @@
+Bound RL trajectory metadata redaction to 128 nested JSON containers and replace any deeper branch with `<REDACTED:TOO_DEEP>`. (@houko)
+`toolset_metadata` can contain values assembled directly by tools rather than parsed with serde_json's default recursion limit, and the previous recursive walker had no independent depth budget; a sufficiently nested value could overflow the exporter thread's stack before upload.
+Values through the documented budget retain the existing recursive credential scrubbing behavior, while the first over-budget container is replaced wholesale so neither its contents nor further recursion reach W&B or Tinker.

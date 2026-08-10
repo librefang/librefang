@@ -186,6 +186,31 @@ def test_parse_command_non_object_json_raises_decode_error():
             parse_command(bad)
 
 
+@pytest.mark.parametrize("params", [[1], "bad", True, 7, [], "", False])
+def test_parse_command_known_method_rejects_non_object_params(params):
+    line = json.dumps({"method": "send", "params": params})
+
+    with pytest.raises(json.JSONDecodeError, match="params"):
+        parse_command(line)
+
+
+def test_parse_command_unknown_method_keeps_future_params_shape():
+    command = parse_command(
+        '{"method":"future_command","params":["future","shape"]}',
+    )
+
+    assert isinstance(command, UnknownCommand)
+    assert command.raw["params"] == ["future", "shape"]
+
+
+@pytest.mark.parametrize("method", [[], {}, True, 7])
+def test_parse_command_rejects_non_string_method(method):
+    line = json.dumps({"method": method, "params": {}})
+
+    with pytest.raises(json.JSONDecodeError, match="method"):
+        parse_command(line)
+
+
 def test_parse_command_reaction_carries_phase_and_tool_name():
     # #6451: the enriched reaction frame carries the lifecycle phase tag
     # and (for tool_use) the tool name so an adapter can render a step

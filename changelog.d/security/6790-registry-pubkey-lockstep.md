@@ -1,0 +1,1 @@
+Restore registry signature verification after the Cloudflare account migration by synchronizing the daemon and Pages endpoint with the active signing-worker public key, and repair the CI lockstep guard so future key drift fails visibly. (@houko)

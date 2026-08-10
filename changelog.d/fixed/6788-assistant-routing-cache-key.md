@@ -1,0 +1,1 @@
+Sticky assistant routing now reads the same sender- and thread-scoped cache keys it writes, while `explicit_only` channels remain on their configured agent when no route has been explicitly cached instead of invoking classification (#6788) (@houko)

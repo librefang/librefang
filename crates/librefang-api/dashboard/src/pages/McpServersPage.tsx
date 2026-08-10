@@ -1907,8 +1907,8 @@ export function McpServersPage() {
         message={t("mcp.delete_confirm")}
         tone="destructive"
         confirmLabel={t("common.delete")}
-        onConfirm={() => {
-          if (deletingServer) deleteMutation.mutate(serverIdOf(deletingServer), {
+        onConfirm={async () => {
+          if (deletingServer) await deleteMutation.mutateAsync(serverIdOf(deletingServer), {
             onSuccess: () => {
               setDeletingServer(null);
               addToast(t("mcp.delete_success"), "success");

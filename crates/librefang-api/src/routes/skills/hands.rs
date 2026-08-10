@@ -67,18 +67,12 @@ pub async fn list_hands(
                 "degraded": degraded,
                 "is_custom": is_custom,
                 "requirements": reqs.iter().map(|(r, ok)| {
-                    let mut req = serde_json::json!({
+                    serde_json::json!({
                         "key": r.check_value,
                         "label": r.label,
                         "satisfied": ok,
                         "optional": r.optional,
-                    });
-                    if *ok {
-                        if let Ok(val) = std::env::var(&r.check_value) {
-                            req["current_value"] = serde_json::json!(val);
-                        }
-                    }
-                    req
+                    })
                 }).collect::<Vec<_>>(),
                 "dashboard_metrics": d.dashboard.metrics.len(),
                 "has_settings": !d.settings.is_empty(),
@@ -1063,7 +1057,7 @@ pub async fn set_hand_secret(
     Path(hand_id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let env_key = match body["key"].as_str() {
+    let requested_key = match body["key"].as_str() {
         Some(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => {
             return ApiErrorResponse::bad_request("Missing 'key' field (env var name)")
@@ -1078,26 +1072,25 @@ pub async fn set_hand_secret(
         }
     };
 
-    // Verify this key belongs to a requirement of the specified hand
-    let valid = {
+    // Resolve the stable requirement key (`r.key`, as exposed by the single-hand detail endpoint) to the actual environment-variable name (`r.check_value`, as exposed by `list_hands`'s "key" field).
+    // Accepting either alias as input but persisting under whatever string the client sent would silently write the secret under a name `check_requirement` never reads, so a save could return 200 OK while leaving the requirement permanently unsatisfied.
+    let env_key = {
         let defs = state.kernel.hands().list_definitions();
-        defs.iter()
-            .find(|d| d.id == hand_id)
-            .map(|def| {
-                def.requires
-                    .iter()
-                    .any(|r| r.check_value == env_key || r.key == env_key)
-            })
-            .unwrap_or(false)
+        defs.iter().find(|d| d.id == hand_id).and_then(|def| {
+            def.requires
+                .iter()
+                .find(|r| r.check_value == requested_key || r.key == requested_key)
+                .map(|r| r.check_value.clone())
+        })
     };
 
-    if !valid {
+    let Some(env_key) = env_key else {
         return ApiErrorResponse::bad_request(format!(
             "'{}' is not a requirement of hand '{}'",
-            env_key, hand_id
+            requested_key, hand_id
         ))
         .into_json_tuple();
-    }
+    };
 
     // Write to secrets.env
     let secrets_path = state.kernel.home_dir().join("secrets.env");
