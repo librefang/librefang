@@ -148,7 +148,7 @@ import json
 import sys
 from typing import Any, Dict, Generator, Optional
 from urllib.request import urlopen, Request
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 
 
@@ -191,6 +191,8 @@ class LibreFang:
         except HTTPError as e:
             body_text = e.read().decode() if e.fp else ""
             raise LibreFangError(f"HTTP {e.code}: {body_text}", e.code, body_text) from e
+        except URLError as e:
+            raise LibreFangError(f"Connection error: {e.reason}") from e
 
     def _stream(self, method: str, path: str, body: Any = None, query: Optional[Dict[str, Any]] = None) -> Generator[Dict, None, None]:
         """SSE streaming — yields parsed JSON events."""
@@ -208,6 +210,8 @@ class LibreFang:
         except HTTPError as e:
             body_text = e.read().decode() if e.fp else ""
             raise LibreFangError(f"HTTP {e.code}: {body_text}", e.code, body_text) from e
+        except URLError as e:
+            raise LibreFangError(f"Connection error: {e.reason}") from e
 
         try:
             buffer = ""

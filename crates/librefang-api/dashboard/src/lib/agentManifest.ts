@@ -363,6 +363,19 @@ const parseInteger = (raw: string): number | null => {
   return n;
 };
 
+const TOML_INTEGER_MAX = 9_223_372_036_854_775_807n;
+
+// Resource byte/time/token quotas are u64 in Rust, but TOML integers are
+// signed 64-bit values. Keep their decimal form as a string so values beyond
+// JavaScript's safe integer range survive the visual-editor round-trip.
+const parseUnsignedTomlInteger = (raw: string): string | null => {
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const value = BigInt(trimmed);
+  if (value > TOML_INTEGER_MAX) return null;
+  return value.toString();
+};
+
 const parseFloatish = (raw: string): number | null => {
   const trimmed = raw.trim();
   if (!trimmed) return null;
@@ -377,6 +390,10 @@ const writeStringScalar = (lines: string[], key: string, value: string): void =>
   lines.push(`${key} = ${escapeTomlString(value)}`);
 };
 const writeNumberScalar = (lines: string[], key: string, value: number | null): void => {
+  if (value === null) return;
+  lines.push(`${key} = ${value}`);
+};
+const writeIntegerScalar = (lines: string[], key: string, value: string | null): void => {
   if (value === null) return;
   lines.push(`${key} = ${value}`);
 };
@@ -483,14 +500,14 @@ export const serializeManifestForm = (
 
   // [resources]
   const resourceBody: string[] = [];
-  writeNumberScalar(resourceBody, "max_llm_tokens_per_hour", parseInteger(form.resources.max_llm_tokens_per_hour));
+  writeIntegerScalar(resourceBody, "max_llm_tokens_per_hour", parseUnsignedTomlInteger(form.resources.max_llm_tokens_per_hour));
   writeNumberScalar(resourceBody, "max_tool_calls_per_minute", parseInteger(form.resources.max_tool_calls_per_minute));
   writeNumberScalar(resourceBody, "max_cost_per_hour_usd", parseFloatish(form.resources.max_cost_per_hour_usd));
   writeNumberScalar(resourceBody, "max_cost_per_day_usd", parseFloatish(form.resources.max_cost_per_day_usd));
   writeNumberScalar(resourceBody, "max_cost_per_month_usd", parseFloatish(form.resources.max_cost_per_month_usd));
-  writeNumberScalar(resourceBody, "max_memory_bytes", parseInteger(form.resources.max_memory_bytes));
-  writeNumberScalar(resourceBody, "max_cpu_time_ms", parseInteger(form.resources.max_cpu_time_ms));
-  writeNumberScalar(resourceBody, "max_network_bytes_per_hour", parseInteger(form.resources.max_network_bytes_per_hour));
+  writeIntegerScalar(resourceBody, "max_memory_bytes", parseUnsignedTomlInteger(form.resources.max_memory_bytes));
+  writeIntegerScalar(resourceBody, "max_cpu_time_ms", parseUnsignedTomlInteger(form.resources.max_cpu_time_ms));
+  writeIntegerScalar(resourceBody, "max_network_bytes_per_hour", parseUnsignedTomlInteger(form.resources.max_network_bytes_per_hour));
   const resourceExtras = renderExtraScalars(safeResourceExtras);
   if (resourceBody.length || resourceExtras.length) {
     lines.push("", "[resources]", ...resourceBody, ...resourceExtras);
@@ -525,9 +542,9 @@ export const serializeManifestForm = (
     const body: string[] = [];
     writeNumberScalar(body, "max_iterations", parseInteger(form.autonomous.max_iterations));
     writeNumberScalar(body, "max_restarts", parseInteger(form.autonomous.max_restarts));
-    writeNumberScalar(body, "heartbeat_interval_secs", parseInteger(form.autonomous.heartbeat_interval_secs));
+    writeIntegerScalar(body, "heartbeat_interval_secs", parseUnsignedTomlInteger(form.autonomous.heartbeat_interval_secs));
     writeNumberScalar(body, "heartbeat_timeout_secs", parseInteger(form.autonomous.heartbeat_timeout_secs));
-    writeNumberScalar(body, "heartbeat_keep_recent", parseInteger(form.autonomous.heartbeat_keep_recent));
+    writeIntegerScalar(body, "heartbeat_keep_recent", parseUnsignedTomlInteger(form.autonomous.heartbeat_keep_recent));
     writeStringScalar(body, "heartbeat_channel", form.autonomous.heartbeat_channel.trim());
     writeStringScalar(body, "quiet_hours", form.autonomous.quiet_hours.trim());
     lines.push("", "[autonomous]", ...body);
@@ -629,7 +646,7 @@ const renderSchedule = (s: ManifestFormState["schedule"]): string => {
     case "proactive":
       return `schedule = { proactive = { conditions = ${tomlArray(s.conditions)} } }`;
     case "continuous": {
-      const interval = parseInteger(s.check_interval_secs) ?? Number(SCHEDULE_DEFAULT_INTERVAL);
+      const interval = parseUnsignedTomlInteger(s.check_interval_secs) ?? SCHEDULE_DEFAULT_INTERVAL;
       return `schedule = { continuous = { check_interval_secs = ${interval} } }`;
     }
   }
@@ -769,6 +786,12 @@ const asStringArray = (v: unknown): string[] => {
   if (!Array.isArray(v)) return [];
   return v.filter((x): x is string => typeof x === "string");
 };
+const containsBigInt = (value: unknown): boolean => {
+  if (typeof value === "bigint") return true;
+  if (Array.isArray(value)) return value.some(containsBigInt);
+  if (isTomlTable(value)) return Object.values(value).some(containsBigInt);
+  return false;
+};
 const asEnum = <T extends readonly string[]>(
   v: unknown,
   allowed: T,
@@ -783,12 +806,23 @@ const asEnum = <T extends readonly string[]>(
 export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   let parsed: TomlTable;
   try {
-    parsed = parse(toml);
+    parsed = parse(toml, { integersAsBigInt: "asNeeded" });
   } catch (e) {
     if (e instanceof TomlError) {
       return { ok: false, message: e.message, line: e.line, column: e.column };
     }
     return { ok: false, message: e instanceof Error ? e.message : String(e) };
+  }
+
+  if (
+    isTomlTable(parsed.response_format) &&
+    asString(parsed.response_format.type) === "json_schema" &&
+    containsBigInt(parsed.response_format.schema)
+  ) {
+    return {
+      ok: false,
+      message: "json_schema_unsafe_integer",
+    };
   }
 
   const form = emptyManifestForm();
