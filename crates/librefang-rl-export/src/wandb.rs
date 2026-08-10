@@ -16,9 +16,9 @@
 //! base64("api:<key>")`. The leading `api:` is the W&B-documented user
 //! placeholder — the API key itself is the password.
 //!
-//! All HTTP traffic flows through `librefang_http::proxied_client()` so
-//! the operator's `[proxy]` config and TLS fallback apply uniformly with
-//! every other outbound caller in the workspace (per the
+//! All HTTP traffic uses `librefang_http::proxied_client_builder()` with
+//! redirect following disabled, so the operator's `[proxy]` config and
+//! TLS fallback apply with every other outbound caller in the workspace (per the
 //! `librefang-extensions` crate's HTTP client convention).
 
 use base64::Engine;
@@ -91,8 +91,9 @@ pub(crate) async fn export_to_wandb_with_base(
     entity: &str,
     run_id_hint: Option<&str>,
     api_key: &str,
-    export: RlTrajectoryExport,
+    mut export: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
+    crate::normalize_export_metadata(&mut export);
     if api_key.is_empty() {
         return Err(ExportError::InvalidConfig(
             "W&B api_key is empty".to_string(),
@@ -121,10 +122,7 @@ pub(crate) async fn export_to_wandb_with_base(
     // forwards `metadata` to the run page verbatim, so a tool result
     // containing a stray credential would otherwise land in a
     // third-party UI.
-    let scrubbed_metadata = export
-        .toolset_metadata
-        .as_ref()
-        .map(crate::redact::redact_metadata);
+    let scrubbed_metadata = export.toolset_metadata.take();
 
     // Disable redirect following: the SSRF allowlist validates only the
     // initial base URL, so a redirect-following client would let an
@@ -132,10 +130,7 @@ pub(crate) async fn export_to_wandb_with_base(
     // metadata), replaying the `Authorization` header on 307/308. A
     // finished upload never needs to follow a redirect; a 3xx must
     // surface as an error. Mirrors `librefang_http::oauth_client_builder`.
-    let client = librefang_http::proxied_client_builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap_or_else(|_| librefang_http::proxied_client());
+    let client = crate::build_export_http_client()?;
     let auth_header = build_basic_auth(api_key);
 
     // Step 1: create / register the run. Wrapped in retry so transient

@@ -101,23 +101,40 @@ fn update_rust_sdk_readme(path: &Path, version: &str) -> Result<(), Box<dyn std:
     Ok(())
 }
 
-fn update_python_setup(path: &Path, version: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn pypi_version(version: &str) -> String {
+    version
+        .replace("-beta.", "b")
+        .replace("-rc.", "rc")
+        .replace("-beta", "b")
+        .replace("-rc", "rc")
+}
+
+fn python_pyproject_with_version(
+    content: &str,
+    version: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut doc = content.parse::<toml_edit::DocumentMut>()?;
+    if doc["project"]["version"].as_str().is_none() {
+        return Err("sdk/python/pyproject.toml is missing project.version".into());
+    }
+    doc["project"]["version"] = toml_edit::value(pypi_version(version));
+    Ok(doc.to_string())
+}
+
+fn update_python_pyproject(path: &Path, version: &str) -> Result<(), Box<dyn std::error::Error>> {
     if !path.exists() {
         return Ok(());
     }
     // PEP 440: -beta.1 → b1, -rc.1 → rc1 (canonical SemVer form, #3310).
     // Also strip the legacy `-beta1` / `-rc1` (no dot) for backward compat
     // when re-syncing from a historical Cargo.toml.
-    let py_version = version
-        .replace("-beta.", "b")
-        .replace("-rc.", "rc")
-        .replace("-beta", "b")
-        .replace("-rc", "rc");
     let content = fs::read_to_string(path)?;
-    let re = Regex::new(r#"version="[^"]*""#)?;
-    let new_content = re.replace(&content, format!(r#"version="{}""#, py_version).as_str());
-    fs::write(path, new_content.as_ref())?;
-    println!("  Updated sdk/python/setup.py (PEP 440: {})", py_version);
+    let new_content = python_pyproject_with_version(&content, version)?;
+    fs::write(path, new_content)?;
+    println!(
+        "  Updated sdk/python/pyproject.toml (PEP 440: {})",
+        pypi_version(version)
+    );
     Ok(())
 }
 
@@ -202,7 +219,7 @@ pub fn run(args: SyncVersionsArgs) -> Result<(), Box<dyn std::error::Error>> {
     update_rust_sdk_readme(&root.join("sdk/rust/README.md"), &version)?;
 
     // Update Python SDK
-    update_python_setup(&root.join("sdk/python/setup.py"), &version)?;
+    update_python_pyproject(&root.join("sdk/python/pyproject.toml"), &version)?;
 
     // Update WhatsApp gateway
     update_json_version(
@@ -271,15 +288,6 @@ mod tests {
         assert!(validate_calver("2026.5.4-beta").is_err()); // missing N
     }
 
-    // --- pypi_version conversion (mirrors the closure inside update_python_setup) ---
-    fn pypi_version(version: &str) -> String {
-        version
-            .replace("-beta.", "b")
-            .replace("-rc.", "rc")
-            .replace("-beta", "b")
-            .replace("-rc", "rc")
-    }
-
     #[test]
     fn pypi_version_canonical_form() {
         assert_eq!(pypi_version("2026.5.4-beta.1"), "2026.5.4b1");
@@ -295,6 +303,22 @@ mod tests {
     #[test]
     fn pypi_version_stable_unchanged() {
         assert_eq!(pypi_version("2026.5.4"), "2026.5.4");
+    }
+
+    #[test]
+    fn python_pyproject_version_is_updated_once() {
+        let input = r#"[project]
+name = "librefang-sdk"
+version = "0.5.2"
+
+[tool.example]
+version = "leave-me-alone"
+"#;
+        let updated = python_pyproject_with_version(input, "2026.8.9-rc.2").unwrap();
+
+        assert!(updated.contains("version = \"2026.8.9rc2\""));
+        assert!(updated.contains("version = \"leave-me-alone\""));
+        assert!(!updated.contains("version = \"0.5.2\""));
     }
 
     // --- prerelease_re used by tauri_patch ---

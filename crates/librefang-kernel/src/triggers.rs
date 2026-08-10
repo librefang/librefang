@@ -218,6 +218,42 @@ pub struct Trigger {
     pub workflow_id: Option<String>,
 }
 
+/// Whether a stored trigger already delivers `TaskPosted` events to a given assignee — the precedence input for the built-in assignee wake.
+///
+/// The three states are distinct on purpose: `Dormant` is a wake that an operator once configured and that can no longer fire, which is worth saying out loud when the built-in path takes over from it, while `None` is an installation that never declared one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskPostedCoverage {
+    /// A stored trigger can currently fire for this assignee.
+    /// The built-in wake stands down and the operator's trigger owns delivery.
+    Covered(TriggerId),
+    /// Triggers address this assignee but none can fire — each is disabled or has exhausted `max_fires`.
+    /// The built-in wake fires and names these, since a dead record is a gap, not a decision to stay silent.
+    Dormant(Vec<TriggerId>),
+    /// No stored trigger addresses this assignee at all.
+    None,
+}
+
+/// What produced a [`TriggerMatch`].
+///
+/// Dispatch is uniform across the variants — the dispatcher consumes one list — but the two differ in what they can be keyed on for diagnostics and for `SessionMode::New` session derivation, and a log line that says only "trigger fired" cannot answer "which trigger?" for a match that has no trigger behind it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerMatchSource {
+    /// A stored trigger record matched the event.
+    Registered(TriggerId),
+    /// The kernel synthesized this match for the assignee of a `TaskPosted` event that no stored trigger currently covers (issue #6728).
+    /// Carries the task id so the wake is traceable to the task that caused it, and so `SessionId::for_task_wake` has a stable key.
+    TaskBoardAssigneeWake { task_id: String },
+}
+
+impl std::fmt::Display for TriggerMatchSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Registered(id) => write!(f, "trigger:{id}"),
+            Self::TaskBoardAssigneeWake { task_id } => write!(f, "assignee_wake:{task_id}"),
+        }
+    }
+}
+
 /// A trigger match result with optional session mode override.
 #[derive(Debug, Clone)]
 pub struct TriggerMatch {
@@ -229,8 +265,8 @@ pub struct TriggerMatch {
     pub session_mode_override: Option<librefang_types::agent::SessionMode>,
     /// If set, dispatch fires a workflow run instead of `send_message_full`.
     pub workflow_id: Option<String>,
-    /// The trigger ID that produced this match, for telemetry.
-    pub trigger_id: TriggerId,
+    /// What produced this match, for telemetry and session derivation.
+    pub source: TriggerMatchSource,
 }
 
 /// Patch payload for updating an existing trigger.
@@ -431,9 +467,17 @@ impl TriggerEngine {
         Ok(())
     }
 
-    /// Register a new trigger.
-    /// Returns `true` if `agent_id` already has an enabled trigger with this exact pattern.
-    /// Used to skip duplicate registration of proactive triggers on restart.
+    /// Returns `true` if `agent_id` owns a trigger with this exact pattern,
+    /// **whatever its `enabled` state**. Used to skip duplicate registration
+    /// of proactive triggers on restart.
+    ///
+    /// Ignoring `enabled` is deliberate, and differs from the coverage rule used by the Task Board assignee wake ([`Self::task_posted_coverage_for`]), which treats a disabled record as no coverage.
+    /// The two questions are not the same one:
+    ///
+    /// - Proactive triggers are auto-registered from `ScheduleMode::Proactive` conditions with `max_fires = 0` (`kernel/spawn.rs`, `kernel/background_lifecycle.rs`), so they can never become disabled by exhausting a budget — `enabled = false` there means exactly one thing, that an operator turned the trigger off.
+    ///   Disabling it is also the *only* off switch: the condition would otherwise be re-registered on the next spawn.
+    ///   Skipping on pattern alone is what makes that switch stick.
+    /// - The assignee wake has an explicit off switch of its own (`[task_board] assignee_wake`, or the per-agent manifest override), so it can afford to treat a dead record as a gap to fill rather than as a decision to stay silent.
     pub fn agent_has_pattern(&self, agent_id: AgentId, pattern: &TriggerPattern) -> bool {
         let Some(ids) = self.agent_triggers.get(&agent_id) else {
             return false;
@@ -942,7 +986,7 @@ impl TriggerEngine {
                     message,
                     session_mode_override: trigger.session_mode,
                     workflow_id: trigger.workflow_id.clone(),
-                    trigger_id: trigger.id,
+                    source: TriggerMatchSource::Registered(trigger.id),
                 });
                 trigger.fire_count += 1;
                 state_mutated = true;
@@ -959,6 +1003,73 @@ impl TriggerEngine {
         }
 
         (matches, state_mutated)
+    }
+
+    /// Whether a stored trigger already delivers `TaskPosted` events to
+    /// `assignee_id`, for the built-in assignee wake (issue #6728).
+    ///
+    /// A record covers the assignee when **both** hold:
+    /// 1. its pattern would match a `TaskPosted` addressed to that assignee — evaluated through [`agent_identity_filter_matches`], the same helper [`matches_pattern`] uses, against both identity forms the substrate accepts in `assigned_to` (UUID and display name); and
+    /// 2. it dispatches *to* that assignee — owner, or `target_agent` when set.
+    ///    An orchestrator's `assignee_match = "self"` trigger that happens to target the assignee fails (1) and is correctly not coverage: it fires for tasks addressed to the orchestrator.
+    ///
+    /// Scans all triggers rather than the `agent_triggers` index because that index is owner-keyed, so a trigger owned by one agent and targeted at another would be missed.
+    /// The scan is O(triggers in the installation) — not O(one agent's triggers) — and runs once per `TaskPosted`, inside `publish_event_inner` and therefore ahead of dispatch.
+    /// That is accepted rather than overlooked: the alternative is a second, assignee-keyed index that has to stay consistent across register / update / remove / re-key, and the ceiling here is `MAX_TRIGGERS_PER_AGENT` × agent count with a cheap per-entry test (a pattern discriminant and an id comparison reject almost everything before any string work).
+    /// If an installation ever makes that product large enough to matter, the index is the fix, and it can be added without changing this function's contract.
+    ///
+    /// Cooldown state is deliberately not consulted: a cooldown-suppressed trigger is still coverage.
+    /// Cooldown is transient dispatch state, and treating it as a gap would re-introduce the double wake that a per-event check causes.
+    /// Only `enabled` and fire-exhaustion count.
+    pub fn task_posted_coverage_for(
+        &self,
+        assignee_id: AgentId,
+        assignee_name: Option<&str>,
+        resolve_name: impl Fn(AgentId) -> Option<String>,
+    ) -> TaskPostedCoverage {
+        let assignee_uuid = assignee_id.to_string();
+
+        // Filter during the walk so only records that actually address this assignee are materialised.
+        // Collecting and sorting every id first, then looking each one up again, paid an O(n log n) sort and n shard lookups on every `TaskPosted` for a candidate set that is almost always empty or a single entry.
+        let mut candidates: Vec<(TriggerId, bool)> = Vec::new();
+        for entry in self.triggers.iter() {
+            let trigger = entry.value();
+            let TriggerPattern::TaskPosted { assignee_match } = &trigger.pattern else {
+                continue;
+            };
+            // (2) dispatch target
+            if trigger.target_agent.unwrap_or(trigger.agent_id) != assignee_id {
+                continue;
+            }
+            // (1) would the filter accept a task addressed to this assignee,
+            // in either of the two identity forms `task_claim` matches on?
+            let owner = Some((trigger.agent_id, resolve_name(trigger.agent_id)));
+            let addressable =
+                agent_identity_filter_matches(assignee_match, Some(assignee_uuid.as_str()), &owner)
+                    || assignee_name.is_some_and(|n| {
+                        agent_identity_filter_matches(assignee_match, Some(n), &owner)
+                    });
+            if !addressable {
+                continue;
+            }
+
+            let exhausted = trigger.max_fires > 0 && trigger.fire_count >= trigger.max_fires;
+            candidates.push((trigger.id, trigger.enabled && !exhausted));
+        }
+
+        // `DashMap` iterates by shard and hash, so which record gets reported must not depend on iteration order.
+        // Ordering the handful that address one assignee gives the same guarantee the whole-store sort used to, without paying for the whole store.
+        candidates.sort_by_key(|(id, _)| *id);
+        if let Some((id, _)) = candidates.iter().find(|(_, can_fire)| *can_fire) {
+            return TaskPostedCoverage::Covered(*id);
+        }
+        let dormant: Vec<TriggerId> = candidates.into_iter().map(|(id, _)| id).collect();
+
+        if dormant.is_empty() {
+            TaskPostedCoverage::None
+        } else {
+            TaskPostedCoverage::Dormant(dormant)
+        }
     }
 
     /// Get a trigger by ID.
@@ -1387,6 +1498,25 @@ fn agent_identity_filter_matches(
         },
         other => candidate == other,
     }
+}
+
+/// Build a `TaskPosted` event for tests in sibling modules.
+///
+/// Lives here rather than in the test module that uses it because
+/// `EventPayload::System` construction is otherwise repeated verbatim in three
+/// files, and a drift in the shape should break one place, not three.
+#[cfg(test)]
+pub(crate) fn tests_support_task_posted_event(task_id: &str, assigned_to: &str) -> Event {
+    Event::new(
+        AgentId::new(),
+        librefang_types::event::EventTarget::Broadcast,
+        EventPayload::System(SystemEvent::TaskPosted {
+            task_id: task_id.to_string(),
+            title: "test task".to_string(),
+            assigned_to: Some(assigned_to.to_string()),
+            created_by: None,
+        }),
+    )
 }
 
 /// Create a human-readable description of an event for use in prompts.
@@ -3341,6 +3471,274 @@ mod tests {
             engine.list_agent_triggers(agent).len(),
             MAX_TRIGGERS_PER_AGENT,
             "cap-refused entries must not bump the agent's trigger count",
+        );
+    }
+
+    // -- task_posted_coverage_for (#6728) ---------------------------------------
+
+    /// Naming the assignee by UUID or by display name has to reach the same
+    /// verdict: the substrate stores `assigned_to` in either form and
+    /// `task_claim` matches both, so a coverage rule that only understood one
+    /// would wake an agent that already has a trigger (double wake) or stay
+    /// silent for one that does not.
+    #[test]
+    fn coverage_accepts_the_assignee_by_uuid_and_by_name() {
+        let engine = TriggerEngine::new();
+        let worker = AgentId::new();
+        let by_uuid = engine
+            .register(
+                worker,
+                TriggerPattern::TaskPosted {
+                    assignee_match: Some(worker.to_string()),
+                },
+                "claim".to_string(),
+                0,
+            )
+            .unwrap();
+        assert_eq!(
+            engine.task_posted_coverage_for(worker, Some("worker"), |_| None),
+            TaskPostedCoverage::Covered(by_uuid),
+        );
+
+        let engine = TriggerEngine::new();
+        let by_name = engine
+            .register(
+                worker,
+                TriggerPattern::TaskPosted {
+                    assignee_match: Some("worker".to_string()),
+                },
+                "claim".to_string(),
+                0,
+            )
+            .unwrap();
+        assert_eq!(
+            engine.task_posted_coverage_for(worker, Some("worker"), |_| None),
+            TaskPostedCoverage::Covered(by_name),
+        );
+    }
+
+    /// `"self"` resolves against the trigger owner, so it covers the owner and
+    /// nobody else.
+    #[test]
+    fn coverage_resolves_self_against_the_owner() {
+        let engine = TriggerEngine::new();
+        let worker = AgentId::new();
+        let bystander = AgentId::new();
+        let id = engine
+            .register(
+                worker,
+                TriggerPattern::TaskPosted {
+                    assignee_match: Some("self".to_string()),
+                },
+                "claim".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let resolver = |id: AgentId| {
+            if id == worker {
+                Some("worker".to_string())
+            } else {
+                None
+            }
+        };
+        assert_eq!(
+            engine.task_posted_coverage_for(worker, Some("worker"), resolver),
+            TaskPostedCoverage::Covered(id),
+        );
+        assert_eq!(
+            engine.task_posted_coverage_for(bystander, Some("bystander"), resolver),
+            TaskPostedCoverage::None,
+            "another agent's self-trigger must not count as coverage",
+        );
+    }
+
+    /// An orchestrator watching the whole board is not a wake path for the
+    /// worker: the match fires, but it dispatches to the orchestrator's own
+    /// session. Counting it would leave the assignee exactly as unreachable
+    /// as before while looking covered.
+    #[test]
+    fn coverage_ignores_an_observer_that_dispatches_elsewhere() {
+        let engine = TriggerEngine::new();
+        let orchestrator = AgentId::new();
+        let worker = AgentId::new();
+        engine
+            .register(
+                orchestrator,
+                TriggerPattern::TaskPosted {
+                    assignee_match: None,
+                },
+                "notify the human about {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(
+            engine.task_posted_coverage_for(worker, Some("worker"), |_| None),
+            TaskPostedCoverage::None,
+        );
+        assert_eq!(
+            engine.task_posted_coverage_for(orchestrator, Some("orchestrator"), |_| None),
+            TaskPostedCoverage::Covered(engine.list_all()[0].id),
+            "the unfiltered observer does cover its own owner",
+        );
+    }
+
+    /// The owner-keyed `agent_triggers` index cannot answer this: an
+    /// orchestrator-owned trigger that routes to the worker via `target_agent`
+    /// is real coverage, and missing it would double-wake the worker on every
+    /// post.
+    #[test]
+    fn coverage_finds_a_trigger_targeted_at_the_assignee() {
+        let engine = TriggerEngine::new();
+        let orchestrator = AgentId::new();
+        let worker = AgentId::new();
+        let id = engine
+            .register_with_target(
+                orchestrator,
+                TriggerPattern::TaskPosted {
+                    assignee_match: Some(worker.to_string()),
+                },
+                "wake the worker".to_string(),
+                0,
+                Some(worker),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            engine.task_posted_coverage_for(worker, Some("worker"), |_| None),
+            TaskPostedCoverage::Covered(id),
+        );
+    }
+
+    /// A trigger that cannot fire is a gap to fill, not a decision to stay
+    /// silent — the 14h outage in #6728 is what "any record counts" produces.
+    /// Both ways a trigger stops firing must report `Dormant` so the built-in
+    /// wake takes over and says which record it took over from.
+    #[test]
+    fn coverage_reports_disabled_and_exhausted_triggers_as_dormant() {
+        let engine = TriggerEngine::new();
+        let worker = AgentId::new();
+        let id = engine
+            .register(
+                worker,
+                TriggerPattern::TaskPosted {
+                    assignee_match: Some("self".to_string()),
+                },
+                "claim".to_string(),
+                0,
+            )
+            .unwrap();
+        engine.set_enabled(id, false);
+        assert_eq!(
+            engine.task_posted_coverage_for(worker, Some("worker"), |_| None),
+            TaskPostedCoverage::Dormant(vec![id]),
+        );
+
+        // Fire-exhaustion: max_fires = 1, then burn it.
+        let engine = TriggerEngine::new();
+        let id = engine
+            .register(
+                worker,
+                TriggerPattern::TaskPosted {
+                    assignee_match: Some("self".to_string()),
+                },
+                "claim".to_string(),
+                1,
+            )
+            .unwrap();
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::TaskPosted {
+                task_id: "t-1".to_string(),
+                title: "burn the budget".to_string(),
+                assigned_to: Some(worker.to_string()),
+                created_by: None,
+            }),
+        );
+        let (matches, _) = engine.evaluate_with_resolver(&event, |_| None);
+        assert_eq!(matches.len(), 1, "the trigger fires once");
+        assert_eq!(
+            engine.task_posted_coverage_for(worker, Some("worker"), |_| None),
+            TaskPostedCoverage::Dormant(vec![id]),
+            "a spent max_fires budget leaves the assignee uncovered",
+        );
+    }
+
+    /// Cooldown is transient dispatch state, not configuration. Treating it as
+    /// a gap would make the built-in wake fire alongside a trigger that is
+    /// about to fire anyway, which is the double wake the declarative check
+    /// exists to avoid.
+    #[test]
+    fn coverage_holds_while_a_trigger_is_cooling_down() {
+        let engine = TriggerEngine::new();
+        let worker = AgentId::new();
+        let id = engine
+            .register(
+                worker,
+                TriggerPattern::TaskPosted {
+                    assignee_match: Some("self".to_string()),
+                },
+                "claim".to_string(),
+                0,
+            )
+            .unwrap();
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::TaskPosted {
+                task_id: "t-1".to_string(),
+                title: "first".to_string(),
+                assigned_to: Some(worker.to_string()),
+                created_by: None,
+            }),
+        );
+        let (matches, _) = engine.evaluate_with_resolver(&event, |_| None);
+        assert_eq!(matches.len(), 1);
+        // Second evaluation inside the cooldown window produces no match...
+        let (matches, _) = engine.evaluate_with_resolver(&event, |_| None);
+        assert!(matches.is_empty(), "cooldown suppresses the second fire");
+        // ...but the trigger is still coverage.
+        assert_eq!(
+            engine.task_posted_coverage_for(worker, Some("worker"), |_| None),
+            TaskPostedCoverage::Covered(id),
+        );
+    }
+
+    /// Only `TaskPosted` records answer this question — a `TaskClaimed` /
+    /// `TaskCompleted` subscription is a notification path, not a wake path.
+    #[test]
+    fn coverage_ignores_other_task_board_patterns() {
+        let engine = TriggerEngine::new();
+        let worker = AgentId::new();
+        engine
+            .register(
+                worker,
+                TriggerPattern::TaskClaimed {
+                    creator_match: None,
+                },
+                "notify".to_string(),
+                0,
+            )
+            .unwrap();
+        engine
+            .register(
+                worker,
+                TriggerPattern::TaskCompleted {
+                    creator_match: None,
+                },
+                "notify".to_string(),
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(
+            engine.task_posted_coverage_for(worker, Some("worker"), |_| None),
+            TaskPostedCoverage::None,
         );
     }
 }

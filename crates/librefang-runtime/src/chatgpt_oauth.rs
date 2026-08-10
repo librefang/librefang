@@ -762,6 +762,8 @@ fn success_html() -> String {
 
 /// Error page shown when OAuth returns an error.
 fn error_html(error: &str, description: &str) -> String {
+    let error = escape_html_text(error);
+    let description = escape_html_text(description);
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -786,6 +788,21 @@ fn error_html(error: &str, description: &str) -> String {
 </body>
 </html>"#
     )
+}
+
+fn escape_html_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 #[cfg(test)]
@@ -969,5 +986,20 @@ mod tests {
         let html = error_html("access_denied", "User cancelled");
         assert!(html.contains("access_denied"));
         assert!(html.contains("User cancelled"));
+    }
+
+    #[test]
+    fn test_error_html_escapes_untrusted_callback_values() {
+        let html = error_html(
+            r#"<script>alert("error")</script>&'"#,
+            r#"<img src=x onerror='alert("description")'>&"#,
+        );
+
+        assert!(!html.contains("<script>"), "{html}");
+        assert!(!html.contains("<img"), "{html}");
+        assert!(!html.contains("onerror='"), "{html}");
+        assert!(html.contains("&lt;script&gt;alert(&quot;error&quot;)&lt;/script&gt;&amp;&#39;"));
+        assert!(html
+            .contains("&lt;img src=x onerror=&#39;alert(&quot;description&quot;)&#39;&gt;&amp;"));
     }
 }
