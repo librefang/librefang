@@ -35,4 +35,14 @@ mod packaging_tests {
             "librefang-sidecar = { path = \"../librefang-sidecar\", version = \"0.1.0\" }"
         ));
     }
+
+    #[test]
+    fn binary_uses_a_command_line_crates_io_category() {
+        let manifest = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+        )
+        .expect("read package manifest");
+        assert!(manifest.contains("categories = [\"command-line-utilities\"]"));
+        assert!(!manifest.contains("categories = [\"api-bindings\"]"));
+    }
 }
