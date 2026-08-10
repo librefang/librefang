@@ -186,3 +186,32 @@ describe("AgentManifestForm — tools/skills/mcp selection (#5246)", () => {
     expect(within(list).getByText("write_file")).toBeInTheDocument();
   });
 });
+
+describe("AgentManifestForm — compact controls", () => {
+  it("clears duplicate text submitted to a tag input", async () => {
+    const user = userEvent.setup();
+    const state = emptyManifestForm();
+    state.mcp_servers = ["filesystem"];
+    render(<Harness initialState={state} />);
+
+    const removeButton = screen.getByRole("button", { name: "remove filesystem" });
+    const input = removeButton.parentElement?.parentElement?.querySelector("input");
+    expect(input).toBeInstanceOf(HTMLInputElement);
+    if (!(input instanceof HTMLInputElement)) return;
+
+    await user.type(input, "filesystem{Enter}");
+    expect(input).toHaveValue("");
+    expect(screen.getAllByRole("button", { name: "remove filesystem" })).toHaveLength(1);
+  });
+
+  it("gives the stream-thinking checkbox an accessible name", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    await user.click(screen.getByRole("checkbox", { name: "agents.form.thinking_enabled" }));
+
+    expect(
+      screen.getByRole("checkbox", { name: "agents.form.stream_thinking" }),
+    ).toBeInTheDocument();
+  });
+});

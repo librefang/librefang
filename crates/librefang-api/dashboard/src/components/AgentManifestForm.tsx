@@ -658,6 +658,7 @@ export function AgentManifestForm({
             <Field label={t("agents.form.stream_thinking")}>
               <Toggle
                 label=""
+                ariaLabel={t("agents.form.stream_thinking")}
                 checked={value.thinking.stream_thinking}
                 onChange={(checked) => updateThinking({ stream_thinking: checked })}
               />
@@ -1239,10 +1240,12 @@ function ExtrasOverrideHint({ message }: { message: string }) {
 
 function Toggle({
   label,
+  ariaLabel,
   checked,
   onChange,
 }: {
   label: string;
+  ariaLabel?: string;
   checked: boolean;
   onChange: (next: boolean) => void;
 }) {
@@ -1251,10 +1254,11 @@ function Toggle({
       <input
         type="checkbox"
         checked={checked}
+        aria-label={ariaLabel}
         onChange={(e) => onChange(e.target.checked)}
         className="h-4 w-4 rounded border-border-subtle accent-brand"
       />
-      {label}
+      {label ? <span>{label}</span> : null}
     </label>
   );
 }
@@ -1273,9 +1277,9 @@ function TagInput({
   const commit = (raw: string): void => {
     const cleaned = raw.trim();
     if (!cleaned) return;
+    setInputValue("");
     if (value.includes(cleaned)) return;
     onChange([...value, cleaned]);
-    setInputValue("");
   };
   return (
     <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border-subtle bg-main px-2 py-1.5 focus-within:border-brand">
