@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from librefang import librefang_client as client_module
 from librefang.librefang_client import LibreFang
 
@@ -52,3 +54,19 @@ def test_non_data_trailing_line_is_ignored(monkeypatch):
     events = list(LibreFang("http://example.test")._stream("GET", "/events"))
 
     assert events == []
+
+
+def test_truncated_utf8_at_eof_raises_instead_of_silently_mangling(monkeypatch):
+    # "data: " followed by the first byte of a multi-byte UTF-8 codepoint
+    # (0xE2 starts a 3-byte sequence), with no continuation bytes and no
+    # trailing newline before the connection closes. The trailing-buffer
+    # flush must decode as strictly as the per-line decode in the main loop
+    # above it, so truncated data surfaces as a clear failure rather than a
+    # `{"raw": "�"}` event that hides the corruption.
+    response = FakeStreamResponse([b"data: " + bytes([0xE2])])
+    monkeypatch.setattr(client_module, "urlopen", lambda _request: response)
+
+    with pytest.raises(UnicodeDecodeError):
+        list(LibreFang("http://example.test")._stream("GET", "/events"))
+
+    assert response.closed

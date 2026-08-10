@@ -103,7 +103,10 @@ def main():
     assert py.count("except URLError as e:") == 2, "both Python request paths must wrap connection failures"
     assert_in("active_error = sys.exc_info()[0] is not None", py, "python-stream-close-finally")
     assert_in("if buffer:", py, "python-flush-trailing-sse-line")
-    assert_in('line = buffer.decode(errors="replace").strip()', py, "python-parse-trailing-sse-line")
+    assert_in("line = buffer.decode().strip()", py, "python-parse-trailing-sse-line")
+    assert py.count("line = line.decode().strip()") + py.count(
+        "line = buffer.decode().strip()"
+    ) == 2, "trailing SSE flush must decode strictly, matching the per-line decode above it"
     assert_in("const trailing = buffer.trim();", js, "js-flush-trailing-sse-line")
     assert_in('if (trailing.startsWith("data: ")) {', js, "js-parse-trailing-sse-line")
 

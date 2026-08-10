@@ -235,7 +235,7 @@ class LibreFang:
             # A clean EOF can arrive without a trailing newline, leaving the last event in the buffer.
             # Parse it here rather than dropping it; the loop above only fires on a newline.
             if buffer:
-                line = buffer.decode(errors="replace").strip()
+                line = buffer.decode().strip()
                 if line.startswith("data: "):
                     data_str = line[6:]
                     if data_str != "[DONE]":
