@@ -1,0 +1,10 @@
+Bound nested workflow runs by the inter-agent call-depth quota, which the `workflow_run` tool had been bypassing entirely.
+Running a workflow executed it inline on the calling agent's task and each step nested a complete agent turn, but nothing counted that nesting — so an agent whose workflow step targets an agent that runs a workflow again recursed with no bound other than the wall-clock `triggers.max_workflow_secs`, long after the tokio worker's stack had run out.
+Workflow nesting is now charged to the same `max_agent_call_depth` budget that `agent_send` hops already use, because `A --agent_send--> B --workflow--> C` stacks real agent turns exactly the way `A -> B -> C` does and one operator knob should cap both.
+A run entered too deep is refused as a policy error before the run record is created, so a capped chain reports the quota instead of leaving an orphan `Pending` run behind.
+Two hops between the kernel and the agent were flattening that refusal into a generic server error, so the agent was told its workflow had crashed rather than that it had hit a limit.
+It now arrives as a permission denial, which also stops a capped agent from losing its whole turn to a repeated-failure abort.
+The daemon and the desktop app's embedded server also raise their tokio worker stack from tokio's 2 MiB default to 8 MiB: an agent turn is a chain of very large futures and a nested turn restacks it, so overflowing it aborted the whole process — with only two workers that took the HTTP API and every cron job down together.
+The CLI TUI's in-process kernel mode runs the same turn chain on its own long-lived runtime and on the dedicated thread that streams a turn's events, so both get the same 8 MiB stack.
+The stack change is headroom rather than a bound, and neither change is proven to be the cause of the crash reported in #6659, whose original report is unrecoverable; the next occurrence on the larger stack is what will tell unbounded recursion apart from bounded depth with fat frames.
+(#6743) (@houko)
