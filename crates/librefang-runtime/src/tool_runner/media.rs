@@ -338,12 +338,15 @@ fn window_continuation(
     };
     // A window is "full" only within a tolerance: the produced stream ends on a packet boundary, so an exactly-covered window still lands a few milliseconds short and a strict comparison would call every window the last one.
     //
-    // `consumed > 0.0` is part of the condition rather than only of the cursor below.
-    // For a `max_secs` under the tolerance — which `parse_window` permits, it only rejects zero — the tolerance alone would call a window that produced *nothing* full, and the caller would be told there is more with nowhere to resume from.
-    // The two fields have to agree: "there is more" is only meaningful alongside a place to continue.
-    let has_more = consumed > 0.0 && consumed >= window.max_secs - WINDOW_COMPLETE_TOLERANCE_SECS;
+    // The tolerance is capped at half the window so it can never exceed what it is a tolerance *on*.
+    // `parse_window` admits any positive `max_secs`, and for one below the flat tolerance the subtraction goes negative — after which every positive `consumed` clears the bar, so a 0.2 s window that produced 0.01 s (the recording ended almost immediately) would still report "there is more".
+    // Clamping the threshold at zero does not fix that: 0.01 clears a threshold of 0 just as easily.
+    // Scaling does, and leaves the flat value in force for any window over half a second — which is every window the tool's own defaults and documentation steer callers toward.
+    let tolerance = WINDOW_COMPLETE_TOLERANCE_SECS.min(window.max_secs / 2.0);
+    let has_more = consumed > 0.0 && consumed >= window.max_secs - tolerance;
     WindowContinuation {
         has_more,
+        // "There is more" is only actionable alongside a place to continue, so the cursor is derived from the same decision rather than computed separately.
         next_start_sec: has_more.then_some(window.start_sec + consumed),
     }
 }
@@ -1468,6 +1471,32 @@ mod transcribe_window_tests {
         let empty = window_continuation(w(0.1), Some(0.0));
         assert!(!empty.has_more, "an empty window is not a full one");
         assert_eq!(empty.next_start_sec, None);
+
+        // A window shorter than the flat tolerance must still be judged against
+        // its own length. With an unscaled tolerance the threshold goes
+        // negative and any positive `consumed` clears it, so a recording that
+        // ended almost immediately would report more to come — and clamping
+        // the threshold at zero would not help, since a hair above zero clears
+        // zero too.
+        let barely_started = window_continuation(w(0.2), Some(0.01));
+        assert!(
+            !barely_started.has_more,
+            "0.01s of a 0.2s window is not a full window"
+        );
+        assert_eq!(barely_started.next_start_sec, None);
+
+        // The same short window, actually filled, still continues — the scaled
+        // tolerance must not make small windows unwalkable.
+        let short_but_full = window_continuation(w(0.2), Some(0.19));
+        assert!(
+            short_but_full.has_more,
+            "a short window that came back full must still continue"
+        );
+
+        // Windows above the flat tolerance keep the flat behaviour: a 20 ms
+        // packet's worth of shortfall is still "full".
+        let packet_short = window_continuation(w(600.0), Some(599.8));
+        assert!(packet_short.has_more);
 
         // The two fields agree in every case, which is the invariant a caller relies on: `has_more` without a resume point is unactionable.
         for (max_secs, consumed) in [
