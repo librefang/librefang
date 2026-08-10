@@ -50,6 +50,16 @@ pub mod users;
 pub mod webhooks;
 pub mod workflows;
 
+/// Boot a concrete kernel for route unit tests without scattering concrete
+/// kernel references across production route modules. The import-surface gate
+/// explicitly allowlists this boundary module (#3744).
+#[cfg(test)]
+pub(crate) fn boot_test_kernel(
+    config: librefang_types::config::KernelConfig,
+) -> librefang_kernel::LibreFangKernel {
+    librefang_kernel::LibreFangKernel::boot_with_config(config).expect("test kernel boots")
+}
+
 // Glob re-export to keep `routes::handler_name` backward compatible
 // (utoipa macros in openapi.rs, ws.rs, etc. all depend on this path format).
 //

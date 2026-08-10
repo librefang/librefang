@@ -11,13 +11,15 @@ export interface DrawerContent {
   /** Called when the drawer is dismissed via Esc / X / mobile backdrop.
    *  Parents typically use this to flip their own `isOpen` state. */
   onClose?: () => void;
+  /** Opaque identity used by DrawerPanel to avoid closing a newer owner. */
+  owner?: object;
 }
 
 interface DrawerState {
   isOpen: boolean;
   content: DrawerContent | null;
   open: (content: DrawerContent) => void;
-  close: () => void;
+  close: (owner?: object) => void;
 }
 
 // Single global push-drawer slot. The `<DrawerPanel>` adapter is the primary
@@ -32,5 +34,8 @@ export const useDrawerStore = create<DrawerState>((set) => ({
   isOpen: false,
   content: null,
   open: (content) => set({ isOpen: true, content }),
-  close: () => set({ isOpen: false }),
+  close: (owner) => set((state) => {
+    if (owner !== undefined && state.content?.owner !== owner) return state;
+    return { isOpen: false, content: null };
+  }),
 }));

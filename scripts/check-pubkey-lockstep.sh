@@ -2,7 +2,8 @@
 # Fail if the registry pubkey is not byte-identical across the four
 # locations that have to stay in lockstep:
 #
-#   1. crates/librefang-runtime/src/plugin_manager.rs  EMBEDDED_REGISTRY_PUBKEY
+#   1. crates/librefang-runtime/src/plugin_manager/registry.rs
+#                                      EMBEDDED_REGISTRY_PUBKEYS active slot
 #   2. web/workers/registry-worker/wrangler.toml       REGISTRY_PUBLIC_KEY
 #   3. web/workers/marketplace-worker/wrangler.toml    REGISTRY_PUBLIC_KEY
 #   4. web/public/_worker.js                           REGISTRY_PUBLIC_KEY
@@ -17,6 +18,11 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+
+if ! command -v perl >/dev/null 2>&1; then
+  echo "::error::perl is required by the pubkey lockstep check" >&2
+  exit 1
+fi
 
 extract() {
   local path="$1" name="$2"
@@ -36,11 +42,14 @@ extract() {
   # shaped fragments inside comments don't get picked up. Length-check
   # the captured value to exactly 44 chars (Ed25519 raw 32 bytes -> b64
   # with padding) — wrong length is wrong key.
-  body="$(perl -ne '
+  if ! body="$(perl -ne '
     if (/^[ \t]*(?:const[ \t]+)?'"$name"'\b[^"\x27\n=:]*[=:][^"\x27\n]*['\''"]([A-Za-z0-9+\/=]{44})['\''"]/) {
       print $1; exit
     }
-  ' "$repo_root/$path" 2>/dev/null || true)"
+  ' "$repo_root/$path")"; then
+    echo "::error file=$path::perl failed while extracting $name" >&2
+    exit 1
+  fi
   if [ -z "$body" ]; then
     echo "::error file=$path::$name constant not found" >&2
     exit 1
@@ -48,15 +57,37 @@ extract() {
   echo "$body"
 }
 
-# The daemon now embeds a SLICE of pubkeys (each `EmbeddedPubkey {
-# pubkey_b64, expires_at }`). Slot 0 is the active key. We pull the
-# FIRST `pubkey_b64: "..."` field — the active slot — and compare
-# against the worker side. The unique field name avoids matching any
-# stray `b64` literal that drifts in elsewhere (PR re-review LOW
-# round 4).
-daemon=$(extract \
-  "crates/librefang-runtime/src/plugin_manager.rs" \
-  'pubkey_b64')
+# Extract the sole `EmbeddedPubkey` entry whose sibling `expires_at` field is
+# `None`. Textual order alone is not enough: a rotation may retain an expiring
+# legacy entry, while the no-expiry entry is the active worker-signing key.
+extract_active_daemon_key() {
+  local path="crates/librefang-runtime/src/plugin_manager/registry.rs"
+  local body
+
+  if ! body="$(perl -0777 -ne '
+    if (/\bEMBEDDED_REGISTRY_PUBKEYS\b\s*:[^=]*=\s*&\[(.*?)\];/s) {
+      my $slots = $1;
+      while ($slots =~ /\bEmbeddedPubkey\s*\{(.*?)\}/sg) {
+        my $slot = $1;
+        next unless $slot =~ /^[ \t]*expires_at\s*:\s*None\b/m;
+        if ($slot =~ /^[ \t]*pubkey_b64\s*:\s*"([A-Za-z0-9+\/=]{44})"/m) {
+          print "$1\n";
+        }
+      }
+    }
+  ' "$repo_root/$path")"; then
+    echo "::error file=$path::perl failed while extracting the active pubkey" >&2
+    exit 1
+  fi
+
+  if [[ ! "$body" =~ ^[A-Za-z0-9+/=]{44}$ ]]; then
+    echo "::error file=$path::expected exactly one valid pubkey_b64 with expires_at: None" >&2
+    exit 1
+  fi
+  echo "$body"
+}
+
+daemon=$(extract_active_daemon_key)
 registry_worker=$(extract \
   "web/workers/registry-worker/wrangler.toml" \
   'REGISTRY_PUBLIC_KEY')

@@ -165,6 +165,14 @@ pub fn proxied_client_builder() -> reqwest::ClientBuilder {
     build_http_client(&active_proxy())
 }
 
+/// Build an HTTP client that never uses configured or environment proxies.
+///
+/// SSRF-sensitive callers that pin a hostname to locally validated socket addresses must connect directly.
+/// A proxy can resolve the original hostname itself, bypassing reqwest's DNS overrides and reopening DNS rebinding.
+pub fn direct_client_builder() -> reqwest::ClientBuilder {
+    build_http_client(&ProxyConfig::default()).no_proxy()
+}
+
 /// Convenience: build a ready-to-use proxy-aware [`reqwest::Client`].
 pub fn proxied_client() -> reqwest::Client {
     proxied_client_builder()
@@ -303,6 +311,12 @@ mod tests {
     fn test_empty_proxy_config_builds_client() {
         let proxy = ProxyConfig::default();
         let client = build_http_client(&proxy).build().unwrap();
+        drop(client);
+    }
+
+    #[test]
+    fn test_direct_client_builder_builds_client() {
+        let client = direct_client_builder().build().unwrap();
         drop(client);
     }
 

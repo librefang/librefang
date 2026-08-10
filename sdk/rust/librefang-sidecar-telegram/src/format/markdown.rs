@@ -30,10 +30,80 @@ const CODE_PLACEHOLDER_CLOSE: char = '\u{E001}';
 static RE_LINK: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").expect("link regex"));
 static RE_BOLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^*]+)\*\*").expect("bold regex"));
-// Single-star italic — careful not to match `**`.
-static RE_ITALIC: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?:^|[^*])\*([^*\n]+)\*(?:[^*]|$)").expect("italic regex"));
 static RE_CODE: Lazy<Regex> = Lazy::new(|| Regex::new(r"`([^`\n]+)`").expect("code regex"));
+static RE_CODE_PLACEHOLDER: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\x{E000}C([0-9]+)\x{E001}").expect("code placeholder regex"));
+
+fn restore_code_placeholders(text: &str, placeholders: &[String]) -> String {
+    RE_CODE_PLACEHOLDER
+        .replace_all(text, |caps: &regex::Captures<'_>| {
+            let original = caps.get(0).unwrap().as_str();
+            caps[1]
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| placeholders.get(index))
+                .cloned()
+                .unwrap_or_else(|| original.to_string())
+        })
+        .into_owned()
+}
+
+fn is_single_star(bytes: &[u8], index: usize) -> bool {
+    bytes.get(index) == Some(&b'*')
+        && index.checked_sub(1).and_then(|i| bytes.get(i)) != Some(&b'*')
+        && bytes.get(index + 1) != Some(&b'*')
+}
+
+/// Replace paired single-star italic runs in one left-to-right pass.
+///
+/// Rust's `regex` crate deliberately has no look-around. A regex that consumes
+/// the character after a closing star cannot see that same character as the
+/// leading boundary of the next run, so `*a* *b*` skips `*b*`. Scanning the
+/// ASCII delimiter positions directly keeps that shared boundary available,
+/// leaves double-star and unclosed runs untouched, and remains O(n).
+fn render_single_star_italics(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut output = String::with_capacity(text.len());
+    let mut copied_through = 0usize;
+    let mut scan = 0usize;
+
+    while let Some(offset) = bytes[scan..].iter().position(|byte| *byte == b'*') {
+        let open = scan + offset;
+        if !is_single_star(bytes, open) {
+            scan = open + 1;
+            continue;
+        }
+
+        let mut candidate = open + 1;
+        let mut close = None;
+        while candidate < bytes.len() {
+            match bytes[candidate] {
+                b'\n' => break,
+                b'*' => {
+                    if candidate > open + 1 && is_single_star(bytes, candidate) {
+                        close = Some(candidate);
+                    }
+                    break;
+                }
+                _ => candidate += 1,
+            }
+        }
+
+        let Some(close) = close else {
+            scan = open + 1;
+            continue;
+        };
+        output.push_str(&text[copied_through..open]);
+        output.push_str("<i>");
+        output.push_str(&text[open + 1..close]);
+        output.push_str("</i>");
+        copied_through = close + 1;
+        scan = copied_through;
+    }
+
+    output.push_str(&text[copied_through..]);
+    output
+}
 
 /// Render one inline-Markdown chunk to HTML.
 fn render_inline_markdown(text: &str) -> String {
@@ -55,24 +125,7 @@ fn render_inline_markdown(text: &str) -> String {
         })
         .to_string();
 
-    // Italic — `replace_all` walks left-to-right and the regex consumes the surrounding non-`*` characters as part of each match's leading/trailing capture, so adjacent italics still resolve correctly in a single O(n) pass. The earlier `loop { replace; if unchanged break }` form was O(n²) on input with many italic runs (a 25 KB stream of `*a* *b* …` re-scanned the entire buffer per iteration, ~2.5 GB total scan).
-    let italics_done = RE_ITALIC
-        .replace_all(&with_bold, |caps: &regex::Captures<'_>| {
-            let m = caps.get(0).unwrap().as_str();
-            let inner = &caps[1];
-            // Preserve the leading non-`*` byte (and trailing non-`*` byte) so word boundaries don't drift.
-            let leading = m.chars().next().filter(|c| *c != '*').map_or("", |_| {
-                &m[..m.char_indices().nth(1).map(|(i, _)| i).unwrap_or(0)]
-            });
-            let trailing = if m.ends_with('*') {
-                ""
-            } else {
-                let last_idx = m.char_indices().last().map(|(i, _)| i).unwrap_or(m.len());
-                &m[last_idx..]
-            };
-            format!("{leading}<i>{inner}</i>{trailing}")
-        })
-        .to_string();
+    let italics_done = render_single_star_italics(&with_bold);
 
     // Links last so `[text](url)` inside bold/italic is recognised.
     // The URL is inserted into an HTML attribute, so a literal `"` in it (legal per RFC 3986 in query strings) would prematurely terminate the attribute — `sanitize_telegram_html::RE_ATTR` then reads the truncated href and the user lands somewhere wrong. Escape `"` to `&quot;` defensively. `&`, `<`, `>` were already escape_htmled before RE_LINK ran.
@@ -84,13 +137,7 @@ fn render_inline_markdown(text: &str) -> String {
         })
         .to_string();
 
-    // Restore code placeholders.
-    let mut restored = with_links;
-    for (i, html) in placeholders.iter().enumerate() {
-        let placeholder = format!("{CODE_PLACEHOLDER_OPEN}C{i}{CODE_PLACEHOLDER_CLOSE}");
-        restored = restored.replace(&placeholder, html);
-    }
-    restored
+    restore_code_placeholders(&with_links, &placeholders)
 }
 
 /// Convert Markdown text to Telegram-compatible HTML.
@@ -99,31 +146,47 @@ pub fn markdown_to_telegram_html(text: &str) -> String {
     // Normalise line endings.
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let mut out = String::new();
-    let mut lines = text.lines().peekable();
+    let lines: Vec<&str> = text.lines().collect();
+    // Record the next exact closing line for each supported fence in one
+    // reverse pass. This lets an unclosed opener fall through without probing
+    // the entire tail repeatedly when adversarial input contains many opener-
+    // shaped lines.
+    let mut next_closing = vec![(None, None); lines.len()];
+    let mut next_backticks = None;
+    let mut next_tildes = None;
+    for index in (0..lines.len()).rev() {
+        next_closing[index] = (next_backticks, next_tildes);
+        match lines[index].trim() {
+            "```" => next_backticks = Some(index),
+            "~~~" => next_tildes = Some(index),
+            _ => {}
+        }
+    }
+    let mut line_index = 0usize;
 
     let mut current_list_kind: Option<ListKind> = None;
     let mut ordered_counter: u32 = 1;
 
-    while let Some(line) = lines.next() {
+    while line_index < lines.len() {
+        let current_index = line_index;
+        let line = lines[current_index];
+        line_index += 1;
         // Code fence.
         if let Some(fence) = code_fence(line) {
-            let mut body = String::new();
-            for inner in lines.by_ref() {
-                if inner.trim() == fence {
-                    break;
-                }
-                body.push_str(inner);
-                body.push('\n');
+            let closing_index = match fence {
+                "```" => next_closing[current_index].0,
+                "~~~" => next_closing[current_index].1,
+                _ => None,
+            };
+            if let Some(closing_index) = closing_index {
+                let body = lines[current_index + 1..closing_index].join("\n");
+                line_index = closing_index + 1;
+                out.push_str("<pre><code>");
+                out.push_str(&escape_html(&body));
+                out.push_str("</code></pre>\n");
+                current_list_kind = None;
+                continue;
             }
-            // Strip trailing newline added by the loop.
-            if body.ends_with('\n') {
-                body.pop();
-            }
-            out.push_str("<pre><code>");
-            out.push_str(&escape_html(&body));
-            out.push_str("</code></pre>\n");
-            current_list_kind = None;
-            continue;
         }
         // Heading.
         if let Some(rest) = heading(line) {
@@ -264,6 +327,24 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_italic_runs_are_all_rendered() {
+        let html = markdown_to_telegram_html("*first* *second* *third*");
+        assert_eq!(html.trim(), "<i>first</i> <i>second</i> <i>third</i>");
+    }
+
+    #[test]
+    fn italic_scan_preserves_double_stars_and_unclosed_runs() {
+        let html = markdown_to_telegram_html("**bold** and *unclosed");
+        assert_eq!(html.trim(), "<b>bold</b> and *unclosed");
+    }
+
+    #[test]
+    fn adjacent_italic_runs_preserve_unicode_boundaries() {
+        let html = markdown_to_telegram_html("*日本語* *😀*");
+        assert_eq!(html.trim(), "<i>日本語</i> <i>😀</i>");
+    }
+
+    #[test]
     fn inline_code() {
         let html = markdown_to_telegram_html("use `cargo build`");
         assert!(html.contains("<code>cargo build</code>"));
@@ -277,6 +358,19 @@ mod tests {
             html.contains("<pre><code>let x = 1;\n</code></pre>")
                 || html.contains("<pre><code>let x = 1;</code></pre>")
         );
+    }
+
+    #[test]
+    fn unclosed_code_fence_does_not_swallow_remaining_blocks() {
+        for fence in ["```", "~~~"] {
+            let md = format!("before\n{fence}\nunclosed\n# still heading\n*still italic*");
+            let html = markdown_to_telegram_html(&md);
+            assert!(!html.contains("<pre><code>"));
+            assert!(html.contains(fence));
+            assert!(html.contains("unclosed"));
+            assert!(html.contains("<b>still heading</b>"));
+            assert!(html.contains("<i>still italic</i>"));
+        }
     }
 
     #[test]
@@ -320,6 +414,21 @@ mod tests {
         // The literal `\u{E000}C0\u{E001}` should be stripped (escape_html eats the sentinels), and only the real backtick span should render as <code>.
         assert!(html.contains("<code>x</code>"));
         assert_eq!(html.matches("<code>").count(), 1);
+    }
+
+    #[test]
+    fn restores_code_placeholders_in_one_ordered_pass() {
+        let placeholders = vec!["<code>one</code>".into(), "<code>two</code>".into()];
+        let encoded = format!(
+            "a{CODE_PLACEHOLDER_OPEN}C0{CODE_PLACEHOLDER_CLOSE}b{CODE_PLACEHOLDER_OPEN}C1{CODE_PLACEHOLDER_CLOSE}c"
+        );
+        assert_eq!(
+            restore_code_placeholders(&encoded, &placeholders),
+            "a<code>one</code>b<code>two</code>c"
+        );
+
+        let unknown = format!("{CODE_PLACEHOLDER_OPEN}C9{CODE_PLACEHOLDER_CLOSE}");
+        assert_eq!(restore_code_placeholders(&unknown, &placeholders), unknown);
     }
 
     #[test]
