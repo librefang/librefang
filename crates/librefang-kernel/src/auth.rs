@@ -3,6 +3,7 @@
 //! The AuthManager maps platform user identities (Telegram ID, Discord ID, etc.)
 //! to LibreFang users with roles, then enforces permission checks on actions.
 
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use librefang_channels::types::{ChannelRoleQuery, SenderContext};
 use librefang_types::agent::UserId;
@@ -16,6 +17,7 @@ use librefang_types::user_policy::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 /// User roles with hierarchical permissions.
@@ -229,23 +231,25 @@ impl RoleCacheKey {
     }
 }
 
-/// RBAC authentication and authorization manager.
-pub struct AuthManager {
+/// Coherent generation of every config-derived authorization index.
+struct AuthSnapshot {
     /// Known users by their LibreFang user ID.
-    users: DashMap<UserId, UserIdentity>,
+    users: HashMap<UserId, UserIdentity>,
     /// Channel binding index: "channel_type:platform_id" → UserId.
-    channel_index: DashMap<String, UserId>,
+    channel_index: HashMap<String, UserId>,
     /// Resolved channel-role cache: `(channel, account, chat, user) → UserRole`.
-    /// Populated lazily by [`AuthManager::resolve_role_for_sender`]; the
-    /// design contract is that the cache lives for the session's lifetime
-    /// and is invalidated on session restart via [`AuthManager::invalidate_role_cache`].
+    /// Kept inside the generation so an in-flight lookup from an old config can never repopulate the cache used by the new config.
     role_cache: DashMap<RoleCacheKey, UserRole>,
     /// Tool groups (categories) referenced by per-user policies. Cloned
     /// from `KernelConfig.tool_policy.groups` at construction.
-    /// `RwLock<Arc<…>>` so `config_reload` can swap the snapshot in
-    /// place while resolution-path readers (`tool_groups()`) only pay
-    /// for an `Arc::clone` instead of a per-call `Vec` clone.
-    tool_groups: std::sync::RwLock<std::sync::Arc<Vec<ToolGroup>>>,
+    tool_groups: Arc<Vec<ToolGroup>>,
+}
+
+/// RBAC authentication and authorization manager.
+pub struct AuthManager {
+    /// Config reload builds a complete replacement off to the side, then publishes it with one atomic pointer swap.
+    /// Readers retain their loaded generation for the duration of a decision, so they cannot observe a cleared user table, mismatched channel index, or mismatched tool groups.
+    snapshot: ArcSwap<AuthSnapshot>,
 }
 
 impl AuthManager {
@@ -261,17 +265,14 @@ impl AuthManager {
     /// `ToolPolicy.groups` so per-user `tool_categories` can resolve
     /// group names to their tool patterns.
     pub fn with_tool_groups(user_configs: &[UserConfig], tool_groups: &[ToolGroup]) -> Self {
-        let manager = Self {
-            users: DashMap::new(),
-            channel_index: DashMap::new(),
-            role_cache: DashMap::new(),
-            tool_groups: std::sync::RwLock::new(std::sync::Arc::new(tool_groups.to_vec())),
-        };
-        manager.populate(user_configs);
-        manager
+        Self {
+            snapshot: ArcSwap::from_pointee(Self::build_snapshot(user_configs, tool_groups)),
+        }
     }
 
-    fn populate(&self, user_configs: &[UserConfig]) {
+    fn build_snapshot(user_configs: &[UserConfig], tool_groups: &[ToolGroup]) -> AuthSnapshot {
+        let mut users = HashMap::with_capacity(user_configs.len());
+        let mut channel_index = HashMap::new();
         for config in user_configs {
             let user_id = UserId::from_name(&config.name);
             let role = UserRole::from_str_role(&config.role);
@@ -304,7 +305,7 @@ impl AuthManager {
                 raw_memory_access: config.memory_access.clone(),
             };
 
-            self.users.insert(user_id, identity);
+            users.insert(user_id, identity);
 
             // Index channel bindings. Only the explicit (channel_type,
             // platform_id) tuple is registered — there is **no** bare
@@ -315,7 +316,7 @@ impl AuthManager {
             // rights to an unrelated inbound on a third channel.
             for (channel_type, platform_id) in &config.channel_bindings {
                 let key = format!("{channel_type}:{platform_id}");
-                self.channel_index.insert(key, user_id);
+                channel_index.insert(key, user_id);
             }
 
             info!(
@@ -325,6 +326,12 @@ impl AuthManager {
                 "Registered user"
             );
         }
+        AuthSnapshot {
+            users,
+            channel_index,
+            role_cache: DashMap::new(),
+            tool_groups: Arc::new(tool_groups.to_vec()),
+        }
     }
 
     /// Replace the in-memory user/channel indexes from a fresh
@@ -333,40 +340,14 @@ impl AuthManager {
     /// `[users.tool_policy]`, and `[tool_policy.groups]` take effect
     /// without a daemon restart.
     ///
-    /// This is intentionally a "stop-the-world" replace inside the
-    /// `config_reload_lock` write guard — concurrent `identify`/
-    /// `resolve_user_tool_decision` calls will observe a clean snapshot
-    /// either before or after the swap, never a torn one.
+    /// The replacement is built before publication.
+    /// Concurrent readers retain either the complete old generation or the complete new generation.
     pub fn reload(&self, user_configs: &[UserConfig], tool_groups: &[ToolGroup]) {
-        self.users.clear();
-        self.channel_index.clear();
-        // Drop every cached channel-derived role. Without this, an
-        // operator who edits `[[users]]` channel bindings or
-        // `[channel_role_mapping]` and reloads still sees the OLD
-        // resolved role for any sender whose role was already cached
-        // this session — the new policy is applied for fresh senders
-        // but cached ones effectively keep stale (possibly elevated)
-        // privileges until the daemon restarts. Clearing here is the
-        // counterpart to `invalidate_role_cache()` for the hot-reload
-        // path. `DashMap::clear` takes the per-shard locks internally;
-        // no external coordination needed even though concurrent
-        // `resolve_role_for_sender` calls may race the swap — they'll
-        // observe either the pre-clear or post-clear state, never a
-        // torn one, and a missed entry just means one extra platform
-        // lookup, not stale privileges.
-        self.role_cache.clear();
-        // Panic on a poisoned lock: silently keeping the stale snapshot
-        // would mean `/api/config/reload` reports success while the new
-        // `[tool_policy.groups]` are never enforced — exactly the
-        // failure mode `HotAction::ReloadAuth` exists to prevent.
-        *self
-            .tool_groups
-            .write()
-            .expect("AuthManager.tool_groups RwLock poisoned during reload") =
-            std::sync::Arc::new(tool_groups.to_vec());
-        self.populate(user_configs);
+        let snapshot = Self::build_snapshot(user_configs, tool_groups);
+        let registered_users = snapshot.users.len();
+        self.snapshot.store(Arc::new(snapshot));
         info!(
-            users = self.users.len(),
+            users = registered_users,
             tool_groups = tool_groups.len(),
             "AuthManager reloaded from config"
         );
@@ -378,19 +359,20 @@ impl AuthManager {
     /// or None for unrecognized users.
     pub fn identify(&self, channel_type: &str, platform_id: &str) -> Option<UserId> {
         let key = format!("{channel_type}:{platform_id}");
-        self.channel_index.get(&key).map(|r| *r.value())
+        self.snapshot.load().channel_index.get(&key).copied()
     }
 
     /// Get a user's identity by their UserId.
     pub fn get_user(&self, user_id: UserId) -> Option<UserIdentity> {
-        self.users.get(&user_id).map(|r| r.value().clone())
+        self.snapshot.load().users.get(&user_id).cloned()
     }
 
     /// Authorize a user for an action.
     ///
     /// Returns Ok(()) if the user has sufficient permissions, or AuthDenied error.
     pub fn authorize(&self, user_id: UserId, action: &Action) -> LibreFangResult<()> {
-        let identity = self
+        let snapshot = self.snapshot.load();
+        let identity = snapshot
             .users
             .get(&user_id)
             .ok_or_else(|| LibreFangError::AuthDenied("Unknown user".to_string()))?;
@@ -408,17 +390,17 @@ impl AuthManager {
 
     /// Check if RBAC is configured (any users registered).
     pub fn is_enabled(&self) -> bool {
-        !self.users.is_empty()
+        !self.snapshot.load().users.is_empty()
     }
 
     /// Get the count of registered users.
     pub fn user_count(&self) -> usize {
-        self.users.len()
+        self.snapshot.load().users.len()
     }
 
     /// List all registered users.
     pub fn list_users(&self) -> Vec<UserIdentity> {
-        self.users.iter().map(|r| r.value().clone()).collect()
+        self.snapshot.load().users.values().cloned().collect()
     }
 
     /// Resolve the effective LibreFang role for a sender.
@@ -455,11 +437,13 @@ impl AuthManager {
         mapping: &ChannelRoleMapping,
         role_query: Option<&dyn ChannelRoleQuery>,
     ) -> UserRole {
+        let snapshot = self.snapshot.load_full();
         // 1. Explicit UserConfig.role wins. Look up by channel binding
         //    *before* hitting the cache so explicit-role changes during
         //    config reload take effect immediately.
-        if let Some(user_id) = self.identify(&sender.channel, &sender.user_id) {
-            if let Some(identity) = self.get_user(user_id) {
+        let binding_key = format!("{}:{}", sender.channel, sender.user_id);
+        if let Some(user_id) = snapshot.channel_index.get(&binding_key) {
+            if let Some(identity) = snapshot.users.get(user_id) {
                 debug!(
                     user = %identity.name,
                     role = %identity.role,
@@ -471,7 +455,7 @@ impl AuthManager {
 
         // 2. Cache lookup for the channel-derived path.
         let cache_key = RoleCacheKey::from_sender(sender);
-        if let Some(cached) = self.role_cache.get(&cache_key) {
+        if let Some(cached) = snapshot.role_cache.get(&cache_key) {
             return *cached.value();
         }
 
@@ -535,7 +519,7 @@ impl AuthManager {
 
         let role = resolved.unwrap_or(UserRole::Viewer);
         if !transient {
-            self.role_cache.insert(cache_key, role);
+            snapshot.role_cache.insert(cache_key, role);
         }
         role
     }
@@ -544,13 +528,26 @@ impl AuthManager {
     /// restarts so a user whose platform role changed mid-session sees the
     /// updated permissions on next interaction.
     pub fn invalidate_role_cache(&self) {
-        self.role_cache.clear();
+        loop {
+            let snapshot = self.snapshot.load_full();
+            snapshot.role_cache.clear();
+            if Arc::ptr_eq(&snapshot, &self.snapshot.load_full()) {
+                break;
+            }
+        }
     }
 
     /// Drop only the cache entries for a single sender — used when a
     /// targeted invalidation suffices (e.g. an admin tooling hook).
     pub fn invalidate_role_cache_for(&self, sender: &SenderContext) {
-        self.role_cache.remove(&RoleCacheKey::from_sender(sender));
+        let key = RoleCacheKey::from_sender(sender);
+        loop {
+            let snapshot = self.snapshot.load_full();
+            snapshot.role_cache.remove(&key);
+            if Arc::ptr_eq(&snapshot, &self.snapshot.load_full()) {
+                break;
+            }
+        }
     }
     /// Resolve a `sender_id` and `channel` pair to a known user, if any.
     ///
@@ -566,25 +563,23 @@ impl AuthManager {
             return None;
         };
         let key = format!("{ch}:{sid}");
-        self.channel_index.get(&key).map(|r| *r.value())
+        self.snapshot.load().channel_index.get(&key).copied()
     }
 
-    /// Cheap snapshot of the kernel's tool groups (used for per-user
-    /// category evaluation). Returns an `Arc::clone` of the live
-    /// snapshot so the resolution hot path doesn't pay a `Vec` clone
-    /// per tool call. Config reload swaps the inner `Arc` in place
-    /// (`reload()`); existing `Arc` clones held by in-flight evaluations
-    /// keep pointing at the pre-swap snapshot for their lifetime.
-    pub fn tool_groups(&self) -> std::sync::Arc<Vec<ToolGroup>> {
-        self.tool_groups
-            .read()
-            .expect("AuthManager.tool_groups RwLock poisoned")
-            .clone()
+    /// Cheap snapshot of the kernel's tool groups (used for per-user category evaluation).
+    /// Returns an `Arc::clone` of the live snapshot so the resolution hot path doesn't pay a `Vec` clone per tool call.
+    /// Existing clones keep their generation alive across config reload.
+    pub fn tool_groups(&self) -> Arc<Vec<ToolGroup>> {
+        Arc::clone(&self.snapshot.load().tool_groups)
     }
 
     /// Get the resolved per-user RBAC policy for a user, if registered.
     pub fn user_policy(&self, user_id: UserId) -> Option<ResolvedUserPolicy> {
-        self.users.get(&user_id).map(|r| r.value().policy.clone())
+        self.snapshot
+            .load()
+            .users
+            .get(&user_id)
+            .map(|identity| identity.policy.clone())
     }
 
     /// Get the per-user spending budget (RBAC M5) for a user, if
@@ -593,7 +588,7 @@ impl AuthManager {
     /// — in both cases the metering layer falls back to the global /
     /// per-agent / per-provider budgets only.
     pub fn budget_for(&self, user_id: UserId) -> Option<librefang_types::config::UserBudgetConfig> {
-        self.users.get(&user_id)?.value().budget.clone()
+        self.snapshot.load().users.get(&user_id)?.budget.clone()
     }
 
     /// Read-only diagnostic snapshot of every RBAC input that contributes
@@ -618,10 +613,11 @@ impl AuthManager {
     /// `ToolPolicy::check_tool` + global `ApprovalPolicy.channel_rules`)
     /// and is intentionally not duplicated here.
     pub fn effective_permissions(&self, user_id: UserId) -> Option<EffectivePermissions> {
-        let identity = self.users.get(&user_id)?.value().clone();
+        let snapshot = self.snapshot.load();
+        let identity = snapshot.users.get(&user_id)?.clone();
 
         // Read the raw `Option<...>` slices preserved on `UserIdentity`
-        // by `populate`. This is the only way to faithfully report
+        // by `build_snapshot`. This is the only way to faithfully report
         // "not declared" vs "configured-but-empty": the resolved
         // policy on `identity.policy.*` was default-filled at boot, so
         // those two cases would be indistinguishable from there.
@@ -635,9 +631,9 @@ impl AuthManager {
         // users * 3-4 platforms — cheap and avoids carrying a parallel
         // copy on `UserIdentity`.
         let mut channel_bindings: HashMap<String, String> = HashMap::new();
-        for entry in self.channel_index.iter() {
-            if *entry.value() == user_id {
-                if let Some((channel, platform_id)) = entry.key().split_once(':') {
+        for (key, bound_user_id) in &snapshot.channel_index {
+            if *bound_user_id == user_id {
+                if let Some((channel, platform_id)) = key.split_once(':') {
                     channel_bindings.insert(channel.to_string(), platform_id.to_string());
                 }
             }
@@ -660,10 +656,11 @@ impl AuthManager {
     /// with the role default. Returns the role-default ACL when the user
     /// has no registered customisation (`is_unconfigured`).
     pub fn memory_acl_for(&self, user_id: UserId) -> Option<UserMemoryAccess> {
-        let identity = self.users.get(&user_id)?;
-        let acl = &identity.value().policy.memory_access;
+        let snapshot = self.snapshot.load();
+        let identity = snapshot.users.get(&user_id)?;
+        let acl = &identity.policy.memory_access;
         if acl.is_unconfigured() {
-            Some(default_memory_acl(identity.value().role))
+            Some(default_memory_acl(identity.role))
         } else {
             Some(acl.clone())
         }
@@ -690,10 +687,11 @@ impl AuthManager {
         channel: Option<&str>,
         system_call: bool,
     ) -> UserToolGate {
+        let snapshot = self.snapshot.load_full();
         // No registered users → guest mode (default-allow with minimal
         // perms — design decision #2). The runtime keeps its existing
         // approval/capability gates.
-        if self.users.is_empty() {
+        if snapshot.users.is_empty() {
             return UserToolGate::Allow;
         }
 
@@ -708,7 +706,11 @@ impl AuthManager {
             return UserToolGate::Allow;
         }
 
-        let Some(user_id) = self.resolve_user(sender_id, channel) else {
+        let (Some(channel), Some(sender_id)) = (channel, sender_id) else {
+            return guest_gate(tool_name);
+        };
+        let binding_key = format!("{channel}:{sender_id}");
+        let Some(user_id) = snapshot.channel_index.get(&binding_key).copied() else {
             // RBAC is enabled but the sender isn't recognised. Default-deny
             // for tools that don't appear on the read-only safe list, route
             // everything else through an admin approval. We no longer
@@ -718,7 +720,7 @@ impl AuthManager {
             return guest_gate(tool_name);
         };
 
-        self.resolve_decision_for_user(user_id, tool_name, channel)
+        Self::resolve_decision_for_snapshot(&snapshot, user_id, tool_name, Some(channel))
     }
 
     /// Evaluate the per-user RBAC gate for an already-resolved [`UserId`].
@@ -739,15 +741,25 @@ impl AuthManager {
         tool_name: &str,
         channel: Option<&str>,
     ) -> UserToolGate {
-        let groups = self.tool_groups();
-        let Some(identity) = self.get_user(user_id) else {
+        let snapshot = self.snapshot.load();
+        Self::resolve_decision_for_snapshot(&snapshot, user_id, tool_name, channel)
+    }
+
+    fn resolve_decision_for_snapshot(
+        snapshot: &AuthSnapshot,
+        user_id: UserId,
+        tool_name: &str,
+        channel: Option<&str>,
+    ) -> UserToolGate {
+        let Some(identity) = snapshot.users.get(&user_id) else {
             return UserToolGate::Allow;
         };
 
         // Layer A — apply the user's own policy.
-        let user_decision = identity
-            .policy
-            .evaluate(tool_name, channel, groups.as_slice());
+        let user_decision =
+            identity
+                .policy
+                .evaluate(tool_name, channel, snapshot.tool_groups.as_slice());
 
         match user_decision {
             UserToolDecision::Allow => UserToolGate::Allow,
@@ -1078,6 +1090,8 @@ fn guest_gate(tool_name: &str) -> UserToolGate {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
 
     fn test_configs() -> Vec<UserConfig> {
         vec![
@@ -1314,6 +1328,64 @@ mod tests {
             UserToolGate::Deny { reason } => assert!(reason.contains("Bob")),
             other => panic!("expected Deny, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn reload_never_exposes_guest_mode_to_concurrent_authorization() {
+        let users: Vec<UserConfig> = (0..512)
+            .map(|index| {
+                user_with_policy(
+                    &format!("User {index}"),
+                    "user",
+                    &index.to_string(),
+                    Some(UserToolPolicy {
+                        allowed_tools: vec![],
+                        denied_tools: vec!["shell_exec".into()],
+                    }),
+                    None,
+                    None,
+                    HashMap::new(),
+                )
+            })
+            .collect();
+        let manager = Arc::new(AuthManager::new(&users));
+        let stop = Arc::new(AtomicBool::new(false));
+        let observed_allow = Arc::new(AtomicBool::new(false));
+        let start = Arc::new(Barrier::new(2));
+
+        let reader = {
+            let manager = Arc::clone(&manager);
+            let stop = Arc::clone(&stop);
+            let observed_allow = Arc::clone(&observed_allow);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                while !stop.load(Ordering::Acquire) {
+                    if manager.resolve_user_tool_decision(
+                        "shell_exec",
+                        Some("0"),
+                        Some("telegram"),
+                        false,
+                    ) == UserToolGate::Allow
+                    {
+                        observed_allow.store(true, Ordering::Release);
+                        break;
+                    }
+                }
+            })
+        };
+
+        start.wait();
+        for _ in 0..32 {
+            manager.reload(&users, &[]);
+        }
+        stop.store(true, Ordering::Release);
+        reader.join().expect("authorization reader panicked");
+
+        assert!(
+            !observed_allow.load(Ordering::Acquire),
+            "reload temporarily exposed guest mode and allowed shell_exec"
+        );
     }
 
     #[test]

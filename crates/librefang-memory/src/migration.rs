@@ -9,7 +9,7 @@ const SCHEMA_VERSION: u32 = 47;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
-    let current_version = get_schema_version(conn);
+    let current_version = get_schema_version(conn)?;
 
     // Refuse to run if the DB was created by a newer binary. Silently
     // downgrading `user_version` would corrupt v(N+1)+ columns/indexes.
@@ -239,7 +239,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // every restart, and log a single warn line summarising the rescue.
     // Idempotent: a clean DB inserts nothing because every version
     // already has its row.
-    let final_version = get_schema_version(conn);
+    let final_version = get_schema_version(conn)?;
     let mut backfilled: u32 = 0;
     let mut backfill_failed = false;
     for v in 1..=final_version {
@@ -290,9 +290,8 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 }
 
 /// Get the current schema version from the database.
-fn get_schema_version(conn: &Connection) -> u32 {
+fn get_schema_version(conn: &Connection) -> Result<u32, rusqlite::Error> {
     conn.pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap_or(0)
 }
 
 /// Check if a column exists in a table (SQLite has no ADD COLUMN IF NOT EXISTS).
@@ -1884,6 +1883,58 @@ fn migrate_v40(conn: &Connection) -> Result<(), rusqlite::Error> {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[test]
+    fn test_schema_version_read_error_stops_before_migration_ddl() {
+        let conn = Connection::open_in_memory().unwrap();
+        let ddl_attempts = Arc::new(AtomicUsize::new(0));
+        let callback_attempts = Arc::clone(&ddl_attempts);
+
+        conn.authorizer(Some(move |ctx: AuthContext<'_>| match ctx.action {
+            AuthAction::Pragma {
+                pragma_name: "user_version",
+                ..
+            } => Authorization::Deny,
+            AuthAction::CreateTable { .. } => {
+                callback_attempts.fetch_add(1, Ordering::SeqCst);
+                Authorization::Allow
+            }
+            _ => Authorization::Allow,
+        }))
+        .unwrap();
+
+        assert!(run_migrations(&conn).is_err());
+        assert_eq!(
+            ddl_attempts.load(Ordering::SeqCst),
+            0,
+            "a schema-version read error must fail before migration DDL"
+        );
+    }
+
+    #[test]
+    fn test_final_schema_version_read_error_is_propagated() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let callback_reads = Arc::clone(&reads);
+
+        conn.authorizer(Some(move |ctx: AuthContext<'_>| match ctx.action {
+            AuthAction::Pragma {
+                pragma_name: "user_version",
+                pragma_value: None,
+            } if callback_reads.fetch_add(1, Ordering::SeqCst) == 1 => Authorization::Deny,
+            _ => Authorization::Allow,
+        }))
+        .unwrap();
+
+        assert!(run_migrations(&conn).is_err());
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn test_migration_creates_tables() {
@@ -2412,7 +2463,7 @@ mod tests {
         assert!(column_exists(&conn, "audit_entries", "user_id"));
         assert!(column_exists(&conn, "audit_entries", "channel"));
         // Schema version stays at the latest.
-        assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
     }
 
     #[test]
@@ -2460,7 +2511,7 @@ mod tests {
         run_migrations(&conn).unwrap();
         assert!(column_exists(&conn, "usage_events", "user_id"));
         assert!(column_exists(&conn, "usage_events", "channel"));
-        assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
     }
 
     #[test]
@@ -2488,7 +2539,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(v40_rows, 1, "v40 must record its audit row");
-        assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
     }
 
     #[test]
@@ -2501,7 +2552,7 @@ mod tests {
         run_migrations(&conn).unwrap();
         assert!(column_exists(&conn, "agents", "session_id"));
         assert!(column_exists(&conn, "sessions", "messages_generation"));
-        assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
     }
 
     #[test]
@@ -2540,7 +2591,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
         run_migrations(&conn).unwrap();
-        assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
     }
 
     /// Issue #3360: v31 adds the `bound_to` column on `totp_used_codes` so
@@ -2880,7 +2931,7 @@ mod tests {
         // are guarded.
         migrate_v33(&conn).unwrap();
         run_migrations(&conn).unwrap();
-        assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
     }
 
     #[test]
@@ -2923,12 +2974,12 @@ mod tests {
         )
         .unwrap();
         // user_version is still 9 — the partial-apply scenario.
-        assert_eq!(get_schema_version(&conn), 9);
+        assert_eq!(get_schema_version(&conn).unwrap(), 9);
 
         // Resuming migrations from this state must succeed without
         // "duplicate column name: agent_id".
         run_migrations(&conn).expect("v10 retry on partial-apply DB must not error");
-        assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
 
         // Columns are still present and writable.
         assert!(column_exists(&conn, "entities", "agent_id"));
@@ -2968,7 +3019,7 @@ mod tests {
         assert!(!column_exists(&conn, "relations", "agent_id"));
 
         run_migrations(&conn).expect("v10 must skip entities ALTER and apply relations ALTER");
-        assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
         assert!(column_exists(&conn, "entities", "agent_id"));
         assert!(column_exists(&conn, "relations", "agent_id"));
     }

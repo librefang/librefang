@@ -102,6 +102,35 @@ fn auth_post_json(path: &str, body: serde_json::Value) -> Request<Body> {
         .unwrap()
 }
 
+fn auth_put_json(path: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method(Method::PUT)
+        .uri(path)
+        .header(header::AUTHORIZATION, format!("Bearer {API_KEY}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// Asserts the one documented refusal shape: `423` plus the structured body every guarded route shares.
+/// Factored out because the provider cases below assert it three times and a copy that drifted would silently stop checking the contract.
+fn assert_managed_refusal(status: StatusCode, body: &[u8]) {
+    assert_eq!(
+        status,
+        StatusCode::LOCKED,
+        "managed mode must answer 423, got {status}: {}",
+        String::from_utf8_lossy(body)
+    );
+
+    let v: serde_json::Value = serde_json::from_slice(body).expect("locked body is JSON");
+    assert_eq!(v["code"], "config_managed");
+    assert_eq!(v["ok"], false);
+    assert!(
+        v["source"].as_str().is_some_and(|s| !s.is_empty()),
+        "the refusal must tell the operator which file is managed; got {v}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/config
 // ---------------------------------------------------------------------------
@@ -206,24 +235,151 @@ async fn config_set_is_locked_in_managed_mode_and_leaves_the_file_untouched() {
     )
     .await;
 
-    assert_eq!(
-        status,
-        StatusCode::LOCKED,
-        "managed mode must answer 423, got {status}: {}",
-        String::from_utf8_lossy(&body)
-    );
-
-    let v: serde_json::Value = serde_json::from_slice(&body).expect("locked body is JSON");
-    assert_eq!(v["code"], "config_managed");
-    assert_eq!(v["ok"], false);
-    assert!(
-        v["source"].as_str().is_some_and(|s| !s.is_empty()),
-        "the refusal must tell the operator which file is managed; got {v}"
-    );
+    assert_managed_refusal(status, &body);
 
     assert_eq!(
         std::fs::read_to_string(&config_path).expect("config.toml still readable"),
         seed,
         "a refused write must not have opened, truncated, or rewritten the file"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Provider routes that persist deployment configuration
+// ---------------------------------------------------------------------------
+//
+// `set_provider_key` persists `[default_model]` (auto-switch / free-model migration), `set_provider_url` persists `[provider_urls]` and `[provider_proxy_urls]`, and `set_default_provider` persists `[default_model]` outright.
+// All three shipped unguarded in #6717 even though "every API route that persists deployment configuration is locked" is an acceptance criterion of #6695, so each gets a case here.
+
+/// `POST /api/providers/{name}/key` is refused **in full**, which is wider than the rest of managed mode.
+/// The route's `config.toml` write is conditional on live daemon state, so guarding only that write would accept or refuse the identical request depending on timing — and in the refusing case it would already have rewritten `secrets.env`.
+/// Hence the assertion set covers both files: a refused request must leave `config.toml` *and* `secrets.env` byte-identical.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_provider_key_is_locked_in_managed_mode() {
+    let _guard = ManagedModeGuard::set().await;
+
+    let h = boot_router_with_api_key(API_KEY).await;
+    let config_path = h.home.join("config.toml");
+    let config_seed = format!("api_key = \"{API_KEY}\"\n");
+    std::fs::write(&config_path, &config_seed).expect("seed config.toml");
+
+    // Seed `secrets.env` too.
+    // Asserting it is unchanged is only meaningful against a file that exists — an absent file would pass the check trivially even if the handler had written one and then failed.
+    let secrets_path = h.home.join("secrets.env");
+    let secrets_seed = "PREEXISTING_API_KEY=untouched\n";
+    std::fs::write(&secrets_path, secrets_seed).expect("seed secrets.env");
+
+    // `groq` is a real catalog provider with a real `api_key_env`, so this request succeeds in mutable mode.
+    // A refusal here is the mode, not a validation failure on an unknown provider name.
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/providers/groq/key",
+            serde_json::json!({"key": "gsk-managed-mode-must-refuse-this"}),
+        ),
+    )
+    .await;
+
+    assert_managed_refusal(status, &body);
+
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("config.toml still readable"),
+        config_seed,
+        "a refused write must not have opened, truncated, or rewritten config.toml"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&secrets_path).expect("secrets.env still readable"),
+        secrets_seed,
+        "the refusal happens before the secrets.env write, so the credential file must be untouched too"
+    );
+}
+
+/// `PUT /api/providers/{name}/url` persists `[provider_urls]` / `[provider_proxy_urls]`, which are deployment configuration.
+/// The guard also has to fire before the in-memory catalog is mutated, otherwise a refused request would still move the running daemon's endpoint with nothing on disk to show for it — so this asserts the live catalog kept the original URL as well as the file.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_provider_url_is_locked_in_managed_mode() {
+    let _guard = ManagedModeGuard::set().await;
+
+    let h = boot_router_with_api_key(API_KEY).await;
+    let config_path = h.home.join("config.toml");
+    let seed = format!("api_key = \"{API_KEY}\"\n");
+    std::fs::write(&config_path, &seed).expect("seed config.toml");
+
+    let url_before = {
+        let catalog = h.state.kernel.model_catalog_ref().load();
+        catalog.get_provider("ollama").map(|p| p.base_url.clone())
+    };
+
+    let (status, body) = send(
+        h.app.clone(),
+        auth_put_json(
+            "/api/providers/ollama/url",
+            serde_json::json!({"base_url": "http://managed-mode-must-refuse-this:11434"}),
+        ),
+    )
+    .await;
+
+    assert_managed_refusal(status, &body);
+
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("config.toml still readable"),
+        seed,
+        "a refused write must not have opened, truncated, or rewritten the file"
+    );
+
+    let url_after = {
+        let catalog = h.state.kernel.model_catalog_ref().load();
+        catalog.get_provider("ollama").map(|p| p.base_url.clone())
+    };
+    assert_eq!(
+        url_before, url_after,
+        "a refused request must not move the live catalog either — that is the drift managed mode exists to prevent"
+    );
+}
+
+/// `POST /api/providers/{name}/default` exists to persist `[default_model]`, so managed mode refuses it.
+/// The persist failure inside the handler is only a `warn!`, so without the guard this route would answer `200` and hot-switch the live default while the manifest kept saying otherwise; the in-memory override is therefore asserted alongside the file.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_default_provider_is_locked_in_managed_mode() {
+    let _guard = ManagedModeGuard::set().await;
+
+    let h = boot_router_with_api_key(API_KEY).await;
+    let config_path = h.home.join("config.toml");
+    let seed = format!("api_key = \"{API_KEY}\"\n");
+    std::fs::write(&config_path, &seed).expect("seed config.toml");
+
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/providers/ollama/default",
+            serde_json::json!({"model": "managed-mode-must-refuse-this"}),
+        ),
+    )
+    .await;
+
+    assert_managed_refusal(status, &body);
+
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("config.toml still readable"),
+        seed,
+        "a refused write must not have opened, truncated, or rewritten the file"
+    );
+
+    // Assert on the *effective* default rather than on `override.is_none()`: the override being unset at boot is a kernel construction detail, while "the refused model never became the live default" is the property the guard is responsible for.
+    let effective_model = {
+        let guard = h
+            .state
+            .kernel
+            .default_model_override_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(dm) => dm.model.clone(),
+            None => h.state.kernel.config_ref().default_model.model.clone(),
+        }
+    };
+    assert_eq!(
+        effective_model, "test-model",
+        "a refused request must not hot-switch the live default model"
     );
 }

@@ -69,25 +69,8 @@ function defaultItemFor(itemSchema: JsonSchema | undefined, root: ConfigSchemaRo
   return out;
 }
 
-// Stable runtime ids for items so React's key= prop tracks each row
-// across reorders/removals. Stored in a non-enumerable property so the
-// JSON.stringify of an item the user sees in the textarea doesn't
-// surface this implementation detail. We re-attach on incoming items
-// that don't have one yet (e.g. from a fresh /api/config GET).
 function newItemId(): string {
   return createClientId();
-}
-const itemIdMap = new WeakMap<object, string>();
-
-function ensureItemId(item: unknown): string {
-  if (item !== null && typeof item === "object") {
-    const existing = itemIdMap.get(item);
-    if (existing) return existing;
-    const id = newItemId();
-    itemIdMap.set(item, id);
-    return id;
-  }
-  return newItemId();
 }
 
 type Props = {
@@ -100,8 +83,27 @@ type Props = {
 export function StructListEditor({ value, onChange, itemSchema, schemaRoot }: Props) {
   const { t } = useTranslation();
   const items = useMemo(() => Array.isArray(value) ? value : [], [value]);
+  // Initial keys are deterministic and local to this sibling list, keeping
+  // the state initializer pure even when React invokes it twice in StrictMode.
+  const [itemIds, setItemIds] = useState(() =>
+    items.map((_, idx) => `initial-struct-list-row-${idx}`));
+
+  // External config updates can change the list length without going through
+  // the handlers below. Reconcile after commit while preserving IDs by index;
+  // local add/remove operations update both arrays in the same event.
+  useEffect(() => {
+    if (itemIds.length === items.length) return;
+    setItemIds([
+      ...itemIds.slice(0, items.length),
+      ...Array.from(
+        { length: Math.max(0, items.length - itemIds.length) },
+        () => newItemId(),
+      ),
+    ]);
+  }, [itemIds, items.length]);
 
   const removeItem = useCallback((idx: number) => {
+    setItemIds((prev) => prev.filter((_, i) => i !== idx));
     onChange(items.filter((_, i) => i !== idx));
   }, [items, onChange]);
 
@@ -110,6 +112,8 @@ export function StructListEditor({ value, onChange, itemSchema, schemaRoot }: Pr
   }, [items, onChange]);
 
   const addItem = useCallback(() => {
+    const id = newItemId();
+    setItemIds((prev) => [...prev, id]);
     onChange([...items, defaultItemFor(itemSchema, schemaRoot)]);
   }, [items, onChange, itemSchema, schemaRoot]);
 
@@ -122,11 +126,10 @@ export function StructListEditor({ value, onChange, itemSchema, schemaRoot }: Pr
       )}
       {items.map((item, idx) => (
         <StructListRow
-          // Stable id survives reordering / removal so the row's
-          // expanded state and in-progress JSON edit don't desync to
-          // the wrong item when a sibling row is deleted (round-4
-          // review of #4678).
-          key={ensureItemId(item)}
+          // Edits replace the item object, so the key must live outside the
+          // value. The temporary key is only reachable for an external list
+          // growth before the reconciliation effect commits its generated ID.
+          key={itemIds[idx] ?? `pending-struct-list-row-${idx}`}
           headline={headlineFor(item, idx)}
           item={item}
           onChange={(next) => updateItem(idx, next)}

@@ -46,7 +46,9 @@ impl WebFetchEngine {
     /// [`Self::send_with_pinned_redirects`], which re-validates AND re-pins
     /// every hop so the IP we checked is the IP we connect to.
     pub(crate) fn pinned_client(&self, resolution: SsrfResolution) -> reqwest::Client {
-        let builder = crate::http_client::proxied_client_builder()
+        // A configured/env proxy can re-resolve the original hostname itself, bypassing the DNS pin below and reopening the DNS-rebinding window this method's own docs describe.
+        // Connect directly, matching the legacy web-fetch path's `direct_client_builder` (#6761).
+        let builder = crate::http_client::direct_client_builder()
             .timeout(std::time::Duration::from_secs(self.config.timeout_secs))
             .redirect(reqwest::redirect::Policy::none())
             .gzip(true)
@@ -354,11 +356,8 @@ pub struct SsrfResolution {
 impl SsrfResolution {
     /// Apply the pinned DNS resolution to a [`reqwest::ClientBuilder`] so
     /// the actual HTTP request connects to the IPs we already validated.
-    pub fn pin_dns(self, mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-        for addr in &self.resolved {
-            builder = builder.resolve(&self.hostname, *addr);
-        }
-        builder
+    pub fn pin_dns(self, builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+        builder.resolve_to_addrs(&self.hostname, &self.resolved)
     }
 }
 

@@ -242,7 +242,7 @@ classified differently — the row note spells out which is which.
 | `health_check` | R | Health-check config. |
 | `heartbeat` | R | Heartbeat-monitor global defaults. |
 | `prompt_intelligence` | R | Prompt-intelligence (versioning + A/B) config. |
-| `task_board` | R | Shared task-board safety knobs. |
+| `task_board` | N | Shared task-board knobs. The sweeper re-reads `claim_ttl_secs` / `sweep_interval_secs` / `max_retries` on every tick, and the same tick re-reads `pending_grace_secs` / `wake_backoff_max_secs` for the delivery reconcile; `assignee_wake` is read per task post. All six take effect without a restart. |
 | `background` | R | Background autonomous-loop executor knobs. |
 
 ### Proxy / runtime / paths / misc

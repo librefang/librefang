@@ -32,12 +32,14 @@
 //!
 //! # HTTP client
 //!
-//! All outbound HTTP flows through
-//! [`librefang_http::proxied_client`], the workspace's shared
-//! reqwest client. This is non-negotiable per the
+//! All outbound HTTP clients start from
+//! [`librefang_http::proxied_client_builder`], the workspace's shared
+//! reqwest client configuration. This is non-negotiable per the
 //! `librefang-extensions` AGENTS.md ("no bespoke `reqwest::Client`"):
-//! the shared client carries the configured proxy, TLS fallback
-//! roots, and `User-Agent: librefang/<version>`.
+//! the shared builder carries the configured proxy, TLS fallback
+//! roots, and `User-Agent: librefang/<version>`. Exporters additionally
+//! disable redirects before building the client and fail closed if that
+//! secure client cannot be constructed.
 
 #![deny(missing_docs)]
 
@@ -52,6 +54,19 @@ mod wandb;
 pub use error::ExportError;
 
 use chrono::{DateTime, Utc};
+
+fn build_export_http_client_with(
+    builder: reqwest::ClientBuilder,
+) -> Result<reqwest::Client, ExportError> {
+    builder
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(ExportError::from)
+}
+
+fn build_export_http_client() -> Result<reqwest::Client, ExportError> {
+    build_export_http_client_with(librefang_http::proxied_client_builder())
+}
 
 /// Target service to export a trajectory to.
 ///
@@ -255,8 +270,9 @@ pub struct ExportReceipt {
 ///   the body did not match the expected shape.
 pub async fn export(
     target: ExportTarget,
-    payload: RlTrajectoryExport,
+    mut payload: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
+    normalize_export_metadata(&mut payload);
     match target {
         ExportTarget::WandB {
             project,
@@ -311,6 +327,12 @@ pub async fn export(
     }
 }
 
+fn normalize_export_metadata(export: &mut RlTrajectoryExport) {
+    if let Some(metadata) = export.toolset_metadata.take() {
+        export.toolset_metadata = Some(redact::redact_metadata(metadata));
+    }
+}
+
 /// Resolve an `*_env` indirection: read the named environment variable
 /// and return its value. Empty / unset env vars surface as
 /// [`ExportError::InvalidConfig`] so the operator sees the failure at
@@ -341,6 +363,15 @@ pub(crate) fn resolve_env_secret(env_var: &str, field_label: &str) -> Result<Str
 mod tests {
     use super::*;
 
+    #[test]
+    fn export_client_build_failure_is_not_replaced_by_a_default_client() {
+        let invalid_builder = reqwest::Client::builder().user_agent("invalid\nuser-agent");
+        let error = build_export_http_client_with(invalid_builder)
+            .expect_err("an invalid secure client must fail closed");
+
+        assert!(matches!(error, ExportError::NetworkError(_)));
+    }
+
     /// `*_env` indirection: an empty env-var name fails fast with
     /// `InvalidConfig` (no env probe) so a caller that accidentally
     /// stored the literal secret in the `*_env` field — or left it
@@ -367,6 +398,31 @@ mod tests {
             }
             other => panic!("expected InvalidConfig, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn invalid_export_safely_consumes_extremely_deep_metadata() {
+        let mut metadata = serde_json::Value::Null;
+        for _ in 0..50_000 {
+            metadata = serde_json::Value::Array(vec![metadata]);
+        }
+        let payload = RlTrajectoryExport {
+            run_id: "rid".to_string(),
+            trajectory_bytes: b"bytes".to_vec(),
+            toolset_metadata: Some(metadata),
+            started_at: chrono::Utc::now(),
+            finished_at: chrono::Utc::now(),
+        };
+        let target = ExportTarget::Atropos {
+            project: String::new(),
+            base_url: "http://127.0.0.1:8000".to_string(),
+            max_token_length: None,
+            group_size: None,
+            weight: None,
+        };
+
+        let error = export(target, payload).await.unwrap_err();
+        assert!(matches!(error, ExportError::InvalidConfig(_)));
     }
 
     /// SSRF gate: routing a Tinker export at the cloud metadata IP

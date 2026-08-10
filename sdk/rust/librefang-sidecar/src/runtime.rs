@@ -25,7 +25,7 @@
 //!     }
 //! }
 //!
-//! #[tokio::main]
+//! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 //!     run_stdio(MyAdapter).await
 //! }
@@ -566,7 +566,7 @@ pub async fn run_stdio_with<A: SidecarAdapter + 'static>(
 /// Returning `Result` from the builder means a missing-env bootstrap failure becomes a structured error message instead of a `panic!` + stack trace, which is what `MyAdapter::new()` -> `expect("BOT_TOKEN must be set")` would otherwise produce.
 ///
 /// ```ignore
-/// #[tokio::main]
+/// #[tokio::main(flavor = "current_thread")]
 /// async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 ///     run_stdio_main(MyAdapter::schema, || Ok(MyAdapter::new())).await
 /// }

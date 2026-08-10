@@ -139,14 +139,20 @@ Two dispatch details matter for a multi-step display:
   that declares `reaction` sees the full `Thinking → ToolUse… →
   Done/Error` sequence. Adapters that do not declare `reaction` treat
   every one of these as a no-op, so the change is inert for them.
-- The **Slack** sidecar (`sdk/python/librefang/sidecar/adapters/slack.py`)
-  is the first consumer: it declares `reaction` and folds the phase
-  stream into an updated-in-place Block Kit card (`chat.update`) that
-  shows the live step list for multi-step turns. Single-step turns (no
-  tool ran) post no card and keep the pre-existing `eyes → check`
-  receipt reactions, which are driven independently by the receive/send
-  hooks — the phase stream never emits emoji reactions on Slack. The
-  card honours the same `SLACK_REACTIONS` opt-out as the receipts.
+- The **Slack** sidecar (`sdk/python/librefang/sidecar/adapters/slack.py`) is the first consumer: it declares `reaction` and drives *both* of its processing indicators off the one phase stream.
+  The `eyes → check` receipt is added on `Queued` and flipped on `Done` / `Error` (to `white_check_mark` / `x`); the multi-step Block Kit card is posted lazily on the first `ToolUse` and updated in place (`chat.update`) until the turn terminates.
+  Single-step turns (no tool ran) post no card and keep just the receipt.
+
+  The receipt used to be driven by the receive/send hooks instead, and #6731 moved it onto the lifecycle because "we received a message" and "we are answering it" are different facts.
+  `dispatch_message` has roughly two dozen `return` paths above the first `send_lifecycle_reaction(Queued)` call — mention-only group gating, per-user and per-channel rate limits, the reply-intent precheck, command policy, thread ownership, RBAC — and none of them was visible to the adapter, so a receive-time reaction on a declined message was never cleared.
+  Keying off `Queued` closes all of them structurally rather than one at a time, and `Error` gives a failed turn a terminal state it previously never got.
+  Two integration tests in `crates/librefang-channels/tests/bridge_integration_test.rs` (`test_group_gating_skip_emits_no_lifecycle_reaction_6731`, `test_group_gating_pass_emits_queued_then_done_6731`) pin the contract the adapter now depends on: a gated-out group message emits no lifecycle reaction, and a dispatched one starts on `Queued`.
+
+  An adapter consuming the phase stream must therefore key its state strictly on the frame's `message_id`.
+  Slack learned that the hard way: the old send-hook finalization keyed on the reply's thread id, which for an in-thread reply is the thread *root*, so the exact key missed and a "first pending entry in this channel" fallback flipped an unrelated sibling message's reaction.
+
+  The two indicators have independent switches: `SLACK_REACTIONS` for the receipt and `SLACK_PROGRESS_CARD` for the card (#6730).
+  The card's default follows `SLACK_REACTIONS`, so an operator who set `SLACK_REACTIONS=false` for silence keeps it, but either can now be turned off without the other.
 
 ## Supervision
 
