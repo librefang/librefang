@@ -291,15 +291,15 @@ describe("RuntimePage", () => {
   });
 
   it("opens shutdown confirm dialog and fires shutdown mutation on confirm", () => {
-    const mutate = vi.fn();
-    useShutdownServerMock.mockReturnValue(makeMutation({ mutate }));
+    const mutateAsync = vi.fn().mockResolvedValue(undefined);
+    useShutdownServerMock.mockReturnValue(makeMutation({ mutateAsync }));
     renderPage();
 
     fireEvent.click(screen.getByRole("button", { name: "runtime.shutdown" }));
     // Confirm dialog now visible
     const confirmBtn = screen.getByRole("button", { name: "runtime.shutdown_confirm" });
     fireEvent.click(confirmBtn);
-    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(mutateAsync).toHaveBeenCalledTimes(1);
   });
 
   it("invokes reloadConfig mutation when reload button is clicked", () => {
@@ -327,11 +327,11 @@ describe("RuntimePage", () => {
   });
 
   it("opens restore confirm dialog and fires restoreBackup with filename on confirm", () => {
-    const mutate = vi.fn();
-    useRestoreBackupMock.mockReturnValue(makeMutation({ mutate }));
+    const mutateAsync = vi.fn().mockResolvedValue(undefined);
+    useRestoreBackupMock.mockReturnValue(makeMutation({ mutateAsync }));
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: "runtime.restore" }));
     fireEvent.click(screen.getByRole("button", { name: "runtime.restore_confirm" }));
-    expect(mutate).toHaveBeenCalledWith("backup-1.tar.gz");
+    expect(mutateAsync).toHaveBeenCalledWith("backup-1.tar.gz");
   });
 });
