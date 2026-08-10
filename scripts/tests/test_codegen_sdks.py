@@ -80,6 +80,8 @@ def main():
     assert_in("fn process_sse_line(", rs, "rust-shared-sse-line-parser")
     assert_in("if !buffer.is_empty()", rs, "rust-flush-trailing-sse-line")
     assert_in("process_sse_line(&buffer, &tx)", rs, "rust-parse-trailing-sse-line")
+    assert_in('"error": fmt.Sprintf("marshal: %v", err)', go, "go-stream-marshal-error")
+    assert_not_in("b, _ := json.Marshal(body)", go, "go-no-discarded-stream-marshal-error")
     assert_in("from urllib.error import HTTPError, URLError", py, "python-urlerror-import")
     assert py.count("except URLError as e:") == 2, "both Python request paths must wrap connection failures"
     assert_in("active_error = sys.exc_info()[0] is not None", py, "python-stream-close-finally")
