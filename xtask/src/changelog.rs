@@ -174,8 +174,7 @@ fn command_output_with_timeout(command: &mut Command, timeout: Duration) -> Resu
         thread::sleep(COMMAND_POLL_INTERVAL.min(timeout.saturating_sub(started.elapsed())));
     }
 
-    // Close a race where the command and both readers finished exactly as the
-    // deadline expired, before sending a kill signal to a now-empty group.
+    // Close a race where the command and both readers finished exactly as the deadline expired, before sending a kill signal to a now-empty group.
     if status.is_none() {
         status = match child.try_wait() {
             Ok(status) => status,
@@ -205,8 +204,8 @@ fn command_output_with_timeout(command: &mut Command, timeout: Duration) -> Resu
         )
     })?;
 
-    // Give the killed tree a short, bounded opportunity to close its pipes and
-    // be reaped. Never turn timeout cleanup into another unbounded wait.
+    // Give the killed tree a short, bounded opportunity to close its pipes and be reaped.
+    // Never turn timeout cleanup into another unbounded wait.
     let cleanup_deadline = Instant::now() + COMMAND_KILL_GRACE;
     let mut cleanup_error = None;
     while Instant::now() < cleanup_deadline {
@@ -1087,8 +1086,7 @@ fn render_changelog(content: &str, version: &str, section: &str) -> String {
             .find(|heading| !content[heading.start()..].starts_with(UNRELEASED_HEADING))
     }) {
         // Insert before the first dated release heading so a leading `## [Unreleased]` section stays on top.
-        // If there is no dated heading, skip the Unreleased heading itself and
-        // insert before any later custom section.
+        // If there is no dated heading, skip the Unreleased heading itself and insert before any later custom section.
         let pos = m.start();
         let mut result = String::new();
         result.push_str(&content[..pos]);
@@ -1496,8 +1494,7 @@ pub fn run(args: ChangelogArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let pr_numbers = require_pr_numbers(extract_pr_numbers(&root, &git_range)?, &git_range)?;
 
-    // Fetch every PR fail-closed: partial metadata would silently publish an
-    // incomplete release section.
+    // Fetch every PR fail-closed: partial metadata would silently publish an incomplete release section.
     let prs: Vec<PrInfo> = pr_numbers
         .iter()
         .map(|&num| fetch_pr_info(num))
@@ -1558,8 +1555,7 @@ pub fn run(args: ChangelogArgs) -> Result<(), Box<dyn std::error::Error>> {
     if !drained.curated.is_empty() {
         // Count PRs actually in range, not references found: curated prose cites
         // plenty of older PRs that were never going to get a generated entry here.
-        // Metadata collection is fail-closed, so `prs` contains every extracted
-        // in-range PR or generation returned before touching the changelog.
+        // Metadata collection is fail-closed, so `prs` contains every extracted in-range PR or generation returned before touching the changelog.
         let in_range: BTreeSet<u64> = prs.iter().map(|p| p.number).collect();
         let suppressed_in_range = suppressed.intersection(&in_range).count();
         // Broken out by bullet, because the totals mean different things. Nothing
