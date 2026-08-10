@@ -68,9 +68,8 @@ class WorkflowReportHardeningTests(unittest.TestCase):
             0,
             report_result.stdout + report_result.stderr,
         )
-        # ci.yml has pre-existing shellcheck findings outside this report's
-        # scope. Keep actionlint's YAML/expression checks as a durable gate
-        # while the two smaller workflows retain full shellcheck coverage.
+        # ci.yml has pre-existing shellcheck findings outside this report's scope.
+        # Keep actionlint's YAML/expression checks as a durable gate while the two smaller workflows retain full shellcheck coverage.
         ci_result = subprocess.run(
             [actionlint, "-shellcheck=", str(CI)],
             cwd=ROOT,
