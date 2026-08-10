@@ -1,0 +1,1 @@
+Require context-free blocking Hand tool requests to enter the human approval queue, preventing curated Hand auto-approval from bypassing per-user RBAC when sender and `force_human` context are unavailable (#6758) (@houko)

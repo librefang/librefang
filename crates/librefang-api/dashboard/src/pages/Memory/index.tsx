@@ -267,9 +267,9 @@ export function MemoryPage() {
         })}
         tone="destructive"
         confirmLabel={t("common.delete", { defaultValue: "Delete" })}
-        onConfirm={() => {
+        onConfirm={async () => {
           if (deleteConfirm) {
-            deleteMutation.mutate(deleteConfirm.id, {
+            await deleteMutation.mutateAsync(deleteConfirm.id, {
               onSuccess: () =>
                 addToast(
                   t("memory.delete_success", { defaultValue: "Memory deleted" }),
@@ -279,7 +279,6 @@ export function MemoryPage() {
                 addToast(err instanceof Error ? err.message : t("common.error"), "error"),
             });
           }
-          setDeleteConfirm(null);
         }}
         onClose={() => setDeleteConfirm(null)}
       />

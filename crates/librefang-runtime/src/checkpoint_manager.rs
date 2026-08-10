@@ -312,7 +312,8 @@ impl CheckpointManager {
         }
 
         // Take a pre-rollback snapshot so the user can undo the undo.
-        let pre_reason = format!("pre-rollback snapshot (restoring to {})", &commit_hash[..8]);
+        let display_hash = commit_hash.get(..8).unwrap_or(commit_hash);
+        let pre_reason = format!("pre-rollback snapshot (restoring to {display_hash})");
         if let Err(e) = self.snapshot(&work_dir, &pre_reason) {
             // Non-fatal: warn but continue with the restore.
             warn!("pre-rollback snapshot failed (continuing): {e}");
@@ -706,6 +707,7 @@ mod tests {
 
     #[test]
     fn valid_commit_hashes_are_accepted() {
+        assert!(CheckpointManager::validate_commit_hash("abcd").is_ok());
         assert!(CheckpointManager::validate_commit_hash("abcdef01").is_ok());
         assert!(CheckpointManager::validate_commit_hash("ABCDEF01").is_ok());
         assert!(CheckpointManager::validate_commit_hash(
@@ -731,6 +733,59 @@ mod tests {
             "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2a1b2c3d4e5f6a1b2c3d4e5f6f"
         )
         .is_err());
+    }
+
+    #[test]
+    fn restore_accepts_valid_commit_hash_shorter_than_eight_characters() {
+        let checkpoint_root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let manager = CheckpointManager::new(checkpoint_root.path().to_path_buf());
+        let tracked_file = workspace.path().join("tracked.txt");
+
+        std::fs::write(&tracked_file, "first version").unwrap();
+        let first_hash = manager
+            .snapshot(workspace.path(), "first snapshot")
+            .unwrap();
+        std::fs::write(&tracked_file, "second version").unwrap();
+        let second_hash = manager
+            .snapshot(workspace.path(), "second snapshot")
+            .unwrap();
+
+        let shadow = manager.shadow_repo_dir(&workspace.path().canonicalize().unwrap());
+        let (ok, short_hash, stderr) = run_git(
+            &["rev-parse", "--short=4", &first_hash],
+            &shadow,
+            workspace.path(),
+            GIT_TIMEOUT_SECS,
+            &[],
+        );
+        assert!(ok, "git failed to abbreviate {first_hash}: {stderr}");
+        assert!(
+            short_hash.len() < 8,
+            "test setup did not produce a commit abbreviation shorter than eight characters: \
+             first={first_hash}, second={second_hash}, abbreviation={short_hash}",
+        );
+
+        std::fs::write(&tracked_file, "third version").unwrap();
+        manager.restore(workspace.path(), &short_hash).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&tracked_file).unwrap(),
+            "first version"
+        );
+        let snapshots = manager.list_snapshots(workspace.path()).unwrap();
+        assert_eq!(
+            snapshots[0].message,
+            format!("pre-rollback snapshot (restoring to {short_hash})")
+        );
+
+        manager
+            .restore(workspace.path(), &snapshots[0].hash)
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tracked_file).unwrap(),
+            "third version"
+        );
     }
 
     #[test]

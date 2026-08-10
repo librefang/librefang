@@ -1,8 +1,6 @@
-//! [`kernel_handle::ApprovalGate`] — tool-approval policy + RBAC gate. Holds
-//! the synchronous "does this tool require approval?" predicates and the
-//! async request/submit/resolve flow used by the agent loop. Hand-tagged
-//! agents (curated trusted packages) auto-approve unless the per-user
-//! policy demanded human approval (RBAC M3, #3054).
+//! [`kernel_handle::ApprovalGate`] — tool-approval policy + RBAC gate.
+//! Holds the synchronous "does this tool require approval?" predicates and the async request/submit/resolve flow used by the agent loop.
+//! Hand-tagged agents (curated trusted packages) auto-approve on the context-carrying non-blocking path unless per-user policy demanded human approval (RBAC M3, #3054).
 
 use std::sync::Arc;
 
@@ -100,18 +98,11 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         action_summary: &str,
         session_id: Option<&str>,
     ) -> Result<librefang_types::approval::ApprovalDecision, kernel_handle::KernelOpError> {
-        use librefang_types::approval::{ApprovalDecision, ApprovalRequest as TypedRequest};
+        use librefang_types::approval::ApprovalRequest as TypedRequest;
 
-        // Hand agents are curated trusted packages — auto-approve tool execution.
-        // Check if this agent has a "hand:" tag indicating it was spawned by activate_hand().
-        if let Ok(aid) = agent_id.parse::<AgentId>() {
-            if let Some(entry) = self.agents.registry.get(aid) {
-                if entry.tags.iter().any(|t| t.starts_with("hand:")) {
-                    info!(agent_id, tool_name, "Auto-approved for hand agent");
-                    return Ok(ApprovalDecision::Approved);
-                }
-            }
-        }
+        // The blocking trait carries neither sender identity nor `force_human`.
+        // It therefore cannot prove that per-user policy allowed a hand-agent carve-out.
+        // Always queue a real approval on this context-free path; context-carrying hand execution uses `submit_tool_approval` below.
 
         let policy = self.governance.approval_manager.policy();
         let risk_level = crate::approval::ApprovalManager::classify_risk(tool_name);

@@ -1,0 +1,1 @@
+- Removed Tokio's multi-thread scheduler from the Rust sidecar SDK's published dependency features and moved its echo example to the current-thread runtime. (@houko)

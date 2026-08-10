@@ -159,6 +159,8 @@ channel_type = "slack"
 SLACK_APP_TOKEN = "xapp-..."
 SLACK_BOT_TOKEN = "xoxb-..."
 # SLACK_FORCE_FLAT_REPLIES = "false"   # 设为 "true" 将回复以顶层消息发送
+# SLACK_REACTIONS = "true"             # 设为 "false" 关闭 👀 / ✅ 处理回执
+# SLACK_PROGRESS_CARD = "true"         # 设为 "false" 关闭多步任务进度卡片
 ```
 
 8. 重启守护进程。
@@ -169,7 +171,14 @@ Slack 适配器使用 Socket Mode，通过 WebSocket 连接到 Slack 服务器�
 
 ### 处理状态反应（Reactions）
 
-Slack 适配器通过给用户消息加 reaction 显示"我在处理"反馈：收到时加 👀，回复发出后替换为 ✅。用 `SLACK_REACTIONS` 环境变量控制（默认 `true`，设为 `false` 关闭）。`already_reacted` / `no_reaction` 错误会被静默忽略（fail-open），所以 reaction 失败永远不会阻塞消息处理。详见 channels overview 的 [Reactions and Processing State](/zh/integrations/channels#reactions-and-processing-state)。
+Slack 适配器通过给触发这一轮对话的消息加 reaction 显示"我在处理"反馈：开始处理时加 👀，成功后替换为 ✅，失败则替换为 ❌。
+回执由守护进程的对话生命周期驱动，而不是由"收到消息"驱动，因此守护进程决定不回答的消息（未命中 mention-only 群组门禁、发送者被限流、bridge 自己处理掉的斜杠命令）根本不会被加上任何 reaction，而不是留下一个永远清不掉的 👀。
+用 `SLACK_REACTIONS` 环境变量控制（默认 `true`，设为 `false` 关闭）。
+`already_reacted` / `no_reaction` 错误会被静默忽略（fail-open），所以 reaction 失败永远不会阻塞消息处理。
+详见 channels overview 的 [Reactions and Processing State](/zh/integrations/channels#reactions-and-processing-state)。
+
+多步任务进度卡片（调用工具的对话会原地更新的 Block Kit 步骤列表）是独立的指示器，由 `SLACK_PROGRESS_CARD` 单独控制。
+它的默认值跟随 `SLACK_REACTIONS`，所以 `SLACK_REACTIONS=false` 依然意味着彻底安静；但两者现在可以分别设置：`SLACK_REACTIONS=false` 配 `SLACK_PROGRESS_CARD=true` 得到卡片但没有 emoji，反过来则只有回执没有卡片。
 
 ---
 

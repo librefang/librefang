@@ -30,10 +30,64 @@ const CODE_PLACEHOLDER_CLOSE: char = '\u{E001}';
 static RE_LINK: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").expect("link regex"));
 static RE_BOLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^*]+)\*\*").expect("bold regex"));
-// Single-star italic — careful not to match `**`.
-static RE_ITALIC: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?:^|[^*])\*([^*\n]+)\*(?:[^*]|$)").expect("italic regex"));
 static RE_CODE: Lazy<Regex> = Lazy::new(|| Regex::new(r"`([^`\n]+)`").expect("code regex"));
+
+fn is_single_star(bytes: &[u8], index: usize) -> bool {
+    bytes.get(index) == Some(&b'*')
+        && index.checked_sub(1).and_then(|i| bytes.get(i)) != Some(&b'*')
+        && bytes.get(index + 1) != Some(&b'*')
+}
+
+/// Replace paired single-star italic runs in one left-to-right pass.
+///
+/// Rust's `regex` crate deliberately has no look-around. A regex that consumes
+/// the character after a closing star cannot see that same character as the
+/// leading boundary of the next run, so `*a* *b*` skips `*b*`. Scanning the
+/// ASCII delimiter positions directly keeps that shared boundary available,
+/// leaves double-star and unclosed runs untouched, and remains O(n).
+fn render_single_star_italics(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut output = String::with_capacity(text.len());
+    let mut copied_through = 0usize;
+    let mut scan = 0usize;
+
+    while let Some(offset) = bytes[scan..].iter().position(|byte| *byte == b'*') {
+        let open = scan + offset;
+        if !is_single_star(bytes, open) {
+            scan = open + 1;
+            continue;
+        }
+
+        let mut candidate = open + 1;
+        let mut close = None;
+        while candidate < bytes.len() {
+            match bytes[candidate] {
+                b'\n' => break,
+                b'*' => {
+                    if candidate > open + 1 && is_single_star(bytes, candidate) {
+                        close = Some(candidate);
+                    }
+                    break;
+                }
+                _ => candidate += 1,
+            }
+        }
+
+        let Some(close) = close else {
+            scan = open + 1;
+            continue;
+        };
+        output.push_str(&text[copied_through..open]);
+        output.push_str("<i>");
+        output.push_str(&text[open + 1..close]);
+        output.push_str("</i>");
+        copied_through = close + 1;
+        scan = copied_through;
+    }
+
+    output.push_str(&text[copied_through..]);
+    output
+}
 
 /// Render one inline-Markdown chunk to HTML.
 fn render_inline_markdown(text: &str) -> String {
@@ -55,24 +109,7 @@ fn render_inline_markdown(text: &str) -> String {
         })
         .to_string();
 
-    // Italic — `replace_all` walks left-to-right and the regex consumes the surrounding non-`*` characters as part of each match's leading/trailing capture, so adjacent italics still resolve correctly in a single O(n) pass. The earlier `loop { replace; if unchanged break }` form was O(n²) on input with many italic runs (a 25 KB stream of `*a* *b* …` re-scanned the entire buffer per iteration, ~2.5 GB total scan).
-    let italics_done = RE_ITALIC
-        .replace_all(&with_bold, |caps: &regex::Captures<'_>| {
-            let m = caps.get(0).unwrap().as_str();
-            let inner = &caps[1];
-            // Preserve the leading non-`*` byte (and trailing non-`*` byte) so word boundaries don't drift.
-            let leading = m.chars().next().filter(|c| *c != '*').map_or("", |_| {
-                &m[..m.char_indices().nth(1).map(|(i, _)| i).unwrap_or(0)]
-            });
-            let trailing = if m.ends_with('*') {
-                ""
-            } else {
-                let last_idx = m.char_indices().last().map(|(i, _)| i).unwrap_or(m.len());
-                &m[last_idx..]
-            };
-            format!("{leading}<i>{inner}</i>{trailing}")
-        })
-        .to_string();
+    let italics_done = render_single_star_italics(&with_bold);
 
     // Links last so `[text](url)` inside bold/italic is recognised.
     // The URL is inserted into an HTML attribute, so a literal `"` in it (legal per RFC 3986 in query strings) would prematurely terminate the attribute — `sanitize_telegram_html::RE_ATTR` then reads the truncated href and the user lands somewhere wrong. Escape `"` to `&quot;` defensively. `&`, `<`, `>` were already escape_htmled before RE_LINK ran.
@@ -261,6 +298,24 @@ mod tests {
         let html = markdown_to_telegram_html("**bold** and *italic*");
         assert!(html.contains("<b>bold</b>"));
         assert!(html.contains("<i>italic</i>"));
+    }
+
+    #[test]
+    fn adjacent_italic_runs_are_all_rendered() {
+        let html = markdown_to_telegram_html("*first* *second* *third*");
+        assert_eq!(html.trim(), "<i>first</i> <i>second</i> <i>third</i>");
+    }
+
+    #[test]
+    fn italic_scan_preserves_double_stars_and_unclosed_runs() {
+        let html = markdown_to_telegram_html("**bold** and *unclosed");
+        assert_eq!(html.trim(), "<b>bold</b> and *unclosed");
+    }
+
+    #[test]
+    fn adjacent_italic_runs_preserve_unicode_boundaries() {
+        let html = markdown_to_telegram_html("*日本語* *😀*");
+        assert_eq!(html.trim(), "<i>日本語</i> <i>😀</i>");
     }
 
     #[test]

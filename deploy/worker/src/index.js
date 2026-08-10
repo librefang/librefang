@@ -2,27 +2,34 @@ const FLY_API = 'https://api.machines.dev/v1';
 const DOCKER_IMAGE = 'ghcr.io/librefang/librefang:latest';
 const REGION = 'nrt';
 
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
+export function createWorker(fetchImpl = globalThis.fetch) {
+  return {
+    async fetch(request) {
+      const url = new URL(request.url);
 
-    if (url.pathname === '/api/deploy' && request.method === 'POST') {
-      return handleDeploy(request, env);
-    }
+      if (url.pathname === '/api/deploy' && request.method === 'POST') {
+        return handleDeploy(request, fetchImpl);
+      }
 
-    return new Response(HTML, {
-      headers: { 'Content-Type': 'text/html; charset=utf-8' },
-    });
-  },
-};
+      return new Response(HTML, {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      });
+    },
+  };
+}
 
-async function handleDeploy(request, env) {
+export default createWorker();
+
+async function handleDeploy(request, fetchImpl) {
   try {
     const body = await request.json();
-    const { token } = body;
+    const { token, openrouterApiKey } = body;
 
     if (!token) {
       return json({ error: 'API Token is required' }, 400);
+    }
+    if (typeof openrouterApiKey !== 'string' || !openrouterApiKey.trim()) {
+      return json({ error: 'OpenRouter API Key is required' }, 400);
     }
 
     const headers = {
@@ -31,14 +38,14 @@ async function handleDeploy(request, env) {
     };
 
     // 1. Verify token
-    const orgsRes = await fetch(`${FLY_API}/apps`, { headers });
+    const orgsRes = await fetchImpl(`${FLY_API}/apps`, { headers });
     if (!orgsRes.ok) {
       return json({ error: 'Invalid API Token. Please check and try again.' }, 401);
     }
 
     // 2. Create app
     const appName = `librefang-${randomHex(6)}`;
-    const appRes = await fetch(`${FLY_API}/apps`, {
+    const appRes = await fetchImpl(`${FLY_API}/apps`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ app_name: appName, org_slug: 'personal' }),
@@ -52,14 +59,14 @@ async function handleDeploy(request, env) {
     const flyGraphQL = 'https://api.fly.io/graphql';
     const gqlHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 
-    await fetch(flyGraphQL, {
+    await fetchImpl(flyGraphQL, {
       method: 'POST',
       headers: gqlHeaders,
       body: JSON.stringify({
         query: `mutation { allocateIPAddress(input: { appId: "${appName}", type: shared_v4 }) { ipAddress { address type } } }`,
       }),
     });
-    await fetch(flyGraphQL, {
+    await fetchImpl(flyGraphQL, {
       method: 'POST',
       headers: gqlHeaders,
       body: JSON.stringify({
@@ -68,7 +75,7 @@ async function handleDeploy(request, env) {
     });
 
     // 4. Create volume
-    const volRes = await fetch(`${FLY_API}/apps/${appName}/volumes`, {
+    const volRes = await fetchImpl(`${FLY_API}/apps/${appName}/volumes`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ name: 'librefang_data', region: REGION, size_gb: 1 }),
@@ -78,15 +85,15 @@ async function handleDeploy(request, env) {
       return json({ error: `Failed to create volume: ${err}` }, 500);
     }
 
-    // 5. Build env
-    const builtinKey = env.OPENROUTER_API_KEY || '';
+    // 5. Build env exclusively from credentials supplied by this deployer.
+    // Never copy a Worker-level provider key into user-owned infrastructure.
     const env_vars = {
       LIBREFANG_HOME: '/data',
-      OPENROUTER_API_KEY: builtinKey,
+      OPENROUTER_API_KEY: openrouterApiKey.trim(),
     };
 
     // 6. Create machine
-    const machineRes = await fetch(`${FLY_API}/apps/${appName}/machines`, {
+    const machineRes = await fetchImpl(`${FLY_API}/apps/${appName}/machines`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -113,8 +120,12 @@ async function handleDeploy(request, env) {
     });
 
     if (!machineRes.ok) {
-      const err = await machineRes.text();
-      return json({ error: `Failed to create machine: ${err}` }, 500);
+      // This request contains the caller's provider key.
+      // Never reflect Fly's raw validation body because it may echo the submitted machine config.
+      return json(
+        { error: 'Failed to create machine. Check your Fly configuration and try again.' },
+        500,
+      );
     }
 
     const machine = await machineRes.json();
@@ -503,14 +514,14 @@ const HTML = `<!DOCTYPE html>
       <button class="back-btn" onclick="showPlatforms()">&larr; Back to platforms</button>
 
       <div class="badge-row">
-        <span class="badge"><span class="dot dot-green"></span>Free LLM included</span>
-        <span class="badge"><span class="dot dot-purple"></span>No API key needed</span>
+        <span class="badge"><span class="dot dot-green"></span>OpenRouter ready</span>
+        <span class="badge"><span class="dot dot-purple"></span>Bring your own key</span>
         <span class="badge"><span class="dot dot-orange"></span>1 GB storage</span>
       </div>
 
       <div id="form-section">
         <div class="free-note">
-          A free LLM (Step 3.5 Flash via OpenRouter) is pre-configured. Your instance works out of the box &mdash; no API keys required.
+          Step 3.5 Flash is pre-configured through OpenRouter. You provide your own OpenRouter API key, so the credential belongs only to your account and Fly machine.
         </div>
 
         <div class="card">
@@ -528,8 +539,18 @@ const HTML = `<!DOCTYPE html>
           <div class="step">
             <div class="step-num">2</div>
             <div class="step-content">
+              <div class="step-title">Get an OpenRouter API Key</div>
+              <div class="step-desc">
+                Create a key in <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener">OpenRouter settings</a>.
+                The deploy worker forwards it only into your Fly machine configuration and does not retain it.
+              </div>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num">3</div>
+            <div class="step-content">
               <div class="step-title">Paste and deploy</div>
-              <div class="step-desc">Your token is only sent to the Fly.io API and is never stored on our servers.</div>
+              <div class="step-desc">The deploy worker forwards your Fly token to Fly.io and does not retain it.</div>
             </div>
           </div>
         </div>
@@ -539,6 +560,10 @@ const HTML = `<!DOCTYPE html>
             <label>Fly.io API Token <span style="color:var(--red)">*</span></label>
             <input type="password" id="token" placeholder="fo1_xxxxxxxxxxxx" autocomplete="off" />
           </div>
+          <div class="field">
+            <label>OpenRouter API Key <span style="color:var(--red)">*</span></label>
+            <input type="password" id="openrouterApiKey" placeholder="sk-or-v1-xxxxxxxxxxxx" autocomplete="off" />
+          </div>
 
           <button class="btn" id="deployBtn" onclick="deploy()">Deploy to Fly.io</button>
 
@@ -547,7 +572,7 @@ const HTML = `<!DOCTYPE html>
             <div class="progress-step" id="ps-app"><span class="icon"></span> Creating app...</div>
             <div class="progress-step" id="ps-net"><span class="icon"></span> Allocating IP addresses...</div>
             <div class="progress-step" id="ps-vol"><span class="icon"></span> Creating persistent volume...</div>
-            <div class="progress-step" id="ps-machine"><span class="icon"></span> Launching machine with Step 3.5 Flash...</div>
+            <div class="progress-step" id="ps-machine"><span class="icon"></span> Launching machine with your OpenRouter key...</div>
           </div>
 
           <div class="error-msg" id="error"></div>
@@ -559,7 +584,7 @@ const HTML = `<!DOCTYPE html>
           <h2>Deployed!</h2>
           <p style="color:var(--dim); margin-bottom: 16px;">
             Your LibreFang instance is starting up (1-2 min).<br>
-            Free LLM (Step 3.5 Flash) is pre-configured and ready to use.
+            Step 3.5 Flash is pre-configured with your OpenRouter account.
           </p>
           <a class="result-link" id="appLink" href="#" target="_blank">Open Dashboard</a>
           <a class="result-link secondary" id="flyLink" href="#" target="_blank">Fly.io Console</a>
@@ -588,7 +613,7 @@ const HTML = `<!DOCTYPE html>
         <details>
           <summary style="color:var(--dim);font-size:0.85rem;cursor:pointer;">How to add or change LLM provider after deploy?</summary>
           <div style="color:var(--dim);font-size:0.85rem;line-height:1.6;padding:8px 0 0 16px;">
-            <code style="color:var(--green);background:var(--bg);padding:2px 6px;border-radius:4px;">flyctl secrets set OPENAI_API_KEY=sk-... --app your-app-name</code><br>
+            <code style="color:var(--green);background:var(--bg);padding:2px 6px;border-radius:4px;">flyctl secrets set OPENROUTER_API_KEY=sk-or-... --app your-app-name</code><br>
             Then edit <code style="color:var(--green);">/data/config.toml</code> via <code style="color:var(--green);">flyctl ssh console</code> to update the default model.
           </div>
         </details>
@@ -624,7 +649,9 @@ const HTML = `<!DOCTYPE html>
 
     async function deploy() {
       const token = document.getElementById('token').value.trim();
+      const openrouterApiKey = document.getElementById('openrouterApiKey').value.trim();
       if (!token) { showError('Please enter your Fly.io API Token.'); return; }
+      if (!openrouterApiKey) { showError('Please enter your OpenRouter API Key.'); return; }
 
       const btn = document.getElementById('deployBtn');
       const progress = document.getElementById('progress');
@@ -652,7 +679,7 @@ const HTML = `<!DOCTYPE html>
         const res = await fetch('/api/deploy', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token }),
+          body: JSON.stringify({ token, openrouterApiKey }),
         });
 
         clearInterval(stepInterval);
@@ -671,8 +698,8 @@ const HTML = `<!DOCTYPE html>
         document.getElementById('flyLink').href = data.dashboardUrl;
         document.getElementById('resultInfo').innerHTML =
           'App: <code>' + data.appName + '</code> &bull; Region: <code>' + data.region + '</code><br>' +
-          'Model: <code>Step 3.5 Flash (free)</code><br>' +
-          'Upgrade model: <code>flyctl secrets set OPENAI_API_KEY=sk-... --app ' + data.appName + '</code>';
+          'Model: <code>Step 3.5 Flash via your OpenRouter account</code><br>' +
+          'Rotate key: <code>flyctl secrets set OPENROUTER_API_KEY=sk-or-... --app ' + data.appName + '</code>';
       } catch (err) {
         clearInterval(stepInterval);
         showError(err.message);
