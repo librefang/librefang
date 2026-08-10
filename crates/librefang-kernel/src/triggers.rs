@@ -304,12 +304,26 @@ pub struct TriggerEngine {
     triggers: DashMap<TriggerId, Trigger>,
     /// Index: agent_id → list of trigger IDs belonging to that agent.
     agent_triggers: DashMap<AgentId, Vec<TriggerId>>,
-    /// Per-trigger last fire wall-clock timestamp for cooldown enforcement.
+    /// Last fire wall-clock timestamp per cooldown window (issue #6756).
     ///
-    /// Uses `DateTime<Utc>` rather than `std::time::Instant` so that the state
-    /// can be round-tripped through the `Trigger.last_fired_at` field on disk,
+    /// Keyed on `(trigger, subject)` rather than on the trigger alone, where
+    /// the subject is what the event is *about* — a task id, a memory key —
+    /// for the patterns that name one. A window keyed on the trigger cannot
+    /// tell "the same thing fired twice" from "two different things happened
+    /// a second apart", and silently discarded the second, which for a task
+    /// board means the work is never announced again.
+    ///
+    /// Entries with `None` are the trigger-wide window used by patterns that
+    /// identify no subject (`All`, `System`, `ContentMatch`, …), so a
+    /// catch-all keeps exactly the rate cap it has today.
+    ///
+    /// Uses `DateTime<Utc>` rather than `std::time::Instant` so the trigger-wide
+    /// entry can be round-tripped through `Trigger.last_fired_at` on disk,
     /// surviving daemon restarts without resetting all cooldown windows.
-    last_fired: DashMap<TriggerId, DateTime<Utc>>,
+    /// Per-subject entries stay in memory: a restart then costs at most one
+    /// extra fire per subject, which is the safe direction, and it keeps the
+    /// persisted field meaning what it says.
+    last_fired: DashMap<(TriggerId, Option<String>), DateTime<Utc>>,
     /// Maximum number of triggers that can fire from a single event.
     max_triggers_per_event: usize,
     /// Default cooldown duration (seconds) applied when a trigger has no override.
@@ -410,7 +424,7 @@ impl TriggerEngine {
             // This ensures that a trigger which fired shortly before a restart
             // still honours its cooldown window after the daemon comes back up.
             if let Some(last_fired_at) = trigger.last_fired_at {
-                self.last_fired.insert(id, last_fired_at);
+                self.last_fired.insert((id, None), last_fired_at);
             }
             self.triggers.insert(id, trigger);
             // Guard against duplicate IDs in a corrupted file: only add to the
@@ -444,7 +458,7 @@ impl TriggerEngine {
             .iter()
             .map(|e| {
                 let mut t = e.value().clone();
-                if let Some(ts) = self.last_fired.get(&t.id) {
+                if let Some(ts) = self.last_fired.get(&(t.id, None)) {
                     t.last_fired_at = Some(*ts);
                 }
                 t
@@ -647,7 +661,7 @@ impl TriggerEngine {
             if let Some(mut list) = self.agent_triggers.get_mut(&trigger.agent_id) {
                 list.retain(|id| *id != trigger_id);
             }
-            self.last_fired.remove(&trigger_id);
+            self.forget_cooldowns(trigger_id);
             true
         } else {
             false
@@ -659,7 +673,7 @@ impl TriggerEngine {
         if let Some((_, trigger_ids)) = self.agent_triggers.remove(&agent_id) {
             for id in trigger_ids {
                 self.triggers.remove(&id);
-                self.last_fired.remove(&id);
+                self.forget_cooldowns(id);
             }
         }
     }
@@ -679,7 +693,7 @@ impl TriggerEngine {
         let mut taken = Vec::with_capacity(trigger_ids.len());
         for id in trigger_ids {
             if let Some((_, t)) = self.triggers.remove(&id) {
-                self.last_fired.remove(&id);
+                self.forget_cooldowns(id);
                 taken.push(t);
             }
         }
@@ -813,9 +827,11 @@ impl TriggerEngine {
         }
         let id = t.id;
         drop(entry);
-        // Pattern change means the trigger is logically new — clear any stale cooldown timer.
+        // Pattern change means the trigger is logically new — clear any stale
+        // cooldown timer, including per-subject windows the old pattern opened
+        // whose subjects the new one may not even have (#6756).
         if pattern_changed {
-            self.last_fired.remove(&id);
+            self.forget_cooldowns(id);
         }
         self.triggers.get(&id).map(|t| t.clone())
     }
@@ -913,12 +929,16 @@ impl TriggerEngine {
                 continue;
             }
 
-            // Check per-trigger cooldown using wall-clock timestamps so that
-            // cooldown windows survive daemon restarts.
+            // Check the cooldown window using wall-clock timestamps so that
+            // windows survive daemon restarts. The window is scoped to the
+            // event's subject where the pattern names one (#6756), so a second
+            // task completing a second after the first is a distinct window
+            // rather than a suppressed repeat.
+            let subject = cooldown_subject(&trigger.pattern, event);
             let cooldown =
                 Duration::from_secs(trigger.cooldown_secs.unwrap_or(self.default_cooldown_secs));
             if !cooldown.is_zero() {
-                if let Some(last) = self.last_fired.get(&trigger.id) {
+                if let Some(last) = self.last_fired.get(&(trigger.id, subject.clone())) {
                     // `now - *last` is negative when `*last > now`, which can happen
                     // if the wall clock stepped backwards (NTP correction, manual
                     // adjustment, VM snapshot restore) or if the persisted
@@ -997,7 +1017,15 @@ impl TriggerEngine {
                 });
                 trigger.fire_count += 1;
                 state_mutated = true;
-                self.last_fired.insert(trigger.id, now);
+                // Stamp the window that was actually consulted, and the
+                // trigger-wide entry alongside it so `last_fired_at` on disk
+                // keeps meaning "when this trigger last fired" for operators
+                // and for restart recovery.
+                self.last_fired.insert((trigger.id, subject.clone()), now);
+                if subject.is_some() {
+                    self.last_fired.insert((trigger.id, None), now);
+                }
+                self.prune_expired_cooldowns(now);
 
                 debug!(
                     trigger_id = %trigger.id,
@@ -1077,6 +1105,43 @@ impl TriggerEngine {
         } else {
             TaskPostedCoverage::Dormant(dormant)
         }
+    }
+
+    /// Drop cooldown entries that can no longer suppress anything.
+    ///
+    /// Per-subject windows are unbounded in principle — one entry per task id
+    /// a trigger ever saw — so without this a long-lived daemon on a busy board
+    /// would accumulate them for the life of the process. An entry older than
+    /// the longest window any trigger could be using is dead weight: the check
+    /// that consults it can only ever conclude "elapsed", so removing it is
+    /// invisible.
+    ///
+    /// Runs only once the map is larger than a fire could plausibly need, so
+    /// the common path pays a length check rather than a scan.
+    fn prune_expired_cooldowns(&self, now: DateTime<Utc>) {
+        const PRUNE_THRESHOLD: usize = 4096;
+        if self.last_fired.len() < PRUNE_THRESHOLD {
+            return;
+        }
+        let longest = self
+            .triggers
+            .iter()
+            .map(|t| t.cooldown_secs.unwrap_or(self.default_cooldown_secs))
+            .max()
+            .unwrap_or(self.default_cooldown_secs);
+        let horizon = chrono::Duration::seconds(longest as i64);
+        // Keep the trigger-wide entries regardless: they are bounded by the
+        // trigger count and back `last_fired_at` on disk.
+        self.last_fired
+            .retain(|(_, subject), last| subject.is_none() || now - *last < horizon);
+    }
+
+    /// Drop every cooldown window belonging to a trigger — the trigger-wide
+    /// entry and each per-subject one (#6756). A trigger that is gone or whose
+    /// pattern changed must not leave windows behind that would suppress its
+    /// successor.
+    fn forget_cooldowns(&self, trigger_id: TriggerId) {
+        self.last_fired.retain(|(id, _), _| *id != trigger_id);
     }
 
     /// Get a trigger by ID.
@@ -1535,6 +1600,40 @@ pub(crate) fn tests_support_task_posted_event(task_id: &str, assigned_to: &str) 
             created_by: None,
         }),
     )
+}
+
+/// What a matching event is *about*, for the cooldown window (issue #6756).
+///
+/// `Some(subject)` narrows the window to that subject, so two distinct
+/// subjects arriving inside one window no longer suppress each other; `None`
+/// keeps the trigger-wide window.
+///
+/// Deliberately driven by the **pattern**, not by whatever the event happens
+/// to carry. A pattern that names a subject is one where two subjects are
+/// definitionally two units of work — a second task is not a repeat of the
+/// first, and nothing will re-announce it. A catch-all (`All`, `System`,
+/// `Lifecycle`, `ContentMatch`, …) matches a stream whose subjects are nearly
+/// always distinct, so keying on them would turn "at most once per window"
+/// into "once per event" — the opposite of what an operator asked for by
+/// setting a cooldown on a wildcard.
+fn cooldown_subject(pattern: &TriggerPattern, event: &Event) -> Option<String> {
+    match pattern {
+        TriggerPattern::TaskPosted { .. }
+        | TriggerPattern::TaskClaimed { .. }
+        | TriggerPattern::TaskCompleted { .. } => match &event.payload {
+            EventPayload::System(SystemEvent::TaskPosted { task_id, .. })
+            | EventPayload::System(SystemEvent::TaskClaimed { task_id, .. })
+            | EventPayload::System(SystemEvent::TaskCompleted { task_id, .. }) => {
+                Some(task_id.clone())
+            }
+            _ => None,
+        },
+        TriggerPattern::MemoryKeyPattern { .. } => match &event.payload {
+            EventPayload::MemoryUpdate(delta) => Some(delta.key.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Create a human-readable description of an event for use in prompts.
@@ -2172,7 +2271,7 @@ mod tests {
         // the bug's `unwrap_or(Duration::ZERO)` path would suppress every
         // fire for the next hour.
         let future = Utc::now() + chrono::Duration::hours(1);
-        engine.last_fired.insert(tid, future);
+        engine.last_fired.insert((tid, None), future);
 
         let event = Event::new(
             AgentId::new(),
@@ -2192,7 +2291,7 @@ mod tests {
         // After firing, `last_fired` is rewritten to `now` (≤ Utc::now() at
         // the assertion point) — the anomaly has self-healed and normal
         // cooldown behaviour resumes.
-        let stamped = *engine.last_fired.get(&tid).unwrap();
+        let stamped = *engine.last_fired.get(&(tid, None)).unwrap();
         assert!(
             stamped <= Utc::now(),
             "last_fired must be reset to a non-future timestamp after firing"
@@ -2285,11 +2384,11 @@ mod tests {
 
         // Fire to create a last_fired entry
         engine.evaluate(&event);
-        assert!(engine.last_fired.contains_key(&tid));
+        assert!(engine.last_fired.contains_key(&(tid, None)));
 
         // Remove should clean up
         engine.remove(tid);
-        assert!(!engine.last_fired.contains_key(&tid));
+        assert!(!engine.last_fired.contains_key(&(tid, None)));
     }
 
     #[test]
@@ -3238,7 +3337,7 @@ mod tests {
         // Fire once to set last_fired
         let (matches, _) = engine1.evaluate(&event);
         assert_eq!(matches.len(), 1, "First fire must succeed");
-        assert!(engine1.last_fired.contains_key(&tid));
+        assert!(engine1.last_fired.contains_key(&(tid, None)));
 
         // Persist (stamps last_fired_at into the trigger JSON)
         engine1.persist().unwrap();
@@ -3966,6 +4065,212 @@ mod tests {
         assert_eq!(
             engine.task_posted_coverage_for(worker, Some("worker"), |_| None),
             TaskPostedCoverage::None,
+        );
+    }
+
+    // -- subject-scoped cooldown (#6756) ---------------------------------------
+
+    fn completion_of(task_id: &str, creator: AgentId) -> Event {
+        Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::TaskCompleted {
+                task_id: task_id.to_string(),
+                completed_by: "worker".to_string(),
+                result: format!("result of {task_id}"),
+                created_by: Some(creator.to_string()),
+            }),
+        )
+    }
+
+    /// The reported defect, verbatim from the issue: two distinct tasks
+    /// finishing back to back — what any drain loop produces — must notify
+    /// twice. Before this change the second event was discarded, not delayed,
+    /// and nothing re-announced it.
+    #[test]
+    fn distinct_task_completions_inside_one_window_both_fire() {
+        let engine = TriggerEngine::new(); // default cooldown_secs = 5
+        let orchestrator = AgentId::new();
+        engine
+            .register(
+                orchestrator,
+                TriggerPattern::TaskCompleted {
+                    creator_match: None,
+                },
+                "notify the human: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let (first, _) =
+            engine.evaluate_with_resolver(&completion_of("task-1", orchestrator), |_| None);
+        let (second, _) =
+            engine.evaluate_with_resolver(&completion_of("task-2", orchestrator), |_| None);
+
+        assert_eq!(first.len(), 1, "first completion notifies");
+        assert_eq!(
+            second.len(),
+            1,
+            "a distinct task's completion is a distinct window, not a repeat"
+        );
+    }
+
+    /// The storm protection the knob exists for still works: the *same*
+    /// subject arriving twice inside the window is a repeat and is suppressed.
+    #[test]
+    fn a_repeat_of_the_same_subject_is_still_suppressed() {
+        let engine = TriggerEngine::new();
+        let orchestrator = AgentId::new();
+        engine
+            .register(
+                orchestrator,
+                TriggerPattern::TaskCompleted {
+                    creator_match: None,
+                },
+                "notify: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let event = completion_of("task-1", orchestrator);
+        let (first, _) = engine.evaluate_with_resolver(&event, |_| None);
+        let (again, _) = engine.evaluate_with_resolver(&event, |_| None);
+
+        assert_eq!(first.len(), 1);
+        assert!(
+            again.is_empty(),
+            "the same subject inside the window is exactly what cooldown is for"
+        );
+    }
+
+    /// A catch-all keeps the rate cap it has today. Keying its window on the
+    /// subject would turn "at most once per window" into "once per event" for
+    /// a trigger whose whole point is a bounded firehose.
+    #[test]
+    fn a_catch_all_trigger_keeps_its_trigger_wide_window() {
+        let engine = TriggerEngine::new();
+        let watcher = AgentId::new();
+        engine
+            .register(
+                watcher,
+                TriggerPattern::All,
+                "saw: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let (first, _) = engine.evaluate_with_resolver(&completion_of("task-1", watcher), |_| None);
+        let (second, _) =
+            engine.evaluate_with_resolver(&completion_of("task-2", watcher), |_| None);
+
+        assert_eq!(first.len(), 1);
+        assert!(
+            second.is_empty(),
+            "distinct subjects must not widen a catch-all's window"
+        );
+    }
+
+    /// Memory updates get the same treatment as task-board events: two keys
+    /// changing inside one window are two facts, not one repeated.
+    #[test]
+    fn distinct_memory_keys_inside_one_window_both_fire() {
+        let engine = TriggerEngine::new();
+        let agent = AgentId::new();
+        engine
+            .register(
+                agent,
+                TriggerPattern::MemoryKeyPattern {
+                    key_pattern: "project/".to_string(),
+                },
+                "memory changed: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let update = |key: &str| {
+            Event::new(
+                agent,
+                EventTarget::Broadcast,
+                EventPayload::MemoryUpdate(librefang_types::event::MemoryDelta {
+                    agent_id: agent,
+                    key: key.to_string(),
+                    operation: librefang_types::event::MemoryOperation::Updated,
+                }),
+            )
+        };
+
+        let (first, _) = engine.evaluate_with_resolver(&update("project/alpha"), |_| None);
+        let (second, _) = engine.evaluate_with_resolver(&update("project/beta"), |_| None);
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1, "a different key is a different subject");
+    }
+
+    /// `last_fired_at` on disk keeps meaning "when this trigger last fired",
+    /// so restart recovery and the operator-facing field are unaffected by the
+    /// window being subject-scoped in memory.
+    #[test]
+    fn firing_on_a_subject_still_stamps_the_trigger_wide_entry() {
+        let engine = TriggerEngine::new();
+        let orchestrator = AgentId::new();
+        let tid = engine
+            .register(
+                orchestrator,
+                TriggerPattern::TaskCompleted {
+                    creator_match: None,
+                },
+                "notify: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let (fired, _) =
+            engine.evaluate_with_resolver(&completion_of("task-1", orchestrator), |_| None);
+        assert_eq!(fired.len(), 1);
+
+        assert!(
+            engine
+                .last_fired
+                .contains_key(&(tid, Some("task-1".to_string()))),
+            "the subject window is what the next check consults"
+        );
+        assert!(
+            engine.last_fired.contains_key(&(tid, None)),
+            "the trigger-wide entry backs last_fired_at on disk"
+        );
+    }
+
+    /// Removing a trigger must take its per-subject windows with it, or a
+    /// successor registered with the same id space would inherit suppression
+    /// it never earned.
+    #[test]
+    fn removing_a_trigger_forgets_every_subject_window() {
+        let engine = TriggerEngine::new();
+        let orchestrator = AgentId::new();
+        let tid = engine
+            .register(
+                orchestrator,
+                TriggerPattern::TaskCompleted {
+                    creator_match: None,
+                },
+                "notify: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+        engine.evaluate_with_resolver(&completion_of("task-1", orchestrator), |_| None);
+        engine.evaluate_with_resolver(&completion_of("task-2", orchestrator), |_| None);
+        assert!(engine.last_fired.iter().count() >= 2);
+
+        assert!(engine.remove(tid));
+
+        assert_eq!(
+            engine
+                .last_fired
+                .iter()
+                .filter(|e| e.key().0 == tid)
+                .count(),
+            0,
+            "no window of a removed trigger may survive"
         );
     }
 }
