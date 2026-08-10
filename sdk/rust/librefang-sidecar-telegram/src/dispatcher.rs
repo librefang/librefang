@@ -1,11 +1,11 @@
 //! Outbound dispatch: SDK `Content` value → Telegram Bot API call.
 //!
 //! Mirrors the Python adapter's `_dispatch_content` / `_send_*` family.
-//! All text routes go through `format_and_sanitize` → `split_to_utf16_chunks` → `sendMessage` (HTML parse mode), with a "can't parse entities" automatic fallback to plain text. The same fallback is applied to single-item captioned media (Image / Voice / Video / Audio / Animation) so a malformed sanitiser output never silently drops the media send. MediaGroup does NOT have a per-item fallback — it's an atomic Bot API call and a parse error on ANY item caption fails the whole group; callers that need fallback-per-item should send items individually.
+//! All text routes go through `format_sanitize_and_chunk` → `sendMessage` (HTML parse mode), with a "can't parse entities" automatic fallback to plain text. The same fallback is applied to single-item captioned media (Image / Voice / Video / Audio / Animation) so a malformed sanitiser output never silently drops the media send. MediaGroup does NOT have a per-item fallback — it's an atomic Bot API call and a parse error on ANY item caption fails the whole group; callers that need fallback-per-item should send items individually.
 
 use crate::api::types::InlineKeyboardButton as TgButton;
 use crate::api::{BotClient, Error, Result};
-use crate::format::{format_and_sanitize, split_to_utf16_chunks, TELEGRAM_MSG_LIMIT};
+use crate::format::{format_and_sanitize, format_sanitize_and_chunk};
 use serde_json::{json, Value};
 
 const PARSE_MODE_HTML: &str = "HTML";
@@ -31,6 +31,13 @@ fn prepare_caption(raw: Option<&str>) -> Option<String> {
     Some(crate::format::truncate_to_utf16_limit(&formatted, CAPTION_LIMIT_UTF16).to_string())
 }
 
+fn required_coordinate(payload: &Value, key: &str) -> Result<f64> {
+    payload
+        .get(key)
+        .and_then(Value::as_f64)
+        .ok_or_else(|| Error::Other(format!("Location.{key} missing or not a JSON number")))
+}
+
 /// Truncate a raw (un-formatted) caption to the Bot API limit for the plain-text fallback.
 fn truncate_raw_caption(raw: Option<&str>) -> Option<String> {
     let raw = raw.map(str::trim).filter(|s| !s.is_empty())?;
@@ -44,8 +51,7 @@ pub async fn send_text(
     text: &str,
     thread_id: Option<i64>,
 ) -> Result<()> {
-    let formatted = format_and_sanitize(text);
-    for chunk in split_to_utf16_chunks(&formatted, TELEGRAM_MSG_LIMIT) {
+    for chunk in format_sanitize_and_chunk(text) {
         match client
             .send_message(chat_id, &chunk, Some(PARSE_MODE_HTML), thread_id, None)
             .await
@@ -367,8 +373,8 @@ pub async fn dispatch_content(
                 .await?;
         }
         "Location" => {
-            let lat = payload.get("lat").and_then(Value::as_f64).unwrap_or(0.0);
-            let lon = payload.get("lon").and_then(Value::as_f64).unwrap_or(0.0);
+            let lat = required_coordinate(payload, "lat")?;
+            let lon = required_coordinate(payload, "lon")?;
             client.send_location(chat_id, lat, lon, thread_id).await?;
         }
         "Command" => {
@@ -634,4 +640,25 @@ fn looks_like_ogg_opus(bytes: &[u8]) -> bool {
     }
     // OpusHead magic appears at byte 28 in a standard Ogg/Opus stream.
     &bytes[28..36] == b"OpusHead"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn location_coordinates_are_required_numbers() {
+        let valid = json!({"lat": 35.6812, "lon": 139.7671});
+        assert_eq!(required_coordinate(&valid, "lat").unwrap(), 35.6812);
+        assert_eq!(required_coordinate(&valid, "lon").unwrap(), 139.7671);
+
+        for malformed in [
+            json!({"lon": 139.7671}),
+            json!({"lat": "35.6812", "lon": 139.7671}),
+            json!({"lat": null, "lon": 139.7671}),
+        ] {
+            let error = required_coordinate(&malformed, "lat").expect_err("invalid latitude");
+            assert!(error.to_string().contains("Location.lat"));
+        }
+    }
 }
