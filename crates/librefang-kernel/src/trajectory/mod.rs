@@ -116,9 +116,8 @@ impl CompiledPatterns {
                 // typically >= 20 chars.
                 jwt: Regex::new(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b")
                     .expect("jwt regex must compile"),
-                // Standalone base64 candidate > 40 chars. The replacement
-                // step additionally requires a base64-specific `+`, `/`, or
-                // padding marker so plain hex digests are preserved.
+                // Standalone base64 candidate > 40 chars.
+                // The replacement step additionally requires a base64-specific `+`, `/`, or padding marker so plain hex digests are preserved.
                 long_b64: Regex::new(r"\b[A-Za-z0-9+/]{40,}={0,2}")
                     .expect("long_b64 regex must compile"),
             }
