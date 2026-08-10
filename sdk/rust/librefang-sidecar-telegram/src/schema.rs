@@ -49,6 +49,7 @@ mod tests {
             .expect("schema must declare TELEGRAM_BOT_TOKEN");
         assert_eq!(bot_token.field_type, FieldType::Secret);
         assert!(bot_token.required);
+        assert!(!bot_token.advanced);
 
         let allowed_users = schema
             .fields
