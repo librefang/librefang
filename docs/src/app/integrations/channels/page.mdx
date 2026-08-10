@@ -246,7 +246,10 @@ Other channels keep their previous formatter defaults — only Signal flipped.
 
 Several adapters can show "I'm working on it" feedback by attaching a reaction to the user's message and removing it once the reply is sent. This is per-channel:
 
-- **Slack** — `reactions_enabled` toggle (env var `SLACK_REACTIONS`, default `true`). Adds 👀 on receive, replaces with ✅ on reply. `already_reacted` / `no_reaction` errors are silently ignored (fail-open).
+- **Slack** — `reactions_enabled` toggle (env var `SLACK_REACTIONS`, default `true`). Adds 👀 when a turn starts, replaces it with ✅ when the turn succeeds and ❌ when it fails.
+  Driven by the daemon's turn lifecycle rather than by receiving the message, so a message the daemon declines to answer (mention-only group gating, a rate limit, a slash command handled in-bridge) gets nothing rather than a 👀 nobody ever clears.
+  The multi-step task-progress card is a separate indicator with its own `SLACK_PROGRESS_CARD` switch, defaulting to whatever `SLACK_REACTIONS` is.
+  `already_reacted` / `no_reaction` errors are silently ignored (fail-open).
 - **Feishu** — adds a `Typing` reaction on receive, removes it on reply send. Both calls are fire-and-forget; API failures `warn!` but never block message processing.
 
 Add the same on a custom adapter by spawning the reaction call as a `tokio::spawn` task and storing `(reaction_id, message_id)` in a per-chat map keyed off the chat id.

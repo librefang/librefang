@@ -18,6 +18,7 @@ tracing = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
 metrics = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
 # Serialises the env-mutating ElevenLabs voice_id validator tests so

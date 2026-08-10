@@ -1076,27 +1076,32 @@ interface GitHubStatsData {
   starHistory?: { stars: number }[]
 }
 
-function GitHubStats({ t }: SectionProps) {
+export function GitHubStats({ t }: SectionProps) {
   const gs = t.githubStats
   if (!gs) return null
-  const common = t.common!
+  return <GitHubStatsContent t={t} gs={gs} />
+}
 
-  /* eslint-disable react-hooks/rules-of-hooks */
+function GitHubStatsContent({ t, gs }: SectionProps & { gs: NonNullable<Translation['githubStats']> }) {
   const [data, setData] = useState<GitHubStatsData | null>(null)
   const [docsVisits, setDocsVisits] = useState(0)
   const [loading, setLoading] = useState(true)
-  /* eslint-enable react-hooks/rules-of-hooks */
 
   useEffect(() => {
+    const controller = new AbortController()
     Promise.all([
-      fetch('https://stats.librefang.ai/api/github').then(r => r.ok ? r.json() as Promise<GitHubStatsData> : null).catch(() => null),
-      fetch('https://counter.librefang.ai/api').then(r => r.ok ? r.json() as Promise<{ total: number }> : { total: 0 }).catch(() => ({ total: 0 })),
+      fetch('https://stats.librefang.ai/api/github', { signal: controller.signal }).then(r => r.ok ? r.json() as Promise<GitHubStatsData> : null).catch(() => null),
+      fetch('https://counter.librefang.ai/api', { signal: controller.signal }).then(r => r.ok ? r.json() as Promise<{ total: number }> : { total: 0 }).catch(() => ({ total: 0 })),
     ]).then(([gh, docs]) => {
+      if (controller.signal.aborted) return
       setData(gh)
       setDocsVisits(docs?.total || 0)
       setLoading(false)
     })
+    return () => controller.abort()
   }, [])
+
+  const common = t.common!
 
   const stars = data?.stars ?? 0
   const forks = data?.forks ?? 0
