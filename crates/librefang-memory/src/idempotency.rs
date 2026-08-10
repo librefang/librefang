@@ -451,9 +451,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let pool = Pool::builder()
             .max_size(2)
-            .build(SqliteConnectionManager::file(
-                temp.path().join("idempotency.db"),
-            ))
+            .build(
+                SqliteConnectionManager::file(temp.path().join("idempotency.db"))
+                    .with_init(|c| c.execute_batch(crate::substrate::DEFAULT_CONNECTION_PRAGMAS)),
+            )
             .unwrap();
         run_migrations(&pool.get().unwrap()).unwrap();
         let store = SqliteIdempotencyStore::new(pool);
