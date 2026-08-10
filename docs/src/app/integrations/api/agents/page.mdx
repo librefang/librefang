@@ -592,7 +592,14 @@ A `task_posted` trigger can opt to fire only when the task is assigned to the ag
 `assignee_match` accepts:
 
 - `"self"` — fire only when `task.assignee_id == agent.id`. Use this for "I should work on tasks assigned to me" agents.
-- `"any"` (default) — legacy behaviour; fires on every `task_posted` event regardless of assignee.
+- `"unassigned"` — fire only for work nobody owns.
+  Matches both spellings that reach the event: an absent assignee and an empty one, since neither the `task_post` tool nor `POST /api/tasks` normalises the field.
+- Omitting `assignee_match` (or sending `null`) — legacy behaviour; fires on every `task_posted` event regardless of assignee.
+  The literal string `"any"` is **not** a special keyword here, unlike `"self"` and `"unassigned"`: sending `"assignee_match": "any"` falls through to the exact-string match arm, so it only fires for a task literally assigned to an agent named `"any"`.
+  Omit the field entirely to get the fire-for-all default.
+
+Note that `"unassigned"` reacts to a task being *posted* without an owner, not to one becoming unowned later.
+A claim released by the stuck-task sweeper publishes no event, so it does not wake this trigger — see #6728.
 
 ### GET /api/triggers
 

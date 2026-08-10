@@ -306,7 +306,7 @@ jobs:
               sys.exit(1)
           print(f'{len(glob.glob(".github/workflows/*.yml"))} workflow files parse and declare triggers + jobs')
           PY
-      - name: Check release-tag workflow input safety
+      - name: Check release workflow input safety
         run: python3 scripts/tests/test_release_tag_workflow_safety.py
       - name: Check formatting
         run: cargo xtask fmt
