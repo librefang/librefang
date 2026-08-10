@@ -25,8 +25,13 @@ const ALLOWED_TAGS: &[&str] = &[
 const ALLOWED_HREF_SCHEMES: &[&str] = &["https:", "http:", "mailto:", "tg:"];
 
 static RE_TAG: Lazy<Regex> = Lazy::new(|| {
-    // Match either an opening tag `<name attrs>` or a closing tag `</name>` or a self-closing variant.
-    Regex::new(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)([^>]*)>").expect("tag regex")
+    // Match either an opening tag `<name attrs>` or a closing tag `</name>`
+    // or a self-closing variant. Quoted attribute values are matched as whole
+    // units so a literal `>` inside either quote style cannot terminate the
+    // surrounding tag early. The final `[^>]` fallback deliberately accepts
+    // an unmatched quote up to the first `>` so malformed input still goes
+    // through the safe attribute rebuild instead of leaking as a raw tag.
+    Regex::new(r#"<(/?)([a-zA-Z][a-zA-Z0-9-]*)((?:"[^"]*"|'[^']*'|[^>])*)>"#).expect("tag regex")
 });
 
 static RE_ATTR: Lazy<Regex> = Lazy::new(|| {
@@ -44,6 +49,48 @@ fn escape_attr_value(v: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+fn entity_len(text: &str) -> Option<usize> {
+    let semicolon = text
+        .as_bytes()
+        .iter()
+        .take(13)
+        .position(|byte| *byte == b';')?;
+    if semicolon == 0 || semicolon > 12 {
+        return None;
+    }
+    let body = &text[1..semicolon];
+    let valid = matches!(body, "amp" | "lt" | "gt" | "quot")
+        || body.strip_prefix('#').is_some_and(|number| {
+            number.strip_prefix(['x', 'X']).map_or_else(
+                || !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()),
+                |hex| !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()),
+            )
+        });
+    valid.then_some(semicolon + 1)
+}
+
+fn push_escaped_literal(out: &mut String, text: &str) {
+    let mut cursor = 0;
+    while cursor < text.len() {
+        let tail = &text[cursor..];
+        let ch = tail.chars().next().expect("cursor is before end");
+        match ch {
+            '&' => {
+                if let Some(len) = entity_len(tail) {
+                    out.push_str(&tail[..len]);
+                    cursor += len;
+                    continue;
+                }
+                out.push_str("&amp;");
+            }
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+        cursor += ch.len_utf8();
+    }
 }
 
 fn rebuild_attrs(tag_name: &str, attr_str: &str) -> Option<String> {
@@ -84,7 +131,7 @@ pub fn sanitize_telegram_html(text: &str) -> String {
     for m in RE_TAG.find_iter(text) {
         // Append any literal text between the last cursor and this tag.
         if m.start() > cursor {
-            out.push_str(&text[cursor..m.start()]);
+            push_escaped_literal(&mut out, &text[cursor..m.start()]);
         }
         cursor = m.end();
 
@@ -98,7 +145,7 @@ pub fn sanitize_telegram_html(text: &str) -> String {
         let self_closing = attrs.trim_end().ends_with('/');
 
         if !ALLOWED_TAGS.contains(&tag.as_str()) {
-            // Drop the tag entirely (no inline escape — the surrounding text already had its `<` / `>` HTML-escaped by the caller / markdown converter).
+            // Drop the tag entirely. Literal segments are escaped independently.
             continue;
         }
 
@@ -138,7 +185,7 @@ pub fn sanitize_telegram_html(text: &str) -> String {
 
     // Trailing literal text.
     if cursor < text.len() {
-        out.push_str(&text[cursor..]);
+        push_escaped_literal(&mut out, &text[cursor..]);
     }
 
     // Auto-close anything still open.
@@ -181,6 +228,27 @@ mod tests {
     }
 
     #[test]
+    fn greater_than_inside_quoted_attributes_does_not_end_tag() {
+        let href = sanitize_telegram_html("<a href=\"https://example.com/a>b\">x</a>");
+        assert_eq!(href, "<a href=\"https://example.com/a&gt;b\">x</a>");
+
+        let class = sanitize_telegram_html("<code class='a>b'>x</code>");
+        assert_eq!(class, "<code class=\"a&gt;b\">x</code>");
+    }
+
+    #[test]
+    fn unterminated_attribute_quotes_fall_back_to_safe_tag_rebuild() {
+        let double = sanitize_telegram_html("<code class=\"unterminated>after");
+        assert_eq!(double, "<code>after</code>");
+
+        let single = sanitize_telegram_html("<code class='unterminated>after");
+        assert_eq!(single, "<code>after</code>");
+
+        let disallowed = sanitize_telegram_html("<script data=\"unterminated>bad");
+        assert_eq!(disallowed, "bad");
+    }
+
+    #[test]
     fn auto_closes_unclosed_tag() {
         let s = sanitize_telegram_html("<b>unclosed");
         assert_eq!(s, "<b>unclosed</b>");
@@ -199,5 +267,19 @@ mod tests {
             sanitize_telegram_html("<tg-emoji emoji-id=\"42\" />after"),
             "<tg-emoji emoji-id=\"42\"></tg-emoji>after"
         );
+    }
+
+    #[test]
+    fn escapes_literal_text_nodes_without_double_escaping_entities() {
+        let s = sanitize_telegram_html("a < b & c<b>d > e &amp; f</b>g &lt; h");
+        assert_eq!(s, "a &lt; b &amp; c<b>d &gt; e &amp; f</b>g &lt; h");
+    }
+
+    #[test]
+    fn many_bare_ampersands_are_processed_linearly() {
+        let input = "&".repeat(512 * 1024);
+        let output = sanitize_telegram_html(&input);
+        assert_eq!(output.len(), input.len() * "&amp;".len());
+        assert!(output.starts_with("&amp;&amp;"));
     }
 }

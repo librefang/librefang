@@ -102,7 +102,8 @@ The regex is `'-(beta|rc)\.?[0-9]'` — the `\.?` is what made the legacy
 - `calver_re_accepts_both_forms` — channel-pick validator accepts both.
 
 `xtask/src/sync_versions.rs::tests` mirrors the same coverage for
-`validate_calver`, the PEP 440 conversion, and the Tauri patch regex.
+`validate_calver`, the Python `pyproject.toml` PEP 440 update, and the Tauri
+patch regex.
 
 ## Operator quick reference
 

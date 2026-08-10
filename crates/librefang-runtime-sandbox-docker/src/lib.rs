@@ -713,6 +713,12 @@ pub fn config_hash(config: &DockerSandboxConfig) -> u64 {
     config.network.hash(&mut hasher);
     config.memory_limit.hash(&mut hasher);
     config.workdir.hash(&mut hasher);
+    config.cpu_limit.to_bits().hash(&mut hasher);
+    config.read_only_root.hash(&mut hasher);
+    config.cap_add.hash(&mut hasher);
+    config.tmpfs.hash(&mut hasher);
+    config.pids_limit.hash(&mut hasher);
+    config.blocked_mounts.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -1229,6 +1235,45 @@ mod tests {
             ..Default::default()
         };
         assert_ne!(config_hash(&c1), config_hash(&c2));
+    }
+
+    #[test]
+    fn test_config_hash_covers_container_security_boundary() {
+        let baseline = DockerSandboxConfig::default();
+        let mut variants = Vec::new();
+
+        let mut config = baseline.clone();
+        config.cap_add = vec!["CHOWN".into()];
+        variants.push(("cap_add", config));
+
+        let mut config = baseline.clone();
+        config.read_only_root = !config.read_only_root;
+        variants.push(("read_only_root", config));
+
+        let mut config = baseline.clone();
+        config.pids_limit += 1;
+        variants.push(("pids_limit", config));
+
+        let mut config = baseline.clone();
+        config.tmpfs.push("/run:size=8m".into());
+        variants.push(("tmpfs", config));
+
+        let mut config = baseline.clone();
+        config.cpu_limit = 2.0;
+        variants.push(("cpu_limit", config));
+
+        let mut config = baseline.clone();
+        config.blocked_mounts.push("/home/private".into());
+        variants.push(("blocked_mounts", config));
+
+        let baseline_hash = config_hash(&baseline);
+        for (field, config) in variants {
+            assert_ne!(
+                baseline_hash,
+                config_hash(&config),
+                "changing {field} must prevent container pool reuse"
+            );
+        }
     }
 }
 

@@ -69,6 +69,9 @@ export function StringMapEditor({
   // Track what we last emitted so we can ignore "incoming" prop updates
   // that are just our own commit echoing back through the parent.
   const lastEmittedRef = useRef<Record<string, string | number> | null>(null);
+  // State updaters must remain pure: React may replay them in StrictMode.
+  // This flag transfers the commit notification to the post-commit effect.
+  const shouldEmitRef = useRef(false);
 
   // Re-seed from incoming value ONLY when the parent state diverged from
   // our last emitted commit (e.g. another tab edited config, or the user
@@ -87,15 +90,18 @@ export function StringMapEditor({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
 
+  useEffect(() => {
+    if (!shouldEmitRef.current) return;
+    shouldEmitRef.current = false;
+    const obj = commitRows(rows);
+    lastEmittedRef.current = obj;
+    onChange(obj);
+  }, [onChange, rows]);
+
   const emit = useCallback((updater: (prev: Row[]) => Row[]) => {
-    setRows((prev) => {
-      const next = updater(prev);
-      const obj = commitRows(next);
-      lastEmittedRef.current = obj;
-      onChange(obj);
-      return next;
-    });
-  }, [onChange]);
+    shouldEmitRef.current = true;
+    setRows(updater);
+  }, []);
 
   const updateKey = useCallback((id: string, key: string) => {
     emit((prev) => prev.map((r) => r.id === id ? { ...r, key } : r));

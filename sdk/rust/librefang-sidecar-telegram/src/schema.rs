@@ -12,7 +12,7 @@ pub fn telegram_schema() -> Schema {
                 .required()
                 .placeholder("123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"),
             Field::new("ALLOWED_USERS", "Allowed User IDs", FieldType::List)
-                .placeholder("123456789, 987654321")
+                .placeholder("123456789, 987654321 — leave empty to allow ALL users (insecure)")
                 .advanced(),
             Field::new(
                 "TELEGRAM_CLEAR_DONE_REACTION",
@@ -49,6 +49,18 @@ mod tests {
             .expect("schema must declare TELEGRAM_BOT_TOKEN");
         assert_eq!(bot_token.field_type, FieldType::Secret);
         assert!(bot_token.required);
+
+        let allowed_users = schema
+            .fields
+            .iter()
+            .find(|f| f.key == "ALLOWED_USERS")
+            .expect("schema must declare ALLOWED_USERS");
+        assert!(
+            allowed_users.placeholder.contains("empty")
+                && allowed_users.placeholder.contains("ALL users")
+                && allowed_users.placeholder.contains("insecure"),
+            "blank permit-all behavior must be explicit in the dashboard schema"
+        );
 
         let streaming = schema
             .fields
