@@ -110,11 +110,19 @@ MASTODON_INSTANCE_URL = "https://mastodon.social"
 
 ## 通道覆盖
 
-`ChannelOverrides` 用来让 agent 按通道自定义行为。Sidecar 迁移后**通道级**这一层已经移除（`[channels.<name>.overrides]` 子表挂在已删的进程内 `ChannelsConfig` 上），只剩 `agent.toml` 里的 **agent 级** 覆盖。原来通道级表里的大多数 knob 现在改到对应 sidecar 的 `[sidecar_channels.env]` 环境变量里 —— 详见[频道配置指南里的迁移对照表](/zh/configuration/channels#通道行为覆盖旧版--已移除)。
+`ChannelOverrides` 用来让 agent 按通道自定义行为。
+Sidecar 迁移移除的是旧的 `[channels.<name>.overrides]` 子表本身 —— 它挂在已删的进程内 `ChannelsConfig` 上 —— 但通道级这一层依然存在，只是改写成 sidecar 条目上的一等字段。
+详见[频道配置指南里的迁移对照表](/zh/configuration/channels#通道行为覆盖旧版--已移除)。
 
 - **Agent 级** 在 `agent.toml` —— 只对该 agent 在所有通道上生效。加顶层 `[channel_overrides]` 段。
+- **通道级** 在 `[[sidecar_channels]]` —— 对该通道上的所有 agent 生效。
+  直接写在条目的键上（`dm_policy`、`group_policy`、`threading`、`output_format`、`command_policy`、`message_coalesce_window_ms`），**不是**写在 `[sidecar_channels.env]` 里。
+  只有至少设了其中一个，bridge 才会据此构造 `ChannelOverrides`；什么都没设的普通 sidecar 条目不贡献任何覆盖。
 
-**解析顺序**（迁移后）：agent 级 → 内置默认。哪一层设了哪一层赢。
+**解析顺序**：agent 级 → 通道级（`[[sidecar_channels]]`）→ 内置默认。
+
+优先级是**整个结构体级别的，不是逐字段的**：只要 agent 有 `[channel_overrides]` 段，就整体采用它，通道级结构体不再参与；因此 agent 没设的字段会落到**内置默认**，而不是落到通道级的值上。
+用哪一层，就把在意的字段在那一层全部写齐。
 （sidecar 环境变量不在这条链上 —— 只有 WhatsApp sidecar 读 `WHATSAPP_DM_POLICY`，且它在消息到达内核之前就在 sidecar 侧过滤。）
 
 ```toml
@@ -149,6 +157,7 @@ usage_footer = "compact"
 | `system_prompt` | `Option<String>` | Agent 默认值 | 覆盖此通道的系统提示词。 |
 | `dm_policy` | `Option<DmPolicy>` | `None`（未设） | 如何处理私信。`None` 不做任何私聊门控（私聊放行），且不影响其他 override（#6445）。 |
 | `group_policy` | `Option<GroupPolicy>` | `None`（未设） | 如何处理群组/频道消息。`None` 处理每条群消息；显式 `MentionOnly` 才收窄为仅 @提及（#6445）。 |
+| `group_trigger_patterns` | `Vec<String>` | `[]`（空） | 额外的 `regex` 模式，命中后等同于 Bot 被 @提及从而唤醒 agent。仅在 mention-only 语义下生效 —— 即显式 `group_policy = "mention_only"`，或 `group_policy` 未设但本列表非空。转义写法见下方说明。 |
 | `rate_limit_per_user` | `u32` | `0`（无限制） | 每用户每分钟最大消息数。 |
 | `threading` | `bool` | `false` | 以线程回复形式发送响应（仅限支持的平台）。 |
 | `output_format` | `Option<OutputFormat>` | `Markdown` | 此通道的输出格式。 |
@@ -179,7 +188,7 @@ usage_footer = "compact"
 
 | DmPolicy | 行为 |
 |----------|------|
-| `Respond` | 回复所有私信（默认）。 |
+| `Respond` | 回复所有私信。它既是 `DmPolicy` 枚举自身的默认值，也正好等于 `dm_policy` 未设时的行为，两者一致。 |
 | `AllowedOnly` | 仅回复 `allowed_users` 中用户的私信。 |
 | `Ignore` | 静默丢弃所有私信。 |
 
@@ -190,11 +199,35 @@ usage_footer = "compact"
 | GroupPolicy | 行为 |
 |-------------|------|
 | `All` | 回复群组中的所有消息。 |
-| `MentionOnly` | 仅在 Bot 被 @提及时回复（默认）。 |
+| `MentionOnly` | 仅在 Bot 被 @提及、或消息命中某条 `group_trigger_patterns` 时回复。它是 `GroupPolicy` 枚举的默认值，但**不要**据此认为 `group_policy` 未设时也是这个行为 —— 字段不写时会处理每条群消息，等同于 `All`（#6445）。要得到 `MentionOnly`，要么显式写出来，要么只声明 `group_trigger_patterns` 而不写 `group_policy`（隐式生效）。 |
 | `CommandsOnly` | 仅回复 `/command` 命令消息。 |
 | `Ignore` | 静默忽略所有群组消息。 |
 
 策略在 `dispatch_message()` 中执行，早于消息到达 Agent 循环。这意味着被忽略的消息不会消耗任何 LLM token。
+
+#### `group_trigger_patterns` 的转义
+
+这些是完整的 `regex` crate 模式。常见写法是给别名加词边界锚点，避免 agent 的名字在更长的单词内部被命中。
+请使用 TOML **字面量**（单引号）字符串，让反斜线原样传给正则引擎：
+
+```toml
+# agent.toml —— 正确
+[channel_overrides]
+group_trigger_patterns = ['(?i)\bvivi\b']
+```
+
+在 TOML **基本**（双引号）字符串里，`\b` 是 *退格* 转义，不是正则转义。
+于是 `"(?i)\bvivi\b"` 到内核时变成了 `(?i)<U+0008>vivi<U+0008>`，而 regex crate 会把它当普通字面量接受 —— 编译不报错，然后永远匹配不上任何真实消息，agent 就是不认自己的别名（#6732）。
+如果一定要用双引号，就把每个反斜线都写两遍：
+
+```toml
+# agent.toml —— 同样正确，但更容易写错
+[channel_overrides]
+group_trigger_patterns = ["(?i)\\bvivi\\b"]
+```
+
+无法解析的模式，或因转义被误读而含控制字符的模式，会在该 agent 的 manifest 被接受时以 `WARN` 报出并带上 agent 名 —— 启动时、热重载时、manifest 更新时都会检查。
+该告警不会阻止 agent 启动，所以群里的别名唤不动 agent 时，请查看 daemon 日志。
 
 ---
 
