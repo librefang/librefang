@@ -124,6 +124,13 @@ fn strip_mid_tag(chunk: &str) -> &str {
     }
 }
 
+/// Trim only a newly selected input prefix. Its returned length is therefore
+/// the exact byte count to consume from `remaining`; formatting carry is never
+/// part of the boundary calculation.
+fn trim_input_boundary(input: &str) -> &str {
+    adjust_html_entity_boundary(strip_mid_tag(input))
+}
+
 static RE_TAG: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)([^>]*)>").expect("tag regex"));
 const VOID_TAGS: &[&str] = &[
@@ -197,17 +204,16 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<String> {
         if input_chunk.is_empty() {
             input_chunk = input_prefix;
         }
-        // Combine carry + input_chunk for entity / tag analysis on the actual emitted text.
-        let mut combined = String::with_capacity(carry.len() + input_chunk.len());
-        combined.push_str(&carry);
-        combined.push_str(input_chunk);
-        let trimmed = strip_mid_tag(&combined);
-        let trimmed = adjust_html_entity_boundary(trimmed);
-        let trimmed_len = trimmed.len();
-        // Choose what to emit: either the entity/tag-trimmed combined slice (normal path) or, if that left no progress to make on `remaining`, the carry plus one forced unit of input. Either way we run the SAME tag-rebalancing on the emitted text so open tags from `carry` get matching close tags appended and propagate forward via `next_carry`.
+        // Trim only the new input. Inferring progress by trimming
+        // `carry + input` and subtracting carry length would couple forward
+        // progress to assumptions inside the boundary helpers.
+        let trimmed_input = trim_input_boundary(input_chunk);
+        // Choose what to emit: either carry plus the safely trimmed input
+        // (normal path), or if no safe input remains, carry plus one forced
+        // input unit. Both paths run the same tag rebalancing below.
         let mut emitted_text: String;
         let mut consumed_from_input: usize;
-        let degenerate_progress = trimmed_len <= carry.len();
+        let degenerate_progress = trimmed_input.is_empty();
         if degenerate_progress {
             // Degenerate: budget too small for any safe progress. If `remaining` starts with `<` AND the matching `>` is within `limit` UTF-16 units, consume the whole tag so the next chunk reopens cleanly — emitting a bare leading `<` would produce HTML Telegram cannot parse. If the tag is unmatched (no `>`) or runs past `limit` UTF-16 units (a degenerate or adversarial mega-attribute), fall back to forcing one Unicode scalar of progress; the chunk will be unbalanced and the parse-entities fallback will rescue delivery as plain text.
             //
@@ -234,8 +240,10 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<String> {
             emitted_text = t;
             consumed_from_input = take;
         } else {
-            emitted_text = trimmed.to_string();
-            consumed_from_input = trimmed_len - carry.len();
+            emitted_text = String::with_capacity(carry.len() + trimmed_input.len());
+            emitted_text.push_str(&carry);
+            emitted_text.push_str(trimmed_input);
+            consumed_from_input = trimmed_input.len();
         }
         let mut stack = unclosed_tags(&emitted_text);
         let mut close_suffix: String = stack.iter().rev().map(|(n, _)| format!("</{n}>")).collect();
@@ -286,11 +294,8 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<String> {
                 .saturating_sub(utf16_len(&carry))
                 .saturating_sub(utf16_len(&close_suffix));
             let reduced = truncate_to_utf16_limit(&remaining[..previous_consumed], available_input);
-            let mut combined = String::with_capacity(carry.len() + reduced.len());
-            combined.push_str(&carry);
-            combined.push_str(reduced);
-            let reduced = adjust_html_entity_boundary(strip_mid_tag(&combined));
-            let reduced_consumed = reduced.len().saturating_sub(carry.len());
+            let reduced_input = trim_input_boundary(reduced);
+            let reduced_consumed = reduced_input.len();
 
             if reduced_consumed == 0 || reduced_consumed >= previous_consumed {
                 // Carry plus its exact close suffix can consume the whole
@@ -305,7 +310,10 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<String> {
                 break;
             }
 
-            emitted_text = reduced.to_string();
+            emitted_text.clear();
+            emitted_text.reserve(carry.len() + reduced_input.len());
+            emitted_text.push_str(&carry);
+            emitted_text.push_str(reduced_input);
             consumed_from_input = reduced_consumed;
             stack = unclosed_tags(&emitted_text);
             close_suffix = stack.iter().rev().map(|(n, _)| format!("</{n}>")).collect();
@@ -385,6 +393,17 @@ mod tests {
         // Now force a split at the end so the chunk includes the `&` but no entity follows.
         let chunks = split_to_utf16_chunks(s, 9);
         assert_eq!(chunks.join(""), s);
+    }
+
+    #[test]
+    fn boundary_trimming_is_relative_to_new_input() {
+        assert_eq!(trim_input_boundary("abc&am"), "abc");
+        assert_eq!(trim_input_boundary("<tg-emoji emoji-id=\"42"), "");
+        assert_eq!(trim_input_boundary("plain text"), "plain text");
+
+        let chunks = split_to_utf16_chunks("<b>123456&amp;tail</b>", 12);
+        let text = chunks.concat().replace("<b>", "").replace("</b>", "");
+        assert_eq!(text, "123456&amp;tail");
     }
 
     #[test]
