@@ -618,6 +618,57 @@ async fn skills_install_path_traversal_hand_rejected_400() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn skillhub_install_path_traversal_hand_rejected_400() {
+    // Skillhub has its own install handler. Reject traversal before the
+    // hand directory existence probe so an attacker cannot escape the
+    // workspace root (or use the response as a filesystem oracle).
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/skillhub/install",
+        Some(serde_json::json!({"slug": "anything", "hand": "../../x"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("hand"),
+        "error must scope the rejection to the bad `hand` field: {body:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn skillhub_install_accepts_canonical_max_length_hand_identifier() {
+    let h = boot().await;
+    let hand_id = "a".repeat(128);
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/skillhub/install",
+        Some(serde_json::json!({"slug": "anything", "hand": hand_id})),
+    )
+    .await;
+
+    // The hand does not exist in this isolated home, so reaching the lookup's
+    // 404 proves the canonical 128-character id passed API validation without
+    // allowing the request to continue to the network client.
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("not found"),
+        "expected the request to reach the hand lookup: {body:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/skills/uninstall — error path only.
 // ---------------------------------------------------------------------------

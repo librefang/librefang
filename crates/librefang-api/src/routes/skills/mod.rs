@@ -301,8 +301,7 @@ pub struct PendingListQuery {
 /// `workspaces/hands/`).
 ///
 /// Contract:
-/// - non-empty, ≤ 64 chars (caps log noise and matches the project
-///   pattern from `agent_templates.rs::validate_template_name`)
+/// - non-empty, ≤ 64 chars for skill names; ≤ 128 for hand ids to match `librefang_hands`' canonical `MAX_HAND_ID_LEN`
 /// - characters limited to `[A-Za-z0-9_-]` — the strictest project
 ///   convention; cannot contain `..`, `/`, `\`, or any platform
 ///   path separator
@@ -313,9 +312,10 @@ pub struct PendingListQuery {
 /// `field` is "name" or "hand" — used to scope the rejection
 /// message so the client knows which input was bad.
 fn validate_skill_identifier(value: &str, field: &str) -> Result<(), String> {
-    if value.is_empty() || value.len() > 64 {
+    let max_len = if field == "hand" { 128 } else { 64 };
+    if value.is_empty() || value.len() > max_len {
         return Err(format!(
-            "invalid skill {field}: must be 1-64 characters, got {} chars",
+            "invalid skill {field}: must be 1-{max_len} characters, got {} chars",
             value.len()
         ));
     }
@@ -1882,6 +1882,22 @@ mod skill_identifier_validation {
         assert!(
             err.contains("1-64"),
             "expected 1-64 length message; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn hand_length_matches_canonical_128_character_limit() {
+        let max_length = "a".repeat(128);
+        assert!(
+            validate_skill_identifier(&max_length, "hand").is_ok(),
+            "canonical 128-character hand ids must remain accepted"
+        );
+
+        let too_long = "a".repeat(129);
+        let err = validate_skill_identifier(&too_long, "hand").unwrap_err();
+        assert!(
+            err.contains("1-128"),
+            "expected canonical hand length in error; got {err:?}"
         );
     }
 

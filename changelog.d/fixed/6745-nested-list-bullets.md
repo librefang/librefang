@@ -1,0 +1,3 @@
+A sub-list nested inside a list item keeps its own bullets, indented, rather than being folded into its parent's line.
+Folding a list item's children onto one line is what lets a bullet still read as a bullet, but a nested `li` has already emitted its own `- ` by the time the outer one folds, so the whole sub-list collapsed into the parent as `- Fruits - Apple - Banana` — markers mid-sentence that read as list items, or as a numeric range on text like `- Price - 5 - 10`.
+An `article` also now earns a blank line the way `section` and `div` already do, so entries on a feed page that carry no heading of their own stay distinct instead of running together into one block (#6624, #6745) (@nevgenov)

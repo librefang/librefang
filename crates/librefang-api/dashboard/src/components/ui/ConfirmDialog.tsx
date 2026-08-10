@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useRef } from "react";
+import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { AlertTriangle, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
@@ -15,7 +15,7 @@ interface ConfirmDialogProps {
   cancelLabel?: string;
   /** Visual tone — destructive renders the confirm button in error colors. */
   tone?: "default" | "destructive";
-  onConfirm: () => void;
+  onConfirm: () => void | Promise<void>;
   onClose: () => void;
 }
 
@@ -34,7 +34,9 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
 }: ConfirmDialogProps) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLDivElement>(null);
-  const isConfirming = useRef(false);
+  const isConfirmingRef = useRef(false);
+  const activeConfirmationRef = useRef<object | null>(null);
+  const [isConfirming, setIsConfirming] = useState(false);
   const onCloseRef = useRef(onClose);
   const onConfirmRef = useRef(onConfirm);
   const titleId = useId();
@@ -43,10 +45,37 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
   onConfirmRef.current = onConfirm;
   useFocusTrap(isOpen, dialogRef, true);
 
+  const requestClose = useCallback(() => {
+    if (isConfirmingRef.current) return;
+    onCloseRef.current();
+  }, []);
+
+  const requestConfirm = useCallback(() => {
+    if (isConfirmingRef.current) return;
+    const confirmationToken = {};
+    activeConfirmationRef.current = confirmationToken;
+    isConfirmingRef.current = true;
+    setIsConfirming(true);
+    void (async () => {
+      try {
+        await onConfirmRef.current();
+        if (activeConfirmationRef.current !== confirmationToken) return;
+        onCloseRef.current();
+      } catch {
+        if (activeConfirmationRef.current !== confirmationToken) return;
+        isConfirmingRef.current = false;
+        setIsConfirming(false);
+      }
+    })();
+  }, []);
+
   useEffect(() => {
-    if (isOpen) {
-      isConfirming.current = false;
-    }
+    activeConfirmationRef.current = null;
+    isConfirmingRef.current = false;
+    setIsConfirming(false);
+    return () => {
+      activeConfirmationRef.current = null;
+    };
   }, [isOpen]);
 
   useEffect(() => {
@@ -71,20 +100,17 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
       return false;
     };
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCloseRef.current();
+      if (e.key === "Escape") requestClose();
       // Enter confirms — safer on non-destructive dialogs; for destructive
       // we still require a click so users can't accidentally nuke data.
       if (e.key === "Enter" && tone !== "destructive" && !isEditableTarget(e.target)) {
-        if (isConfirming.current) return;
         e.preventDefault();
-        isConfirming.current = true;
-        onConfirmRef.current();
-        onCloseRef.current();
+        requestConfirm();
       }
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [isOpen, tone]);
+  }, [isOpen, requestClose, requestConfirm, tone]);
 
   const isDestructive = tone === "destructive";
   const confirmBtnClass = isDestructive
@@ -96,7 +122,7 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
       {isOpen && (
         <motion.div
           className="fixed inset-0 z-[150] flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-0 sm:p-4"
-          onClick={onClose}
+          onClick={requestClose}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -116,8 +142,9 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
         exit="exit"
       >
         <button
-          onClick={onClose}
-          className="absolute right-3 top-3 h-7 w-7 flex items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+          onClick={requestClose}
+          disabled={isConfirming}
+          className="absolute right-3 top-3 h-7 w-7 flex items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-colors disabled:cursor-not-allowed disabled:opacity-50"
           aria-label={t("common.close", { defaultValue: "Close" })}
         >
           <X className="h-3.5 w-3.5" />
@@ -137,19 +164,17 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
         </div>
         <div className="flex gap-2 border-t border-border-subtle/50 px-5 py-3">
           <button
-            onClick={onClose}
-            className="flex-1 rounded-xl border border-border-subtle bg-surface py-2.5 text-xs font-bold text-text-dim hover:bg-surface-hover transition-colors"
+            onClick={requestClose}
+            disabled={isConfirming}
+            className="flex-1 rounded-xl border border-border-subtle bg-surface py-2.5 text-xs font-bold text-text-dim hover:bg-surface-hover transition-colors disabled:cursor-not-allowed disabled:opacity-50"
           >
             {cancelLabel ?? t("common.cancel", { defaultValue: "Cancel" })}
           </button>
           <button
-            onClick={() => {
-              if (isConfirming.current) return;
-              isConfirming.current = true;
-              onConfirm();
-              onClose();
-            }}
-            className={`flex-1 rounded-xl py-2.5 text-xs font-bold transition-all hover:-translate-y-0.5 ${confirmBtnClass}`}
+            onClick={requestConfirm}
+            disabled={isConfirming}
+            aria-busy={isConfirming}
+            className={`flex-1 rounded-xl py-2.5 text-xs font-bold transition-all hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0 ${confirmBtnClass}`}
           >
             {confirmLabel ?? t("common.confirm", { defaultValue: "Confirm" })}
           </button>

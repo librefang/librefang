@@ -385,18 +385,9 @@ impl CronScheduler {
         id: CronJobId,
         updates: &serde_json::Value,
     ) -> LibreFangResult<CronJob> {
-        // Candidate-validate-swap: clone the current job, apply the
-        // partial updates onto the candidate, run the same `validate(0)`
-        // that `add_job` runs, and only after that passes do we swap the
-        // candidate into place under the shard lock. This generalises
-        // the #4732 bypass closure from "delivery / delivery_targets
-        // re-validated on update" to "the entire CronJob shape is
-        // re-validated on update" — name length, schedule cron-expr
-        // syntax, every CronAction shape, and the SSRF / path checks all
-        // gate update the same way they gate add. A pre-#4739 PUT
-        // carrying e.g. an empty `name` plus a valid `delivery` was
-        // accepted; now the same payload is rejected before any field
-        // hits live state.
+        // Candidate-validate-swap: clone the current job, apply the partial updates onto the candidate, run the same home-aware validation that `add_job` runs, and only after that passes do we swap the candidate into place under the shard lock.
+        // This generalises the #4732 bypass closure from "delivery / delivery_targets re-validated on update" to "the entire CronJob shape is re-validated on update" — name length, schedule cron-expr syntax, every CronAction shape, and the SSRF / path checks all gate update the same way they gate add.
+        // A pre-#4739 PUT carrying e.g. an empty `name` plus a valid `delivery` was accepted; now the same payload is rejected before any field hits live state.
         //
         // Atomicity: `meta.job` is replaced once with a fully validated
         // candidate, so an `Err` at any step leaves the live row
@@ -448,28 +439,15 @@ impl CronScheduler {
             .map_err(|e| LibreFangError::Internal(format!("Invalid delivery_targets: {e}")))?;
         }
 
-        // Run the same shape + SSRF validation `add_job` runs. We pass
-        // `existing_count = 0` because this is an in-place update on an
-        // existing job — capacity (MAX_JOBS_PER_AGENT) is unaffected by
-        // an update that doesn't change `agent_id`. Cross-agent moves
-        // are NOT capacity-checked here today; tracking under a
-        // separate follow-up issue (#4732 followup).
+        // Run the same shape, SSRF, and pre_script path validation as `add_job`.
+        // Capacity checks remain unchanged for updates; making add/move limit enforcement atomic requires a shared mutation lock and is tracked separately from this path-allowlist fix.
         candidate
-            .validate(0)
+            .validate_with_home(0, Some(&self.home_dir))
             .map_err(LibreFangError::InvalidInput)?;
 
-        // #5113 follow-up: `validate(0)` only checks field count and
-        // character set of the cron expression — it doesn't detect
-        // semantically-impossible schedules like `"0 0 30 2 *"` (Feb 30,
-        // never fires). `add_job` probes for this with
-        // `compute_next_run_after_opt` and rejects pre-insert; without
-        // the same probe here, a PUT could install a wedged schedule on
-        // an existing job, after which `due_jobs` would fall back to a
-        // `+1h` retry every tick until `MAX_CONSECUTIVE_ERRORS` triggers
-        // auto-disable — five wasted LLM-token fires. Only probe when
-        // the schedule field was actually part of this update; otherwise
-        // we'd reject every update on an already-wedged row (e.g. one
-        // persisted by an older daemon) and lock users out of fixing it.
+        // #5113 follow-up: shape validation only checks field count and character set of the cron expression — it doesn't detect semantically-impossible schedules like `"0 0 30 2 *"` (Feb 30, never fires).
+        // `add_job` probes for this with `compute_next_run_after_opt` and rejects pre-insert; without the same probe here, a PUT could install a wedged schedule on an existing job, after which `due_jobs` would fall back to a `+1h` retry every tick until `MAX_CONSECUTIVE_ERRORS` triggers auto-disable — five wasted LLM-token fires.
+        // Only probe when the schedule field was actually part of this update; otherwise we'd reject every update on an already-wedged row (e.g. one persisted by an older daemon) and lock users out of fixing it.
         if schedule_updated {
             if let CronSchedule::Cron { expr, .. } = &candidate.schedule {
                 if compute_next_run_after_opt(&candidate.schedule, Utc::now()).is_none() {
@@ -2668,6 +2646,57 @@ mod tests {
 
         // State invariant: targets must not have been partially written.
         assert!(sched.get_job(id).unwrap().delivery_targets.is_empty());
+    }
+
+    #[test]
+    fn update_job_rejects_pre_script_outside_home_scripts() {
+        let (sched, tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let id = sched.add_job(make_job(agent), false).unwrap();
+        let outside_script = tmp.path().join("outside.sh");
+        std::fs::write(&outside_script, "#!/bin/sh\n").unwrap();
+
+        let updates = serde_json::json!({
+            "action": {
+                "kind": "agent_turn",
+                "message": "run pre-processing",
+                "model_override": null,
+                "timeout_secs": null,
+                "pre_script": {"argv": [outside_script], "env": {}}
+            }
+        });
+        let err = sched
+            .update_job(id, &updates)
+            .expect_err("update must enforce the same pre_script allowlist as add");
+
+        assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
+        assert!(matches!(
+            sched.get_job(id).unwrap().action,
+            CronAction::SystemEvent { .. }
+        ));
+    }
+
+    #[test]
+    fn update_job_accepts_pre_script_inside_home_scripts() {
+        let (sched, tmp) = make_scheduler(100);
+        let scripts_dir = tmp.path().join("scripts");
+        std::fs::create_dir_all(&scripts_dir).unwrap();
+        let allowed_script = scripts_dir.join("allowed.sh");
+        std::fs::write(&allowed_script, "#!/bin/sh\n").unwrap();
+        let id = sched.add_job(make_job(AgentId::new()), false).unwrap();
+
+        let updates = serde_json::json!({
+            "action": {
+                "kind": "agent_turn",
+                "message": "run pre-processing",
+                "model_override": null,
+                "timeout_secs": null,
+                "pre_script": {"argv": [allowed_script], "env": {}}
+            }
+        });
+        let updated = sched.update_job(id, &updates).unwrap();
+
+        assert!(matches!(updated.action, CronAction::AgentTurn { .. }));
     }
 
     /// Issue #5113 follow-up: `update_job` must apply the same
