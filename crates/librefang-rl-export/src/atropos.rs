@@ -46,8 +46,8 @@
 //! See <https://github.com/NousResearch/atropos/blob/main/atroposlib/api/server.py>
 //! and `atroposlib/api/env_interaction.md` for the producer-side flow.
 //!
-//! All HTTP traffic uses `librefang_http::proxied_client_builder()` with
-//! redirect following disabled.
+//! HTTP clients inherit LibreFang's TLS, timeout, and user-agent settings,
+//! but disable redirects and proxies so validated DNS addresses stay pinned.
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -112,29 +112,11 @@ const DEFAULT_MAX_TOKEN_LENGTH: u32 = 32_768;
 const DEFAULT_GROUP_SIZE: u32 = 1;
 const DEFAULT_WEIGHT: f32 = 1.0;
 
-/// Export a trajectory to Atropos. Internal entry point; the public
-/// `crate::export` dispatch matches on `ExportTarget::Atropos` and
-/// calls in here.
-pub(crate) async fn export_to_atropos(
+pub(crate) fn validate_config(
     project: &str,
     base: &str,
-    tuning: AtroposTuning,
-    export: RlTrajectoryExport,
-) -> Result<ExportReceipt, ExportError> {
-    export_to_atropos_with_base(base, project, tuning, export).await
-}
-
-/// Same as `export_to_atropos` but with a caller-supplied base URL.
-/// Exposed at `pub(crate)` so the in-crate wiremock tests can point at
-/// a `MockServer::uri()`; production callers go through the public
-/// `crate::export` surface.
-pub(crate) async fn export_to_atropos_with_base(
-    base: &str,
-    project: &str,
-    tuning: AtroposTuning,
-    mut export: RlTrajectoryExport,
-) -> Result<ExportReceipt, ExportError> {
-    crate::normalize_export_metadata(&mut export);
+    export: &RlTrajectoryExport,
+) -> Result<(), ExportError> {
     if project.is_empty() {
         return Err(ExportError::InvalidConfig(
             "Atropos project (desired_name) is empty".to_string(),
@@ -153,6 +135,49 @@ pub(crate) async fn export_to_atropos_with_base(
             "Atropos export trajectory_bytes is empty".to_string(),
         ));
     }
+    Ok(())
+}
+
+/// Export a trajectory to Atropos. Internal entry point; the public
+/// `crate::export` dispatch matches on `ExportTarget::Atropos` and
+/// calls in here.
+pub(crate) async fn export_to_atropos(
+    project: &str,
+    base: &str,
+    tuning: AtroposTuning,
+    client: reqwest::Client,
+    export: RlTrajectoryExport,
+) -> Result<ExportReceipt, ExportError> {
+    export_to_atropos_with_client(base, project, tuning, client, export).await
+}
+
+/// Same as `export_to_atropos` but with a caller-supplied base URL.
+/// Exposed at `pub(crate)` so the in-crate wiremock tests can point at
+/// a `MockServer::uri()`; production callers go through the public
+/// `crate::export` surface.
+#[cfg(test)]
+pub(crate) async fn export_to_atropos_with_base(
+    base: &str,
+    project: &str,
+    tuning: AtroposTuning,
+    export: RlTrajectoryExport,
+) -> Result<ExportReceipt, ExportError> {
+    let resolution = crate::ssrf::ResolvedEgress {
+        hostname: None,
+        addresses: Vec::new(),
+    };
+    let client = crate::build_export_http_client(&resolution)?;
+    export_to_atropos_with_client(base, project, tuning, client, export).await
+}
+
+async fn export_to_atropos_with_client(
+    base: &str,
+    project: &str,
+    tuning: AtroposTuning,
+    client: reqwest::Client,
+    export: RlTrajectoryExport,
+) -> Result<ExportReceipt, ExportError> {
+    validate_config(project, base, &export)?;
     // SSRF validation runs in `crate::export` before dispatch so the
     // in-crate wiremock tests can point `*_with_base` at a loopback
     // mock. Production callers never bypass that gate.
@@ -160,14 +185,6 @@ pub(crate) async fn export_to_atropos_with_base(
     let max_token_length = tuning.max_token_length.unwrap_or(DEFAULT_MAX_TOKEN_LENGTH);
     let group_size = tuning.group_size.unwrap_or(DEFAULT_GROUP_SIZE);
     let weight = tuning.weight.unwrap_or(DEFAULT_WEIGHT);
-
-    // Disable redirect following: the SSRF allowlist validates only the
-    // initial base URL, so a redirect-following client would let an
-    // attacker-controlled base 3xx to an internal host (e.g. cloud
-    // metadata), bypassing the guard. A finished upload never needs to
-    // follow a redirect; a 3xx must surface as an error. Mirrors
-    // `librefang_http::oauth_client_builder`.
-    let client = crate::build_export_http_client()?;
 
     // Step 1: register this producer with the running Atropos trainer.
     let register_url = format!("{}/register-env", base.trim_end_matches('/'));
