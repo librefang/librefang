@@ -1,0 +1,1 @@
+Make the `xtask` license fallback inspect the full Rust dependency graph and evaluate SPDX AND/OR expressions correctly instead of silently skipping third-party crates or matching license-name substrings. (@houko)

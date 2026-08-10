@@ -203,6 +203,7 @@ impl SetupWizard {
             channel_overrides: None,
             max_history_messages: None,
             max_concurrent_invocations: None,
+            assignee_wake: None,
             cache_context: false,
             tool_exec_backend: None,
             skill_workshop: librefang_types::agent::SkillWorkshopConfig::default(),

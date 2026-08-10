@@ -146,7 +146,7 @@ async function handleRegistry(request, env, ctx, forceRefresh) {
     return response
   }
 
-  await refreshRegistryCache(env)
+  await doSyncFromRepo(env, { requireAuth: false })
   const fresh = await env.DB.prepare(
     `SELECT value FROM kv_store WHERE key = 'registry_data'`,
   ).first()
