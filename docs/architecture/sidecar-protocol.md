@@ -121,6 +121,13 @@ builder. Their presence/absence is additive and not version-bumping.
 | `stream_delta` | `stream_id`, `text` |
 | `stream_end` | `stream_id` |
 
+The Rust SDK deliberately rejects a typed command when a field shown
+without `?` is missing. Its reader emits a protocol `error` event and
+continues. The Python SDK's legacy parser is more permissive and may
+replace missing values with empty strings; adapters must not rely on
+that leniency. Optional fields continue to use their documented
+defaults in both SDKs.
+
 `send.params.user` is `ChannelUser` =
 `{ platform_id, display_name, librefang_user }` (`librefang_user`
 serialized as `null` when absent — it is not skipped).

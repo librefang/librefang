@@ -1,0 +1,3 @@
+Redact common AWS, GitHub, Slack, and Stripe credential formats from RL trajectory metadata before it leaves the process. (@houko)
+These tokens carry distinctive prefixes but can be shorter than the existing 40-character opaque-blob threshold, so values such as `AKIA…`, `ghp_…`, `xoxb-…`, and `rk_live_…` previously passed through to W&B or Tinker unchanged unless surrounding text happened to match the generic key/value rule.
+The exporter now applies a dedicated, prefix-constrained credential pattern before its existing generic API-key and blob rules, while retaining the kernel baseline parity check unchanged.

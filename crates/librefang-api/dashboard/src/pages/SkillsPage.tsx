@@ -1093,7 +1093,7 @@ function SkillDetailModal({
   const [confirmAction, setConfirmAction] = useState<{
     title: string;
     message: string;
-    onConfirm: () => void;
+    onConfirm: () => void | Promise<void>;
   } | null>(null);
 
   useEffect(() => {
@@ -2175,9 +2175,9 @@ export function SkillsPage() {
         title={t("skills.uninstall_confirm_title")}
         message={t("skills.uninstall_confirm", { name: uninstalling ?? "" })}
         tone="destructive"
-        onConfirm={() => {
+        onConfirm={async () => {
           if (uninstalling) {
-            uninstallMutation.mutate(uninstalling, {
+            await uninstallMutation.mutateAsync(uninstalling, {
               onSuccess: () => {
                 addToast(t("common.success"), "success");
                 setUninstalling(null);
