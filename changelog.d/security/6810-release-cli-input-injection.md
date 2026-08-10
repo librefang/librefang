@@ -1,0 +1,1 @@
+- Validate that the manual release-cli input names a canonical existing release before any build starts, pass it through workflow environment data for every upload, download, and signing shell step, and extend the release workflow CI scanner to cover both manual release workflows. (@TechWizard9999)
