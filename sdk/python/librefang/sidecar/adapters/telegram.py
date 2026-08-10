@@ -697,6 +697,20 @@ def _is_ogg_opus(data: bytes) -> bool:
 
 
 def _extract_retry_after(body, default: int) -> int:
+    """Resolve a 429 delay: HTTP delta-seconds ``Retry-After`` header
+    first (stashed by ``_api_post`` / ``_multipart`` as
+    ``_retry_after_header``), then Telegram's JSON
+    ``parameters.retry_after``, then ``default``.
+    Mirrors ``telegram.rs``'s ``resolve_retry_after``: a header that
+    isn't a bare non-negative integer (HTTP-date form, a decimal, a
+    stray sign) falls through to the JSON value instead of raising or
+    producing a negative delay."""
+    if isinstance(body, dict):
+        header = body.get("_retry_after_header")
+        if isinstance(header, str):
+            stripped = header.strip()
+            if stripped and stripped.isascii() and stripped.isdigit():
+                return int(stripped)
     try:
         v = body if isinstance(body, dict) else json.loads(body)
         ra = v.get("parameters", {}).get("retry_after")
@@ -730,7 +744,12 @@ def _api_get(url: str, params: dict, timeout: float) -> dict:
 def _api_post(url: str, payload: dict, timeout: float) -> dict:
     """POST a JSON body. Returns ``{"_http": code, ...}`` on an HTTP
     error instead of raising, so callers can implement Telegram's
-    documented 400/429 recovery paths exactly like the Rust adapter."""
+    documented 400/429 recovery paths exactly like the Rust adapter.
+    Also stashes any ``Retry-After`` response header as
+    ``_retry_after_header`` (on both the 2xx-but-``ok:false`` path and
+    the non-2xx path) so ``_extract_retry_after`` can honour it ahead
+    of the JSON body's ``parameters.retry_after``, matching
+    ``telegram.rs``'s header-first resolution."""
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
@@ -739,7 +758,11 @@ def _api_post(url: str, payload: dict, timeout: float) -> dict:
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-            return json.loads(resp.read().decode("utf-8", "replace"))
+            parsed = json.loads(resp.read().decode("utf-8", "replace"))
+            retry_after_header = resp.headers.get("Retry-After")
+            if retry_after_header is not None:
+                parsed["_retry_after_header"] = retry_after_header
+            return parsed
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace")
         try:
@@ -747,6 +770,9 @@ def _api_post(url: str, payload: dict, timeout: float) -> dict:
         except ValueError:
             parsed = {"ok": False, "description": body}
         parsed["_http"] = e.code
+        retry_after_header = e.headers.get("Retry-After")
+        if retry_after_header is not None:
+            parsed["_retry_after_header"] = retry_after_header
         return parsed
 
 
@@ -773,7 +799,11 @@ def _multipart(url: str, fields: dict, file_field: str, filename: str,
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-            return json.loads(resp.read().decode("utf-8", "replace"))
+            parsed = json.loads(resp.read().decode("utf-8", "replace"))
+            retry_after_header = resp.headers.get("Retry-After")
+            if retry_after_header is not None:
+                parsed["_retry_after_header"] = retry_after_header
+            return parsed
     except urllib.error.HTTPError as e:
         b = e.read().decode("utf-8", "replace")
         try:
@@ -781,6 +811,9 @@ def _multipart(url: str, fields: dict, file_field: str, filename: str,
         except ValueError:
             parsed = {"ok": False, "description": b}
         parsed["_http"] = e.code
+        retry_after_header = e.headers.get("Retry-After")
+        if retry_after_header is not None:
+            parsed["_retry_after_header"] = retry_after_header
         return parsed
 
 

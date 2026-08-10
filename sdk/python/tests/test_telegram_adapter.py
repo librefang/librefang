@@ -8,7 +8,9 @@ telegram.rs sanitize_telegram_html) so the two implementations cannot
 drift apart silently.
 """
 
+import io
 import os
+import urllib.error
 
 import pytest
 
@@ -103,6 +105,80 @@ def test_utf16_and_chunking():
     chunks = tg._split_to_utf16_chunks("y" * 4094 + "&amp;tail", 4096)
     assert all("&am" not in c[-3:] for c in chunks)
     assert "".join(chunks) == "y" * 4094 + "&amp;tail"
+
+
+def test_extract_retry_after_prefers_header_then_body_then_default():
+    # HTTP delta-seconds header wins over the JSON body's
+    # parameters.retry_after (matches telegram.rs's resolve_retry_after).
+    assert tg._extract_retry_after(
+        {"_retry_after_header": "19", "parameters": {"retry_after": 7}}, 5
+    ) == 19
+    # Non-numeric / HTTP-date header forms fall through to the body value.
+    assert tg._extract_retry_after(
+        {"_retry_after_header": "not-seconds", "parameters": {"retry_after": 7}}, 5
+    ) == 7
+    # Negative / signed header is rejected the same way (no negative sleep).
+    assert tg._extract_retry_after(
+        {"_retry_after_header": "-5", "parameters": {"retry_after": 7}}, 5
+    ) == 7
+    # Missing header and missing body -> default.
+    assert tg._extract_retry_after({}, 5) == 5
+    # Whitespace-padded numeric header is still honoured.
+    assert tg._extract_retry_after({"_retry_after_header": " 19 "}, 5) == 19
+    # No header at all still reads the body (pre-existing behavior).
+    assert tg._extract_retry_after({"parameters": {"retry_after": 7}}, 5) == 7
+
+
+def test_api_post_and_multipart_propagate_retry_after_header(monkeypatch):
+    class FakeHeaders:
+        def __init__(self, value):
+            self._value = value
+
+        def get(self, _key, default=None):
+            return self._value if self._value is not None else default
+
+    class FakeResponse:
+        def __init__(self, body: bytes, retry_after):
+            self._body = body
+            self.headers = FakeHeaders(retry_after)
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    # Success path (2xx): header is stashed alongside the parsed body.
+    monkeypatch.setattr(
+        tg.urllib.request, "urlopen",
+        lambda *a, **k: FakeResponse(b'{"ok": true}', "13"))
+    resp = tg._api_post("https://x", {}, 1.0)
+    assert resp["_retry_after_header"] == "13"
+
+    resp2 = tg._multipart("https://x", {}, "f", "n", "m", b"", 1.0)
+    assert resp2["_retry_after_header"] == "13"
+
+    # No header present: key is absent, not None (callers use .get()).
+    monkeypatch.setattr(
+        tg.urllib.request, "urlopen",
+        lambda *a, **k: FakeResponse(b'{"ok": true}', None))
+    resp3 = tg._api_post("https://x", {}, 1.0)
+    assert "_retry_after_header" not in resp3
+
+    # Non-2xx path: header is stashed alongside `_http`.
+    def raise_http_error(*_a, **_k):
+        err = urllib.error.HTTPError(
+            "https://x", 429, "Too Many Requests",
+            {"Retry-After": "21"}, io.BytesIO(b'{"ok": false}'))
+        raise err
+
+    monkeypatch.setattr(tg.urllib.request, "urlopen", raise_http_error)
+    resp4 = tg._api_post("https://x", {}, 1.0)
+    assert resp4["_http"] == 429
+    assert resp4["_retry_after_header"] == "21"
 
 
 def test_truncate_utf8_callback_data():
