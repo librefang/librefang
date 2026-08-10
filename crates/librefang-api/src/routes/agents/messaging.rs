@@ -70,6 +70,19 @@ pub async fn send_message(
         );
     }
 
+    // Owner-scoping (#6753): `agent_message` in `middleware::user_role_allows_request`
+    // deliberately lets any `User`-role caller POST `/message` on an arbitrary agent
+    // id. Without this check a non-owner could drive a full LLM turn — tool
+    // execution and budget spend included — on another user's agent by
+    // guessing/enumerating its UUID, which is the exact class of gap this PR closes
+    // for the read-only agent-scoped routes.
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return crate::extensions::with_agent_id(
+            agent_id,
+            ApiErrorResponse::not_found(err_not_found).with_code("agent_not_found"),
+        );
+    }
+
     // Reject messages when the agent's provider has no API key configured
     {
         let registry = state.kernel.agent_registry();
@@ -448,6 +461,16 @@ pub async fn send_message_stream(
     };
 
     if state.kernel.agent_registry().get(agent_id).is_none() {
+        return ApiErrorResponse::not_found(err_not_found)
+            .with_code("agent_not_found")
+            .into_response();
+    }
+
+    // Owner-scoping (#6753): see the matching check in `send_message` above —
+    // `agent_message` in `middleware::user_role_allows_request` allows any
+    // `User`-role caller to POST here for an arbitrary agent id, so this handler
+    // must scope by ownership itself.
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
         return ApiErrorResponse::not_found(err_not_found)
             .with_code("agent_not_found")
             .into_response();
