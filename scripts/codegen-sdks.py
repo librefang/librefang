@@ -232,6 +232,17 @@ class LibreFang:
                             yield json.loads(data_str)
                         except json.JSONDecodeError:
                             yield {"raw": data_str}
+            # A clean EOF can arrive without a trailing newline, leaving the last event in the buffer.
+            # Parse it here rather than dropping it; the loop above only fires on a newline.
+            if buffer:
+                line = buffer.decode(errors="replace").strip()
+                if line.startswith("data: "):
+                    data_str = line[6:]
+                    if data_str != "[DONE]":
+                        try:
+                            yield json.loads(data_str)
+                        except json.JSONDecodeError:
+                            yield {"raw": data_str}
         finally:
             active_error = sys.exc_info()[0] is not None
             try:
@@ -384,6 +395,15 @@ class LibreFang {
         if (!trimmed.startsWith("data: ")) continue;
         const data = trimmed.slice(6);
         if (data === "[DONE]") return;
+        try { yield JSON.parse(data); } catch { yield { raw: data }; }
+      }
+    }
+    // A clean EOF can arrive without a trailing newline, leaving the last event in the buffer.
+    // Parse it here rather than dropping it; the loop above only fires on a newline.
+    const trailing = buffer.trim();
+    if (trailing.startsWith("data: ")) {
+      const data = trailing.slice(6);
+      if (data !== "[DONE]") {
         try { yield JSON.parse(data); } catch { yield { raw: data }; }
       }
     }
