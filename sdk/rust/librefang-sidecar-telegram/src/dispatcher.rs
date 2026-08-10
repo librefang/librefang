@@ -568,7 +568,7 @@ fn build_media_group(items: &[Value]) -> Result<Value> {
         let media = payload
             .get("url")
             .and_then(Value::as_str)
-            .unwrap_or("")
+            .ok_or_else(|| Error::Other(format!("MediaGroup item {tag} missing url")))?
             .to_string();
         let raw_caption = payload.get("caption").and_then(Value::as_str);
         let formatted_caption = prepare_caption(raw_caption);
@@ -657,6 +657,36 @@ mod tests {
         assert!(error
             .to_string()
             .contains("MediaGroup item is not a JSON object"));
+    }
+
+    #[test]
+    fn media_group_rejects_item_missing_url() {
+        let error = build_media_group(&[
+            json!({"Image": {"url": "https://example.com/one.jpg"}}),
+            json!({"Video": {"caption": "no url here"}}),
+        ])
+        .expect_err("media group item without a url must fail");
+
+        assert!(error
+            .to_string()
+            .contains("MediaGroup item Video missing url"));
+    }
+
+    #[test]
+    fn media_group_accepts_a_valid_variable_length_group() {
+        // Telegram's sendMediaGroup accepts 2-10 items; exercise both ends of that range.
+        let two = build_media_group(&[
+            json!({"Image": {"url": "https://example.com/one.jpg", "caption": "first"}}),
+            json!({"Video": {"url": "https://example.com/two.mp4", "duration_seconds": 12}}),
+        ])
+        .expect("a valid 2-item group must be accepted");
+        assert_eq!(two.as_array().map(Vec::len), Some(2));
+
+        let ten_items: Vec<Value> = (0..10)
+            .map(|i| json!({"Image": {"url": format!("https://example.com/{i}.jpg")}}))
+            .collect();
+        let ten = build_media_group(&ten_items).expect("a valid 10-item group must be accepted");
+        assert_eq!(ten.as_array().map(Vec::len), Some(10));
     }
 
     #[test]
