@@ -393,6 +393,10 @@ impl SidecarAdapter for TelegramAdapter {
             Command::StreamDelta(d) => {
                 let mut map = self.streams.lock().await;
                 let Some(state) = map.get_mut(&d.stream_id) else {
+                    eprintln!(
+                        "[telegram] StreamDelta for unknown stream_id={:?}, dropped",
+                        d.stream_id
+                    );
                     return Ok(());
                 };
                 if state.buf.len().saturating_add(d.text.len()) > MAX_STREAM_BUFFER_BYTES {
@@ -618,6 +622,13 @@ mod tests {
                 }))
                 .await
                 .expect("reaction remains best effort");
+            adapter
+                .on_command(Command::StreamDelta(librefang_sidecar::StreamDelta {
+                    stream_id: "missing\r\nforged\u{1b}[31m".into(),
+                    text: "lost".into(),
+                }))
+                .await
+                .expect("unknown stream delta remains best effort");
         });
 
         let request_lines = server.join().expect("fixture server thread");
@@ -646,6 +657,9 @@ mod tests {
         );
         assert!(combined.contains("typing action failed"));
         assert!(combined.contains("reaction update failed"));
+        assert!(combined.contains(
+            "StreamDelta for unknown stream_id=\"missing\\r\\nforged\\u{1b}[31m\", dropped"
+        ));
         assert!(combined.contains("upstream\\r\\nforged\\u{1b}[31m"));
         assert!(!combined.contains("upstream\r\nforged"));
     }
