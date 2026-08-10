@@ -41,6 +41,11 @@ fn trace(args: std::fmt::Arguments<'_>) {
     }
 }
 
+fn best_effort_command_error(operation: &str, error: &(impl std::fmt::Display + ?Sized)) -> String {
+    let rendered = error.to_string();
+    format!("[telegram] {operation} failed: {rendered:?}")
+}
+
 macro_rules! tg_trace {
     ($($arg:tt)*) => { trace(format_args!($($arg)*)) };
 }
@@ -303,7 +308,9 @@ impl SidecarAdapter for TelegramAdapter {
                     return Err(format!("non-numeric channel_id: {}", t.channel_id).into());
                 };
                 tg_trace!("on_command Typing chat={chat_id}");
-                let _ = self.client.send_chat_action(chat_id, "typing").await;
+                if let Err(error) = self.client.send_chat_action(chat_id, "typing").await {
+                    eprintln!("{}", best_effort_command_error("typing action", &error));
+                }
                 Ok(())
             }
             Command::Reaction(r) => {
@@ -322,10 +329,13 @@ impl SidecarAdapter for TelegramAdapter {
                     .into_iter()
                     .map(|e| json!({"type": "emoji", "emoji": e}))
                     .collect();
-                let _ = self
+                if let Err(error) = self
                     .client
                     .set_message_reaction(chat_id, message_id, reactions)
-                    .await;
+                    .await
+                {
+                    eprintln!("{}", best_effort_command_error("reaction update", &error));
+                }
                 Ok(())
             }
             Command::Interactive(i) => {
@@ -540,6 +550,105 @@ impl SidecarAdapter for TelegramAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn best_effort_command_errors_are_single_line_and_control_escaped() {
+        let error = Error::Other("upstream\r\nforged\u{1b}[31m".into());
+        let message = best_effort_command_error("typing action", &error);
+
+        assert_eq!(
+            message,
+            "[telegram] typing action failed: \"upstream\\r\\nforged\\u{1b}[31m\""
+        );
+        assert!(!message.contains('\r'));
+        assert!(!message.contains('\n'));
+        assert!(!message.contains('\u{1b}'));
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for stderr capture"]
+    fn best_effort_command_failure_fixture() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        let address = listener.local_addr().expect("fixture address");
+        let server = std::thread::spawn(move || {
+            let mut request_lines = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept fixture request");
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).expect("read fixture request");
+                let request = String::from_utf8_lossy(&request[..read]);
+                request_lines.push(request.lines().next().unwrap_or_default().to_string());
+
+                let body = b"upstream\r\nforged\x1b[31m";
+                write!(
+                    stream,
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("write fixture headers");
+                stream.write_all(body).expect("write fixture body");
+            }
+            request_lines
+        });
+
+        let root = format!("http://{address}");
+        let client =
+            BotClient::with_roots("fixture-token", &root, &root).expect("construct fixture client");
+        let adapter = TelegramAdapter {
+            client: Arc::new(client),
+            allowlist: AllowList::from_env_value(None),
+            clear_done_reaction: false,
+            streams: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let runtime = tokio::runtime::Runtime::new().expect("fixture runtime");
+        runtime.block_on(async {
+            adapter
+                .on_command(Command::Typing(librefang_sidecar::TypingCmd {
+                    channel_id: "42".into(),
+                }))
+                .await
+                .expect("typing remains best effort");
+            adapter
+                .on_command(Command::Reaction(librefang_sidecar::Reaction {
+                    channel_id: "42".into(),
+                    message_id: "7".into(),
+                    reaction: "👍".into(),
+                    ..Default::default()
+                }))
+                .await
+                .expect("reaction remains best effort");
+        });
+
+        let request_lines = server.join().expect("fixture server thread");
+        assert!(request_lines[0].contains("/sendChatAction"));
+        assert!(request_lines[1].contains("/setMessageReaction"));
+    }
+
+    #[test]
+    fn best_effort_commands_log_real_failures_and_stay_successful() {
+        let output =
+            std::process::Command::new(std::env::current_exe().expect("current test binary"))
+                .args([
+                    "--exact",
+                    "adapter::tests::best_effort_command_failure_fixture",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .output()
+                .expect("run subprocess fixture");
+        assert!(output.status.success(), "fixture failed: {output:?}");
+
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(combined.contains("typing action failed"));
+        assert!(combined.contains("reaction update failed"));
+        assert!(combined.contains("upstream\\r\\nforged\\u{1b}[31m"));
+        assert!(!combined.contains("upstream\r\nforged"));
+    }
 
     #[tokio::test]
     async fn commands_reject_non_numeric_channel_ids_consistently() {
