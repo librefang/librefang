@@ -4925,8 +4925,8 @@ async fn test_upload_owner_metadata_survives_registry_miss() {
         .unwrap();
     assert_eq!(admin.status(), StatusCode::OK);
 
-    // Daemon-generated browser/image-tool artifacts carry an explicit shared
-    // sidecar. Ordinary authenticated users must be able to consume their URL.
+    // Daemon-generated browser/image-tool artifacts carry an explicit shared sidecar.
+    // Ordinary authenticated users must be able to consume their URL.
     let shared_id = uuid::Uuid::new_v4().to_string();
     std::fs::write(upload_dir.join(format!("{shared_id}.png")), b"shared image").unwrap();
     std::fs::write(
@@ -5086,8 +5086,8 @@ async fn no_auth_http_upload_can_be_attached_over_websocket() {
         .await
         .unwrap();
 
-    // Attachment injection happens before provider dispatch. Poll the real
-    // session state rather than sleeping for a guessed amount of time.
+    // Attachment injection happens before provider dispatch.
+    // Poll the real session state rather than sleeping for a guessed amount of time.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let session = client

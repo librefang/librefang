@@ -420,9 +420,8 @@ pub async fn agent_ws(
         role: crate::middleware::UserRole::Owner,
         user_id: librefang_types::agent::UserId(crate::middleware::ROOT_API_KEY_USER_ID),
     };
-    // Mirror the HTTP middleware's no-auth attribution. Uploads created by the
-    // local dashboard in this mode are owned by the synthetic root principal,
-    // so the WS path must carry the same identity when attaching them.
+    // Mirror the HTTP middleware's no-auth attribution.
+    // Uploads created by the local dashboard in this mode are owned by the synthetic root principal, so the WS path must carry the same identity when attaching them.
     let mut authenticated_user = (!auth_required).then(&root_user);
     if auth_required {
         // SECURITY (#3610): Loud reject if a client still sends `?token=` in
