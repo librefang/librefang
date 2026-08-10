@@ -415,7 +415,15 @@ pub async fn agent_ws(
         }
     }
 
-    let mut authenticated_user: Option<crate::middleware::AuthenticatedApiUser> = None;
+    let root_user = || crate::middleware::AuthenticatedApiUser {
+        name: "root".to_string(),
+        role: crate::middleware::UserRole::Owner,
+        user_id: librefang_types::agent::UserId(crate::middleware::ROOT_API_KEY_USER_ID),
+    };
+    // Mirror the HTTP middleware's no-auth attribution. Uploads created by the
+    // local dashboard in this mode are owned by the synthetic root principal,
+    // so the WS path must carry the same identity when attaching them.
+    let mut authenticated_user = (!auth_required).then(&root_user);
     if auth_required {
         // SECURITY (#3610): Loud reject if a client still sends `?token=` in
         // the WS URL. The credential leaks into proxy access logs and browser
@@ -478,13 +486,7 @@ pub async fn agent_ws(
                 }
             }
             if api_auth {
-                authenticated_user = Some(crate::middleware::AuthenticatedApiUser {
-                    name: "root".to_string(),
-                    role: crate::middleware::UserRole::Owner,
-                    user_id: librefang_types::agent::UserId(
-                        crate::middleware::ROOT_API_KEY_USER_ID,
-                    ),
-                });
+                authenticated_user = Some(root_user());
             }
         }
 
@@ -1118,25 +1120,27 @@ async fn handle_text_message(
                     .filter_map(|a| serde_json::from_value(a.clone()).ok())
                     .collect();
                 if !refs.is_empty() {
-                    let image_blocks = match crate::routes::resolve_attachments(
-                        state,
-                        &refs,
-                        client.authenticated_user.as_ref(),
-                    )
-                    .await
-                    {
-                        Ok(blocks) => blocks,
-                        Err(_) => {
-                            return send_json_or_close(
-                                sender,
-                                &serde_json::json!({
-                                    "type": "error",
-                                    "error": "You are not authorized to access this upload"
-                                }),
-                            )
-                            .await;
-                        }
-                    };
+                    let image_blocks =
+                        match crate::routes::resolve_attachments(
+                            state,
+                            &refs,
+                            client.authenticated_user.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(blocks) => blocks,
+                            Err(_) => {
+                                return send_json_or_close(sender, &stamp_message_id(
+                                    serde_json::json!({
+                                        "type": "error",
+                                        "content": "You are not authorized to access this upload",
+                                        "code": "upload_access_denied"
+                                    }),
+                                    message_id.as_deref(),
+                                ))
+                                .await;
+                            }
+                        };
                     if !image_blocks.is_empty() {
                         has_images = true;
                         let webui_sender = librefang_channels::types::SenderContext {
