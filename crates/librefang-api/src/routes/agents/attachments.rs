@@ -137,9 +137,8 @@ pub async fn resolve_attachments(
             continue;
         }
 
-        // Resolve durable ownership metadata before trusting any client-supplied
-        // attachment fields. The in-memory registry is only a cache and may be
-        // empty after restart.
+        // Resolve durable ownership metadata before trusting any client-supplied attachment fields.
+        // The in-memory registry is only a cache and may be empty after restart.
         let meta = if let Some(meta) = UPLOAD_REGISTRY.get(&att.file_id) {
             Some(meta.clone())
         } else {

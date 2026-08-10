@@ -357,9 +357,8 @@ pub async fn serve_upload(
         .channels
         .effective_file_download_dir();
 
-    // The registry caches content_type/filename/owner metadata. Reload the
-    // persisted sidecar after a daemon restart; a true miss is legacy content
-    // with unknown ownership and is restricted to Admin/Owner in auth mode.
+    // The registry caches content_type/filename/owner metadata.
+    // Reload the persisted sidecar after a daemon restart; a true miss is legacy content with unknown ownership and is restricted to Admin/Owner in auth mode.
     let meta = match UPLOAD_REGISTRY.get(&file_id) {
         Some(meta) => Some(meta.clone()),
         None => {

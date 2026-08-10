@@ -101,8 +101,7 @@ async fn save_upload(
         .await
         .map_err(|e| format!("Failed to write upload file: {e}"))?;
 
-    // Persist and register metadata so serve_upload retains the correct type
-    // and explicit shared-access policy across daemon restarts.
+    // Persist and register metadata so serve_upload retains the correct type and explicit shared-access policy across daemon restarts.
     let meta = super::agents::UploadMeta {
         filename: filename.to_string(),
         content_type: content_type.to_string(),
