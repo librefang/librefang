@@ -44,6 +44,7 @@ Lazy loading 在 manifest 用 `lazy_tools = true` 按 agent 开启。关掉则�
 | `goal_update` | `goal` | 中途更新**当前** agent 的目标。新目标写进 agent 的 manifest,后续 prompt 看得到。 |
 
 `[kernel]` 里的 `max_agent_call_depth`(默认 `5`)封顶 `agent_send` 链能递归多深 —— 让 A→B→A 循环根本到不了生产。
+下面的 `workflow_run` 若发生嵌套(某一步的目标 agent 又跑了一次 workflow)也计入同一份预算,因为每一步都会嵌套一整个 agent turn,效果跟 `agent_send` 跳一层一样。
 
 ---
 
@@ -91,7 +92,7 @@ claim TTL 用来从 worker 崩溃中恢复 —— 认领者没在 TTL 内 `task_
 
 | 工具 | 参数 | 用途 |
 |---|---|---|
-| `workflow_run` | `workflow_id`、可选 `inputs` | 同步执行存好的 workflow 并返回结果。 |
+| `workflow_run` | `workflow_id`、可选 `inputs` | 同步执行存好的 workflow 并返回结果。嵌套深度受与 `agent_send`(上文)相同的 `max_agent_call_depth` 预算约束;超深的 run 会被拒绝,而不是任其递归。 |
 | `event_publish` | `event_type`、`payload` | 把结构化事件发到事件总线。监听该 `event_type` 的 trigger(agent manifest 里的 `[[trigger]]` 块)会触发。 |
 | `system_time` | — | 取 daemon 当前墙钟时间(RFC3339 UTC)。便宜,不调外部 clock。 |
 
