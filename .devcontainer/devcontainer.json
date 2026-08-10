@@ -9,7 +9,7 @@
       "version": "20"
     }
   },
-  "postCreateCommand": "cargo build --workspace 2>&1 | tail -5 && echo '✅ Build complete!'",
+  "postCreateCommand": "bash -o pipefail -c \"cargo build --workspace 2>&1 | tail -5 && echo '✅ Build complete!'\"",
   "customizations": {
     "vscode": {
       "extensions": [

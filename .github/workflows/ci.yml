@@ -120,7 +120,7 @@ jobs:
           # `openapi-drift` job still gates direct edits.
           RUST=false;    has '^(crates/|Cargo\.(toml|lock)$|xtask/|openapi\.json$|sdk/)' && RUST=true
           DOCS=false;    has '^(docs/|.*\.md$)'                                       && DOCS=true
-          CI=false;      has '^\.github/workflows/'                                   && CI=true
+          CI=false;      has '^(\.github/workflows/|\.devcontainer/|scripts/tests/test_release_tag_workflow_safety\.py$)' && CI=true
           INSTALL=false; has '^web/public/install\.(sh|ps1)$|^scripts/tests/install_sh_test\.sh$' && INSTALL=true
           # The WASM-skill guest SDK and its example are independent
           # workspaces (own `[workspace]` roots), so the main RUST lane —
