@@ -169,8 +169,15 @@ export function StringMapEditor({
     }]);
   }, [emit, valueType]);
 
+  // Border color is applied per-input below rather than baked in here: the
+  // key input swaps to `border-danger` on a duplicate, and appending that
+  // alongside an always-on `border-border-subtle` would leave two
+  // conflicting border-color utilities on the same element with no
+  // guaranteed winner (see the exclusive ternary used for the same case in
+  // StructListEditor.tsx and ConfigPage.tsx).
   const inputClass =
-    "px-2.5 py-1.5 rounded-lg border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand transition-colors";
+    "px-2.5 py-1.5 rounded-lg border bg-main text-xs font-mono outline-none transition-colors";
+  const defaultBorderClass = "border-border-subtle focus:border-brand";
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -190,7 +197,7 @@ export function StringMapEditor({
                 onChange={(e) => updateKey(r.id, e.target.value)}
                 placeholder={keyPlaceholder ?? t("config.map_key", "key")}
                 aria-invalid={isDuplicate || undefined}
-                className={`${inputClass} flex-1 min-w-0 ${isDuplicate ? "border-danger" : ""}`}
+                className={`${inputClass} flex-1 min-w-0 ${isDuplicate ? "border-danger" : defaultBorderClass}`}
                 autoComplete="off"
                 spellCheck={false}
               />
@@ -204,7 +211,7 @@ export function StringMapEditor({
                 min={valueType === "number" ? min : undefined}
                 max={valueType === "number" ? max : undefined}
                 step={valueType === "number" ? step : undefined}
-                className={`${inputClass} flex-1 min-w-0`}
+                className={`${inputClass} flex-1 min-w-0 ${defaultBorderClass}`}
                 autoComplete="off"
                 spellCheck={false}
               />
