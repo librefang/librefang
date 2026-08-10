@@ -1312,35 +1312,82 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
     const remove = ['script','style','nav','footer','header','aside','iframe','noscript','svg','canvas'];
     remove.forEach(tag => clone.querySelectorAll(tag).forEach(el => el.remove()));
 
-    let root = clone.querySelector('main, article, [role="main"], .content, #content');
+    // `querySelector` returns the *first* match, which on a feed or a results page is one card rather than the list of them — measured at 13.7% of the page on a DuckDuckGo results page.
+    // Repeated sibling `article` elements are the signature of that shape, so climb to the ancestor that holds them, the way Readability resolves the same case by walking to the common ancestor of its close-scoring candidates.
+    // The test is on a node's *direct children*: at least three of them must each carry an article of their own.
+    // Merely containing three articles somewhere below is not the same shape and reaches too far — an ordinary post page whose "related posts" widget is built out of `article` clears that bar, and selection then lands on the whole document and pulls the widget in beside the post.
+    // Counting article-carrying children instead sees two there, one for the post and one for the widget, so selection falls through to the single-article path that page always had.
+    // Counting the articles themselves as direct children would be the narrower rule and would miss a feed whose cards each sit in a wrapper, which is the common shape.
+    //
+    // Searched over the whole tree rather than climbed from the first article's ancestors, because the container is not always an ancestor of the article that happens to come first in the document.
+    // A featured card above a grid — `<div><article/></div>` followed by a sibling `<div>` of three more — puts the first article in a branch the grid is not under, so a climb never examines the grid at all and falls through to the very first-match query this exists to replace.
+    // Between candidates, one that contains another is the wider shape and loses to it, so a feed flanked by single-article widgets selects the feed rather than the ancestor holding all three.
+    // Between candidates that do not contain one another, the one with the most article-carrying children wins: they are independent clusters, and depth says nothing about which is the page's subject — a three-card widget nested deep and placed before the feed would otherwise beat a twenty-card feed for being deeper.
+    // One post-order pass counts articles per subtree and collects candidates from those counts, rather than asking each child whether it contains an article, which would rescan the subtree once per child.
+    let root = clone.querySelector('main, [role="main"]');
+    if (!root) {
+        const candidates = [];
+        function scan(node) {
+            let count = node.tagName === 'ARTICLE' ? 1 : 0;
+            let carriers = 0;
+            for (const child of node.children) {
+                const sub = scan(child);
+                if (sub > 0) carriers++;
+                count += sub;
+            }
+            if (carriers >= 3) candidates.push({ node, carriers });
+            return count;
+        }
+        if (scan(clone) >= 3 && candidates.length) {
+            const innermost = candidates.filter(c => !candidates.some(o => o !== c && c.node.contains(o.node)));
+            root = innermost.reduce((best, c) => (c.carriers > best.carriers ? c : best)).node;
+        }
+    }
+    if (!root) root = clone.querySelector('article, .content, #content');
     if (!root) root = clone;
 
     const lines = [];
+    // Parallel to `lines`: whether that line is a bullet a nested `li` already emitted.
+    // A list item folds its children onto one line, and it has to fold only its *own* text — re-folding a sub-list's bullets would put their `- ` markers mid-sentence.
+    // Tracked as a flag rather than sniffed back out of the string, because a text node may legitimately begin with `- `.
+    const isBullet = [];
+    function emit(line, bullet) { lines.push(line); isBullet.push(bullet === true); }
+    // `article` earns a blank line for the same reason `section` does, and it matters more now that root selection can resolve to a container of sibling cards: feed entries that carry no heading of their own would otherwise run together into one undifferentiated block.
+    const BLOCK = ['p','div','section','tr','article'];
     function walk(node) {
         if (node.nodeType === 3) {
             const t = node.textContent.trim();
-            if (t) lines.push(t);
+            if (t) emit(t);
             return;
         }
         if (node.nodeType !== 1) return;
         const tag = node.tagName.toLowerCase();
         if (['h1','h2','h3','h4','h5','h6'].includes(tag)) {
             const level = '#'.repeat(parseInt(tag[1]));
-            lines.push('\n' + level + ' ' + node.textContent.trim());
+            emit('\n' + level + ' ' + node.textContent.trim());
             return;
         }
         if (tag === 'a' && node.href && node.textContent.trim()) {
-            lines.push('[' + node.textContent.trim() + '](' + node.href + ')');
+            emit('[' + node.textContent.trim() + '](' + node.href + ')');
             return;
         }
         if (tag === 'li') {
-            lines.push('- ' + node.textContent.trim());
+            // Recurse rather than flattening to `textContent`: returning here dropped the destination of every link inside a list item, which on a Wikipedia article is 1100 of 1723 links and on a results page is all of them.
+            // The item's own text folds back onto one line so a bullet still reads as a bullet, while bullets from a nested list stay on their own lines and gain a level of indent.
+            const start = lines.length;
+            for (const child of node.childNodes) walk(child);
+            const produced = lines.splice(start);
+            const flags = isBullet.splice(start);
+            const own = produced.filter((_, i) => !flags[i]).join(' ').replace(/\s+/g, ' ').trim();
+            const nested = produced.filter((_, i) => flags[i]);
+            if (own) emit('- ' + own, true);
+            for (const n of nested) emit('  ' + n, true);
             return;
         }
-        if (tag === 'br') { lines.push(''); return; }
-        if (['p','div','section','tr'].includes(tag)) lines.push('');
+        if (tag === 'br') { emit(''); return; }
+        if (BLOCK.includes(tag)) emit('');
         for (const child of node.childNodes) walk(child);
-        if (['p','div','section','tr'].includes(tag)) lines.push('');
+        if (BLOCK.includes(tag)) emit('');
     }
     walk(root);
 
@@ -1560,6 +1607,313 @@ mod tests {
         );
         assert!(extract_content_js(1_000).contains("1000"));
         assert!(extract_content_js(50_000).contains("50000"));
+    }
+
+    /// A link inside a list item must keep its destination.
+    ///
+    /// The `li` branch used to flatten the item to `textContent` and return, so every nested anchor reached the output as bare text — 1,100 of 1,723 anchors on a Wikipedia article, and 11 of 11 on a search-results page.
+    /// Asserted against the template because the traversal itself needs a live DOM; this pins the shape that made the flattening possible.
+    #[test]
+    fn test_list_items_recurse_instead_of_flattening_to_text() {
+        assert!(
+            !EXTRACT_CONTENT_JS_TEMPLATE.contains("lines.push('- ' + node.textContent.trim())"),
+            "flattening a list item to its text drops the href of every link inside it"
+        );
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("if (tag === 'li')"),
+            "the list-item branch must still exist so bullets keep rendering as bullets"
+        );
+    }
+
+    /// A sub-list keeps its own bullets instead of being folded into its parent's line.
+    ///
+    /// Folding a list item's children onto one line is what lets a bullet still read as a bullet, but a nested `li` has already emitted its own `- ` by the time the outer one folds — so folding everything produced `- Fruits - Apple - Banana`, with markers mid-sentence that read as list items or as a numeric range on text like `- Price - 5 - 10`.
+    /// Ported from the JS the script runs, because the traversal itself needs a live DOM.
+    #[test]
+    fn test_nested_lists_keep_their_own_bullets() {
+        /// One list item: its own text, plus any sub-list beneath it.
+        struct Item {
+            text: &'static str,
+            subs: Vec<Item>,
+        }
+        fn item(text: &'static str, subs: Vec<Item>) -> Item {
+            Item { text, subs }
+        }
+
+        /// The `li` branch's fold: own text onto one line, a sub-list's bullets kept and indented.
+        fn render(item: &Item) -> Vec<String> {
+            let (mut lines, mut flags): (Vec<String>, Vec<bool>) = (vec![], vec![]);
+            if !item.text.is_empty() {
+                lines.push(item.text.to_string());
+                flags.push(false);
+            }
+            for sub in &item.subs {
+                for line in render(sub) {
+                    lines.push(line);
+                    flags.push(true);
+                }
+            }
+            let own: Vec<&str> = lines
+                .iter()
+                .zip(&flags)
+                .filter(|(_, nested)| !**nested)
+                .map(|(l, _)| l.as_str())
+                .collect();
+            let own = own.join(" ");
+            let nested: Vec<String> = lines
+                .iter()
+                .zip(&flags)
+                .filter(|(_, nested)| **nested)
+                .map(|(l, _)| format!("  {l}"))
+                .collect();
+
+            let mut out = Vec::new();
+            if !own.is_empty() {
+                out.push(format!("- {own}"));
+            }
+            out.extend(nested);
+            out
+        }
+
+        assert_eq!(
+            render(&item(
+                "Fruits",
+                vec![item("Apple", vec![]), item("Banana", vec![])]
+            )),
+            vec!["- Fruits", "  - Apple", "  - Banana"],
+            "a sub-list must stay a sub-list rather than collapsing into its parent's line"
+        );
+        assert_eq!(
+            render(&item("A", vec![item("B", vec![item("C", vec![])])])),
+            vec!["- A", "  - B", "    - C"],
+            "each level of nesting earns one level of indent"
+        );
+        // The flat case the fold exists for is unchanged.
+        assert_eq!(
+            render(&item("Just an item", vec![])),
+            vec!["- Just an item"]
+        );
+    }
+
+    /// Feed entries must be separated from one another.
+    ///
+    /// Root selection can now resolve to the container of several sibling `<article>` cards, and an entry that carries no heading of its own emits no separator — so consecutive cards ran together into one undifferentiated block, which works against covering the feed in the first place.
+    #[test]
+    fn test_article_earns_a_block_separator() {
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("'tr','article'"),
+            "an article is a block, like the section and div beside it in that list"
+        );
+    }
+
+    /// The first-match query must not be what selects the root on a page with several articles.
+    ///
+    /// `querySelector('main, article, …')` returned the first match, which on a results page is one card — 13.7% of the page.
+    /// Which container is chosen instead is pinned by behaviour in `test_root_selection_finds_a_container_of_repeated_cards`; this only guards the query from coming back.
+    #[test]
+    fn test_root_selection_does_not_take_the_first_article_match() {
+        assert!(
+            !EXTRACT_CONTENT_JS_TEMPLATE
+                .contains(r#"querySelector('main, article, [role="main"], .content, #content')"#),
+            "a single first-match query cannot distinguish one article from a feed of them"
+        );
+    }
+
+    /// Selection finds the container of repeated cards, and does not reach past it on a page that merely has articles in more than one place.
+    ///
+    /// Ported from the JS the script runs, because the search needs a live DOM.
+    /// Counting *contained* articles rather than article-carrying children reaches the whole document on an ordinary post page whose "related posts" widget is built out of `article`, taking the widget along with the post.
+    /// Anchoring on the first article's ancestors instead of searching the tree misses a grid that sits beside a featured card rather than under it.
+    #[test]
+    fn test_root_selection_finds_a_container_of_repeated_cards() {
+        struct Node {
+            tag: &'static str,
+            name: &'static str,
+            kids: Vec<Node>,
+        }
+        fn el(tag: &'static str, name: &'static str, kids: Vec<Node>) -> Node {
+            Node { tag, name, kids }
+        }
+        fn article(name: &'static str) -> Node {
+            el("article", name, vec![])
+        }
+        fn has_article(n: &Node) -> bool {
+            n.tag == "article" || n.kids.iter().any(has_article)
+        }
+        fn count_articles(n: &Node) -> usize {
+            usize::from(n.tag == "article") + n.kids.iter().map(count_articles).sum::<usize>()
+        }
+
+        /// The chosen root's name, or `None` when selection falls through to the single-article path.
+        ///
+        /// The same rule the script runs: collect every node whose direct children carry at least three articles between them, drop any that contains another candidate, and take the one with the most carriers from what is left.
+        fn chosen(page: &Node) -> Option<&'static str> {
+            if count_articles(page) < 3 {
+                return None;
+            }
+            /// `(name, carriers, names below it that also qualify)`, in post-order.
+            fn collect(n: &Node, out: &mut Vec<(&'static str, usize, Vec<&'static str>)>) {
+                let before = out.len();
+                for k in &n.kids {
+                    collect(k, out);
+                }
+                let carriers = n.kids.iter().filter(|k| has_article(k)).count();
+                if carriers >= 3 {
+                    let below = out[before..].iter().map(|(name, _, _)| *name).collect();
+                    out.push((n.name, carriers, below));
+                }
+            }
+            let mut candidates = Vec::new();
+            collect(page, &mut candidates);
+            // Folded rather than `max_by_key`, which keeps the *last* of equal maxima where the script's reduce keeps the first.
+            candidates
+                .iter()
+                .filter(|(_, _, below)| below.is_empty())
+                .fold(
+                    None,
+                    |best: Option<&(&str, usize, Vec<&str>)>, c| match best {
+                        Some(b) if b.1 >= c.1 => Some(b),
+                        _ => Some(c),
+                    },
+                )
+                .map(|(name, _, _)| *name)
+        }
+
+        // The shape the change exists for: a results page of sibling cards.
+        let results = el(
+            "body",
+            "body",
+            vec![el(
+                "div",
+                "results",
+                (0..11).map(|_| article("card")).collect(),
+            )],
+        );
+        assert_eq!(chosen(&results), Some("results"));
+
+        // The same shape with each card in a wrapper, which is at least as common.
+        let feed = el(
+            "body",
+            "body",
+            vec![el(
+                "div",
+                "feed",
+                (0..5)
+                    .map(|_| el("div", "card", vec![article("post")]))
+                    .collect(),
+            )],
+        );
+        assert_eq!(chosen(&feed), Some("feed"));
+
+        // The over-reach case: one post plus a related-posts widget also built out of `article`.
+        // Three articles are present, but only two children carry them, so this must not resolve to the document.
+        let blog = el(
+            "body",
+            "body",
+            vec![
+                el("div", "content", vec![article("the post")]),
+                el("div", "related", vec![article("rel 1"), article("rel 2")]),
+            ],
+        );
+        assert_eq!(
+            chosen(&blog),
+            None,
+            "a post page with a related-posts widget must stay on the post, not climb to the document"
+        );
+
+        // Below the threshold entirely.
+        let single = el(
+            "body",
+            "body",
+            vec![el("div", "content", vec![article("only")])],
+        );
+        assert_eq!(chosen(&single), None);
+
+        // A featured card above the grid, which a search anchored on the first article cannot reach: the grid is that article's sibling subtree, not one of its ancestors.
+        let featured = el(
+            "body",
+            "body",
+            vec![
+                el("div", "lone", vec![article("featured")]),
+                el(
+                    "div",
+                    "feed",
+                    vec![article("a"), article("b"), article("c")],
+                ),
+            ],
+        );
+        assert_eq!(
+            chosen(&featured),
+            Some("feed"),
+            "a grid beside a featured card is still the grid, and returning the featured card alone is the bug this exists to fix"
+        );
+
+        // A feed flanked by unrelated single-article widgets: the deepest qualifying node is the feed, not the ancestor that happens to hold all three.
+        let flanked = el(
+            "body",
+            "body",
+            vec![
+                el(
+                    "div",
+                    "feed",
+                    vec![article("a"), article("b"), article("c")],
+                ),
+                el("div", "trending", vec![article("teaser")]),
+                el("div", "related", vec![article("teaser")]),
+            ],
+        );
+        assert_eq!(
+            chosen(&flanked),
+            Some("feed"),
+            "scattered single-article widgets must not widen selection to the whole page"
+        );
+
+        // Two independent clusters at different depths: a small widget nested deep and placed *before* the feed in the document.
+        // Depth is not evidence of being the page's subject, so the larger cluster wins.
+        let widget_first = el(
+            "body",
+            "body",
+            vec![
+                el(
+                    "div",
+                    "sidebar",
+                    vec![el(
+                        "div",
+                        "wrap",
+                        vec![el(
+                            "div",
+                            "widget",
+                            vec![article("w1"), article("w2"), article("w3")],
+                        )],
+                    )],
+                ),
+                el("div", "feed", (0..20).map(|_| article("card")).collect()),
+            ],
+        );
+        assert_eq!(
+            chosen(&widget_first),
+            Some("feed"),
+            "a deeper three-card widget must not beat the feed it happens to precede"
+        );
+
+        // Two clusters of equal size: the first in document order, so the choice is stable rather than arbitrary.
+        let two_feeds = el(
+            "body",
+            "body",
+            vec![
+                el(
+                    "div",
+                    "first",
+                    vec![article("a"), article("b"), article("c")],
+                ),
+                el(
+                    "div",
+                    "second",
+                    vec![article("d"), article("e"), article("f")],
+                ),
+            ],
+        );
+        assert_eq!(chosen(&two_feeds), Some("first"));
     }
 
     /// The truncation marker counts against the cap rather than overshooting it.

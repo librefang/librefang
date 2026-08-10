@@ -1454,6 +1454,14 @@ pub async fn set_provider_key(
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    // Managed mode (#6695) refuses the whole request, not just the config write.
+    // This handler writes `secrets.env` at the top and only *conditionally* reaches `persist_default_model` further down — the auto-switch branches depend on whether the current default already has a working key, which the caller cannot predict.
+    // A guard at the config write would therefore refuse a request that had already rewritten `secrets.env` and mutated the process environment, and would return 200 or 423 for the identical request depending on daemon state.
+    // Refusing first keeps the request atomic and the contract documentable: in a managed deployment provider credentials come from the environment or secret manifest, not from this route.
+    if let Some(locked) = crate::routes::guard_config_write() {
+        return locked;
+    }
+
     // Shape-check the path-supplied provider name BEFORE we derive an env
     // var from it. See `docs/issues/set-provider-key-arbitrary-names.md`.
     if let Err(msg) = crate::validation::check_provider_name_shape(&name) {
@@ -2410,6 +2418,12 @@ pub async fn set_provider_url(
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    // Managed mode (#6695): `[provider_urls]` and `[provider_proxy_urls]` are deployment configuration, persisted below at `upsert_provider_url` / `upsert_provider_proxy_url`.
+    // Refuse before the in-memory catalog is mutated, so a refused request leaves neither the file nor the live catalog moved — otherwise the running daemon would drift from the manifest with nothing on disk to show for it.
+    if let Some(locked) = crate::routes::guard_config_write() {
+        return locked;
+    }
+
     // Accept any provider name — custom providers are supported via OpenAI-compatible format.
     let base_url_raw = match body["base_url"].as_str() {
         Some(u) if !u.trim().is_empty() => u.trim().to_string(),
@@ -2592,6 +2606,13 @@ pub async fn set_default_provider(
     Path(name): Path<String>,
     body: Option<axum::Json<serde_json::Value>>,
 ) -> impl IntoResponse {
+    // Managed mode (#6695): the whole point of this route is to persist `[default_model]` into config.toml (`persist_default_model` below), which a managed deployment owns.
+    // The guard runs before the catalog refreshes because those issue outbound HTTP to OpenRouter / EveryAPI — a refused request should cost nothing, and refreshing a catalog we are about to refuse to act on is pure waste.
+    // Refusing here also keeps the in-memory `default_model_override` aligned with the file: the persist failure below is only a `warn!`, so without the guard a managed deployment would answer 200 and hot-switch the live default while the manifest kept saying otherwise — the exact silent drift managed mode exists to prevent.
+    if let Some(locked) = crate::routes::guard_config_write() {
+        return locked;
+    }
+
     if name == "openrouter" {
         let _ = crate::openrouter_catalog::refresh_if_stale(&state.kernel).await;
     }
