@@ -46,9 +46,7 @@ macro_rules! tg_trace {
 }
 
 /// Apply the configured identity boundary to an extracted Telegram sender.
-/// Missing identity is compatible only with an explicitly open allowlist;
-/// restricted deployments fail closed instead of relying on the translator to
-/// reject every sender-less update variant independently.
+/// Missing identity is compatible only with an explicitly open allowlist; restricted deployments fail closed instead of relying on the translator to reject every sender-less update variant independently.
 fn sender_passes_allowlist(allowlist: &AllowList, sender: Option<&Sender>) -> bool {
     match sender {
         Some(sender) => allowlist.permits(&sender.user_id, sender.username.as_deref()),
