@@ -203,7 +203,7 @@ mod tests {
         ];
         for (prefix, suffix) in credentials {
             let credential = format!("{prefix}{suffix}");
-            let redacted = redact_metadata(&Value::String(format!("credential={credential}")));
+            let redacted = redact_metadata(Value::String(format!("credential={credential}")));
             let rendered = redacted.as_str().unwrap();
             assert!(
                 !rendered.contains(&credential),
@@ -227,7 +227,7 @@ mod tests {
         ];
         for (prefix, suffix) in near_misses {
             let input = format!("{prefix}{suffix}");
-            let redacted = redact_metadata(&Value::String(input.clone()));
+            let redacted = redact_metadata(Value::String(input.clone()));
             assert_eq!(redacted, Value::String(input));
         }
     }
