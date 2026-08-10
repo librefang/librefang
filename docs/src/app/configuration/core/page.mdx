@@ -691,7 +691,7 @@ trusted_manifest_signers   = []
 | `max_upload_size_bytes` | usize | `10485760` (10 MiB) | Cap on a single uploaded file. |
 | `max_request_body_bytes` | usize | `16777216` (16 MiB) | Cap on the entire HTTP request body. |
 | `max_concurrent_bg_llm` | usize | `8` | Concurrent background LLM calls (compaction, summarise, dream, …). |
-| `max_agent_call_depth` | u32 | `5` | Inter-agent call depth (prevents recursion bombs across `agent_send`). |
+| `max_agent_call_depth` | u32 | `5` | Inter-agent call depth (prevents recursion bombs across `agent_send`); nested `workflow_run` calls are charged to the same budget. |
 | `local_probe_interval_secs` | u64 | `60` | How often local providers (Ollama / vLLM / LM Studio) are re-probed. |
 | `strict_config` | bool | `false` | When `true`, unknown config fields cause boot to fail (otherwise log a warning and continue). |
 | `update_channel` | enum | `"stable"` | Which release channel `librefang upgrade` consults. |

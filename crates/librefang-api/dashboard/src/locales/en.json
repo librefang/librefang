@@ -370,6 +370,7 @@
       "preview_markdown": "Markdown",
       "switch_to_toml": "Switch to TOML →",
       "toml_parse_error": "TOML parse error: {{msg}}",
+      "json_schema_unsafe_integer": "JSON schema integers whose absolute value exceeds 9,007,199,254,740,991 cannot be edited safely in visual mode. Keep this manifest in TOML mode.",
       "copy": "Copy to clipboard",
       "copied": "Copied to clipboard",
       "module": "Module",

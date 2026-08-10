@@ -833,10 +833,13 @@ export function AgentsPage() {
     if (next === "form" && manifestToml.trim() && manifestToml !== serializedFormToml) {
       const parsed = parseManifestToml(manifestToml);
       if (!parsed.ok) {
+        const parseMessage = parsed.message === "json_schema_unsafe_integer"
+          ? t("agents.form.json_schema_unsafe_integer")
+          : parsed.message;
         setTomlParseError(
           parsed.line !== undefined
-            ? `Line ${parsed.line}:${parsed.column ?? 0} — ${parsed.message}`
-            : parsed.message,
+            ? `Line ${parsed.line}:${parsed.column ?? 0} — ${parseMessage}`
+            : parseMessage,
         );
         return;
       }
