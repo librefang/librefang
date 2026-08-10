@@ -296,14 +296,13 @@ fn safe_ext_from_filename(filename: &str) -> Option<String> {
 
 /// Durable metadata for a file exposed through `/api/uploads/{file_id}`.
 ///
-/// Cross-crate producers persist this sidecar beside the upload so the API can
-/// reconstruct its content type and access policy after a daemon restart.
+/// Cross-crate producers persist this sidecar beside the upload so the API can reconstruct its content type and access policy after a daemon restart.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UploadMetadata {
     pub filename: String,
     pub content_type: String,
-    /// `Some` binds a human upload to its owner. Persisted `None` explicitly
-    /// marks daemon-generated or no-auth content as shared.
+    /// `Some` binds a human upload to its owner.
+    /// Persisted `None` explicitly marks daemon-generated or no-auth content as shared.
     pub uploaded_by: Option<crate::agent::UserId>,
 }
 
