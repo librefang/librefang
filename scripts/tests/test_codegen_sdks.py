@@ -86,6 +86,11 @@ def main():
     assert_in('"status": resp.StatusCode', go, "go-error-event-status")
     assert_in("if !buffer.is_empty()", rs, "rust-flush-trailing-sse-line")
     assert_in('if let Some(data) = line.trim().strip_prefix("data: ")', rs, "rust-parse-trailing-sse-line")
+    assert_in(
+        'invalid utf-8 in SSE line at byte {}", e.valid_up_to())',
+        rs,
+        "rust-trailing-sse-flush-reports-invalid-utf8",
+    )
     assert_in('"error": fmt.Sprintf("new request: %v", err)', go, "go-stream-request-error")
     assert_not_in("req, _ := http.NewRequest", go, "go-no-discarded-stream-request-error")
     assert_in('buffer = b""', py, "python-byte-buffer")
