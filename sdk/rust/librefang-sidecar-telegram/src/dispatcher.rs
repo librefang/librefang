@@ -45,6 +45,12 @@ fn truncate_raw_caption(raw: Option<&str>) -> Option<String> {
 }
 
 /// Send a text message (formatted + sanitised + chunked).
+///
+/// Delivery is not atomic when formatting produces multiple Telegram messages:
+/// chunks are sent sequentially, and an error on a later chunk is returned after
+/// earlier chunks have already been delivered. Telegram provides no rollback for
+/// those preceding messages, so callers must treat an error as possible partial
+/// delivery rather than as proof that the recipient saw nothing.
 pub async fn send_text(
     client: &BotClient,
     chat_id: i64,
