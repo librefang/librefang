@@ -201,10 +201,13 @@ pub fn markdown_to_telegram_html(text: &str) -> String {
             current_list_kind = None;
             out.push_str("<blockquote>");
             out.push_str(&render_inline_markdown(content));
-            while let Some(next_content) = lines.peek().and_then(|next| blockquote(next)) {
+            while line_index < lines.len() {
+                let Some(next_content) = blockquote(lines[line_index]) else {
+                    break;
+                };
                 out.push('\n');
                 out.push_str(&render_inline_markdown(next_content));
-                lines.next();
+                line_index += 1;
             }
             out.push_str("</blockquote>\n");
             continue;
