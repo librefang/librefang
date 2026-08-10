@@ -452,17 +452,81 @@ timeout_secs = 30
     expect(reparsed.extras.topLevel.exec_policy).toBeUndefined();
   });
 
+  it("preserves u64 resource limits above Number.MAX_SAFE_INTEGER", () => {
+    const source = `name = "a"
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+
+[resources]
+max_llm_tokens_per_hour = 9007199254740993
+max_memory_bytes = 9007199254740994
+max_cpu_time_ms = 9223372036854775806
+max_network_bytes_per_hour = 9223372036854775807
+`;
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const serialized = serializeManifestForm(parsed.form, parsed.extras);
+    expect(serialized).toContain("max_llm_tokens_per_hour = 9007199254740993");
+    expect(serialized).toContain("max_memory_bytes = 9007199254740994");
+    expect(serialized).toContain("max_cpu_time_ms = 9223372036854775806");
+    expect(serialized).toContain("max_network_bytes_per_hour = 9223372036854775807");
+
+    const reparsed = parseManifestToml(serialized);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.resources).toMatchObject(parsed.form.resources);
+  });
+
+  it("preserves large continuous and autonomous interval values", () => {
+    const source = `name = "a"
+schedule = { continuous = { check_interval_secs = 9007199254740993 } }
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+
+[autonomous]
+heartbeat_interval_secs = 9223372036854775807
+heartbeat_keep_recent = 9007199254740994
+`;
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const serialized = serializeManifestForm(parsed.form, parsed.extras);
+    expect(serialized).toContain("check_interval_secs = 9007199254740993");
+    expect(serialized).toContain("heartbeat_interval_secs = 9223372036854775807");
+    expect(serialized).toContain("heartbeat_keep_recent = 9007199254740994");
+  });
+
+  it("fails closed when a JSON schema contains an unsafe BigInt", () => {
+    const parsed = parseManifestToml(`name = "a"
+response_format = { type = "json_schema", name = "score", schema = { maximum = 9007199254740993 } }
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+`);
+
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.message).toBe("json_schema_unsafe_integer");
+  });
+
   it("rejects negative and out-of-range integers in number fields", () => {
     // Codex P2 regression: parseInteger used to accept any JS number,
     // including negatives (which u32/u64 deserializers reject) and
-    // values above MAX_SAFE_INTEGER (which lose precision before
-    // serialization).
+    // values outside the target unsigned Rust type.
     const form = emptyManifestForm();
     form.name = "a";
     form.model.provider = "openai";
     form.model.model = "gpt-4o";
     form.model.max_tokens = "-100";
-    form.resources.max_llm_tokens_per_hour = "9999999999999999999"; // > MAX_SAFE_INTEGER
+    form.resources.max_llm_tokens_per_hour = "9223372036854775808"; // TOML i64::MAX + 1
 
     const toml = serializeManifestForm(form);
     expect(toml).not.toContain("max_tokens =");

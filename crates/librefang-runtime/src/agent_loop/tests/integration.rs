@@ -2501,3 +2501,74 @@ async fn parallel_dispatch_write_read_mix_groups_and_orders() {
         assert!(content.contains(&format!("content-{i}")));
     }
 }
+
+/// Proxy measurement for the fat-frame half of #6659, deliberately labelled as such: it would NOT have caught the missing depth accounting on the workflow path, and it cannot fail the way a stack overflow does.
+///
+/// `run_agent_loop`'s future is the state machine a nested agent turn stacks once per level, and the #6659 crash report works out to roughly 40 KB per frame — which reads as bounded depth with very large frames rather than deep recursion.
+/// So the size of this future is the number worth watching: if it grows by an order of magnitude, a legal-depth delegation chain starts aborting a 2 MiB tokio worker even with the depth cap in place.
+///
+/// An `async fn` does nothing until polled, so constructing the future without awaiting it is enough to measure it — no runtime needed.
+/// The bound is generous on purpose: this pins the order of magnitude, not a byte count, so ordinary feature work does not have to re-baseline it.
+#[test]
+fn run_agent_loop_future_size_stays_within_its_order_of_magnitude() {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let agent_id = librefang_types::agent::AgentId::new();
+    let mut session = librefang_memory::session::Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id,
+        messages: Vec::new(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> = Arc::new(EmptyAfterToolUseDriver::new());
+    let options = LoopOptions::default();
+
+    let fut = run_agent_loop(
+        &manifest,
+        "measure only — never polled",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None, // on_phase
+        None, // media_engine
+        None, // media_drivers
+        None, // tts_engine
+        None, // docker_config
+        None, // hooks
+        None, // context_window_tokens
+        None, // process_manager
+        None, // checkpoint_manager
+        None, // process_registry
+        None, // user_content_blocks
+        None, // proactive_memory
+        None, // context_engine
+        None, // pending_messages
+        &options,
+    );
+
+    let size = std::mem::size_of_val(&fut);
+    // Printed so a `--nocapture` run reports the current figure for a PR body or an issue comment without anyone having to rebuild with nightly and `-Zprint-type-sizes`.
+    eprintln!("run_agent_loop future size: {size} bytes");
+    assert!(
+        size < 512 * 1024,
+        "run_agent_loop's future grew to {size} bytes. Each nested agent turn \
+         (agent_send, a workflow step) stacks one of these on the polling \
+         thread, and the daemon's tokio workers get 8 MiB — so a 512 KiB \
+         future leaves room for only a handful of levels. Shrink it (box a \
+         large await site) rather than raising this bound."
+    );
+    drop(fut);
+}

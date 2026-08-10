@@ -44,6 +44,7 @@ For talking to other agents **inside the same LibreFang daemon** (no A2A protoco
 | `goal_update` | `goal` | Update **this** agent's goal/objective mid-turn. The new goal is written into the agent's manifest and surfaces in subsequent prompts. |
 
 `max_agent_call_depth` in `[kernel]` (default `5`) caps how deep an `agent_send` chain can recurse — prevents A→B→A loops from ever reaching production.
+A nested `workflow_run` (below) whose step targets an agent that runs a workflow again is charged to this same budget, since each step nests a whole agent turn exactly as an `agent_send` hop does.
 
 ---
 
@@ -91,7 +92,7 @@ The claim TTL exists to recover from worker crashes — if the claimer doesn't `
 
 | Tool | Arguments | Purpose |
 |---|---|---|
-| `workflow_run` | `workflow_id`, optional `inputs` | Execute a stored workflow synchronously and return its result. |
+| `workflow_run` | `workflow_id`, optional `inputs` | Execute a stored workflow synchronously and return its result. Nesting is bounded by the same `max_agent_call_depth` quota as `agent_send` (above); a run entered too deep is refused rather than left to recurse. |
 | `event_publish` | `event_type`, `payload` | Publish a structured event onto the event bus. Triggers (`[[trigger]]` blocks on agent manifests) listening on `event_type` will fire. |
 | `system_time` | — | Get the daemon's current wall-clock time (RFC3339 UTC). Cheap; no external clock call. |
 

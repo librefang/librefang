@@ -132,6 +132,29 @@ tokio::task_local! {
     pub static CANVAS_ALLOWED_TAGS: std::sync::Arc<Vec<String>>;
 }
 
+/// Run `fut` one level deeper in the synchronous inter-agent call chain.
+///
+/// Every path that nests a *whole agent turn* inside another agent's turn on the same task must go through here, so [`current_agent_depth`] reflects the real number of stacked turns and the operator quota (`config.toml: max_agent_call_depth`) actually bounds it.
+///
+/// Before this existed, `agent_send` was the only path that accounted for nesting; the workflow-step dispatch in the kernel nested turns with no accounting at all, so an agent whose workflow step targets an agent that re-runs the same workflow recursed with no depth bound whatsoever (refs #6659).
+/// Callers outside `tool_runner` — the kernel's workflow drivers — need this because `AGENT_CALL_DEPTH` is module-private.
+///
+/// The check itself stays with the caller: each entry point already knows how to shape its own refusal (`ToolError::PermissionDenied` for a tool, `LibreFangError::CapabilityDenied` for a kernel op), and both read the same `max_agent_call_depth` knob.
+///
+/// `fut` is boxed for the same reason [`crate::held_agent_locks::scope`] boxes its argument: the future being wrapped here is an entire agent turn, an enormous state machine.
+/// Inlining it would stack another full copy of it per nesting level, adding stack cost at exactly the boundary this helper exists to bound.
+/// Boxing makes each level cost a pointer.
+pub async fn with_agent_call_depth<F>(fut: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    let fut = Box::pin(fut);
+    let next = current_agent_depth().saturating_add(1);
+    AGENT_CALL_DEPTH
+        .scope(std::cell::Cell::new(next), fut)
+        .await
+}
+
 /// Shared `Option<&Arc<dyn KernelHandle>>` -> `&Arc<dyn KernelHandle>` unwrap
 /// used by every kernel-backed tool module. Kept at the parent module so each
 /// child can `use super::require_kernel` without redeclaring it.
