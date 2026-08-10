@@ -128,6 +128,8 @@ pub(crate) fn resolve_lang(lang: Option<&axum::Extension<RequestLanguage>>) -> &
 /// Admin and Owner roles can inspect every agent.
 /// Lower roles are limited to agents whose manifest author matches their authenticated name.
 /// `None` remains allowed for the explicitly trusted loopback/no-auth deployment mode, matching the existing API compatibility contract.
+///
+/// An agent that is not in the registry is denied to every principal, including Admin: an agent-scoped resource addressed by an id that resolves to nothing is reported as 404 rather than served, so id enumeration cannot distinguish "exists but not yours" from "does not exist".
 pub(crate) fn can_access_agent(
     state: &AppState,
     agent_id: librefang_types::agent::AgentId,
