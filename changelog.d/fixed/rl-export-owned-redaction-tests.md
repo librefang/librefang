@@ -1,0 +1,1 @@
+- Fixed RL-export test targets after metadata redaction changed to consume owned JSON values. (@houko)
