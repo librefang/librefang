@@ -428,6 +428,10 @@ impl SidecarAdapter for TelegramAdapter {
             Command::StreamEnd(e) => {
                 let mut map = self.streams.lock().await;
                 let Some(state) = map.remove(&e.stream_id) else {
+                    eprintln!(
+                        "[telegram] StreamEnd for unknown stream_id={:?}, dropped",
+                        e.stream_id
+                    );
                     return Ok(());
                 };
                 tg_trace!(
