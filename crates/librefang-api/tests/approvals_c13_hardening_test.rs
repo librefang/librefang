@@ -1,8 +1,7 @@
 //! Regression tests for the approvals hardening cluster (audit findings #18, #24).
 //!
 //! - #18: per-approval TOTP replay prevention must be atomic so a single
-//!   valid single-use code cannot authorize more than one concurrent approval
-//!   (TOCTOU between `is_totp_code_used` and `record_totp_code_used_for`).
+//!   valid single-use code cannot authorize more than one concurrent approval.
 //! - #24: `approve_request` must route the typed `KernelOpError` through the
 //!   central status-code map (like `reject_request`), so a missing/expired id
 //!   yields 404 rather than a blanket 400.
@@ -203,10 +202,10 @@ async fn approve_and_reject_agree_on_missing_id_status() {
 
 /// Fire many concurrent `approve` requests, each for a distinct pending
 /// approval but all carrying the *same* single-use TOTP code. The atomic
-/// check-and-record critical section must let exactly ONE succeed; every
-/// other must be rejected as replay. Without the fix (non-atomic
-/// check-then-record), multiple requests read `is_totp_code_used == false`
-/// before any records the code and more than one approval succeeds.
+/// replay-table claim must let exactly ONE succeed; every other must be
+/// rejected as replay. Without the fix (non-atomic check-then-record),
+/// multiple requests can observe the code as unused before any records it and
+/// more than one approval succeeds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_approvals_consume_totp_code_exactly_once() {
     let h = boot();

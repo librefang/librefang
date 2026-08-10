@@ -115,6 +115,17 @@ fn current_code(h: &Harness) -> String {
         .expect("generate current code")
 }
 
+fn drop_totp_used_codes_table(h: &Harness) {
+    h.state
+        .kernel
+        .memory_substrate()
+        .pool()
+        .get()
+        .expect("test database connection")
+        .execute("DROP TABLE totp_used_codes", [])
+        .expect("drop replay table");
+}
+
 // ---------------------------------------------------------------------------
 // Status
 // ---------------------------------------------------------------------------
@@ -239,6 +250,39 @@ async fn setup_when_already_confirmed_requires_current_code() {
     );
 }
 
+/// Resetting an existing enrollment must fail closed when the verified code
+/// cannot be persisted in the replay table. Otherwise the caller receives a
+/// fresh secret while the same observed code remains reusable.
+#[tokio::test(flavor = "multi_thread")]
+async fn setup_reset_does_not_rotate_when_replay_claim_persistence_fails() {
+    let h = boot();
+    let (_, first_setup) = json_post(&h, "/api/approvals/totp/setup", serde_json::json!({})).await;
+    let original_secret = first_setup["secret"].as_str().unwrap().to_string();
+    let code = current_code(&h);
+    let (confirm_status, _) = json_post(
+        &h,
+        "/api/approvals/totp/confirm",
+        serde_json::json!({ "code": code.clone() }),
+    )
+    .await;
+    assert_eq!(confirm_status, StatusCode::OK);
+
+    drop_totp_used_codes_table(&h);
+    let (status, body) = json_post(
+        &h,
+        "/api/approvals/totp/setup",
+        serde_json::json!({ "current_code": code }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "got: {body}");
+    assert_eq!(
+        h.state.kernel.vault_get("totp_secret").as_deref(),
+        Some(original_secret.as_str()),
+        "failed replay persistence must not rotate the enrollment"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Confirm
 // ---------------------------------------------------------------------------
@@ -290,8 +334,8 @@ async fn confirm_with_invalid_code_keeps_pending() {
 }
 
 /// Replaying the same TOTP code twice (even one that just successfully
-/// confirmed) must be rejected — the replay-prevention bucket
-/// (`is_totp_code_used`) is the only line of defense between an attacker
+/// confirmed) must be rejected — the replay table's atomic claim is the only
+/// line of defense between an attacker
 /// who shoulder-surfed a single 30-second window and full 2FA bypass.
 #[tokio::test(flavor = "multi_thread")]
 async fn confirm_rejects_replayed_code() {
@@ -307,8 +351,8 @@ async fn confirm_rejects_replayed_code() {
     .await;
     assert_eq!(s1, StatusCode::OK);
 
-    // Re-issue the same code: the replay bucket (`is_totp_code_used`)
-    // must reject it, even though the first call already succeeded.
+    // Re-issue the same code: the replay-table claim must reject it, even
+    // though the first call already succeeded.
     let (s2, b2) = json_post(
         &h,
         "/api/approvals/totp/confirm",
@@ -323,6 +367,29 @@ async fn confirm_rejects_replayed_code() {
     assert!(
         err.contains("already been used"),
         "expected replay error, got: {err}"
+    );
+}
+
+/// Confirmation must not activate TOTP when recording the code as consumed
+/// fails. Activating it anyway leaves the verified code replayable.
+#[tokio::test(flavor = "multi_thread")]
+async fn confirm_does_not_activate_when_replay_claim_persistence_fails() {
+    let h = boot();
+    let (_, _) = json_post(&h, "/api/approvals/totp/setup", serde_json::json!({})).await;
+    let code = current_code(&h);
+    drop_totp_used_codes_table(&h);
+
+    let (status, body) = json_post(
+        &h,
+        "/api/approvals/totp/confirm",
+        serde_json::json!({ "code": code }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "got: {body}");
+    assert_eq!(
+        h.state.kernel.vault_get("totp_confirmed").as_deref(),
+        Some("false")
     );
 }
 
@@ -446,5 +513,40 @@ async fn revoke_with_invalid_code_does_not_clear() {
     assert!(
         h.state.kernel.vault_get("totp_secret").is_some(),
         "secret must NOT be wiped by a failed revoke"
+    );
+}
+
+/// Revocation is the most damaging replay-persistence failure: it must leave
+/// the existing enrollment intact when the verified code cannot be claimed.
+#[tokio::test(flavor = "multi_thread")]
+async fn revoke_does_not_disable_totp_when_replay_claim_persistence_fails() {
+    let h = boot();
+    let (_, setup) = json_post(&h, "/api/approvals/totp/setup", serde_json::json!({})).await;
+    let original_secret = setup["secret"].as_str().unwrap().to_string();
+    let code = current_code(&h);
+    let (confirm_status, _) = json_post(
+        &h,
+        "/api/approvals/totp/confirm",
+        serde_json::json!({ "code": code.clone() }),
+    )
+    .await;
+    assert_eq!(confirm_status, StatusCode::OK);
+
+    drop_totp_used_codes_table(&h);
+    let (status, body) = json_post(
+        &h,
+        "/api/approvals/totp/revoke",
+        serde_json::json!({ "code": code }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "got: {body}");
+    assert_eq!(
+        h.state.kernel.vault_get("totp_confirmed").as_deref(),
+        Some("true")
+    );
+    assert_eq!(
+        h.state.kernel.vault_get("totp_secret").as_deref(),
+        Some(original_secret.as_str())
     );
 }

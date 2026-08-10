@@ -714,37 +714,6 @@ pub(crate) async fn dashboard_login(
                         )
                             .into_response();
                     }
-                    // Replay-prevention check (#3359): reject a code already used
-                    // in the last 60 seconds.
-                    if state.kernel.approvals().is_totp_code_used(totp_code) {
-                        // Atomic check + record (#3584) preserves fail-secure on
-                        // DB persist failure (#3372): Err(false) = DB write
-                        // dropped, so reject with 500; Err(true) = already locked
-                        // out, fall through to the "already used" response so the
-                        // lockout state is not leaked here.
-                        if let Err(false) = state
-                            .kernel
-                            .approvals()
-                            .check_and_record_totp_failure("api_admin")
-                        {
-                            return (
-                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                axum::response::Json(serde_json::json!({
-                                    "ok": false,
-                                    "error": "Failed to persist TOTP failure counter",
-                                })),
-                            )
-                                .into_response();
-                        }
-                        return (
-                            axum::http::StatusCode::UNAUTHORIZED,
-                            axum::response::Json(serde_json::json!({
-                                "ok": false,
-                                "error": "TOTP code has already been used. Wait for the next 30-second window.",
-                            })),
-                        )
-                            .into_response();
-                    }
                     // Verify TOTP code
                     let secret = state.kernel.vault_get("totp_secret").unwrap_or_default();
                     let issuer = policy.totp_issuer.clone();
@@ -754,24 +723,48 @@ pub(crate) async fn dashboard_login(
                         .verify_totp(&secret, totp_code, &issuer)
                     {
                         Ok(true) => {
-                            // Mark code as used so it cannot be replayed.
-                            // Fail-secure (#3372 parity): if the DB write fails
-                            // the code is NOT in the replay table and could be
-                            // reused, so reject with 500 rather than logging in.
-                            if state
-                                .kernel
-                                .approvals()
-                                .record_totp_code_used_for(totp_code, Some("login"))
-                                .is_err()
+                            let kernel = Arc::clone(&state.kernel);
+                            let totp_code = totp_code.to_string();
+                            match tokio::task::spawn_blocking(move || {
+                                kernel
+                                    .approvals()
+                                    .claim_totp_code_used_for(&totp_code, Some("login"))
+                            })
+                            .await
                             {
-                                return (
-                                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                    axum::response::Json(serde_json::json!({
-                                        "ok": false,
-                                        "error": "Failed to persist TOTP used-code record",
-                                    })),
-                                )
-                                    .into_response();
+                                Ok(Ok(librefang_kernel::approval::TotpCodeClaim::Claimed)) => {}
+                                Ok(Ok(librefang_kernel::approval::TotpCodeClaim::AlreadyUsed)) => {
+                                    return (
+                                        axum::http::StatusCode::UNAUTHORIZED,
+                                        axum::response::Json(serde_json::json!({
+                                            "ok": false,
+                                            "error": "TOTP code has already been used. Wait for the next 30-second window.",
+                                        })),
+                                    )
+                                        .into_response();
+                                }
+                                Ok(Err(error)) => {
+                                    tracing::warn!(%error, "Failed to persist dashboard-login TOTP claim");
+                                    return (
+                                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                        axum::response::Json(serde_json::json!({
+                                            "ok": false,
+                                            "error": "Failed to persist TOTP used-code record",
+                                        })),
+                                    )
+                                        .into_response();
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%error, "Dashboard-login TOTP claim task failed");
+                                    return (
+                                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                        axum::response::Json(serde_json::json!({
+                                            "ok": false,
+                                            "error": "Failed to persist TOTP used-code record",
+                                        })),
+                                    )
+                                        .into_response();
+                                }
                             }
                         }
                         Ok(false) => {
@@ -4092,6 +4085,78 @@ mod dashboard_login_totp_lockout_tests {
         assert_eq!(
             body["error"], "Too many failed TOTP attempts. Try again later.",
             "dashboard login must lock out after repeated TOTP failures; body: {body:?}"
+        );
+    }
+
+    /// The dashboard-login consumer must propagate a replay-table claim error
+    /// instead of issuing a session after a valid cryptographic verification.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dashboard_login_fails_closed_when_totp_claim_persistence_fails() {
+        use totp_rs::{Algorithm, Secret, TOTP};
+
+        let tmp = tempfile::tempdir().expect("temp dir");
+        librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
+        let mut config = KernelConfig {
+            home_dir: tmp.path().to_path_buf(),
+            data_dir: tmp.path().join("data"),
+            api_key: "secret-token".to_string(),
+            dashboard_user: DASH_USER.to_string(),
+            dashboard_pass: DASH_PASS.to_string(),
+            default_model: DefaultModelConfig {
+                provider: "ollama".to_string(),
+                model: "test-model".to_string(),
+                api_key_env: "OLLAMA_API_KEY".to_string(),
+                base_url: None,
+                message_timeout_secs: 300,
+                extra_params: std::collections::BTreeMap::new(),
+                cli_profile_dirs: Vec::new(),
+            },
+            ..KernelConfig::default()
+        };
+        config.approval.second_factor = SecondFactor::Login;
+        config.approval.totp_issuer = "LibreFang".to_string();
+        let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boots"));
+        kernel.clone().set_self_handle();
+        let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let (_app, state) = build_router(kernel, addr).await;
+
+        let (secret, _uri, _qr) = state
+            .kernel
+            .approvals()
+            .new_totp_secret("LibreFang", DASH_USER)
+            .expect("generate totp secret");
+        state
+            .kernel
+            .vault_set("totp_secret", &secret)
+            .expect("persist totp secret");
+        state
+            .kernel
+            .vault_set("totp_confirmed", "true")
+            .expect("persist totp confirmed flag");
+        let issuer = state.kernel.approvals().policy().totp_issuer.clone();
+        let raw = Secret::Encoded(secret)
+            .to_bytes()
+            .expect("decode base32 secret");
+        let code = TOTP::new(Algorithm::SHA1, 6, 1, 30, raw, Some(issuer), String::new())
+            .expect("totp init")
+            .generate_current()
+            .expect("current code");
+
+        state
+            .kernel
+            .memory_substrate()
+            .pool()
+            .get()
+            .expect("database connection")
+            .execute("DROP TABLE totp_used_codes", [])
+            .expect("drop replay table");
+
+        let (status, body) = login_with_totp(&state, &code).await;
+        assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"], "Failed to persist TOTP used-code record");
+        assert!(
+            body.get("token").is_none(),
+            "failed claim must not issue a session"
         );
     }
 }
