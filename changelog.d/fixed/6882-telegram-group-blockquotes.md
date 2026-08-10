@@ -1,0 +1,1 @@
+- Grouped consecutive Telegram Markdown quote lines into one multi-line blockquote, matching the Python adapter. (@houko)

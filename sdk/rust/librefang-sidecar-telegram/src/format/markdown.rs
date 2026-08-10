@@ -175,6 +175,11 @@ pub fn markdown_to_telegram_html(text: &str) -> String {
             current_list_kind = None;
             out.push_str("<blockquote>");
             out.push_str(&render_inline_markdown(content));
+            while let Some(next_content) = lines.peek().and_then(|next| blockquote(next)) {
+                out.push('\n');
+                out.push_str(&render_inline_markdown(next_content));
+                lines.next();
+            }
             out.push_str("</blockquote>\n");
             continue;
         }
@@ -338,6 +343,15 @@ mod tests {
     fn heading_becomes_bold() {
         let html = markdown_to_telegram_html("# Title");
         assert!(html.contains("<b>Title</b>"));
+    }
+
+    #[test]
+    fn consecutive_quote_lines_form_one_blockquote() {
+        let html = markdown_to_telegram_html("> first\n> **second**\nplain");
+        assert_eq!(
+            html,
+            "<blockquote>first\n<b>second</b></blockquote>\nplain\n"
+        );
     }
 
     #[test]
