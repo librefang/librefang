@@ -106,6 +106,58 @@ pub fn unpack(packed: i64) -> (u32, u32) {
     ((packed >> 32) as u32, packed as u32)
 }
 
+/// Bytes per WASM linear-memory page, per the wasm spec (fixed, not
+/// configurable). Used to convert `memory_size` (page count) into a byte
+/// length for bounds checks.
+#[cfg(target_arch = "wasm32")]
+const WASM_PAGE_SIZE: usize = 64 * 1024;
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn checked_guest_memory_range(
+    ptr: u32,
+    len: u32,
+    memory_len: usize,
+) -> Option<core::ops::Range<usize>> {
+    if len == 0 {
+        return Some(0..0);
+    }
+    if ptr == 0 {
+        return None;
+    }
+    let start = usize::try_from(ptr).ok()?;
+    let len = usize::try_from(len).ok()?;
+    if len > i32::MAX as usize {
+        return None;
+    }
+    let end = start.checked_add(len)?;
+    (end <= memory_len).then_some(start..end)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn checked_signed_guest_memory_range(
+    ptr: i32,
+    len: i32,
+    memory_len: usize,
+) -> Option<core::ops::Range<usize>> {
+    let ptr = u32::try_from(ptr).ok()?;
+    let len = u32::try_from(len).ok()?;
+    checked_guest_memory_range(ptr, len, memory_len)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn copy_guest_memory(ptr: u32, len: u32) -> Option<Vec<u8>> {
+    let memory_len = core::arch::wasm32::memory_size::<0>().checked_mul(WASM_PAGE_SIZE)?;
+    let range = checked_guest_memory_range(ptr, len, memory_len)?;
+    if range.is_empty() {
+        return Some(Vec::new());
+    }
+
+    // SAFETY: the host contract returns memory obtained from this module's `alloc` export.
+    // The checked range is non-null and wholly contained in current linear memory.
+    // The bytes are copied before this function returns, so no reference escapes or survives memory growth.
+    Some(unsafe { core::slice::from_raw_parts(range.start as *const u8, range.len()).to_vec() })
+}
+
 /// An error from a host call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostError {
@@ -193,8 +245,11 @@ pub fn host_call(method: &str, params: Value) -> Result<Value, HostError> {
             imports::host_call(request_bytes.as_ptr() as i32, request_bytes.len() as i32)
         };
         let (ptr, len) = unpack(packed);
-        let response_bytes =
-            unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) }.to_vec();
+        let response_bytes = copy_guest_memory(ptr, len).ok_or_else(|| {
+            HostError::Decode(format!(
+                "host response points outside guest memory (ptr={ptr}, len={len})"
+            ))
+        })?;
         let response: Value = serde_json::from_slice(&response_bytes)
             .map_err(|e| HostError::Decode(e.to_string()))?;
         parse_envelope(response)
@@ -211,6 +266,8 @@ pub fn host_call(method: &str, params: Value) -> Result<Value, HostError> {
 pub fn log(level: LogLevel, message: &str) {
     #[cfg(target_arch = "wasm32")]
     unsafe {
+        // SAFETY: `message` is a live `&str` whose backing bytes remain valid for this synchronous call.
+        // The host copies the bytes and does not retain the pointer.
         imports::host_log(level as i32, message.as_ptr() as i32, message.len() as i32);
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -300,7 +357,9 @@ pub mod host {
 /// call the macro, not these functions.
 #[doc(hidden)]
 pub mod __rt {
-    use super::{pack, run, Request};
+    #[cfg(target_arch = "wasm32")]
+    use super::run;
+    use super::{pack, Request};
     use serde_json::Value;
 
     /// Allocate `size` bytes of guest memory and return a pointer the host can
@@ -308,8 +367,11 @@ pub mod __rt {
     /// torn down after a single `execute`, so per-invocation allocations are
     /// reclaimed wholesale rather than individually freed.
     pub fn alloc(size: i32) -> i32 {
-        let buf: Vec<u8> = Vec::with_capacity(size.max(0) as usize);
-        let ptr = buf.as_ptr() as i32;
+        if size <= 0 {
+            return 0;
+        }
+        let mut buf: Vec<u8> = Vec::with_capacity(size as usize);
+        let ptr = buf.as_mut_ptr() as i32;
         core::mem::forget(buf);
         ptr
     }
@@ -320,15 +382,38 @@ pub mod __rt {
     where
         F: FnOnce(Request) -> Result<Value, String>,
     {
-        // SAFETY: the host wrote `len` bytes at `ptr` (a pointer it obtained
-        // from our `alloc`) immediately before calling `execute`.
-        let input = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-        let output = run(input, handler);
-        let out_len = output.len() as u32;
-        let out_ptr = output.as_ptr() as u32;
-        // Leak the output so the host can read it after we return.
-        core::mem::forget(output);
-        pack(out_ptr, out_len)
+        if ptr < 0 || len < 0 {
+            return pack(0, 0);
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (ptr, len, handler);
+            pack(0, 0)
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let memory_len = core::arch::wasm32::memory_size::<0>()
+                .checked_mul(super::WASM_PAGE_SIZE)
+                .unwrap_or(0);
+            let Some(range) = super::checked_signed_guest_memory_range(ptr, len, memory_len) else {
+                return pack(0, 0);
+            };
+            let input = if range.is_empty() {
+                &[]
+            } else {
+                // SAFETY: the range is non-null and contained in the current linear memory.
+                // The host initialized it immediately before this synchronous `execute` call.
+                unsafe { core::slice::from_raw_parts(range.start as *const u8, range.len()) }
+            };
+            let output = run(input, handler);
+            let out_len = output.len() as u32;
+            let out_ptr = output.as_ptr() as u32;
+            // Leak the output so the host can read it after we return.
+            core::mem::forget(output);
+            pack(out_ptr, out_len)
+        }
     }
 }
 
@@ -435,5 +520,50 @@ mod tests {
     fn host_call_off_guest_is_not_in_guest() {
         assert_eq!(host_call("time_now", json!({})), Err(HostError::NotInGuest));
         assert_eq!(host::time_now(), Err(HostError::NotInGuest));
+    }
+
+    #[test]
+    fn alloc_rejects_nonpositive_sizes() {
+        assert_eq!(__rt::alloc(0), 0);
+        assert_eq!(__rt::alloc(-1), 0);
+        assert_eq!(__rt::alloc(i32::MIN), 0);
+    }
+
+    #[test]
+    fn guest_memory_range_rejects_invalid_unsigned_bounds() {
+        assert_eq!(checked_guest_memory_range(0, 0, 64), Some(0..0));
+        assert_eq!(checked_guest_memory_range(0, 1, 64), None);
+        assert_eq!(checked_guest_memory_range(60, 4, 64), Some(60..64));
+        assert_eq!(checked_guest_memory_range(60, 5, 64), None);
+        assert_eq!(checked_guest_memory_range(u32::MAX, 2, 64), None);
+        assert_eq!(
+            checked_guest_memory_range(1, i32::MAX as u32 + 1, usize::MAX),
+            None
+        );
+    }
+
+    #[test]
+    fn guest_memory_range_rejects_negative_signed_bounds() {
+        assert_eq!(checked_signed_guest_memory_range(-1, 0, 64), None);
+        assert_eq!(checked_signed_guest_memory_range(0, -1, 64), None);
+        assert_eq!(checked_signed_guest_memory_range(8, 4, 64), Some(8..12));
+    }
+
+    #[test]
+    fn execute_rejects_negative_abi_values_before_dispatch() {
+        let called = core::cell::Cell::new(false);
+        let result = __rt::execute(-1, 0, |_| {
+            called.set(true);
+            Ok(json!({}))
+        });
+        assert_eq!(result, pack(0, 0));
+        assert!(!called.get());
+
+        let result = __rt::execute(0, -1, |_| {
+            called.set(true);
+            Ok(json!({}))
+        });
+        assert_eq!(result, pack(0, 0));
+        assert!(!called.get());
     }
 }

@@ -354,8 +354,12 @@ describe("ChannelsPage", () => {
     expect(reload.mutate).toHaveBeenCalledTimes(1);
   });
 
-  it("removes a configured channel after confirmation", () => {
+  it("keeps removal confirmation open until the mutation succeeds", async () => {
     const { remove } = setMutationDefaults();
+    let resolveRemove!: () => void;
+    remove.mutateAsync.mockImplementation(() => new Promise<void>((resolve) => {
+      resolveRemove = resolve;
+    }));
     useChannelsMock.mockReturnValue(
       makeQuery<ChannelItem[]>([makeChannel({ name: "telegram", configured: true })]),
     );
@@ -363,8 +367,14 @@ describe("ChannelsPage", () => {
     // The remove dialog only appears after the per-card Trash button is clicked.
     fireEvent.click(screen.getByRole("button", { name: "channels.remove" }));
     fireEvent.click(screen.getByRole("button", { name: "common.confirm" }));
-    expect(remove.mutate).toHaveBeenCalledTimes(1);
-    expect(remove.mutate.mock.calls[0][0]).toBe("telegram");
+    expect(remove.mutateAsync).toHaveBeenCalledTimes(1);
+    expect(remove.mutateAsync.mock.calls[0][0]).toBe("telegram");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    resolveRemove();
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
   it("pre-populates non-secret field values from the sidecar schema", () => {

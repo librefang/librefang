@@ -57,11 +57,10 @@ export function DrawerPanel({
     isOpenRef.current = isOpen;
   }, [isOpen]);
 
-  // Track the body identity we last pushed into the slot. The
-  // parent-driven close watcher uses this to skip `close()` when another
-  // DrawerPanel has taken over the slot in the same commit — see
-  // ownership check below (#4714).
-  const lastPushedBodyRef = useRef<ReactNode>(null);
+  // Created in the push effect (not render) and retained for this panel's
+  // current open lifetime. The store checks it atomically on owner-scoped
+  // closes, so a previous panel cannot close a slot a sibling has claimed.
+  const ownerRef = useRef<object | null>(null);
 
   // Push children into the slot whenever we're open. Re-runs on every
   // re-render that changes any of the deps — including `children`, which
@@ -70,13 +69,15 @@ export function DrawerPanel({
   useEffect(() => {
     if (!isOpen) return;
     const body = children;
-    lastPushedBodyRef.current = body;
+    const owner = ownerRef.current ?? {};
+    ownerRef.current = owner;
     open({
       title,
       size,
       hideCloseButton,
       body,
       onClose: () => onCloseRef.current(),
+      owner,
     });
   }, [isOpen, title, size, hideCloseButton, children, open]);
 
@@ -88,7 +89,7 @@ export function DrawerPanel({
   // dismissals from the parent silently no-op'd, leaving the form
   // visible with a perpetually spinning submit button (#4687).
   //
-  // Ownership check (#4714): only fire `close()` when our body still
+  // Ownership check (#4714): only fire `close(owner)` when our opaque token
   // owns the slot. In a picker → config / "select item closes one
   // drawer and opens another" flow, the picker DrawerPanel transitions
   // isOpen=true → false in the same commit that the config DrawerPanel
@@ -97,7 +98,7 @@ export function DrawerPanel({
   // drawer, and the existing external-close watcher then fires its
   // onClose, which makes the parent unmount the config drawer — net
   // result: user picks an item and the configuration window vanishes
-  // immediately. Comparing against `lastPushedBodyRef` lets the
+  // immediately. The store's atomic token comparison lets the
   // late-mounting drawer's push "win" the slot without the previous
   // owner clobbering it.
   //
@@ -109,11 +110,10 @@ export function DrawerPanel({
   useEffect(() => {
     const wasOpen = prevIsOpenRef.current;
     prevIsOpenRef.current = isOpen;
-    if (wasOpen && !isOpen && drawerOpen) {
-      const currentBody = useDrawerStore.getState().content?.body;
-      if (currentBody === lastPushedBodyRef.current) {
-        close();
-      }
+    if (wasOpen && !isOpen) {
+      const owner = ownerRef.current;
+      if (drawerOpen && owner) close(owner);
+      ownerRef.current = null;
     }
   }, [isOpen, drawerOpen, close]);
 
@@ -137,7 +137,9 @@ export function DrawerPanel({
   // Cleanup on unmount.
   useEffect(
     () => () => {
-      if (isOpenRef.current) close();
+      const owner = ownerRef.current;
+      if (isOpenRef.current && owner) close(owner);
+      ownerRef.current = null;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
