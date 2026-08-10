@@ -105,8 +105,9 @@ fn do_stream(
     method: reqwest::Method,
     body: Option<Value>,
     query: Vec<(String, Option<String>)>,
-) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+) -> tokio::sync::mpsc::Receiver<Value> {
+    const STREAM_CHANNEL_CAPACITY: usize = 256;
+    let (tx, rx) = tokio::sync::mpsc::channel(STREAM_CHANNEL_CAPACITY);
     tokio::spawn(async move {
         let url = match build_url(&client, &base_url, path_segments.iter().map(String::as_str)) {
             Ok(url) => url,
@@ -115,10 +116,12 @@ fn do_stream(
                     Error::Api { status: 0, body } => body,
                     other => other.to_string(),
                 };
-                let _ = tx.send(serde_json::json!({
-                    "error": error,
-                    "status": 0,
-                }));
+                let _ = tx
+                    .send(serde_json::json!({
+                        "error": error,
+                        "status": 0,
+                    }))
+                    .await;
                 return;
             }
         };
@@ -139,23 +142,31 @@ fn do_stream(
         } else {
             req
         };
-        let res = match req.send().await {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = tx.send(serde_json::json!({
-                    "error": e.to_string(),
-                    "status": 0,
-                }));
-                return;
+        let res = tokio::select! {
+            _ = tx.closed() => return,
+            result = req.send() => match result {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(serde_json::json!({
+                        "error": e.to_string(),
+                        "status": 0,
+                    })).await;
+                    return;
+                }
             }
         };
         if !res.status().is_success() {
             let status = res.status().as_u16();
-            let body = res.text().await.unwrap_or_default();
-            let _ = tx.send(serde_json::json!({
-                "error": format!("HTTP {}: {}", status, body),
-                "status": status,
-            }));
+            let body = tokio::select! {
+                _ = tx.closed() => return,
+                body = res.text() => body.unwrap_or_default(),
+            };
+            let _ = tx
+                .send(serde_json::json!({
+                    "error": format!("HTTP {}: {}", status, body),
+                    "status": status,
+                }))
+                .await;
             return;
         }
         // Accumulate raw bytes so multi-byte UTF-8 codepoints are not split
@@ -165,23 +176,29 @@ fn do_stream(
         const MAX_SSE_LINE: usize = 8 * 1024 * 1024;
         let mut stream = res.bytes_stream();
         let mut buffer: Vec<u8> = Vec::new();
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = match chunk_result {
-                Ok(chunk) => chunk,
-                Err(e) => {
-                    let _ = tx.send(serde_json::json!({
-                        "error": format!("stream error: {}", e),
-                        "status": 0,
-                    }));
-                    return;
-                }
+        loop {
+            let chunk = tokio::select! {
+                _ = tx.closed() => return,
+                next = stream.next() => match next {
+                    Some(Ok(chunk)) => chunk,
+                    Some(Err(e)) => {
+                        let _ = tx.send(serde_json::json!({
+                            "error": format!("stream error: {}", e),
+                            "status": 0,
+                        })).await;
+                        return;
+                    }
+                    None => break,
+                },
             };
             buffer.extend_from_slice(&chunk);
             if buffer.len() > MAX_SSE_LINE {
-                let _ = tx.send(serde_json::json!({
-                    "error": format!("SSE line exceeded {} bytes", MAX_SSE_LINE),
-                    "status": 0,
-                }));
+                let _ = tx
+                    .send(serde_json::json!({
+                        "error": format!("SSE line exceeded {} bytes", MAX_SSE_LINE),
+                        "status": 0,
+                    }))
+                    .await;
                 return;
             }
             while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
@@ -189,10 +206,12 @@ fn do_stream(
                 let line = match std::str::from_utf8(&line_bytes) {
                     Ok(s) => s.trim(),
                     Err(e) => {
-                        let _ = tx.send(serde_json::json!({
+                        if tx.send(serde_json::json!({
                             "error": format!("invalid utf-8 in SSE line at byte {}", e.valid_up_to()),
                             "status": 0,
-                        }));
+                        })).await.is_err() {
+                            return;
+                        }
                         continue;
                     }
                 };
@@ -202,10 +221,14 @@ fn do_stream(
                     }
                     match serde_json::from_str::<Value>(data) {
                         Ok(v) => {
-                            let _ = tx.send(v);
+                            if tx.send(v).await.is_err() {
+                                return;
+                            }
                         }
                         Err(_) => {
-                            let _ = tx.send(serde_json::json!({"raw": data}));
+                            if tx.send(serde_json::json!({"raw": data})).await.is_err() {
+                                return;
+                            }
                         }
                     }
                 }
@@ -772,11 +795,7 @@ impl AgentsResource {
         .await
     }
 
-    pub fn send_message_stream(
-        &self,
-        id: &str,
-        data: Value,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
+    pub fn send_message_stream(&self, id: &str, data: Value) -> tokio::sync::mpsc::Receiver<Value> {
         do_stream(
             self.client.clone(),
             self.base_url.clone(),
@@ -1005,7 +1024,7 @@ impl AgentsResource {
         &self,
         id: &str,
         session_id: &str,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
+    ) -> tokio::sync::mpsc::Receiver<Value> {
         do_stream(
             self.client.clone(),
             self.base_url.clone(),
@@ -2896,7 +2915,7 @@ impl NetworkResource {
         .await
     }
 
-    pub fn comms_events_stream(&self) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
+    pub fn comms_events_stream(&self) -> tokio::sync::mpsc::Receiver<Value> {
         do_stream(
             self.client.clone(),
             self.base_url.clone(),
@@ -4502,7 +4521,7 @@ impl SystemResource {
         .await
     }
 
-    pub fn logs_stream(&self) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
+    pub fn logs_stream(&self) -> tokio::sync::mpsc::Receiver<Value> {
         do_stream(
             self.client.clone(),
             self.base_url.clone(),
