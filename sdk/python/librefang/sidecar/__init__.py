@@ -46,6 +46,7 @@ from .protocol import (
 )
 from .runtime import (
     ProducerCrashed,
+    ReaderCrashed,
     SidecarAdapter,
     describe_main,
     run,
@@ -56,6 +57,7 @@ from .runtime import (
 
 __all__ = [
     "ProducerCrashed",
+    "ReaderCrashed",
     "SidecarAdapter",
     "describe_main",
     "run",
