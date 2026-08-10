@@ -270,6 +270,21 @@ mod tests {
     }
 
     #[test]
+    fn self_closing_tag_nested_inside_open_tag_does_not_leak_onto_stack() {
+        // A self-closing tag inside an enclosing tag must not push onto the
+        // stack — otherwise the enclosing tag's own close would pop the
+        // wrong entry (or the self-closing tag would linger unclosed).
+        let s = sanitize_telegram_html("<b>before<code/>after</b>tail");
+        assert_eq!(s, "<b>before<code></code>after</b>tail");
+    }
+
+    #[test]
+    fn adjacent_self_closing_tags_do_not_interfere_with_each_other() {
+        let s = sanitize_telegram_html("<code/><code/>text");
+        assert_eq!(s, "<code></code><code></code>text");
+    }
+
+    #[test]
     fn escapes_literal_text_nodes_without_double_escaping_entities() {
         let s = sanitize_telegram_html("a < b & c<b>d > e &amp; f</b>g &lt; h");
         assert_eq!(s, "a &lt; b &amp; c<b>d &gt; e &amp; f</b>g &lt; h");
