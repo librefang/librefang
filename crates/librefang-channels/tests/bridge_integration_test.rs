@@ -1180,7 +1180,9 @@ struct ReactionRecordingAdapter {
     name: String,
     channel_type: ChannelType,
     rx: Mutex<Option<mpsc::Receiver<ChannelMessage>>>,
-    reactions: Arc<Mutex<Vec<LifecycleReaction>>>,
+    /// Every reaction, paired with the `message_id` it targeted.
+    /// The id is what the Slack sidecar keys its receipt on (#6731), so a test that asserts "this message got no reaction" needs it recorded.
+    reactions: Arc<Mutex<Vec<(String, LifecycleReaction)>>>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -1199,7 +1201,23 @@ impl ReactionRecordingAdapter {
     }
 
     fn get_reactions(&self) -> Vec<LifecycleReaction> {
-        self.reactions.lock().unwrap().clone()
+        self.reactions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, r)| r.clone())
+            .collect()
+    }
+
+    /// Phases recorded for one `message_id`, in arrival order.
+    fn phases_for(&self, message_id: &str) -> Vec<AgentPhase> {
+        self.reactions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| id == message_id)
+            .map(|(_, r)| r.phase.clone())
+            .collect()
     }
 }
 
@@ -1235,10 +1253,13 @@ impl ChannelAdapter for ReactionRecordingAdapter {
     async fn send_reaction(
         &self,
         _user: &ChannelUser,
-        _message_id: &str,
+        message_id: &str,
         reaction: &LifecycleReaction,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.reactions.lock().unwrap().push(reaction.clone());
+        self.reactions
+            .lock()
+            .unwrap()
+            .push((message_id.to_string(), reaction.clone()));
         Ok(())
     }
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1373,6 +1394,191 @@ async fn test_non_streaming_adapter_receives_tool_use_reaction() {
             .any(|r| matches!(&r.phase, AgentPhase::Done))
     })
     .await;
+
+    manager.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Group gating emits NO lifecycle reaction (#6731)
+// ---------------------------------------------------------------------------
+//
+// The Slack sidecar's eyes/check receipt keys off the `Queued` lifecycle phase rather than off receiving a message, which is only correct if a message the bridge declines to answer produces no lifecycle signal at all.
+// Mention-only group gating is the path #6731 was reported on: `dispatch_message` returns at the `!should_process_group_message` arm, well before the first `send_lifecycle_reaction(Queued)` call.
+// This test pins that contract so a future refactor that moved the reaction above the gate would resurrect the permanently-stuck eyes on the Slack side.
+
+/// Handle that reports `group_policy = mention_only` as a per-agent override, the way an `agent.toml` `[channel_overrides]` block does.
+/// The trait default returns `None`, so without this the bridge sees no policy and processes every group message.
+struct MockMentionOnlyHandle {
+    agents: Mutex<Vec<(AgentId, String)>>,
+}
+
+impl MockMentionOnlyHandle {
+    fn new(agents: Vec<(AgentId, String)>) -> Self {
+        Self {
+            agents: Mutex::new(agents),
+        }
+    }
+}
+
+#[async_trait]
+impl ChannelBridgeHandle for MockMentionOnlyHandle {
+    async fn send_message(&self, _agent_id: AgentId, message: &str) -> Result<String, String> {
+        Ok(format!("Echo: {message}"))
+    }
+
+    async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
+        let agents = self.agents.lock().unwrap();
+        Ok(agents.iter().find(|(_, n)| n == name).map(|(id, _)| *id))
+    }
+
+    async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+        Ok(self.agents.lock().unwrap().clone())
+    }
+
+    async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+        Err("mock: spawn not implemented".to_string())
+    }
+
+    async fn agent_channel_overrides(&self, _agent_id: AgentId) -> Option<ChannelOverrides> {
+        Some(ChannelOverrides {
+            group_policy: Some(librefang_types::config::GroupPolicy::MentionOnly),
+            ..Default::default()
+        })
+    }
+
+    fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}
+}
+
+/// Build a group message with an explicit platform message id, so a test can tell one message's reactions from another's.
+fn make_group_msg(
+    channel: ChannelType,
+    group_id: &str,
+    message_id: &str,
+    text: &str,
+    was_mentioned: bool,
+) -> ChannelMessage {
+    let mut metadata = HashMap::new();
+    if was_mentioned {
+        metadata.insert("was_mentioned".to_string(), serde_json::json!(true));
+    }
+    ChannelMessage {
+        channel,
+        platform_message_id: message_id.to_string(),
+        sender: ChannelUser {
+            platform_id: group_id.to_string(),
+            display_name: "GroupUser".to_string(),
+            librefang_user: None,
+        },
+        content: ChannelContent::Text(text.to_string()),
+        target_agent: None,
+        timestamp: chrono::Utc::now(),
+        is_group: true,
+        thread_id: None,
+        metadata,
+    }
+}
+
+#[tokio::test]
+async fn test_group_gating_skip_emits_no_lifecycle_reaction_6731() {
+    let agent_id = AgentId::new();
+    let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockMentionOnlyHandle::new(vec![(
+        agent_id,
+        "gated".to_string(),
+    )]));
+    let router = Arc::new(AgentRouter::new());
+    // Group messages resolve on `sender.platform_id`, which for a group is the chat id (see `resolve_or_fallback`'s binding-keys comment).
+    router.set_user_default("G01".to_string(), agent_id);
+
+    let (adapter, tx) = ReactionRecordingAdapter::new("slack-mock", ChannelType::Slack);
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    // Unaddressed first, then an addressed one.
+    // Both are dispatched on the same serialized adapter stream, so once the addressed message has reached its terminal phase the unaddressed one has had its full turn to produce a reaction — no sleeps needed to prove the absence.
+    tx.send(make_group_msg(
+        ChannelType::Slack,
+        "G01",
+        "skip-1",
+        "just chatting among ourselves",
+        false,
+    ))
+    .await
+    .unwrap();
+    tx.send(make_group_msg(
+        ChannelType::Slack,
+        "G01",
+        "pass-1",
+        "hey bot, do the thing",
+        true,
+    ))
+    .await
+    .unwrap();
+
+    // Positive control: the addressed message really did run a turn, so the harness and the override are both wired correctly.
+    wait_until("done reaction for the addressed message", || {
+        adapter_ref
+            .phases_for("pass-1")
+            .iter()
+            .any(|p| matches!(p, AgentPhase::Done))
+    })
+    .await;
+
+    // The gated-out message never got a lifecycle signal, so the Slack sidecar never adds an eyes it would have no way to clear.
+    assert!(
+        adapter_ref.phases_for("skip-1").is_empty(),
+        "a mention-only-gated group message must produce no lifecycle reaction, got {:?}",
+        adapter_ref.phases_for("skip-1")
+    );
+
+    manager.stop().await;
+}
+
+#[tokio::test]
+async fn test_group_gating_pass_emits_queued_then_done_6731() {
+    let agent_id = AgentId::new();
+    let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockMentionOnlyHandle::new(vec![(
+        agent_id,
+        "gated".to_string(),
+    )]));
+    let router = Arc::new(AgentRouter::new());
+    router.set_user_default("G01".to_string(), agent_id);
+
+    let (adapter, tx) = ReactionRecordingAdapter::new("slack-mock", ChannelType::Slack);
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    tx.send(make_group_msg(
+        ChannelType::Slack,
+        "G01",
+        "pass-1",
+        "hey bot, do the thing",
+        true,
+    ))
+    .await
+    .unwrap();
+
+    wait_until("done reaction", || {
+        adapter_ref
+            .phases_for("pass-1")
+            .iter()
+            .any(|p| matches!(p, AgentPhase::Done))
+    })
+    .await;
+
+    // Queued must arrive, and arrive first: it is what the Slack sidecar hangs the eyes on, and a Done without a preceding Queued would leave a turn with a check and no in-progress marker.
+    let phases = adapter_ref.phases_for("pass-1");
+    assert!(
+        matches!(phases.first(), Some(AgentPhase::Queued)),
+        "the first lifecycle phase of a dispatched turn must be Queued, got {phases:?}"
+    );
+    assert!(
+        matches!(phases.last(), Some(AgentPhase::Done)),
+        "a successful turn must end on Done, got {phases:?}"
+    );
 
     manager.stop().await;
 }

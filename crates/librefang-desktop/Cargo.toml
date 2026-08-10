@@ -53,6 +53,12 @@ tauri-plugin-shell = "2"
 # We force the `async-io` backend for `ksni` (instead of `tokio` / default features) because the `tokio` backend pulls in `zbus/tokio`, which triggers a nested runtime panic ("Cannot start a runtime from within a runtime") when Tauri/notify-rust invokes blocking session bus connection calls inside a Tokio worker thread.
 ksni = { version = "0.3.6", default-features = false, features = ["async-io"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+] }
+
 [target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
 # Mobile-only plugins
 tauri-plugin-barcode-scanner = "2"

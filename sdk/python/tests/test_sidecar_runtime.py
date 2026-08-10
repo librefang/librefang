@@ -5,11 +5,12 @@ a queue feeds stdin lines, a list captures emitted events.
 """
 
 import asyncio
+import io
 import json
 
 import pytest
 
-from librefang.sidecar import ProducerCrashed, SidecarAdapter, run
+from librefang.sidecar import ProducerCrashed, ReaderCrashed, SidecarAdapter, run
 from librefang.sidecar.protocol import Send
 
 
@@ -161,6 +162,28 @@ async def test_invalid_json_emits_error_and_continues():
     assert any(s.text == "after" for s in adapter.sends)
 
 
+async def test_non_object_command_params_emit_error_and_continue():
+    adapter = RecordingAdapter()
+    emitted = await _drive(adapter, [
+        '{"method":"send","params":["not","an","object"]}',
+        '{"method":"send","params":{"channel_id":"c","text":"after","user":{}}}',
+    ])
+
+    assert any(e["method"] == "error" for e in emitted)
+    assert [send.text for send in adapter.sends] == ["after"]
+
+
+async def test_non_string_command_method_emits_error_and_continues():
+    adapter = RecordingAdapter()
+    emitted = await _drive(adapter, [
+        '{"method":[],"params":{}}',
+        '{"method":"send","params":{"channel_id":"c","text":"after","user":{}}}',
+    ])
+
+    assert any(e["method"] == "error" for e in emitted)
+    assert [send.text for send in adapter.sends] == ["after"]
+
+
 async def test_producer_emits_inbound_messages():
     class Producer(SidecarAdapter):
         async def on_send(self, cmd):  # unused here
@@ -208,6 +231,114 @@ async def test_producer_crash_exits_nonzero_after_cleanup():
     assert isinstance(ei.value.__cause__, RuntimeError)
     assert "transport died unrecoverably" in str(ei.value.__cause__)
     assert adapter.shutdown_called, "cleanup must run before nonzero exit"
+
+
+async def test_reader_crash_stops_run_after_cleanup():
+    adapter = RecordingAdapter()
+
+    async def broken_line_source():
+        raise RuntimeError("stdin transport failed")
+
+    with pytest.raises(ReaderCrashed) as error:
+        await asyncio.wait_for(
+            run(
+                adapter,
+                line_source=broken_line_source,
+                emit=lambda _event: None,
+                ready_interval=0.01,
+            ),
+            timeout=1.0,
+        )
+
+    assert isinstance(error.value.__cause__, RuntimeError)
+    assert "stdin transport failed" in str(error.value.__cause__)
+    assert adapter.shutdown_called, "cleanup must run before reader failure surfaces"
+
+
+async def test_unexpected_parser_error_stops_reader_instead_of_hanging(monkeypatch):
+    adapter = RecordingAdapter()
+    delivered = False
+
+    async def line_source():
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return '{"method":"send","params":{}}'
+        return None
+
+    def broken_parser(_line):
+        raise TypeError("unexpected parser failure")
+
+    monkeypatch.setattr("librefang.sidecar.runtime.protocol.parse_command", broken_parser)
+
+    with pytest.raises(ReaderCrashed) as error:
+        await asyncio.wait_for(
+            run(
+                adapter,
+                line_source=line_source,
+                emit=lambda _event: None,
+                ready_interval=0.01,
+            ),
+            timeout=1.0,
+        )
+
+    assert isinstance(error.value.__cause__, TypeError)
+    assert adapter.shutdown_called
+
+
+async def test_reader_emit_failure_stops_run_after_cleanup():
+    adapter = RecordingAdapter()
+    lines = iter(["not-json{", None])
+
+    async def line_source():
+        return next(lines)
+
+    def emit(event):
+        if event["method"] == "error":
+            raise OSError("stdout write failed")
+
+    with pytest.raises(ReaderCrashed) as error:
+        await asyncio.wait_for(
+            run(
+                adapter,
+                line_source=line_source,
+                emit=emit,
+                ready_interval=0.01,
+            ),
+            timeout=1.0,
+        )
+
+    assert isinstance(error.value.__cause__, OSError)
+    assert adapter.shutdown_called
+
+
+async def test_stdio_reader_thread_failure_reaches_async_reader(monkeypatch):
+    from librefang.sidecar.runtime import _run_stdio
+
+    class BrokenStdin:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            raise OSError("stdin device failed")
+
+    adapter = RecordingAdapter()
+    monkeypatch.setattr("sys.stdin", BrokenStdin())
+    monkeypatch.setattr("sys.stdout", io.StringIO())
+
+    with pytest.raises(ReaderCrashed) as error:
+        await asyncio.wait_for(
+            _run_stdio(
+                adapter,
+                ready_interval=0.01,
+                ready_max_attempts=1,
+            ),
+            timeout=1.0,
+        )
+
+    assert isinstance(error.value.__cause__, OSError)
+    assert "stdin device failed" in str(error.value.__cause__)
+    assert adapter.shutdown_called
 
 
 def test_run_stdio_translates_producer_crash_to_nonzero_exit():

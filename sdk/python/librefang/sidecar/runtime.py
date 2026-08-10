@@ -59,6 +59,13 @@ EmitFn = Callable[[Dict[str, Any]], None]
 LineSource = Callable[[], Awaitable[Optional[str]]]
 
 
+class _ReaderThreadFailure:
+    """Carries a synchronous stdin failure across the asyncio queue."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+
 class ProducerCrashed(Exception):
     """Raised from :func:`run` when :meth:`SidecarAdapter.produce` exits
     with an unhandled error.
@@ -69,6 +76,15 @@ class ProducerCrashed(Exception):
     ``shutdown``/EOF). Library callers using :func:`run` directly can
     catch this to inspect ``__cause__`` (the original transport error)
     before deciding how to surface the failure."""
+
+
+class ReaderCrashed(Exception):
+    """Raised from :func:`run` when the command reader exits with an
+    unexpected error.
+
+    Cleanup has already run. :func:`run_stdio` converts this to a nonzero
+    exit so the daemon supervisor can restart the sidecar instead of leaving
+    a process alive with no command consumer."""
 
 
 class SidecarAdapter:
@@ -191,6 +207,7 @@ async def run(
     acked = asyncio.Event()
     stop = asyncio.Event()
     producer_error: Optional[BaseException] = None
+    reader_error: Optional[BaseException] = None
 
     async def ready_loop() -> None:
         attempts = 0
@@ -223,55 +240,68 @@ async def run(
             stop.set()
 
     async def reader() -> None:
-        while not stop.is_set():
-            line = await line_source()
-            if line is None:
-                stop.set()
-                return
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                cmd = protocol.parse_command(line)
-            except json.JSONDecodeError as e:
-                emit(protocol.error(f"invalid JSON: {e}"))
-                continue
-            if isinstance(cmd, ReadyAck):
-                acked.set()
-                continue
-            if isinstance(cmd, Shutdown):
-                stop.set()
-                return
-            try:
-                await adapter.on_command(cmd)
-            except Exception as e:  # noqa: BLE001
-                # The bare except is load-bearing: we cannot raise out
-                # of `reader()` without taking down the entire sidecar
-                # process for one bad command. But the previous
-                # `error=str(e)` lost the traceback, which has burned
-                # us repeatedly — the four channel reply-routing
-                # regressions fixed in #5417→#5423→#5431→#5439 all
-                # took multiple post-merge review passes to surface
-                # because the original failure looked like
-                # ``on_command failed error="missing parent fullname"``
-                # with no clue WHERE it was raised. Include the
-                # traceback as a structured field so debuggers can
-                # grep for the offending adapter / line directly.
-                #
-                # The richer long-term fix — surfacing on_command
-                # failures as a structured JSON-RPC error response so
-                # the bridge can correlate the failure to the original
-                # cmd id and the agent's error-handling lane fires —
-                # is tracked in a follow-up; it needs a protocol
-                # change (Response.error field) that this hotfix
-                # doesn't ship.
-                log.error(
-                    "on_command failed",
-                    error=str(e),
-                    error_type=type(e).__name__,
-                    traceback=traceback.format_exc(),
-                    cmd_type=type(cmd).__name__,
-                )
+        nonlocal reader_error
+        try:
+            while not stop.is_set():
+                line = await line_source()
+                if line is None:
+                    stop.set()
+                    return
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    cmd = protocol.parse_command(line)
+                except json.JSONDecodeError as e:
+                    emit(protocol.error(f"invalid JSON: {e}"))
+                    continue
+                if isinstance(cmd, ReadyAck):
+                    acked.set()
+                    continue
+                if isinstance(cmd, Shutdown):
+                    stop.set()
+                    return
+                try:
+                    await adapter.on_command(cmd)
+                except Exception as e:  # noqa: BLE001
+                    # The bare except is load-bearing: we cannot raise out
+                    # of `reader()` without taking down the entire sidecar
+                    # process for one bad command. But the previous
+                    # `error=str(e)` lost the traceback, which has burned
+                    # us repeatedly — the four channel reply-routing
+                    # regressions fixed in #5417→#5423→#5431→#5439 all
+                    # took multiple post-merge review passes to surface
+                    # because the original failure looked like
+                    # ``on_command failed error="missing parent fullname"``
+                    # with no clue WHERE it was raised. Include the
+                    # traceback as a structured field so debuggers can
+                    # grep for the offending adapter / line directly.
+                    #
+                    # The richer long-term fix — surfacing on_command
+                    # failures as a structured JSON-RPC error response so
+                    # the bridge can correlate the failure to the original
+                    # cmd id and the agent's error-handling lane fires —
+                    # is tracked in a follow-up; it needs a protocol
+                    # change (Response.error field) that this hotfix
+                    # doesn't ship.
+                    log.error(
+                        "on_command failed",
+                        error=str(e),
+                        error_type=type(e).__name__,
+                        traceback=traceback.format_exc(),
+                        cmd_type=type(cmd).__name__,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            reader_error = e
+            log.error(
+                "reader crashed",
+                error=str(e),
+                error_type=type(e).__name__,
+                traceback=traceback.format_exc(),
+            )
+            stop.set()
 
     tasks = [
         asyncio.ensure_future(ready_loop()),
@@ -305,6 +335,10 @@ async def run(
         raise ProducerCrashed(
             "sidecar producer crashed; cleanup ran"
         ) from producer_error
+    if reader_error is not None:
+        raise ReaderCrashed(
+            "sidecar reader crashed; cleanup ran"
+        ) from reader_error
 
 
 def run_stdio(adapter: SidecarAdapter, *, ready_interval: float = 2.0,
@@ -323,7 +357,7 @@ def run_stdio(adapter: SidecarAdapter, *, ready_interval: float = 2.0,
     from your ``__main__`` block instead; this fallback exists only to
     defend direct ``run_stdio(instance)`` callers.
 
-    A :class:`ProducerCrashed` from ``run`` becomes ``SystemExit(1)`` so
+    A fatal reader or producer error from ``run`` becomes ``SystemExit(1)`` so
     the daemon supervisor (and any non-supervised runner) sees a nonzero
     exit code, distinguishable from a clean ``shutdown``/EOF."""
     if "--describe" in sys.argv[1:]:
@@ -331,7 +365,7 @@ def run_stdio(adapter: SidecarAdapter, *, ready_interval: float = 2.0,
     try:
         asyncio.run(_run_stdio(adapter, ready_interval=ready_interval,
                                ready_max_attempts=ready_max_attempts))
-    except ProducerCrashed:
+    except (ProducerCrashed, ReaderCrashed):
         raise SystemExit(1)
 
 
@@ -356,17 +390,26 @@ async def _run_stdio(adapter: SidecarAdapter, *,
                      ready_interval: float,
                      ready_max_attempts: int) -> None:
     loop = asyncio.get_event_loop()
-    queue: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
+    queue: "asyncio.Queue[Any]" = asyncio.Queue()
 
     def _reader_thread() -> None:
-        for line in sys.stdin:
-            loop.call_soon_threadsafe(queue.put_nowait, line)
-        loop.call_soon_threadsafe(queue.put_nowait, None)
+        try:
+            for line in sys.stdin:
+                loop.call_soon_threadsafe(queue.put_nowait, line)
+        except Exception as e:  # noqa: BLE001
+            loop.call_soon_threadsafe(
+                queue.put_nowait, _ReaderThreadFailure(e),
+            )
+        else:
+            loop.call_soon_threadsafe(queue.put_nowait, None)
 
     threading.Thread(target=_reader_thread, daemon=True).start()
 
     async def line_source() -> Optional[str]:
-        return await queue.get()
+        item = await queue.get()
+        if isinstance(item, _ReaderThreadFailure):
+            raise item.error
+        return item
 
     write_lock = threading.Lock()
 
