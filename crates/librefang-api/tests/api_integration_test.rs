@@ -3367,6 +3367,7 @@ async fn start_test_server_with_rbac_users(
         .nest("/api", routes::budget::router())
         .nest("/api", routes::authz::router())
         .nest("/api", routes::users::router())
+        .nest("/api", routes::agents::router())
         .layer(axum::middleware::from_fn_with_state(
             api_key_state,
             middleware::auth,
@@ -4775,6 +4776,22 @@ async fn test_upload_roundtrip_serves_by_bare_file_id() {
             uuid::Uuid::parse_str(file_id).is_ok(),
             "file_id must stay a bare UUID, got {file_id}"
         );
+        let upload_dir = harness
+            .state
+            .kernel
+            .config_ref()
+            .channels
+            .effective_file_download_dir();
+        let persisted_meta: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(upload_dir.join(format!(".{file_id}.meta.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted_meta["filename"], filename);
+        assert_eq!(persisted_meta["content_type"], content_type);
+        assert!(
+            persisted_meta["uploaded_by"].is_string(),
+            "full-router uploads must persist the injected local owner"
+        );
 
         let mut serve = Request::builder()
             .method("GET")
@@ -4816,6 +4833,87 @@ async fn test_upload_roundtrip_serves_by_bare_file_id() {
     .await;
     // text/plain → persisted as `<uuid>.txt`; also round-trips by bare id.
     upload_then_serve(&harness, "text/plain", "note.txt", b"hello-6530".to_vec()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_upload_owner_metadata_survives_registry_miss() {
+    let server = start_test_server_with_rbac_users(
+        "any-key",
+        vec![
+            ("Alice", "user", "alice-user-key"),
+            ("Eve", "viewer", "eve-viewer-key"),
+            ("Admin", "admin", "admin-key"),
+        ],
+    )
+    .await;
+    let file_id = uuid::Uuid::new_v4().to_string();
+    let upload_dir = server
+        .state
+        .kernel
+        .config_ref()
+        .channels
+        .effective_file_download_dir();
+    std::fs::create_dir_all(&upload_dir).unwrap();
+    std::fs::write(upload_dir.join(format!("{file_id}.pdf")), b"private upload").unwrap();
+    std::fs::write(
+        upload_dir.join(format!(".{file_id}.meta.json")),
+        serde_json::to_vec(&serde_json::json!({
+            "filename": "private.pdf",
+            "content_type": "application/pdf",
+            "uploaded_by": librefang_types::agent::UserId::from_name("Alice"),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/uploads/{file_id}", server.base_url);
+    let owner = client
+        .get(&url)
+        .header("authorization", "Bearer alice-user-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(owner.status(), StatusCode::OK);
+    assert_eq!(owner.bytes().await.unwrap().as_ref(), b"private upload");
+
+    let stranger = client
+        .get(&url)
+        .header("authorization", "Bearer eve-viewer-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stranger.status(), StatusCode::FORBIDDEN);
+
+    let admin = client
+        .get(&url)
+        .header("authorization", "Bearer admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin.status(), StatusCode::OK);
+
+    let unknown_id = uuid::Uuid::new_v4().to_string();
+    std::fs::write(
+        upload_dir.join(format!("{unknown_id}.png")),
+        b"legacy unknown owner",
+    )
+    .unwrap();
+    let unknown_url = format!("{}/api/uploads/{unknown_id}", server.base_url);
+    let stranger = client
+        .get(&unknown_url)
+        .header("authorization", "Bearer eve-viewer-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stranger.status(), StatusCode::FORBIDDEN);
+    let admin = client
+        .get(&unknown_url)
+        .header("authorization", "Bearer admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin.status(), StatusCode::OK);
 }
 
 // ---------------------------------------------------------------------------
