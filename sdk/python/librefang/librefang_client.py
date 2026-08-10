@@ -17,7 +17,7 @@ import json
 import sys
 from typing import Any, Dict, Generator, Optional
 from urllib.request import urlopen, Request
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 
 DEFAULT_TIMEOUT = 30.0
@@ -89,6 +89,8 @@ class LibreFang:
         except HTTPError as e:
             body_text = e.read().decode() if e.fp else ""
             raise LibreFangError(f"HTTP {e.code}: {body_text}", e.code, body_text) from e
+        except URLError as e:
+            raise LibreFangError(f"Connection error: {e.reason}") from e
 
     def _stream(self, method: str, path: str, body: Any = None, query: Optional[Dict[str, Any]] = None) -> Generator[Dict, None, None]:
         """SSE streaming — yields parsed JSON events."""
@@ -106,18 +108,20 @@ class LibreFang:
         except HTTPError as e:
             body_text = e.read().decode() if e.fp else ""
             raise LibreFangError(f"HTTP {e.code}: {body_text}", e.code, body_text) from e
+        except URLError as e:
+            raise LibreFangError(f"Connection error: {e.reason}") from e
 
         try:
-            buffer = ""
+            buffer = b""
             while True:
                 chunk = resp.read(4096)
                 if not chunk:
                     break
-                buffer += chunk.decode()
-                lines = buffer.split("\n")
+                buffer += chunk
+                lines = buffer.split(b"\n")
                 buffer = lines.pop()
                 for line in lines:
-                    line = line.strip()
+                    line = line.decode().strip()
                     if line.startswith("data: "):
                         data_str = line[6:]
                         if data_str == "[DONE]":

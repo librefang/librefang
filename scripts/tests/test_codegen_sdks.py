@@ -63,6 +63,7 @@ def main():
     assert_in("async invokeTool(name, data, query)", js, "js-invoke_tool-sig")
     assert_in("InvokeTool(name string, data map[string]interface{}, query map[string]string)", go, "go-invoke_tool-sig")
     assert_in("pub async fn invoke_tool(&self, name: &str, data: Value, agent_id: Option<&str>)", rs, "rust-invoke_tool-sig")
+    assert_in('#[tokio::main(flavor = "current_thread")]', rs, "rust-doc-current-thread-runtime")
     assert_in("Self::with_client(base_url, Client::new())", rs, "rust-default-client-delegation")
     assert_in("pub fn with_client(base_url: impl Into<String>, client: Client) -> Self", rs, "rust-custom-client-constructor")
 
@@ -72,12 +73,29 @@ def main():
     assert_in("Vec<u8>", rs, "rust-byte-buffer")
     assert_not_in("from_utf8_lossy(&chunk)", rs, "rust-no-lossy-chunk")
     assert_in('"status": status', rs, "rust-error-event-status")
-    assert_in("while let Some(chunk_result) = stream.next().await", rs, "rust-stream-result-loop")
+    assert_in("mpsc::channel(STREAM_CHANNEL_CAPACITY)", rs, "rust-bounded-stream-channel")
+    assert_not_in("mpsc::unbounded_channel()", rs, "rust-no-unbounded-stream-channel")
+    assert rs.count("_ = tx.closed() => return") == 3, "all stream network waits must cancel on receiver drop"
+    assert_in("Some(Err(e)) => {", rs, "rust-stream-result-loop")
+    assert_in(".path_segments_mut()", rs, "rust-url-segment-builder")
+    assert_in('&["api", "agents", id]', rs, "rust-borrowed-path-segments")
+    assert_in('id.to_string(),', rs, "rust-owned-stream-path-segment")
+    assert_not_in('format!("/api/', rs, "rust-no-raw-path-formatting")
     assert_in('"error": format!("stream error: {}", e)', rs, "rust-stream-transport-error")
     assert_not_in("while let Some(Ok(chunk))", rs, "rust-no-silent-stream-error")
     assert_in('"status": resp.StatusCode', go, "go-error-event-status")
     assert_in("DEFAULT_TIMEOUT = 30.0", py, "python-default-timeout")
     assert py.count("urlopen(req, timeout=self.timeout)") == 2
+    assert_in('"error": fmt.Sprintf("new request: %v", err)', go, "go-stream-request-error")
+    assert_not_in("req, _ := http.NewRequest", go, "go-no-discarded-stream-request-error")
+    assert_in('buffer = b""', py, "python-byte-buffer")
+    assert_in('lines = buffer.split(b"\\n")', py, "python-byte-line-split")
+    assert_in("line = line.decode().strip()", py, "python-decode-complete-line")
+    assert_not_in("buffer += chunk.decode()", py, "python-no-per-chunk-decode")
+    assert_in('"error": fmt.Sprintf("marshal: %v", err)', go, "go-stream-marshal-error")
+    assert_not_in("b, _ := json.Marshal(body)", go, "go-no-discarded-stream-marshal-error")
+    assert_in("from urllib.error import HTTPError, URLError", py, "python-urlerror-import")
+    assert py.count("except URLError as e:") == 2, "both Python request paths must wrap connection failures"
     assert_in("active_error = sys.exc_info()[0] is not None", py, "python-stream-close-finally")
 
     # SSE line-size cap
@@ -87,6 +105,10 @@ def main():
     # Reserved-word escape works
     assert mod._py_safe("class") == "class_"
     assert mod._rust_safe("type") == "type_"
+    assert mod._rust_path_segments("/api/agents/{id}", owned=False) == '&["api", "agents", id]'
+    assert mod._rust_path_segments("/api/agents/{id}", owned=True) == (
+        'vec!["api".to_string(), "agents".to_string(), id.to_string()]'
+    )
 
     print(f"OK — {sum(len(v) for v in tag_ops.values())} ops across {len(tag_ops)} tags")
 

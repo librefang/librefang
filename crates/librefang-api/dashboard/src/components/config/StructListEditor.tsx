@@ -179,12 +179,6 @@ function StructListRow({
 
   const handleChange = useCallback((raw: string) => {
     setText(raw);
-    if (raw.trim() === "") {
-      setError(null);
-      onChange({});
-      lastEmittedRef.current = raw;
-      return;
-    }
     try {
       const parsed = JSON.parse(raw);
       setError(null);
@@ -196,6 +190,15 @@ function StructListRow({
       isDirtyRef.current = true;
     }
   }, [onChange]);
+
+  const finishEdit = useCallback(() => {
+    if (text.trim() !== "") return;
+    const incoming = JSON.stringify(item, null, 2);
+    setText(incoming);
+    lastEmittedRef.current = incoming;
+    isDirtyRef.current = false;
+    setError(null);
+  }, [item, text]);
 
   return (
     <div className="rounded-lg border border-border-subtle bg-main">
@@ -224,6 +227,7 @@ function StructListRow({
           <textarea
             value={text}
             onChange={(e) => handleChange(e.target.value)}
+            onBlur={finishEdit}
             rows={Math.min(Math.max(text.split("\n").length, 4), 20)}
             spellCheck={false}
             className={`w-full px-2.5 py-1.5 rounded-lg border bg-main text-[11px] font-mono outline-none resize-y transition-colors ${

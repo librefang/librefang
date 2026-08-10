@@ -16,10 +16,8 @@
 //! base64("api:<key>")`. The leading `api:` is the W&B-documented user
 //! placeholder — the API key itself is the password.
 //!
-//! All HTTP traffic uses `librefang_http::proxied_client_builder()` with
-//! redirect following disabled, so the operator's `[proxy]` config and
-//! TLS fallback apply with every other outbound caller in the workspace (per the
-//! `librefang-extensions` crate's HTTP client convention).
+//! HTTP clients inherit LibreFang's TLS, timeout, and user-agent settings,
+//! but disable redirects and proxies so validated DNS addresses stay pinned.
 
 use base64::Engine;
 use chrono::Utc;
@@ -60,40 +58,11 @@ struct CreateRunResponse {
     url: String,
 }
 
-/// Export a trajectory to W&B. Internal entry point; the public
-/// `crate::export` dispatch matches on `ExportTarget::WandB` and calls
-/// in here.
-pub(crate) async fn export_to_wandb(
+pub(crate) fn validate_config(
     project: &str,
     entity: &str,
-    run_id_hint: Option<&str>,
     api_key: &str,
-    export: RlTrajectoryExport,
-) -> Result<ExportReceipt, ExportError> {
-    export_to_wandb_with_base(
-        DEFAULT_WANDB_BASE,
-        project,
-        entity,
-        run_id_hint,
-        api_key,
-        export,
-    )
-    .await
-}
-
-/// Same as `export_to_wandb` but with a caller-supplied base URL.
-/// Exposed at `pub(crate)` so the in-crate wiremock tests can point at
-/// a `MockServer::uri()`; production callers go through the public
-/// `crate::export` surface which always uses `DEFAULT_WANDB_BASE`.
-pub(crate) async fn export_to_wandb_with_base(
-    base: &str,
-    project: &str,
-    entity: &str,
-    run_id_hint: Option<&str>,
-    api_key: &str,
-    mut export: RlTrajectoryExport,
-) -> Result<ExportReceipt, ExportError> {
-    crate::normalize_export_metadata(&mut export);
+) -> Result<(), ExportError> {
     if api_key.is_empty() {
         return Err(ExportError::InvalidConfig(
             "W&B api_key is empty".to_string(),
@@ -112,6 +81,69 @@ pub(crate) async fn export_to_wandb_with_base(
                 .to_string(),
         ));
     }
+    Ok(())
+}
+
+/// Export a trajectory to W&B. Internal entry point; the public
+/// `crate::export` dispatch matches on `ExportTarget::WandB` and calls
+/// in here.
+pub(crate) async fn export_to_wandb(
+    project: &str,
+    entity: &str,
+    run_id_hint: Option<&str>,
+    api_key: &str,
+    client: reqwest::Client,
+    export: RlTrajectoryExport,
+) -> Result<ExportReceipt, ExportError> {
+    export_to_wandb_with_client(
+        DEFAULT_WANDB_BASE,
+        project,
+        entity,
+        run_id_hint,
+        api_key,
+        client,
+        export,
+    )
+    .await
+}
+
+/// Same as `export_to_wandb` but with a caller-supplied base URL.
+/// Exposed at `pub(crate)` so the in-crate wiremock tests can point at
+/// a `MockServer::uri()`; production callers go through the public
+/// `crate::export` surface which always uses `DEFAULT_WANDB_BASE`.
+#[cfg(test)]
+pub(crate) async fn export_to_wandb_with_base(
+    base: &str,
+    project: &str,
+    entity: &str,
+    run_id_hint: Option<&str>,
+    api_key: &str,
+    export: RlTrajectoryExport,
+) -> Result<ExportReceipt, ExportError> {
+    let resolution = crate::ssrf::ResolvedEgress {
+        hostname: None,
+        addresses: Vec::new(),
+    };
+    let client = crate::build_export_http_client(&resolution)?;
+    export_to_wandb_with_client(base, project, entity, run_id_hint, api_key, client, export).await
+}
+
+async fn export_to_wandb_with_client(
+    base: &str,
+    project: &str,
+    entity: &str,
+    run_id_hint: Option<&str>,
+    api_key: &str,
+    client: reqwest::Client,
+    mut export: RlTrajectoryExport,
+) -> Result<ExportReceipt, ExportError> {
+    // Redact here rather than only at the `crate::export` dispatch: this is
+    // the last hop before the bytes leave the process, so every entry point
+    // — including the in-crate wiremock ones — is covered. The pass is
+    // idempotent, so the dispatch-level call is not duplicated work of
+    // consequence.
+    crate::normalize_export_metadata(&mut export);
+    validate_config(project, entity, api_key)?;
     // SSRF validation is gated on `crate::export` (the public dispatch
     // entry point) rather than here, so the in-crate `wiremock` tests
     // can point `*_with_base` at a `127.0.0.1` mock without tripping
@@ -124,13 +156,6 @@ pub(crate) async fn export_to_wandb_with_base(
     // third-party UI.
     let scrubbed_metadata = export.toolset_metadata.take();
 
-    // Disable redirect following: the SSRF allowlist validates only the
-    // initial base URL, so a redirect-following client would let an
-    // attacker-controlled base 3xx to an internal host (e.g. cloud
-    // metadata), replaying the `Authorization` header on 307/308. A
-    // finished upload never needs to follow a redirect; a 3xx must
-    // surface as an error. Mirrors `librefang_http::oauth_client_builder`.
-    let client = crate::build_export_http_client()?;
     let auth_header = build_basic_auth(api_key);
 
     // Step 1: create / register the run. Wrapped in retry so transient

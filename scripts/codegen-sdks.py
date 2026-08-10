@@ -148,7 +148,7 @@ import json
 import sys
 from typing import Any, Dict, Generator, Optional
 from urllib.request import urlopen, Request
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 
 DEFAULT_TIMEOUT = 30.0
@@ -194,6 +194,8 @@ class LibreFang:
         except HTTPError as e:
             body_text = e.read().decode() if e.fp else ""
             raise LibreFangError(f"HTTP {e.code}: {body_text}", e.code, body_text) from e
+        except URLError as e:
+            raise LibreFangError(f"Connection error: {e.reason}") from e
 
     def _stream(self, method: str, path: str, body: Any = None, query: Optional[Dict[str, Any]] = None) -> Generator[Dict, None, None]:
         """SSE streaming — yields parsed JSON events."""
@@ -211,18 +213,20 @@ class LibreFang:
         except HTTPError as e:
             body_text = e.read().decode() if e.fp else ""
             raise LibreFangError(f"HTTP {e.code}: {body_text}", e.code, body_text) from e
+        except URLError as e:
+            raise LibreFangError(f"Connection error: {e.reason}") from e
 
         try:
-            buffer = ""
+            buffer = b""
             while True:
                 chunk = resp.read(4096)
                 if not chunk:
                     break
-                buffer += chunk.decode()
-                lines = buffer.split("\\n")
+                buffer += chunk
+                lines = buffer.split(b"\\n")
                 buffer = lines.pop()
                 for line in lines:
-                    line = line.strip()
+                    line = line.decode().strip()
                     if line.startswith("data: "):
                         data_str = line[6:]
                         if data_str == "[DONE]":
@@ -566,10 +570,18 @@ func (c *Client) stream(method, path string, body interface{}, query map[string]
 \t\turlStr := c.BaseURL + c.withQuery(path, query)
 \t\tvar bodyBytes []byte
 \t\tif body != nil {
-\t\t\tb, _ := json.Marshal(body)
+\t\t\tb, err := json.Marshal(body)
+\t\t\tif err != nil {
+\t\t\t\tch <- map[string]interface{}{"error": fmt.Sprintf("marshal: %v", err), "status": 0}
+\t\t\t\treturn
+\t\t\t}
 \t\t\tbodyBytes = b
 \t\t}
-\t\treq, _ := http.NewRequest(method, urlStr, bytes.NewReader(bodyBytes))
+\t\treq, err := http.NewRequest(method, urlStr, bytes.NewReader(bodyBytes))
+\t\tif err != nil {
+\t\t\tch <- map[string]interface{}{"error": fmt.Sprintf("new request: %v", err), "status": 0}
+\t\t\treturn
+\t\t}
 \t\tfor k, v := range c.Headers {
 \t\t\treq.Header.Set(k, v)
 \t\t}
@@ -725,7 +737,7 @@ _RUST_LIB_HEADER = """\
 //! ```rust,no_run
 //! use librefang::LibreFang;
 //!
-//! #[tokio::main]
+//! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let client = LibreFang::new("http://localhost:4545");
 //!     let health = client.system.health().await?;
@@ -752,16 +764,47 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+fn build_url<'a>(
+    client: &Client,
+    base_url: &str,
+    path_segments: impl IntoIterator<Item = &'a str>,
+) -> Result<reqwest::Url> {
+    let path_segments: Vec<&str> = path_segments.into_iter().collect();
+    if let Some(segment) = path_segments
+        .iter()
+        .copied()
+        .find(|segment| matches!(*segment, "." | ".."))
+    {
+        return Err(Error::Api {
+            status: 0,
+            body: format!("invalid path segment: {}", segment),
+        });
+    }
+    let mut url = client.get(base_url).build()?.url().clone();
+    url.set_query(None);
+    url.set_fragment(None);
+    let mut segments = url
+        .path_segments_mut()
+        .map_err(|_| Error::Api {
+            status: 0,
+            body: "base URL cannot contain path segments".to_string(),
+        })?;
+    segments.pop_if_empty();
+    segments.extend(path_segments);
+    drop(segments);
+    Ok(url)
+}
+
 async fn do_req(
     client: &Client,
     base_url: &str,
     method: reqwest::Method,
-    path: &str,
+    path_segments: &[&str],
     body: Option<Value>,
     query: &[(&str, Option<&str>)],
 ) -> Result<Value> {
-    let url = format!("{}{}", base_url, path);
-    let req = client.request(method, &url);
+    let url = build_url(client, base_url, path_segments.iter().copied())?;
+    let req = client.request(method, url);
     let filtered: Vec<(&str, &str)> = query
         .iter()
         .filter_map(|(k, v)| v.map(|vv| (*k, vv)))
@@ -780,38 +823,58 @@ async fn do_req(
 fn do_stream(
     client: Client,
     base_url: String,
-    path: String,
+    path_segments: Vec<String>,
     method: reqwest::Method,
     body: Option<Value>,
     query: Vec<(String, Option<String>)>,
-) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+) -> tokio::sync::mpsc::Receiver<Value> {
+    const STREAM_CHANNEL_CAPACITY: usize = 256;
+    let (tx, rx) = tokio::sync::mpsc::channel(STREAM_CHANNEL_CAPACITY);
     tokio::spawn(async move {
-        let url = format!("{}{}", base_url, path);
-        let req = client.request(method, &url).header("Accept", "text/event-stream");
+        let url = match build_url(&client, &base_url, path_segments.iter().map(String::as_str)) {
+            Ok(url) => url,
+            Err(e) => {
+                let error = match e {
+                    Error::Api { status: 0, body } => body,
+                    other => other.to_string(),
+                };
+                let _ = tx.send(serde_json::json!({
+                    "error": error,
+                    "status": 0,
+                })).await;
+                return;
+            }
+        };
+        let req = client.request(method, url).header("Accept", "text/event-stream");
         let filtered: Vec<(String, String)> = query
             .into_iter()
             .filter_map(|(k, v)| v.map(|vv| (k, vv)))
             .collect();
         let req = if filtered.is_empty() { req } else { req.query(&filtered) };
         let req = if let Some(b) = body { req.json(&b) } else { req };
-        let res = match req.send().await {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = tx.send(serde_json::json!({
-                    "error": e.to_string(),
-                    "status": 0,
-                }));
-                return;
+        let res = tokio::select! {
+            _ = tx.closed() => return,
+            result = req.send() => match result {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(serde_json::json!({
+                        "error": e.to_string(),
+                        "status": 0,
+                    })).await;
+                    return;
+                }
             }
         };
         if !res.status().is_success() {
             let status = res.status().as_u16();
-            let body = res.text().await.unwrap_or_default();
+            let body = tokio::select! {
+                _ = tx.closed() => return,
+                body = res.text() => body.unwrap_or_default(),
+            };
             let _ = tx.send(serde_json::json!({
                 "error": format!("HTTP {}: {}", status, body),
                 "status": status,
-            }));
+            })).await;
             return;
         }
         // Accumulate raw bytes so multi-byte UTF-8 codepoints are not split
@@ -821,23 +884,27 @@ fn do_stream(
         const MAX_SSE_LINE: usize = 8 * 1024 * 1024;
         let mut stream = res.bytes_stream();
         let mut buffer: Vec<u8> = Vec::new();
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = match chunk_result {
-                Ok(chunk) => chunk,
-                Err(e) => {
-                    let _ = tx.send(serde_json::json!({
-                        "error": format!("stream error: {}", e),
-                        "status": 0,
-                    }));
-                    return;
-                }
+        loop {
+            let chunk = tokio::select! {
+                _ = tx.closed() => return,
+                next = stream.next() => match next {
+                    Some(Ok(chunk)) => chunk,
+                    Some(Err(e)) => {
+                        let _ = tx.send(serde_json::json!({
+                            "error": format!("stream error: {}", e),
+                            "status": 0,
+                        })).await;
+                        return;
+                    }
+                    None => break,
+                },
             };
             buffer.extend_from_slice(&chunk);
             if buffer.len() > MAX_SSE_LINE {
                 let _ = tx.send(serde_json::json!({
                     "error": format!("SSE line exceeded {} bytes", MAX_SSE_LINE),
                     "status": 0,
-                }));
+                })).await;
                 return;
             }
             while let Some(pos) = buffer.iter().position(|&b| b == b'\\n') {
@@ -845,19 +912,25 @@ fn do_stream(
                 let line = match std::str::from_utf8(&line_bytes) {
                     Ok(s) => s.trim(),
                     Err(e) => {
-                        let _ = tx.send(serde_json::json!({
+                        if tx.send(serde_json::json!({
                             "error": format!("invalid utf-8 in SSE line at byte {}", e.valid_up_to()),
                             "status": 0,
-                        }));
+                        })).await.is_err() {
+                            return;
+                        }
                         continue;
                     }
                 };
                 if let Some(data) = line.strip_prefix("data: ") {
                     if data == "[DONE]" { return; }
                     match serde_json::from_str::<Value>(data) {
-                        Ok(v) => { let _ = tx.send(v); }
+                        Ok(v) => {
+                            if tx.send(v).await.is_err() { return; }
+                        }
                         Err(_) => {
-                            let _ = tx.send(serde_json::json!({"raw": data}));
+                            if tx.send(serde_json::json!({"raw": data})).await.is_err() {
+                                return;
+                            }
                         }
                     }
                 }
@@ -872,9 +945,19 @@ fn do_stream(
 _RUST_OLD_MODS = ["agents", "models", "providers", "skills", "tools"]
 
 
-def _rust_path_fmt(path: str) -> str:
-    """'/api/agents/{id}' → '/api/agents/{}' (Rust format! style)"""
-    return re.sub(r"\{[^}]+\}", "{}", path)
+def _rust_path_segments(path: str, *, owned: bool) -> str:
+    """Render an endpoint path as safely appended URL segments."""
+    rendered = []
+    for segment in path.strip("/").split("/"):
+        param = re.fullmatch(r"\{([^}]+)\}", segment)
+        if param:
+            value = _rust_safe(param.group(1))
+            rendered.append(f"{value}.to_string()" if owned else value)
+        else:
+            literal = json.dumps(segment)
+            rendered.append(f"{literal}.to_string()" if owned else literal)
+    collection = f"[{', '.join(rendered)}]"
+    return f"vec!{collection}" if owned else f"&{collection}"
 
 
 def gen_rust(tag_ops: dict) -> str:
@@ -942,18 +1025,11 @@ def gen_rust(tag_ops: dict) -> str:
                 rust_params.append(f"{_rust_safe(qp)}: Option<&str>")
             sig = ", ".join(["&self"] + rust_params)
 
-            fmt_path = _rust_path_fmt(path)
-            fmt_args = "".join(f", {_rust_safe(p)}" for p in params)
-            path_expr = (
-                f'format!("{fmt_path}"{fmt_args})'
-                if params
-                else f'"{path}".to_string()'
-            )
-
             method_const = f"reqwest::Method::{http}"
             body_arg = "Some(data)" if has_body else "None"
 
             if is_stream:
+                path_arg = _rust_path_segments(path, owned=True)
                 if query_params:
                     q_items = ", ".join(
                         f'("{qp}".to_string(), {_rust_safe(qp)}.map(|s| s.to_string()))'
@@ -962,10 +1038,11 @@ def gen_rust(tag_ops: dict) -> str:
                     query_arg = f"vec![{q_items}]"
                 else:
                     query_arg = "Vec::new()"
-                out += f"\n    pub fn {op_id}({sig}) -> tokio::sync::mpsc::UnboundedReceiver<Value> {{\n"
-                out += f"        do_stream(self.client.clone(), self.base_url.clone(), {path_expr}, {method_const}, {body_arg}, {query_arg})\n"
+                out += f"\n    pub fn {op_id}({sig}) -> tokio::sync::mpsc::Receiver<Value> {{\n"
+                out += f"        do_stream(self.client.clone(), self.base_url.clone(), {path_arg}, {method_const}, {body_arg}, {query_arg})\n"
                 out += "    }\n"
             else:
+                path_arg = _rust_path_segments(path, owned=False)
                 if query_params:
                     q_items = ", ".join(
                         f'("{qp}", {_rust_safe(qp)})' for qp in query_params
@@ -974,7 +1051,7 @@ def gen_rust(tag_ops: dict) -> str:
                 else:
                     query_arg = "&[]"
                 out += f"\n    pub async fn {op_id}({sig}) -> Result<Value> {{\n"
-                out += f"        do_req(&self.client, &self.base_url, {method_const}, &{path_expr}, {body_arg}, {query_arg}).await\n"
+                out += f"        do_req(&self.client, &self.base_url, {method_const}, {path_arg}, {body_arg}, {query_arg}).await\n"
                 out += "    }\n"
 
         out += "}\n\n"
