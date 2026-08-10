@@ -4914,6 +4914,100 @@ async fn test_upload_owner_metadata_survives_registry_miss() {
         .await
         .unwrap();
     assert_eq!(admin.status(), StatusCode::OK);
+
+    // Daemon-generated browser/image-tool artifacts carry an explicit shared
+    // sidecar. Ordinary authenticated users must be able to consume their URL.
+    let shared_id = uuid::Uuid::new_v4().to_string();
+    std::fs::write(upload_dir.join(format!("{shared_id}.png")), b"shared image").unwrap();
+    std::fs::write(
+        librefang_types::media::upload_metadata_path(&upload_dir, &shared_id),
+        serde_json::to_vec(&librefang_types::media::UploadMetadata {
+            filename: "generated.png".to_string(),
+            content_type: "image/png".to_string(),
+            uploaded_by: None,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let shared = client
+        .get(format!("{}/api/uploads/{shared_id}", server.base_url))
+        .header("authorization", "Bearer eve-viewer-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(shared.status(), StatusCode::OK);
+    assert_eq!(shared.bytes().await.unwrap().as_ref(), b"shared image");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn message_routes_reject_foreign_upload_attachments() {
+    let server = start_test_server_with_rbac_users(
+        "any-key",
+        vec![
+            ("Alice", "user", "alice-user-key"),
+            ("Eve", "user", "eve-user-key"),
+        ],
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let spawn = client
+        .post(format!("{}/api/agents", server.base_url))
+        .header("authorization", "Bearer any-key")
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(spawn.status(), StatusCode::CREATED);
+    let spawn_body: serde_json::Value = spawn.json().await.unwrap();
+    let agent_id = spawn_body["agent_id"].as_str().unwrap();
+
+    let file_id = uuid::Uuid::new_v4().to_string();
+    let upload_dir = server
+        .state
+        .kernel
+        .config_ref()
+        .channels
+        .effective_file_download_dir();
+    std::fs::create_dir_all(&upload_dir).unwrap();
+    std::fs::write(upload_dir.join(format!("{file_id}.txt")), b"Alice's secret").unwrap();
+    std::fs::write(
+        librefang_types::media::upload_metadata_path(&upload_dir, &file_id),
+        serde_json::to_vec(&librefang_types::media::UploadMetadata {
+            filename: "secret.txt".to_string(),
+            content_type: "text/plain".to_string(),
+            uploaded_by: Some(librefang_types::agent::UserId::from_name("Alice")),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let body = serde_json::json!({
+        "message": "summarize the attachment",
+        "attachments": [{
+            "file_id": file_id,
+            "filename": "secret.txt",
+            "content_type": "text/plain"
+        }]
+    });
+
+    for suffix in ["message", "message/stream"] {
+        let response = client
+            .post(format!(
+                "{}/api/agents/{agent_id}/{suffix}",
+                server.base_url
+            ))
+            .header("authorization", "Bearer eve-user-key")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "foreign attachment must be rejected before dispatch on {suffix}"
+        );
+        let json: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(json["code"], "upload_access_denied");
+    }
 }
 
 // ---------------------------------------------------------------------------

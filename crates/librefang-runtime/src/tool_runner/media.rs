@@ -363,27 +363,21 @@ pub(super) async fn tool_image_generate(
     let mut image_urls: Vec<String> = Vec::new();
     {
         use base64::Engine;
-        tokio::fs::create_dir_all(upload_dir)
-            .await
-            .map_err(|e| ToolError::upstream_msg(format!("Failed to create upload dir: {e}")))?;
         for img in &result.images {
-            let file_id = uuid::Uuid::new_v4().to_string();
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(&img.data_base64)
                 .map_err(|e| {
                     ToolError::upstream_msg(format!("Failed to decode image data: {e}"))
                 })?;
-            // Persist as `<uuid>.png` (#6530); the URL keeps the bare file_id
-            // and serve_upload's resolver reconstructs the `.png` name.
-            let path = upload_dir.join(librefang_types::media::on_disk_name(
-                &file_id,
+            let url = crate::uploaded_file::save_shared_upload(
+                upload_dir,
+                &decoded,
                 "image/png",
-                "",
-            ));
-            tokio::fs::write(&path, &decoded).await.map_err(|e| {
-                ToolError::upstream_msg(format!("Failed to write upload file: {e}"))
-            })?;
-            image_urls.push(format!("/api/uploads/{file_id}"));
+                "generated.png",
+            )
+            .await
+            .map_err(ToolError::upstream_msg)?;
+            image_urls.push(url);
         }
     }
 
@@ -448,25 +442,22 @@ async fn save_media_images_to_uploads(
             }
             continue;
         }
-        let file_id = uuid::Uuid::new_v4().to_string();
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(&img.data_base64)
             .map_err(|e| ToolError::upstream_msg(format!("Failed to decode image: {e}")))?;
         if decoded.is_empty() {
             continue;
         }
-        // Persist as `<uuid>.png` (#6530); the returned URL keeps the bare
-        // `file_id`, and serve_upload's resolver reconstructs the `.png` name
-        // (these generated images are not in UPLOAD_REGISTRY).
-        let path = upload_dir.join(librefang_types::media::on_disk_name(
-            &file_id,
-            "image/png",
-            "",
-        ));
-        tokio::fs::write(&path, &decoded)
+        urls.push(
+            crate::uploaded_file::save_shared_upload(
+                upload_dir,
+                &decoded,
+                "image/png",
+                "generated.png",
+            )
             .await
-            .map_err(|e| ToolError::upstream_msg(format!("Failed to write upload file: {e}")))?;
-        urls.push(format!("/api/uploads/{file_id}"));
+            .map_err(ToolError::upstream_msg)?,
+        );
     }
     Ok(urls)
 }

@@ -144,18 +144,17 @@ pub async fn tool_browser_screenshot(
     let mut image_urls: Vec<String> = Vec::new();
     if !b64.is_empty() {
         use base64::Engine;
-        let _ = std::fs::create_dir_all(upload_dir);
-        let file_id = uuid::Uuid::new_v4().to_string();
         if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(b64) {
-            // Screenshots are PNG; persist as `<uuid>.png` (#6530). The URL
-            // keeps the bare file_id and serve_upload's resolver finds the file.
-            let path = upload_dir.join(librefang_types::media::on_disk_name(
-                &file_id,
+            match crate::uploaded_file::save_shared_upload(
+                upload_dir,
+                &decoded,
                 "image/png",
-                "",
-            ));
-            if std::fs::write(&path, &decoded).is_ok() {
-                image_urls.push(format!("/api/uploads/{file_id}"));
+                "screenshot.png",
+            )
+            .await
+            {
+                Ok(url) => image_urls.push(url),
+                Err(error) => tracing::warn!(%error, "failed to persist browser screenshot"),
             }
         }
     }

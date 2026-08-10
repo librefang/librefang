@@ -1452,6 +1452,7 @@ pub async fn hand_instance_browser(
 pub async fn hand_send_message(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(req): Json<MessageRequest>,
 ) -> impl IntoResponse {
     let (_instance, agent_id) = match resolve_hand_agent(&state, id) {
@@ -1482,7 +1483,23 @@ pub async fn hand_send_message(
     // hand path's behaviour byte-identical while closing the cross-chat
     // leak on the agent message path.
     if !req.attachments.is_empty() {
-        let image_blocks = super::agents::resolve_attachments(&state, &req.attachments);
+        let image_blocks = match super::agents::resolve_attachments(
+            &state,
+            &req.attachments,
+            api_user.as_ref().map(|user| &user.0),
+        )
+        .await
+        {
+            Ok(blocks) => blocks,
+            Err(_) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "You are not authorized to access this upload"
+                    })),
+                );
+            }
+        };
         if !image_blocks.is_empty() {
             let fallback_session_id = state
                 .kernel

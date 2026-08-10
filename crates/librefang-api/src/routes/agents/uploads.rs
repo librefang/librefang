@@ -15,24 +15,15 @@ struct UploadResponse {
     transcription: Option<String>,
 }
 
-/// Metadata stored alongside uploaded files.
-#[derive(Clone, serde::Deserialize, serde::Serialize)]
-pub(crate) struct UploadMeta {
-    #[allow(dead_code)]
-    pub(crate) filename: String,
-    pub(crate) content_type: String,
-    /// User who uploaded the file (#3361). A persisted `None` explicitly
-    /// marks daemon-generated or no-auth content as shared. Missing metadata
-    /// is distinct and fails closed for authenticated non-admin callers.
-    pub(crate) uploaded_by: Option<librefang_types::agent::UserId>,
-}
+/// API-local name for the shared durable upload metadata contract.
+pub(crate) type UploadMeta = librefang_types::media::UploadMetadata;
 
 /// In-memory cache of upload metadata persisted beside each new file.
 pub(crate) static UPLOAD_REGISTRY: LazyLock<DashMap<String, UploadMeta>> =
     LazyLock::new(DashMap::new);
 
 fn upload_meta_path(upload_dir: &std::path::Path, file_id: &str) -> std::path::PathBuf {
-    upload_dir.join(format!(".{file_id}.meta.json"))
+    librefang_types::media::upload_metadata_path(upload_dir, file_id)
 }
 
 pub(crate) fn persist_upload_meta_sync(
@@ -59,7 +50,10 @@ pub(crate) async fn persist_upload_meta(
         .map_err(|error| format!("upload metadata task failed: {error}"))?
 }
 
-async fn load_upload_meta(upload_dir: &std::path::Path, file_id: &str) -> Option<UploadMeta> {
+pub(crate) async fn load_upload_meta(
+    upload_dir: &std::path::Path,
+    file_id: &str,
+) -> Option<UploadMeta> {
     let path = upload_meta_path(upload_dir, file_id);
     let bytes = match tokio::fs::read(&path).await {
         Ok(bytes) => bytes,
@@ -78,7 +72,7 @@ async fn load_upload_meta(upload_dir: &std::path::Path, file_id: &str) -> Option
     }
 }
 
-fn upload_access_allowed(
+pub(crate) fn upload_access_allowed(
     meta: Option<&UploadMeta>,
     caller: Option<&crate::middleware::AuthenticatedApiUser>,
 ) -> bool {
@@ -222,6 +216,11 @@ pub async fn upload_file(
     let file_path = upload_dir.join(&on_disk);
     if let Err(e) = tokio::fs::write(&file_path, &body).await {
         tracing::warn!("Failed to write upload: {e}");
+        if let Err(cleanup_error) = tokio::fs::remove_file(&file_path).await {
+            if cleanup_error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(%cleanup_error, file_id, "failed to clean up partial upload");
+            }
+        }
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": err_upload_save_failed})),
@@ -297,33 +296,6 @@ pub async fn upload_file(
 /// content type the reader may not know). Returns the first existing path.
 /// `file_id` is a validated UUID, so the probe's prefix match cannot escape
 /// `dir`.
-pub(crate) fn resolve_existing_upload_path(
-    dir: &std::path::Path,
-    file_id: &str,
-    content_type: &str,
-    filename: &str,
-) -> Option<std::path::PathBuf> {
-    let named = dir.join(librefang_types::media::on_disk_name(
-        file_id,
-        content_type,
-        filename,
-    ));
-    if named.exists() {
-        return Some(named);
-    }
-    let bare = dir.join(file_id);
-    if bare.exists() {
-        return Some(bare);
-    }
-    let prefix = format!("{file_id}.");
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(&prefix) {
-            return Some(entry.path());
-        }
-    }
-    None
-}
-
 pub(crate) async fn resolve_existing_upload_path_async(
     dir: &std::path::Path,
     file_id: &str,
@@ -452,49 +424,10 @@ pub async fn serve_upload(
 mod tests {
     use super::{
         format_upload_limit, load_upload_meta, persist_upload_meta_sync,
-        resolve_existing_upload_path, resolve_existing_upload_path_async, upload_access_allowed,
-        UploadMeta,
+        resolve_existing_upload_path_async, upload_access_allowed, UploadMeta,
     };
     use crate::middleware::{AuthenticatedApiUser, UserRole};
     use librefang_types::agent::UserId;
-
-    #[test]
-    fn resolver_finds_named_bare_and_generated_image_schemes() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path();
-
-        // 1. Registry hit: producer wrote `<uuid>.png`, reader knows the type.
-        let named_id = "11111111-1111-1111-1111-111111111111";
-        std::fs::write(p.join(format!("{named_id}.png")), b"png").unwrap();
-        assert_eq!(
-            resolve_existing_upload_path(p, named_id, "image/png", "shot.png"),
-            Some(p.join(format!("{named_id}.png")))
-        );
-
-        // 2. Legacy file written bare `<uuid>` before #6530: still served, even
-        //    though the reader now computes a `.png` name that does not exist.
-        let bare_id = "22222222-2222-2222-2222-222222222222";
-        std::fs::write(p.join(bare_id), b"legacy").unwrap();
-        assert_eq!(
-            resolve_existing_upload_path(p, bare_id, "image/png", "old.png"),
-            Some(p.join(bare_id))
-        );
-
-        // 3. Generated image not in the registry: the reader defaults the type,
-        //    but the `<uuid>.*` probe finds the real extension.
-        let gen_id = "33333333-3333-3333-3333-333333333333";
-        std::fs::write(p.join(format!("{gen_id}.jpg")), b"jpg").unwrap();
-        assert_eq!(
-            resolve_existing_upload_path(p, gen_id, "application/octet-stream", ""),
-            Some(p.join(format!("{gen_id}.jpg")))
-        );
-
-        // 4. Nothing on disk → None.
-        assert_eq!(
-            resolve_existing_upload_path(p, "44444444-4444-4444-4444-444444444444", "", ""),
-            None
-        );
-    }
 
     #[tokio::test]
     async fn async_resolver_finds_named_bare_and_generated_image_schemes() {
