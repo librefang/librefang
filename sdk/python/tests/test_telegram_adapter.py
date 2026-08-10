@@ -92,6 +92,12 @@ def test_sanitize_telegram_html():
     # self_closing_tag_nested_inside_open_tag_does_not_leak_onto_stack)
     assert s("<b>before<code/>after</b>tail") == (
         "<b>before<code></code>after</b>tail")
+    # crossed/mismatched nesting: closing the outer tag while an inner
+    # tag is still open must close the inner tag first, matching
+    # telegram.rs's stack-drain behavior — not just pop the matched
+    # entry and leave the inner tag's close to land after it (which
+    # would emit invalid crossed HTML Telegram cannot parse).
+    assert s("<b><i>x</b>") == "<b><i>x</i></b>"
 
 
 # ---- chunker: vs crate::message_truncator -------------------------

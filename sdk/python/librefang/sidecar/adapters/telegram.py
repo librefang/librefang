@@ -584,8 +584,14 @@ def sanitize_telegram_html(text: str) -> str:
                                 pos = k
                                 break
                         if pos is not None:
-                            open_tags.pop(pos)
-                            result.append(text[i:tag_end + 1])
+                            # Close every tag above (and including) the
+                            # match, innermost first, mirroring
+                            # telegram.rs — sanitiser priority is
+                            # "produce valid HTML" not "preserve nesting
+                            # depth" when tags cross.
+                            for unclosed in reversed(open_tags[pos:]):
+                                result.append("</" + unclosed + ">")
+                            del open_tags[pos:]
                         else:
                             result.append("&lt;")
                             result.append(_escape_html_text(tag_content))

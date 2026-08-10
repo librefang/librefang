@@ -285,6 +285,16 @@ mod tests {
     }
 
     #[test]
+    fn crossed_close_tag_closes_inner_tag_first() {
+        // `</b>` arrives while `<i>` is still open above it on the stack.
+        // The sanitiser must close every tag above the match (innermost
+        // first) rather than leave `<i>` to close after `<b>`, which
+        // would emit invalid crossed HTML Telegram cannot parse.
+        let s = sanitize_telegram_html("<b><i>x</b>");
+        assert_eq!(s, "<b><i>x</i></b>");
+    }
+
+    #[test]
     fn escapes_literal_text_nodes_without_double_escaping_entities() {
         let s = sanitize_telegram_html("a < b & c<b>d > e &amp; f</b>g &lt; h");
         assert_eq!(s, "a &lt; b &amp; c<b>d &gt; e &amp; f</b>g &lt; h");
