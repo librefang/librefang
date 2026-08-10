@@ -890,8 +890,14 @@ def gen_rust(tag_ops: dict) -> str:
 
     out += "impl LibreFang {\n"
     out += "    pub fn new(base_url: impl Into<String>) -> Self {\n"
+    out += "        Self::with_client(base_url, Client::new())\n"
+    out += "    }\n\n"
+    out += "    /// Creates an SDK client using a caller-configured HTTP client.\n"
+    out += "    ///\n"
+    out += "    /// Use this to configure authentication headers, cookies, proxies,\n"
+    out += "    /// TLS, or other [`reqwest::Client`] behavior shared by all resources.\n"
+    out += "    pub fn with_client(base_url: impl Into<String>, client: Client) -> Self {\n"
     out += "        let base_url = base_url.into().trim_end_matches('/').to_string();\n"
-    out += "        let client = Client::new();\n"
     out += "        Self {\n"
     for tag in tags:
         attr = _tag_attr(tag)
