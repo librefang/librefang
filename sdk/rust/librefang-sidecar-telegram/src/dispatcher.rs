@@ -38,6 +38,54 @@ fn required_coordinate(payload: &Value, key: &str) -> Result<f64> {
         .ok_or_else(|| Error::Other(format!("Location.{key} missing or not a JSON number")))
 }
 
+fn validated_poll(payload: &Value) -> Result<(Vec<Value>, bool, Option<u32>)> {
+    let raw_options = payload
+        .get("options")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::Other("Poll.options missing or not a JSON array".into()))?;
+    if !(1..=12).contains(&raw_options.len()) {
+        return Err(Error::Other(
+            "Poll.options must contain between 1 and 12 answers".into(),
+        ));
+    }
+    let options = raw_options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            option
+                .as_str()
+                .map(|text| json!({"text": text}))
+                .ok_or_else(|| Error::Other(format!("Poll.options[{index}] must be a JSON string")))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let is_quiz = payload
+        .get("is_quiz")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let correct = match payload.get("correct_option_id") {
+        Some(value) => {
+            let raw = value.as_u64().ok_or_else(|| {
+                Error::Other("Poll.correct_option_id must be a non-negative integer".into())
+            })?;
+            Some(u32::try_from(raw).map_err(|_| {
+                Error::Other("Poll.correct_option_id exceeds the supported integer range".into())
+            })?)
+        }
+        None => None,
+    };
+    if is_quiz && correct.is_none() {
+        return Err(Error::Other(
+            "Poll.correct_option_id is required for quiz polls".into(),
+        ));
+    }
+    if correct.is_some_and(|index| index as usize >= options.len()) {
+        return Err(Error::Other(
+            "Poll.correct_option_id is outside the options array".into(),
+        ));
+    }
+    Ok((options, is_quiz, correct))
+}
+
 /// Truncate a raw (un-formatted) caption to the Bot API limit for the plain-text fallback.
 fn truncate_raw_caption(raw: Option<&str>) -> Option<String> {
     let raw = raw.map(str::trim).filter(|s| !s.is_empty())?;
@@ -500,24 +548,7 @@ pub async fn dispatch_content(
                 .get("question")
                 .and_then(Value::as_str)
                 .ok_or_else(|| Error::Other("Poll.question missing".into()))?;
-            let options: Vec<Value> = payload
-                .get("options")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str())
-                        .map(|s| json!({"text": s}))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let is_quiz = payload
-                .get("is_quiz")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let correct = payload
-                .get("correct_option_id")
-                .and_then(Value::as_u64)
-                .map(|n| n as u32);
+            let (options, is_quiz, correct) = validated_poll(payload)?;
             let explanation = payload.get("explanation").and_then(Value::as_str);
             client
                 .send_poll(
@@ -660,5 +691,36 @@ mod tests {
             let error = required_coordinate(&malformed, "lat").expect_err("invalid latitude");
             assert!(error.to_string().contains("Location.lat"));
         }
+    }
+
+    #[test]
+    fn poll_options_and_quiz_answer_are_validated_locally() {
+        for malformed in [
+            json!({}),
+            json!({"options": []}),
+            json!({"options": ["a", 2]}),
+            json!({"options": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]}),
+            json!({"options": ["only"], "is_quiz": true}),
+            json!({"options": ["a", "b"], "is_quiz": true, "correct_option_id": 2}),
+            json!({"options": ["a", "b"], "is_quiz": true, "correct_option_id": "1"}),
+            json!({"options": ["a", "b"], "is_quiz": true, "correct_option_id": u64::from(u32::MAX) + 1}),
+        ] {
+            assert!(validated_poll(&malformed).is_err());
+        }
+
+        let (options, is_quiz, correct) = validated_poll(&json!({
+            "options": ["a", "b"],
+            "is_quiz": true,
+            "correct_option_id": 1
+        }))
+        .expect("valid quiz");
+        assert_eq!(options, vec![json!({"text": "a"}), json!({"text": "b"})]);
+        assert!(is_quiz);
+        assert_eq!(correct, Some(1));
+
+        let (_, is_quiz, correct) =
+            validated_poll(&json!({"options": ["a"]})).expect("valid regular poll");
+        assert!(!is_quiz);
+        assert_eq!(correct, None);
     }
 }
