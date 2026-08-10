@@ -323,6 +323,8 @@ fn tui_runtime() -> &'static tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_name("librefang-tui-bg")
+            // Same 2 MiB -> 8 MiB worker stack rationale as the daemon and the desktop embedded server (refs #6659): the TUI's in-process mode (`InProcess(Arc<LibreFangKernel>)`) runs the same `agent_send` / workflow-step turn chain as those, so it can restack the same fat frames.
+            .thread_stack_size(8 * 1024 * 1024)
             .build()
             .expect("Failed to create Tokio runtime")
     })
@@ -382,34 +384,41 @@ pub fn spawn_inprocess_stream(
 ) -> StreamCancelToken {
     let token = StreamCancelToken::new();
     let cancel = token.clone();
-    std::thread::spawn(move || {
-        // The shared runtime, not a throwaway: the agent loop detaches tasks (tool executions, memory writes) that must outlive this turn.
-        match block_on_tui(kernel.send_message_streaming_with_routing(agent_id, &message, None)) {
-            Ok((mut rx, handle)) => {
-                block_on_tui(async {
-                    while let Some(ev) = rx.recv().await {
-                        if cancel.is_cancelled() {
-                            break;
+    std::thread::Builder::new()
+        .name("librefang-tui-stream".into())
+        // This thread runs `block_on_tui`, so the outermost agent turn is polled on *its* stack, not on `tui_runtime()`'s worker threads -- `thread_stack_size` on that runtime's builder does not cover it, same gap the desktop server thread had (refs #6659).
+        // `send_message_streaming_with_routing` is the same `agent_send` / workflow-step turn chain the daemon and desktop size for, so give this thread the same headroom.
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            // The shared runtime, not a throwaway: the agent loop detaches tasks (tool executions, memory writes) that must outlive this turn.
+            match block_on_tui(kernel.send_message_streaming_with_routing(agent_id, &message, None))
+            {
+                Ok((mut rx, handle)) => {
+                    block_on_tui(async {
+                        while let Some(ev) = rx.recv().await {
+                            if cancel.is_cancelled() {
+                                break;
+                            }
+                            if tx.send(AppEvent::Stream(ev)).is_err() {
+                                return;
+                            }
                         }
-                        if tx.send(AppEvent::Stream(ev)).is_err() {
+                        if cancel.is_cancelled() {
                             return;
                         }
-                    }
-                    if cancel.is_cancelled() {
-                        return;
-                    }
-                    let result = handle
-                        .await
-                        .map_err(|e| e.to_string())
-                        .and_then(|r| r.map_err(|e| e.to_string()));
-                    let _ = tx.send(AppEvent::StreamDone(result));
-                });
+                        let result = handle
+                            .await
+                            .map_err(|e| e.to_string())
+                            .and_then(|r| r.map_err(|e| e.to_string()));
+                        let _ = tx.send(AppEvent::StreamDone(result));
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::StreamDone(Err(format!("{e}"))));
+                }
             }
-            Err(e) => {
-                let _ = tx.send(AppEvent::StreamDone(Err(format!("{e}"))));
-            }
-        }
-    });
+        })
+        .expect("failed to spawn librefang-tui-stream thread");
     token
 }
 

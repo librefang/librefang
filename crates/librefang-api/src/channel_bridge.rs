@@ -490,14 +490,28 @@ where
     tokio::spawn(async move {
         let (error_msg, status): (Option<String>, Result<(), String>) = match kernel_handle.await {
             Err(e) if e.is_cancelled() => {
-                // Intentional: cancelled (superseded) turns report Err status so
-                // bridge consumers apply AgentPhase::Error + record_delivery(success=false).
-                // A superseded turn is one whose kernel handle was aborted because a newer
-                // message arrived for the same (agent, session) — see messaging.rs rapid-dispatch
-                // race. Treating this as a delivery failure is pre-existing behaviour; a future
-                // follow-up could teach the bridge to skip lifecycle/record_delivery on
-                // cancellation specifically.
-                warn!("Streaming kernel task was cancelled: {e}");
+                // Deliberate: cancelled (superseded) turns report Err status so bridge consumers apply AgentPhase::Error + record_delivery(success=false).
+                // A superseded turn is one whose kernel handle was aborted because a newer message arrived for the same (agent, session) — see the supersede warn! in messaging.rs.
+                //
+                // Reporting it as a delivery failure is the correct call and stays as-is: the turn genuinely delivered nothing, so counting it as a success would make the delivery metric claim replies that no user ever received.
+                // The phase is self-correcting because the superseding turn immediately drives the agent back out of Error.
+                //
+                // `error_msg` stays `None` on purpose — the user is not at fault and a newer turn is already running, so an error bubble would be noise.
+                // One line, not two: the consequence is what an operator debugging "the bot ignored me" needs, and the bare cancellation on its own says nothing about it.
+                // In a group the silence is doubled — the `is_group` arm further down drops error text as well, so nothing at all appears in the channel to explain the gap.
+                if is_group {
+                    warn!(
+                        "Streaming kernel task was cancelled ({e}): this superseded turn produces \
+                         no reply, and group-channel error suppression means no visible error \
+                         either, so the user sees pure silence. The group session spans the whole \
+                         channel, so another user's message in any thread can preempt this turn."
+                    );
+                } else {
+                    warn!(
+                        "Streaming kernel task was cancelled ({e}): this superseded turn produces \
+                         no reply, so the user sees silence until the newer turn answers."
+                    );
+                }
                 (None, Err("kernel task cancelled".to_string()))
             }
             Err(e) => {
