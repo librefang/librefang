@@ -285,10 +285,15 @@ pub struct PollResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct InlineKeyboardButton {
     pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub callback_data: Option<String>,
+    #[serde(flatten)]
+    pub action: InlineKeyboardAction,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum InlineKeyboardAction {
+    Url { url: String },
+    CallbackData { callback_data: String },
 }
 
 #[cfg(test)]
@@ -306,6 +311,31 @@ mod tests {
         assert!(response.description.is_none());
         assert!(response.error_code.is_none());
         assert!(response.parameters.is_none());
+    }
+
+    #[test]
+    fn inline_keyboard_action_serializes_as_exactly_one_bot_api_field() {
+        let url = InlineKeyboardButton {
+            text: "Docs".into(),
+            action: InlineKeyboardAction::Url {
+                url: "https://example.com".into(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(url).unwrap(),
+            json!({"text": "Docs", "url": "https://example.com"})
+        );
+
+        let callback = InlineKeyboardButton {
+            text: "Run".into(),
+            action: InlineKeyboardAction::CallbackData {
+                callback_data: "run".into(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(callback).unwrap(),
+            json!({"text": "Run", "callback_data": "run"})
+        );
     }
 
     #[test]
