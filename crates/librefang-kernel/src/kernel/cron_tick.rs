@@ -289,21 +289,23 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                             {
                                 let cron_sid = SessionId::for_channel(agent_id, "cron");
                                 // #3443 / cron-prune-lock-across-llm-await:
-                                // the per-session mutex is acquired around the
-                                // read-then-write cycle so two cron fires for
-                                // the same agent cannot clobber each other's
-                                // keep-set. **The lock MUST NOT be held across
+                                // the per-agent and per-session mutexes are
+                                // acquired around each read-then-write cycle so
+                                // cron sends and sibling prune fires cannot
+                                // clobber each other's keep-set. **The locks
+                                // MUST NOT be held across
                                 // `try_summarize_trim().await`** — under a
                                 // congested provider the LLM call can stall
                                 // for tens of seconds, and the persistent
                                 // `(agent, "cron")` lock would jam every
                                 // sibling cron fire for the duration. Instead:
                                 //
-                                //   1. Take the lock, snapshot the messages
-                                //      and record `messages_generation`.
-                                //   2. Drop the lock.
+                                //   1. Take both locks (agent then session),
+                                //      snapshot the messages and record
+                                //      `messages_generation`.
+                                //   2. Drop both locks.
                                 //   3. Run `try_summarize_trim` lock-free.
-                                //   4. Re-acquire the lock; if
+                                //   4. Re-acquire both locks; if
                                 //      `messages_generation` is unchanged,
                                 //      apply the trim result; otherwise drop
                                 //      our result (a concurrent fire won the
@@ -551,6 +553,22 @@ enum CronPrunePlan {
     },
 }
 
+/// Acquire the two lock namespaces that serialize cron-session write-back.
+/// The global order is agent first, then session; message sends use the same
+/// order, so prune cannot blind-overwrite a concurrent appended turn or form
+/// an AB-BA cycle.
+async fn acquire_cron_prune_write_locks(
+    agent_lock: Arc<tokio::sync::Mutex<()>>,
+    session_lock: Arc<tokio::sync::Mutex<()>>,
+) -> (
+    tokio::sync::OwnedMutexGuard<()>,
+    tokio::sync::OwnedMutexGuard<()>,
+) {
+    let agent_guard = agent_lock.lock_owned().await;
+    let session_guard = session_lock.lock_owned().await;
+    (agent_guard, session_guard)
+}
+
 /// Cron-session prune / compaction with the lock released across the LLM
 /// `try_summarize_trim` await.
 ///
@@ -580,9 +598,20 @@ async fn cron_prune_session(
     compaction_mode: librefang_types::config::CronCompactionMode,
     keep_recent_cfg: usize,
 ) {
-    // Phase 1 — plan under the lock.
+    let agent_lock = kernel_job
+        .agents
+        .agent_msg_locks
+        .entry(agent_id)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+
+    // Phase 1 — plan under both write locks. The cheap Prune path performs
+    // its blind storage upsert here, so it must serialize with persistent
+    // cron message sends on the agent lock as well as sibling compaction on
+    // the session lock.
     let plan = {
-        let _g = prune_lock.lock().await;
+        let (_agent_guard, _session_guard) =
+            acquire_cron_prune_write_locks(agent_lock.clone(), prune_lock.clone()).await;
         cron_prune_plan(
             kernel_job,
             agent_id,
@@ -659,14 +688,8 @@ async fn cron_prune_session(
     // pair and there is no AB-BA cycle. The guard is dropped when this function
     // returns, before the fire's own `send_message_full` call re-acquires the
     // agent lock, so there is no self-re-entry on the non-reentrant mutex.
-    let agent_lock = kernel_job
-        .agents
-        .agent_msg_locks
-        .entry(agent_id)
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone();
-    let _agent_g = agent_lock.lock().await;
-    let _g = prune_lock.lock().await;
+    let (_agent_guard, _session_guard) =
+        acquire_cron_prune_write_locks(agent_lock, prune_lock).await;
     let mut session = match kernel_job.memory.substrate.get_session(cron_sid) {
         Ok(Some(s)) => s,
         Ok(None) | Err(_) => {
@@ -928,6 +951,7 @@ mod tests {
     //! in `crates/librefang-kernel/tests/cron_compaction_test.rs` and the
     //! `librefang-api` integration suite.
 
+    use super::acquire_cron_prune_write_locks;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tokio::sync::Mutex;
@@ -1178,5 +1202,45 @@ mod tests {
              survived (final messages: {without_fix:?}) — the test no longer \
              reproduces finding #22"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cron_prune_write_locks_are_acquired_agent_then_session() {
+        let agent_lock = Arc::new(Mutex::new(()));
+        let session_lock = Arc::new(Mutex::new(()));
+        let session_guard = session_lock.lock().await;
+        let (acquired_tx, acquired_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+
+        let task_agent_lock = agent_lock.clone();
+        let task_session_lock = session_lock.clone();
+        let task = tokio::spawn(async move {
+            let guards = acquire_cron_prune_write_locks(task_agent_lock, task_session_lock).await;
+            acquired_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            drop(guards);
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if agent_lock.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("prune helper never acquired the agent lock");
+
+        drop(session_guard);
+        acquired_rx.await.unwrap();
+        assert!(
+            agent_lock.try_lock().is_err(),
+            "agent lock must remain held for the full prune write section"
+        );
+        release_tx.send(()).unwrap();
+        task.await.unwrap();
+        assert!(agent_lock.try_lock().is_ok());
+        assert!(session_lock.try_lock().is_ok());
     }
 }

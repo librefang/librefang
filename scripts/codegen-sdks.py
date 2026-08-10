@@ -7,10 +7,10 @@ Usage:
     python3 scripts/codegen-sdks.py --dry-run # print diffs, don't write
 """
 import json
+import sys
 import re
 import shutil
 import subprocess
-import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -145,6 +145,7 @@ Usage:
 """
 
 import json
+import sys
 from typing import Any, Dict, Generator, Optional
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
@@ -208,25 +209,32 @@ class LibreFang:
             body_text = e.read().decode() if e.fp else ""
             raise LibreFangError(f"HTTP {e.code}: {body_text}", e.code, body_text) from e
 
-        buffer = b""
-        while True:
-            chunk = resp.read(4096)
-            if not chunk:
-                break
-            buffer += chunk
-            lines = buffer.split(b"\\n")
-            buffer = lines.pop()
-            for line in lines:
-                line = line.decode().strip()
-                if line.startswith("data: "):
-                    data_str = line[6:]
-                    if data_str == "[DONE]":
-                        return
-                    try:
-                        yield json.loads(data_str)
-                    except json.JSONDecodeError:
-                        yield {"raw": data_str}
-        resp.close()
+        try:
+            buffer = b""
+            while True:
+                chunk = resp.read(4096)
+                if not chunk:
+                    break
+                buffer += chunk
+                lines = buffer.split(b"\\n")
+                buffer = lines.pop()
+                for line in lines:
+                    line = line.decode().strip()
+                    if line.startswith("data: "):
+                        data_str = line[6:]
+                        if data_str == "[DONE]":
+                            return
+                        try:
+                            yield json.loads(data_str)
+                        except json.JSONDecodeError:
+                            yield {"raw": data_str}
+        finally:
+            active_error = sys.exc_info()[0] is not None
+            try:
+                resp.close()
+            except Exception:
+                if not active_error:
+                    raise
 
 '''
 
@@ -810,7 +818,17 @@ fn do_stream(
         const MAX_SSE_LINE: usize = 8 * 1024 * 1024;
         let mut stream = res.bytes_stream();
         let mut buffer: Vec<u8> = Vec::new();
-        while let Some(Ok(chunk)) = stream.next().await {
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = match chunk_result {
+                Ok(chunk) => chunk,
+                Err(e) => {
+                    let _ = tx.send(serde_json::json!({
+                        "error": format!("stream error: {}", e),
+                        "status": 0,
+                    }));
+                    return;
+                }
+            };
             buffer.extend_from_slice(&chunk);
             if buffer.len() > MAX_SSE_LINE {
                 let _ = tx.send(serde_json::json!({
@@ -872,8 +890,14 @@ def gen_rust(tag_ops: dict) -> str:
 
     out += "impl LibreFang {\n"
     out += "    pub fn new(base_url: impl Into<String>) -> Self {\n"
+    out += "        Self::with_client(base_url, Client::new())\n"
+    out += "    }\n\n"
+    out += "    /// Creates an SDK client using a caller-configured HTTP client.\n"
+    out += "    ///\n"
+    out += "    /// Use this to configure authentication headers, cookies, proxies,\n"
+    out += "    /// TLS, or other [`reqwest::Client`] behavior shared by all resources.\n"
+    out += "    pub fn with_client(base_url: impl Into<String>, client: Client) -> Self {\n"
     out += "        let base_url = base_url.into().trim_end_matches('/').to_string();\n"
-    out += "        let client = Client::new();\n"
     out += "        Self {\n"
     for tag in tags:
         attr = _tag_attr(tag)

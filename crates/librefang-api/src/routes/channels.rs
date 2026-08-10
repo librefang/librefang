@@ -277,7 +277,7 @@ const TELEGRAM_STATIC_FIELDS: &[StaticSidecarField] = &[
         label: "Allowed User IDs",
         field_type: "list",
         required: false,
-        placeholder: "123456789, 987654321",
+        placeholder: "123456789, 987654321 — leave empty to allow ALL users (insecure)",
         advanced: true,
     },
     StaticSidecarField {
@@ -1449,6 +1449,16 @@ mod static_schema_tests {
                 ("ALLOWED_USERS", "list", false, true),
                 ("TELEGRAM_CLEAR_DONE_REACTION", "bool", false, true),
             ]
+        );
+        let allowed_users = TELEGRAM_STATIC_FIELDS
+            .iter()
+            .find(|field| field.key == "ALLOWED_USERS")
+            .expect("Telegram fallback must declare ALLOWED_USERS");
+        assert!(
+            allowed_users.placeholder.contains("empty")
+                && allowed_users.placeholder.contains("ALL users")
+                && allowed_users.placeholder.contains("insecure"),
+            "fallback schema must disclose blank permit-all behavior"
         );
     }
 

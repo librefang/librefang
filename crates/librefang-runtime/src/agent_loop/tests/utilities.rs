@@ -1838,6 +1838,84 @@ async fn test_normal_turn_persists_session_as_incognito_control() {
     );
 }
 
+#[tokio::test]
+async fn test_heartbeat_pruning_keeps_new_messages_start_on_current_turn() {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let agent_id = librefang_types::agent::AgentId::new();
+    let session_id = librefang_types::agent::SessionId::new();
+    let mut messages = Vec::new();
+    for index in 0..12 {
+        messages.push(Message::user(format!("heartbeat {index}")));
+        messages.push(Message::assistant("[no reply needed]"));
+    }
+    let mut session = librefang_memory::session::Session {
+        id: session_id,
+        agent_id,
+        messages,
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    let mut manifest = test_manifest();
+    manifest.autonomous = Some(librefang_types::agent::AutonomousConfig {
+        heartbeat_keep_recent: Some(2),
+        ..Default::default()
+    });
+    let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
+
+    let result = run_agent_loop(
+        &manifest,
+        "current turn",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &LoopOptions::default(),
+    )
+    .await
+    .expect("loop should complete");
+
+    assert!(
+        result.new_messages_start <= session.messages.len(),
+        "returned message boundary {} exceeds pruned session length {}",
+        result.new_messages_start,
+        session.messages.len(),
+    );
+    let new_messages = &session.messages[result.new_messages_start..];
+    assert_eq!(new_messages.len(), 2);
+    assert_eq!(new_messages[0].role, Role::User);
+    assert_eq!(new_messages[0].content.text_content(), "current turn");
+    assert_eq!(new_messages[1].role, Role::Assistant);
+    assert_eq!(
+        new_messages[1].content.text_content(),
+        "Hello from the agent!"
+    );
+}
+
 /// `LoopOptions::incognito = true` MUST suppress the SQLite write at
 /// `finalize_successful_end_turn` even on a clean end-turn.
 #[tokio::test]
