@@ -1,0 +1,1 @@
+- Kept rendering content after an unclosed Telegram Markdown code fence instead of swallowing the remainder into one code block. (@houko)
