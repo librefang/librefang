@@ -383,6 +383,51 @@ async fn non_owner_cannot_clone_agent() {
     assert_eq!(status, StatusCode::CREATED);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn non_owner_cannot_message_another_users_agent() {
+    // `agent_message` in `middleware::user_role_allows_request` deliberately lets any `User`-role caller POST `/message` and `/message/stream` on an arbitrary agent id (unlike most mutations, which require Admin+), so the ownership boundary has to be enforced in the handler itself — the same shape as `non_owner_cannot_clone_agent`.
+    // Without it a non-owner could drive a full LLM turn — tool execution and budget spend included — on another user's agent by guessing/enumerating its UUID.
+    let h = boot().await;
+    let agent_id = spawn_authored(&h.state, "Alice");
+    let aid = agent_id.to_string();
+
+    for path in [
+        format!("/api/agents/{aid}/message"),
+        format!("/api/agents/{aid}/message/stream"),
+    ] {
+        let status = request_status(
+            &h.app,
+            Method::POST,
+            &path,
+            BOB_KEY,
+            Some(serde_json::json!({"message": "hello"})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{path} must 404 for a non-owner"
+        );
+
+        // Alice, the real owner, must clear the ownership check and reach the
+        // provider-auth check below it, never a 404. The test harness has no
+        // provider configured, so this is deterministic without a real LLM call.
+        let status = request_status(
+            &h.app,
+            Method::POST,
+            &path,
+            ALICE_KEY,
+            Some(serde_json::json!({"message": "hello"})),
+        )
+        .await;
+        assert_ne!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{path} must not 404 for the owner"
+        );
+    }
+}
+
 fn spawn_cron_job(
     state: &AppState,
     agent_id: AgentId,
