@@ -92,6 +92,12 @@ def test_sanitize_telegram_html():
     # self_closing_tag_nested_inside_open_tag_does_not_leak_onto_stack)
     assert s("<b>before<code/>after</b>tail") == (
         "<b>before<code></code>after</b>tail")
+    # self-closing tag with trailing whitespace before `>` (valid HTML)
+    # must still be detected as self-closing, matching sanitize.rs's
+    # trim_end()-based check — without the rstrip() this regresses to
+    # wrapping the following text instead of closing immediately.
+    assert s("<b/ >after") == "<b></b>after"
+    assert s("<code/ >after") == "<code></code>after"
     # crossed/mismatched nesting: closing the outer tag while an inner
     # tag is still open must close the inner tag first, matching
     # telegram.rs's stack-drain behavior — not just pop the matched

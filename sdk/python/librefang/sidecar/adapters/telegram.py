@@ -597,9 +597,15 @@ def sanitize_telegram_html(text: str) -> str:
                             result.append(_escape_html_text(tag_content))
                             result.append("&gt;")
                     else:
-                        self_closing = tag_content.endswith("/")
+                        # rstrip before checking for the marker so a
+                        # self-closing tag with trailing whitespace before
+                        # `>` (e.g. `<tag/ >`, valid HTML) is still detected
+                        # — matches sanitize.rs's `attrs.trim_end().ends_with('/')`.
+                        self_closing = tag_content.rstrip().endswith("/")
                         attrs_raw = tag_content[len(name_raw):]
-                        attrs_raw = attrs_raw.rstrip("/").strip()
+                        if self_closing:
+                            attrs_raw = attrs_raw.rstrip()[:-1]
+                        attrs_raw = attrs_raw.strip()
                         rebuilt = _rebuild_safe_tag(
                             name_raw, attrs_raw, self_closing
                         )
