@@ -109,15 +109,14 @@ fn media_placeholder(label: &str, duration_secs: Option<u32>, caption: Option<&s
     TgContent::Text(format!("[{label}{dur}{cap}]"))
 }
 
-/// Render a `getFile` failure for logging. Debug-formats the file id and error so embedded control
-/// characters (newlines, ANSI escapes) are escaped rather than able to forge extra log lines.
+/// Render a `getFile` failure for logging.
+/// Debug-formats the file id and error so embedded control characters (newlines, ANSI escapes) are escaped rather than able to forge extra log lines.
 fn file_lookup_error_log(file_id: &str, error: &impl std::fmt::Display) -> String {
     let rendered_error = error.to_string();
     format!("[telegram] getFile failed for file_id {file_id:?}: {rendered_error:?}")
 }
 
-/// Render an `answerCallbackQuery` failure for logging, with the same control-character escaping as
-/// `file_lookup_error_log`.
+/// Render an `answerCallbackQuery` failure for logging, with the same control-character escaping as `file_lookup_error_log`.
 fn callback_ack_error_log(callback_id: &str, error: &impl std::fmt::Display) -> String {
     let rendered_error = error.to_string();
     format!(
