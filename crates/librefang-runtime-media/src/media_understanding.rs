@@ -247,33 +247,44 @@ impl MediaEngine {
 
         let _permit = self.semaphore.acquire().await.map_err(|e| e.to_string())?;
 
+        // A windowed call over a file on disk never needs the bytes in memory: ffmpeg seeks into the file itself, and everything downstream works on the window it cuts.
+        // Skipping the read here is what keeps a walk's cost proportional to the recording rather than to the recording times the number of windows — the read, and for a `Base64` attachment the decode as well, would otherwise be repeated in full for every window.
+        let windowed_path = match (&attachment.source, window) {
+            (MediaSource::FilePath { path }, Some(_)) => Some(std::path::PathBuf::from(path)),
+            _ => None,
+        };
+
         // Read attachment bytes from source. For a Video attachment these are
         // the still-muxed container bytes; the video branch below extracts
         // the audio track before anything past it runs.
-        let mut audio_bytes = match &attachment.source {
-            MediaSource::FilePath { path } => tokio::fs::read(path).await.map_err(|e| {
-                format!(
-                    "Failed to read {} file '{path}': {e}",
-                    attachment.media_type
-                )
-            })?,
-            MediaSource::Base64 { data, .. } => {
-                use base64::Engine;
-                base64::engine::general_purpose::STANDARD
-                    .decode(data)
-                    .map_err(|e| {
-                        format!("Failed to decode base64 {}: {e}", attachment.media_type)
-                    })?
-            }
-            MediaSource::Url { url } => {
-                return Err(format!(
-                    "URL-based source not supported for transcription: {url}"
-                ));
-            }
-            other => {
-                return Err(format!(
-                    "Unsupported source variant for transcription: {other:?}"
-                ));
+        let mut audio_bytes = if windowed_path.is_some() {
+            Vec::new()
+        } else {
+            match &attachment.source {
+                MediaSource::FilePath { path } => tokio::fs::read(path).await.map_err(|e| {
+                    format!(
+                        "Failed to read {} file '{path}': {e}",
+                        attachment.media_type
+                    )
+                })?,
+                MediaSource::Base64 { data, .. } => {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD
+                        .decode(data)
+                        .map_err(|e| {
+                            format!("Failed to decode base64 {}: {e}", attachment.media_type)
+                        })?
+                }
+                MediaSource::Url { url } => {
+                    return Err(format!(
+                        "URL-based source not supported for transcription: {url}"
+                    ));
+                }
+                other => {
+                    return Err(format!(
+                        "Unsupported source variant for transcription: {other:?}"
+                    ));
+                }
             }
         };
 
@@ -296,15 +307,16 @@ impl MediaEngine {
         // Handled first for that reason — running either of them before this would decode the whole recording just to throw most of it away.
         let mut consumed_secs = None;
         if let Some(window) = window {
-            let Some(cut) = extract_media_window(&audio_bytes, window)
+            let source = match &windowed_path {
+                Some(path) => WindowSource::Path(path.as_path()),
+                None => WindowSource::Bytes(&audio_bytes),
+            };
+            let Some(cut) = extract_media_window(source, window)
                 .await
                 .map_err(|e| format!("ffmpeg window extraction failed: {e}"))?
             else {
                 // Overshoot: the window began past the end of the recording.
-                // Reported as a zero-length window rather than an error, so the
-                // caller's loop ends on `has_more: false` the way the tool
-                // description tells it to, instead of on a failure it has no
-                // way to distinguish from a broken file.
+                // Reported as a zero-length window rather than an error, so the caller's loop ends on `has_more: false` the way the tool description tells it to, instead of on a failure it has no way to distinguish from a broken file.
                 return Ok(TranscriptionOutcome {
                     understanding: MediaUnderstanding {
                         media_type: MediaType::Audio,
@@ -449,12 +461,8 @@ impl MediaEngine {
 
         let transcription = transcription.trim().to_string();
         if transcription.is_empty() {
-            // A whole file that transcribes to nothing is a failure worth
-            // surfacing. One *window* of a recording that transcribes to
-            // nothing is ordinary — a pause, a silent stretch, a gap between
-            // speakers — and erroring there would abort the walk with no
-            // resume point, stranding the rest of the recording behind a
-            // silence.
+            // A whole file that transcribes to nothing is a failure worth surfacing.
+            // One *window* of a recording that transcribes to nothing is ordinary — a pause, a silent stretch, a gap between speakers — and erroring there would abort the walk with no resume point, stranding the rest of the recording behind a silence.
             if window.is_some() {
                 info!(
                     provider,
@@ -1367,6 +1375,18 @@ pub struct MediaWindow {
     pub max_secs: f64,
 }
 
+/// Where the bytes of a window's source live (#6748).
+///
+/// A transcription driven by a tool call already has the recording on disk, and ffmpeg can seek into it directly.
+/// One driven by an inbound attachment has only bytes, which have to reach a file before ffmpeg can seek at all — see #6747 for what happens when they do not.
+#[derive(Debug, Clone, Copy)]
+enum WindowSource<'a> {
+    /// A file already on disk; used as-is.
+    Path(&'a Path),
+    /// Bytes in memory; staged to a scratch file first.
+    Bytes(&'a [u8]),
+}
+
 /// Cut `[start_sec, start_sec + max_secs)` out of any container ffmpeg can open and re-encode it to the same Ogg/Opus target [`extract_video_audio_track`] produces (#6748).
 ///
 /// The input is staged to a file for the same reason that path does it (#6747): a pipe cannot seek, `mp4` / `mov` keep their index in a trailing `moov` atom, and a demux that fails for want of a backward seek still exits 0 and still emits a headers-only Ogg.
@@ -1379,11 +1399,20 @@ pub struct MediaWindow {
 ///
 /// `Ok(None)` means the window carried no audio and started past the opening of the recording — an overshoot, which ends the walk rather than failing it.
 async fn extract_media_window(
-    input_bytes: &[u8],
+    input: WindowSource<'_>,
     window: MediaWindow,
 ) -> Result<Option<Vec<u8>>, String> {
-    let staged = ScopedTempFile::write(input_bytes, "media").await?;
-    let input_path = staged.path().to_string_lossy().into_owned();
+    // Staging only when the caller has bytes rather than a file.
+    // A source already on disk is already seekable, so copying it to scratch would buy nothing and cost a full write per window — and a walk issues one call per window, so that cost would be paid for the whole recording every time rather than once.
+    let staged = match input {
+        WindowSource::Bytes(bytes) => Some(ScopedTempFile::write(bytes, "media").await?),
+        WindowSource::Path(_) => None,
+    };
+    let input_path = match (&staged, input) {
+        (Some(tmp), _) => tmp.path().to_string_lossy().into_owned(),
+        (None, WindowSource::Path(path)) => path.to_string_lossy().into_owned(),
+        (None, WindowSource::Bytes(_)) => unreachable!("bytes are always staged"),
+    };
     let start = format!("{:.3}", window.start_sec.max(0.0));
     let dur = format!("{:.3}", window.max_secs.max(0.0));
 
@@ -1416,9 +1445,7 @@ async fn extract_media_window(
     )
     .await?;
 
-    // Same defence in depth as the video path: a demux that fails for want of
-    // a seek still exits 0 and still emits a headers-only container, so
-    // neither guard in `run_ffmpeg_pipe` catches it.
+    // Same defence in depth as the video path: a demux that fails for want of a seek still exits 0 and still emits a headers-only container, so neither guard in `run_ffmpeg_pipe` catches it.
     //
     // Unlike that path, an empty result here is not always a failure.
     // A window at or past the end of the recording is a legitimate request — the walk reaches one by itself whenever a recording's length is close to a multiple of `max_secs` — and it produces exactly the same headers-only bytes.
@@ -1490,20 +1517,13 @@ fn ogg_opus_duration_secs(ogg: &[u8]) -> Option<f64> {
         // table's entries — following it is what keeps payload bytes from
         // being mistaken for the next header.
         let segments = ogg[at + 26] as usize;
-        // A truncated tail must not discard what was already read — the guard
-        // above says so and this is the other half of it: a stream that stops
-        // inside the segment table or mid-payload leaves the granules of every
-        // complete page before it perfectly usable, and `?` here would throw
-        // them away along with the incomplete one.
+        // A truncated tail must not discard what was already read — the guard above says so and this is the other half of it: a stream that stops inside the segment table or mid-payload leaves the granules of every complete page before it perfectly usable, and `?` here would throw them away along with the incomplete one.
         let Some(table) = ogg.get(at + HEADER_LEN..at + HEADER_LEN + segments) else {
             break;
         };
         let payload: usize = table.iter().map(|&n| n as usize).sum();
         let page_end = at + HEADER_LEN + segments + payload;
-        // The granule is only meaningful once the page it describes has
-        // actually arrived: accepting it from a page whose payload was cut off
-        // would report audio the caller never received, and the caller would
-        // advance past it.
+        // The granule is only meaningful once the page it describes has actually arrived: accepting it from a page whose payload was cut off would report audio the caller never received, and the caller would advance past it.
         if page_end > ogg.len() {
             break;
         }
@@ -2741,10 +2761,7 @@ mod tests {
         assert_eq!(ogg_opus_duration_secs(b""), None);
     }
 
-    /// A stream that stops inside a page must still report the granules of the
-    /// complete pages before it — the walk's own comment promises exactly that,
-    /// and an early `?` used to discard them, stopping a caller's walk short of
-    /// the recording's end.
+    /// A stream that stops inside a page must still report the granules of the complete pages before it — the walk's own comment promises exactly that, and an early `?` used to discard them, stopping a caller's walk short of the recording's end.
     #[test]
     fn ogg_opus_duration_keeps_what_it_read_when_the_tail_is_truncated() {
         fn page(granule: u64, payload: &[u8]) -> Vec<u8> {
@@ -2770,9 +2787,8 @@ mod tests {
         let complete_len = whole.len();
         whole.extend(page(96_000, &[7u8; 32]));
 
-        // Cut inside the third page's header, its segment table, and its
-        // payload in turn. Every one of those leaves the 1 s of complete pages
-        // before it intact, so every one must report 1 s rather than nothing.
+        // Cut inside the third page's header, its segment table, and its payload in turn.
+        // Every one of those leaves the 1 s of complete pages before it intact, so every one must report 1 s rather than nothing.
         for cut in [complete_len + 4, complete_len + 27, complete_len + 30] {
             let truncated = &whole[..cut];
             assert_eq!(
@@ -2782,9 +2798,7 @@ mod tests {
             );
         }
 
-        // And the granule of a page whose payload never arrived must not be
-        // accepted: reporting 2 s here would advance the caller past audio it
-        // never received.
+        // And the granule of a page whose payload never arrived must not be accepted: reporting 2 s here would advance the caller past audio it never received.
         let mid_payload = &whole[..whole.len() - 8];
         assert_eq!(ogg_opus_duration_secs(mid_payload), Some(1.0));
     }
@@ -2798,7 +2812,7 @@ mod tests {
         let source = synth_ogg_opus(12.0).await;
 
         let cut = extract_media_window(
-            &source,
+            WindowSource::Bytes(&source),
             MediaWindow {
                 start_sec: 2.0,
                 max_secs: 5.0,
@@ -2815,6 +2829,106 @@ mod tests {
         );
     }
 
+    /// The branch the walk's termination rests on: a window that begins **past** the end of the recording, rather than merely overlapping it.
+    /// ffmpeg emits headers with no audio there, which is byte-identical to a failed demux, so the two are told apart by where the window started — and this shape must end the walk rather than fail it.
+    #[tokio::test]
+    async fn extract_media_window_fully_past_the_end_reports_no_window() {
+        if !ffmpeg_available() {
+            eprintln!("ffmpeg not on PATH — skipping");
+            return;
+        }
+        let source = synth_ogg_opus(1.0).await;
+
+        for start_sec in [1.2_f64, 1.5, 2.0, 5.0] {
+            let out = extract_media_window(
+                WindowSource::Bytes(&source),
+                MediaWindow {
+                    start_sec,
+                    max_secs: 600.0,
+                },
+            )
+            .await
+            .expect("an overshoot must not be an error");
+            assert!(
+                out.is_none(),
+                "a window starting at {start_sec}s of a 1s recording carries no audio"
+            );
+        }
+    }
+
+    /// Records a limitation this guard does **not** cover, so it is not mistaken for one that does.
+    ///
+    /// ffmpeg abandons the seek once `-ss` is far enough past the end and returns the recording from the beginning instead of nothing.
+    /// Measured against ffmpeg 8.1 on a 1.0065 s source: `-ss` of 1.2 through 5 s all yield the 137-byte headers-only stream this guard rejects, while `-ss 30` and `-ss 120` both yield 5013 bytes carrying the first 1.013 s of the recording — real audio, which the guard therefore passes.
+    ///
+    /// A walk never asks for that: `next_start_sec` advances by the produced duration, so it overshoots by less than one window and lands in the range above.
+    /// It is reachable only when a caller supplies `start_sec` itself and is far wrong about the recording's length, and the cost is a billed request for audio already transcribed plus a duplicate of the opening appended to the transcript.
+    ///
+    /// Left as a known limitation rather than papered over: the obvious remedy, `-copyts`, makes the granule absolute (a tail window at `-ss 8` of a 10 s source reports 10.007 s instead of 2.006 s) and changes what `-t` means, which would break the produced-duration contract the whole walk rests on.
+    #[tokio::test]
+    async fn extract_media_window_far_past_the_end_is_not_detected() {
+        if !ffmpeg_available() {
+            eprintln!("ffmpeg not on PATH — skipping");
+            return;
+        }
+        let source = synth_ogg_opus(1.0).await;
+
+        let out = extract_media_window(
+            WindowSource::Bytes(&source),
+            MediaWindow {
+                start_sec: 60.0,
+                max_secs: 600.0,
+            },
+        )
+        .await
+        .expect("extraction itself succeeds");
+        assert!(
+            out.is_some(),
+            "documents current behaviour: a far overshoot returns the start of the recording rather than nothing — see this test's doc comment"
+        );
+    }
+
+    /// The same window cut straight from a file on disk, which is the path a tool call takes: no read, no base64, no staging copy per window.
+    #[tokio::test]
+    async fn extract_media_window_accepts_a_path_without_staging() {
+        if !ffmpeg_available() {
+            eprintln!("ffmpeg not on PATH — skipping");
+            return;
+        }
+        let bytes = synth_ogg_opus(6.0).await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("source.ogg");
+        tokio::fs::write(&path, &bytes).await.expect("write source");
+
+        let from_path = extract_media_window(
+            WindowSource::Path(&path),
+            MediaWindow {
+                start_sec: 1.0,
+                max_secs: 3.0,
+            },
+        )
+        .await
+        .expect("path input must work")
+        .expect("a window inside the recording carries audio");
+        let from_bytes = extract_media_window(
+            WindowSource::Bytes(&bytes),
+            MediaWindow {
+                start_sec: 1.0,
+                max_secs: 3.0,
+            },
+        )
+        .await
+        .expect("byte input must work")
+        .expect("a window inside the recording carries audio");
+
+        let a = ogg_opus_duration_secs(&from_path).expect("duration");
+        let b = ogg_opus_duration_secs(&from_bytes).expect("duration");
+        assert!(
+            (a - b).abs() < 0.05,
+            "path and byte inputs must produce the same window, got {a}s vs {b}s"
+        );
+    }
+
     /// The end-of-recording signal: a window that runs past the end comes back short, and that shortfall — not any assumption about the request — is what tells the caller to stop.
     #[tokio::test]
     async fn extract_media_window_past_the_end_returns_a_short_window() {
@@ -2825,7 +2939,7 @@ mod tests {
         let source = synth_ogg_opus(6.0).await;
 
         let cut = extract_media_window(
-            &source,
+            WindowSource::Bytes(&source),
             MediaWindow {
                 start_sec: 4.0,
                 max_secs: 600.0,

@@ -206,6 +206,51 @@ async fn build_transcription_attachment(
     })
 }
 
+/// Build the attachment for a windowed transcription: same format admission and same size budget as [`build_transcription_attachment`], but pointing at the file rather than carrying it (#6748).
+///
+/// The size still comes from the file's metadata, so `MediaAttachment::validate()` applies exactly the limit it applied before — the budget is unchanged, only the transport is.
+async fn build_windowed_attachment(
+    resolved: &Path,
+    ext: &str,
+) -> Result<librefang_types::media::MediaAttachment, ToolError> {
+    let (media_type, mime, max_bytes) = match video_mime_from_ext(ext) {
+        Some(video_mime) => (
+            librefang_types::media::MediaType::Video,
+            video_mime,
+            MAX_VIDEO_BYTES,
+        ),
+        None => (
+            librefang_types::media::MediaType::Audio,
+            audio_mime_from_ext(ext).ok_or_else(|| ToolError::InvalidParameter {
+                name: "path",
+                reason: format!(
+                    "Unsupported audio format: .{ext} (supported: {SUPPORTED_AUDIO_EXTS_DOC}, {SUPPORTED_VIDEO_EXTS_DOC})"
+                ),
+            })?,
+            MAX_AUDIO_BYTES,
+        ),
+    };
+
+    let meta = tokio::fs::metadata(resolved)
+        .await
+        .map_err(|e| ToolError::upstream_msg(format!("Failed to stat file: {e}")))?;
+    if meta.len() > max_bytes {
+        return Err(ToolError::upstream_msg(format!(
+            "File too large: {} bytes (limit: {max_bytes} bytes)",
+            meta.len()
+        )));
+    }
+
+    Ok(librefang_types::media::MediaAttachment {
+        media_type,
+        mime_type: mime.to_string(),
+        source: librefang_types::media::MediaSource::FilePath {
+            path: resolved.to_string_lossy().into_owned(),
+        },
+        size_bytes: meta.len(),
+    })
+}
+
 /// Default window length, in seconds of media, when `max_secs` is omitted (#6748).
 ///
 /// Ten minutes is the largest round number that stays inside the tool-result budget on ordinary speech: a 600 s window measured ~16.8 KB of transcript against a 16 KB `spill_threshold_bytes`, so the inline path is already at its limit here and anything longer reliably spills.
@@ -244,19 +289,18 @@ pub(super) async fn tool_media_transcribe(
         .to_lowercase();
     validate_ext(&ext)?;
 
-    let attachment = build_transcription_attachment(&resolved, &ext).await?;
+    // A windowed call hands the provider a path rather than the bytes: ffmpeg seeks into the file itself, so reading and base64-encoding the whole recording would be repeated for every window of a walk and thrown away each time.
+    let attachment = match parse_window(input)? {
+        Some(_) => build_windowed_attachment(&resolved, &ext).await?,
+        None => build_transcription_attachment(&resolved, &ext).await?,
+    };
     let language = input["language"].as_str();
     let prompt = input["prompt"].as_str();
     let window = parse_window(input)?;
 
     // Resolved before the provider call, not inside the write below.
-    // Transcription costs an ffmpeg pass and a billed request, and on this
-    // branch the transcript exists nowhere else — it is not put in the
-    // response when a destination was named — so a path rejected afterwards
-    // destroys work that was already paid for and makes the caller pay again
-    // for the retry.
-    // `web_fetch_to_file` orders it the same way, resolving its destination
-    // ahead of the SSRF check and the fetch.
+    // Transcription costs an ffmpeg pass and a billed request, and on this branch the transcript exists nowhere else — it is not put in the response when a destination was named — so a path rejected afterwards destroys work that was already paid for and makes the caller pay again for the retry.
+    // `web_fetch_to_file` orders it the same way, resolving its destination ahead of the SSRF check and the fetch.
     let out_dest = match input["out_path"].as_str() {
         Some(out_path) => Some(resolve_transcript_dest(
             out_path,
@@ -1488,11 +1532,8 @@ mod transcribe_window_tests {
         assert_eq!(empty.next_start_sec, None);
 
         // A window shorter than the flat tolerance must still be judged against
-        // its own length. With an unscaled tolerance the threshold goes
-        // negative and any positive `consumed` clears it, so a recording that
-        // ended almost immediately would report more to come — and clamping
-        // the threshold at zero would not help, since a hair above zero clears
-        // zero too.
+        // its own length.
+        // With an unscaled tolerance the threshold goes negative and any positive `consumed` clears it, so a recording that ended almost immediately would report more to come — and clamping the threshold at zero would not help, since a hair above zero clears zero too.
         let barely_started = window_continuation(w(0.2), Some(0.01));
         assert!(
             !barely_started.has_more,
