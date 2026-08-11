@@ -1490,11 +1490,7 @@ impl ApprovalManager {
             .with_issuer(Some(issuer.to_string()))
             .build()
             .map_err(|e| format!("TOTP init error: {e}"))?;
-        // `check_current` now returns the matched skew step (`Option<u64>`)
-        // instead of a bare bool (totp-rs 6.0 changed this so callers can
-        // enforce single-use-per-step themselves); this call site only
-        // needs pass/fail, and single-use enforcement already lives in the
-        // replay-claim table (see `claim_totp_code_used_for`).
+        // `check_current` now returns the matched skew step (`Option<u64>`) instead of a bare bool (totp-rs 6.0 changed this so callers can enforce single-use-per-step themselves); this call site only needs pass/fail, and single-use enforcement already lives in the replay-claim table (see `claim_totp_code_used_for`).
         Ok(totp.check_current(code).is_some())
     }
 
