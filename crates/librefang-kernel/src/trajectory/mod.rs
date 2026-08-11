@@ -117,10 +117,7 @@ impl CompiledPatterns {
                 jwt: Regex::new(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b")
                     .expect("jwt regex must compile"),
                 // Standalone base64 candidate > 40 chars.
-                // The replacement step preserves the candidate only when every
-                // character is a hex digit (0-9a-fA-F), so SHA-1/SHA-256-style
-                // digests pass through unredacted; anything containing a
-                // non-hex letter, `+`, `/`, or padding is masked.
+                // The replacement step preserves the candidate only when every character is a hex digit (0-9a-fA-F), so SHA-1/SHA-256-style digests pass through unredacted; anything containing a non-hex letter, `+`, `/`, or padding is masked.
                 long_b64: Regex::new(r"\b[A-Za-z0-9+/]{40,}={0,2}")
                     .expect("long_b64 regex must compile"),
             }
@@ -649,10 +646,7 @@ mod tests {
 
     #[test]
     fn workspace_collapse_requires_component_boundary_at_end_too() {
-        // A bare mention of the workspace root followed by punctuation (not
-        // another path separator, and not end-of-string) must still count
-        // as a boundary — otherwise the path leaks whenever it's not
-        // immediately followed by `/` or `\`.
+        // A bare mention of the workspace root followed by punctuation (not another path separator, and not end-of-string) must still count as a boundary — otherwise the path leaks whenever it's not immediately followed by `/` or `\`.
         let exp = dummy_exporter(policy_with_workspace("/home/alice"));
         assert_eq!(
             exp.redact_text("workspace root is /home/alice, please don't touch it"),
