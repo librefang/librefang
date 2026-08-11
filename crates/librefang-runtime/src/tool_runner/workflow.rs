@@ -368,3 +368,62 @@ pub(super) async fn tool_workflow_describe(
         "input_schema": input_schema,
     }))?)
 }
+
+pub(super) async fn tool_workflow_create(
+    input: &serde_json::Value,
+    kernel: Option<&std::sync::Arc<dyn crate::kernel_handle::KernelHandle>>,
+    caller_agent_id: Option<&str>,
+) -> ToolResult {
+    let kh = require_kernel_typed(kernel)?;
+    let name = input["name"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("name"))?;
+    let description = input["description"].as_str().unwrap_or("");
+
+    // Validate name — same rules as validate_template_name
+    if name.is_empty() || name.len() > 64 {
+        return Err(ToolError::InvalidParameter {
+            name: "name",
+            reason: "Workflow name must be 1-64 characters".to_string(),
+        });
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(ToolError::InvalidParameter {
+            name: "name",
+            reason: "Workflow name must be [A-Za-z0-9_-] only".to_string(),
+        });
+    }
+
+    let steps = input["steps"]
+        .as_array()
+        .ok_or(ToolError::InvalidParameter {
+            name: "steps",
+            reason: "steps must be an array".to_string(),
+        })?;
+
+    if steps.is_empty() {
+        return Err(ToolError::InvalidParameter {
+            name: "steps",
+            reason: "Workflow must have at least one step".to_string(),
+        });
+    }
+
+    // Serialize to workflow JSON the same shape the HTTP API expects
+    let workflow_json = serde_json::json!({
+        "name": name,
+        "description": description,
+        "steps": steps,
+        "input_schema": input.get("input_schema"),
+        "total_timeout_secs": input.get("total_timeout_secs"),
+    });
+
+    let workflow_json_str = serde_json::to_string(&workflow_json)
+        .map_err(|e| ToolError::upstream_msg(e.to_string()))?;
+
+    kh.create_workflow(&workflow_json_str, caller_agent_id)
+        .await
+        .map_err(ToolError::upstream)
+}

@@ -506,6 +506,92 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
                 }
             })
     }
+
+    async fn create_workflow(
+        &self,
+        workflow_json: &str,
+        _caller_agent_id: Option<&str>,
+    ) -> Result<String, kernel_handle::KernelOpError> {
+        use crate::workflow::Workflow;
+        use kernel_handle::KernelOpError;
+        use std::io::Write;
+
+        // Parse and validate
+        let wf: Workflow = serde_json::from_str(workflow_json)
+            .map_err(|e| KernelOpError::Internal(format!("Invalid workflow JSON: {e}")))?;
+
+        if wf.name.is_empty() || wf.name.len() > 64 {
+            return Err(KernelOpError::Internal(
+                "Workflow name must be 1-64 chars".to_string(),
+            ));
+        }
+        if !wf
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(KernelOpError::Internal(
+                "Workflow name must be [A-Za-z0-9_-]".to_string(),
+            ));
+        }
+
+        // Run semantic validation (same as HTTP API)
+        let validation_errors = wf.validate();
+        if !validation_errors.is_empty() {
+            let reasons: Vec<String> = validation_errors
+                .into_iter()
+                .map(|(step, reason)| format!("{step}: {reason}"))
+                .collect();
+            return Err(KernelOpError::Internal(format!(
+                "Workflow validation failed: {}",
+                reasons.join("; ")
+            )));
+        }
+
+        // Check for name collision
+        let workflows_dir = self.home_dir_boot.join("workflows");
+        let file_path = workflows_dir.join(format!("{}.workflow.toml", &wf.name));
+        if file_path.exists() {
+            return Err(KernelOpError::Internal(format!(
+                "Workflow '{}' already exists",
+                &wf.name
+            )));
+        }
+
+        // Ensure dir exists
+        std::fs::create_dir_all(&workflows_dir)
+            .map_err(|e| KernelOpError::Internal(format!("Failed to create workflows dir: {e}")))?;
+
+        // Serialize to TOML
+        let toml_str = toml::to_string_pretty(&wf)
+            .map_err(|e| KernelOpError::Internal(format!("TOML serialization failed: {e}")))?;
+
+        // Atomic write: tmp file + rename
+        let tmp_path = workflows_dir.join(format!(".{}.tmp", &wf.name));
+        {
+            let mut f = std::fs::File::create(&tmp_path)
+                .map_err(|e| KernelOpError::Internal(format!("Failed to write workflow: {e}")))?;
+            f.write_all(toml_str.as_bytes())
+                .map_err(|e| KernelOpError::Internal(format!("Failed to write workflow: {e}")))?;
+            f.flush()
+                .map_err(|e| KernelOpError::Internal(format!("Failed to flush workflow: {e}")))?;
+        }
+        std::fs::rename(&tmp_path, &file_path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            KernelOpError::Internal(format!("Failed to persist workflow: {e}"))
+        })?;
+
+        // Register in engine (hot-reload)
+        let _ = self.workflows.engine.register(wf).await;
+
+        let workflow_name = file_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        Ok(workflow_name)
+    }
 }
 
 #[cfg(test)]
