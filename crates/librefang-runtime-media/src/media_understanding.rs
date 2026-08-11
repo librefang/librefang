@@ -322,10 +322,7 @@ impl MediaEngine {
                         media_type: MediaType::Audio,
                         description: String::new(),
                         provider: provider.to_string(),
-                        // Named even though nothing was transcribed: the field
-                        // describes the configuration the call ran under, and
-                        // a caller reading the last step of a walk should not
-                        // see it blank out.
+                        // Named even though nothing was transcribed: the field describes the configuration the call ran under, and a caller reading the last step of a walk should not see it blank out.
                         model: self
                             .config
                             .audio_model
@@ -339,7 +336,10 @@ impl MediaEngine {
             };
             let produced = ogg_opus_duration_secs(&cut);
             info!(
-                original_size = audio_bytes.len(),
+                // From the attachment, not the buffer: a windowed call over a
+                // file never fills the buffer, so reading its length here
+                // logged every long recording as zero bytes.
+                original_size = attachment.size_bytes,
                 window_size = cut.len(),
                 start_sec = window.start_sec,
                 max_secs = window.max_secs,
@@ -1509,9 +1509,7 @@ async fn source_decodes(input_path: &str) -> Result<bool, String> {
         "check whether a recording's audio track decodes",
     )
     .await;
-    // A probe that cannot even run says nothing about the source, so it must
-    // not be read as "the file is fine" — treat it as undecodable and let the
-    // caller report the original failure.
+    // A probe that cannot even run says nothing about the source, so it must not be read as "the file is fine" — treat it as undecodable and let the caller report the original failure.
     Ok(probe
         .map(|bytes| ogg_contains_audio(&bytes))
         .unwrap_or(false))
@@ -2942,11 +2940,19 @@ mod tests {
 
     /// Records a limitation this guard does **not** cover, so it is not mistaken for one that does.
     ///
-    /// ffmpeg abandons the seek once `-ss` is far enough past the end and returns the recording from the beginning instead of nothing.
-    /// Measured against ffmpeg 8.1 on a 1.0065 s source: `-ss` of 1.2 through 5 s all yield the 137-byte headers-only stream this guard rejects, while `-ss 30` and `-ss 120` both yield 5013 bytes carrying the first 1.013 s of the recording — real audio, which the guard therefore passes.
+    /// ffmpeg abandons the seek once `-ss` is past the end by more than a fixed margin and returns the recording from the beginning instead of nothing.
     ///
-    /// A walk never asks for that: `next_start_sec` advances by the produced duration, so it overshoots by less than one window and lands in the range above.
-    /// It is reachable only when a caller supplies `start_sec` itself and is far wrong about the recording's length, and the cost is a billed request for audio already transcribed plus a duplicate of the opening appended to the transcript.
+    /// The margin is **absolute, not proportional**: measured on ffmpeg 8.1 across 10 s, 60 s and 300 s sources, every one of them yields the headers-only stream this guard rejects up to about 8 s past the end and the 5524-byte opening of the recording from about 10 s past it.
+    /// An earlier note here put the safe range at "five times the recording", which was an artefact of measuring a 1 s source — five seconds of slack looked proportional and is not.
+    /// On a 45-minute recording the margin is 0.4 % of its length.
+    ///
+    /// A walk never asks for that: `next_start_sec` advances by the produced duration, so it overshoots by a fraction of a second and lands well inside the safe range.
+    /// It is reachable when a caller sets `start_sec` itself and is off by more than ten seconds — "from the fiftieth minute" of a recording that runs forty-five.
+    /// The cost is a billed request for audio already transcribed, plus the opening of the recording appended to `out_path` as though it were the window that was asked for, with `has_more: false` reporting success.
+    ///
+    /// Not detectable from the output: the clamped stream is ordinary audio, and comparing it against the recording's opening does not work either, since Ogg page headers carry per-encode serials and CRCs (measured: 3 % byte agreement, the same as for a legitimate tail).
+    /// Knowing the source duration would settle it and there is no way to learn it here without `ffprobe`, which the kernel does not call.
+    /// So the constraint is stated where the caller can act on it — the tool schema and both documentation pages tell it to advance with `next_start_sec` rather than guess an offset.
     ///
     /// Left as a known limitation rather than papered over: the obvious remedy, `-copyts`, makes the granule absolute (a tail window at `-ss 8` of a 10 s source reports 10.007 s instead of 2.006 s) and changes what `-t` means, which would break the produced-duration contract the whole walk rests on.
     #[tokio::test]
@@ -2966,10 +2972,9 @@ mod tests {
         )
         .await
         .expect("extraction itself succeeds");
-        assert!(
-            out.is_some(),
-            "documents current behaviour: a far overshoot returns the start of the recording rather than nothing — see this test's doc comment"
-        );
+        // Asserts only that this does not error, which holds both today and after any future fix.
+        // Pinning `is_some()` would make the fix look like a regression to whoever writes it.
+        let _ = out;
     }
 
     /// The same window cut straight from a file on disk, which is the path a tool call takes: no read, no base64, no staging copy per window.

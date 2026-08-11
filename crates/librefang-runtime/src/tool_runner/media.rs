@@ -290,13 +290,13 @@ pub(super) async fn tool_media_transcribe(
     validate_ext(&ext)?;
 
     // A windowed call hands the provider a path rather than the bytes: ffmpeg seeks into the file itself, so reading and base64-encoding the whole recording would be repeated for every window of a walk and thrown away each time.
-    let attachment = match parse_window(input)? {
+    let window = parse_window(input)?;
+    let attachment = match window {
         Some(_) => build_windowed_attachment(&resolved, &ext).await?,
         None => build_transcription_attachment(&resolved, &ext).await?,
     };
     let language = input["language"].as_str();
     let prompt = input["prompt"].as_str();
-    let window = parse_window(input)?;
 
     // Resolved before the provider call, not inside the write below.
     // Transcription costs an ffmpeg pass and a billed request, and on this branch the transcript exists nowhere else — it is not put in the response when a destination was named — so a path rejected afterwards destroys work that was already paid for and makes the caller pay again for the retry.
@@ -484,8 +484,8 @@ struct WrittenTranscript {
 
 /// Resolve `out_path` against the workspace sandbox — the same call `web_fetch_to_file` and `file_write` use, so a transcript cannot be written outside the agent's roots and `..` is rejected.
 ///
-/// Separate from the write so it can run **before** the provider call.
-/// A path rejected afterwards would destroy a transcript that cost an ffmpeg pass and a billed request and exists nowhere else.
+/// Separate from the write so it can run **before** the provider call: a path rejected afterwards would destroy a transcript that cost an ffmpeg pass and a billed request and exists nowhere else.
+/// It stays a pure decision — nothing is created here, so a rejected call leaves no trace on disk.
 fn resolve_transcript_dest(
     out_path: &str,
     workspace_root: Option<&Path>,
@@ -502,16 +502,6 @@ fn resolve_transcript_dest(
                 name: "out_path",
                 reason,
             })?;
-
-    // Created here rather than at write time for the same reason the path is
-    // resolved here: a directory that cannot be created — permissions, a full
-    // disk — must fail before the transcription is paid for, not after.
-    if let Some(parent) = resolved.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| ToolError::InvalidParameter {
-            name: "out_path",
-            reason: format!("cannot create parent directories: {e}"),
-        })?;
-    }
 
     Ok(resolved)
 }
@@ -537,6 +527,14 @@ async fn write_transcript(
     use tokio::io::AsyncWriteExt;
 
     let out_path = resolved.display();
+
+    // Directories are created here, next to the write, rather than during resolution: resolution runs before the provider call and must stay a pure decision about the path, or a mistyped `out_path` would leave a directory behind on every rejected call.
+    // Both neighbours order it the same way — `web_fetch_to_file` creates after the download, `file_write` immediately before writing.
+    if let Some(parent) = resolved.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            ToolError::upstream_msg(format!("Failed to create parent directories: {e}"))
+        })?;
+    }
 
     // Appended rather than rewritten: holding every prior window in memory to rewrite the file whole would reintroduce, on disk, exactly the proportional-to-recording-length cost this parameter exists to remove.
     let mut file = tokio::fs::OpenOptions::new()
