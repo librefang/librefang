@@ -333,10 +333,7 @@ async fn confirm_with_invalid_code_keeps_pending() {
     assert_eq!(st["confirmed"], false);
 }
 
-/// Replaying the same TOTP code twice (even one that just successfully
-/// confirmed) must be rejected — the replay table's atomic claim is the only
-/// line of defense between an attacker
-/// who shoulder-surfed a single 30-second window and full 2FA bypass.
+/// Replaying the same TOTP code twice (even one that just successfully confirmed) must be rejected — the replay table's atomic claim is the only line of defense between an attacker who shoulder-surfed a single 30-second window and full 2FA bypass.
 #[tokio::test(flavor = "multi_thread")]
 async fn confirm_rejects_replayed_code() {
     let h = boot();
@@ -351,8 +348,7 @@ async fn confirm_rejects_replayed_code() {
     .await;
     assert_eq!(s1, StatusCode::OK);
 
-    // Re-issue the same code: the replay-table claim must reject it, even
-    // though the first call already succeeded.
+    // Re-issue the same code: the replay-table claim must reject it, even though the first call already succeeded.
     let (s2, b2) = json_post(
         &h,
         "/api/approvals/totp/confirm",
