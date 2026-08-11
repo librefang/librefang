@@ -322,7 +322,17 @@ impl MediaEngine {
                         media_type: MediaType::Audio,
                         description: String::new(),
                         provider: provider.to_string(),
-                        model: String::new(),
+                        // Named even though nothing was transcribed: the field
+                        // describes the configuration the call ran under, and
+                        // a caller reading the last step of a walk should not
+                        // see it blank out.
+                        model: self
+                            .config
+                            .audio_model
+                            .as_deref()
+                            .or(custom_stt_model_ref(provider, &self.config.custom_stt))
+                            .unwrap_or_else(|| default_audio_model(provider))
+                            .to_string(),
                     },
                     consumed_secs: Some(0.0),
                 });
@@ -1448,10 +1458,14 @@ async fn extract_media_window(
     // Same defence in depth as the video path: a demux that fails for want of a seek still exits 0 and still emits a headers-only container, so neither guard in `run_ffmpeg_pipe` catches it.
     //
     // Unlike that path, an empty result here is not always a failure.
-    // A window at or past the end of the recording is a legitimate request — the walk reaches one by itself whenever a recording's length is close to a multiple of `max_secs` — and it produces exactly the same headers-only bytes.
-    // The two are indistinguishable at the byte level, so they are told apart by where the window starts: a request beyond the opening of the recording that came back empty is an overshoot and ends the walk, while an empty window at the very start means the input itself could not be decoded.
+    // A window at or past the end of the recording is a legitimate request — the walk reaches one by itself whenever a recording's length is close to a multiple of `max_secs` — and it produces exactly the same headers-only bytes as a track that would not decode.
+    //
+    // Where the window starts is not enough to tell them apart, because `start_sec` is a parameter a caller sets directly: "transcribe from the tenth minute" of a file whose audio is broken would otherwise be reported as a successful empty window, and the caller would conclude there is nothing there.
+    // That is exactly the silent failure #6747 exists to make loud, so it is not reintroduced on a technicality.
+    // One cheap probe settles it: cut a second from the very start of the same source.
+    // If that carries audio the track decodes fine and the empty window really is past the end; if it does not, the input is the problem and saying so is worth the extra second.
     if !ogg_contains_audio(&out) {
-        if window.start_sec > 0.0 {
+        if window.start_sec > 0.0 && source_decodes(&input_path).await? {
             return Ok(None);
         }
         return Err(format!(
@@ -1462,6 +1476,45 @@ async fn extract_media_window(
     }
 
     Ok(Some(out))
+}
+
+/// Whether the source at `input_path` yields any audio at all, probed by cutting one second from its start (#6748).
+///
+/// Only consulted when a window came back empty, which is rare — once at the end of a walk — so the extra ffmpeg call costs a second on a path that was already stopping.
+/// It buys the difference between "this window is past the end" and "this file's audio does not decode", which are byte-identical outcomes and mean opposite things to the caller.
+async fn source_decodes(input_path: &str) -> Result<bool, String> {
+    let probe = run_ffmpeg_pipe(
+        &[
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            input_path,
+            "-t",
+            "1",
+            "-vn",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "32k",
+            "-ar",
+            "48000",
+            "-ac",
+            "1",
+            "-f",
+            "ogg",
+            "pipe:1",
+        ],
+        None,
+        "check whether a recording's audio track decodes",
+    )
+    .await;
+    // A probe that cannot even run says nothing about the source, so it must
+    // not be read as "the file is fine" — treat it as undecodable and let the
+    // caller report the original failure.
+    Ok(probe
+        .map(|bytes| ogg_contains_audio(&bytes))
+        .unwrap_or(false))
 }
 
 /// Playable duration of an Ogg/Opus stream, read from the granule position of its final page.
@@ -2852,6 +2905,37 @@ mod tests {
             assert!(
                 out.is_none(),
                 "a window starting at {start_sec}s of a 1s recording carries no audio"
+            );
+        }
+    }
+
+    /// A source whose audio will not decode must fail loudly even when the window starts past the opening, rather than being reported as a successful empty window — the caller would otherwise conclude the recording holds nothing there and move on, which is the silent failure #6747 exists to prevent.
+    ///
+    /// ⚠️ This covers the case ffmpeg rejects outright, which is the reachable one: garbage input exits non-zero and `run_ffmpeg_pipe` turns that into an error before the guard is consulted.
+    /// It does **not** exercise the `source_decodes` probe, and neutralising that probe leaves this test green.
+    /// The shape the probe exists for — ffmpeg exiting 0 while emitting a headers-only container from an input it accepted — could not be synthesised here: with file input every undecodable source tried exits non-zero.
+    /// That shape was real over a pipe (#6747), so the probe is kept as defence rather than removed for want of a fixture, but it is deliberately not claimed to be pinned.
+    #[tokio::test]
+    async fn extract_media_window_reports_an_undecodable_source_at_any_offset() {
+        if !ffmpeg_available() {
+            eprintln!("ffmpeg not on PATH — skipping");
+            return;
+        }
+        let garbage: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+
+        for start_sec in [0.0_f64, 600.0] {
+            let err = extract_media_window(
+                WindowSource::Bytes(&garbage),
+                MediaWindow {
+                    start_sec,
+                    max_secs: 600.0,
+                },
+            )
+            .await
+            .err();
+            assert!(
+                err.is_some(),
+                "an undecodable source must be an error at start_sec={start_sec}, not an empty window"
             );
         }
     }

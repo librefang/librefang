@@ -482,19 +482,10 @@ struct WrittenTranscript {
     sha256: String,
 }
 
-/// Write (or append) a transcript to a workspace-relative path.
+/// Resolve `out_path` against the workspace sandbox — the same call `web_fetch_to_file` and `file_write` use, so a transcript cannot be written outside the agent's roots and `..` is rejected.
 ///
-/// Resolution goes through [`crate::workspace_sandbox::resolve_sandbox_path_ext`] — the same call `web_fetch_to_file` and `file_write` use — so a transcript cannot be written outside the agent's roots and `..` is rejected.
-///
-/// `append` exists because assembling a long recording is the normal case: each window continues the file the previous one started.
-/// The reported `bytes` and `sha256` describe the **whole file** after the write, not just this window's share, so a caller that has walked five windows can verify the artefact it ends up with rather than the last fragment of it.
-///
-/// Appended windows are separated by [`WINDOW_SEPARATOR`], because a window boundary lands mid-sentence by design and the provider path trims each transcript's surrounding whitespace (`media_understanding.rs`, right after dispatch).
-/// Concatenating the trimmed pieces directly would fuse the last word of one window to the first word of the next at *every* boundary, not occasionally.
-///
-/// A failed write is not rolled back, and for the append case it cannot be cheaply: buffering the assembled transcript to rewrite it atomically would restore, on disk, the proportional-to-recording-length cost this whole parameter exists to remove.
-/// What the caller gets instead is detection — `bytes` and `sha256` describe the file as it now stands, so a short or corrupted artefact is visible rather than silent.
-/// Recovery is to restart the walk from `start_sec = 0`, which truncates; retrying only the failed window would append after the partial bytes.
+/// Separate from the write so it can run **before** the provider call.
+/// A path rejected afterwards would destroy a transcript that cost an ffmpeg pass and a billed request and exists nowhere else.
 fn resolve_transcript_dest(
     out_path: &str,
     workspace_root: Option<&Path>,
@@ -505,14 +496,38 @@ fn resolve_transcript_dest(
         reason: "workspace sandbox is not configured, so there is no root to write under"
             .to_string(),
     })?;
-    crate::workspace_sandbox::resolve_sandbox_path_ext(out_path, root, additional_roots).map_err(
-        |reason| ToolError::InvalidParameter {
+    let resolved =
+        crate::workspace_sandbox::resolve_sandbox_path_ext(out_path, root, additional_roots)
+            .map_err(|reason| ToolError::InvalidParameter {
+                name: "out_path",
+                reason,
+            })?;
+
+    // Created here rather than at write time for the same reason the path is
+    // resolved here: a directory that cannot be created — permissions, a full
+    // disk — must fail before the transcription is paid for, not after.
+    if let Some(parent) = resolved.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| ToolError::InvalidParameter {
             name: "out_path",
-            reason,
-        },
-    )
+            reason: format!("cannot create parent directories: {e}"),
+        })?;
+    }
+
+    Ok(resolved)
 }
 
+/// Write (or append) a transcript to an already-resolved workspace path.
+///
+/// `append` exists because assembling a long recording is the normal case: each window continues the file the previous one started.
+/// The reported `bytes` and `sha256` describe the **whole file** after the write, not just this window's share, so a caller that has walked five windows can verify the artefact it ends up with rather than the last fragment of it.
+///
+/// Appended windows are separated by [`WINDOW_SEPARATOR`], because a window boundary lands mid-sentence by design and the provider path trims each transcript's surrounding whitespace (`media_understanding.rs`, right after dispatch).
+/// Concatenating the trimmed pieces directly would fuse the last word of one window to the first word of the next at *every* boundary, not occasionally.
+/// An empty window writes nothing at all, separator included — a silent stretch of the recording must not leave a blank line in the artefact.
+///
+/// A failed write is not rolled back, and for the append case it cannot be cheaply: buffering the assembled transcript to rewrite it atomically would restore, on disk, the proportional-to-recording-length cost this whole parameter exists to remove.
+/// What the caller gets instead is detection — `bytes` and `sha256` describe the file as it now stands, so a short or corrupted artefact is visible rather than silent.
+/// Recovery is to restart the walk from `start_sec = 0`, which truncates; retrying only the failed window would append after the partial bytes.
 async fn write_transcript(
     resolved: &Path,
     transcript: &str,
@@ -523,12 +538,6 @@ async fn write_transcript(
 
     let out_path = resolved.display();
 
-    if let Some(parent) = resolved.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            ToolError::upstream_msg(format!("Failed to create parent directories: {e}"))
-        })?;
-    }
-
     // Appended rather than rewritten: holding every prior window in memory to rewrite the file whole would reintroduce, on disk, exactly the proportional-to-recording-length cost this parameter exists to remove.
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
@@ -538,8 +547,10 @@ async fn write_transcript(
         .open(resolved)
         .await
         .map_err(|e| ToolError::upstream_msg(format!("Failed to open '{out_path}': {e}")))?;
-    // Only between windows, and only when there is something to separate from — a separator ahead of the first window would put a stray newline at the head of every transcript.
-    let needs_separator = append
+    // Only between windows, only when there is something to separate from, and only when there is something to separate.
+    // A separator ahead of the first window would head every transcript with a stray newline; one ahead of an empty window — a pause in the recording, or the overshoot that ends a walk — would leave a blank line in the artefact for every silence.
+    let needs_separator = !transcript.is_empty()
+        && append
         && tokio::fs::metadata(resolved)
             .await
             .is_ok_and(|m| m.len() > 0);
@@ -1571,6 +1582,40 @@ mod transcribe_window_tests {
                 "has_more and next_start_sec disagreed for max_secs={max_secs}, consumed={consumed:?}"
             );
         }
+    }
+
+    /// A window that transcribed to nothing — a pause in the recording, or the
+    /// overshoot that ends a walk — must leave the artefact untouched.
+    /// Writing the separator alone would put a blank line in the transcript for
+    /// every silence, and a trailing one at the end of every walk.
+    #[tokio::test]
+    async fn an_empty_window_writes_nothing_at_all() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dest = root.path().join("t.txt");
+
+        write_transcript(&dest, "first window", false)
+            .await
+            .expect("write");
+        let after_silence = write_transcript(&dest, "", true)
+            .await
+            .expect("an empty window must not fail");
+
+        let on_disk = tokio::fs::read_to_string(&dest).await.expect("read");
+        assert_eq!(
+            on_disk, "first window",
+            "an empty window must add neither text nor separator"
+        );
+        assert_eq!(after_silence.bytes, on_disk.len() as u64);
+
+        // And the window after the silence still separates properly from the
+        // one before it, rather than inheriting a swallowed separator.
+        write_transcript(&dest, "third window", true)
+            .await
+            .expect("write");
+        assert_eq!(
+            tokio::fs::read_to_string(&dest).await.expect("read"),
+            "first window\nthird window"
+        );
     }
 
     /// A restart of the walk (`start_sec = 0`) must not leave the previous run's tail behind it, which is what makes re-running a failed transcription safe.
