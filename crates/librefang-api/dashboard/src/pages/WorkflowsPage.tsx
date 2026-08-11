@@ -498,17 +498,9 @@ export function WorkflowsPage() {
     runsQuery.data,
   ]);
 
-  // First-time visitors with no workflows configured land on the
-  // marketplace tab — instantiating a template is the obvious next
-  // step. Fires once per mount; if the user manually flips back to
-  // "My Workflows", we don't override on the next refetch.
-  const autoSwitchedRef = useRef(false);
-  useEffect(() => {
-    if (autoSwitchedRef.current) return;
-    if (!workflowsQuery.isSuccess) return;
-    autoSwitchedRef.current = true;
-    if ((workflowsQuery.data ?? []).length === 0) setActiveTab("templates");
-  }, [workflowsQuery.isSuccess, workflowsQuery.data]);
+  // Show the "My Workflows" empty state on first visit so users see
+  // the "Create your first workflow" and "Ask an agent" options
+  // before being nudged toward templates.
 
   useEffect(() => {
     if (!workflowsQuery.isSuccess) return;

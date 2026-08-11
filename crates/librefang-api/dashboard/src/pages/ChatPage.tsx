@@ -31,7 +31,7 @@ import {
   setCachedChatMessages,
 } from "../lib/chatSessionCache";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu } from "lucide-react";
+import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu, GitBranch } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
@@ -1295,9 +1295,10 @@ interface MessageBubbleProps {
   isSpeaking?: boolean;
   ttsStatus?: "idle" | "loading" | "playing" | "paused";
   ttsAvailable?: boolean;
+  onSaveWorkflow?: (content: string) => void;
 }
 
-const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
+const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable, onSaveWorkflow }: MessageBubbleProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
@@ -1517,6 +1518,15 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
                 ) : (
                   <Volume2 size={12} />
                 )}
+              </button>
+            )}
+            {!message.isStreaming && !message.error && message.role === "assistant" && onSaveWorkflow && (
+              <button
+                onClick={() => onSaveWorkflow(message.content)}
+                className="h-6 w-6 rounded-md flex items-center justify-center text-text-dim/60 hover:text-brand hover:bg-surface-hover transition-colors"
+                title={t("workflows.save_from_chat")}
+              >
+                <GitBranch size={12} />
               </button>
             )}
             {!message.error && onCopy && (
@@ -2973,6 +2983,24 @@ export function ChatPage() {
     [mediaProvidersQuery.data],
   );
 
+  const handleSaveWorkflow = useCallback((content: string) => {
+    // Extract the first JSON code block or object from the message
+    const jsonMatch = content.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/) ??
+      content.match(/(\{[\s\S]*"steps"[\s\S]*\})/);
+    if (jsonMatch) {
+      try {
+        const parsed = JSON.parse(jsonMatch[1]);
+        sessionStorage.setItem("canvas-draft", JSON.stringify(parsed));
+        addToast(t("workflows.saved_to_canvas"), "success");
+        navigate({ to: "/canvas" });
+      } catch {
+        addToast(t("workflows.invalid_json"), "error");
+      }
+    } else {
+      addToast(t("workflows.no_json_found"), "error");
+    }
+  }, [navigate, t]);
+
   const handleCopy = useCallback(async (messageId: string, content: string) => {
     if (await copyToClipboard(content)) {
       setCopiedMessageId(messageId);
@@ -3647,6 +3675,7 @@ export function ChatPage() {
                     usageFooter={usageFooter}
                     onCopy={handleCopy}
                     copied={copiedMessageId === msg.id}
+                    onSaveWorkflow={handleSaveWorkflow}
                     onSpeak={ttsAvailable ? tts.toggle : undefined}
                     isSpeaking={tts.speakingMessageId === msg.id}
                     ttsStatus={tts.speakingMessageId === msg.id ? tts.status : "idle"}
