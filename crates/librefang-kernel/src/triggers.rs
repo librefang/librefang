@@ -191,7 +191,13 @@ pub struct Trigger {
     /// Enables cross-session wake: one agent's trigger can wake a different agent.
     #[serde(default)]
     pub target_agent: Option<AgentId>,
-    /// Cooldown duration in seconds after this trigger fires before it can fire again.
+    /// Cooldown duration in seconds after this trigger fires before the same window may fire again.
+    ///
+    /// For patterns that name a subject — the task-board, memory-key and agent-lifecycle kinds, see `cooldown_subject` — the window is `(trigger, subject)`, so the trigger can fire again immediately for a *different* subject and this bound applies per subject rather than per trigger (#6756).
+    /// Every other pattern keeps a single trigger-wide window.
+    ///
+    /// Worth pairing carefully with `max_fires`: a subject-scoped trigger fires once per subject, so a burst of distinct subjects consumes the fire budget as fast as they arrive rather than at one per window.
+    ///
     /// `None` means use the default cooldown (`DEFAULT_COOLDOWN_SECS`).
     /// Set to `Some(0)` to disable cooldown for this trigger.
     #[serde(default)]
@@ -377,7 +383,7 @@ impl TriggerEngine {
     /// Restores `last_fired` state from `Trigger.last_fired_at` so that the trigger-wide cooldown window survives daemon restarts.
     ///
     /// This covers the trigger-wide window only (#6756).
-    /// Per-subject windows — the task-board, memory-key and agent-lifecycle pattern kinds, see [`cooldown_subject`] — are in-memory and do not survive a restart: such a trigger comes back with no suppression for any subject, including one it fired on moments earlier.
+    /// Per-subject windows — the task-board, memory-key and agent-lifecycle pattern kinds, see `cooldown_subject` — are in-memory and do not survive a restart: such a trigger comes back with no suppression for any subject, including one it fired on moments earlier.
     /// The trade is deliberate, since persisting a window per subject would grow the file without bound and the failure direction is an extra delivery rather than a lost one.
     ///
     /// Returns the number of triggers loaded. Returns `Ok(0)` if the
@@ -856,9 +862,9 @@ impl TriggerEngine {
     /// (agent_id, message_to_send) pairs for matching triggers.
     ///
     /// Applies two layers of storm prevention:
-    /// 1. **Per-trigger cooldown** — after firing, a trigger is suppressed for
-    ///    `cooldown_secs` (default `DEFAULT_COOLDOWN_SECS`). Set `cooldown_secs = Some(0)`
-    ///    on a trigger to disable its cooldown.
+    /// 1. **Cooldown** — after firing, the window it fired in is suppressed for `cooldown_secs` (default `DEFAULT_COOLDOWN_SECS`).
+    ///    For most patterns that window is the trigger itself; for patterns that name a subject it is `(trigger, subject)`, so a second task or memory key is a separate window rather than a suppressed repeat (#6756, see `cooldown_subject`).
+    ///    Set `cooldown_secs = Some(0)` on a trigger to disable its cooldown.
     /// 2. **Per-event budget** — at most `max_triggers_per_event` triggers may fire
     ///    from a single event evaluation. Excess matches are dropped with a warning.
     pub fn evaluate(&self, event: &Event) -> (Vec<TriggerMatch>, bool) {
@@ -902,8 +908,8 @@ impl TriggerEngine {
         // shard write-lock. `DashMap::len()` read-locks every shard, so calling
         // it inside the loop — while a `self.triggers.get_mut(&id)` `RefMut`
         // holds that same shard's write-lock — self-deadlocks the evaluator the
-        // first time the per-event budget is exhausted (it lands in the `warn!` branch below).
-        // `ids.len()` is the same total, taken lock-free.
+        // first time the per-event budget is exhausted (it lands in the `warn!`
+        // branch below). `ids.len()` is the same total, taken lock-free.
         let total_registered = ids.len();
         // Set when a fire stamps a cooldown window, so the prune below runs only when there is something new to prune.
         let mut inserted_cooldown = false;
