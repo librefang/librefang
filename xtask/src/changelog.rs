@@ -579,9 +579,8 @@ fn generate_stats_line(prs: &[PrInfo], base_tag: Option<&str>) -> Option<String>
     ))
 }
 
-/// Summarize the classified changelog into a `### Highlights` block via local
-/// `claude` CLI. Returns `None` if claude isn't installed, the call fails, or
-/// the response is empty — never propagates errors to gate the release.
+/// Validate and format a `claude`-generated Highlights block.
+/// Rejects output that does not open with exactly `### Highlights`, or that carries any other markdown heading, so a prompt-injected heading (`## [Unreleased]`, a forged `### Fixed`, etc.) can never reach the assembled changelog.
 fn format_highlights_output(raw: &str) -> Option<String> {
     let text = raw.trim();
     let mut lines = text.lines();
@@ -591,6 +590,9 @@ fn format_highlights_output(raw: &str) -> Option<String> {
     Some(format!("{text}\n\n"))
 }
 
+/// Summarize the classified changelog into a `### Highlights` block via local
+/// `claude` CLI. Returns `None` if claude isn't installed, the call fails, or
+/// the response is empty — never propagates errors to gate the release.
 fn generate_highlights(classified: &str) -> Option<String> {
     if classified.trim().is_empty() {
         return None;
