@@ -2949,13 +2949,10 @@ impl McpConnection {
                 // not in `arguments` — see #5965.
                 params.arguments = Some(strip_caller_from_arguments(arguments));
 
-                // Attach the kernel-attested caller context to the request
-                // `_meta` (MCP's home for protocol metadata) under a reverse-DNS
-                // namespaced key. `CallToolRequestParams.meta` serialises as the
-                // `_meta` field; a `RequestMetaObject` derefs to a
-                // `serde_json::Map`, so an arbitrary JSON object value is
-                // fine. On serialise failure we omit it (server falls back
-                // to its no-caller branch) rather than escalate. See #5965.
+                // Attach the kernel-attested caller context to the request `_meta` (MCP's home for protocol metadata) under a reverse-DNS namespaced key.
+                // `CallToolRequestParams.meta` serialises as the `_meta` field; a `RequestMetaObject` derefs to a `serde_json::Map`, so an arbitrary JSON object value is fine.
+                // On serialise failure we omit it (server falls back to its no-caller branch) rather than escalate.
+                // See #5965.
                 if let Some(c) = caller {
                     if let Some(v) = caller_context_meta_value(c) {
                         let mut meta = rmcp::model::RequestMetaObject::new();
