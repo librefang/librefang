@@ -151,9 +151,7 @@ async fn json_request(
 
 /// Register an agent so agent-scoped reads resolve.
 ///
-/// The cron scheduler accepts a job for any `AgentId` without consulting the
-/// registry, but the read routes deny an id the registry cannot resolve, so a
-/// job seeded against a bare `AgentId::new()` reads back as 404.
+/// The cron scheduler accepts a job for any `AgentId` without consulting the registry, but the read routes deny an id the registry cannot resolve, so a job seeded against a bare `AgentId::new()` reads back as 404.
 fn spawn_test_agent(h: &Harness) -> librefang_types::agent::AgentId {
     h._state
         .kernel

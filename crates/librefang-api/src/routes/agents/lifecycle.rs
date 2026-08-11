@@ -580,13 +580,9 @@ pub async fn list_agents(
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Query(mut params): Query<AgentListQuery>,
 ) -> impl IntoResponse {
-    // Scope agents by authenticated user: non-admin/owner callers can only
-    // list agents they authored.
-    // The override is unconditional for non-admins — an explicit `?owner=<someone-else>`
-    // from a plain User-role caller must not be trusted, or it defeats the scoping
-    // this same #6753 change enforces on every other agent-scoped route (`can_access_agent`).
-    // Admin/Owner callers, and requests admitted only via the trusted no-auth compatibility
-    // mode (`api_user` is `None`), keep whatever `owner` filter they supplied, if any.
+    // Scope agents by authenticated user: non-admin/owner callers can only list agents they authored.
+    // The override is unconditional for non-admins — an explicit `?owner=<someone-else>` from a plain User-role caller must not be trusted, or it defeats the scoping this same #6753 change enforces on every other agent-scoped route (`can_access_agent`).
+    // Admin/Owner callers, and requests admitted only via the trusted no-auth compatibility mode (`api_user` is `None`), keep whatever `owner` filter they supplied, if any.
     if let Some(ref user) = api_user {
         use crate::middleware::UserRole;
         if user.0.role < UserRole::Admin {

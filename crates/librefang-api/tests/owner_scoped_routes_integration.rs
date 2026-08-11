@@ -68,13 +68,8 @@ async fn boot() -> Harness {
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
         user_api_keys: state.user_api_keys.clone(),
-        // `true`, not the test-harness-typical `false`: production's own
-        // `derive_require_auth_for_reads` (server.rs) auto-enables this whenever any
-        // authentication is configured, which this harness's `[[users]]` always does.
-        // Every dashboard-read-public route (including bare `GET /api/agents`) must
-        // go through the real bearer check here, or `AuthenticatedApiUser` is never
-        // populated for those routes and the ownership assertions below would pass
-        // vacuously — see `non_admin_cannot_override_owner_filter_on_list_agents`.
+        // `true`, not the test-harness-typical `false`: production's own `derive_require_auth_for_reads` (server.rs) auto-enables this whenever any authentication is configured, which this harness's `[[users]]` always does.
+        // Every dashboard-read-public route (including bare `GET /api/agents`) must go through the real bearer check here, or `AuthenticatedApiUser` is never populated for those routes and the ownership assertions below would pass vacuously — see `non_admin_cannot_override_owner_filter_on_list_agents`.
         require_auth_for_reads: true,
         allow_no_auth: false,
         audit_log: Some(state.kernel.audit().clone()),
@@ -409,9 +404,8 @@ async fn non_owner_cannot_message_another_users_agent() {
             "{path} must 404 for a non-owner"
         );
 
-        // Alice, the real owner, must clear the ownership check and reach the
-        // provider-auth check below it, never a 404. The test harness has no
-        // provider configured, so this is deterministic without a real LLM call.
+        // Alice, the real owner, must clear the ownership check and reach the provider-auth check below it, never a 404.
+        // The test harness has no provider configured, so this is deterministic without a real LLM call.
         let status = request_status(
             &h.app,
             Method::POST,
@@ -578,10 +572,7 @@ async fn get_json(app: &Router, path: &str, bearer: &str) -> (StatusCode, serde_
 
 #[tokio::test(flavor = "multi_thread")]
 async fn non_admin_cannot_override_owner_filter_on_list_agents() {
-    // `list_agents` only auto-injected `?owner=<caller>` when the query param was
-    // absent — a non-admin caller supplying `?owner=<someone-else>` explicitly was
-    // trusted as-is, defeating the ownership scoping this PR enforces on every
-    // other agent-scoped route.
+    // `list_agents` only auto-injected `?owner=<caller>` when the query param was absent — a non-admin caller supplying `?owner=<someone-else>` explicitly was trusted as-is, defeating the ownership scoping this PR enforces on every other agent-scoped route.
     let h = boot().await;
     let alice_agent = spawn_authored(&h.state, "Alice");
 
