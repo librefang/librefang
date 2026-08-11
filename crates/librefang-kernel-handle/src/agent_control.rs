@@ -65,6 +65,35 @@ pub trait AgentControl: Send + Sync {
         self.spawn_agent(manifest_toml, parent_id).await
     }
 
+    /// Spawn an ephemeral worker: no workspace, no DB persistence, auto-cleanup.
+    /// Returns the worker's final response text directly.
+    async fn spawn_ephemeral(
+        &self,
+        request: librefang_types::agent::EphemeralSpawnRequest,
+        parent_id: Option<&str>,
+    ) -> Result<String, KernelOpError> {
+        let _ = (request, parent_id);
+        Err(KernelOpError::unavailable("spawn_ephemeral"))
+    }
+
+    /// Like [`spawn_ephemeral`](Self::spawn_ephemeral), but returns the run's
+    /// metering (cost, iterations) alongside the response text. The default
+    /// delegates to `spawn_ephemeral`, so implementations that only wire the
+    /// text path still work — cost is `None` and iterations `0`. The kernel
+    /// overrides this to report real values.
+    async fn spawn_ephemeral_detailed(
+        &self,
+        request: librefang_types::agent::EphemeralSpawnRequest,
+        parent_id: Option<&str>,
+    ) -> Result<librefang_types::agent::EphemeralSpawnResult, KernelOpError> {
+        let response = self.spawn_ephemeral(request, parent_id).await?;
+        Ok(librefang_types::agent::EphemeralSpawnResult {
+            response,
+            cost_usd: None,
+            iterations: 0,
+        })
+    }
+
     /// Send a message to another agent and get the response.
     async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, KernelOpError>;
 

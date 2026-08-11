@@ -959,6 +959,47 @@ pub struct FallbackModel {
     pub extra_params: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
+/// Request to spawn an ephemeral (no-workspace, no-DB) agent worker.
+/// The caller controls everything; nothing is inherited from the parent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EphemeralSpawnRequest {
+    /// Inline system prompt — the worker's mission. Required if no `agent_type`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    /// Named agent type from `~/.librefang/templates/`. Provides defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    /// Model override (provider/model/max_tokens).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelConfig>,
+    /// Tool names to enable. `None` = no tools (pure LLM).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+    /// Skill names to enable. `None` = no skills.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
+    /// The task message to execute.
+    pub message: String,
+    /// Max LLM iterations before forced return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<u32>,
+}
+
+/// Result of an ephemeral worker run, carrying the metering the API surface
+/// reports back to callers. The plain `spawn_ephemeral` handle returns only
+/// `response`; this struct is returned by the detailed handle so cost and
+/// iteration counts survive the trait boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EphemeralSpawnResult {
+    /// The worker's final text response.
+    pub response: String,
+    /// Estimated cost in USD, when the kernel could compute it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// Number of agent-loop iterations the worker ran.
+    pub iterations: u32,
+}
+
 /// Tool configuration within an agent manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolConfig {

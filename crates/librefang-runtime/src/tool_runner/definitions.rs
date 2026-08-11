@@ -340,34 +340,68 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             },
             ToolDefinition {
                 name: tool_name::AGENT_SPAWN.to_string(),
-                description: "Spawn a new agent from settings. Returns the new agent's ID and name.".to_string(),
+                description: "Spawn a new agent (permanent or ephemeral). Permanent: creates a persistent agent, returns ID. Ephemeral: runs a task in an isolated worker with no persistence, returns the result directly.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
+                        "ephemeral": {
+                            "type": "boolean",
+                            "description": "When true, spawn a temporary worker that runs the task and returns the result directly. No workspace, no DB persistence. When false (default), spawn a permanent agent."
+                        },
                         "name": {
                             "type": "string",
-                            "description": "Unique name for the new agent. Ensure it does not conflict with existing agents."
+                            "description": "Unique name for the new agent (permanent spawn only)."
                         },
                         "system_prompt": {
                             "type": "string",
-                            "description": "The system prompt for the new agent"
+                            "description": "The system prompt / mission for the agent."
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "The task message to execute (ephemeral spawn only)."
+                        },
+                        "agent_type": {
+                            "type": "string",
+                            "description": "Named agent type template (ephemeral spawn only). Provides default system_prompt, model, and tools."
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "Model override as 'provider/model' (ephemeral spawn only)."
                         },
                         "tools": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Select from all available tools, including MCP tools. Use the full tool names only"
+                            "description": "Tool names to enable."
+                        },
+                        "skills": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Skill names to enable (ephemeral spawn only)."
+                        },
+                        "max_iterations": {
+                            "type": "integer",
+                            "description": "Max LLM iterations before forced return (ephemeral spawn only)."
                         },
                         "network": {
                             "type": "boolean",
-                            "description": "Whether to enable network access for the new agent (required to be true when web_fetch is in tools)"
+                            "description": "Whether to enable network access (permanent spawn only)."
                         },
                         "shell": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Preset necessary shell commands based on the agent's task (e.g., [\"uv *\", \"pnpm *\"]). "
+                            "description": "Shell commands to allow (permanent spawn only)."
                         }
                     },
-                    "required": ["name", "system_prompt"]
+                    "oneOf": [
+                        {
+                            "required": ["message"],
+                            "description": "Ephemeral spawn: message is the task to execute."
+                        },
+                        {
+                            "required": ["name", "system_prompt"],
+                            "description": "Permanent spawn: name and system_prompt define the new agent."
+                        }
+                    ]
                 }),
             },
             ToolDefinition {

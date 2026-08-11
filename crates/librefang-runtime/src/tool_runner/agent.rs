@@ -265,6 +265,92 @@ pub(super) async fn tool_agent_spawn(
 ) -> ToolResult {
     let kh = require_kernel_typed(kernel)?;
 
+    // Ephemeral spawn runs the agent loop inline on the caller's task, so
+    // each nesting level stacks another ~56 KB of future (#6659). Reject
+    // before we build the request, same as agent_send.
+    let max_depth = kh.max_agent_call_depth();
+    let current_depth = super::current_agent_depth();
+    if current_depth >= max_depth {
+        return Err(ToolError::PermissionDenied(format!(
+            "Inter-agent call depth exceeded (max {max_depth}). \
+             A->B->C chain is too deep. Use the task queue or a permanent agent instead."
+        )));
+    }
+
+    // Ephemeral path: spawn a temporary worker, run task, return result directly
+    if input["ephemeral"].as_bool().unwrap_or(false) {
+        let message = input["message"]
+            .as_str()
+            .ok_or(ToolError::MissingParameter("message"))?;
+
+        let spawn_sink = TaintSink::agent_message();
+        if let Some(violation) = check_taint_outbound_text(message, &spawn_sink) {
+            return Err(ToolError::PermissionDenied(format!(
+                "Taint violation (message): {violation}"
+            )));
+        }
+
+        // Enforce parent's tool allowlist on the ephemeral worker, same as the
+        // permanent-agent path below. An unrestricted parent (None) passes
+        // through the caller's requested tools unfiltered.
+        let requested_tools: Option<Vec<String>> = input["tools"].as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        });
+        let tools = match (parent_allowed_tools, requested_tools) {
+            (Some(allowed), Some(ref req)) if !req.is_empty() => {
+                let filtered: Vec<String> = req
+                    .iter()
+                    .filter(|t| allowed.iter().any(|a| a == *t))
+                    .cloned()
+                    .collect();
+                if filtered.is_empty() && !req.is_empty() {
+                    return Err(ToolError::PermissionDenied(
+                        "None of the requested tools are allowed by the parent agent's tool list"
+                            .to_string(),
+                    ));
+                }
+                Some(filtered)
+            }
+            (Some(_), _) => None,
+            (None, tools) => tools,
+        };
+
+        let request = librefang_types::agent::EphemeralSpawnRequest {
+            system_prompt: input["system_prompt"].as_str().map(String::from),
+            agent_type: input["agent_type"].as_str().map(String::from),
+            model: input.get("model").and_then(|v| {
+                if let Some(s) = v.as_str() {
+                    // "provider/model" shorthand
+                    let mut parts = s.splitn(2, '/');
+                    let provider = parts.next().unwrap_or("default").to_string();
+                    let model = parts.next().unwrap_or("default").to_string();
+                    Some(librefang_types::agent::ModelConfig {
+                        provider,
+                        model,
+                        ..Default::default()
+                    })
+                } else {
+                    serde_json::from_value(v.clone()).ok()
+                }
+            }),
+            tools,
+            skills: input["skills"].as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            }),
+            message: message.to_string(),
+            max_iterations: input["max_iterations"].as_u64().map(|v| v as u32),
+        };
+
+        return kh
+            .spawn_ephemeral(request, parent_id)
+            .await
+            .map_err(ToolError::upstream);
+    }
+
     let name = input["name"]
         .as_str()
         .ok_or(ToolError::MissingParameter("name"))?;

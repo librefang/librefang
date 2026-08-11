@@ -47,6 +47,12 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/agents",
             axum::routing::get(list_agents).post(spawn_agent),
         )
+        // Ephemeral throwaway worker — literal segment, routed before
+        // /agents/{id} so it isn't parsed as a UUID.
+        .route(
+            "/agents/spawn-ephemeral",
+            axum::routing::post(spawn_ephemeral_agent),
+        )
         // Canonical agent UUID registry (refs #4614). Routed before
         // /agents/{id} so the literal segment doesn't get parsed as a UUID.
         .route(

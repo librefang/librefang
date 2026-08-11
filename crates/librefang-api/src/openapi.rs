@@ -55,6 +55,7 @@ use crate::types;
         routes::get_agent_stats,
         routes::list_agent_events,
         routes::spawn_agent,
+        routes::spawn_ephemeral_agent,
         routes::get_agent,
         routes::kill_agent,
         routes::patch_agent,
