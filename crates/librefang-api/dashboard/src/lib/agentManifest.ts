@@ -659,8 +659,7 @@ const renderResponseFormat = (rf: ManifestFormState["response_format"]): string 
   // syntax brittle. Build the value once via JSON, then convert to TOML
   // using a small recursive emitter that always produces inline syntax.
   // Invalid form state is blocked by validateManifestForm before submit.
-  // Keep preview serialization total while sharing the exact same supported
-  // schema domain with the validator.
+  // Keep preview serialization total while sharing the exact same supported schema domain with the validator.
   const schemaValue = parseSupportedJsonSchema(rf.schema) ?? {};
   const parts: string[] = [`type = "json_schema"`, `name = ${escapeTomlString(rf.name || "response")}`];
   parts.push(`schema = ${jsonValueToInlineToml(schemaValue)}`);
@@ -788,9 +787,8 @@ const hasUnsupportedJsonNumber = (raw: string): boolean => {
   return false;
 };
 
-// JSON Schema roots are objects or booleans. TOML has no null value, so a
-// schema containing a JSON null cannot be represented without changing its
-// meaning and must be rejected before serialization.
+// JSON Schema roots are objects or booleans.
+// TOML has no null value, so a schema containing a JSON null cannot be represented without changing its meaning and must be rejected before serialization.
 const parseSupportedJsonSchema = (raw: string): boolean | Record<string, unknown> | undefined => {
   try {
     const parsed: unknown = JSON.parse(raw);
