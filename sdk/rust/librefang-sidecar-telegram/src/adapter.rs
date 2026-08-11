@@ -42,7 +42,7 @@ fn trace(args: std::fmt::Arguments<'_>) {
 }
 
 /// Render a best-effort command failure for logging.
-/// Debug-formats the error so embedded control characters (newlines, ANSI escapes) are escaped rather than able to forge extra log lines, matching `file_lookup_error_log` / `callback_ack_error_log` in `translator.rs`.
+/// Debug-formats the error so embedded control characters (newlines, ANSI escapes) are escaped rather than able to forge extra log lines.
 fn best_effort_command_error(operation: &str, error: &(impl std::fmt::Display + ?Sized)) -> String {
     let rendered = error.to_string();
     format!("[telegram] {operation} failed: {rendered:?}")
