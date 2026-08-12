@@ -1,0 +1,2 @@
+The audit trail's boot-time integrity check verified as intact even when a row failed to decode from SQLite, because the loader silently skipped the malformed row instead of treating the load as incomplete.
+`AuditLog::with_db` now records the first load error it hits — a bad connection, a failed query, or a row that fails to decode — and `verify_integrity` fails closed whenever one is present, so a partially loaded chain never reports as verified (#6968) (@houko)
