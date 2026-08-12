@@ -1,0 +1,2 @@
+The build-timings workflow's `upload-artifact` step and every Cloudflare Wrangler deployment invocation still referenced a mutable major-version tag (`actions/upload-artifact@v4`, `wrangler@4`), so a new release published under that same tag would run in CI without any additional review.
+`upload-artifact` now pins to the same audited v4 commit already used by `coverage.yml`, and each `wrangler` invocation is pinned to the exact `4.121.0` release (#6972) (@houko)
