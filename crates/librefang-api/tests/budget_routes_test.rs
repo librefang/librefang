@@ -165,6 +165,38 @@ async fn budget_status_returns_configured_limits_with_zero_spend() {
     assert_eq!(body["monthly_spend"], 0.0);
 }
 
+/// A `budget_status` query failure (e.g. a corrupted/missing usage table)
+/// must surface as a scrubbed 500, not a panic or a silently-zeroed 200.
+/// Regression companion to
+/// `librefang_kernel_metering::tests::budget_status_surfaces_usage_query_errors`,
+/// exercised here at the HTTP boundary via `ApiErrorResponse::internal_scrub`.
+#[tokio::test(flavor = "multi_thread")]
+async fn budget_status_returns_500_when_usage_query_fails() {
+    let h = boot().await;
+    h.state
+        .kernel
+        .memory_substrate()
+        .pool()
+        .get()
+        .unwrap()
+        .execute("DROP TABLE usage_events", [])
+        .unwrap();
+
+    let (status, body) = request(&h, Method::GET, "/api/budget", None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    // `ApiErrorResponse`'s custom `Serialize` impl emits both the flat
+    // compat field and the nested `error.message` envelope (#3639) —
+    // check both so this test does not silently pass or fail depending
+    // on which shape a future edit trims.
+    assert_eq!(body["message"], "Internal server error");
+    assert_eq!(body["error"]["message"], "Internal server error");
+    let rendered = body.to_string();
+    assert!(
+        !rendered.contains("usage_events") && !rendered.contains("no such table"),
+        "response body must not leak SQL identifiers: {body:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // PUT /api/budget — read-after-write + alias key acceptance
 // ---------------------------------------------------------------------------
