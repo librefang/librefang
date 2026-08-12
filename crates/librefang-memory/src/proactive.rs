@@ -161,14 +161,23 @@ impl ProactiveMemoryStore {
     fn read_config(&self) -> RwLockReadGuard<'_, ProactiveMemoryConfig> {
         self.config.read().unwrap_or_else(|poisoned| {
             tracing::warn!("proactive memory config read lock poisoned; recovering inner state");
-            poisoned.into_inner()
+            let guard = poisoned.into_inner();
+            // `into_inner()` only unwraps the guard; it leaves the lock's
+            // poison flag set. Without this, every later call through this
+            // helper would keep re-entering this branch and re-emitting the
+            // warning above for the rest of the process, even though the
+            // state has already been recovered.
+            self.config.clear_poison();
+            guard
         })
     }
 
     fn write_config(&self) -> RwLockWriteGuard<'_, ProactiveMemoryConfig> {
         self.config.write().unwrap_or_else(|poisoned| {
             tracing::warn!("proactive memory config write lock poisoned; recovering inner state");
-            poisoned.into_inner()
+            let guard = poisoned.into_inner();
+            self.config.clear_poison();
+            guard
         })
     }
 
@@ -178,7 +187,9 @@ impl ProactiveMemoryStore {
                 lock = name,
                 "proactive memory lock poisoned; recovering inner state"
             );
-            poisoned.into_inner()
+            let guard = poisoned.into_inner();
+            lock.clear_poison();
+            guard
         })
     }
 
