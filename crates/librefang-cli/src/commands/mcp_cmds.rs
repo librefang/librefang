@@ -405,7 +405,7 @@ pub(crate) fn upsert_mcp_server_local(
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    std::fs::write(config_path, toml_string).map_err(|e| e.to_string())?;
+    durable_atomic_write(config_path, toml_string.as_bytes(), 0o600).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -434,6 +434,6 @@ pub(crate) fn remove_mcp_server_local(
         });
     }
     let toml_string = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
-    std::fs::write(config_path, toml_string).map_err(|e| e.to_string())?;
+    durable_atomic_write(config_path, toml_string.as_bytes(), 0o600).map_err(|e| e.to_string())?;
     Ok(())
 }

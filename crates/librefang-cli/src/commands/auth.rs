@@ -165,26 +165,11 @@ pub(crate) fn write_chatgpt_secrets(
     // file with owner-only (0600) permissions from the start so there is no
     // window in which a freshly created file sits at the umask default (often
     // 0644, world-readable) before it is tightened.
-    #[cfg(unix)]
-    {
-        use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt as _;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&secrets_path)
-            .map_err(|e| i18n::t_args("auth-error-write-secrets", &[("error", &e.to_string())]))?;
-        f.write_all(updated.as_bytes())
-            .map_err(|e| i18n::t_args("auth-error-write-secrets", &[("error", &e.to_string())]))?;
-    }
-    #[cfg(not(unix))]
-    std::fs::write(&secrets_path, &updated)
+    durable_atomic_write(&secrets_path, updated.as_bytes(), 0o600)
         .map_err(|e| i18n::t_args("auth-error-write-secrets", &[("error", &e.to_string())]))?;
 
-    // `OpenOptions.mode` only applies to a newly created file, so still tighten
-    // a pre-existing file that an older build may have written at a looser mode.
+    // Still tighten a pre-existing file that an older build may have written
+    // at a looser mode.
     restrict_file_permissions(&secrets_path);
 
     Ok(secrets_path)
@@ -217,7 +202,7 @@ pub(crate) fn update_chatgpt_config(
         toml_edit::value(librefang_runtime::chatgpt_oauth::CHATGPT_BASE_URL),
     );
 
-    std::fs::write(&config_path, doc.to_string())
+    durable_atomic_write(&config_path, doc.to_string().as_bytes(), 0o600)
         .map_err(|e| i18n::t_args("auth-error-write-config", &[("error", &e.to_string())]))?;
 
     Ok(())
@@ -285,7 +270,7 @@ pub(crate) fn pool_load_doc_or_exit(path: &std::path::Path) -> toml_edit::Docume
 }
 
 pub(crate) fn pool_write_doc_or_exit(path: &std::path::Path, doc: &toml_edit::DocumentMut) {
-    std::fs::write(path, doc.to_string()).unwrap_or_else(|e| {
+    durable_atomic_write(path, doc.to_string().as_bytes(), 0o600).unwrap_or_else(|e| {
         ui::error(&i18n::t_args(
             "auth-write-failed",
             &[

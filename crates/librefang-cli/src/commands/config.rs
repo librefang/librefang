@@ -260,7 +260,7 @@ pub(crate) fn cmd_config_set(key: &str, value: &str) {
         std::process::exit(1);
     });
 
-    std::fs::write(&config_path, &serialized).unwrap_or_else(|e| {
+    durable_atomic_write(&config_path, serialized.as_bytes(), 0o600).unwrap_or_else(|e| {
         ui::error(&i18n::t_args(
             "config-write-failed",
             &[("error", &e.to_string())],
@@ -338,7 +338,7 @@ pub(crate) fn cmd_config_unset(key: &str) {
         std::process::exit(1);
     });
 
-    std::fs::write(&config_path, &serialized).unwrap_or_else(|e| {
+    durable_atomic_write(&config_path, serialized.as_bytes(), 0o600).unwrap_or_else(|e| {
         ui::error(&i18n::t_args(
             "config-write-failed",
             &[("error", &e.to_string())],
