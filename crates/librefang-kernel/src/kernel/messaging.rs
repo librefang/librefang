@@ -987,7 +987,18 @@ impl LibreFangKernel {
             None, // no pending messages
             &librefang_runtime::agent_loop::LoopOptions {
                 is_fork: false,
-                incognito: false,
+                // Ephemeral workers claim "no workspace, no DB persistence, no
+                // registry entry" (see EphemeralSpawnRequest doc-comment and
+                // changelog.d/added/6699-ephemeral-agents.md). `incognito` is
+                // the flag that actually suppresses `save_session_async` and
+                // proactive-memory writes at the end-of-turn boundary (see
+                // `agent_loop/types.rs: LoopOptions::incognito` and
+                // `agent_loop/end_turn.rs`); leaving it `false` silently
+                // persisted every ephemeral run's full session (system
+                // prompt, messages, tool calls) under a random `agent_id`
+                // that has no registry entry — an orphaned row on every call,
+                // contradicting the documented contract.
+                incognito: true,
                 allowed_tools: None,
                 interrupt: Some(librefang_runtime::interrupt::SessionInterrupt::new()),
                 max_iterations: max_iter,
