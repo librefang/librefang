@@ -169,7 +169,10 @@ pub(super) fn atomic_write_toml(path: &Path, content: &str) -> std::io::Result<(
     tmp.set_file_name(tmp_name);
 
     let write_result = (|| -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&tmp)?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
         f.write_all(content.as_bytes())?;
         // fsync so the bytes hit disk before we publish via rename;
         // without this a power loss between rename and flush would
@@ -191,6 +194,15 @@ pub(super) fn atomic_write_toml(path: &Path, content: &str) -> std::io::Result<(
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
+
+    #[cfg(unix)]
+    path.parent()
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing parent directory")
+        })
+        .and_then(std::fs::File::open)?
+        .sync_all()?;
+
     Ok(())
 }
 
