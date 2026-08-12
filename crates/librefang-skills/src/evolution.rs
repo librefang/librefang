@@ -270,14 +270,7 @@ static ATOMIC_WRITE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 /// a nanosecond timestamp so collisions are extremely unlikely even
 /// under concurrent callers targeting the same final path.
 fn atomic_write(path: &Path, content: &str) -> Result<(), SkillError> {
-    // `Path::parent()` yields `Some("")` for a bare filename, so the staging
-    // file has to be anchored at `.` rather than joined onto an empty path —
-    // otherwise the "same directory as the target" invariant that keeps the
-    // rename atomic holds only by accident.
-    let parent = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
+    let parent = crate::resolve_parent_or_cwd(path);
     std::fs::create_dir_all(parent)?;
 
     // Keep the thread-id string to ASCII-safe chars — `ThreadId`'s

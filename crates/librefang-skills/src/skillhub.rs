@@ -33,14 +33,7 @@ fn atomic_write_manifest(path: &Path, contents: &[u8]) -> Result<(), SkillError>
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    // `Path::parent()` yields `Some("")` for a bare filename, so the staging
-    // file has to be anchored at `.` rather than joined onto an empty path —
-    // otherwise the "same directory as the target" invariant that keeps the
-    // rename atomic holds only by accident.
-    let parent = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
+    let parent = crate::resolve_parent_or_cwd(path);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(".skill.toml.tmp.{}.{}", std::process::id(), seq));
 
