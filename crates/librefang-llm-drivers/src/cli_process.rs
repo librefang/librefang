@@ -11,10 +11,29 @@ use tokio::time::{timeout_at, Instant};
 pub(crate) const DEFAULT_MESSAGE_TIMEOUT_SECS: u64 = 300;
 
 pub(crate) fn timeout_error(timeout_secs: u64, driver: &str) -> crate::llm_driver::LlmError {
+    timeout_error_with_partial(timeout_secs, driver, String::new())
+}
+
+/// Same as [`timeout_error`], but for streaming callers that have already
+/// accumulated assistant text before the deadline hit (see #3552) — passing
+/// it through means the timeout error carries the same partial-output detail
+/// the non-CLI streaming drivers already surface, instead of silently
+/// downgrading to an empty `partial_text` just because this call happened to
+/// go through the CLI-subprocess path.
+pub(crate) fn timeout_error_with_partial(
+    timeout_secs: u64,
+    driver: &str,
+    partial_text: String,
+) -> crate::llm_driver::LlmError {
+    let partial_text_len = partial_text.len();
     crate::llm_driver::LlmError::TimedOut {
         inactivity_secs: timeout_secs,
-        partial_text: None,
-        partial_text_len: 0,
+        partial_text: if partial_text.is_empty() {
+            None
+        } else {
+            Some(std::sync::Arc::from(partial_text))
+        },
+        partial_text_len,
         last_activity: format!("waiting for {driver} subprocess"),
     }
 }

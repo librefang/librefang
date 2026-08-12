@@ -918,9 +918,10 @@ impl QwenCodeDriver {
                 Err(_) => {
                     crate::cli_process::kill_on_timeout(&mut child).await;
                     stderr_handle.abort();
-                    return Err(crate::cli_process::timeout_error(
+                    return Err(crate::cli_process::timeout_error_with_partial(
                         timeout_secs,
                         "Qwen Code CLI",
+                        full_text,
                     ));
                 }
             };
@@ -1018,9 +1019,10 @@ impl QwenCodeDriver {
             Err(_) => {
                 crate::cli_process::kill_on_timeout(&mut child).await;
                 stderr_handle.abort();
-                return Err(crate::cli_process::timeout_error(
+                return Err(crate::cli_process::timeout_error_with_partial(
                     timeout_secs,
                     "Qwen Code CLI",
+                    full_text.clone(),
                 ));
             }
         };
@@ -1029,9 +1031,10 @@ impl QwenCodeDriver {
             Ok(result) => result.unwrap_or_default(),
             Err(_) => {
                 stderr_handle.abort();
-                return Err(crate::cli_process::timeout_error(
+                return Err(crate::cli_process::timeout_error_with_partial(
                     timeout_secs,
                     "Qwen Code CLI",
+                    full_text.clone(),
                 ));
             }
         };
