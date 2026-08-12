@@ -613,7 +613,7 @@ mod tests {
         let adapter = TelegramAdapter {
             client: Arc::new(client),
             allowlist: AllowList::from_env_value(None),
-            clear_done_reaction: false,
+            done_reaction_policy: DoneReactionPolicy::Emit,
             streams: Arc::new(Mutex::new(HashMap::new())),
         };
         let runtime = tokio::runtime::Runtime::new().expect("fixture runtime");
