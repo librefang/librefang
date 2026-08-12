@@ -4786,7 +4786,22 @@ async fn dispatch_message(
             metadata: std::collections::HashMap::new(),
             next_retry_after: None,
         };
-        j.record(entry).await;
+        if !j.record(entry).await {
+            error!(
+                id = %message.platform_message_id,
+                channel = ct_str,
+                "Message dispatch aborted because the recovery journal could not persist it"
+            );
+            send_response(
+                adapter,
+                &message.sender,
+                "Message could not be queued safely. Please try again.".to_string(),
+                thread_id,
+                output_format,
+            )
+            .await;
+            return;
+        }
     }
 
     // Send typing indicator (best-effort)
@@ -6672,7 +6687,22 @@ async fn dispatch_with_blocks(
             metadata: std::collections::HashMap::new(),
             next_retry_after: None,
         };
-        j.record(entry).await;
+        if !j.record(entry).await {
+            error!(
+                id = %message.platform_message_id,
+                channel = ct_str,
+                "Multimodal dispatch aborted because the recovery journal could not persist it"
+            );
+            send_response(
+                adapter,
+                &message.sender,
+                "Message could not be queued safely. Please try again.".to_string(),
+                thread_id,
+                output_format,
+            )
+            .await;
+            return;
+        }
     }
 
     if !typing_indicator_suppressed(overrides.and_then(|o| o.typing_mode)) {
