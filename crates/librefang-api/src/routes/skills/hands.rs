@@ -1,5 +1,40 @@
 use super::*;
 
+/// Hand lifecycle methods perform synchronous registry persistence and, for
+/// activation/deactivation, workspace and SQLite I/O. Keep that work off the
+/// async request worker.
+pub(super) async fn run_hand_lifecycle_job<F, T>(job: F) -> Result<T, tokio::task::JoinError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(job).await
+}
+
+#[cfg(test)]
+mod lifecycle_job_tests {
+    use super::run_hand_lifecycle_job;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lifecycle_job_does_not_block_the_async_worker() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let job = tokio::spawn(run_hand_lifecycle_job(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+
+        tokio::time::timeout(Duration::from_secs(1), started_rx)
+            .await
+            .expect("blocking job did not start")
+            .expect("blocking job dropped its start signal");
+        release_tx.send(()).unwrap();
+        job.await.unwrap().unwrap();
+    }
+}
+
 /// GET /api/hands — List all hand definitions (marketplace).
 #[utoipa::path(
     get,
@@ -974,8 +1009,9 @@ pub async fn pause_hand(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
-    match state.kernel.pause_hand(id) {
-        Ok(()) => match state.kernel.hands().get_instance(id) {
+    let kernel = Arc::clone(&state.kernel);
+    match run_hand_lifecycle_job(move || kernel.pause_hand(id)).await {
+        Ok(Ok(())) => match state.kernel.hands().get_instance(id) {
             // #3832: return the post-mutation entity instead of an ack envelope
             // so the dashboard can setQueryData without a follow-up GET.
             Some(instance) => (StatusCode::OK, Json(hand_instance_to_json(&instance))),
@@ -984,7 +1020,11 @@ pub async fn pause_hand(
                     .into_json_tuple()
             }
         },
-        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Ok(Err(e)) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Err(e) => {
+            tracing::error!(instance = %id, error = %e, "hand pause task failed");
+            ApiErrorResponse::internal("Hand pause task failed").into_json_tuple()
+        }
     }
 }
 
@@ -1004,8 +1044,9 @@ pub async fn resume_hand(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
-    match state.kernel.resume_hand(id) {
-        Ok(()) => match state.kernel.hands().get_instance(id) {
+    let kernel = Arc::clone(&state.kernel);
+    match run_hand_lifecycle_job(move || kernel.resume_hand(id)).await {
+        Ok(Ok(())) => match state.kernel.hands().get_instance(id) {
             // #3832: return the post-mutation entity instead of an ack envelope
             // so the dashboard can setQueryData without a follow-up GET.
             Some(instance) => (StatusCode::OK, Json(hand_instance_to_json(&instance))),
@@ -1014,7 +1055,11 @@ pub async fn resume_hand(
                     .into_json_tuple()
             }
         },
-        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Ok(Err(e)) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Err(e) => {
+            tracing::error!(instance = %id, error = %e, "hand resume task failed");
+            ApiErrorResponse::internal("Hand resume task failed").into_json_tuple()
+        }
     }
 }
 
@@ -1034,12 +1079,17 @@ pub async fn deactivate_hand(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
-    match state.kernel.deactivate_hand(id) {
-        Ok(()) => (
+    let kernel = Arc::clone(&state.kernel);
+    match run_hand_lifecycle_job(move || kernel.deactivate_hand(id)).await {
+        Ok(Ok(())) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "deactivated", "instance_id": id})),
         ),
-        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Ok(Err(e)) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Err(e) => {
+            tracing::error!(instance = %id, error = %e, "hand deactivation task failed");
+            ApiErrorResponse::internal("Hand deactivation task failed").into_json_tuple()
+        }
     }
 }
 
@@ -1252,7 +1302,14 @@ pub async fn update_hand_settings(
     )
 )]
 pub async fn reload_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let (added, updated) = state.kernel.reload_hands();
+    let kernel = Arc::clone(&state.kernel);
+    let (added, updated) = match run_hand_lifecycle_job(move || kernel.reload_hands()).await {
+        Ok(counts) => counts,
+        Err(e) => {
+            tracing::error!(error = %e, "hand reload task failed");
+            return ApiErrorResponse::internal("Hand reload task failed").into_json_tuple();
+        }
+    };
     let total = state.kernel.hands().list_definitions().len();
     (
         StatusCode::OK,
