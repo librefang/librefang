@@ -136,7 +136,11 @@ impl CodexCliDriver {
         // LibreFang can run as a desktop app or daemon whose current directory
         // is not a Git repository. Codex otherwise rejects non-interactive
         // execution before processing the prompt.
-        let mut args = vec!["exec".to_string(), "--skip-git-repo-check".to_string()];
+        let mut args = vec![
+            "exec".to_string(),
+            "--json".to_string(),
+            "--skip-git-repo-check".to_string(),
+        ];
 
         if self.skip_permissions {
             args.push("--sandbox".to_string());
@@ -263,6 +267,71 @@ impl CodexCliDriver {
         None
     }
 
+    /// Parse the JSONL event stream produced by `codex exec --json`.
+    ///
+    /// The last completed agent message is the CLI's final response. Token
+    /// usage is reported on `turn.completed`; cached prompt tokens remain a
+    /// subset of total input tokens, matching [`TokenUsage`]'s convention.
+    fn parse_jsonl_output(stdout: &str) -> Result<(String, TokenUsage), String> {
+        let mut text = None;
+        let mut usage = TokenUsage::default();
+
+        for (index, line) in stdout.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let event: serde_json::Value = serde_json::from_str(line).map_err(|error| {
+                format!(
+                    "invalid Codex CLI JSON event on line {}: {error}",
+                    index + 1
+                )
+            })?;
+
+            match event.get("type").and_then(serde_json::Value::as_str) {
+                Some("item.completed")
+                    if event
+                        .pointer("/item/type")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("agent_message") =>
+                {
+                    if let Some(message) = event
+                        .pointer("/item/text")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        text = Some(message.to_string());
+                    }
+                }
+                Some("turn.completed") => {
+                    let turn_usage = event.get("usage").unwrap_or(&serde_json::Value::Null);
+                    usage = TokenUsage {
+                        input_tokens: turn_usage
+                            .get("input_tokens")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0),
+                        output_tokens: turn_usage
+                            .get("output_tokens")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0),
+                        cache_creation_input_tokens: turn_usage
+                            .get("cache_write_input_tokens")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0),
+                        cache_read_input_tokens: turn_usage
+                            .get("cached_input_tokens")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0),
+                    };
+                }
+                _ => {}
+            }
+        }
+
+        text.map(|text| (text, usage)).ok_or_else(|| {
+            "Codex CLI JSON event stream did not include a completed agent message".to_string()
+        })
+    }
+
     /// Apply security env filtering to a command.
     fn apply_env_filter(cmd: &mut tokio::process::Command) {
         for key in SENSITIVE_ENV_EXACT {
@@ -359,7 +428,11 @@ impl LlmDriver for CodexCliDriver {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let text = stdout.trim().to_string();
+        let (text, usage) = Self::parse_jsonl_output(&stdout).map_err(|message| LlmError::Api {
+            status: 502,
+            message,
+            code: None,
+        })?;
 
         // Recover the model codex actually resolved from its stderr startup
         // banner (#6134). codex's `--json` events carry no model field, but the
@@ -384,11 +457,7 @@ impl LlmDriver for CodexCliDriver {
             }],
             stop_reason: StopReason::EndTurn,
             tool_calls: Vec::new(),
-            usage: TokenUsage {
-                input_tokens: 0,
-                output_tokens: 0,
-                ..Default::default()
-            },
+            usage,
             actual_provider: None,
             actual_model: Some(resolved_model),
         })
@@ -463,6 +532,26 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn json_cli() -> tempfile::TempPath {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(
+            &mut file,
+            br##"#!/bin/sh
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"hello from codex"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":42,"cached_input_tokens":12,"output_tokens":7}}'
+printf '%s\n' 'model: gpt-test-codex' >&2
+"##,
+        )
+        .unwrap();
+        let mut permissions = file.as_file().metadata().unwrap().permissions();
+        permissions.set_mode(0o700);
+        file.as_file().set_permissions(permissions).unwrap();
+        file.into_temp_path()
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn complete_honors_request_timeout() {
         let cli = sleeping_cli();
@@ -482,6 +571,29 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn complete_returns_jsonl_message_and_usage() {
+        let cli = json_cli();
+        let driver = CodexCliDriver::new(Some(cli.to_string_lossy().into_owned()), false);
+        let response = driver
+            .complete(CompletionRequest {
+                model: "codex-cli".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            &response.content[0],
+            ContentBlock::Text { text, .. } if text == "hello from codex"
+        ));
+        assert_eq!(response.usage.input_tokens, 42);
+        assert_eq!(response.usage.output_tokens, 7);
+        assert_eq!(response.usage.cache_read_input_tokens, 12);
+        assert_eq!(response.actual_model.as_deref(), Some("gpt-test-codex"));
     }
 
     #[test]
@@ -527,6 +639,7 @@ mod tests {
             args,
             [
                 "exec",
+                "--json",
                 "--skip-git-repo-check",
                 "--sandbox",
                 "workspace-write",
@@ -545,6 +658,7 @@ mod tests {
             args,
             [
                 "exec",
+                "--json",
                 "--skip-git-repo-check",
                 "--model",
                 "o3",
@@ -597,8 +711,37 @@ mod tests {
         // that forced a placeholder onto a DeepSeek-configured Codex CLI).
         let driver = CodexCliDriver::new(None, false);
         let args = driver.build_args("hello", "codex-cli");
-        assert_eq!(args, ["exec", "--skip-git-repo-check", "hello"]);
+        assert_eq!(args, ["exec", "--json", "--skip-git-repo-check", "hello"]);
         assert!(!args.iter().any(|a| a == "--model"));
+    }
+
+    #[test]
+    fn parse_jsonl_output_extracts_final_message_and_usage() {
+        let output = r#"{"type":"thread.started","thread_id":"thread-1"}
+{"type":"item.completed","item":{"id":"item-1","type":"agent_message","text":"intermediate"}}
+{"type":"item.completed","item":{"id":"item-2","type":"agent_message","text":"final answer"}}
+{"type":"turn.completed","usage":{"input_tokens":24763,"cached_input_tokens":24448,"cache_write_input_tokens":15,"output_tokens":122,"reasoning_output_tokens":10}}"#;
+
+        let (text, usage) = CodexCliDriver::parse_jsonl_output(output).unwrap();
+
+        assert_eq!(text, "final answer");
+        assert_eq!(usage.input_tokens, 24_763);
+        assert_eq!(usage.output_tokens, 122);
+        assert_eq!(usage.cache_read_input_tokens, 24_448);
+        assert_eq!(usage.cache_creation_input_tokens, 15);
+    }
+
+    #[test]
+    fn parse_jsonl_output_rejects_malformed_event() {
+        let error = CodexCliDriver::parse_jsonl_output("not-json").unwrap_err();
+        assert!(error.contains("line 1"));
+    }
+
+    #[test]
+    fn parse_jsonl_output_requires_completed_agent_message() {
+        let output = r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":2}}"#;
+        let error = CodexCliDriver::parse_jsonl_output(output).unwrap_err();
+        assert!(error.contains("completed agent message"));
     }
 
     #[test]
