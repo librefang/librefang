@@ -25,12 +25,7 @@ pub(crate) fn durable_atomic_write(
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => std::path::Path::new("."),
     };
-    let file_name = path.file_name().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "target path has no filename",
-        )
-    })?;
+    let file_name = path.file_name().ok_or(std::io::ErrorKind::InvalidInput)?;
     let mut staging_name = file_name.to_os_string();
     staging_name.push(format!(".{}.{sequence}.tmp", std::process::id()));
     let staging = parent.join(staging_name);
