@@ -1545,9 +1545,13 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
         }
         return kept;
     }
-    // What the table costs once rendered, matching how the tool layer prints an entry.
+    // What the table costs once rendered, matching how the tool layer prints it.
+    // The line that opens the table reaches the model with the entries, so it is part of the cost: counting entries alone put the payload over the operator's ceiling by the length of that line, 93 characters on a page served from a typical origin.
+    // Mirrors `render_page_body` — change one and the other has to follow.
     function tableCost(kept) {
-        let n = 0;
+        if (!kept.length) return 0;
+        let n = '\n\nLinks (click with browser_click, e.g. ⟨1⟩)\n'.length;
+        if (origin) n += ('; paths are relative to ' + origin).length;
         for (const e of kept) n += ('⟨' + e.id + '⟩ ' + e.url + '\n').length;
         return n;
     }
@@ -2477,8 +2481,22 @@ mod tests {
     ///
     /// Ported from the JS the script runs, because the extraction itself needs a live browser — same shape as `test_truncation_marker_fits_inside_the_cap`.
     /// The subtract-the-overflow form this replaces stayed under the cap but landed at 34k against 50k on a Wikipedia-shaped page, because cutting prose drops markers and so drops table entries faster than the prose itself shrank.
+    ///
+    /// The ceiling is asserted against what `render_page_body` actually produces rather than against the ported cost function.
+    /// Re-deriving the cost on both sides is self-consistent by construction, so it cannot see the budget and the renderer disagreeing — which is exactly what happened: the budget counted entries and the renderer also emitted a line introducing them, putting the payload 93 characters past the operator's number.
     #[test]
     fn test_budget_search_fills_the_cap_without_exceeding_it() {
+        // The port below models the script; this checks the script still does what is modelled.
+        // A port is only evidence about the script while the two agree, and nothing else here would notice if the header cost were dropped from the template — the port would go on validating a corrected budget against `render_page_body` and pass.
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("Links (click with browser_click"),
+            "the script's own table cost must include the line that opens the table, or this test measures something the browser never runs"
+        );
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("paths are relative to"),
+            "that line carries the origin, whose length varies per page and so must be measured rather than assumed"
+        );
+
         /// One `⟨n⟩` marker per line, so a cut drops markers the way a real page does.
         fn page(n_links: usize, prose_len: usize, url_len: usize) -> (String, Vec<String>) {
             let links: Vec<String> = (0..n_links)
@@ -2500,34 +2518,58 @@ mod tests {
             let keep = budget.saturating_sub(marker.chars().count());
             format!("{}{marker}", text.chars().take(keep).collect::<String>())
         }
-        fn table_cost(text: &str, links: &[String]) -> usize {
-            (0..links.len())
+        /// The extraction's own view of what the table costs, header included.
+        fn table_cost(text: &str, links: &[String], origin: &str) -> usize {
+            let entries: usize = (0..links.len())
                 .filter(|i| text.contains(&format!("\u{27e8}{}\u{27e9}", i + 1)))
                 .map(|i| {
                     format!("\u{27e8}{}\u{27e9} {}\n", i + 1, links[i])
                         .chars()
                         .count()
                 })
-                .sum()
+                .sum();
+            if entries == 0 {
+                return 0;
+            }
+            let mut header = "\n\nLinks (click with browser_click, e.g. \u{27e8}1\u{27e9})\n"
+                .chars()
+                .count();
+            if !origin.is_empty() {
+                header += format!("; paths are relative to {origin}").chars().count();
+            }
+            entries + header
         }
-        /// `(total, was_truncated)` — a page that fits outright is not expected to fill the cap.
-        fn budgeted(content: &str, links: &[String], cap: usize) -> (usize, bool) {
+        /// The extraction's response for a given prose cut, as `render_page_body` receives it.
+        fn response(content: &str, links: &[String], origin: &str) -> serde_json::Value {
+            let kept: Vec<serde_json::Value> = (0..links.len())
+                .filter(|i| content.contains(&format!("\u{27e8}{}\u{27e9}", i + 1)))
+                .map(|i| serde_json::json!({"id": i + 1, "url": links[i]}))
+                .collect();
+            serde_json::json!({"content": content, "links": kept, "links_base": origin})
+        }
+        /// `(rendered length, was_truncated)` — a page that fits outright is not expected to fill the cap.
+        fn budgeted(content: &str, links: &[String], cap: usize, origin: &str) -> (usize, bool) {
+            let rendered = |budget: usize| {
+                let out = cut(content, budget);
+                render_page_body(&response(&out, links, origin))
+                    .chars()
+                    .count()
+            };
             let total = |budget: usize| {
                 let out = cut(content, budget);
-                out.chars().count() + table_cost(&out, links)
+                out.chars().count() + table_cost(&out, links, origin)
             };
             if total(cap) <= cap {
-                return (total(cap), false);
+                return (rendered(cap), false);
             }
-            let (mut lo, mut hi, mut best) = (0usize, cap, total(0));
+            let (mut lo, mut hi, mut best) = (0usize, cap, rendered(0));
             for _ in 0..24 {
                 if lo >= hi {
                     break;
                 }
                 let mid = (lo + hi).div_ceil(2);
-                let t = total(mid);
-                if t <= cap {
-                    best = t;
+                if total(mid) <= cap {
+                    best = rendered(mid);
                     lo = mid;
                 } else {
                     hi = mid - 1;
@@ -2544,10 +2586,11 @@ mod tests {
             (2000, 200_000, 1_000, 80),
         ] {
             let (content, links) = page(n_links, prose_len, url_len);
-            let (total, truncated) = budgeted(&content, &links, cap);
+            // A real origin, since the table's opening line carries it and so its length counts against the cap.
+            let (total, truncated) = budgeted(&content, &links, cap, "https://en.wikipedia.org");
             assert!(
                 total <= cap,
-                "cap {cap}: prose plus table is {total} chars, past the ceiling the operator set"
+                "cap {cap}: the rendered page is {total} chars, past the ceiling the operator set"
             );
             // Only where the page actually overflows: the HN-shaped row above fits whole at 23,904 and must not be padded out to the cap to satisfy this.
             if truncated {
