@@ -335,7 +335,11 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         (false, false) => "skipped",
     };
 
-    let is_ready = db_ok && !(embedding_required && !embedding_present);
+    // Written as "database ok, and the embedding requirement is satisfied"
+    // rather than negating the failure case: `clippy::nonminimal_bool` rejects
+    // the `!(a && !b)` form, and the positive reading matches the two `checks`
+    // entries reported below.
+    let is_ready = db_ok && (!embedding_required || embedding_present);
     let code = if is_ready {
         StatusCode::OK
     } else {
