@@ -1,0 +1,1 @@
+Enforce denied SPDX licenses for web dependencies from pnpm's JSON report, including Commons Clause rejection and fail-closed command or report errors, instead of printing a truncated report and always succeeding (#6808) (@houko)

@@ -10,9 +10,10 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 
-vi.mock("../../lib/store", () => ({
-  createClientId: () => "row-id",
-}));
+vi.mock("../../lib/store", () => {
+  let nextId = 0;
+  return { createClientId: () => `row-${nextId++}` };
+});
 
 describe("StringMapEditor", () => {
   it("emits one parent change for one edit in StrictMode", () => {
@@ -60,5 +61,20 @@ describe("StringMapEditor", () => {
 
     expect(input).toHaveValue(100);
     expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("marks normalized duplicate keys instead of discarding one silently", () => {
+    const onChange = vi.fn();
+    render(
+      <StringMapEditor value={{ first: "one", second: "two" }} onChange={onChange} />,
+    );
+    const inputs = screen.getAllByRole("textbox");
+
+    fireEvent.change(inputs[2]!, { target: { value: " first " } });
+
+    expect(inputs[0]).toHaveAttribute("aria-invalid", "true");
+    expect(inputs[2]).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getAllByText("Duplicate key")).toHaveLength(2);
+    expect(onChange).toHaveBeenLastCalledWith({ first: "two" });
   });
 });

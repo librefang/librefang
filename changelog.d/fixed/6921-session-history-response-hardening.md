@@ -1,0 +1,1 @@
+Reuse stable session-scoped files when loading inline history images, move their filesystem work off Tokio worker threads, keep empty-session response fields consistent, localize malformed session IDs, and enforce the documented 100 KiB tool-result cap in UTF-8 bytes (#6921) (@houko)

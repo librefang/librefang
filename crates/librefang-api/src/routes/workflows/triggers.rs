@@ -222,6 +222,7 @@ pub async fn list_triggers(
 /// GET /api/triggers/:id — Fetch a single trigger by ID.
 pub async fn get_trigger(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let trigger_id = TriggerId(match id.parse() {
@@ -229,8 +230,10 @@ pub async fn get_trigger(
         Err(_) => return ApiErrorResponse::bad_request("Invalid trigger ID").into_json_tuple(),
     });
     match state.kernel.get_trigger(trigger_id) {
-        Some(t) => (StatusCode::OK, Json(trigger_to_json(&t))),
-        None => ApiErrorResponse::not_found("Trigger not found").into_json_tuple(),
+        Some(t) if super::super::can_access_agent(&state, t.agent_id, api_user.as_ref()) => {
+            (StatusCode::OK, Json(trigger_to_json(&t)))
+        }
+        _ => ApiErrorResponse::not_found("Trigger not found").into_json_tuple(),
     }
 }
 

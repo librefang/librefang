@@ -104,6 +104,10 @@ async fn start_test_server_with_provider(
             axum::routing::get(routes::get_agent_session),
         )
         .route(
+            "/api/uploads/{file_id}",
+            axum::routing::get(routes::serve_upload),
+        )
+        .route(
             "/api/agents/{id}/sessions/{session_id}/trajectory",
             axum::routing::get(routes::export_session_trajectory),
         )
@@ -159,7 +163,12 @@ async fn start_test_server_with_provider(
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     TestServer {
@@ -1037,6 +1046,11 @@ async fn test_agent_session_empty() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["message_count"], 0);
     assert_eq!(body["messages"].as_array().unwrap().len(), 0);
+    assert!(
+        body.get("label").is_some(),
+        "empty session must include label"
+    );
+    assert!(body["label"].is_null());
 }
 
 /// Regression test for the cross-agent session-read guard added in PR #3071.
@@ -1129,6 +1143,8 @@ memory_write = ["self.*"]
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(error["error"]["message"], "Invalid session ID");
 
     // Same-agent round-trip: A's id with A's own session_id → 200.
     let resp = client
@@ -1152,6 +1168,73 @@ memory_write = ["self.*"]
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["session_id"].as_str().unwrap(), a_session_id);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_agent_session_reuses_materialized_history_images() {
+    use base64::Engine as _;
+    use librefang_types::agent::AgentId;
+    use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    let spawned: serde_json::Value = resp.json().await.unwrap();
+    let agent_id: AgentId = spawned["agent_id"].as_str().unwrap().parse().unwrap();
+
+    let substrate = server.state.kernel.memory_substrate();
+    let mut session = substrate.create_session(agent_id).unwrap();
+    session.messages.push(Message {
+        role: Role::User,
+        content: MessageContent::Blocks(vec![ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(b"history image"),
+        }]),
+        pinned: false,
+        timestamp: None,
+    });
+    substrate.save_session(&session).unwrap();
+
+    let url = format!(
+        "{}/api/agents/{}/session?session_id={}",
+        server.base_url, agent_id, session.id.0
+    );
+    let first: serde_json::Value = client.get(&url).send().await.unwrap().json().await.unwrap();
+    let second: serde_json::Value = client.get(&url).send().await.unwrap().json().await.unwrap();
+    let first_id = first["messages"][0]["images"][0]["file_id"]
+        .as_str()
+        .unwrap();
+    let second_id = second["messages"][0]["images"][0]["file_id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(first_id, second_id);
+
+    let download = client
+        .get(format!("{}/api/uploads/{first_id}", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(download.status(), StatusCode::OK);
+    assert_eq!(download.bytes().await.unwrap().as_ref(), b"history image");
+
+    let upload_dir = server
+        .state
+        .kernel
+        .config_ref()
+        .channels
+        .effective_file_download_dir();
+    let image_path = upload_dir.join(librefang_types::media::on_disk_name(
+        first_id,
+        "image/png",
+        "",
+    ));
+    assert_eq!(std::fs::read(&image_path).unwrap(), b"history image");
+    std::fs::remove_file(image_path).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3367,6 +3450,7 @@ async fn start_test_server_with_rbac_users(
         .nest("/api", routes::budget::router())
         .nest("/api", routes::authz::router())
         .nest("/api", routes::users::router())
+        .nest("/api", routes::agents::router())
         .layer(axum::middleware::from_fn_with_state(
             api_key_state,
             middleware::auth,
@@ -3382,7 +3466,12 @@ async fn start_test_server_with_rbac_users(
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     TestServer {
@@ -4775,6 +4864,22 @@ async fn test_upload_roundtrip_serves_by_bare_file_id() {
             uuid::Uuid::parse_str(file_id).is_ok(),
             "file_id must stay a bare UUID, got {file_id}"
         );
+        let upload_dir = harness
+            .state
+            .kernel
+            .config_ref()
+            .channels
+            .effective_file_download_dir();
+        let persisted_meta: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(upload_dir.join(format!(".{file_id}.meta.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted_meta["filename"], filename);
+        assert_eq!(persisted_meta["content_type"], content_type);
+        assert!(
+            persisted_meta["uploaded_by"].is_string(),
+            "full-router uploads must persist the injected local owner"
+        );
 
         let mut serve = Request::builder()
             .method("GET")
@@ -4816,6 +4921,501 @@ async fn test_upload_roundtrip_serves_by_bare_file_id() {
     .await;
     // text/plain → persisted as `<uuid>.txt`; also round-trips by bare id.
     upload_then_serve(&harness, "text/plain", "note.txt", b"hello-6530".to_vec()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_upload_owner_metadata_survives_registry_miss() {
+    let server = start_test_server_with_rbac_users(
+        "any-key",
+        vec![
+            ("Alice", "user", "alice-user-key"),
+            ("Eve", "viewer", "eve-viewer-key"),
+            ("Admin", "admin", "admin-key"),
+        ],
+    )
+    .await;
+    let file_id = uuid::Uuid::new_v4().to_string();
+    let upload_dir = server
+        .state
+        .kernel
+        .config_ref()
+        .channels
+        .effective_file_download_dir();
+    std::fs::create_dir_all(&upload_dir).unwrap();
+    std::fs::write(upload_dir.join(format!("{file_id}.pdf")), b"private upload").unwrap();
+    std::fs::write(
+        upload_dir.join(format!(".{file_id}.meta.json")),
+        serde_json::to_vec(&serde_json::json!({
+            "filename": "private.pdf",
+            "content_type": "application/pdf",
+            "uploaded_by": librefang_types::agent::UserId::from_name("Alice"),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/uploads/{file_id}", server.base_url);
+    let owner = client
+        .get(&url)
+        .header("authorization", "Bearer alice-user-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(owner.status(), StatusCode::OK);
+    assert_eq!(owner.bytes().await.unwrap().as_ref(), b"private upload");
+
+    let stranger = client
+        .get(&url)
+        .header("authorization", "Bearer eve-viewer-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stranger.status(), StatusCode::FORBIDDEN);
+
+    let admin = client
+        .get(&url)
+        .header("authorization", "Bearer admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin.status(), StatusCode::OK);
+
+    let unknown_id = uuid::Uuid::new_v4().to_string();
+    std::fs::write(
+        upload_dir.join(format!("{unknown_id}.png")),
+        b"legacy unknown owner",
+    )
+    .unwrap();
+    let unknown_url = format!("{}/api/uploads/{unknown_id}", server.base_url);
+    let stranger = client
+        .get(&unknown_url)
+        .header("authorization", "Bearer eve-viewer-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stranger.status(), StatusCode::FORBIDDEN);
+    let admin = client
+        .get(&unknown_url)
+        .header("authorization", "Bearer admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin.status(), StatusCode::OK);
+
+    // Daemon-generated browser/image-tool artifacts carry an explicit shared sidecar.
+    // Ordinary authenticated users must be able to consume their URL.
+    let shared_id = uuid::Uuid::new_v4().to_string();
+    std::fs::write(upload_dir.join(format!("{shared_id}.png")), b"shared image").unwrap();
+    std::fs::write(
+        librefang_types::media::upload_metadata_path(&upload_dir, &shared_id),
+        serde_json::to_vec(&librefang_types::media::UploadMetadata {
+            filename: "generated.png".to_string(),
+            content_type: "image/png".to_string(),
+            uploaded_by: None,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let shared = client
+        .get(format!("{}/api/uploads/{shared_id}", server.base_url))
+        .header("authorization", "Bearer eve-viewer-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(shared.status(), StatusCode::OK);
+    assert_eq!(shared.bytes().await.unwrap().as_ref(), b"shared image");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn message_routes_reject_foreign_upload_attachments() {
+    // The agent is authored by Eve on purpose. The owner-scoping guard added in
+    // #6753 runs ahead of attachment resolution in `send_message`, so a caller
+    // who cannot reach the agent at all is turned away with 404
+    // `agent_not_found` (covered by `non_owner_cannot_message_another_users_agent`
+    // in `owner_scoped_routes_integration.rs`) and never reaches the check this
+    // test is about. Eve owning the agent while Alice owns the upload is what
+    // isolates the attachment-ownership boundary.
+    const EVE_MANIFEST: &str = r#"
+name = "eve-agent"
+version = "0.1.0"
+description = "Integration test agent owned by Eve"
+author = "Eve"
+module = "builtin:chat"
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "You are a test agent. Reply concisely."
+
+[capabilities]
+tools = ["file_read"]
+memory_read = ["*"]
+memory_write = ["self.*"]
+"#;
+
+    let server = start_test_server_with_rbac_users(
+        "any-key",
+        vec![
+            ("Alice", "user", "alice-user-key"),
+            ("Eve", "user", "eve-user-key"),
+        ],
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let spawn = client
+        .post(format!("{}/api/agents", server.base_url))
+        .header("authorization", "Bearer any-key")
+        .json(&serde_json::json!({"manifest_toml": EVE_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(spawn.status(), StatusCode::CREATED);
+    let spawn_body: serde_json::Value = spawn.json().await.unwrap();
+    let agent_id = spawn_body["agent_id"].as_str().unwrap();
+
+    let file_id = uuid::Uuid::new_v4().to_string();
+    let upload_dir = server
+        .state
+        .kernel
+        .config_ref()
+        .channels
+        .effective_file_download_dir();
+    std::fs::create_dir_all(&upload_dir).unwrap();
+    std::fs::write(upload_dir.join(format!("{file_id}.txt")), b"Alice's secret").unwrap();
+    std::fs::write(
+        librefang_types::media::upload_metadata_path(&upload_dir, &file_id),
+        serde_json::to_vec(&librefang_types::media::UploadMetadata {
+            filename: "secret.txt".to_string(),
+            content_type: "text/plain".to_string(),
+            uploaded_by: Some(librefang_types::agent::UserId::from_name("Alice")),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let body = serde_json::json!({
+        "message": "summarize the attachment",
+        "attachments": [{
+            "file_id": file_id,
+            "filename": "secret.txt",
+            "content_type": "text/plain"
+        }]
+    });
+
+    for suffix in ["message", "message/stream"] {
+        let response = client
+            .post(format!(
+                "{}/api/agents/{agent_id}/{suffix}",
+                server.base_url
+            ))
+            .header("authorization", "Bearer eve-user-key")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "foreign attachment must be rejected before dispatch on {suffix}"
+        );
+        let json: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(json["code"], "upload_access_denied");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_auth_http_upload_can_be_attached_over_websocket() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let harness = start_full_router("").await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = harness.app.clone();
+    let server_task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+
+    let spawn = client
+        .post(format!("{base_url}/api/agents"))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(spawn.status(), StatusCode::CREATED);
+    let spawn_json: serde_json::Value = spawn.json().await.unwrap();
+    let agent_id = spawn_json["agent_id"].as_str().unwrap();
+
+    let upload = client
+        .post(format!("{base_url}/api/agents/{agent_id}/upload"))
+        .header("content-type", "text/plain")
+        .header("x-filename", "note.txt")
+        .body("no-auth ws attachment")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upload.status(), StatusCode::CREATED);
+    let upload_json: serde_json::Value = upload.json().await.unwrap();
+    let file_id = upload_json["file_id"].as_str().unwrap();
+
+    let (mut socket, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/api/agents/{agent_id}/ws"))
+            .await
+            .unwrap();
+    let connected = socket.next().await.unwrap().unwrap();
+    assert!(connected.to_text().unwrap().contains("connected"));
+    socket
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "message",
+                "content": "read the attachment",
+                "message_id": "no-auth-upload",
+                "attachments": [{
+                    "file_id": file_id,
+                    "filename": "note.txt",
+                    "content_type": "text/plain"
+                }]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    // Attachment injection happens before provider dispatch.
+    // Poll the real session state rather than sleeping for a guessed amount of time.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let session = client
+            .get(format!("{base_url}/api/agents/{agent_id}/session"))
+            .send()
+            .await
+            .unwrap();
+        let body = session.text().await.unwrap();
+        if body.contains("no-auth ws attachment") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no-auth WS must inject the root-owned HTTP upload; last session body: {body}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    socket.close(None).await.unwrap();
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn websocket_rejects_foreign_attachment_with_structured_error() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+    let server = start_test_server_with_rbac_users(
+        "any-key",
+        vec![
+            ("Alice", "user", "alice-user-key"),
+            ("Eve", "user", "eve-user-key"),
+        ],
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let spawn = client
+        .post(format!("{}/api/agents", server.base_url))
+        .header("authorization", "Bearer any-key")
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(spawn.status(), StatusCode::CREATED);
+    let spawn_json: serde_json::Value = spawn.json().await.unwrap();
+    let agent_id = spawn_json["agent_id"].as_str().unwrap();
+
+    let file_id = uuid::Uuid::new_v4().to_string();
+    let upload_dir = server
+        .state
+        .kernel
+        .config_ref()
+        .channels
+        .effective_file_download_dir();
+    std::fs::create_dir_all(&upload_dir).unwrap();
+    std::fs::write(
+        upload_dir.join(format!("{file_id}.txt")),
+        b"Alice's WS secret",
+    )
+    .unwrap();
+    std::fs::write(
+        librefang_types::media::upload_metadata_path(&upload_dir, &file_id),
+        serde_json::to_vec(&librefang_types::media::UploadMetadata {
+            filename: "secret.txt".to_string(),
+            content_type: "text/plain".to_string(),
+            uploaded_by: Some(librefang_types::agent::UserId::from_name("Alice")),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut request = format!(
+        "{}/api/agents/{agent_id}/ws",
+        server.base_url.replacen("http://", "ws://", 1)
+    )
+    .into_client_request()
+    .unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", "Bearer eve-user-key".parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let connected = socket.next().await.unwrap().unwrap();
+    assert!(connected.to_text().unwrap().contains("connected"));
+    socket
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "message",
+                "content": "read the attachment",
+                "message_id": "foreign-upload-turn",
+                "attachments": [{
+                    "file_id": file_id,
+                    "filename": "secret.txt",
+                    "content_type": "text/plain"
+                }]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let denied = loop {
+        let frame = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("attachment denial frame must be immediate")
+            .unwrap()
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        if json["code"] == "upload_access_denied" {
+            break json;
+        }
+    };
+    assert_eq!(denied["type"], "error");
+    assert_eq!(denied["code"], "upload_access_denied");
+    assert_eq!(denied["message_id"], "foreign-upload-turn");
+    assert!(denied["content"].as_str().unwrap().contains("authorized"));
+    assert!(denied.get("error").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hand_message_handler_rejects_foreign_upload_attachment() {
+    let harness = start_full_router("").await;
+    let mut spawn_request = Request::builder()
+        .method("POST")
+        .uri("/api/agents")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({"manifest_toml": TEST_MANIFEST})).unwrap(),
+        ))
+        .unwrap();
+    spawn_request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+    let spawn = harness.app.clone().oneshot(spawn_request).await.unwrap();
+    assert_eq!(spawn.status(), StatusCode::CREATED);
+    let spawn_body = axum::body::to_bytes(spawn.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let spawn_json: serde_json::Value = serde_json::from_slice(&spawn_body).unwrap();
+    let agent_id: librefang_types::agent::AgentId =
+        spawn_json["agent_id"].as_str().unwrap().parse().unwrap();
+
+    let hand_id = harness
+        .state
+        .kernel
+        .hands()
+        .list_definitions()
+        .into_iter()
+        .next()
+        .expect("test registry must contain a hand definition")
+        .id;
+    let instance = harness
+        .state
+        .kernel
+        .hands()
+        .activate(&hand_id, std::collections::HashMap::new())
+        .unwrap();
+    harness
+        .state
+        .kernel
+        .hands()
+        .set_agent(instance.instance_id, agent_id)
+        .unwrap();
+
+    let file_id = uuid::Uuid::new_v4().to_string();
+    let upload_dir = harness
+        .state
+        .kernel
+        .config_ref()
+        .channels
+        .effective_file_download_dir();
+    std::fs::create_dir_all(&upload_dir).unwrap();
+    std::fs::write(
+        upload_dir.join(format!("{file_id}.txt")),
+        b"Alice's hand secret",
+    )
+    .unwrap();
+    std::fs::write(
+        librefang_types::media::upload_metadata_path(&upload_dir, &file_id),
+        serde_json::to_vec(&librefang_types::media::UploadMetadata {
+            filename: "secret.txt".to_string(),
+            content_type: "text/plain".to_string(),
+            uploaded_by: Some(librefang_types::agent::UserId::from_name("Alice")),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    let app = Router::new()
+        .route(
+            "/api/hands/instances/{id}/message",
+            axum::routing::post(routes::hand_send_message),
+        )
+        .with_state(harness.state.clone());
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/hands/instances/{}/message",
+            instance.instance_id
+        ))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "message": "read the attachment",
+                "attachments": [{
+                    "file_id": file_id,
+                    "filename": "secret.txt",
+                    "content_type": "text/plain"
+                }]
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(middleware::AuthenticatedApiUser {
+            name: "Eve".to_string(),
+            role: middleware::UserRole::User,
+            user_id: librefang_types::agent::UserId::from_name("Eve"),
+        });
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 // ---------------------------------------------------------------------------

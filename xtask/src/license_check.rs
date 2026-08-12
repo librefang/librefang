@@ -56,7 +56,10 @@ fn license_expression_is_denied(license: &str, denied: &[&str]) -> Result<bool, 
         let Some(id) = requirement.license.id() else {
             return false;
         };
-        !denied.iter().any(|denied_id| *denied_id == id.name)
+        // Case-insensitive: `denied` comes straight from `--deny` / the CLI default and is never itself run through SPDX parsing, so a custom deny entry with different casing than the canonical SPDX id (e.g. `gpl-3.0-only` vs `GPL-3.0-only`) must still match rather than silently letting the license through.
+        !denied
+            .iter()
+            .any(|denied_id| denied_id.eq_ignore_ascii_case(id.name))
     });
     Ok(!can_choose_permitted_terms)
 }
@@ -74,25 +77,10 @@ fn load_cargo_metadata(root: &Path) -> Result<serde_json::Value, Box<dyn std::er
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 
-fn check_cargo_deny(root: &Path, denied: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-    // Try cargo-deny first
-    let deny_check = Command::new("cargo").args(["deny", "--version"]).output();
-
-    if deny_check.is_ok() && deny_check.unwrap().status.success() {
-        println!("Using cargo-deny...");
-        let status = Command::new("cargo")
-            .args(["deny", "check", "licenses"])
-            .current_dir(root)
-            .status()?;
-        if !status.success() {
-            return Err("cargo deny check failed".into());
-        }
-        return Ok(());
-    }
-
-    // Fallback: use cargo metadata
-    println!("cargo-deny not found, using cargo metadata fallback...");
-    let metadata = load_cargo_metadata(root)?;
+fn check_metadata_license_policy(
+    metadata: &serde_json::Value,
+    denied: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut violations = Vec::new();
     let mut unverified = Vec::new();
     let mut checked = 0;
@@ -164,38 +152,179 @@ fn check_cargo_deny(root: &Path, denied: &[&str]) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-fn check_web_licenses(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn check_rust_licenses_with_tools<RunCargoDeny, LoadMetadata>(
+    denied: &[&str],
+    cargo_deny_available: bool,
+    run_cargo_deny: RunCargoDeny,
+    load_metadata: LoadMetadata,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    RunCargoDeny: FnOnce() -> Result<(), Box<dyn std::error::Error>>,
+    LoadMetadata: FnOnce() -> Result<serde_json::Value, Box<dyn std::error::Error>>,
+{
+    if cargo_deny_available {
+        println!("Using cargo-deny...");
+        run_cargo_deny()?;
+        println!("Applying the explicit denied-license policy...");
+    } else {
+        println!("cargo-deny not found, using cargo metadata fallback...");
+    }
+
+    let metadata = load_metadata()?;
+    check_metadata_license_policy(&metadata, denied)
+}
+
+fn check_cargo_deny(root: &Path, denied: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    let cargo_deny_available = matches!(
+        Command::new("cargo").args(["deny", "--version"]).output(),
+        Ok(output) if output.status.success()
+    );
+
+    check_rust_licenses_with_tools(
+        denied,
+        cargo_deny_available,
+        || {
+            let status = Command::new("cargo")
+                .args(["deny", "check", "licenses"])
+                .current_dir(root)
+                .status()?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err("cargo deny check failed".into())
+            }
+        },
+        || load_cargo_metadata(root),
+    )
+}
+
+fn check_web_license_policy(
+    report: &serde_json::Value,
+    denied: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let groups = report
+        .as_object()
+        .ok_or("pnpm license report was not a JSON object")?;
+    let mut violations = Vec::new();
+    let mut unverified = Vec::new();
+    let mut checked = 0;
+
+    for (group_license, packages) in groups {
+        if group_license.trim().is_empty() {
+            return Err("pnpm license report contained an empty license group".into());
+        }
+        let packages = packages
+            .as_array()
+            .ok_or_else(|| format!("pnpm license group {group_license:?} was not an array"))?;
+        for (index, package) in packages.iter().enumerate() {
+            let package = package.as_object().ok_or_else(|| {
+                format!("pnpm license group {group_license:?} entry {index} was not an object")
+            })?;
+            let name = package
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "pnpm license group {group_license:?} entry {index} had no package name"
+                    )
+                })?;
+            let versions = match package.get("versions") {
+                None => String::new(),
+                Some(serde_json::Value::Array(values)) => {
+                    let mut versions = Vec::with_capacity(values.len());
+                    for version in values {
+                        let version = version
+                            .as_str()
+                            .filter(|value| !value.is_empty())
+                            .ok_or_else(|| {
+                                format!("pnpm package {name:?} had an invalid version")
+                            })?;
+                        versions.push(version);
+                    }
+                    versions.join(", ")
+                }
+                Some(_) => return Err(format!("pnpm package {name:?} had invalid versions").into()),
+            };
+            let label = if versions.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{name}@{versions}")
+            };
+            let license = match package.get("license") {
+                None => group_license.as_str(),
+                Some(serde_json::Value::String(license)) => license.as_str(),
+                Some(_) => {
+                    return Err(format!("pnpm package {name:?} had an invalid license").into())
+                }
+            };
+            checked += 1;
+
+            if license.is_empty() || license == "UNKNOWN" {
+                unverified.push(format!(
+                    "  {label} — no license declared (manual review needed)"
+                ));
+                continue;
+            }
+
+            if has_commons_clause(license) {
+                violations.push(format!(
+                    "  {label} ({license}) — Commons Clause rider detected"
+                ));
+                continue;
+            }
+
+            match license_expression_is_denied(license, denied) {
+                Ok(true) => {
+                    violations.push(format!("  {label} ({license}) — denied SPDX expression"))
+                }
+                Ok(false) => {}
+                Err(_) => unverified.push(format!(
+                    "  {label} ({license}) — invalid or non-SPDX expression (manual review needed)"
+                )),
+            }
+        }
+    }
+
+    println!("  Checked {checked} web packages");
+    if !unverified.is_empty() {
+        println!("  Unverified web licenses — manual review required:");
+        for item in &unverified {
+            println!("WARN {item}");
+        }
+    }
+
+    if violations.is_empty() {
+        println!("  No web license violations found.");
+        Ok(())
+    } else {
+        println!("  Web license violations:");
+        for violation in &violations {
+            println!("{violation}");
+        }
+        Err(format!("{} web license violation(s) found", violations.len()).into())
+    }
+}
+
+fn check_web_licenses(root: &Path, denied: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
     let web_dir = root.join("web");
     if !web_dir.join("package.json").exists() {
         println!("Skipping web license check (no web/package.json)");
         return Ok(());
     }
 
-    // Try pnpm licenses list
     let output = Command::new("pnpm")
         .args(["licenses", "list", "--json"])
         .current_dir(&web_dir)
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            println!("  Web dependency licenses:");
-            // Just report — pnpm licenses list shows the breakdown
-            let lines: Vec<&str> = stdout.lines().take(20).collect();
-            for line in lines {
-                println!("    {}", line);
-            }
-            if stdout.lines().count() > 20 {
-                println!("    ... (truncated)");
-            }
-        }
-        _ => {
-            println!("  pnpm licenses not available, skipping web license check");
-        }
+        .output()
+        .map_err(|error| format!("failed to run pnpm licenses list: {error}"))?;
+    if !output.status.success() {
+        return Err("pnpm licenses list failed".into());
     }
 
-    Ok(())
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("invalid pnpm license JSON: {error}"))?;
+    check_web_license_policy(&report, denied)
 }
 
 pub fn run(args: LicenseCheckArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -214,7 +343,7 @@ pub fn run(args: LicenseCheckArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     if check_all || args.web {
         println!("=== Web Dependencies ===");
-        check_web_licenses(&root)?;
+        check_web_licenses(&root, &denied)?;
         println!();
     }
 
@@ -252,5 +381,131 @@ mod tests {
     #[test]
     fn custom_license_refs_fail_closed_when_required() {
         assert!(license_expression_is_denied("MIT AND LicenseRef-Proprietary", &[]).unwrap());
+    }
+
+    #[test]
+    fn deny_list_matches_regardless_of_case() {
+        // `denied` is raw CLI input, never SPDX-parsed, while `id.name` is the canonical SPDX casing — a differently-cased custom `--deny` entry must still catch the license rather than silently passing it.
+        assert!(license_expression_is_denied("GPL-3.0-only", &["gpl-3.0-only"]).unwrap());
+        assert!(license_expression_is_denied("GPL-3.0-only", &["GPL-3.0-ONLY"]).unwrap());
+    }
+
+    #[test]
+    fn custom_deny_policy_runs_after_successful_cargo_deny() {
+        let cargo_deny_ran = std::cell::Cell::new(false);
+        let metadata = serde_json::json!({
+            "packages": [{
+                "name": "custom-denied",
+                "license": "MIT"
+            }]
+        });
+
+        let result = check_rust_licenses_with_tools(
+            &["MIT"],
+            true,
+            || {
+                cargo_deny_ran.set(true);
+                Ok(())
+            },
+            || Ok(metadata),
+        );
+
+        assert!(
+            cargo_deny_ran.get(),
+            "the repository cargo-deny policy must still run"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("1 license violation"),
+            "a successful cargo-deny run must not bypass the custom deny list"
+        );
+    }
+
+    #[test]
+    fn cargo_deny_failure_stops_before_the_custom_policy() {
+        let metadata_loaded = std::cell::Cell::new(false);
+        let result = check_rust_licenses_with_tools(
+            &["MIT"],
+            true,
+            || Err("cargo-deny rejected the graph".into()),
+            || {
+                metadata_loaded.set(true);
+                Ok(serde_json::json!({ "packages": [] }))
+            },
+        );
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "cargo-deny rejected the graph"
+        );
+        assert!(!metadata_loaded.get());
+    }
+
+    #[test]
+    fn web_license_report_enforces_the_explicit_deny_list() {
+        let report = serde_json::json!({
+            "MIT": [{
+                "name": "blocked-web-package",
+                "versions": ["1.0.0"],
+                "license": "MIT"
+            }]
+        });
+
+        let result = check_web_license_policy(&report, &["MIT"]);
+
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("1 web license violation"),
+            "pnpm's JSON report must be enforced rather than merely printed"
+        );
+    }
+
+    #[test]
+    fn web_license_report_respects_spdx_or_choices() {
+        let report = serde_json::json!({
+            "GPL-3.0-only OR MIT": [{
+                "name": "dual-licensed-web-package",
+                "versions": ["1.0.0"],
+                "license": "GPL-3.0-only OR MIT"
+            }]
+        });
+
+        check_web_license_policy(&report, &["GPL-3.0-only"]).unwrap();
+    }
+
+    #[test]
+    fn malformed_web_license_report_fails_closed() {
+        let result = check_web_license_policy(&serde_json::json!([]), &["MIT"]);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "pnpm license report was not a JSON object"
+        );
+    }
+
+    #[test]
+    fn malformed_web_package_entries_fail_closed() {
+        for report in [
+            serde_json::json!({ "MIT": [null] }),
+            serde_json::json!({
+                "MIT": [{
+                    "name": "package",
+                    "versions": "1.0.0",
+                    "license": "MIT"
+                }]
+            }),
+            serde_json::json!({
+                "MIT": [{
+                    "name": "package",
+                    "versions": ["1.0.0"],
+                    "license": []
+                }]
+            }),
+        ] {
+            assert!(check_web_license_policy(&report, &["GPL-3.0-only"]).is_err());
+        }
     }
 }

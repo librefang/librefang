@@ -18,7 +18,7 @@
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -32,6 +32,9 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn build_url<'a>(
     client: &Client,
@@ -71,7 +74,7 @@ async fn do_req(
     query: &[(&str, Option<&str>)],
 ) -> Result<Value> {
     let url = build_url(client, base_url, path_segments.iter().copied())?;
-    let req = client.request(method, url);
+    let req = client.request(method, url).timeout(DEFAULT_REQUEST_TIMEOUT);
     let filtered: Vec<(&str, &str)> = query
         .iter()
         .filter_map(|(k, v)| v.map(|vv| (*k, vv)))
@@ -234,6 +237,27 @@ fn do_stream(
                 }
             }
         }
+        // A clean EOF can arrive without a trailing newline, leaving the last event in the buffer.
+        // Parse it here rather than dropping it; the loop above only fires on a newline.
+        if !buffer.is_empty() {
+            match std::str::from_utf8(&buffer) {
+                Ok(line) => {
+                    if let Some(data) = line.trim().strip_prefix("data: ") {
+                        if data != "[DONE]" {
+                            let event = serde_json::from_str::<Value>(data)
+                                .unwrap_or_else(|_| serde_json::json!({"raw": data}));
+                            let _ = tx.send(event).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(serde_json::json!({
+                        "error": format!("invalid utf-8 in SSE line at byte {}", e.valid_up_to()),
+                        "status": 0,
+                    })).await;
+                }
+            }
+        }
     });
     rx
 }
@@ -271,7 +295,11 @@ pub struct LibreFang {
 
 impl LibreFang {
     pub fn new(base_url: impl Into<String>) -> Self {
-        Self::with_client(base_url, Client::new())
+        let client = Client::builder()
+            .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+            .build()
+            .expect("failed to build HTTP client");
+        Self::with_client(base_url, client)
     }
 
     /// Creates an SDK client using a caller-configured HTTP client.

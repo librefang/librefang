@@ -6,8 +6,8 @@ use crate::api::{BotClient, Error};
 use crate::dispatcher::{
     dispatch_content, is_message_not_modified, is_parse_entities_error, send_text,
 };
-use crate::reaction::map_reaction;
-use crate::translator::{extract_sender, sender_from_user, update_to_event};
+use crate::reaction::{map_reaction, DoneReactionPolicy};
+use crate::translator::{extract_sender, sender_from_user, update_to_event, Sender};
 use async_trait::async_trait;
 use librefang_sidecar::{Command, EmitFn, SendCommand, SidecarAdapter};
 use serde_json::{json, Value};
@@ -41,8 +41,24 @@ fn trace(args: std::fmt::Arguments<'_>) {
     }
 }
 
+/// Render a best-effort command failure for logging.
+/// Debug-formats the error so embedded control characters (newlines, ANSI escapes) are escaped rather than able to forge extra log lines.
+fn best_effort_command_error(operation: &str, error: &(impl std::fmt::Display + ?Sized)) -> String {
+    let rendered = error.to_string();
+    format!("[telegram] {operation} failed: {rendered:?}")
+}
+
 macro_rules! tg_trace {
     ($($arg:tt)*) => { trace(format_args!($($arg)*)) };
+}
+
+/// Apply the configured identity boundary to an extracted Telegram sender.
+/// Missing identity is compatible only with an explicitly open allowlist; restricted deployments fail closed instead of relying on the translator to reject every sender-less update variant independently.
+fn sender_passes_allowlist(allowlist: &AllowList, sender: Option<&Sender>) -> bool {
+    match sender {
+        Some(sender) => allowlist.permits(&sender.user_id, sender.username.as_deref()),
+        None => allowlist.is_open(),
+    }
 }
 
 /// Whether the streaming send path is advertised as a capability.
@@ -64,7 +80,7 @@ fn streaming_enabled() -> bool {
 pub struct TelegramAdapter {
     client: Arc<BotClient>,
     allowlist: AllowList,
-    clear_done_reaction: bool,
+    done_reaction_policy: DoneReactionPolicy,
     /// Per-stream state for `stream_start` / `stream_delta` / `stream_end`.
     /// Keyed by stream_id; tracks the message_id we are editing, the accumulated text, and the last-edit time so deltas can be throttled.
     streams: Arc<Mutex<HashMap<String, StreamState>>>,
@@ -113,7 +129,7 @@ impl TelegramAdapter {
         )?;
         let client = Arc::new(BotClient::new(token)?);
         let allowlist = AllowList::from_env_value(std::env::var("ALLOWED_USERS").ok().as_deref());
-        let clear_done_reaction = std::env::var("TELEGRAM_CLEAR_DONE_REACTION")
+        let done_reaction_policy = if std::env::var("TELEGRAM_CLEAR_DONE_REACTION")
             .ok()
             .map(|s| {
                 matches!(
@@ -121,11 +137,16 @@ impl TelegramAdapter {
                     "1" | "true" | "yes" | "on"
                 )
             })
-            .unwrap_or(false);
+            .unwrap_or(false)
+        {
+            DoneReactionPolicy::Suppress
+        } else {
+            DoneReactionPolicy::Emit
+        };
         Ok(Self {
             client,
             allowlist,
-            clear_done_reaction,
+            done_reaction_policy,
             streams: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -134,8 +155,14 @@ impl TelegramAdapter {
         channel_id.parse::<i64>().ok()
     }
 
-    fn parse_thread_id(thread: Option<&str>) -> Option<i64> {
-        thread.and_then(|s| s.parse::<i64>().ok())
+    fn parse_thread_id(thread: Option<&str>) -> Result<Option<i64>, String> {
+        match thread {
+            Some(value) => value
+                .parse::<i64>()
+                .map(Some)
+                .map_err(|_| format!("non-numeric thread_id: {value}")),
+            None => Ok(None),
+        }
     }
 
     /// Edit a streaming message with HTML formatting and a plain-text fallback on `can't parse entities`. The plain fallback is derived from `html_body` via `dispatcher::html_to_plain` so the user sees readable prose (matching `send_text`'s fallback shape) rather than literal markdown / HTML markup. `message is not modified` is treated as success on both paths. Other failures are logged; token-bearing errors are already redacted at the BotClient layer.
@@ -261,7 +288,8 @@ impl SidecarAdapter for TelegramAdapter {
         let Some(chat_id) = Self::parse_chat_id(&cmd.channel_id) else {
             return Err(format!("non-numeric channel_id: {}", cmd.channel_id).into());
         };
-        let thread_id = Self::parse_thread_id(cmd.thread_id.as_deref());
+        let thread_id = Self::parse_thread_id(cmd.thread_id.as_deref())
+            .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
 
         if let Some(content) = cmd.content {
             let tag = content
@@ -292,37 +320,43 @@ impl SidecarAdapter for TelegramAdapter {
         match cmd {
             Command::Send(s) => self.on_send(s).await,
             Command::Typing(t) => {
-                if let Some(chat_id) = Self::parse_chat_id(&t.channel_id) {
-                    tg_trace!("on_command Typing chat={chat_id}");
-                    let _ = self.client.send_chat_action(chat_id, "typing").await;
+                let Some(chat_id) = Self::parse_chat_id(&t.channel_id) else {
+                    return Err(format!("non-numeric channel_id: {}", t.channel_id).into());
+                };
+                tg_trace!("on_command Typing chat={chat_id}");
+                if let Err(error) = self.client.send_chat_action(chat_id, "typing").await {
+                    eprintln!("{}", best_effort_command_error("typing action", &error));
                 }
                 Ok(())
             }
             Command::Reaction(r) => {
                 let Some(chat_id) = Self::parse_chat_id(&r.channel_id) else {
-                    return Ok(());
+                    return Err(format!("non-numeric channel_id: {}", r.channel_id).into());
                 };
                 let Ok(message_id) = r.message_id.parse::<i64>() else {
-                    return Ok(());
+                    return Err(format!("non-numeric message_id: {}", r.message_id).into());
                 };
                 tg_trace!(
                     "on_command Reaction chat={chat_id} msg={message_id} reaction={}",
                     r.reaction
                 );
-                let emojis = map_reaction(&r.reaction, self.clear_done_reaction);
+                let emojis = map_reaction(&r.reaction, self.done_reaction_policy);
                 let reactions: Vec<Value> = emojis
                     .into_iter()
                     .map(|e| json!({"type": "emoji", "emoji": e}))
                     .collect();
-                let _ = self
+                if let Err(error) = self
                     .client
                     .set_message_reaction(chat_id, message_id, reactions)
-                    .await;
+                    .await
+                {
+                    eprintln!("{}", best_effort_command_error("reaction update", &error));
+                }
                 Ok(())
             }
             Command::Interactive(i) => {
                 let Some(chat_id) = Self::parse_chat_id(&i.channel_id) else {
-                    return Ok(());
+                    return Err(format!("non-numeric channel_id: {}", i.channel_id).into());
                 };
                 tg_trace!("on_command Interactive chat={chat_id}");
                 let payload = serde_json::to_value(&i.message)?;
@@ -334,9 +368,11 @@ impl SidecarAdapter for TelegramAdapter {
             }
             Command::StreamStart(s) => {
                 let Some(chat_id) = Self::parse_chat_id(&s.channel_id) else {
-                    return Ok(());
+                    return Err(format!("non-numeric channel_id: {}", s.channel_id).into());
                 };
-                let thread_id = Self::parse_thread_id(s.thread_id.as_deref());
+                let thread_id = Self::parse_thread_id(s.thread_id.as_deref()).map_err(
+                    |error| -> Box<dyn std::error::Error + Send + Sync> { error.into() },
+                )?;
                 tg_trace!(
                     "on_command StreamStart chat={chat_id} stream_id={}",
                     s.stream_id
@@ -373,6 +409,10 @@ impl SidecarAdapter for TelegramAdapter {
             Command::StreamDelta(d) => {
                 let mut map = self.streams.lock().await;
                 let Some(state) = map.get_mut(&d.stream_id) else {
+                    eprintln!(
+                        "[telegram] StreamDelta for unknown stream_id={:?}, dropped",
+                        d.stream_id
+                    );
                     return Ok(());
                 };
                 if state.buf.len().saturating_add(d.text.len()) > MAX_STREAM_BUFFER_BYTES {
@@ -401,6 +441,10 @@ impl SidecarAdapter for TelegramAdapter {
             Command::StreamEnd(e) => {
                 let mut map = self.streams.lock().await;
                 let Some(state) = map.remove(&e.stream_id) else {
+                    eprintln!(
+                        "[telegram] StreamEnd for unknown stream_id={:?}, dropped",
+                        e.stream_id
+                    );
                     return Ok(());
                 };
                 tg_trace!(
@@ -442,14 +486,15 @@ impl SidecarAdapter for TelegramAdapter {
                 Ok(resp) => {
                     // Reset backoff on a successful round.
                     backoff = Duration::from_secs(1);
-                    if !resp.result.is_empty() {
+                    let updates = resp.result.as_deref().unwrap_or_default();
+                    if !updates.is_empty() {
                         tg_trace!(
                             "getUpdates -> {} updates (next offset {})",
-                            resp.result.len(),
+                            updates.len(),
                             offset
                         );
                     }
-                    for upd in &resp.result {
+                    for upd in updates {
                         offset = upd.update_id + 1;
                         let kind = if upd.message.is_some() {
                             "message"
@@ -474,18 +519,20 @@ impl SidecarAdapter for TelegramAdapter {
                         } else {
                             None
                         };
-                        if let Some(sender) = sender {
-                            if !self
-                                .allowlist
-                                .permits(&sender.user_id, sender.username.as_deref())
-                            {
+                        if !sender_passes_allowlist(&self.allowlist, sender.as_ref()) {
+                            if let Some(sender) = &sender {
                                 tg_trace!(
                                     "update {} {kind} dropped by allowlist user={}",
                                     upd.update_id,
                                     sender.user_id
                                 );
-                                continue;
+                            } else {
+                                tg_trace!(
+                                    "update {} {kind} dropped by allowlist (missing sender)",
+                                    upd.update_id
+                                );
                             }
+                            continue;
                         }
                         if let Some(event) = update_to_event(&self.client, upd).await {
                             tg_trace!("emit {kind} update_id={}", upd.update_id);
@@ -530,6 +577,196 @@ impl SidecarAdapter for TelegramAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn best_effort_command_errors_are_single_line_and_control_escaped() {
+        let error = Error::Other("upstream\r\nforged\u{1b}[31m".into());
+        let message = best_effort_command_error("typing action", &error);
+
+        assert_eq!(
+            message,
+            "[telegram] typing action failed: \"upstream\\r\\nforged\\u{1b}[31m\""
+        );
+        assert!(!message.contains('\r'));
+        assert!(!message.contains('\n'));
+        assert!(!message.contains('\u{1b}'));
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for stderr capture"]
+    fn best_effort_command_failure_fixture() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        let address = listener.local_addr().expect("fixture address");
+        let server = std::thread::spawn(move || {
+            let mut request_lines = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept fixture request");
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).expect("read fixture request");
+                let request = String::from_utf8_lossy(&request[..read]);
+                request_lines.push(request.lines().next().unwrap_or_default().to_string());
+
+                let body = b"upstream\r\nforged\x1b[31m";
+                write!(
+                    stream,
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("write fixture headers");
+                stream.write_all(body).expect("write fixture body");
+            }
+            request_lines
+        });
+
+        let root = format!("http://{address}");
+        let client =
+            BotClient::with_roots("fixture-token", &root, &root).expect("construct fixture client");
+        let adapter = TelegramAdapter {
+            client: Arc::new(client),
+            allowlist: AllowList::from_env_value(None),
+            done_reaction_policy: DoneReactionPolicy::Emit,
+            streams: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let runtime = tokio::runtime::Runtime::new().expect("fixture runtime");
+        runtime.block_on(async {
+            adapter
+                .on_command(Command::Typing(librefang_sidecar::TypingCmd {
+                    channel_id: "42".into(),
+                }))
+                .await
+                .expect("typing remains best effort");
+            adapter
+                .on_command(Command::Reaction(librefang_sidecar::Reaction {
+                    channel_id: "42".into(),
+                    message_id: "7".into(),
+                    reaction: "👍".into(),
+                    ..Default::default()
+                }))
+                .await
+                .expect("reaction remains best effort");
+            adapter
+                .on_command(Command::StreamDelta(librefang_sidecar::StreamDelta {
+                    stream_id: "missing\r\nforged\u{1b}[31m".into(),
+                    text: "lost".into(),
+                }))
+                .await
+                .expect("unknown stream delta remains best effort");
+        });
+
+        let request_lines = server.join().expect("fixture server thread");
+        assert!(request_lines[0].contains("/sendChatAction"));
+        assert!(request_lines[1].contains("/setMessageReaction"));
+    }
+
+    #[test]
+    fn best_effort_commands_log_real_failures_and_stay_successful() {
+        let output =
+            std::process::Command::new(std::env::current_exe().expect("current test binary"))
+                .args([
+                    "--exact",
+                    "adapter::tests::best_effort_command_failure_fixture",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .output()
+                .expect("run subprocess fixture");
+        assert!(output.status.success(), "fixture failed: {output:?}");
+
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(combined.contains("typing action failed"));
+        assert!(combined.contains("reaction update failed"));
+        assert!(combined.contains(
+            "StreamDelta for unknown stream_id=\"missing\\r\\nforged\\u{1b}[31m\", dropped"
+        ));
+        assert!(combined.contains("upstream\\r\\nforged\\u{1b}[31m"));
+        assert!(!combined.contains("upstream\r\nforged"));
+    }
+
+    #[tokio::test]
+    async fn commands_reject_non_numeric_channel_ids_consistently() {
+        let adapter = test_adapter();
+        let invalid_channel = "telegram:not-a-number".to_string();
+        let commands = [
+            Command::Typing(librefang_sidecar::TypingCmd {
+                channel_id: invalid_channel.clone(),
+            }),
+            Command::Reaction(librefang_sidecar::Reaction {
+                channel_id: invalid_channel.clone(),
+                message_id: "1".into(),
+                reaction: "👍".into(),
+                ..Default::default()
+            }),
+            Command::Interactive(librefang_sidecar::Interactive {
+                channel_id: invalid_channel.clone(),
+                message: Default::default(),
+            }),
+            Command::StreamStart(librefang_sidecar::StreamStart {
+                channel_id: invalid_channel,
+                stream_id: "stream-1".into(),
+                thread_id: None,
+            }),
+        ];
+
+        for command in commands {
+            let error = adapter
+                .on_command(command)
+                .await
+                .expect_err("invalid channel id must fail");
+            assert!(error.to_string().contains("non-numeric channel_id"));
+        }
+
+        let error = adapter
+            .on_command(Command::Reaction(librefang_sidecar::Reaction {
+                channel_id: "42".into(),
+                message_id: "not-a-number".into(),
+                reaction: "👍".into(),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("invalid reaction message id must fail");
+        assert!(error.to_string().contains("non-numeric message_id"));
+
+        let error = adapter
+            .on_send(SendCommand {
+                channel_id: "42".into(),
+                thread_id: Some("not-a-number".into()),
+                ..Default::default()
+            })
+            .await
+            .expect_err("invalid send thread id must fail before the request");
+        assert!(error.to_string().contains("non-numeric thread_id"));
+
+        let error = adapter
+            .on_command(Command::StreamStart(librefang_sidecar::StreamStart {
+                channel_id: "42".into(),
+                stream_id: "stream-with-bad-thread".into(),
+                thread_id: Some("not-a-number".into()),
+            }))
+            .await
+            .expect_err("invalid stream thread id must fail before the request");
+        assert!(error.to_string().contains("non-numeric thread_id"));
+    }
+
+    #[test]
+    fn missing_sender_is_denied_unless_allowlist_is_open() {
+        let restricted = AllowList::from_env_value(Some("12345"));
+        assert!(!sender_passes_allowlist(&restricted, None));
+
+        let open = AllowList::from_env_value(None);
+        assert!(sender_passes_allowlist(&open, None));
+
+        let allowed = crate::translator::Sender {
+            user_id: "12345".into(),
+            name: "Allowed".into(),
+            username: None,
+        };
+        assert!(sender_passes_allowlist(&restricted, Some(&allowed)));
+    }
 
     fn stream_state(last_activity: Instant) -> StreamState {
         StreamState {
@@ -605,7 +842,7 @@ mod tests {
         TelegramAdapter {
             client: Arc::new(BotClient::new("123456:test-token").expect("dummy client")),
             allowlist: AllowList::from_env_value(None),
-            clear_done_reaction: false,
+            done_reaction_policy: DoneReactionPolicy::Emit,
             streams: Arc::new(Mutex::new(HashMap::new())),
         }
     }

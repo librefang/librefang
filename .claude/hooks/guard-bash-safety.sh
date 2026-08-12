@@ -40,7 +40,7 @@ tool="$(py 'import sys,json; print(json.load(sys.stdin).get("tool_name",""))' <<
 cmd="$(py 'import sys,json; print(json.load(sys.stdin).get("tool_input",{}).get("command",""))' <<<"$input")"
 [ -n "$cmd" ] || exit 0
 
-rules="force-push-main,no-verify,broad-git-add,sensitive-file-add,claude-attribution,rm-rf-dangerous,librefang-daemon-launch"
+rules="force-push-main,no-verify,broad-git-add,sensitive-file-add,claude-attribution,gh-body-attribution,rm-rf-dangerous,librefang-daemon-launch"
 
 # check-bash-rules.py is contractually exit-0: it prints a message on a
 # rule hit and nothing on a pass. A non-zero exit therefore means the

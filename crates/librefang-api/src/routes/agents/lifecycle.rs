@@ -580,16 +580,13 @@ pub async fn list_agents(
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Query(mut params): Query<AgentListQuery>,
 ) -> impl IntoResponse {
-    // Scope agents by authenticated user: non-admin/owner callers can only
-    // list agents they authored.  If the caller already supplied an explicit
-    // ?owner= filter we respect it as-is; otherwise we inject the caller's
-    // username automatically.
-    if params.owner.is_none() {
-        if let Some(ref user) = api_user {
-            use crate::middleware::UserRole;
-            if user.0.role < UserRole::Admin {
-                params.owner = Some(user.0.name.clone());
-            }
+    // Scope agents by authenticated user: non-admin/owner callers can only list agents they authored.
+    // The override is unconditional for non-admins — an explicit `?owner=<someone-else>` from a plain User-role caller must not be trusted, or it defeats the scoping this same #6753 change enforces on every other agent-scoped route (`can_access_agent`).
+    // Admin/Owner callers, and requests admitted only via the trusted no-auth compatibility mode (`api_user` is `None`), keep whatever `owner` filter they supplied, if any.
+    if let Some(ref user) = api_user {
+        use crate::middleware::UserRole;
+        if user.0.role < UserRole::Admin {
+            params.owner = Some(user.0.name.clone());
         }
     }
     let catalog_guard = state.kernel.model_catalog_ref().load();
@@ -985,6 +982,7 @@ pub async fn set_agent_mode(
 )]
 pub async fn get_agent(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -1006,6 +1004,11 @@ pub async fn get_agent(
                 .into_response();
         }
     };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+            .with_code("agent_not_found")
+            .into_response();
+    }
 
     let dm = {
         let dm_override = state
@@ -1135,6 +1138,7 @@ pub async fn stop_agent(
 )]
 pub async fn list_agent_runtime(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -1148,6 +1152,12 @@ pub async fn list_agent_runtime(
             )
         }
     };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     let snapshots = state.kernel.list_running_sessions(agent_id);
     (StatusCode::OK, Json(serde_json::json!(snapshots)))
 }

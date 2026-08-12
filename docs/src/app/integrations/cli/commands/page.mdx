@@ -487,7 +487,7 @@ librefang trigger create <AGENT_ID> <PATTERN_JSON> [options]
 | `--prompt <TEMPLATE>` | `"Event: {{event}}"` | Prompt template sent to the agent. Use `{{event}}` as placeholder. |
 | `--max-fires <N>` | `0` (unlimited) | Maximum number of times the trigger can fire. |
 | `--target-agent <ID>` | *(owner)* | Route the triggered message to a different agent instead of the owner. |
-| `--cooldown <SECS>` | none | Minimum seconds between consecutive fires of this trigger. |
+| `--cooldown <SECS>` | none | Minimum seconds between consecutive fires of the same window. For task-board, memory-key and agent-lifecycle patterns the window is per subject, so a different task, key or agent fires immediately. |
 | `--session-mode <MODE>` | agent default | Override session mode for triggered invocations (`persistent` or `new`). |
 
 **Pattern examples:**
@@ -499,7 +499,9 @@ librefang trigger create <AGENT_ID> '"lifecycle"'
 # Fire when any agent is spawned
 librefang trigger create <AGENT_ID> '"agent_spawned"'
 
-# Fire on agent termination, max 5 times, 60s cooldown
+# Fire on agent termination, max 5 times, 60s cooldown per terminated agent.
+# The cooldown is per subject here, so five agents dying at once produce five
+# fires and exhaust --max-fires immediately; raise it if you expect crash waves.
 librefang trigger create <AGENT_ID> '"agent_terminated"' --max-fires 5 --cooldown 60
 
 # Fire on all events, route message to a different agent
@@ -537,7 +539,7 @@ librefang trigger update <TRIGGER_ID> [options]
 | `--prompt <TEMPLATE>` | New prompt template. |
 | `--enabled <true\|false>` | Enable or disable the trigger. |
 | `--max-fires <N>` | New maximum fires limit. |
-| `--cooldown <SECS>` | New cooldown in seconds. |
+| `--cooldown <SECS>` | New cooldown in seconds, applied per window (per subject for task-board, memory-key and agent-lifecycle patterns). |
 | `--clear-cooldown` | Remove the cooldown limit entirely. |
 | `--session-mode <MODE>` | New session mode override (`persistent` or `new`). |
 | `--clear-session-mode` | Remove the session mode override (revert to agent default). |
