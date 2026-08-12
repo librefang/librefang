@@ -291,16 +291,29 @@ fn get_schema_version(conn: &Connection) -> Result<u32, rusqlite::Error> {
 }
 
 /// Check if a column exists in a table (SQLite has no ADD COLUMN IF NOT EXISTS).
+///
+/// Schema inspection errors must stop the migration. Treating them as a
+/// missing column can route a damaged or locked database into an `ALTER TABLE`
+/// branch and obscure the original failure behind a secondary DDL error.
+fn try_column_exists(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, rusqlite::Error> {
+    let sql = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for name in rows {
+        if name? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
 fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
-    let sql = format!("PRAGMA table_info({})", table);
-    let Ok(mut stmt) = conn.prepare(&sql) else {
-        return false;
-    };
-    let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(1)) else {
-        return false;
-    };
-    let names: Vec<String> = rows.filter_map(|r| r.ok()).collect();
-    names.iter().any(|n| n == column)
+    try_column_exists(conn, table, column).expect("test schema inspection must succeed")
 }
 
 /// Set the schema version in the database.
@@ -442,7 +455,7 @@ fn migrate_v2(conn: &Connection) -> Result<(), rusqlite::Error> {
         ("result", "TEXT DEFAULT ''"),
     ];
     for (name, typedef) in &cols {
-        if !column_exists(conn, "task_queue", name) {
+        if !try_column_exists(conn, "task_queue", name)? {
             conn.execute(
                 &format!("ALTER TABLE task_queue ADD COLUMN {} {}", name, typedef),
                 [],
@@ -460,7 +473,7 @@ fn migrate_v2(conn: &Connection) -> Result<(), rusqlite::Error> {
 
 /// Version 3: Add embedding column to memories table for vector search.
 fn migrate_v3(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !column_exists(conn, "memories", "embedding") {
+    if !try_column_exists(conn, "memories", "embedding")? {
         conn.execute(
             "ALTER TABLE memories ADD COLUMN embedding BLOB DEFAULT NULL",
             [],
@@ -519,7 +532,7 @@ fn migrate_v5(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// Version 6: Add label column to sessions table.
 fn migrate_v6(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Check if column already exists before ALTER (SQLite has no ADD COLUMN IF NOT EXISTS)
-    if !column_exists(conn, "sessions", "label") {
+    if !try_column_exists(conn, "sessions", "label")? {
         conn.execute("ALTER TABLE sessions ADD COLUMN label TEXT", [])?;
     }
     conn.execute(
@@ -601,13 +614,13 @@ fn migrate_v9(conn: &Connection) -> Result<(), rusqlite::Error> {
 fn migrate_v10(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Use column_exists guards — identical to the pattern in v6, v14, v15 — so
     // a retry after a partial failure does not error with "column already exists".
-    if !column_exists(conn, "entities", "agent_id") {
+    if !try_column_exists(conn, "entities", "agent_id")? {
         conn.execute(
             "ALTER TABLE entities ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''",
             [],
         )?;
     }
-    if !column_exists(conn, "relations", "agent_id") {
+    if !try_column_exists(conn, "relations", "agent_id")? {
         conn.execute(
             "ALTER TABLE relations ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''",
             [],
@@ -733,7 +746,7 @@ fn migrate_v13(conn: &Connection) -> Result<(), rusqlite::Error> {
 
 /// Version 14: Add latency_ms column to usage_events for model performance tracking.
 fn migrate_v14(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !column_exists(conn, "usage_events", "latency_ms") {
+    if !try_column_exists(conn, "usage_events", "latency_ms")? {
         conn.execute(
             "ALTER TABLE usage_events ADD COLUMN latency_ms INTEGER NOT NULL DEFAULT 0",
             [],
@@ -748,19 +761,19 @@ fn migrate_v14(conn: &Connection) -> Result<(), rusqlite::Error> {
 
 /// Version 15: Add multimodal memory columns for image URL, image embedding, and modality.
 fn migrate_v15(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !column_exists(conn, "memories", "image_url") {
+    if !try_column_exists(conn, "memories", "image_url")? {
         conn.execute(
             "ALTER TABLE memories ADD COLUMN image_url TEXT DEFAULT NULL",
             [],
         )?;
     }
-    if !column_exists(conn, "memories", "image_embedding") {
+    if !try_column_exists(conn, "memories", "image_embedding")? {
         conn.execute(
             "ALTER TABLE memories ADD COLUMN image_embedding BLOB DEFAULT NULL",
             [],
         )?;
     }
-    if !column_exists(conn, "memories", "modality") {
+    if !try_column_exists(conn, "memories", "modality")? {
         conn.execute(
             "ALTER TABLE memories ADD COLUMN modality TEXT DEFAULT 'text'",
             [],
@@ -775,7 +788,7 @@ fn migrate_v15(conn: &Connection) -> Result<(), rusqlite::Error> {
 
 /// v16: Add peer_id column to memories and sessions for per-user isolation.
 fn migrate_v16(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !column_exists(conn, "memories", "peer_id") {
+    if !try_column_exists(conn, "memories", "peer_id")? {
         conn.execute(
             "ALTER TABLE memories ADD COLUMN peer_id TEXT DEFAULT NULL",
             [],
@@ -785,7 +798,7 @@ fn migrate_v16(conn: &Connection) -> Result<(), rusqlite::Error> {
             [],
         )?;
     }
-    if !column_exists(conn, "sessions", "peer_id") {
+    if !try_column_exists(conn, "sessions", "peer_id")? {
         conn.execute(
             "ALTER TABLE sessions ADD COLUMN peer_id TEXT DEFAULT NULL",
             [],
@@ -833,7 +846,7 @@ fn migrate_v47(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Skip the rebuild if a prior run already produced the peer_id column
     // (idempotent retry): the new PK is only observable via a rebuild, and the
     // column's presence is our marker that the rebuild completed.
-    if !column_exists(conn, "entities", "peer_id") {
+    if !try_column_exists(conn, "entities", "peer_id")? {
         conn.execute_batch(
             "CREATE TABLE entities_new (
                 id TEXT NOT NULL,
@@ -859,7 +872,7 @@ fn migrate_v47(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     // --- relations: additive column, shared sentinel '' (single-column id PK
     // is fine here — a relation row is unique per UUID). ---
-    if !column_exists(conn, "relations", "peer_id") {
+    if !try_column_exists(conn, "relations", "peer_id")? {
         conn.execute(
             "ALTER TABLE relations ADD COLUMN peer_id TEXT NOT NULL DEFAULT ''",
             [],
@@ -942,7 +955,7 @@ fn migrate_v18(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// Version 19: Add `provider` column to usage_events so the metering engine
 /// can enforce per-provider budget caps (issue #2316).
 fn migrate_v19(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !column_exists(conn, "usage_events", "provider") {
+    if !try_column_exists(conn, "usage_events", "provider")? {
         conn.execute(
             "ALTER TABLE usage_events ADD COLUMN provider TEXT NOT NULL DEFAULT ''",
             [],
@@ -963,7 +976,7 @@ fn migrate_v19(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// detect and auto-reset stuck `in_progress` tasks whose worker LLM stalled
 /// or crashed without calling `task_complete` (issue #2923 / #2926).
 fn migrate_v20(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !column_exists(conn, "task_queue", "claimed_at") {
+    if !try_column_exists(conn, "task_queue", "claimed_at")? {
         conn.execute(
             "ALTER TABLE task_queue ADD COLUMN claimed_at TEXT DEFAULT NULL",
             [],
@@ -983,7 +996,7 @@ fn migrate_v20(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// Version 21: Add `retry_count` column to `task_queue` so the kernel sweep
 /// can enforce `max_retries` and mark exhausted tasks as `failed`.
 fn migrate_v21(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !column_exists(conn, "task_queue", "retry_count") {
+    if !try_column_exists(conn, "task_queue", "retry_count")? {
         conn.execute(
             "ALTER TABLE task_queue ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
             [],
@@ -1003,10 +1016,10 @@ fn migrate_v21(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// verifying with their original Merkle hashes — the hash function omits
 /// absent fields, so NULL columns produce the pre-migration hash unchanged.
 fn migrate_v22(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !column_exists(conn, "audit_entries", "user_id") {
+    if !try_column_exists(conn, "audit_entries", "user_id")? {
         conn.execute("ALTER TABLE audit_entries ADD COLUMN user_id TEXT", [])?;
     }
-    if !column_exists(conn, "audit_entries", "channel") {
+    if !try_column_exists(conn, "audit_entries", "channel")? {
         conn.execute("ALTER TABLE audit_entries ADD COLUMN channel TEXT", [])?;
     }
     conn.execute(
@@ -1033,10 +1046,10 @@ fn migrate_v22(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// fall outside any per-user filter, which is the right default (cost
 /// existed before the user attribution layer was added).
 fn migrate_v23(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !column_exists(conn, "usage_events", "user_id") {
+    if !try_column_exists(conn, "usage_events", "user_id")? {
         conn.execute("ALTER TABLE usage_events ADD COLUMN user_id TEXT", [])?;
     }
-    if !column_exists(conn, "usage_events", "channel") {
+    if !try_column_exists(conn, "usage_events", "channel")? {
         conn.execute("ALTER TABLE usage_events ADD COLUMN channel TEXT", [])?;
     }
     conn.execute(
@@ -1065,7 +1078,7 @@ fn migrate_v23(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// devices must re-pair to obtain a token; until they do, the auth
 /// middleware will simply not find a match for any bearer they present.
 fn migrate_v24(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !column_exists(conn, "paired_devices", "api_key_hash") {
+    if !try_column_exists(conn, "paired_devices", "api_key_hash")? {
         conn.execute(
             "ALTER TABLE paired_devices ADD COLUMN api_key_hash TEXT NOT NULL DEFAULT ''",
             [],
@@ -1197,7 +1210,7 @@ fn migrate_v28(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// NULL and are treated as "not yet eligible for hard delete" by the sweep,
 /// which compares `< (now - retention_days)`.
 fn migrate_v29(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !column_exists(conn, "memories", "deleted_at") {
+    if !try_column_exists(conn, "memories", "deleted_at")? {
         conn.execute(
             "ALTER TABLE memories ADD COLUMN deleted_at INTEGER DEFAULT NULL",
             [],
@@ -1208,7 +1221,7 @@ fn migrate_v29(conn: &Connection) -> Result<(), rusqlite::Error> {
          ON memories(deleted, deleted_at)",
         [],
     )?;
-    if !column_exists(conn, "task_queue", "finished_at") {
+    if !try_column_exists(conn, "task_queue", "finished_at")? {
         conn.execute(
             "ALTER TABLE task_queue ADD COLUMN finished_at INTEGER DEFAULT NULL",
             [],
@@ -1232,7 +1245,7 @@ fn migrate_v29(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// Pre-v30 rows leave `session_id` NULL and are simply excluded from
 /// per-session aggregates.
 fn migrate_v30(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !column_exists(conn, "usage_events", "session_id") {
+    if !try_column_exists(conn, "usage_events", "session_id")? {
         conn.execute("ALTER TABLE usage_events ADD COLUMN session_id TEXT", [])?;
     }
     conn.execute(
@@ -1270,7 +1283,7 @@ fn migrate_v32(conn: &Connection) -> Result<(), rusqlite::Error> {
     // 1. Add the column. NOT NULL with a literal default is permitted by
     //    SQLite for `ALTER TABLE ... ADD COLUMN`, so existing rows
     //    immediately satisfy the constraint at `0`.
-    if !column_exists(conn, "sessions", "message_count") {
+    if !try_column_exists(conn, "sessions", "message_count")? {
         conn.execute(
             "ALTER TABLE sessions ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0",
             [],
@@ -1349,7 +1362,7 @@ fn migrate_v32(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// `"approval:<uuid>"`). Replay detection itself is unchanged — it still
 /// keys on `code_hash` so a code is single-use across all actions.
 fn migrate_v31(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !column_exists(conn, "totp_used_codes", "bound_to") {
+    if !try_column_exists(conn, "totp_used_codes", "bound_to")? {
         conn.execute_batch("ALTER TABLE totp_used_codes ADD COLUMN bound_to TEXT;")?;
     }
     conn.execute(
@@ -1601,7 +1614,7 @@ fn migrate_v37(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// `column_exists` makes this idempotent: fresh installs (where v17
 /// already created the column) and re-runs both no-op cleanly.
 fn migrate_v38(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !column_exists(conn, "approval_audit", "second_factor_used") {
+    if !try_column_exists(conn, "approval_audit", "second_factor_used")? {
         conn.execute(
             "ALTER TABLE approval_audit ADD COLUMN second_factor_used INTEGER NOT NULL DEFAULT 0",
             [],
@@ -1627,7 +1640,7 @@ fn migrate_v38(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// (`PATCH /api/sessions/{id}/model`) sets and clears it; `NULL` body
 /// clears the override and restores the agent default.
 fn migrate_v39(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !column_exists(conn, "sessions", "model_override") {
+    if !try_column_exists(conn, "sessions", "model_override")? {
         conn.execute(
             "ALTER TABLE sessions ADD COLUMN model_override TEXT DEFAULT NULL",
             [],
@@ -1827,7 +1840,7 @@ fn migrate_v45(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// `NULL`, which the read path treats as "owned by no specific session"
 /// (banner hidden) until the next compaction stamps the owning session.
 fn migrate_v46(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !column_exists(conn, "canonical_sessions", "compacted_summary_session_id") {
+    if !try_column_exists(conn, "canonical_sessions", "compacted_summary_session_id")? {
         conn.execute(
             "ALTER TABLE canonical_sessions ADD COLUMN compacted_summary_session_id TEXT",
             [],
@@ -1842,25 +1855,25 @@ fn migrate_v46(conn: &Connection) -> Result<(), rusqlite::Error> {
 }
 
 fn migrate_v40(conn: &Connection) -> Result<(), rusqlite::Error> {
-    if !column_exists(conn, "agents", "session_id") {
+    if !try_column_exists(conn, "agents", "session_id")? {
         conn.execute(
             "ALTER TABLE agents ADD COLUMN session_id TEXT DEFAULT ''",
             [],
         )?;
     }
-    if !column_exists(conn, "agents", "identity") {
+    if !try_column_exists(conn, "agents", "identity")? {
         conn.execute(
             "ALTER TABLE agents ADD COLUMN identity TEXT DEFAULT '{}'",
             [],
         )?;
     }
-    if !column_exists(conn, "agents", "source_toml_path") {
+    if !try_column_exists(conn, "agents", "source_toml_path")? {
         conn.execute(
             "ALTER TABLE agents ADD COLUMN source_toml_path TEXT DEFAULT NULL",
             [],
         )?;
     }
-    if !column_exists(conn, "sessions", "messages_generation") {
+    if !try_column_exists(conn, "sessions", "messages_generation")? {
         conn.execute(
             "ALTER TABLE sessions ADD COLUMN messages_generation INTEGER NOT NULL DEFAULT 0",
             [],
@@ -2068,6 +2081,19 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(user_version, 1, "failed guard must not advance the ladder");
+    }
+
+    #[test]
+    fn test_column_exists_propagates_schema_inspection_errors() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        let error = try_column_exists(&conn, "unterminated(", "id")
+            .expect_err("invalid schema inspection SQL must not become column-not-found");
+
+        assert!(
+            error.to_string().contains("syntax error"),
+            "unexpected error: {error}"
+        );
     }
 
     /// Happy path: a freshly migrated DB has `MAX(migrations.version) ==
