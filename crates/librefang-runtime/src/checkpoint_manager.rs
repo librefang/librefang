@@ -153,12 +153,8 @@ fn lock_snapshot_counter(counter: &Mutex<usize>) -> MutexGuard<'_, usize> {
     counter.lock().unwrap_or_else(|poisoned| {
         warn!("checkpoint concurrency counter lock poisoned; recovering counter state");
         let guard = poisoned.into_inner();
-        // `into_inner` recovers the guard but leaves the mutex's poison flag
-        // set, so every future `lock()` call would keep taking this
-        // `Err(PoisonError)` branch (and re-logging this warning) even
-        // though the counter itself is now known-good. Clear it once we've
-        // recovered so the mutex behaves normally again for the rest of
-        // the process's life.
+        // `into_inner` recovers the guard but leaves the mutex's poison flag set, so every future `lock()` call would keep taking this `Err(PoisonError)` branch (and re-logging this warning) even though the counter itself is now known-good.
+        // Clear it once we've recovered so the mutex behaves normally again for the rest of the process's life.
         counter.clear_poison();
         guard
     })
