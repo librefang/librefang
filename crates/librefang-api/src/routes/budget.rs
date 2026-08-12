@@ -336,7 +336,7 @@ pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
         .kernel
         .metering_ref()
         .budget_status(&state.kernel.budget_config());
-    Json(serde_json::to_value(&status).unwrap_or_default())
+    Json(status)
 }
 
 /// PUT /api/budget — Update global budget limits and persist to `config.toml`.
@@ -541,7 +541,7 @@ pub async fn update_budget(
     );
 
     let status = state.kernel.metering_ref().budget_status(&new_budget);
-    Json(serde_json::to_value(&status).unwrap_or_default()).into_response()
+    Json(status).into_response()
 }
 
 /// Failure modes for [`persist_budget`].

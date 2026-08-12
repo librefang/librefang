@@ -4,15 +4,29 @@ use super::*;
 // Cron job management endpoints
 // ---------------------------------------------------------------------------
 /// GET /api/cron/jobs — List all cron jobs, optionally filtered by agent_id.
+///
+/// Owner-scoping (#6753 follow-up): non-admins can't see cron jobs for agents they don't author — same leak class this PR closed for `/api/triggers`, since `JobMeta`/`CronJob` carries `prompt_template` and other user-authored content.
+/// Mirrors `list_triggers` in `triggers.rs`: an explicit `?agent_id=` for an unowned agent returns an empty list rather than 404 (avoids leaking existence), and an unfiltered list is post-filtered down to jobs on agents the caller authors.
 #[utoipa::path(get, path = "/api/cron/jobs", tag = "workflows", responses((status = 200, description = "List cron jobs", body = Vec<serde_json::Value>)))]
 pub async fn list_cron_jobs(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
+    let restrict_to: Option<String> = match api_user.as_ref() {
+        Some(u) if u.0.role < crate::middleware::UserRole::Admin => Some(u.0.name.clone()),
+        _ => None,
+    };
     let jobs = if let Some(agent_id_str) = params.get("agent_id") {
         match uuid::Uuid::parse_str(agent_id_str) {
             Ok(uuid) => {
                 let aid = AgentId(uuid);
+                if !super::super::can_access_agent(&state, aid, api_user.as_ref()) {
+                    return (
+                        StatusCode::OK,
+                        Json(serde_json::json!({"jobs": [], "total": 0})),
+                    );
+                }
                 state.kernel.cron().list_jobs(aid)
             }
             Err(_) => {
@@ -21,6 +35,21 @@ pub async fn list_cron_jobs(
         }
     } else {
         state.kernel.cron().list_all_jobs()
+    };
+    let jobs: Vec<_> = if let Some(ref user_name) = restrict_to {
+        let owned_ids: std::collections::HashSet<AgentId> = state
+            .kernel
+            .agent_registry()
+            .list()
+            .iter()
+            .filter(|e| e.manifest.author.eq_ignore_ascii_case(user_name))
+            .map(|e| e.id)
+            .collect();
+        jobs.into_iter()
+            .filter(|j| owned_ids.contains(&j.agent_id))
+            .collect()
+    } else {
+        jobs
     };
     let total = jobs.len();
     let jobs_json: Vec<serde_json::Value> = jobs
@@ -193,17 +222,26 @@ pub async fn toggle_cron_job(
 #[utoipa::path(get, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job details", body = crate::types::JsonObject), (status = 404, description = "Job not found")))]
 pub async fn get_cron_job(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let job_id = librefang_types::scheduler::CronJobId(uuid);
             match state.kernel.cron().get_meta(job_id) {
-                Some(meta) => (
-                    StatusCode::OK,
-                    Json(cron_job_response_with_metrics(&state, &meta)),
-                ),
-                None => ApiErrorResponse::not_found("Job not found").into_json_tuple(),
+                Some(meta)
+                    if super::super::can_access_agent(
+                        &state,
+                        meta.job.agent_id,
+                        api_user.as_ref(),
+                    ) =>
+                {
+                    (
+                        StatusCode::OK,
+                        Json(cron_job_response_with_metrics(&state, &meta)),
+                    )
+                }
+                _ => ApiErrorResponse::not_found("Job not found").into_json_tuple(),
             }
         }
         Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
@@ -217,17 +255,26 @@ pub async fn get_cron_job(
 #[utoipa::path(get, path = "/api/cron/jobs/{id}/status", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job status", body = crate::types::JsonObject)))]
 pub async fn cron_job_status(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let job_id = librefang_types::scheduler::CronJobId(uuid);
             match state.kernel.cron().get_meta(job_id) {
-                Some(meta) => (
-                    StatusCode::OK,
-                    Json(cron_job_response_with_metrics(&state, &meta)),
-                ),
-                None => ApiErrorResponse::not_found("Job not found").into_json_tuple(),
+                Some(meta)
+                    if super::super::can_access_agent(
+                        &state,
+                        meta.job.agent_id,
+                        api_user.as_ref(),
+                    ) =>
+                {
+                    (
+                        StatusCode::OK,
+                        Json(cron_job_response_with_metrics(&state, &meta)),
+                    )
+                }
+                _ => ApiErrorResponse::not_found("Job not found").into_json_tuple(),
             }
         }
         Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),

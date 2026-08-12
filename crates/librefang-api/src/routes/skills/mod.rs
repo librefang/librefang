@@ -15,6 +15,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -1075,13 +1076,17 @@ pub(crate) fn remove_secret_env(path: &std::path::Path, key: &str) -> Result<(),
 
 /// Atomically replace `path` with `content`, ensuring the resulting
 /// inode is mode `0600` (Unix) from creation — never observable at
-/// the process umask. Writes to a sibling `.tmp` file first to keep
+/// the process umask. Writes to a sibling temp file first to keep
 /// the rename within the same filesystem (so `rename(2)` is
-/// atomic). On non-Unix targets the helper still uses the temp +
-/// rename shape so partial writes can't tear the file; the
-/// per-permissions bit is a no-op (Windows ACLs are inherited from
-/// the parent directory, which lives under the daemon-UID user
-/// profile).
+/// atomic). The temp file name is suffixed with the process ID and
+/// a per-process atomic counter so concurrent callers never open
+/// the same staging file and truncate each other's write. On
+/// non-Unix targets the helper still uses the temp + rename shape
+/// so partial writes can't tear the file; the per-permissions bit
+/// is a no-op (Windows ACLs are inherited from the parent
+/// directory, which lives under the daemon-UID user profile). On
+/// Unix, the parent directory is fsynced after a successful rename
+/// so the replacement survives a crash immediately afterward.
 fn atomic_write_secret_file(path: &std::path::Path, content: String) -> Result<(), std::io::Error> {
     use std::io::Write as _;
     let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
@@ -1090,29 +1095,38 @@ fn atomic_write_secret_file(path: &std::path::Path, content: String) -> Result<(
         .map(|n| n.to_owned())
         .unwrap_or_else(|| std::ffi::OsString::from("secrets.env"));
     let mut tmp_name = file_name;
-    tmp_name.push(".tmp");
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    tmp_name.push(format!(".tmp.{}.{seq}", std::process::id()));
     let tmp_path = parent.join(tmp_name);
 
     // Open with mode 0600 from the start on Unix. The temp file is
     // discarded on any error path below so we don't leak a partial
     // write on disk.
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
         opts.mode(0o600);
     }
     let mut f = opts.open(&tmp_path)?;
-    f.write_all(content.as_bytes())?;
-    f.sync_all()?;
+    let write_result = f.write_all(content.as_bytes()).and_then(|()| f.sync_all());
     drop(f);
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error);
+    }
 
     // `rename(2)` is atomic — the destination either contains the
     // old bytes (pre-rename) or the new bytes (post-rename); a
     // concurrent reader never observes a half-written file.
     match std::fs::rename(&tmp_path, path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            #[cfg(unix)]
+            std::fs::File::open(parent)?.sync_all()?;
+            Ok(())
+        }
         Err(e) => {
             // Clean up the temp file so we don't accrete `*.tmp`
             // litter on partial-failure paths.
@@ -1720,10 +1734,25 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("secrets.env");
         write_secret_env(&path, "OPENAI_API_KEY", "sk-1").unwrap();
-        let tmp_path = path.with_file_name("secrets.env.tmp");
-        assert!(
-            !tmp_path.exists(),
-            "tmp sibling must be gone after atomic rename completes",
+        assert_eq!(
+            std::fs::read_dir(tmp.path()).unwrap().count(),
+            1,
+            "successful writes must not leave secret-bearing staging files",
+        );
+    }
+
+    #[test]
+    fn atomic_secret_write_cleans_up_after_rename_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target_dir = tmp.path().join("secrets.env");
+        std::fs::create_dir(&target_dir).unwrap();
+
+        atomic_write_secret_file(&target_dir, "KEY=value\n".to_string()).unwrap_err();
+
+        assert_eq!(
+            std::fs::read_dir(tmp.path()).unwrap().count(),
+            1,
+            "failed renames must not leave secret-bearing staging files",
         );
     }
 

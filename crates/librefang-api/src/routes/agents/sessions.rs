@@ -1,5 +1,100 @@
 use super::*;
 
+const TOOL_RESULT_MAX_BYTES: usize = 100 * 1024;
+
+fn cap_tool_result(result: &str) -> String {
+    if result.len() <= TOOL_RESULT_MAX_BYTES {
+        return result.to_string();
+    }
+    let mut end = TOOL_RESULT_MAX_BYTES;
+    while !result.is_char_boundary(end) {
+        end -= 1;
+    }
+    result[..end].to_string()
+}
+
+async fn remove_history_image_temp(path: &std::path::Path) {
+    if let Err(error) = tokio::fs::remove_file(path).await {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(%error, "failed to clean up session history image");
+        }
+    }
+}
+
+async fn materialize_history_image(
+    upload_dir: &std::path::Path,
+    session_scope: &[u8],
+    media_type: &str,
+    data: &str,
+) -> Option<serde_json::Value> {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(data) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(%error, "failed to decode session history image");
+            return None;
+        }
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(session_scope);
+    hasher.update([0]);
+    hasher.update(media_type.as_bytes());
+    hasher.update([0]);
+    hasher.update(&bytes);
+    let digest = hasher.finalize();
+    let mut file_id_bytes = [0_u8; 16];
+    file_id_bytes.copy_from_slice(&digest[..16]);
+    // RFC 9562 UUIDv8 keeps the content-derived 128-bit identifier compatible with the upload route while reserving the standard version/variant bits.
+    file_id_bytes[6] = (file_id_bytes[6] & 0x0f) | 0x80;
+    file_id_bytes[8] = (file_id_bytes[8] & 0x3f) | 0x80;
+    let file_id = uuid::Uuid::from_bytes(file_id_bytes).to_string();
+    let on_disk = librefang_types::media::on_disk_name(&file_id, media_type, "");
+
+    if let Err(error) = tokio::fs::create_dir_all(upload_dir).await {
+        tracing::warn!(%error, "failed to create session image directory");
+        return None;
+    }
+    let path = upload_dir.join(on_disk);
+    let exists = match tokio::fs::try_exists(&path).await {
+        Ok(exists) => exists,
+        Err(error) => {
+            tracing::warn!(%error, "failed to inspect session history image");
+            return None;
+        }
+    };
+    if !exists {
+        let temporary = upload_dir.join(format!(".{file_id}.{}.tmp", uuid::Uuid::new_v4()));
+        if let Err(error) = tokio::fs::write(&temporary, &bytes).await {
+            tracing::warn!(%error, "failed to write temporary session history image");
+            remove_history_image_temp(&temporary).await;
+            return None;
+        }
+        if let Err(error) = tokio::fs::rename(&temporary, &path).await {
+            if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+                tracing::warn!(%error, "failed to publish session history image");
+                remove_history_image_temp(&temporary).await;
+                return None;
+            }
+            remove_history_image_temp(&temporary).await;
+        }
+    }
+
+    let filename = format!("image.{}", media_type.rsplit('/').next().unwrap_or("png"));
+    UPLOAD_REGISTRY
+        .entry(file_id.clone())
+        .or_insert_with(|| UploadMeta {
+            filename: filename.clone(),
+            content_type: media_type.to_string(),
+            uploaded_by: None,
+        });
+    Some(serde_json::json!({
+        "file_id": file_id,
+        "filename": filename,
+    }))
+}
+
 /// Query params for `GET /api/agents/{id}/session`.
 ///
 /// Using a typed struct (rather than `HashMap<String,String>`) gives us
@@ -25,15 +120,24 @@ pub struct GetAgentSessionQuery {
 )]
 pub async fn get_agent_session(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     query: Result<Query<GetAgentSessionQuery>, axum::extract::rejection::QueryRejection>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let (err_session_invalid, err_agent_invalid, err_agent_not_found, err_session_load_failed) = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        (
+            t.t("api-error-session-invalid-id"),
+            t.t("api-error-agent-invalid-id"),
+            t.t("api-error-agent-not-found"),
+            t.t("api-error-session-load-failed"),
+        )
+    };
     let Query(params) = match query {
         Ok(q) => q,
         Err(_) => {
-            return ApiErrorResponse::bad_request("invalid session_id")
+            return ApiErrorResponse::bad_request(err_session_invalid)
                 .with_code("invalid_session_id")
                 .into_response();
         }
@@ -41,7 +145,7 @@ pub async fn get_agent_session(
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+            return ApiErrorResponse::bad_request(err_agent_invalid)
                 .with_code("invalid_agent_id")
                 .into_response();
         }
@@ -50,11 +154,21 @@ pub async fn get_agent_session(
     let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
-            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+            return ApiErrorResponse::not_found(err_agent_not_found)
                 .with_code("agent_not_found")
                 .into_response();
         }
     };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        // `err_agent_not_found` rather than a fresh `ErrorTranslator`: the
+        // translator is `!Send` and this handler awaits below, so #6921 moved
+        // it into a block that pre-resolves every message and drops it before
+        // the first await. The move in the registry-miss arm above sits on a
+        // diverging branch, so the binding is still live on this path.
+        return ApiErrorResponse::not_found(err_agent_not_found)
+            .with_code("agent_not_found")
+            .into_response();
+    }
 
     // Callers (e.g. the dashboard tab with `?sessionId=` pinned) can override
     // the canonical-active session for this request. The returned messages
@@ -84,7 +198,6 @@ pub async fn get_agent_session(
             // collects all tool_use entries keyed by id; pass 2 attaches results.
 
             // Pass 1: build messages and a lookup from tool_use_id → (msg_idx, tool_idx)
-            use base64::Engine as _;
             let mut built_messages: Vec<serde_json::Value> = Vec::new();
             let mut tool_use_index: std::collections::HashMap<String, (usize, usize)> =
                 std::collections::HashMap::new();
@@ -122,48 +235,20 @@ pub async fn get_agent_session(
                                     data,
                                 } => {
                                     texts.push("[Image]".to_string());
-                                    // Persist image to upload dir so it can be
-                                    // served back when loading session history.
-                                    let file_id = uuid::Uuid::new_v4().to_string();
                                     let upload_dir = state
                                         .kernel
                                         .config_ref()
                                         .channels
                                         .effective_file_download_dir();
-                                    if let Err(e) = std::fs::create_dir_all(&upload_dir) {
-                                        tracing::warn!("Failed to create upload directory: {e}");
-                                    }
-                                    if let Ok(bytes) =
-                                        base64::engine::general_purpose::STANDARD.decode(data)
+                                    if let Some(image) = materialize_history_image(
+                                        &upload_dir,
+                                        target_session_id.0.as_bytes(),
+                                        media_type,
+                                        data,
+                                    )
+                                    .await
                                     {
-                                        // Persist as `<uuid>.<ext>` (#6530); the
-                                        // registry stores content_type so the
-                                        // history-load serve reconstructs it.
-                                        let on_disk = librefang_types::media::on_disk_name(
-                                            &file_id, media_type, "",
-                                        );
-                                        if let Err(e) =
-                                            std::fs::write(upload_dir.join(&on_disk), &bytes)
-                                        {
-                                            tracing::warn!("Failed to write upload file: {e}");
-                                        }
-                                        UPLOAD_REGISTRY.insert(
-                                            file_id.clone(),
-                                            UploadMeta {
-                                                filename: format!(
-                                                    "image.{}",
-                                                    media_type.rsplit('/').next().unwrap_or("png")
-                                                ),
-                                                content_type: media_type.clone(),
-                                                // Generated content has no
-                                                // operator owner — leave None.
-                                                uploaded_by: None,
-                                            },
-                                        );
-                                        msg_images.push(serde_json::json!({
-                                            "file_id": file_id,
-                                            "filename": format!("image.{}", media_type.rsplit('/').next().unwrap_or("png")),
-                                        }));
+                                        msg_images.push(image);
                                     }
                                 }
                                 librefang_types::message::ContentBlock::ToolUse {
@@ -250,9 +335,8 @@ pub async fn get_agent_session(
                                         msg.get_mut("tools").and_then(|v| v.as_array_mut())
                                     {
                                         if let Some(tool_obj) = tools_arr.get_mut(tool_idx) {
-                                            // Cap at 100 KB to keep session responses manageable
-                                            let capped: String =
-                                                result.chars().take(102_400).collect();
+                                            // Cap at 100 KiB of UTF-8 without splitting a code point.
+                                            let capped = cap_tool_result(result);
                                             tool_obj["result"] = serde_json::Value::String(capped);
                                             tool_obj["is_error"] =
                                                 serde_json::Value::Bool(*is_error);
@@ -344,6 +428,7 @@ pub async fn get_agent_session(
                             "agent_id": agent_id.to_string(),
                             "message_count": 0,
                             "context_window_tokens": 0,
+                            "label": null,
                             "messages": [],
                             "compacted_summary": compacted_summary,
                         })),
@@ -353,7 +438,7 @@ pub async fn get_agent_session(
         }
         Err(e) => {
             tracing::warn!("Session load failed for agent {id}: {e}");
-            ApiErrorResponse::internal(t.t("api-error-session-load-failed"))
+            ApiErrorResponse::internal(err_session_load_failed)
                 .with_code("session_load_failed")
                 .into_response()
         }
@@ -401,6 +486,7 @@ pub struct SessionContextResponse {
 )]
 pub async fn get_agent_session_context(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     query: Result<Query<GetAgentSessionQuery>, axum::extract::rejection::QueryRejection>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -431,6 +517,11 @@ pub async fn get_agent_session_context(
                 .into_response();
         }
     };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+            .with_code("agent_not_found")
+            .into_response();
+    }
     let model = entry.manifest.model.model.clone();
 
     // A dashboard tab can pin a non-active session via `?session_id=`. Validate
@@ -520,6 +611,7 @@ pub async fn get_agent_session_context(
 )]
 pub async fn attach_session_stream(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path((id, session_id_str)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> axum::response::Response {
@@ -558,6 +650,11 @@ pub async fn attach_session_stream(
                 .into_response();
         }
     };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+            .with_code("agent_not_found")
+            .into_response();
+    }
 
     // Validate the session belongs to this agent. Two acceptable shapes:
     //   1. The session has been persisted (one or more turns ran) and its
@@ -836,6 +933,7 @@ pub async fn switch_agent_session(
 )]
 pub async fn export_session(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path((id, session_id_str)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -849,6 +947,12 @@ pub async fn export_session(
             )
         }
     };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     let session_id = match session_id_str.parse::<uuid::Uuid>() {
         Ok(uuid) => librefang_types::agent::SessionId(uuid),
         Err(_) => {
@@ -901,6 +1005,7 @@ pub async fn export_session(
 )]
 pub async fn export_session_trajectory(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path((id, session_id_str)): Path<(String, String)>,
     Query(params): Query<HashMap<String, String>>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -936,6 +1041,13 @@ pub async fn export_session_trajectory(
                 .into_response();
         }
     };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": err_not_found})),
+        )
+            .into_response();
+    }
 
     // Parse session ID.
     let session_id = match session_id_str.parse::<uuid::Uuid>() {
@@ -990,7 +1102,20 @@ pub async fn export_session_trajectory(
     let (body, content_type, ext): (String, &'static str, &'static str) = if format == "jsonl" {
         (bundle.to_jsonl(), "application/x-ndjson", "jsonl")
     } else {
-        (bundle.to_json().to_string(), "application/json", "json")
+        let json = match bundle.to_json() {
+            Ok(json) => json,
+            Err(error) => {
+                tracing::error!(%error, "failed to serialize trajectory bundle");
+                let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+                let msg = t.t_args(&err_generic_key, &[("error", &error.to_string())]);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": msg})),
+                )
+                    .into_response();
+            }
+        };
+        (json.to_string(), "application/json", "json")
     };
 
     let filename = format!("trajectory-{}.{}", session_id.0, ext);
@@ -1337,5 +1462,61 @@ pub async fn stop_session(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": scrub_500(&e, &t)})),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine as _;
+
+    #[tokio::test]
+    async fn history_image_materialization_is_stable_and_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"same image bytes");
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(16));
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..16 {
+            let path = temp.path().to_path_buf();
+            let encoded = encoded.clone();
+            let barrier = barrier.clone();
+            tasks.spawn(async move {
+                barrier.wait().await;
+                materialize_history_image(&path, b"session-a", "image/png", &encoded).await
+            });
+        }
+        let mut materialized = Vec::new();
+        while let Some(result) = tasks.join_next().await {
+            materialized.push(result.unwrap().expect("concurrent materialization"));
+        }
+
+        let first = &materialized[0];
+        assert!(materialized
+            .iter()
+            .all(|image| image["file_id"] == first["file_id"]));
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+        let file_id = first["file_id"].as_str().unwrap();
+        assert!(uuid::Uuid::parse_str(file_id).is_ok());
+        assert!(UPLOAD_REGISTRY.contains_key(file_id));
+
+        let other_session =
+            materialize_history_image(temp.path(), b"session-b", "image/png", &encoded)
+                .await
+                .expect("other-session materialization");
+        let other_file_id = other_session["file_id"].as_str().unwrap();
+        assert_ne!(file_id, other_file_id);
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 2);
+
+        UPLOAD_REGISTRY.remove(file_id);
+        UPLOAD_REGISTRY.remove(other_file_id);
+    }
+
+    #[test]
+    fn tool_result_cap_is_a_utf8_byte_limit() {
+        let input = "界".repeat(40_000);
+        let capped = cap_tool_result(&input);
+        assert!(capped.len() <= 102_400);
+        assert!(capped.is_char_boundary(capped.len()));
+        assert!(input.starts_with(&capped));
     }
 }

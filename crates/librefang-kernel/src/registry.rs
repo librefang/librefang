@@ -236,8 +236,11 @@ impl AgentRegistry {
             .remove(&id)
             .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
         for tag in &tags {
-            if let Some(mut ids) = self.tag_index.get_mut(tag) {
-                ids.retain(|&agent_id| agent_id != id);
+            if let Entry::Occupied(mut bucket) = self.tag_index.entry(tag.clone()) {
+                bucket.get_mut().retain(|&agent_id| agent_id != id);
+                if bucket.get().is_empty() {
+                    bucket.remove();
+                }
             }
         }
         self.notify_changed();
@@ -913,6 +916,27 @@ mod tests {
         registry.register(entry).unwrap();
         registry.remove(id).unwrap();
         assert!(registry.get(id).is_none());
+    }
+
+    #[test]
+    fn remove_prunes_empty_tag_buckets() {
+        let registry = AgentRegistry::new();
+        let mut first = test_entry("first-tagged");
+        first.tags = vec!["shared".to_string(), "first-only".to_string()];
+        let first_id = first.id;
+        let mut second = test_entry("second-tagged");
+        second.tags = vec!["shared".to_string()];
+        let second_id = second.id;
+        registry.register(first).unwrap();
+        registry.register(second).unwrap();
+
+        registry.remove(first_id).unwrap();
+
+        assert!(!registry.tag_index.contains_key("first-only"));
+        assert_eq!(
+            registry.tag_index.get("shared").unwrap().as_slice(),
+            &[second_id]
+        );
     }
 
     #[test]

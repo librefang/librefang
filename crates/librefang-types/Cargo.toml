@@ -3,6 +3,8 @@ name = "librefang-types"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 description = "Core types and traits for the LibreFang Agent OS"
 readme = "README.md"
 

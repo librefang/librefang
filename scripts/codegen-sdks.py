@@ -145,11 +145,14 @@ Usage:
 """
 
 import json
+import socket
 import sys
 from typing import Any, Dict, Generator, Optional
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
+
+DEFAULT_TIMEOUT = 30.0
 
 
 class LibreFangError(Exception):
@@ -167,8 +170,9 @@ class _Resource:
 class LibreFang:
     """LibreFang REST API client. Zero dependencies — uses only stdlib urllib."""
 
-    def __init__(self, base_url: str, headers: Optional[Dict[str, str]] = None):
+    def __init__(self, base_url: str, headers: Optional[Dict[str, str]] = None, timeout: float = DEFAULT_TIMEOUT):
         self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
         self._headers = {"Content-Type": "application/json"}
         if headers:
             self._headers.update(headers)
@@ -182,7 +186,7 @@ class LibreFang:
         data = json.dumps(body).encode() if body is not None else None
         req = Request(url, data=data, headers=self._headers, method=method)
         try:
-            with urlopen(req) as resp:
+            with urlopen(req, timeout=self.timeout) as resp:
                 ct = resp.headers.get("content-type", "")
                 text = resp.read().decode()
                 if "application/json" in ct:
@@ -191,6 +195,8 @@ class LibreFang:
         except HTTPError as e:
             body_text = e.read().decode() if e.fp else ""
             raise LibreFangError(f"HTTP {e.code}: {body_text}", e.code, body_text) from e
+        except socket.timeout as e:
+            raise LibreFangError(f"Request timed out after {self.timeout}s") from e
         except URLError as e:
             raise LibreFangError(f"Connection error: {e.reason}") from e
 
@@ -206,10 +212,12 @@ class LibreFang:
         headers["Accept"] = "text/event-stream"
         req = Request(url, data=data, headers=headers, method=method)
         try:
-            resp = urlopen(req)
+            resp = urlopen(req, timeout=self.timeout)
         except HTTPError as e:
             body_text = e.read().decode() if e.fp else ""
             raise LibreFangError(f"HTTP {e.code}: {body_text}", e.code, body_text) from e
+        except socket.timeout as e:
+            raise LibreFangError(f"Request timed out after {self.timeout}s") from e
         except URLError as e:
             raise LibreFangError(f"Connection error: {e.reason}") from e
 
@@ -232,6 +240,19 @@ class LibreFang:
                             yield json.loads(data_str)
                         except json.JSONDecodeError:
                             yield {"raw": data_str}
+            # A clean EOF can arrive without a trailing newline, leaving the last event in the buffer.
+            # Parse it here rather than dropping it; the loop above only fires on a newline.
+            if buffer:
+                line = buffer.decode().strip()
+                if line.startswith("data: "):
+                    data_str = line[6:]
+                    if data_str != "[DONE]":
+                        try:
+                            yield json.loads(data_str)
+                        except json.JSONDecodeError:
+                            yield {"raw": data_str}
+        except socket.timeout as e:
+            raise LibreFangError(f"Request timed out after {self.timeout}s") from e
         finally:
             active_error = sys.exc_info()[0] is not None
             try:
@@ -384,6 +405,15 @@ class LibreFang {
         if (!trimmed.startsWith("data: ")) continue;
         const data = trimmed.slice(6);
         if (data === "[DONE]") return;
+        try { yield JSON.parse(data); } catch { yield { raw: data }; }
+      }
+    }
+    // A clean EOF can arrive without a trailing newline, leaving the last event in the buffer.
+    // Parse it here rather than dropping it; the loop above only fires on a newline.
+    const trailing = buffer.trim();
+    if (trailing.startsWith("data: ")) {
+      const data = trailing.slice(6);
+      if (data !== "[DONE]") {
         try { yield JSON.parse(data); } catch { yield { raw: data }; }
       }
     }
@@ -746,7 +776,7 @@ _RUST_LIB_HEADER = """\
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -760,6 +790,9 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn build_url<'a>(
     client: &Client,
@@ -801,7 +834,9 @@ async fn do_req(
     query: &[(&str, Option<&str>)],
 ) -> Result<Value> {
     let url = build_url(client, base_url, path_segments.iter().copied())?;
-    let req = client.request(method, url);
+    let req = client
+        .request(method, url)
+        .timeout(DEFAULT_REQUEST_TIMEOUT);
     let filtered: Vec<(&str, &str)> = query
         .iter()
         .filter_map(|(k, v)| v.map(|vv| (*k, vv)))
@@ -933,6 +968,27 @@ fn do_stream(
                 }
             }
         }
+        // A clean EOF can arrive without a trailing newline, leaving the last event in the buffer.
+        // Parse it here rather than dropping it; the loop above only fires on a newline.
+        if !buffer.is_empty() {
+            match std::str::from_utf8(&buffer) {
+                Ok(line) => {
+                    if let Some(data) = line.trim().strip_prefix("data: ") {
+                        if data != "[DONE]" {
+                            let event = serde_json::from_str::<Value>(data)
+                                .unwrap_or_else(|_| serde_json::json!({"raw": data}));
+                            let _ = tx.send(event).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(serde_json::json!({
+                        "error": format!("invalid utf-8 in SSE line at byte {}", e.valid_up_to()),
+                        "status": 0,
+                    })).await;
+                }
+            }
+        }
     });
     rx
 }
@@ -973,7 +1029,11 @@ def gen_rust(tag_ops: dict) -> str:
 
     out += "impl LibreFang {\n"
     out += "    pub fn new(base_url: impl Into<String>) -> Self {\n"
-    out += "        Self::with_client(base_url, Client::new())\n"
+    out += "        let client = Client::builder()\n"
+    out += "            .connect_timeout(DEFAULT_CONNECT_TIMEOUT)\n"
+    out += "            .build()\n"
+    out += '            .expect("failed to build HTTP client");\n'
+    out += "        Self::with_client(base_url, client)\n"
     out += "    }\n\n"
     out += "    /// Creates an SDK client using a caller-configured HTTP client.\n"
     out += "    ///\n"

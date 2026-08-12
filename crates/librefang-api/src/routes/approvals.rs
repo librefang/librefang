@@ -121,6 +121,42 @@ fn approval_to_json(
     })
 }
 
+fn approval_record_to_json(
+    record: librefang_kernel::approval::ApprovalRecord,
+    registry_agents: &[librefang_types::agent::AgentEntry],
+) -> serde_json::Value {
+    let request = record.request;
+    let agent_name = registry_agents
+        .iter()
+        .find(|agent| agent.id.to_string() == request.agent_id || agent.name == request.agent_id)
+        .map(|agent| agent.name.as_str())
+        .unwrap_or(&request.agent_id);
+    let status = match record.decision {
+        librefang_types::approval::ApprovalDecision::Approved => "approved",
+        librefang_types::approval::ApprovalDecision::Denied => "rejected",
+        librefang_types::approval::ApprovalDecision::TimedOut => "expired",
+        librefang_types::approval::ApprovalDecision::ModifyAndRetry { .. } => "modify_and_retry",
+        librefang_types::approval::ApprovalDecision::Skipped => "skipped",
+    };
+    serde_json::json!({
+        "id": request.id,
+        "agent_id": request.agent_id,
+        "agent_name": agent_name,
+        "tool_name": request.tool_name,
+        "description": request.description,
+        "action_summary": request.action_summary,
+        "action": request.action_summary,
+        "risk_level": request.risk_level,
+        "requested_at": request.requested_at,
+        "created_at": request.requested_at,
+        "timeout_secs": request.timeout_secs,
+        "session_id": request.session_id,
+        "status": status,
+        "decided_at": record.decided_at,
+        "decided_by": record.decided_by,
+    })
+}
+
 /// GET /api/approvals — List pending and recent approval requests.
 ///
 /// Transforms field names to match the dashboard template expectations:
@@ -151,48 +187,16 @@ pub async fn list_approvals(
     let recent = state.kernel.approvals().list_recent(usize::MAX);
 
     let registry_agents = state.kernel.agent_registry().list();
-    let agent_name_for = |agent_id: &str| {
-        registry_agents
-            .iter()
-            .find(|ag| ag.id.to_string() == agent_id || ag.name == agent_id)
-            .map(|ag| ag.name.clone())
-            .unwrap_or_else(|| agent_id.to_string())
-    };
-
     let mut approvals: Vec<serde_json::Value> = pending
         .iter()
         .map(|a| approval_to_json(a, &registry_agents))
         .collect();
 
-    approvals.extend(recent.into_iter().map(|record| {
-        let request = record.request;
-        let agent_name = agent_name_for(&request.agent_id);
-        let status = match record.decision {
-            librefang_types::approval::ApprovalDecision::Approved => "approved",
-            librefang_types::approval::ApprovalDecision::Denied => "rejected",
-            librefang_types::approval::ApprovalDecision::TimedOut => "expired",
-            librefang_types::approval::ApprovalDecision::ModifyAndRetry { .. } => {
-                "modify_and_retry"
-            }
-            librefang_types::approval::ApprovalDecision::Skipped => "skipped",
-        };
-        serde_json::json!({
-            "id": request.id,
-            "agent_id": request.agent_id,
-            "agent_name": agent_name,
-            "tool_name": request.tool_name,
-            "description": request.description,
-            "action_summary": request.action_summary,
-            "action": request.action_summary,
-            "risk_level": request.risk_level,
-            "requested_at": request.requested_at,
-            "created_at": request.requested_at,
-            "timeout_secs": request.timeout_secs,
-            "status": status,
-            "decided_at": record.decided_at,
-            "decided_by": record.decided_by,
-        })
-    }));
+    approvals.extend(
+        recent
+            .into_iter()
+            .map(|record| approval_record_to_json(record, &registry_agents)),
+    );
 
     approvals.sort_by(|a, b| {
         let a_pending = a["status"].as_str() == Some("pending");
@@ -237,8 +241,23 @@ pub async fn get_approval(
             (StatusCode::OK, Json(approval_to_json(&a, &registry_agents)))
         }
         None => {
-            ApiErrorResponse::not_found(t.t_args("api-error-approval-not-found", &[("id", &id)]))
-                .into_json_tuple()
+            let registry_agents = state.kernel.agent_registry().list();
+            match state
+                .kernel
+                .approvals()
+                .list_recent(usize::MAX)
+                .into_iter()
+                .find(|record| record.request.id == uuid)
+            {
+                Some(record) => (
+                    StatusCode::OK,
+                    Json(approval_record_to_json(record, &registry_agents)),
+                ),
+                None => ApiErrorResponse::not_found(
+                    t.t_args("api-error-approval-not-found", &[("id", &id)]),
+                )
+                .into_json_tuple(),
+            }
         }
     }
 }
@@ -263,12 +282,12 @@ pub(crate) struct CreateApprovalRequest {
     pub session_id: Option<String>,
 }
 
-#[utoipa::path(post, path = "/api/approvals", tag = "approvals", request_body = crate::types::JsonObject, responses((status = 200, description = "Approval created", body = crate::types::JsonObject)))]
+#[utoipa::path(post, path = "/api/approvals", tag = "approvals", request_body = crate::types::JsonObject, responses((status = 201, description = "Approval registered", body = crate::types::JsonObject), (status = 400, description = "Invalid approval request", body = crate::types::JsonObject), (status = 429, description = "Agent pending-approval limit reached", body = crate::types::JsonObject), (status = 500, description = "Approval registration failed", body = crate::types::JsonObject)))]
 #[allow(private_interfaces)]
 pub async fn create_approval(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateApprovalRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     use librefang_types::approval::{ApprovalRequest, RiskLevel};
 
     let policy = state.kernel.approvals().policy();
@@ -302,34 +321,47 @@ pub async fn create_approval(
         tool_use_id: None,
     };
 
-    // Spawn the request in the background (it will block until resolved or timed out)
+    // Registration performs synchronous SQLite persistence.
+    // Run it on the blocking pool, but await the registration result before acknowledging the id so callers never receive a phantom pending request.
     let kernel = Arc::clone(&state.kernel);
-    tokio::spawn(async move {
-        kernel.approvals().request_approval(approval_req).await;
-    });
-
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!({"id": id.to_string(), "status": "pending"})),
-    )
+    match tokio::task::spawn_blocking(move || {
+        kernel.approvals().submit_manual_request(approval_req)
+    })
+    .await
+    {
+        Ok(Ok(_)) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"id": id.to_string(), "status": "pending"})),
+        )
+            .into_response(),
+        Ok(Err(error)) if error.contains("Too many pending") => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": error})),
+        )
+            .into_response(),
+        Ok(Err(error)) => ApiErrorResponse::bad_request(error).into_response(),
+        Err(error) => {
+            ApiErrorResponse::internal_scrub(format!("Approval registration task failed: {error}"))
+                .into_response()
+        }
+    }
 }
 
-/// Process-global lock serializing the per-approval TOTP replay
-/// check-and-record so two concurrent `approve_request` calls cannot both
-/// pass the `is_totp_code_used` gate with the same single-use code before
-/// either records it (TOCTOU).
-///
-/// `record_totp_code_used_for` upserts (`ON CONFLICT(code_hash) DO UPDATE`)
-/// and therefore always succeeds, so it cannot itself act as an atomic claim.
-/// Holding this lock across the check -> verify -> record region makes the
-/// sequence atomic and guarantees a single valid code authorizes exactly one
-/// approval, restoring the #3359 replay and #3360 single-use-per-action
-/// invariants under concurrency (mirrors the recovery-code path, which is made
-/// atomic kernel-side via `vault_recovery_codes_mutex`).
-///
-/// The critical section is fully synchronous — no `.await` runs while the
-/// guard is held — so a `std::sync::Mutex` is the correct primitive here.
-static TOTP_REPLAY_CLAIM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+async fn claim_totp_code(
+    state: &Arc<AppState>,
+    code: &str,
+    bound_to: Option<String>,
+) -> Result<librefang_kernel::approval::TotpCodeClaim, String> {
+    let kernel = Arc::clone(&state.kernel);
+    let code = code.to_string();
+    tokio::task::spawn_blocking(move || {
+        kernel
+            .approvals()
+            .claim_totp_code_used_for(&code, bound_to.as_deref())
+    })
+    .await
+    .map_err(|error| format!("TOTP replay claim task failed: {error}"))?
+}
 
 /// POST /api/approvals/{id}/approve — Approve a pending request.
 ///
@@ -435,68 +467,28 @@ pub async fn approve_request(
                             .into_response();
                         }
                     };
-                    // Serialize the replay check-and-record below so two
-                    // concurrent approvals cannot both consume the same
-                    // single-use code (see `TOTP_REPLAY_CLAIM_LOCK`). The guard
-                    // is dropped at the end of this `else` block — before the
-                    // async `resolve_tool_approval` call — and every path
-                    // between here and the record is synchronous.
-                    let _totp_claim_guard = TOTP_REPLAY_CLAIM_LOCK
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    // Replay-prevention check (#3359): reject a code that was
-                    // already used within the last 60 seconds (two TOTP windows).
-                    if state.kernel.approvals().is_totp_code_used(code) {
-                        // Atomic check + record (#3584) preserves fail-secure
-                        // on DB persist failure (#3372): Err(false) = DB write
-                        // dropped; Err(true) = already locked out, fall through
-                        // to "already used" response so the lockout state is
-                        // not leaked here.
-                        if let Err(false) = state
-                            .kernel
-                            .approvals()
-                            .check_and_record_totp_failure("api_admin")
-                        {
-                            return ApiErrorResponse::internal(
-                                "Failed to persist TOTP failure counter",
-                            )
-                            .into_json_tuple()
-                            .into_response();
-                        }
-                        return ApiErrorResponse::bad_request(
-                            "TOTP code has already been used. Wait for the next 30-second window.",
-                        )
-                        .into_json_tuple()
-                        .into_response();
-                    }
                     match crate::approval::ApprovalManager::verify_totp_code_with_issuer(
                         &secret,
                         code,
                         &totp_issuer,
                     ) {
                         Ok(true) => {
-                            // SECURITY (#3360): Bind the consumed code to the
-                            // approval id it authorized. The replay window is
-                            // still global (`is_totp_code_used` keys on the
-                            // hash alone) so the code is single-use across
-                            // all actions; the binding only documents *which*
-                            // action used it for post-incident audit.
-                            //
-                            // Fail-secure (#3372 parity): if the DB write
-                            // fails the code is NOT in the replay table and
-                            // could be reused, so reject with 500 rather than
-                            // silently approving.
-                            if state
-                                .kernel
-                                .approvals()
-                                .record_totp_code_used_for(code, Some(&format!("approval:{uuid}")))
-                                .is_err()
+                            match claim_totp_code(&state, code, Some(format!("approval:{uuid}")))
+                                .await
                             {
-                                return ApiErrorResponse::internal(
-                                    "Failed to persist TOTP used-code record",
-                                )
-                                .into_json_tuple()
-                                .into_response();
+                                Ok(librefang_kernel::approval::TotpCodeClaim::Claimed) => {}
+                                Ok(librefang_kernel::approval::TotpCodeClaim::AlreadyUsed) => {
+                                    return ApiErrorResponse::bad_request(
+                                        "TOTP code has already been used. Wait for the next 30-second window.",
+                                    )
+                                    .into_json_tuple()
+                                    .into_response();
+                                }
+                                Err(error) => {
+                                    return ApiErrorResponse::internal_scrub(error)
+                                        .into_json_tuple()
+                                        .into_response();
+                                }
                             }
                             // Audit trail: write the binding alongside the
                             // approval resolution so an auditor can correlate
@@ -704,7 +696,7 @@ pub(crate) struct BatchResolveRequest {
 /// (`docs/issues/bulk-with-capacity-no-validate.md`).
 const BULK_APPROVAL_LIMIT: usize = 100;
 
-#[utoipa::path(post, path = "/api/approvals/batch", tag = "approvals", request_body = crate::types::JsonObject, responses((status = 200, description = "Batch resolve results", body = crate::types::JsonObject)))]
+#[utoipa::path(post, path = "/api/approvals/batch", tag = "approvals", request_body = crate::types::JsonObject, responses((status = 200, description = "All batch items resolved successfully", body = crate::types::JsonObject), (status = 207, description = "Batch contains one or more per-item errors", body = crate::types::JsonObject), (status = 400, description = "Invalid batch request", body = crate::types::JsonObject)))]
 #[allow(private_interfaces)]
 pub async fn batch_resolve(
     State(state): State<Arc<AppState>>,
@@ -787,10 +779,12 @@ pub async fn batch_resolve(
         }
     }
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"results": result_json})),
-    )
+    let status = if result_json.iter().any(|result| result["status"] == "error") {
+        StatusCode::MULTI_STATUS
+    } else {
+        StatusCode::OK
+    };
+    (status, Json(serde_json::json!({"results": result_json})))
 }
 
 // ---------------------------------------------------------------------------
@@ -851,7 +845,7 @@ pub async fn list_approvals_for_session(
 }
 
 /// POST /api/approvals/session/{session_id}/approve_all — Approve all pending
-/// approvals for the given session atomically.
+/// approvals for the given session on a best-effort per-item basis.
 ///
 /// Mirrors Hermes-Agent's `resolve_gateway_approval(session_key, "once",
 /// resolve_all=True)`.  TOTP pre-check is enforced — if any pending request
@@ -874,7 +868,7 @@ pub(crate) struct ApproveAllForSessionRequest {
 }
 
 /// POST /api/approvals/session/{session_id}/approve_all — Approve all pending
-/// approvals for the given session atomically.
+/// approvals for the given session on a best-effort per-item basis.
 #[utoipa::path(
     post,
     path = "/api/approvals/session/{session_id}/approve_all",
@@ -882,7 +876,7 @@ pub(crate) struct ApproveAllForSessionRequest {
     params(("session_id" = String, Path, description = "Session ID")),
     request_body = ApproveAllForSessionRequest,
     responses(
-        (status = 200, description = "All pending session approvals approved", body = crate::types::JsonObject),
+        (status = 200, description = "Best-effort session approval results", body = crate::types::JsonObject),
         (status = 400, description = "TOTP required for one or more items", body = crate::types::JsonObject),
         (status = 409, description = "Pending set changed since request was issued", body = crate::types::JsonObject),
     )
@@ -1001,7 +995,7 @@ pub async fn approve_all_for_session(
 }
 
 /// POST /api/approvals/session/{session_id}/reject_all — Reject all pending
-/// approvals for the given session atomically.
+/// approvals for the given session on a best-effort per-item basis.
 ///
 /// Mirrors Hermes-Agent's `resolve_gateway_approval(session_key, "deny",
 /// resolve_all=True)`.
@@ -1011,7 +1005,7 @@ pub async fn approve_all_for_session(
     tag = "approvals",
     params(("session_id" = String, Path, description = "Session ID")),
     responses(
-        (status = 200, description = "All pending session approvals rejected", body = crate::types::JsonObject)
+        (status = 200, description = "Best-effort session rejection results", body = crate::types::JsonObject)
     )
 )]
 pub async fn reject_all_for_session(
@@ -1175,28 +1169,6 @@ pub async fn totp_setup(
                         }
                     }
                 } else {
-                    // TOTP code — check replay before verifying (#3359).
-                    if state.kernel.approvals().is_totp_code_used(code) {
-                        // Atomic check + record (#3584) preserves fail-secure
-                        // on DB persist failure (#3372): Err(false) = DB write
-                        // dropped; Err(true) = already locked out, fall through
-                        // to "already used" response so the lockout state is
-                        // not leaked here.
-                        if let Err(false) = state
-                            .kernel
-                            .approvals()
-                            .check_and_record_totp_failure(SETUP_LOCKOUT_KEY)
-                        {
-                            return ApiErrorResponse::internal(
-                                "Failed to persist TOTP failure counter",
-                            )
-                            .into_json_tuple();
-                        }
-                        return ApiErrorResponse::bad_request(
-                            "TOTP code has already been used. Wait for the next 30-second window.",
-                        )
-                        .into_json_tuple();
-                    }
                     match state.kernel.vault_get("totp_secret") {
                         Some(secret) => {
                             let ok =
@@ -1207,7 +1179,19 @@ pub async fn totp_setup(
                                 )
                                 .unwrap_or(false);
                             if ok {
-                                state.kernel.approvals().record_totp_code_used(code);
+                                match claim_totp_code(&state, code, None).await {
+                                    Ok(librefang_kernel::approval::TotpCodeClaim::Claimed) => {}
+                                    Ok(librefang_kernel::approval::TotpCodeClaim::AlreadyUsed) => {
+                                        return ApiErrorResponse::bad_request(
+                                            "TOTP code has already been used. Wait for the next 30-second window.",
+                                        )
+                                        .into_json_tuple();
+                                    }
+                                    Err(error) => {
+                                        return ApiErrorResponse::internal_scrub(error)
+                                            .into_json_tuple();
+                                    }
+                                }
                             }
                             ok
                         }
@@ -1331,32 +1315,22 @@ pub async fn totp_confirm(
         }
     };
 
-    // Replay-prevention check (#3359): reject a code already used in the last 60 s.
-    if state.kernel.approvals().is_totp_code_used(&body.code) {
-        // Atomic check + record (#3584) preserves fail-secure on DB persist
-        // failure (#3372): Err(false) = DB write dropped; Err(true) = already
-        // locked out, fall through to "already used" response so the lockout
-        // state is not leaked here.
-        if let Err(false) = state
-            .kernel
-            .approvals()
-            .check_and_record_totp_failure("api_admin")
-        {
-            return ApiErrorResponse::internal("Failed to persist TOTP failure counter")
-                .into_json_tuple();
-        }
-        return ApiErrorResponse::bad_request(
-            "TOTP code has already been used. Wait for the next 30-second window.",
-        )
-        .into_json_tuple();
-    }
     match crate::approval::ApprovalManager::verify_totp_code_with_issuer(
         &secret,
         &body.code,
         &totp_issuer,
     ) {
         Ok(true) => {
-            state.kernel.approvals().record_totp_code_used(&body.code);
+            match claim_totp_code(&state, &body.code, None).await {
+                Ok(librefang_kernel::approval::TotpCodeClaim::Claimed) => {}
+                Ok(librefang_kernel::approval::TotpCodeClaim::AlreadyUsed) => {
+                    return ApiErrorResponse::bad_request(
+                        "TOTP code has already been used. Wait for the next 30-second window.",
+                    )
+                    .into_json_tuple();
+                }
+                Err(error) => return ApiErrorResponse::internal_scrub(error).into_json_tuple(),
+            }
             if let Err(e) = state.kernel.vault_set("totp_confirmed", "true") {
                 return ApiErrorResponse::internal(e).into_json_tuple();
             }
@@ -1470,16 +1444,6 @@ pub async fn totp_revoke(
             }
         }
     } else {
-        // TOTP replay check first (#3952).  Most damaging path of all:
-        // a single replayed code disables 2FA entirely.  approve_request
-        // and totp_confirm both check this; totp_revoke was missed.
-        if state.kernel.approvals().is_totp_code_used(&body.code) {
-            // Don't count toward the lockout — the code itself isn't
-            // wrong, it's already-spent.  Return the same 400 shape so
-            // the caller can't distinguish "already used" from "wrong".
-            return ApiErrorResponse::bad_request("TOTP code already used. Wait for a new code.")
-                .into_json_tuple();
-        }
         match state.kernel.vault_get("totp_secret") {
             Some(secret) => {
                 let ok = crate::approval::ApprovalManager::verify_totp_code_with_issuer(
@@ -1489,8 +1453,18 @@ pub async fn totp_revoke(
                 )
                 .unwrap_or(false);
                 if ok {
-                    // Mark consumption only after a true verify.
-                    state.kernel.approvals().record_totp_code_used(&body.code);
+                    match claim_totp_code(&state, &body.code, None).await {
+                        Ok(librefang_kernel::approval::TotpCodeClaim::Claimed) => {}
+                        Ok(librefang_kernel::approval::TotpCodeClaim::AlreadyUsed) => {
+                            return ApiErrorResponse::bad_request(
+                                "TOTP code already used. Wait for a new code.",
+                            )
+                            .into_json_tuple();
+                        }
+                        Err(error) => {
+                            return ApiErrorResponse::internal_scrub(error).into_json_tuple();
+                        }
+                    }
                 }
                 ok
             }

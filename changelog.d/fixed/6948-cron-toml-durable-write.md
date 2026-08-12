@@ -1,0 +1,2 @@
+Cron script TOML writes opened their staging file with `File::create`, which truncates and silently reuses an existing file of the same name instead of failing loudly on a staging-name collision.
+The staging file is now opened with `create_new` so a collision surfaces as an error rather than being silently overwritten, and the parent directory is fsynced after the atomic rename on Unix so a completed write survives a crash immediately afterward (#6948) (@houko)

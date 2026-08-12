@@ -658,13 +658,9 @@ const renderResponseFormat = (rf: ManifestFormState["response_format"]): string 
   // json_schema — schemas can be deeply nested, which makes inline-table
   // syntax brittle. Build the value once via JSON, then convert to TOML
   // using a small recursive emitter that always produces inline syntax.
-  let schemaValue: unknown = {};
-  try {
-    schemaValue = JSON.parse(rf.schema || "{}");
-  } catch {
-    // Bad JSON in the schema field — fall back to {} rather than emit
-    // garbage. The user sees the parse error live in the form anyway.
-  }
+  // Invalid form state is blocked by validateManifestForm before submit.
+  // Keep preview serialization total while sharing the exact same supported schema domain with the validator.
+  const schemaValue = parseSupportedJsonSchema(rf.schema) ?? {};
   const parts: string[] = [`type = "json_schema"`, `name = ${escapeTomlString(rf.name || "response")}`];
   parts.push(`schema = ${jsonValueToInlineToml(schemaValue)}`);
   if (rf.strict) parts.push("strict = true");
@@ -753,12 +749,73 @@ const stringifyOrEmpty = (value: unknown): string => {
   }
 };
 
+const containsJsonNull = (value: unknown): boolean => {
+  if (value === null) return true;
+  if (Array.isArray(value)) return value.some(containsJsonNull);
+  if (typeof value === "object") return Object.values(value).some(containsJsonNull);
+  return false;
+};
+
+const hasUnsupportedJsonNumber = (raw: string): boolean => {
+  for (let index = 0; index < raw.length; index += 1) {
+    if (raw[index] === '"') {
+      index += 1;
+      while (index < raw.length && raw[index] !== '"') {
+        if (raw[index] === "\\") index += 1;
+        index += 1;
+      }
+      continue;
+    }
+    if (raw[index] !== "-" && !/[0-9]/.test(raw[index])) continue;
+
+    const token = raw
+      .slice(index)
+      .match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/)?.[0];
+    if (!token) continue;
+    const value = Number(token);
+    const mantissa = token.split(/[eE]/, 1)[0];
+    const underflowed = value === 0 && /[1-9]/.test(mantissa);
+    if (
+      !Number.isFinite(value) ||
+      underflowed ||
+      (Number.isInteger(value) && !Number.isSafeInteger(value))
+    ) {
+      return true;
+    }
+    index += token.length - 1;
+  }
+  return false;
+};
+
+// JSON Schema roots are objects or booleans.
+// TOML has no null value, so a schema containing a JSON null cannot be represented without changing its meaning and must be rejected before serialization.
+const parseSupportedJsonSchema = (raw: string): boolean | Record<string, unknown> | undefined => {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (hasUnsupportedJsonNumber(raw)) return undefined;
+    if (typeof parsed === "boolean") return parsed;
+    if (isTomlTable(parsed) && !containsJsonNull(parsed)) return parsed;
+  } catch {
+    // The caller reports the field-level validation error.
+  }
+  return undefined;
+};
+
 // Form-validation errors. Returns an empty array when submittable.
 export const validateManifestForm = (form: ManifestFormState): string[] => {
   const errors: string[] = [];
   if (!form.name.trim()) errors.push("name");
   if (!form.model.provider.trim()) errors.push("model.provider");
   if (!form.model.model.trim()) errors.push("model.model");
+  if (form.schedule.mode === "periodic" && !form.schedule.cron.trim()) {
+    errors.push("schedule.cron");
+  }
+  if (form.response_format.mode === "json_schema") {
+    const schema = form.response_format.schema.trim();
+    if (!schema || parseSupportedJsonSchema(schema) === undefined) {
+      errors.push("response_format.schema");
+    }
+  }
   return errors;
 };
 
@@ -985,10 +1042,7 @@ const stripKnown = (table: TomlTable, knownKeys: Set<string>): TomlTable => {
 };
 
 const parseScheduleField = (raw: unknown): ManifestFormState["schedule"] => {
-  if (typeof raw === "string") {
-    if (raw === "reactive") return { mode: "reactive" };
-    return { mode: "reactive" };
-  }
+  if (typeof raw === "string") return { mode: "reactive" };
   if (!isTomlTable(raw)) return { mode: "reactive" };
   if (isTomlTable(raw.periodic)) {
     return { mode: "periodic", cron: asString(raw.periodic.cron) };

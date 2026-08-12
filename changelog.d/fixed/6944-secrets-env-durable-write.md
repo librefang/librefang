@@ -1,0 +1,2 @@
+Secret writes to `secrets.env` could report success while a staging-file `fsync` failure went unnoticed, or leave a 0600 secret-bearing staging file behind after a failed write or rename.
+The staging file now propagates `fsync` errors instead of discarding them, gets removed on any write or rename failure, and the parent directory is fsynced after the atomic rename on Unix so a completed write survives a crash immediately afterward (#6944) (@houko)

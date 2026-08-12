@@ -9,6 +9,17 @@ use librefang_channels::router::AgentRouter;
 use librefang_channels::sidecar::SidecarAdapter;
 use librefang_channels::types::{ChannelAdapter, SenderContext};
 
+fn is_safe_manifest_name(name: &str) -> bool {
+    if name.contains(['/', '\\']) {
+        return false;
+    }
+    let mut components = std::path::Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(component)), None) if component == name
+    )
+}
+
 /// Sanitize LLM/driver errors into user-friendly messages for channel delivery.
 ///
 /// Prevents raw technical details (stack traces, driver internals, status codes)
@@ -929,6 +940,10 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn spawn_agent_by_name(&self, manifest_name: &str) -> Result<AgentId, String> {
+        if !is_safe_manifest_name(manifest_name) {
+            return Err("Invalid manifest name".to_string());
+        }
+
         // Look for manifest at ~/.librefang/workspaces/agents/{name}/agent.toml
         let manifest_path = self
             .kernel
@@ -1678,17 +1693,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                             }
                         }
                         Some(code) => {
-                            // TOTP code — replay check first (#3952): if a
-                            // captured/screen-shared code was already used
-                            // within the 60s acceptance window, refuse it
-                            // even if the time-window math still validates.
-                            // The HTTP approval path checks this in
-                            // approve_request; the channel-bridge path was
-                            // missed in #3952 and remained vulnerable to
-                            // replay over Telegram / Slack / WhatsApp etc.
-                            if self.kernel.approvals().is_totp_code_used(code) {
-                                return "TOTP code already used. Wait for a new code.".into();
-                            }
                             let secret = match self.kernel.vault_get("totp_secret") {
                                 Some(s) => s,
                                 None => return "TOTP not configured. Set up TOTP first.".into(),
@@ -1700,12 +1704,26 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                 &totp_issuer,
                             ) {
                                 Ok(true) => {
-                                    // Record consumption only after a true
-                                    // verify so a wrong code can still be
-                                    // tried again with the same digits at
-                                    // the next time-step.
-                                    self.kernel.approvals().record_totp_code_used(code);
-                                    true
+                                    let kernel = Arc::clone(&self.kernel);
+                                    let code = code.to_string();
+                                    match tokio::task::spawn_blocking(move || {
+                                        kernel.approvals().claim_totp_code_used_for(&code, None)
+                                    })
+                                    .await
+                                    {
+                                        Ok(Ok(
+                                            librefang_kernel::approval::TotpCodeClaim::Claimed,
+                                        )) => true,
+                                        Ok(Ok(
+                                            librefang_kernel::approval::TotpCodeClaim::AlreadyUsed,
+                                        )) => {
+                                            return "TOTP code already used. Wait for a new code."
+                                                .into();
+                                        }
+                                        Ok(Err(_)) | Err(_) => {
+                                            return "TOTP service temporarily unavailable.".into();
+                                        }
+                                    }
                                 }
                                 Ok(false) => {
                                     // Atomically check lockout + record failure (#3584).
@@ -3065,6 +3083,28 @@ mod tests {
     use super::*;
     use librefang_kernel::event_bus::EventBus;
 
+    #[test]
+    fn manifest_name_must_be_one_path_component() {
+        assert!(is_safe_manifest_name("research-agent"));
+        assert!(is_safe_manifest_name(".private-agent"));
+
+        for unsafe_name in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "nested/agent",
+            "nested\\agent",
+            "/tmp/agent",
+            "C:\\tmp\\agent",
+        ] {
+            assert!(
+                !is_safe_manifest_name(unsafe_name),
+                "accepted unsafe manifest name: {unsafe_name:?}"
+            );
+        }
+    }
+
     // ── seed_router_agent_names: defined-but-unspawned agents ─────
     //
     // Regression for inbound channel bindings silently falling through
@@ -3208,6 +3248,94 @@ mod tests {
         let mgr = fresh_approval_manager();
         let msg = resolve_no_pending_message(&mgr, "");
         assert!(msg.contains("No pending approval matching"));
+    }
+
+    /// The channel adapter must consume the same persistent atomic claim as HTTP/login surfaces: a valid code approves one request, then the same code is rejected for a distinct pending request.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn channel_approval_rejects_replayed_totp_code() {
+        use librefang_testing::MockKernelBuilder;
+        use librefang_types::approval::{ApprovalRequest, RiskLevel, SecondFactor};
+        use totp_rs::{Algorithm, Builder as TotpBuilder, Secret};
+
+        let (kernel, _tmp) = MockKernelBuilder::new().build();
+        let mut policy = kernel.approvals().policy();
+        policy.second_factor = SecondFactor::Totp;
+        policy.totp_tools = vec!["shell_exec".to_string()];
+        kernel.approvals().update_policy(policy);
+
+        let (secret, _uri, _qr) = kernel
+            .approvals()
+            .new_totp_secret("LibreFang", "channel-test")
+            .expect("generate secret");
+        kernel
+            .vault_set("totp_secret", &secret)
+            .expect("persist secret");
+        let issuer = kernel.approvals().policy().totp_issuer.clone();
+        let code = TotpBuilder::new()
+            .with_algorithm(Algorithm::SHA1)
+            .with_skew(1)
+            .with_step_duration(30)
+            .with_secret(Secret::try_from_base32(&secret).expect("decode base32 secret"))
+            .with_issuer(Some(issuer))
+            .with_account_name(String::new())
+            .build()
+            .expect("totp init")
+            .generate_current()
+            .to_string();
+
+        let make_request = || ApprovalRequest {
+            id: uuid::Uuid::new_v4(),
+            agent_id: "channel-agent".to_string(),
+            tool_name: "shell_exec".to_string(),
+            description: "channel replay test".to_string(),
+            action_summary: "echo test".to_string(),
+            risk_level: RiskLevel::High,
+            requested_at: chrono::Utc::now(),
+            timeout_secs: 300,
+            sender_id: Some("channel-user".to_string()),
+            channel: Some("telegram".to_string()),
+            chat_id: None,
+            route_to: Vec::new(),
+            escalation_count: 0,
+            session_id: None,
+            tool_use_id: None,
+        };
+        let first = make_request();
+        let first_id = first.id;
+        kernel
+            .approvals()
+            .submit_manual_request(first)
+            .expect("submit first approval");
+        let second = make_request();
+        let second_id = second.id;
+        kernel
+            .approvals()
+            .submit_manual_request(second)
+            .expect("submit second approval");
+
+        let adapter = KernelBridgeAdapter {
+            kernel: kernel.clone(),
+            started_at: Instant::now(),
+        };
+        let first_message = adapter
+            .resolve_approval_text(&first_id.to_string(), true, Some(&code), "channel-user")
+            .await;
+        assert!(
+            first_message.starts_with("Approved ["),
+            "got: {first_message}"
+        );
+
+        let replay_message = adapter
+            .resolve_approval_text(&second_id.to_string(), true, Some(&code), "channel-user")
+            .await;
+        assert_eq!(
+            replay_message,
+            "TOTP code already used. Wait for a new code."
+        );
+        assert!(
+            kernel.approvals().get_pending(second_id).is_some(),
+            "replayed code must not resolve the second request"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -58,7 +58,7 @@ jobs:
                   core.info(`Issue #${num}: added "${LABEL}"`);
                 } else if (pr.state === 'closed' && !pr.merged && hasLabel) {
                   // PR closed without merge — check if any other open PR links this issue
-                  const { data: prs } = await github.rest.pulls.list({
+                  const prs = await github.paginate(github.rest.pulls.list, {
                     owner: context.repo.owner,
                     repo: context.repo.repo,
                     state: 'open',

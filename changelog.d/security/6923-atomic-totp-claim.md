@@ -1,0 +1,3 @@
+Make verified TOTP codes single-use through an atomic SQLite claim shared by dashboard login, HTTP approval, enrollment reset, confirmation, revocation, and channel approval paths, and fail closed before sensitive state changes when replay persistence is unavailable.
+Move the claim onto Tokio's blocking pool instead of holding a process-wide mutex and synchronous SQLite work on an async worker.
+Register manual approval requests before returning `201 Created`, return recent resolved approvals from the per-id endpoint, report mixed batch outcomes with HTTP 207, and describe session-wide resolution accurately as best-effort rather than transactional. (#6923) (@houko)

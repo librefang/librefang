@@ -70,6 +70,15 @@ pub async fn send_message(
         );
     }
 
+    // Owner-scoping (#6753): `agent_message` in `middleware::user_role_allows_request` deliberately lets any `User`-role caller POST `/message` on an arbitrary agent id.
+    // Without this check a non-owner could drive a full LLM turn — tool execution and budget spend included — on another user's agent by guessing/enumerating its UUID, which is the exact class of gap this PR closes for the read-only agent-scoped routes.
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return crate::extensions::with_agent_id(
+            agent_id,
+            ApiErrorResponse::not_found(err_not_found).with_code("agent_not_found"),
+        );
+    }
+
     // Reject messages when the agent's provider has no API key configured
     {
         let registry = state.kernel.agent_registry();
@@ -139,7 +148,21 @@ pub async fn send_message(
 
     // Resolve file attachments into image content blocks
     if !req.attachments.is_empty() {
-        let image_blocks = resolve_attachments(&state, &req.attachments);
+        let image_blocks = match resolve_attachments(
+            &state,
+            &req.attachments,
+            api_user.as_ref().map(|user| &user.0),
+        )
+        .await
+        {
+            Ok(blocks) => blocks,
+            Err(denied) => {
+                tracing::warn!(file_id = %denied.file_id, "message attachment access denied");
+                return ApiErrorResponse::forbidden("You are not authorized to access this upload")
+                    .with_code("upload_access_denied")
+                    .into_response();
+            }
+        };
         if !image_blocks.is_empty() {
             // Snapshot the agent's persistent (registry) session id as
             // the last-resort fallback in
@@ -453,6 +476,13 @@ pub async fn send_message_stream(
             .into_response();
     }
 
+    // Owner-scoping (#6753): see the matching check in `send_message` above — `agent_message` in `middleware::user_role_allows_request` allows any `User`-role caller to POST here for an arbitrary agent id, so this handler must scope by ownership itself.
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return ApiErrorResponse::not_found(err_not_found)
+            .with_code("agent_not_found")
+            .into_response();
+    }
+
     // Parse optional explicit session_id override from the request body.
     // Hoisted above the attachment-injection block so it can be threaded
     // into `inject_attachments_into_session`.
@@ -472,7 +502,21 @@ pub async fn send_message_stream(
         build_streaming_kernel_args(&req, session_id_override);
 
     if !req.attachments.is_empty() {
-        let image_blocks = resolve_attachments(&state, &req.attachments);
+        let image_blocks = match resolve_attachments(
+            &state,
+            &req.attachments,
+            api_user.as_ref().map(|user| &user.0),
+        )
+        .await
+        {
+            Ok(blocks) => blocks,
+            Err(denied) => {
+                tracing::warn!(file_id = %denied.file_id, "stream attachment access denied");
+                return ApiErrorResponse::forbidden("You are not authorized to access this upload")
+                    .with_code("upload_access_denied")
+                    .into_response();
+            }
+        };
         if !image_blocks.is_empty() {
             let fallback_session_id = state
                 .kernel
@@ -625,6 +669,7 @@ pub async fn send_message_stream(
 )]
 pub async fn get_agent_deliveries(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Query(params): Query<HashMap<String, String>>,
@@ -645,6 +690,12 @@ pub async fn get_agent_deliveries(
             }
         }
     };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
 
     let limit = params
         .get("limit")

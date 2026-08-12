@@ -154,6 +154,44 @@ fn test_record_with_context_persists_user_and_channel() {
 }
 
 #[test]
+fn malformed_persisted_row_fails_integrity_verification() {
+    let pool = Pool::builder()
+        .max_size(1)
+        .build(SqliteConnectionManager::memory())
+        .unwrap();
+    {
+        let conn = pool.get().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            );
+            INSERT INTO audit_entries VALUES (
+                0, X'00', 'agent-1', 'ToolInvoke', 'detail', 'ok', NULL, NULL,
+                '0000000000000000000000000000000000000000000000000000000000000000',
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+            );",
+        )
+        .unwrap();
+    }
+
+    let log = AuditLog::with_db(pool);
+
+    assert_eq!(log.len(), 0, "malformed rows must not enter the chain");
+    let error = log.verify_integrity().unwrap_err();
+    assert!(error.contains("only partially loaded"), "{error}");
+    assert!(error.contains("ordered index 0"), "{error}");
+}
+
+#[test]
 fn test_new_rbac_variants_preserve_chain() {
     // RBAC M5: UserLogin / RoleChange / PermissionDenied / BudgetExceeded
     // must hash like every other variant — adding them MUST NOT shift the

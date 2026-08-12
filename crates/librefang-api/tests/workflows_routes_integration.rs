@@ -149,6 +149,19 @@ async fn json_request(
     (status, value)
 }
 
+/// Register an agent so agent-scoped reads resolve.
+///
+/// The cron scheduler accepts a job for any `AgentId` without consulting the registry, but the read routes deny an id the registry cannot resolve, so a job seeded against a bare `AgentId::new()` reads back as 404.
+fn spawn_test_agent(h: &Harness) -> librefang_types::agent::AgentId {
+    h._state
+        .kernel
+        .spawn_agent_typed(librefang_types::agent::AgentManifest {
+            name: format!("workflows-fixture-{}", uuid::Uuid::new_v4()),
+            ..librefang_types::agent::AgentManifest::default()
+        })
+        .expect("spawn fixture agent")
+}
+
 async fn get(h: &Harness, path: &str) -> (StatusCode, serde_json::Value) {
     // GET handlers don't read a JSON body; send no content-type to mirror
     // how curl would hit them in production.
@@ -937,7 +950,6 @@ async fn workflow_template_instantiate_unknown_returns_404() {
 #[tokio::test(flavor = "multi_thread")]
 async fn schedule_manual_run_delivers_workflow_output_to_channel_targets() {
     use chrono::Utc;
-    use librefang_types::agent::AgentId;
     use librefang_types::scheduler::{
         CronAction, CronDelivery, CronDeliveryTarget, CronJob, CronJobId, CronSchedule,
     };
@@ -962,7 +974,7 @@ async fn schedule_manual_run_delivers_workflow_output_to_channel_targets() {
 
     let job = CronJob {
         id: CronJobId::new(),
-        agent_id: AgentId::new(),
+        agent_id: spawn_test_agent(&h),
         name: "manual telegram delivery".to_string(),
         enabled: true,
         schedule: CronSchedule::Every { every_secs: 3600 },
@@ -1028,16 +1040,16 @@ async fn workflow_templates_list_supports_query_filters() {
 async fn cron_job_get_response_has_session_size_fields() {
     use chrono::Utc;
     use librefang_memory::session::Session;
-    use librefang_types::agent::{AgentId, SessionId};
+    use librefang_types::agent::SessionId;
     use librefang_types::message::Message;
     use librefang_types::scheduler::{CronAction, CronDelivery, CronJob, CronJobId, CronSchedule};
 
     let h = boot().await;
     let kernel = &h._state.kernel;
 
-    // Build a synthetic agent — add_job does not validate against the
-    // registry, so any AgentId works.
-    let agent_id = AgentId::new();
+    // add_job does not validate against the registry, but the read route
+    // resolves the agent to authorize the caller, so register a real one.
+    let agent_id = spawn_test_agent(&h);
     let job = CronJob {
         id: CronJobId::new(),
         agent_id,
@@ -1116,12 +1128,11 @@ async fn cron_job_get_response_has_session_size_fields() {
 async fn cron_job_get_response_session_fields_default_zero_when_no_session() {
     // No persistent cron session yet → both counters must be 0, not absent.
     use chrono::Utc;
-    use librefang_types::agent::AgentId;
     use librefang_types::scheduler::{CronAction, CronDelivery, CronJob, CronJobId, CronSchedule};
 
     let h = boot().await;
     let kernel = &h._state.kernel;
-    let agent_id = AgentId::new();
+    let agent_id = spawn_test_agent(&h);
     let job = CronJob {
         id: CronJobId::new(),
         agent_id,
@@ -1163,12 +1174,11 @@ async fn cron_job_get_response_session_fields_default_zero_when_no_session() {
 /// a UUID-string suitable for the `/api/cron/jobs/{id}` path.
 async fn seed_cron_job(h: &Harness) -> String {
     use chrono::Utc;
-    use librefang_types::agent::AgentId;
     use librefang_types::scheduler::{CronAction, CronDelivery, CronJob, CronJobId, CronSchedule};
 
     let job = CronJob {
         id: CronJobId::new(),
-        agent_id: AgentId::new(),
+        agent_id: spawn_test_agent(h),
         name: "ssrf-fixture".to_string(),
         enabled: true,
         schedule: CronSchedule::Every { every_secs: 3600 },
@@ -1587,12 +1597,12 @@ async fn workflow_input_schema_oversize_is_truncated() {
 /// Seed a cron job carrying every field the schedules view used to drop.
 async fn seed_cron_job_with_routing_fields(h: &Harness) -> String {
     use chrono::Utc;
-    use librefang_types::agent::{AgentId, SessionMode};
+    use librefang_types::agent::SessionMode;
     use librefang_types::scheduler::{CronAction, CronDelivery, CronJob, CronJobId, CronSchedule};
 
     let job = CronJob {
         id: CronJobId::new(),
-        agent_id: AgentId::new(),
+        agent_id: spawn_test_agent(h),
         name: "routing-fixture".to_string(),
         enabled: true,
         schedule: CronSchedule::Cron {

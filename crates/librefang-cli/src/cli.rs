@@ -1269,7 +1269,8 @@ pub(crate) enum TriggerCommands {
         /// Route triggered messages to this agent instead of the owner (cross-session wake).
         #[arg(long)]
         target_agent: Option<String>,
-        /// Cooldown in seconds before this trigger can fire again (0 = no cooldown).
+        /// Cooldown in seconds before the same window may fire again (0 = no cooldown).
+        /// Patterns that name a subject — task board, memory key, agent lifecycle — hold one window per subject, so the trigger can fire again immediately for a different task, key or agent.
         #[arg(long)]
         cooldown: Option<u64>,
         /// Session mode override: "persistent" or "new".
@@ -1295,7 +1296,7 @@ pub(crate) enum TriggerCommands {
         /// New maximum fires limit (0 = unlimited).
         #[arg(long)]
         max_fires: Option<u64>,
-        /// New cooldown in seconds between fires.
+        /// New cooldown in seconds before the same window may fire again (per subject for task-board, memory-key and agent-lifecycle patterns).
         #[arg(long)]
         cooldown: Option<u64>,
         /// Remove the cooldown limit entirely.

@@ -1,0 +1,2 @@
+Sidecar config writes used `fs::write` for the staging file, which never fsyncs, so a crash between the write and the rename could leave the renamed file pointing at stale or truncated data, and a rename failure left the staging file behind instead of being cleaned up.
+The staging file is now opened with `create_new`, fsynced before the rename, removed on any write or rename failure, and the parent directory is fsynced after a successful rename on Unix so a completed write survives a crash immediately afterward (#6945) (@houko)

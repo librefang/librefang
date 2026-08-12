@@ -242,6 +242,65 @@ async fn get_approval_returns_seeded_request() {
     assert_eq!(body["status"], "pending");
 }
 
+/// A request remains addressable by id after resolution while it is still in the manager's recent-history ring.
+/// The list endpoint already exposes the same record, so returning 404 here would make the two read surfaces disagree.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_approval_resolved_returns_recent_record() {
+    let h = boot();
+    let id = seed_pending(&h, make_request("a", "shell_exec", None)).await;
+
+    let (resolve_status, _) = post(
+        &h,
+        &format!("/api/approvals/{id}/reject"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(resolve_status, StatusCode::OK);
+
+    let (status, body) = get(&h, &format!("/api/approvals/{id}")).await;
+    assert_eq!(status, StatusCode::OK, "got: {body}");
+    assert_eq!(body["id"], id.to_string());
+    assert_eq!(body["status"], "rejected");
+    assert!(body["decided_at"].is_string());
+}
+
+/// Manual creation must not acknowledge an approval that the manager refused to register.
+/// The manager caps one agent at five pending requests; the sixth call therefore provides a deterministic registration-failure boundary.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_approval_rejects_when_pending_registration_fails() {
+    let h = boot();
+
+    for index in 0..5 {
+        let (status, body) = post(
+            &h,
+            "/api/approvals",
+            serde_json::json!({
+                "agent_id": "manual-agent",
+                "tool_name": format!("manual_tool_{index}")
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "got: {body}");
+        let id = Uuid::parse_str(body["id"].as_str().expect("created id")).unwrap();
+        assert!(
+            h.state.kernel.approvals().get_pending(id).is_some(),
+            "201 must not return before the approval is registered"
+        );
+    }
+
+    let (status, body) = post(
+        &h,
+        "/api/approvals",
+        serde_json::json!({
+            "agent_id": "manual-agent",
+            "tool_name": "manual_tool_over_limit"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "got: {body}");
+    assert_eq!(h.state.kernel.approvals().pending_count(), 5);
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/approvals/{id}/approve & /reject & /modify
 // ---------------------------------------------------------------------------
@@ -420,7 +479,7 @@ async fn batch_reports_invalid_uuid_per_item() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "got: {body}");
+    assert_eq!(status, StatusCode::MULTI_STATUS, "got: {body}");
     let results = body["results"].as_array().unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0]["status"], "error");

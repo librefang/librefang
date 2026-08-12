@@ -243,7 +243,7 @@ impl LibreFangKernel {
         summary
     }
 
-    /// Build a compact MCP server/tool summary for the system prompt; caches per allowlist + mcp_generation to skip Mutex and re-render on hit.
+    /// Build a compact MCP server/tool summary for the system prompt; caches per allowlist + mcp_generation to skip tool-lock acquisition and re-rendering on hit.
     pub(crate) fn build_mcp_summary(&self, mcp_allowlist: &[String]) -> String {
         let mcp_gen = self
             .mcp
@@ -252,8 +252,7 @@ impl LibreFangKernel {
         let cache_key = mcp_summary_cache_key(mcp_allowlist);
 
         // Cache hit on the current generation: clone the cached String.
-        if let Some(entry) = self.mcp.mcp_summary_cache.get(&cache_key) {
-            let (cached_gen, cached_str) = entry.value();
+        if let Some((cached_gen, cached_str)) = self.mcp.mcp_summary_cache.lock().get(&cache_key) {
             if *cached_gen == mcp_gen {
                 return cached_str.clone();
             }
@@ -279,9 +278,17 @@ impl LibreFangKernel {
             .unwrap_or_default();
 
         let rendered = render_mcp_summary(&tool_names, &configured_servers, mcp_allowlist);
-        self.mcp
-            .mcp_summary_cache
-            .insert(cache_key, (mcp_gen, rendered.clone()));
+        let mut cache = self.mcp.mcp_summary_cache.lock();
+        if cache.len() >= super::subsystems::mcp::MAX_MCP_SUMMARY_CACHE_ENTRIES
+            && !cache.contains_key(&cache_key)
+        {
+            // Allowlist combinations are caller-controlled through agent
+            // manifests. Drop the derived cache wholesale at its hard cap so
+            // stale generations and one-off combinations cannot grow for the
+            // lifetime of the daemon.
+            cache.clear();
+        }
+        cache.insert(cache_key, (mcp_gen, rendered.clone()));
         rendered
     }
 

@@ -14,11 +14,14 @@ Usage:
 """
 
 import json
+import socket
 import sys
 from typing import Any, Dict, Generator, Optional
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
+
+DEFAULT_TIMEOUT = 30.0
 
 
 class LibreFangError(Exception):
@@ -36,8 +39,9 @@ class _Resource:
 class LibreFang:
     """LibreFang REST API client. Zero dependencies — uses only stdlib urllib."""
 
-    def __init__(self, base_url: str, headers: Optional[Dict[str, str]] = None):
+    def __init__(self, base_url: str, headers: Optional[Dict[str, str]] = None, timeout: float = DEFAULT_TIMEOUT):
         self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
         self._headers = {"Content-Type": "application/json"}
         if headers:
             self._headers.update(headers)
@@ -77,7 +81,7 @@ class LibreFang:
         data = json.dumps(body).encode() if body is not None else None
         req = Request(url, data=data, headers=self._headers, method=method)
         try:
-            with urlopen(req) as resp:
+            with urlopen(req, timeout=self.timeout) as resp:
                 ct = resp.headers.get("content-type", "")
                 text = resp.read().decode()
                 if "application/json" in ct:
@@ -86,6 +90,8 @@ class LibreFang:
         except HTTPError as e:
             body_text = e.read().decode() if e.fp else ""
             raise LibreFangError(f"HTTP {e.code}: {body_text}", e.code, body_text) from e
+        except socket.timeout as e:
+            raise LibreFangError(f"Request timed out after {self.timeout}s") from e
         except URLError as e:
             raise LibreFangError(f"Connection error: {e.reason}") from e
 
@@ -101,10 +107,12 @@ class LibreFang:
         headers["Accept"] = "text/event-stream"
         req = Request(url, data=data, headers=headers, method=method)
         try:
-            resp = urlopen(req)
+            resp = urlopen(req, timeout=self.timeout)
         except HTTPError as e:
             body_text = e.read().decode() if e.fp else ""
             raise LibreFangError(f"HTTP {e.code}: {body_text}", e.code, body_text) from e
+        except socket.timeout as e:
+            raise LibreFangError(f"Request timed out after {self.timeout}s") from e
         except URLError as e:
             raise LibreFangError(f"Connection error: {e.reason}") from e
 
@@ -127,6 +135,19 @@ class LibreFang:
                             yield json.loads(data_str)
                         except json.JSONDecodeError:
                             yield {"raw": data_str}
+            # A clean EOF can arrive without a trailing newline, leaving the last event in the buffer.
+            # Parse it here rather than dropping it; the loop above only fires on a newline.
+            if buffer:
+                line = buffer.decode().strip()
+                if line.startswith("data: "):
+                    data_str = line[6:]
+                    if data_str != "[DONE]":
+                        try:
+                            yield json.loads(data_str)
+                        except json.JSONDecodeError:
+                            yield {"raw": data_str}
+        except socket.timeout as e:
+            raise LibreFangError(f"Request timed out after {self.timeout}s") from e
         finally:
             active_error = sys.exc_info()[0] is not None
             try:

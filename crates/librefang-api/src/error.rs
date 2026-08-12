@@ -89,13 +89,62 @@ impl From<KernelOpError> for ApiErrorResponse {
     fn from(err: KernelOpError) -> Self {
         let status = kernel_op_status(&err);
         let code = kernel_op_code(&err).to_string();
+        let error = if status.is_server_error() {
+            tracing::error!(error = %err, code, "kernel error scrubbed before response");
+            if status == StatusCode::SERVICE_UNAVAILABLE {
+                "Service unavailable".to_string()
+            } else {
+                "Internal server error".to_string()
+            }
+        } else {
+            err.to_string()
+        };
         ApiErrorResponse {
-            error: err.to_string(),
+            error,
             code: Some(code.clone()),
             r#type: Some(code),
             details: None,
             request_id: None,
             status,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_kernel_errors_are_scrubbed_but_keep_typed_code() {
+        let response = ApiErrorResponse::from(KernelOpError::Internal(
+            "database path /srv/private/state.db failed".to_string(),
+        ));
+
+        assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.error, "Internal server error");
+        assert_eq!(response.code.as_deref(), Some("internal_error"));
+        assert!(!response.error.contains("/srv/private"));
+    }
+
+    #[test]
+    fn client_kernel_errors_retain_actionable_message() {
+        let response = ApiErrorResponse::from(KernelOpError::InvalidInput(
+            "agent name must not be empty".to_string(),
+        ));
+
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        assert!(response.error.contains("agent name must not be empty"));
+        assert_eq!(response.code.as_deref(), Some("invalid_input"));
+    }
+
+    #[test]
+    fn unavailable_kernel_errors_are_scrubbed() {
+        let response = ApiErrorResponse::from(KernelOpError::Unavailable(
+            "internal queue worker crashed".to_string(),
+        ));
+
+        assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.error, "Service unavailable");
+        assert_eq!(response.code.as_deref(), Some("service_unavailable"));
     }
 }

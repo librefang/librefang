@@ -14,7 +14,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;
 use tokio::sync::broadcast;
-use totp_rs::{Algorithm, Secret, TOTP};
+use totp_rs::{Algorithm, Builder as TotpBuilder, Secret};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -108,6 +108,15 @@ pub struct ApprovalRecord {
     pub decision: ApprovalDecision,
     pub decided_at: chrono::DateTime<Utc>,
     pub decided_by: Option<String>,
+}
+
+/// Result of atomically claiming a verified TOTP code in the replay table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TotpCodeClaim {
+    /// This caller inserted or refreshed an expired code record and owns the single permitted use.
+    Claimed,
+    /// A still-live replay-window record already owns this code.
+    AlreadyUsed,
 }
 
 impl ApprovalManager {
@@ -857,6 +866,20 @@ impl ApprovalManager {
             return Err("Duplicate approval request already pending".to_string());
         }
 
+        self.insert_pending_request(req, Some(deferred))
+    }
+
+    /// Register a manually-created approval without blocking for its eventual decision.
+    /// Unlike [`Self::request_approval`], successful return means the request is already visible in the pending queue.
+    pub fn submit_manual_request(&self, req: ApprovalRequest) -> Result<uuid::Uuid, String> {
+        self.insert_pending_request(req, None)
+    }
+
+    fn insert_pending_request(
+        &self,
+        req: ApprovalRequest,
+        deferred: Option<DeferredToolExecution>,
+    ) -> Result<uuid::Uuid, String> {
         // Per-agent pending limit
         let agent_pending_count = self.pending_count_for_agent(&req.agent_id);
         if agent_pending_count >= MAX_PENDING_PER_AGENT {
@@ -865,14 +888,14 @@ impl ApprovalManager {
 
         let id = req.id;
         // Persist before inserting so the entry survives a daemon restart (issue #3611).
-        self.db_insert_pending(&req, Some(&deferred));
+        self.db_insert_pending(&req, deferred.as_ref());
         let req_for_event = req.clone();
         self.pending.insert(
             id,
             PendingRequest {
                 request: req,
                 sender: None,
-                deferred: Some(deferred),
+                deferred,
                 submitted_at: chrono::Utc::now(),
             },
         );
@@ -1155,19 +1178,14 @@ impl ApprovalManager {
 
     /// Resolve all pending requests belonging to a specific session.
     ///
-    /// This mirrors Hermes-Agent's `resolve_gateway_approval(session_key,
-    /// choice, resolve_all=True)`: every request whose `session_id` matches
-    /// is resolved atomically with the given decision.
+    /// This mirrors Hermes-Agent's `resolve_gateway_approval(session_key, choice, resolve_all=True)`: every request whose `session_id` matches is attempted with the given decision.
+    /// Resolution is best-effort rather than transactional; concurrent changes and per-item errors are skipped.
     ///
-    /// Returns the number of requests resolved (0 if the session had nothing
-    /// pending).  This method does NOT spawn handle_approval_resolution for
-    /// deferred payloads — callers that need deferred execution handling should
-    /// use resolve_tool_approval (kernel) in a loop instead.
+    /// Returns the number of requests resolved (0 if the session had nothing pending).
+    /// This method does NOT spawn handle_approval_resolution for deferred payloads — callers that need deferred execution handling should use resolve_tool_approval (kernel) in a loop instead.
     ///
-    /// TOTP is not enforced here: resolve() is called with totp_verified=false,
-    /// so TOTP-required requests will return Err and not be counted.  Callers
-    /// who want TOTP pre-enforcement should check policy.tool_requires_totp()
-    /// before calling this method.
+    /// TOTP is not enforced here: resolve() is called with totp_verified=false, so TOTP-required requests will return Err and not be counted.
+    /// Callers who want TOTP pre-enforcement should check policy.tool_requires_totp() before calling this method.
     pub fn resolve_all_for_session(
         &self,
         session_id: &str,
@@ -1480,21 +1498,18 @@ impl ApprovalManager {
         code: &str,
         issuer: &str,
     ) -> Result<bool, String> {
-        let secret = Secret::Encoded(secret_base32.to_string());
-        let raw = secret
-            .to_bytes()
+        let secret = Secret::try_from_base32(secret_base32)
             .map_err(|e| format!("Invalid TOTP secret: {e}"))?;
-        let totp = TOTP::new(
-            Algorithm::SHA1,
-            6,
-            TOTP_SKEW_STEPS,
-            TOTP_STEP_SECS,
-            raw,
-            Some(issuer.to_string()),
-            String::new(),
-        )
-        .map_err(|e| format!("TOTP init error: {e}"))?;
-        Ok(totp.check_current(code).unwrap_or(false))
+        let totp = TotpBuilder::new()
+            .with_algorithm(Algorithm::SHA1)
+            .with_skew(TOTP_SKEW_STEPS as u16)
+            .with_step_duration(TOTP_STEP_SECS)
+            .with_secret(secret)
+            .with_issuer(Some(issuer.to_string()))
+            .build()
+            .map_err(|e| format!("TOTP init error: {e}"))?;
+        // `check_current` now returns the matched skew step (`Option<u64>`) instead of a bare bool (totp-rs 6.0 changed this so callers can enforce single-use-per-step themselves); this call site only needs pass/fail, and single-use enforcement already lives in the replay-claim table (see `claim_totp_code_used_for`).
+        Ok(totp.check_current(code).is_some())
     }
 
     /// Instance wrapper around [`Self::verify_totp_code_with_issuer`].
@@ -1540,24 +1555,20 @@ impl ApprovalManager {
         issuer: &str,
         account: &str,
     ) -> Result<(String, String, String), String> {
-        let secret = Secret::generate_secret();
-        let base32 = secret.to_encoded().to_string();
-        let raw = secret
-            .to_bytes()
-            .map_err(|e| format!("Secret encoding error: {e}"))?;
-        let totp = TOTP::new(
-            Algorithm::SHA1,
-            6,
-            1,
-            30,
-            raw,
-            Some(issuer.to_string()),
-            account.to_string(),
-        )
-        .map_err(|e| format!("TOTP init error: {e}"))?;
-        let uri = totp.get_url();
+        let secret = Secret::generate();
+        let base32 = secret.to_base32();
+        let totp = TotpBuilder::new()
+            .with_algorithm(Algorithm::SHA1)
+            .with_skew(1)
+            .with_step_duration(30)
+            .with_secret(secret)
+            .with_issuer(Some(issuer.to_string()))
+            .with_account_name(account.to_string())
+            .build()
+            .map_err(|e| format!("TOTP init error: {e}"))?;
+        let uri = totp.to_url().map_err(|e| format!("TOTP URL error: {e}"))?;
         let qr_b64 = totp
-            .get_qr_base64()
+            .to_qr_base64()
             .map_err(|e| format!("QR generation error: {e}"))?;
         Ok((base32, uri, qr_b64))
     }
@@ -1884,7 +1895,8 @@ impl ApprovalManager {
     /// server) cannot be replayed after the record has aged out but while the
     /// code still verifies. Derived as `TOTP_STEP_SECS * (2 * TOTP_SKEW_STEPS + 1)`
     /// so a future skew change stays consistent with `verify_totp_code_with_issuer`.
-    pub fn is_totp_code_used(&self, code: &str) -> bool {
+    #[cfg(test)]
+    fn is_totp_code_used(&self, code: &str) -> bool {
         let Some(db) = &self.audit_db else {
             return false;
         };
@@ -1910,7 +1922,8 @@ impl ApprovalManager {
     /// Also prunes entries older than the replay window plus one extra step
     /// (120 seconds at the current step/skew) from the table to keep it small,
     /// staying strictly wider than `is_totp_code_used`'s lookup window.
-    pub fn record_totp_code_used(&self, code: &str) {
+    #[cfg(test)]
+    fn record_totp_code_used(&self, code: &str) {
         // Ignore errors for non-action callers (enrollment confirm, revoke) —
         // those flows don't have a structured error path to return a 500.
         let _ = self.record_totp_code_used_for(code, None);
@@ -1929,7 +1942,8 @@ impl ApprovalManager {
     /// Returns `Err` if the DB write fails. Callers that can propagate an HTTP
     /// response MUST treat this as a 500 — a failed write leaves the code out
     /// of the replay-detection table, allowing reuse.
-    pub fn record_totp_code_used_for(
+    #[cfg(test)]
+    fn record_totp_code_used_for(
         &self,
         code: &str,
         bound_to: Option<&str>,
@@ -1964,6 +1978,54 @@ impl ApprovalManager {
             rusqlite::params![prune_before],
         );
         Ok(())
+    }
+
+    /// Atomically claim a verified TOTP code for one action.
+    ///
+    /// The conditional UPSERT is the serialization point: a live row is left unchanged (zero affected rows), while a missing or expired row is written (one affected row).
+    /// This remains correct across async tasks and multiple daemon processes sharing the same SQLite database, unlike a process-local check-then-record mutex.
+    pub fn claim_totp_code_used_for(
+        &self,
+        code: &str,
+        bound_to: Option<&str>,
+    ) -> Result<TotpCodeClaim, String> {
+        let Some(db) = &self.audit_db else {
+            return Ok(TotpCodeClaim::Claimed);
+        };
+        let conn = db
+            .get()
+            .map_err(|error| format!("failed to acquire TOTP replay database: {error}"))?;
+        let hash = Self::totp_code_hash(code);
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let replay_window_secs = TOTP_STEP_SECS as i64 * (2 * TOTP_SKEW_STEPS as i64 + 1);
+        let window_start = now_unix - replay_window_secs;
+        let changed = conn
+            .execute(
+                "INSERT INTO totp_used_codes (code_hash, used_at, bound_to)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(code_hash) DO UPDATE SET
+                     used_at  = excluded.used_at,
+                     bound_to = excluded.bound_to
+                 WHERE totp_used_codes.used_at < ?4",
+                rusqlite::params![hash, now_unix, bound_to, window_start],
+            )
+            .map_err(|error| format!("failed to persist TOTP used-code record: {error}"))?;
+
+        if changed == 0 {
+            return Ok(TotpCodeClaim::AlreadyUsed);
+        }
+
+        let prune_before = now_unix - (replay_window_secs + TOTP_STEP_SECS as i64);
+        if let Err(error) = conn.execute(
+            "DELETE FROM totp_used_codes WHERE used_at < ?1",
+            rusqlite::params![prune_before],
+        ) {
+            warn!(error = %error, "Failed to prune expired TOTP replay records");
+        }
+        Ok(TotpCodeClaim::Claimed)
     }
 
     /// SHA-256 hex of an OIDC state nonce.  We only persist the hash so
@@ -3578,19 +3640,17 @@ mod tests {
         assert!(uri.contains("LibreFang"));
 
         // 2. Generate a valid code from the secret
-        let totp_secret = Secret::Encoded(secret.clone());
-        let raw = totp_secret.to_bytes().unwrap();
-        let totp = TOTP::new(
-            Algorithm::SHA1,
-            6,
-            1,
-            30,
-            raw,
-            Some("LibreFang".to_string()),
-            "test".to_string(),
-        )
-        .unwrap();
-        let valid_code = totp.generate_current().unwrap();
+        let totp_secret = Secret::try_from_base32(&secret).unwrap();
+        let totp = TotpBuilder::new()
+            .with_algorithm(Algorithm::SHA1)
+            .with_skew(1)
+            .with_step_duration(30)
+            .with_secret(totp_secret)
+            .with_issuer(Some("LibreFang".to_string()))
+            .with_account_name("test".to_string())
+            .build()
+            .unwrap();
+        let valid_code = totp.generate_current().to_string();
 
         // 3. Verify the code against our verify function
         assert!(ApprovalManager::verify_totp_code(&secret, &valid_code).unwrap());
@@ -3927,6 +3987,89 @@ mod tests {
         assert!(!mgr.is_totp_code_used("654321"));
     }
 
+    /// The replay table is the cross-task/process serialization point: even when many workers race with the same valid code, exactly one claim may authorize an action.
+    #[test]
+    fn concurrent_totp_claim_has_exactly_one_winner() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        let workers = 16;
+        let manager = Arc::new(make_manager_with_db());
+        let barrier = Arc::new(Barrier::new(workers));
+        let handles: Vec<_> = (0..workers)
+            .map(|index| {
+                let manager = Arc::clone(&manager);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    manager
+                        .claim_totp_code_used_for("246810", Some(&format!("approval:{index}")))
+                        .expect("claim query")
+                })
+            })
+            .collect();
+
+        let outcomes: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("claim worker"))
+            .collect();
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, TotpCodeClaim::Claimed))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, TotpCodeClaim::AlreadyUsed))
+                .count(),
+            workers - 1
+        );
+    }
+
+    #[test]
+    fn totp_claim_rejects_live_record_and_refreshes_expired_record() {
+        let manager = make_manager_with_db();
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let insert_record = |code: &str, age_secs: i64| {
+            manager
+                .audit_db
+                .as_ref()
+                .unwrap()
+                .get()
+                .unwrap()
+                .execute(
+                    "INSERT INTO totp_used_codes (code_hash, used_at, bound_to)
+                     VALUES (?1, ?2, NULL)",
+                    rusqlite::params![ApprovalManager::totp_code_hash(code), now_unix - age_secs],
+                )
+                .unwrap();
+        };
+
+        insert_record("111222", 75);
+        assert_eq!(
+            manager
+                .claim_totp_code_used_for("111222", Some("live"))
+                .unwrap(),
+            TotpCodeClaim::AlreadyUsed,
+            "75 seconds remains inside the 90-second skew-aware replay window"
+        );
+
+        insert_record("333444", 100);
+        assert_eq!(
+            manager
+                .claim_totp_code_used_for("333444", Some("refreshed"))
+                .unwrap(),
+            TotpCodeClaim::Claimed,
+            "an expired hash must not permanently ban a future repeated code value"
+        );
+    }
+
     #[test]
     fn test_totp_code_hash_does_not_store_plaintext() {
         // The hash of "123456" must not equal "123456".
@@ -4034,13 +4177,13 @@ mod tests {
         );
     }
 
-    /// `record_totp_code_used_for` MUST surface a DB write failure as `Err`,
+    /// The atomic claim MUST surface a DB write failure as `Err`,
     /// not swallow it as `Ok`. A silent failure leaves the code out of the
     /// replay-detection table, letting an attacker reuse the same code
     /// immediately. Simulate the failure by dropping the underlying table
     /// out from under the manager (e.g. a corrupted/mis-migrated audit DB).
     #[test]
-    fn record_totp_code_used_for_surfaces_db_failure() {
+    fn atomic_totp_claim_surfaces_db_failure() {
         let pool = Pool::builder()
             .max_size(1)
             .build(SqliteConnectionManager::memory())
@@ -4056,7 +4199,7 @@ mod tests {
             .execute("DROP TABLE totp_used_codes", [])
             .unwrap();
 
-        mgr.record_totp_code_used_for("999111", Some("approval:abc"))
+        mgr.claim_totp_code_used_for("999111", Some("approval:abc"))
             .expect_err("DB write must surface as Err so the caller can return 500");
     }
 

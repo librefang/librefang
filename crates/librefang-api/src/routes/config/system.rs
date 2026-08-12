@@ -9,6 +9,7 @@ use super::*;
     )
 )]
 pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let (memory_used_mb, hostname) = tokio::join!(current_process_rss_mb(), system_hostname());
     let agents: Vec<serde_json::Value> = state
         .kernel
         .agent_registry()
@@ -50,8 +51,6 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .count_sessions()
         .unwrap_or(0);
 
-    let memory_used_mb = current_process_rss_mb();
-
     let cfg = state.kernel.config_snapshot();
     Json(serde_json::json!({
         "status": "running",
@@ -66,7 +65,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "api_listen": cfg.api_listen,
         "home_dir": state.kernel.home_dir().display().to_string(),
         "log_level": cfg.log_level,
-        "hostname": system_hostname(),
+        "hostname": hostname,
         "network_enabled": cfg.network_enabled,
         "terminal_enabled": cfg.terminal.enabled,
         "config_exists": state.kernel.home_dir().join("config.toml").exists(),
@@ -335,7 +334,11 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         (false, false) => "skipped",
     };
 
-    let is_ready = db_ok && !(embedding_required && !embedding_present);
+    // Written as "database ok, and the embedding requirement is satisfied"
+    // rather than negating the failure case: `clippy::nonminimal_bool` rejects
+    // the `!(a && !b)` form, and the positive reading matches the two `checks`
+    // entries reported below.
+    let is_ready = db_ok && (!embedding_required || embedding_present);
     let code = if is_ready {
         StatusCode::OK
     } else {

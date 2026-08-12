@@ -3,6 +3,8 @@ name = "librefang-llm-driver"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 description = "LLM driver trait and shared types for LibreFang"
 
 [dependencies]

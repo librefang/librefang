@@ -2953,8 +2953,38 @@
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Approval created",
+          "201": {
+            "description": "Approval registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid approval request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Agent pending-approval limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Approval registration failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -3044,7 +3074,27 @@
         },
         "responses": {
           "200": {
-            "description": "Batch resolve results",
+            "description": "All batch items resolved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "207": {
+            "description": "Batch contains one or more per-item errors",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid batch request",
             "content": {
               "application/json": {
                 "schema": {
@@ -3115,7 +3165,7 @@
         "tags": [
           "approvals"
         ],
-        "summary": "POST /api/approvals/session/{session_id}/approve_all — Approve all pending\napprovals for the given session atomically.",
+        "summary": "POST /api/approvals/session/{session_id}/approve_all — Approve all pending\napprovals for the given session on a best-effort per-item basis.",
         "operationId": "approve_all_for_session",
         "parameters": [
           {
@@ -3140,7 +3190,7 @@
         },
         "responses": {
           "200": {
-            "description": "All pending session approvals approved",
+            "description": "Best-effort session approval results",
             "content": {
               "application/json": {
                 "schema": {
@@ -3177,7 +3227,7 @@
         "tags": [
           "approvals"
         ],
-        "summary": "POST /api/approvals/session/{session_id}/reject_all — Reject all pending\napprovals for the given session atomically.",
+        "summary": "POST /api/approvals/session/{session_id}/reject_all — Reject all pending\napprovals for the given session on a best-effort per-item basis.",
         "description": "Mirrors Hermes-Agent's `resolve_gateway_approval(session_key, \"deny\",\nresolve_all=True)`.",
         "operationId": "reject_all_for_session",
         "parameters": [
@@ -3193,7 +3243,7 @@
         ],
         "responses": {
           "200": {
-            "description": "All pending session approvals rejected",
+            "description": "Best-effort session rejection results",
             "content": {
               "application/json": {
                 "schema": {
@@ -5891,6 +5941,7 @@
           "workflows"
         ],
         "summary": "GET /api/cron/jobs — List all cron jobs, optionally filtered by agent_id.",
+        "description": "Owner-scoping (#6753 follow-up): non-admins can't see cron jobs for agents they don't author — same leak class this PR closed for `/api/triggers`, since `JobMeta`/`CronJob` carries `prompt_template` and other user-authored content.\nMirrors `list_triggers` in `triggers.rs`: an explicit `?agent_id=` for an unowned agent returns an empty list rather than 404 (avoids leaking existence), and an unfiltered list is post-filtered down to jobs on agents the caller authors.",
         "operationId": "list_cron_jobs",
         "responses": {
           "200": {
@@ -13601,7 +13652,7 @@
       },
       "ApproveAllForSessionRequest": {
         "type": "object",
-        "description": "POST /api/approvals/session/{session_id}/approve_all — Approve all pending\napprovals for the given session atomically.\n\nMirrors Hermes-Agent's `resolve_gateway_approval(session_key, \"once\",\nresolve_all=True)`.  TOTP pre-check is enforced — if any pending request\nrequires TOTP, the entire batch is rejected before any mutation.",
+        "description": "POST /api/approvals/session/{session_id}/approve_all — Approve all pending\napprovals for the given session on a best-effort per-item basis.\n\nMirrors Hermes-Agent's `resolve_gateway_approval(session_key, \"once\",\nresolve_all=True)`.  TOTP pre-check is enforced — if any pending request\nrequires TOTP, the entire batch is rejected before any mutation.",
         "properties": {
           "expected_count": {
             "type": [

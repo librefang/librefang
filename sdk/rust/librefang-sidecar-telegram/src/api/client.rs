@@ -8,6 +8,8 @@
 
 use super::error::{Error, Result};
 use super::types::{ApiResponse, GetFileResult, PollResult, SendMessageResult, UpdatesResponse};
+use bytes::Bytes;
+use reqwest::header::{HeaderValue, RETRY_AFTER};
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -15,6 +17,9 @@ use std::time::Duration;
 
 pub const DEFAULT_LONGPOLL_TIMEOUT_SECS: u64 = 30;
 pub const SEND_TIMEOUT_SECS: u64 = 30;
+/// Conservative throughput floor used to extend multipart request deadlines.
+/// The fixed send timeout remains the connection/base budget; uploads receive one extra second per 64 KB of payload.
+const MULTIPART_BYTES_PER_SECOND: usize = 64_000;
 /// Extra buffer added to the long-poll server-side timeout to derive the reqwest per-request deadline. Telegram sometimes returns a few hundred milliseconds after the server timeout elapses.
 pub const LONGPOLL_CLIENT_BUFFER_SECS: u64 = 5;
 pub const RETRY_AFTER_DEFAULT_SECS: u64 = 5;
@@ -32,18 +37,27 @@ pub struct BotClient {
 impl BotClient {
     pub fn new(token: impl Into<String>) -> Result<Self> {
         let token = token.into();
+        let api_root = format!("https://api.telegram.org/bot{token}");
+        let file_root = format!("https://api.telegram.org/file/bot{token}");
+        Self::with_roots(token, api_root, file_root)
+    }
+
+    pub(crate) fn with_roots(
+        token: impl Into<String>,
+        api_root: impl Into<String>,
+        file_root: impl Into<String>,
+    ) -> Result<Self> {
+        let token = token.into();
         if token.trim().is_empty() {
             return Err(Error::Other("TELEGRAM_BOT_TOKEN is empty".into()));
         }
         let http = Client::builder()
             .timeout(Duration::from_secs(SEND_TIMEOUT_SECS))
             .build()?;
-        let api_root = format!("https://api.telegram.org/bot{token}");
-        let file_root = format!("https://api.telegram.org/file/bot{token}");
         Ok(Self {
             http,
-            api_root,
-            file_root,
+            api_root: api_root.into(),
+            file_root: file_root.into(),
             token,
         })
     }
@@ -112,17 +126,16 @@ impl BotClient {
         for attempt in 0..2 {
             let resp = self.http.post(&url).json(payload).send().await?;
             let status = resp.status();
+            let retry_after_header = resp.headers().get(RETRY_AFTER).cloned();
             let body = resp.text().await?;
             if status.is_success() {
                 let parsed: ApiResponse<Value> = serde_json::from_str(&body)?;
                 if parsed.ok {
                     return Ok(parsed.result.unwrap_or(Value::Null));
                 }
-                let retry_after = parsed
-                    .parameters
-                    .as_ref()
-                    .and_then(|p| p.retry_after)
-                    .unwrap_or(RETRY_AFTER_DEFAULT_SECS);
+                let body_retry_after = parsed.parameters.as_ref().and_then(|p| p.retry_after);
+                let retry_after =
+                    resolve_retry_after(retry_after_header.as_ref(), body_retry_after);
                 if attempt == 0
                     && parsed.error_code == Some(429)
                     && retry_after <= MAX_RETRY_AFTER_SECS
@@ -137,7 +150,10 @@ impl BotClient {
                 });
             } else if status.as_u16() == 429 && attempt == 0 {
                 // Some 429s come back with non-2xx HTTP status; honour Retry-After header or fall back to default — but cap so a multi-hour flood-wait doesn't stall the loop.
-                let retry_after = resp_retry_after_default(body.as_str());
+                let retry_after = resolve_retry_after(
+                    retry_after_header.as_ref(),
+                    body_retry_after(body.as_str()),
+                );
                 if retry_after > MAX_RETRY_AFTER_SECS {
                     return Err(Error::Api {
                         method: method.into(),
@@ -155,9 +171,7 @@ impl BotClient {
                 });
             }
         }
-        unreachable!(
-            "call_json loop body either returns or `continue`s; the for-2 range cannot exhaust"
-        )
+        Err(retry_loop_exhausted(method))
     }
 
     pub async fn call_typed<T: Serialize + ?Sized, R: serde::de::DeserializeOwned>(
@@ -468,10 +482,14 @@ impl BotClient {
         thread_id: Option<i64>,
     ) -> Result<Value> {
         let url = format!("{}/{method}", self.api_root);
-        // reqwest::multipart::Form consumes its parts when sent. To support the rare 429 retry without keeping a streamable body, we clone `bytes` for each attempt; the trade-off is ~1 extra Vec<u8> heap copy on the happy path in exchange for a working retry path without async-body rewinding.
+        let bytes = shared_upload_bytes(bytes);
+        let request_timeout = multipart_timeout(bytes.len());
+        let byte_len = bytes.len() as u64;
+        // Forms consume their parts.
+        // Bytes is reference-counted, so rebuilding a part for the rare 429 retry shares the upload allocation instead of copying the full attachment on every attempt.
         for attempt in 0..2 {
-            let mut part =
-                reqwest::multipart::Part::bytes(bytes.clone()).file_name(filename.clone());
+            let mut part = reqwest::multipart::Part::stream_with_length(bytes.clone(), byte_len)
+                .file_name(filename.clone());
             if let Some(mt) = mime_type.as_ref() {
                 part = part
                     .mime_str(mt)
@@ -486,19 +504,24 @@ impl BotClient {
             if let Some(t) = thread_id {
                 form = form.text("message_thread_id", t.to_string());
             }
-            let resp = self.http.post(&url).multipart(form).send().await?;
+            let resp = self
+                .http
+                .post(&url)
+                .timeout(request_timeout)
+                .multipart(form)
+                .send()
+                .await?;
             let status = resp.status();
+            let retry_after_header = resp.headers().get(RETRY_AFTER).cloned();
             let body = resp.text().await?;
             if status.is_success() {
                 let parsed: ApiResponse<Value> = serde_json::from_str(&body)?;
                 if parsed.ok {
                     return Ok(parsed.result.unwrap_or(Value::Null));
                 }
-                let retry_after = parsed
-                    .parameters
-                    .as_ref()
-                    .and_then(|p| p.retry_after)
-                    .unwrap_or(RETRY_AFTER_DEFAULT_SECS);
+                let body_retry_after = parsed.parameters.as_ref().and_then(|p| p.retry_after);
+                let retry_after =
+                    resolve_retry_after(retry_after_header.as_ref(), body_retry_after);
                 if attempt == 0
                     && parsed.error_code == Some(429)
                     && retry_after <= MAX_RETRY_AFTER_SECS
@@ -512,7 +535,10 @@ impl BotClient {
                     description: self.redact(parsed.description.unwrap_or_default()),
                 });
             } else if status.as_u16() == 429 && attempt == 0 {
-                let retry_after = resp_retry_after_default(body.as_str());
+                let retry_after = resolve_retry_after(
+                    retry_after_header.as_ref(),
+                    body_retry_after(body.as_str()),
+                );
                 if retry_after > MAX_RETRY_AFTER_SECS {
                     return Err(Error::Api {
                         method: method.into(),
@@ -530,14 +556,105 @@ impl BotClient {
                 });
             }
         }
-        unreachable!("send_multipart loop body either returns or `continue`s; the for-2 range cannot exhaust")
+        Err(retry_loop_exhausted(method))
     }
 }
 
-/// Try to parse a Retry-After value out of a non-2xx 429 body, falling back to the default.
-fn resp_retry_after_default(body: &str) -> u64 {
+fn shared_upload_bytes(bytes: Vec<u8>) -> Bytes {
+    Bytes::from(bytes)
+}
+
+fn multipart_timeout(byte_len: usize) -> Duration {
+    let transfer_secs = u64::try_from(byte_len / MULTIPART_BYTES_PER_SECOND).unwrap_or(u64::MAX);
+    Duration::from_secs(SEND_TIMEOUT_SECS.saturating_add(transfer_secs))
+}
+
+fn retry_loop_exhausted(method: &str) -> Error {
+    Error::Other(format!(
+        "Telegram API retry loop exhausted unexpectedly for method {method}"
+    ))
+}
+
+/// Resolve any 429 delay using HTTP delta-seconds first, then Telegram's JSON value, then the conservative local default.
+/// A syntactically numeric header that overflows `u64` is saturated so the caller's flood-wait cap rejects it; unsupported HTTP-date/non-numeric forms fall through to the JSON value.
+fn resolve_retry_after(header: Option<&HeaderValue>, body_retry_after: Option<u64>) -> u64 {
+    let header_retry_after = header
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .map(|value| value.parse::<u64>().unwrap_or(u64::MAX));
+    header_retry_after
+        .or(body_retry_after)
+        .unwrap_or(RETRY_AFTER_DEFAULT_SECS)
+}
+
+fn body_retry_after(body: &str) -> Option<u64> {
     serde_json::from_str::<ApiResponse<Value>>(body)
         .ok()
-        .and_then(|p| p.parameters.and_then(|x| x.retry_after))
-        .unwrap_or(RETRY_AFTER_DEFAULT_SECS)
+        .and_then(|response| response.parameters.and_then(|params| params.retry_after))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+
+    #[test]
+    fn retry_after_prefers_header_then_body_then_default() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("19"));
+        assert_eq!(resolve_retry_after(headers.get(RETRY_AFTER), Some(7)), 19);
+
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("not-seconds"));
+        assert_eq!(resolve_retry_after(headers.get(RETRY_AFTER), Some(7)), 7);
+
+        assert_eq!(resolve_retry_after(None, None), 5);
+    }
+
+    #[test]
+    fn numeric_retry_after_overflow_remains_over_the_flood_wait_cap() {
+        let overflow = HeaderValue::from_static("18446744073709551616");
+        assert_eq!(resolve_retry_after(Some(&overflow), Some(7)), u64::MAX);
+
+        let above_cap = HeaderValue::from_static("301");
+        assert_eq!(resolve_retry_after(Some(&above_cap), Some(7)), 301);
+
+        let padded = HeaderValue::from_bytes(b" 19 ").expect("valid header whitespace");
+        assert_eq!(resolve_retry_after(Some(&padded), Some(7)), 19);
+    }
+
+    #[test]
+    fn json_retry_after_parser_supports_non_2xx_body_path() {
+        let body = r#"{"ok":false,"parameters":{"retry_after":7}}"#;
+        assert_eq!(body_retry_after(body), Some(7));
+        assert_eq!(body_retry_after("not-json"), None);
+    }
+
+    #[test]
+    fn multipart_retry_bytes_share_the_same_allocation() {
+        let upload = shared_upload_bytes(vec![1_u8; 1024]);
+        let retry = upload.clone();
+        assert_eq!(upload.as_ptr(), retry.as_ptr());
+        assert_eq!(upload.len(), retry.len());
+    }
+
+    #[test]
+    fn multipart_timeout_scales_with_payload_size() {
+        assert_eq!(multipart_timeout(0), Duration::from_secs(30));
+        assert_eq!(multipart_timeout(63_999), Duration::from_secs(30));
+        assert_eq!(multipart_timeout(64_000), Duration::from_secs(31));
+        assert_eq!(multipart_timeout(64_000_000), Duration::from_secs(1_030));
+    }
+
+    #[test]
+    fn exhausted_retry_loop_is_a_recoverable_method_error() {
+        let error = retry_loop_exhausted("sendDocument");
+        match error {
+            Error::Other(message) => {
+                assert!(message.contains("sendDocument"));
+                assert!(message.contains("retry loop exhausted"));
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
 }

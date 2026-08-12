@@ -90,7 +90,7 @@ pub fn upsert_secret(path: &Path, key: &str, value: &str) -> Result<(), String> 
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(".secrets.env.tmp.{}.{seq}", std::process::id()));
-    {
+    let write_result = (|| -> Result<(), String> {
         let mut f = fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -105,9 +105,32 @@ pub fn upsert_secret(path: &Path, key: &str, value: &str) -> Result<(), String> 
         }
         f.write_all(out.as_bytes())
             .map_err(|e| format!("write {tmp:?}: {e}"))?;
-        f.sync_all().ok();
+        f.sync_all().map_err(|e| format!("sync {tmp:?}: {e}"))?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
     }
-    fs::rename(&tmp, path).map_err(|e| format!("rename {tmp:?} -> {path:?}: {e}"))?;
+
+    if let Err(error) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("rename {tmp:?} -> {path:?}: {error}"));
+    }
+
+    // `rename(2)` is atomic, but the directory entry it rewrites is only
+    // guaranteed durable once the *directory's* metadata is synced — an
+    // fsync of the file itself (above) does not cover that. Without this,
+    // a crash right after a successful rename can roll the directory back
+    // to pointing at the old inode (or, on some filesystems, no inode at
+    // all) even though callers already observed `Ok(())`. Unix-only:
+    // Windows durably commits renames as part of the NTFS transaction log
+    // without a separate directory-handle fsync step.
+    #[cfg(unix)]
+    fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| format!("sync parent directory {parent:?}: {e}"))?;
+
     Ok(())
 }
 
@@ -145,5 +168,33 @@ mod tests {
         let path = dir.path().join("secrets.env");
         upsert_secret(&path, "OPENAI_API_KEY", "sk-123").unwrap();
         assert_eq!(read(&path), "OPENAI_API_KEY=sk-123\n");
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "successful writes must not leave secret-bearing staging files"
+        );
+    }
+
+    #[test]
+    fn rename_failure_cleans_up_staging_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("secrets.env");
+        // Make the destination an existing directory so the final
+        // `fs::rename(tmp, path)` fails (ENOTDIR/EISDIR) without touching
+        // the write/fsync stage at all — this exercises the rename-failure
+        // cleanup path specifically, distinct from the write-failure path.
+        fs::create_dir(&path).unwrap();
+
+        let err = upsert_secret(&path, "OPENAI_API_KEY", "sk-123").unwrap_err();
+        assert!(err.contains("rename"), "got: {err}");
+
+        // Only the pre-existing `secrets.env/` directory should remain;
+        // the `.secrets.env.tmp.*` staging file must not survive a failed
+        // rename.
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "leftover staging file after failed rename"
+        );
     }
 }

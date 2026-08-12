@@ -1,8 +1,6 @@
 //! Regression tests for the approvals hardening cluster (audit findings #18, #24).
 //!
-//! - #18: per-approval TOTP replay prevention must be atomic so a single
-//!   valid single-use code cannot authorize more than one concurrent approval
-//!   (TOCTOU between `is_totp_code_used` and `record_totp_code_used_for`).
+//! - #18: per-approval TOTP replay prevention must be atomic so a single valid single-use code cannot authorize more than one concurrent approval.
 //! - #24: `approve_request` must route the typed `KernelOpError` through the
 //!   central status-code map (like `reject_request`), so a missing/expired id
 //!   yields 404 rather than a blanket 400.
@@ -85,21 +83,17 @@ async fn post(
 
 /// Build a `TOTP` client that exactly mirrors `ApprovalManager::generate_totp_secret`
 /// so `generate_current()` produces a code the kernel will accept.
-fn totp_for(secret_base32: &str, issuer: &str) -> totp_rs::TOTP {
-    use totp_rs::{Algorithm, Secret, TOTP};
-    let raw = Secret::Encoded(secret_base32.to_string())
-        .to_bytes()
-        .expect("decode base32 secret");
-    TOTP::new(
-        Algorithm::SHA1,
-        6,
-        1,
-        30,
-        raw,
-        Some(issuer.to_string()),
-        String::new(),
-    )
-    .expect("totp init")
+fn totp_for(secret_base32: &str, issuer: &str) -> totp_rs::Totp {
+    use totp_rs::{Algorithm, Builder as TotpBuilder, Secret};
+    let secret = Secret::try_from_base32(secret_base32).expect("decode base32 secret");
+    TotpBuilder::new()
+        .with_algorithm(Algorithm::SHA1)
+        .with_skew(1)
+        .with_step_duration(30)
+        .with_secret(secret)
+        .with_issuer(Some(issuer.to_string()))
+        .build()
+        .expect("totp init")
 }
 
 fn current_code(h: &Harness) -> String {
@@ -109,9 +103,7 @@ fn current_code(h: &Harness) -> String {
         .vault_get("totp_secret")
         .expect("totp_secret in vault");
     let issuer = h.state.kernel.approvals().policy().totp_issuer.clone();
-    totp_for(&secret, &issuer)
-        .generate_current()
-        .expect("generate current code")
+    totp_for(&secret, &issuer).generate_current().to_string()
 }
 
 fn make_request(agent: &str, tool: &str) -> ApprovalRequest {
@@ -201,12 +193,9 @@ async fn approve_and_reject_agree_on_missing_id_status() {
 // Finding #18 — one single-use TOTP code approves at most one action
 // ---------------------------------------------------------------------------
 
-/// Fire many concurrent `approve` requests, each for a distinct pending
-/// approval but all carrying the *same* single-use TOTP code. The atomic
-/// check-and-record critical section must let exactly ONE succeed; every
-/// other must be rejected as replay. Without the fix (non-atomic
-/// check-then-record), multiple requests read `is_totp_code_used == false`
-/// before any records the code and more than one approval succeeds.
+/// Fire many concurrent `approve` requests, each for a distinct pending approval but all carrying the *same* single-use TOTP code.
+/// The atomic replay-table claim must let exactly ONE succeed; every other must be rejected as replay.
+/// Without the fix (non-atomic check-then-record), multiple requests can observe the code as unused before any records it and more than one approval succeeds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_approvals_consume_totp_code_exactly_once() {
     let h = boot();

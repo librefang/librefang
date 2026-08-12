@@ -59,7 +59,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
 /// deployment target. `$HOSTNAME` is honoured first for parity with
 /// containers that synthesise it; `hostname(1)` is the POSIX fallback.
 /// Returns `None` only when both fail (rare).
-fn system_hostname() -> Option<String> {
+async fn system_hostname() -> Option<String> {
     if let Ok(h) = std::env::var("HOSTNAME") {
         let trimmed = h.trim();
         if !trimmed.is_empty() {
@@ -68,8 +68,9 @@ fn system_hostname() -> Option<String> {
     }
     #[cfg(unix)]
     {
-        std::process::Command::new("hostname")
+        tokio::process::Command::new("hostname")
             .output()
+            .await
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .map(|s| s.trim().to_string())
@@ -95,12 +96,13 @@ fn system_hostname() -> Option<String> {
 /// neither `ps` nor `tasklist` is available, or when parsing the output
 /// fails — callers should render a placeholder in that case rather than
 /// treating `0` as a real reading.
-fn current_process_rss_mb() -> Option<u64> {
+async fn current_process_rss_mb() -> Option<u64> {
     #[cfg(unix)]
     {
-        std::process::Command::new("ps")
+        tokio::process::Command::new("ps")
             .args(["-o", "rss=", "-p", &std::process::id().to_string()])
             .output()
+            .await
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .and_then(|s| s.trim().parse::<u64>().ok())
@@ -110,7 +112,7 @@ fn current_process_rss_mb() -> Option<u64> {
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("tasklist")
+        tokio::process::Command::new("tasklist")
             .args([
                 "/FI",
                 &format!("PID eq {}", std::process::id()),
@@ -120,6 +122,7 @@ fn current_process_rss_mb() -> Option<u64> {
             ])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
+            .await
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .and_then(|s| {
@@ -1035,6 +1038,7 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
 }
 
 async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value {
+    let (memory_used_mb, hostname) = tokio::join!(current_process_rss_mb(), system_hostname());
     // Health (same logic as /api/health)
     let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
@@ -1078,7 +1082,6 @@ async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value 
     // reads these out of the snapshot for its info panel and KPI tiles.
     // Anything missing here renders as "-" on the page.
     let uptime_seconds = state.started_at.elapsed().as_secs();
-    let memory_used_mb = current_process_rss_mb();
     let status = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "agent_count": agent_count,
@@ -1092,7 +1095,7 @@ async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value 
         "api_listen": cfg.api_listen,
         "home_dir": state.kernel.home_dir().display().to_string(),
         "log_level": cfg.log_level,
-        "hostname": system_hostname(),
+        "hostname": hostname,
         "network_enabled": cfg.network_enabled,
         "terminal_enabled": cfg.terminal.enabled,
     });

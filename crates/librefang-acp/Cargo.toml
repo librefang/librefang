@@ -3,6 +3,8 @@ name = "librefang-acp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 description = "Agent Client Protocol (ACP) adapter for LibreFang — embeds LibreFang agents in Zed/VSCode/JetBrains via stdio JSON-RPC (#3313)"
 
 [features]

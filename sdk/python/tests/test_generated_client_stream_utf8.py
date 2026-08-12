@@ -25,7 +25,7 @@ def test_stream_reassembles_utf8_split_at_4096_byte_boundary(monkeypatch):
     assert len(first) == 4096
 
     response = _ChunkedResponse([first, second, b""])
-    monkeypatch.setattr(generated_client, "urlopen", lambda _request: response)
+    monkeypatch.setattr(generated_client, "urlopen", lambda _request, **_kwargs: response)
 
     events = list(generated_client.LibreFang("http://daemon")._stream("GET", "/events"))
 

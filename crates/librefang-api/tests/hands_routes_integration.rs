@@ -2253,3 +2253,19 @@ async fn update_hand_manifest_requires_auth() {
         "PUT /manifest must require auth (got {status})"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/hands/instances/{id}/browser
+// ---------------------------------------------------------------------------
+
+/// The browser-state route stays wired and keeps answering `404` for an unknown instance.
+///
+/// This endpoint renders the extracted page for a human operator, and it now renders the link table alongside the prose rather than reading `content` alone — the extraction emits `⟨n⟩` markers, so `content` by itself would show markers with nothing to resolve them against.
+/// What that rendering produces is pinned as a unit test on the shared renderer (`librefang_runtime::browser::render_page_body`), because reaching the branch that calls it needs a live browser session, which `TestServer` has no way to create.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_hand_instance_browser_unknown_returns_404() {
+    let h = boot_router_open().await;
+    let unknown = uuid::Uuid::new_v4();
+    let (status, _) = get_json(&h.app, &format!("/api/hands/instances/{unknown}/browser")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

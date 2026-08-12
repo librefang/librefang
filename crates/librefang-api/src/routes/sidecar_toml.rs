@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
@@ -150,8 +151,33 @@ static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
     let parent = path.parent().ok_or("config path has no parent")?;
     let tmp = parent.join(next_tmp_name());
-    fs::write(&tmp, contents).map_err(|e| format!("write {tmp:?}: {e}"))?;
-    fs::rename(&tmp, path).map_err(|e| format!("rename {tmp:?} -> {path:?}: {e}"))?;
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|e| format!("open {tmp:?}: {e}"))?;
+    let write_result = (|| -> Result<(), String> {
+        file.write_all(contents.as_bytes())
+            .map_err(|e| format!("write {tmp:?}: {e}"))?;
+        file.sync_all().map_err(|e| format!("sync {tmp:?}: {e}"))?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+
+    if let Err(error) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("rename {tmp:?} -> {path:?}: {error}"));
+    }
+
+    #[cfg(unix)]
+    fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| format!("sync parent directory {parent:?}: {e}"))?;
+
     Ok(())
 }
 
@@ -202,6 +228,41 @@ pub fn remove_sidecar_block(path: &Path, name: &str) -> Result<bool, String> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use tempfile::TempDir;
+
+    #[test]
+    fn atomic_write_replaces_config_without_staging_residue() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+
+        atomic_write(&path, "[kernel]\nname = \"test\"\n").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[kernel]\nname = \"test\"\n"
+        );
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "successful writes must not leave staging files"
+        );
+    }
+
+    #[test]
+    fn atomic_write_removes_staging_file_when_rename_fails() {
+        let dir = TempDir::new().unwrap();
+        let target_dir = dir.path().join("config.toml");
+        fs::create_dir(&target_dir).unwrap();
+
+        let error = atomic_write(&target_dir, "new config").unwrap_err();
+
+        assert!(error.contains("rename"), "got: {error}");
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "failed renames must not leave staging files"
+        );
+    }
 
     /// Both writers mint tempfile names from one namespace, so the sequence backing that namespace has to be shared and atomic.
     /// Before the writers were funnelled through `atomic_write`, each declared its own `static SEQ` starting at zero, so the first `upsert` and the first `remove` in a process both produced `.config.toml.tmp.{pid}.0`.

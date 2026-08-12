@@ -40,8 +40,12 @@ static RE_ATTR: Lazy<Regex> = Lazy::new(|| {
 });
 
 fn href_is_safe(href: &str) -> bool {
-    let lower = href.trim().to_ascii_lowercase();
-    ALLOWED_HREF_SCHEMES.iter().any(|s| lower.starts_with(s))
+    let trimmed = href.trim();
+    ALLOWED_HREF_SCHEMES.iter().any(|scheme| {
+        trimmed
+            .get(..scheme.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+    })
 }
 
 fn escape_attr_value(v: &str) -> String {
@@ -142,6 +146,7 @@ pub fn sanitize_telegram_html(text: &str) -> String {
             .unwrap_or(false);
         let tag = captures.get(2).unwrap().as_str().to_ascii_lowercase();
         let attrs = captures.get(3).map(|s| s.as_str()).unwrap_or("");
+        let self_closing = attrs.trim_end().ends_with('/');
 
         if !ALLOWED_TAGS.contains(&tag.as_str()) {
             // Drop the tag entirely. Literal segments are escaped independently.
@@ -168,7 +173,13 @@ pub fn sanitize_telegram_html(text: &str) -> String {
                 out.push_str(&tag);
                 out.push_str(&rebuilt);
                 out.push('>');
-                stack.push(tag);
+                if self_closing {
+                    out.push_str("</");
+                    out.push_str(&tag);
+                    out.push('>');
+                } else {
+                    stack.push(tag);
+                }
             }
             None => {
                 // Tag's required attribute (e.g. <a href>) failed the safety check → drop the tag.
@@ -218,6 +229,8 @@ mod tests {
     fn accepts_safe_href() {
         let s = sanitize_telegram_html("<a href=\"https://example.com\">x</a>");
         assert!(s.contains("<a href=\"https://example.com\">"));
+        assert!(href_is_safe(" HTTPS://example.com "));
+        assert!(!href_is_safe("éttps://example.com"));
     }
 
     #[test]
@@ -251,6 +264,40 @@ mod tests {
     fn keeps_code_class() {
         let s = sanitize_telegram_html("<code class=\"rust\">x</code>");
         assert!(s.contains("class=\"rust\""));
+    }
+
+    #[test]
+    fn self_closing_allowed_tag_does_not_wrap_following_text() {
+        assert_eq!(sanitize_telegram_html("<code/>after"), "<code></code>after");
+        assert_eq!(
+            sanitize_telegram_html("<tg-emoji emoji-id=\"42\" />after"),
+            "<tg-emoji emoji-id=\"42\"></tg-emoji>after"
+        );
+    }
+
+    #[test]
+    fn self_closing_tag_nested_inside_open_tag_does_not_leak_onto_stack() {
+        // A self-closing tag inside an enclosing tag must not push onto the
+        // stack — otherwise the enclosing tag's own close would pop the
+        // wrong entry (or the self-closing tag would linger unclosed).
+        let s = sanitize_telegram_html("<b>before<code/>after</b>tail");
+        assert_eq!(s, "<b>before<code></code>after</b>tail");
+    }
+
+    #[test]
+    fn adjacent_self_closing_tags_do_not_interfere_with_each_other() {
+        let s = sanitize_telegram_html("<code/><code/>text");
+        assert_eq!(s, "<code></code><code></code>text");
+    }
+
+    #[test]
+    fn crossed_close_tag_closes_inner_tag_first() {
+        // `</b>` arrives while `<i>` is still open above it on the stack.
+        // The sanitiser must close every tag above the match (innermost
+        // first) rather than leave `<i>` to close after `<b>`, which
+        // would emit invalid crossed HTML Telegram cannot parse.
+        let s = sanitize_telegram_html("<b><i>x</b>");
+        assert_eq!(s, "<b><i>x</i></b>");
     }
 
     #[test]
