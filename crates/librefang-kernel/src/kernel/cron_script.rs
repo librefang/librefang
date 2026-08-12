@@ -203,15 +203,11 @@ pub(super) fn atomic_write_toml(path: &Path, content: &str) -> std::io::Result<(
 
 /// Resolve the directory whose entry must be fsynced after replacing `path`.
 ///
-/// `Path::parent()` returns `Some("")` — not `None` — for a bare relative
-/// filename like `agent.toml`; `None` only happens for `/` or an empty path
-/// itself. Treating the empty-but-present case as an error would fail
-/// `File::open("")` with ENOENT *after* the rename already succeeded,
-/// reporting failure for a write that actually landed on disk. Mapping it to
-/// `.` fsyncs the real containing directory instead.
+/// `Path::parent()` returns `Some("")` — not `None` — for a bare relative filename like `agent.toml`; `None` only happens for `/` or an empty path itself.
+/// Treating the empty-but-present case as an error would fail `File::open("")` with ENOENT *after* the rename already succeeded, reporting failure for a write that actually landed on disk.
+/// Mapping it to `.` fsyncs the real containing directory instead.
 ///
-/// This mirrors the same resolution in `librefang_api::atomic_write`; keep the
-/// two in step if either changes.
+/// This mirrors the same resolution in `librefang_api::atomic_write`; keep the two in step if either changes.
 #[cfg(unix)]
 pub(super) fn parent_dir_for_fsync(path: &Path) -> &Path {
     match path.parent() {
