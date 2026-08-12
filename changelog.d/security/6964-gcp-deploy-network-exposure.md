@@ -1,0 +1,2 @@
+The GCP Terraform deploy opened SSH and the LibreFang dashboard/API firewall rules to `0.0.0.0/0`, and cloud-init still set the stale `LIBREFANG_BIND` variable instead of the supported `LIBREFANG_LISTEN`, leaving the public listener with no bearer key configured.
+Both firewall rules now require an operator-supplied `allowed_source_cidr`, with `0.0.0.0/0` and `::/0` rejected at plan time, and a required 32-character-minimum `LIBREFANG_API_KEY` is generated and wired through cloud-init so the API enforces bearer authentication (#6964) (@houko)
