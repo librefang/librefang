@@ -244,9 +244,8 @@ async fn setup_when_already_confirmed_requires_current_code() {
     );
 }
 
-/// Resetting an existing enrollment must fail closed when the verified code
-/// cannot be persisted in the replay table. Otherwise the caller receives a
-/// fresh secret while the same observed code remains reusable.
+/// Resetting an existing enrollment must fail closed when the verified code cannot be persisted in the replay table.
+/// Otherwise the caller receives a fresh secret while the same observed code remains reusable.
 #[tokio::test(flavor = "multi_thread")]
 async fn setup_reset_does_not_rotate_when_replay_claim_persistence_fails() {
     let h = boot();
@@ -360,8 +359,8 @@ async fn confirm_rejects_replayed_code() {
     );
 }
 
-/// Confirmation must not activate TOTP when recording the code as consumed
-/// fails. Activating it anyway leaves the verified code replayable.
+/// Confirmation must not activate TOTP when recording the code as consumed fails.
+/// Activating it anyway leaves the verified code replayable.
 #[tokio::test(flavor = "multi_thread")]
 async fn confirm_does_not_activate_when_replay_claim_persistence_fails() {
     let h = boot();
@@ -506,8 +505,7 @@ async fn revoke_with_invalid_code_does_not_clear() {
     );
 }
 
-/// Revocation is the most damaging replay-persistence failure: it must leave
-/// the existing enrollment intact when the verified code cannot be claimed.
+/// Revocation is the most damaging replay-persistence failure: it must leave the existing enrollment intact when the verified code cannot be claimed.
 #[tokio::test(flavor = "multi_thread")]
 async fn revoke_does_not_disable_totp_when_replay_claim_persistence_fails() {
     let h = boot();

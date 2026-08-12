@@ -242,10 +242,8 @@ async fn get_approval_returns_seeded_request() {
     assert_eq!(body["status"], "pending");
 }
 
-/// A request remains addressable by id after resolution while it is still in
-/// the manager's recent-history ring. The list endpoint already exposes the
-/// same record, so returning 404 here would make the two read surfaces
-/// disagree.
+/// A request remains addressable by id after resolution while it is still in the manager's recent-history ring.
+/// The list endpoint already exposes the same record, so returning 404 here would make the two read surfaces disagree.
 #[tokio::test(flavor = "multi_thread")]
 async fn get_approval_resolved_returns_recent_record() {
     let h = boot();
@@ -266,9 +264,8 @@ async fn get_approval_resolved_returns_recent_record() {
     assert!(body["decided_at"].is_string());
 }
 
-/// Manual creation must not acknowledge an approval that the manager refused
-/// to register. The manager caps one agent at five pending requests; the sixth
-/// call therefore provides a deterministic registration-failure boundary.
+/// Manual creation must not acknowledge an approval that the manager refused to register.
+/// The manager caps one agent at five pending requests; the sixth call therefore provides a deterministic registration-failure boundary.
 #[tokio::test(flavor = "multi_thread")]
 async fn create_approval_rejects_when_pending_registration_fails() {
     let h = boot();

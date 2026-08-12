@@ -113,8 +113,7 @@ pub struct ApprovalRecord {
 /// Result of atomically claiming a verified TOTP code in the replay table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TotpCodeClaim {
-    /// This caller inserted or refreshed an expired code record and owns the
-    /// single permitted use.
+    /// This caller inserted or refreshed an expired code record and owns the single permitted use.
     Claimed,
     /// A still-live replay-window record already owns this code.
     AlreadyUsed,
@@ -1181,8 +1180,8 @@ impl ApprovalManager {
     ///
     /// This mirrors Hermes-Agent's `resolve_gateway_approval(session_key,
     /// choice, resolve_all=True)`: every request whose `session_id` matches
-    /// is attempted with the given decision. Resolution is best-effort rather
-    /// than transactional; concurrent changes and per-item errors are skipped.
+    /// is attempted with the given decision.
+    /// Resolution is best-effort rather than transactional; concurrent changes and per-item errors are skipped.
     ///
     /// Returns the number of requests resolved (0 if the session had nothing
     /// pending).  This method does NOT spawn handle_approval_resolution for
@@ -3994,9 +3993,7 @@ mod tests {
         assert!(!mgr.is_totp_code_used("654321"));
     }
 
-    /// The replay table is the cross-task/process serialization point: even
-    /// when many workers race with the same valid code, exactly one claim may
-    /// authorize an action.
+    /// The replay table is the cross-task/process serialization point: even when many workers race with the same valid code, exactly one claim may authorize an action.
     #[test]
     fn concurrent_totp_claim_has_exactly_one_winner() {
         use std::sync::Barrier;

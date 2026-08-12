@@ -1,7 +1,6 @@
 //! Regression tests for the approvals hardening cluster (audit findings #18, #24).
 //!
-//! - #18: per-approval TOTP replay prevention must be atomic so a single
-//!   valid single-use code cannot authorize more than one concurrent approval.
+//! - #18: per-approval TOTP replay prevention must be atomic so a single valid single-use code cannot authorize more than one concurrent approval.
 //! - #24: `approve_request` must route the typed `KernelOpError` through the
 //!   central status-code map (like `reject_request`), so a missing/expired id
 //!   yields 404 rather than a blanket 400.

@@ -321,9 +321,8 @@ pub async fn create_approval(
         tool_use_id: None,
     };
 
-    // Registration performs synchronous SQLite persistence. Run it on the
-    // blocking pool, but await the registration result before acknowledging
-    // the id so callers never receive a phantom pending request.
+    // Registration performs synchronous SQLite persistence.
+    // Run it on the blocking pool, but await the registration result before acknowledging the id so callers never receive a phantom pending request.
     let kernel = Arc::clone(&state.kernel);
     match tokio::task::spawn_blocking(move || {
         kernel.approvals().submit_manual_request(approval_req)

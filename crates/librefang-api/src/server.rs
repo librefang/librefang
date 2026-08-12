@@ -4106,8 +4106,7 @@ mod dashboard_login_totp_lockout_tests {
         );
     }
 
-    /// The dashboard-login consumer must propagate a replay-table claim error
-    /// instead of issuing a session after a valid cryptographic verification.
+    /// The dashboard-login consumer must propagate a replay-table claim error instead of issuing a session after a valid cryptographic verification.
     #[tokio::test(flavor = "multi_thread")]
     async fn dashboard_login_fails_closed_when_totp_claim_persistence_fails() {
         use totp_rs::{Algorithm, Builder as TotpBuilder, Secret};
