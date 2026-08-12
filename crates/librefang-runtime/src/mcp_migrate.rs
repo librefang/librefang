@@ -411,15 +411,25 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
-        {
+        let mode = {
             use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
             let mode = std::fs::metadata(path)
                 .ok()
                 .map(|metadata| metadata.permissions().mode())
                 .unwrap_or(0o600);
             options.mode(mode);
-        }
+            mode
+        };
         let mut file = options.open(&staging)?;
+        // `OpenOptionsExt::mode` is masked by the process umask on creation,
+        // so a umask that clears bits present in `mode` would silently
+        // produce a file more restrictive than the permissions we are meant
+        // to preserve. Force the exact bits explicitly, bypassing the umask.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            file.set_permissions(std::fs::Permissions::from_mode(mode & 0o7777))?;
+        }
         file.write_all(content)?;
         file.sync_all()?;
         replace_file(&staging, path)?;
@@ -530,6 +540,32 @@ mod tests {
         assert_eq!(
             std::fs::metadata(&new_path).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+    }
+
+    /// `OpenOptionsExt::mode` is masked by the process umask on creation, so
+    /// preserving the existing mode only by passing it to `.mode()` silently
+    /// drops any bit the umask also covers (e.g. group/other write under the
+    /// common 0o022 umask). This pins that the helper forces the exact
+    /// existing bits via an explicit `set_permissions` afterward, rather than
+    /// only working by coincidence when the existing mode happens not to
+    /// overlap the umask.
+    #[cfg(unix)]
+    #[test]
+    fn durable_atomic_write_preserves_bits_that_conflict_with_process_umask() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        write(&path, "old = true\n");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+        durable_atomic_write(&path, b"new = true\n").unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o666,
+            "existing permissions must survive the process umask"
         );
     }
 
