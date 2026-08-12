@@ -147,9 +147,8 @@ pub struct CronScheduler {
     home_dir: PathBuf,
     /// Global cap on total jobs across all agents (atomic for hot-reload).
     max_total_jobs: AtomicUsize,
-    /// Serializes capacity checks with insertion. DashMap makes each map
-    /// operation atomic, but a separate `len()` check otherwise lets
-    /// concurrent creators exceed global and per-agent limits.
+    /// Serializes capacity checks with insertion.
+    /// DashMap makes each map operation atomic, but a separate `len()` check otherwise lets concurrent creators exceed global and per-agent limits.
     add_lock: std::sync::Mutex<()>,
     /// Serializes `persist()` writes so concurrent callers (cron loop, API
     /// routes, spawned cron tasks) don't corrupt the tmp file by interleaving
