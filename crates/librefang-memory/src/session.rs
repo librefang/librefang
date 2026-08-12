@@ -1595,8 +1595,10 @@ impl SessionStore {
                 )
                 .map_err(LibreFangError::memory)?;
 
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(LibreFangError::memory)?
+            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| {
+                warn!(error = %e, "session FTS search: row decode failed");
+                LibreFangError::memory(e)
+            })?
         } else {
             let mut stmt = conn
                 .prepare(
@@ -1622,8 +1624,10 @@ impl SessionStore {
                 )
                 .map_err(LibreFangError::memory)?;
 
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(LibreFangError::memory)?
+            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| {
+                warn!(error = %e, "session FTS search: row decode failed");
+                LibreFangError::memory(e)
+            })?
         };
 
         Ok(results)
