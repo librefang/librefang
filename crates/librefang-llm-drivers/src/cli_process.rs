@@ -39,6 +39,13 @@ pub(crate) fn timeout_error_with_partial(
 }
 
 pub(crate) enum OutputError {
+    /// The subprocess itself never started (binary missing, exec permission
+    /// denied, …). Distinct from `Io` below so callers can keep pointing
+    /// operators at "install the CLI" guidance only for this case, not for
+    /// a failure that happened after the process was already running.
+    Spawn(std::io::Error),
+    /// The subprocess started successfully but a later step — reaping its
+    /// exit status or draining its output pipes — failed.
     Io(std::io::Error),
     TimedOut,
 }
@@ -149,7 +156,7 @@ pub(crate) async fn output_with_timeout(
 ) -> Result<Output, OutputError> {
     command.kill_on_drop(true);
     set_process_group(command);
-    let mut child = command.spawn().map_err(OutputError::Io)?;
+    let mut child = command.spawn().map_err(OutputError::Spawn)?;
     let mut stdout_task = AbortOnDrop::new(tokio::spawn(read_pipe(child.stdout.take())));
     let mut stderr_task = AbortOnDrop::new(tokio::spawn(read_pipe(child.stderr.take())));
     let deadline = Instant::now() + duration;

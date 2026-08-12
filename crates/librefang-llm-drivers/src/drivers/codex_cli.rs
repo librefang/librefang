@@ -320,10 +320,15 @@ impl LlmDriver for CodexCliDriver {
             Err(crate::cli_process::OutputError::TimedOut) => {
                 return Err(crate::cli_process::timeout_error(timeout_secs, "Codex CLI"));
             }
-            Err(crate::cli_process::OutputError::Io(e)) => {
+            Err(crate::cli_process::OutputError::Spawn(e)) => {
                 return Err(LlmError::Http(format!(
                     "Codex CLI not found or failed to start ({e}). \
                      Install: npm install -g @openai/codex"
+                )));
+            }
+            Err(crate::cli_process::OutputError::Io(e)) => {
+                return Err(LlmError::Http(format!(
+                    "Codex CLI subprocess failed after starting: {e}"
                 )));
             }
         };

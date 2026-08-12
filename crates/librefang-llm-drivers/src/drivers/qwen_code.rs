@@ -735,13 +735,18 @@ impl QwenCodeDriver {
                     "Qwen Code CLI",
                 ));
             }
-            Err(crate::cli_process::OutputError::Io(e)) => {
+            Err(crate::cli_process::OutputError::Spawn(e)) => {
                 return Err(LlmError::Http(format!(
                     "Qwen Code CLI not found or failed to start ({e}). \
                      Install: npm install -g @qwen-code/qwen-code && qwen auth. \
                      If the CLI is installed in a non-standard location, set \
                      provider_urls.qwen-code in your LibreFang config.toml \
                      (e.g. provider_urls.qwen-code = \"/path/to/qwen\")"
+                )));
+            }
+            Err(crate::cli_process::OutputError::Io(e)) => {
+                return Err(LlmError::Http(format!(
+                    "Qwen Code CLI subprocess failed after starting: {e}"
                 )));
             }
         };

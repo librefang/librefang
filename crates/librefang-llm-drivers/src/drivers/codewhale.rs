@@ -245,10 +245,15 @@ impl LlmDriver for CodeWhaleDriver {
                     "CodeWhale CLI",
                 ));
             }
-            Err(crate::cli_process::OutputError::Io(e)) => {
+            Err(crate::cli_process::OutputError::Spawn(e)) => {
                 return Err(LlmError::Http(format!(
                     "CodeWhale CLI not found or failed to start ({e}). \
                      Install: npm install -g codewhale"
+                )));
+            }
+            Err(crate::cli_process::OutputError::Io(e)) => {
+                return Err(LlmError::Http(format!(
+                    "CodeWhale CLI subprocess failed after starting: {e}"
                 )));
             }
         };

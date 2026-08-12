@@ -233,10 +233,15 @@ impl LlmDriver for GeminiCliDriver {
                     "Gemini CLI",
                 ));
             }
-            Err(crate::cli_process::OutputError::Io(e)) => {
+            Err(crate::cli_process::OutputError::Spawn(e)) => {
                 return Err(LlmError::Http(format!(
                     "Gemini CLI not found or failed to start ({e}). \
                      Install the Google Gemini CLI and run: gemini"
+                )));
+            }
+            Err(crate::cli_process::OutputError::Io(e)) => {
+                return Err(LlmError::Http(format!(
+                    "Gemini CLI subprocess failed after starting: {e}"
                 )));
             }
         };
