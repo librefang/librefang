@@ -1141,8 +1141,7 @@ impl LibreFangKernel {
     }
 }
 
-/// Move the synchronous SQLite and filesystem summary writes off the Tokio
-/// worker that generated the summary.
+/// Move the synchronous SQLite and filesystem summary writes off the Tokio worker that generated the summary.
 async fn persist_session_summary_off_thread(
     memory: Arc<librefang_memory::MemorySubstrate>,
     agent_id: AgentId,
