@@ -3,6 +3,8 @@ name = "librefang-extensions"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 description = "Extension & integration system for LibreFang — one-click MCP server setup, credential vault, OAuth2 PKCE"
 
 [dependencies]

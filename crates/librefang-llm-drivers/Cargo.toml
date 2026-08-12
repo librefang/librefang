@@ -3,6 +3,8 @@ name = "librefang-llm-drivers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 description = "Concrete LLM provider drivers (anthropic, openai, gemini, …) implementing the librefang-llm-driver trait"
 readme = "README.md"
 

@@ -3,6 +3,8 @@ name = "librefang-desktop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 description = "Native desktop application for the LibreFang Agent OS (Tauri 2.0)"
 
 [build-dependencies]

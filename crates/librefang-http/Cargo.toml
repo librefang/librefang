@@ -3,6 +3,8 @@ name = "librefang-http"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 description = "Shared HTTP client builder with proxy and TLS fallback for LibreFang"
 
 [dependencies]

@@ -3,6 +3,8 @@ name = "librefang-memory-wiki"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 description = "Durable markdown knowledge vault for the LibreFang Agent OS — provenance frontmatter + Obsidian-friendly export. See issue #3329."
 
 [dependencies]

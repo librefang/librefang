@@ -3,6 +3,8 @@ name = "librefang-channels"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 description = "Channel Bridge Layer — pluggable messaging integrations for LibreFang"
 readme = "README.md"
 
