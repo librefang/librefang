@@ -15,7 +15,35 @@
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
 use librefang_types::tool::ToolExecutionStatus;
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 use tracing::{debug, warn};
+
+const INJECTION_MARKERS: &[&str] = &[
+    "<|system|>",
+    "<|im_start|>",
+    "<|im_end|>",
+    "### SYSTEM:",
+    "### System Prompt:",
+    "[SYSTEM]",
+    "<<SYS>>",
+    "<</SYS>>",
+    "IGNORE PREVIOUS INSTRUCTIONS",
+    "Ignore all previous instructions",
+    "ignore the above",
+    "disregard previous",
+];
+
+static INJECTION_MARKER_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    let pattern = INJECTION_MARKERS
+        .iter()
+        .map(|marker| regex::escape(marker))
+        .collect::<Vec<_>>()
+        .join("|");
+    regex::RegexBuilder::new(&pattern)
+        .case_insensitive(true)
+        .build()
+        .expect("injection marker regex must compile")
+});
 
 /// Statistics from a repair operation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1059,46 +1087,9 @@ fn is_base64_char(c: char) -> bool {
 
 /// Remove common prompt injection markers from content.
 fn strip_injection_markers(content: &str) -> String {
-    // These patterns are commonly used in prompt injection attempts
-    const INJECTION_MARKERS: &[&str] = &[
-        "<|system|>",
-        "<|im_start|>",
-        "<|im_end|>",
-        "### SYSTEM:",
-        "### System Prompt:",
-        "[SYSTEM]",
-        "<<SYS>>",
-        "<</SYS>>",
-        "IGNORE PREVIOUS INSTRUCTIONS",
-        "Ignore all previous instructions",
-        "ignore the above",
-        "disregard previous",
-    ];
-
-    let mut result = content.to_string();
-    let lower = result.to_lowercase();
-
-    for marker in INJECTION_MARKERS {
-        let marker_lower = marker.to_lowercase();
-        // Case-insensitive replacement
-        if lower.contains(&marker_lower) {
-            // Find and replace case-insensitively
-            let mut new_result = String::with_capacity(result.len());
-            let mut search_pos = 0;
-            let result_lower = result.to_lowercase();
-
-            while let Some(found) = result_lower[search_pos..].find(&marker_lower) {
-                let abs_pos = search_pos + found;
-                new_result.push_str(&result[search_pos..abs_pos]);
-                new_result.push_str("[injection marker removed]");
-                search_pos = abs_pos + marker.len();
-            }
-            new_result.push_str(&result[search_pos..]);
-            result = new_result;
-        }
-    }
-
-    result
+    INJECTION_MARKER_RE
+        .replace_all(content, "[injection marker removed]")
+        .into_owned()
 }
 
 /// Remove NO_REPLY assistant turns and their preceding user-message triggers
