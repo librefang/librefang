@@ -1,0 +1,3 @@
+Chromium binary discovery for browser sessions previously ran synchronously on the async task launching the session, probing configured/candidate paths with blocking `std::fs` checks and shelling out to `which` / `where.exe` for a PATH lookup.
+A slow disk or a hung `which` invocation could stall the Tokio worker thread handling that request for the duration of the search.
+Discovery now runs on Tokio's blocking thread pool via `spawn_blocking`, preserving the existing configured-path, environment, platform-candidate, and PATH lookup order, with a blocking-task failure surfaced explicitly instead of silently propagating a `JoinError` (#7042) (@houko)
