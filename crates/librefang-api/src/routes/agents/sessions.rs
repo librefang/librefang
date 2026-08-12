@@ -160,7 +160,12 @@ pub async fn get_agent_session(
         }
     };
     if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
-        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+        // `err_agent_not_found` rather than a fresh `ErrorTranslator`: the
+        // translator is `!Send` and this handler awaits below, so #6921 moved
+        // it into a block that pre-resolves every message and drops it before
+        // the first await. The move in the registry-miss arm above sits on a
+        // diverging branch, so the binding is still live on this path.
+        return ApiErrorResponse::not_found(err_agent_not_found)
             .with_code("agent_not_found")
             .into_response();
     }
