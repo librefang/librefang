@@ -898,13 +898,22 @@ pub async fn search_sessions(
     let limit = pagination.effective_limit();
     let offset = pagination.effective_offset();
 
-    match state.kernel.memory_substrate().search_sessions_paginated(
-        &query,
-        agent_id.as_ref(),
-        Some(limit),
-        offset,
-    ) {
-        Ok(results) => {
+    let substrate = Arc::clone(state.kernel.memory_substrate());
+    // Same rationale as /api/sessions (#6986): this FTS5 query runs a
+    // synchronous SQLite connection, so keep it off the Tokio worker
+    // rather than blocking whichever one happens to serve this request.
+    let search_result = tokio::task::spawn_blocking(move || {
+        substrate.search_sessions_paginated(&query, agent_id.as_ref(), Some(limit), offset)
+    })
+    .await;
+
+    match search_result {
+        Err(error) => {
+            tracing::error!(%error, "session search query task failed");
+            ApiErrorResponse::internal(error.to_string()).into_json_tuple()
+        }
+        Ok(Err(e)) => ApiErrorResponse::internal(e.to_string()).into_json_tuple(),
+        Ok(Ok(results)) => {
             // Canonical paginated envelope (#3842): {items,total,offset,limit}.
             // The substrate has no count() for FTS5 search, so `total` is a
             // best-effort lower bound: when the page isn't full it is exact
@@ -939,6 +948,5 @@ pub async fn search_sessions(
                 ),
             )
         }
-        Err(e) => ApiErrorResponse::internal(e.to_string()).into_json_tuple(),
     }
 }
