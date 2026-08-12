@@ -3629,6 +3629,41 @@ async fn test_user_budget_detail_includes_enforced_true() {
     assert!(body["alert_breach"].is_boolean());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_detail_fails_closed_when_storage_is_unavailable() {
+    // #6971 — `user_budget_detail` reads `query_user_hourly` /
+    // `query_user_daily` / `query_user_monthly` and, before that fix,
+    // `.unwrap_or(0.0)`'d a query failure into a silent zero-spend
+    // response. Dropping the backing table forces every one of those
+    // three queries to fail, so a regression here would report success
+    // with fabricated zero spend numbers instead of failing closed.
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let conn = server
+        .state
+        .kernel
+        .memory_substrate()
+        .pool()
+        .get()
+        .unwrap();
+    conn.execute("DROP TABLE usage_events", []).unwrap();
+    drop(conn);
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/budget/users/Alice", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 500);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "usage_query_failed");
+    assert_eq!(body["message"], "Internal server error");
+    assert!(!body.to_string().contains("usage_events"), "body: {body}");
+}
+
 // ───────────────────────────────────────────────────────────────────────
 // Effective-permissions snapshot — `/api/authz/effective/{user_id}`
 //
