@@ -1623,9 +1623,8 @@ pub async fn memory_config_patch(
         return locked;
     }
 
-    // Keep the complete read-modify-write-reload transaction under the shared
-    // config lock. Otherwise two unrelated dashboard saves can read the same
-    // snapshot and the later write silently reverts the earlier one.
+    // Keep the complete read-modify-write-reload transaction under the shared config lock.
+    // Otherwise two unrelated dashboard saves can read the same snapshot and the later write silently reverts the earlier one.
     let _config_guard = state.config_write_lock.lock().await;
     let config_path = state.kernel.home_dir().join("config.toml");
 

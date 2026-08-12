@@ -254,8 +254,8 @@ async fn config_set_is_locked_in_managed_mode_and_leaves_the_file_untouched() {
     );
 }
 
-/// Memory settings are deployment configuration too. Refuse the PATCH before
-/// reading or rewriting config.toml so managed deployments remain immutable.
+/// Memory settings are deployment configuration too.
+/// Refuse the PATCH before reading or rewriting config.toml so managed deployments remain immutable.
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_config_patch_is_locked_in_managed_mode() {
     let _guard = ManagedModeGuard::set().await;
