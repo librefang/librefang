@@ -1026,23 +1026,14 @@ pub async fn configure_sidecar_channel(
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
 
-    // 4. Split payload: secrets go to secrets.env, everything else goes
-    //    into the [sidecar_channels.env] table.
+    // 4. Split payload: secrets go to secrets.env, everything else goes into the [sidecar_channels.env] table.
     //
-    //    Both the secrets.env upserts and the config.toml upsert below
-    //    run inside `state.config_write_lock`. That mutex also gates
-    //    `POST /api/config/set` and the legacy `configure_channel`
-    //    handler (issue #3183), so two concurrent
-    //    `POST /api/channels/sidecar/{a,b}/configure` calls — or one of
-    //    those interleaved with `config_set` — cannot lost-update on
-    //    `~/.librefang/config.toml` or on `~/.librefang/secrets.env`.
-    //    The guard is dropped before `reload_config().await` so the
-    //    hot-reload step does not gate other config-writing handlers.
+    //    Both the secrets.env upserts and the config.toml upsert below run inside `state.config_write_lock`.
+    //    That mutex also gates `POST /api/config/set` and the legacy `configure_channel` handler (issue #3183), so two concurrent `POST /api/channels/sidecar/{a,b}/configure` calls — or one of those interleaved with `config_set` — cannot lost-update on `~/.librefang/config.toml` or on `~/.librefang/secrets.env`.
+    //    The guard is dropped before `reload_config().await` so the hot-reload step does not gate other config-writing handlers.
     //
-    //    Include-file detection, the `secrets.env` membership read, and
-    //    all durable writes run as one serialized blocking task. Keeping
-    //    include detection under the lock also prevents another config
-    //    writer from changing the include list between the check and write.
+    //    Include-file detection, the `secrets.env` membership read, and all durable writes run as one serialized blocking task.
+    //    Keeping include detection under the lock also prevents another config writer from changing the include list between the check and write.
     let shadowed_secrets = {
         let _config_guard = state.config_write_lock.lock().await;
         tokio::task::spawn_blocking(move || {
