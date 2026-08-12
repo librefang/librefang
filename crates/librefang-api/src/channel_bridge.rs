@@ -3218,7 +3218,7 @@ mod tests {
     async fn channel_approval_rejects_replayed_totp_code() {
         use librefang_testing::MockKernelBuilder;
         use librefang_types::approval::{ApprovalRequest, RiskLevel, SecondFactor};
-        use totp_rs::{Algorithm, Secret, TOTP};
+        use totp_rs::{Algorithm, Builder as TotpBuilder, Secret};
 
         let (kernel, _tmp) = MockKernelBuilder::new().build();
         let mut policy = kernel.approvals().policy();
@@ -3234,13 +3234,17 @@ mod tests {
             .vault_set("totp_secret", &secret)
             .expect("persist secret");
         let issuer = kernel.approvals().policy().totp_issuer.clone();
-        let raw = Secret::Encoded(secret)
-            .to_bytes()
-            .expect("decode base32 secret");
-        let code = TOTP::new(Algorithm::SHA1, 6, 1, 30, raw, Some(issuer), String::new())
+        let code = TotpBuilder::new()
+            .with_algorithm(Algorithm::SHA1)
+            .with_skew(1)
+            .with_step_duration(30)
+            .with_secret(Secret::try_from_base32(&secret).expect("decode base32 secret"))
+            .with_issuer(Some(issuer))
+            .with_account_name(String::new())
+            .build()
             .expect("totp init")
             .generate_current()
-            .expect("current code");
+            .to_string();
 
         let make_request = || ApprovalRequest {
             id: uuid::Uuid::new_v4(),

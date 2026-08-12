@@ -4110,7 +4110,7 @@ mod dashboard_login_totp_lockout_tests {
     /// instead of issuing a session after a valid cryptographic verification.
     #[tokio::test(flavor = "multi_thread")]
     async fn dashboard_login_fails_closed_when_totp_claim_persistence_fails() {
-        use totp_rs::{Algorithm, Secret, TOTP};
+        use totp_rs::{Algorithm, Builder as TotpBuilder, Secret};
 
         pin_vault_key();
         let tmp = tempfile::tempdir().expect("temp dir");
@@ -4153,13 +4153,17 @@ mod dashboard_login_totp_lockout_tests {
             .vault_set("totp_confirmed", "true")
             .expect("persist totp confirmed flag");
         let issuer = state.kernel.approvals().policy().totp_issuer.clone();
-        let raw = Secret::Encoded(secret)
-            .to_bytes()
-            .expect("decode base32 secret");
-        let code = TOTP::new(Algorithm::SHA1, 6, 1, 30, raw, Some(issuer), String::new())
+        let code = TotpBuilder::new()
+            .with_algorithm(Algorithm::SHA1)
+            .with_skew(1)
+            .with_step_duration(30)
+            .with_secret(Secret::try_from_base32(&secret).expect("decode base32 secret"))
+            .with_issuer(Some(issuer))
+            .with_account_name(String::new())
+            .build()
             .expect("totp init")
             .generate_current()
-            .expect("current code");
+            .to_string();
 
         state
             .kernel
