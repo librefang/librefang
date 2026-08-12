@@ -294,6 +294,25 @@ fn safe_ext_from_filename(filename: &str) -> Option<String> {
     }
 }
 
+/// Durable metadata for a file exposed through `/api/uploads/{file_id}`.
+///
+/// Cross-crate producers persist this sidecar beside the upload so the API can reconstruct its content type and access policy after a daemon restart.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UploadMetadata {
+    pub filename: String,
+    pub content_type: String,
+    /// `Some` binds a human upload to its owner.
+    /// Persisted `None` explicitly marks daemon-generated or no-auth content as shared.
+    pub uploaded_by: Option<crate::agent::UserId>,
+}
+
+/// Hidden sidecar path for [`UploadMetadata`].
+///
+/// The leading dot keeps it out of the legacy `<uuid>.*` data-file probe.
+pub fn upload_metadata_path(upload_dir: &std::path::Path, file_id: &str) -> std::path::PathBuf {
+    upload_dir.join(format!(".{file_id}.meta.json"))
+}
+
 /// Compute the on-disk basename for a persisted upload: `"<file_id>.<ext>"`,
 /// or a bare `"<file_id>"` when no extension can be determined.
 ///
@@ -933,6 +952,25 @@ mod tests {
         assert_eq!(
             on_disk_name(id, "audio/ogg; codecs=opus", "voice.oga"),
             on_disk_name(id, "audio/ogg; codecs=opus", "voice.oga"),
+        );
+    }
+
+    #[test]
+    fn upload_metadata_sidecar_contract_is_shared_and_hidden() {
+        let id = "33333333-3333-3333-3333-333333333333";
+        let meta = UploadMetadata {
+            filename: "generated.png".to_string(),
+            content_type: "image/png".to_string(),
+            uploaded_by: None,
+        };
+        let encoded = serde_json::to_vec(&meta).unwrap();
+        let decoded: UploadMetadata = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.filename, "generated.png");
+        assert_eq!(decoded.content_type, "image/png");
+        assert_eq!(decoded.uploaded_by, None);
+        assert_eq!(
+            upload_metadata_path(std::path::Path::new("/uploads"), id),
+            std::path::Path::new("/uploads").join(format!(".{id}.meta.json"))
         );
     }
 

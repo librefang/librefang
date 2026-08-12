@@ -1,0 +1,1 @@
+Release changelog generation now fails closed when git or GitHub metadata is incomplete, bounds external commands, rejects model-generated section headings, preserves the Unreleased section on a first release, and reuses compiled title patterns. (#6915) (@houko)

@@ -49,12 +49,16 @@ mod tests {
             .expect("schema must declare TELEGRAM_BOT_TOKEN");
         assert_eq!(bot_token.field_type, FieldType::Secret);
         assert!(bot_token.required);
+        assert!(!bot_token.advanced);
 
         let allowed_users = schema
             .fields
             .iter()
             .find(|f| f.key == "ALLOWED_USERS")
             .expect("schema must declare ALLOWED_USERS");
+        assert_eq!(allowed_users.field_type, FieldType::List);
+        assert!(!allowed_users.required);
+        assert!(allowed_users.advanced);
         assert!(
             allowed_users.placeholder.contains("empty")
                 && allowed_users.placeholder.contains("ALL users")
@@ -62,12 +66,22 @@ mod tests {
             "blank permit-all behavior must be explicit in the dashboard schema"
         );
 
+        let clear_done_reaction = schema
+            .fields
+            .iter()
+            .find(|f| f.key == "TELEGRAM_CLEAR_DONE_REACTION")
+            .expect("schema must declare TELEGRAM_CLEAR_DONE_REACTION");
+        assert_eq!(clear_done_reaction.field_type, FieldType::Bool);
+        assert!(!clear_done_reaction.required);
+        assert!(clear_done_reaction.advanced);
+
         let streaming = schema
             .fields
             .iter()
             .find(|f| f.key == "TELEGRAM_STREAMING")
             .expect("schema must declare TELEGRAM_STREAMING");
         assert_eq!(streaming.field_type, FieldType::Bool);
+        assert!(!streaming.required);
         assert!(streaming.advanced);
     }
 }

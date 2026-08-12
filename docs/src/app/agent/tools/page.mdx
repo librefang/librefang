@@ -199,8 +199,8 @@ Tool calls into provider-specific media APIs. Per-tool capability grants require
 | `image_generate(prompt, size?, style?)` | Generate an image (OpenAI / Replicate / Vertex). |
 | `image_analyze(image, question)` | Vision Q&A on an existing image. |
 | `media_describe(image_or_video)` | Caption / describe an existing media asset. |
-| `media_transcribe(audio_or_video, language?, prompt?)` | Speech-to-text on an audio file, or a video container's audio track (extracted server-side). Rejects unrecognised file extensions. |
-| `speech_to_text(audio_or_video, language?, prompt?)` | Same providers and video-container support as `media_transcribe`; falls back to a permissive best-guess MIME type instead of rejecting an unrecognised extension. |
+| `media_transcribe(audio_or_video, language?, prompt?, start_sec?, max_secs?, out_path?)` | Speech-to-text on an audio file, or a video container's audio track (extracted server-side). Rejects unrecognised file extensions. `start_sec` / `max_secs` transcribe one window and return `has_more` / `next_start_sec` to walk the rest; `out_path` writes the transcript to a workspace file and returns only path, size, sha256 and a preview. Long recordings need both — see below. |
+| `speech_to_text(audio_or_video, language?, prompt?)` | Same providers and video-container support as `media_transcribe`, and falls back to a permissive best-guess MIME type instead of rejecting an unrecognised extension. Has no windowing or `out_path`, so a recording long enough to need either belongs on `media_transcribe`. |
 | `text_to_speech(text, voice?)` | TTS synthesis. |
 | `music_generate(prompt, lyrics?)` | Music generation (Suno / Replicate). |
 | `video_generate(prompt, duration_secs?)` | Submit a video-generation task; returns `task_id`. |
@@ -208,6 +208,31 @@ Tool calls into provider-specific media APIs. Per-tool capability grants require
 | `canvas_present(html)` | Render an interactive HTML canvas in the dashboard. |
 
 Cost and latency vary widely between providers — check `[media] providers` in `config.toml` to control which provider serves each tool.
+
+### Transcribing a long recording
+
+A whole meeting returned in one tool result does not reach the agent intact: the kernel spills any result over `[tool_results] spill_threshold_bytes` (16 KB by default) to the artifact store and hands the agent a stub, and a single transcription request is bounded by a wall-clock timeout that does not scale with the length of the input.
+Both limits are reached long before any file-size limit is — a ten-minute recording is a couple of megabytes of extracted audio.
+
+So transcribe in windows, and write to a file:
+
+```
+media_transcribe(path="meeting.mp4", max_secs=600, out_path="meeting.txt")
+→ { "written_to": "...", "file_bytes": 16831, "has_more": true, "next_start_sec": 600.0, "window_preview": "..." }
+
+media_transcribe(path="meeting.mp4", start_sec=600, max_secs=600, out_path="meeting.txt")
+→ ... repeat while has_more is true
+```
+
+A window starting at `0` begins a new file; later windows append to it separated by a newline, so the calls assemble one transcript without the agent holding any of it.
+Advance by `next_start_sec` rather than by `max_secs`: a seek lands on a keyframe and the final window is short, so the produced length is the only edge that does not drift.
+
+Do not guess `start_sec` either.
+A window starting more than about ten seconds past the end of the recording does not come back empty — ffmpeg gives up on the seek and returns the recording from the beginning, which then reads as though it were the part that was asked for.
+The margin is absolute rather than a share of the length, so on a long recording it is a small fraction of one: asking for minute fifty of a forty-five-minute meeting is enough.
+
+Lower `max_secs` if a call times out.
+How much media fits in one request depends on provider speed, and a self-hosted endpoint can be an order of magnitude slower than a hosted one.
 
 ---
 
