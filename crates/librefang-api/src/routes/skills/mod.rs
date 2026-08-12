@@ -1258,31 +1258,6 @@ fn status_str_for_catalog(
     }
 }
 
-/// Recursively copy a directory tree.
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        // `std::fs::copy` dereferences links, so a symlink planted in the registry checkout would write the target's real contents into the installed skill.
-        // Mirrors `librefang_skills::marketplace::copy_dir_recursive`.
-        if ty.is_symlink() {
-            tracing::warn!(
-                path = %entry.path().display(),
-                "skipping symlink while installing skill"
-            );
-            continue;
-        }
-        let dest_path = dst.join(entry.file_name());
-        if ty.is_dir() {
-            copy_dir_recursive(&entry.path(), &dest_path)?;
-        } else {
-            std::fs::copy(entry.path(), &dest_path)?;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1308,7 +1283,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside_dir, src.join("link_dir")).unwrap();
 
         let dest = tmp.path().join("dest");
-        copy_dir_recursive(&src, &dest).unwrap();
+        librefang_skills::evolution::install_local_skill(&src, &dest).unwrap();
 
         assert!(dest.join("SKILL.md").exists());
         assert!(dest.join("nested/file.txt").exists());

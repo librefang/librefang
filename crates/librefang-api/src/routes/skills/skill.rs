@@ -167,18 +167,9 @@ pub async fn install_skill(
     }
 
     let dest = skills_dir.join(&req.name);
-    if dest.exists() {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": format!("Skill '{}' is already installed", req.name),
-                "status": "already_installed",
-            })),
-        );
-    }
 
-    // Copy the skill directory from registry to skills
-    match copy_dir_recursive(&registry_src, &dest) {
+    // Copy under the same per-skill lock used by evolve/uninstall operations.
+    match librefang_skills::evolution::install_local_skill(&registry_src, &dest) {
         Ok(()) => {
             let version = "latest".to_string();
 
@@ -194,10 +185,15 @@ pub async fn install_skill(
                 })),
             )
         }
+        Err(librefang_skills::SkillError::AlreadyInstalled(_)) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("Skill '{}' is already installed", req.name),
+                "status": "already_installed",
+            })),
+        ),
         Err(e) => {
             tracing::warn!("Skill install failed: {e}");
-            // Clean up partial copy
-            let _ = std::fs::remove_dir_all(&dest);
             ApiErrorResponse::internal_scrub(e).into_json_tuple()
         }
     }
