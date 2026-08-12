@@ -137,6 +137,12 @@ fn fmt_global_budget_diff(
 // Usage endpoint
 // ---------------------------------------------------------------------------
 
+fn usage_query_error(error: impl std::fmt::Display) -> Response {
+    ApiErrorResponse::internal_scrub(error)
+        .with_code("usage_query_failed")
+        .into_response()
+}
+
 /// GET /api/usage — Get per-agent usage statistics.
 ///
 /// The per-agent rollup is materialized from the in-memory agent registry
@@ -147,30 +153,36 @@ fn fmt_global_budget_diff(
     tag = "budget",
     responses((status = 200, description = "Per-agent usage statistics", body = crate::types::JsonObject))
 )]
-pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn usage_stats(State(state): State<Arc<AppState>>) -> Response {
     let usage_store = state.kernel.memory_substrate().usage();
-    let items: Vec<serde_json::Value> = state
+    let items = state
         .kernel
         .agent_registry()
         .list()
         .iter()
-        .map(|e| {
-            // Read from persistent SQLite store (survives restarts)
-            let summary = usage_store.query_summary(Some(e.id)).unwrap_or_default();
-            serde_json::json!({
-                "agent_id": e.id.to_string(),
-                "name": e.name,
-                "is_hand": e.is_hand,
-                "total_tokens": summary.total_input_tokens + summary.total_output_tokens,
-                "input_tokens": summary.total_input_tokens,
-                "output_tokens": summary.total_output_tokens,
-                "total_cost_usd": summary.total_cost_usd,
-                "cost": summary.total_cost_usd,
-                "call_count": summary.call_count,
-                "tool_calls": summary.total_tool_calls,
-            })
-        })
-        .collect();
+        .map(
+            |e| -> librefang_types::error::LibreFangResult<serde_json::Value> {
+                // Read from persistent SQLite store (survives restarts)
+                let summary = usage_store.query_summary(Some(e.id))?;
+                Ok(serde_json::json!({
+                    "agent_id": e.id.to_string(),
+                    "name": e.name,
+                    "is_hand": e.is_hand,
+                    "total_tokens": summary.total_input_tokens + summary.total_output_tokens,
+                    "input_tokens": summary.total_input_tokens,
+                    "output_tokens": summary.total_output_tokens,
+                    "total_cost_usd": summary.total_cost_usd,
+                    "cost": summary.total_cost_usd,
+                    "call_count": summary.call_count,
+                    "tool_calls": summary.total_tool_calls,
+                }))
+            },
+        )
+        .collect::<librefang_types::error::LibreFangResult<Vec<_>>>();
+    let items = match items {
+        Ok(items) => items,
+        Err(error) => return usage_query_error(error),
+    };
     let total = items.len();
     Json(crate::types::PaginatedResponse {
         items,
@@ -178,6 +190,7 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
         offset: 0,
         limit: None,
     })
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -191,7 +204,7 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
     tag = "budget",
     responses((status = 200, description = "Overall usage summary", body = crate::types::JsonObject))
 )]
-pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn usage_summary(State(state): State<Arc<AppState>>) -> Response {
     match state.kernel.memory_substrate().usage().query_summary(None) {
         Ok(s) => Json(serde_json::json!({
             "total_input_tokens": s.total_input_tokens,
@@ -199,14 +212,9 @@ pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "total_cost_usd": s.total_cost_usd,
             "call_count": s.call_count,
             "total_tool_calls": s.total_tool_calls,
-        })),
-        Err(_) => Json(serde_json::json!({
-            "total_input_tokens": 0,
-            "total_output_tokens": 0,
-            "total_cost_usd": 0.0,
-            "call_count": 0,
-            "total_tool_calls": 0,
-        })),
+        }))
+        .into_response(),
+        Err(error) => usage_query_error(error),
     }
 }
 
@@ -217,7 +225,7 @@ pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoRespo
     tag = "budget",
     responses((status = 200, description = "Usage grouped by model", body = crate::types::JsonObject))
 )]
-pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> Response {
     match state.kernel.memory_substrate().usage().query_by_model() {
         Ok(models) => {
             let list: Vec<serde_json::Value> = models
@@ -232,9 +240,9 @@ pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResp
                     })
                 })
                 .collect();
-            Json(serde_json::json!({"models": list}))
+            Json(serde_json::json!({"models": list})).into_response()
         }
-        Err(_) => Json(serde_json::json!({"models": []})),
+        Err(error) => usage_query_error(error),
     }
 }
 
@@ -245,7 +253,7 @@ pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResp
     tag = "budget",
     responses((status = 200, description = "Model performance metrics", body = crate::types::JsonObject))
 )]
-pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> Response {
     match state
         .kernel
         .memory_substrate()
@@ -270,9 +278,9 @@ pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> i
                     })
                 })
                 .collect();
-            Json(serde_json::json!({"models": list}))
+            Json(serde_json::json!({"models": list})).into_response()
         }
-        Err(_) => Json(serde_json::json!({"models": []})),
+        Err(error) => usage_query_error(error),
     }
 }
 
@@ -283,7 +291,7 @@ pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> i
     tag = "budget",
     responses((status = 200, description = "Daily usage breakdown", body = crate::types::JsonObject))
 )]
-pub async fn usage_daily(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn usage_daily(State(state): State<Arc<AppState>>) -> Response {
     let days = state
         .kernel
         .memory_substrate()
@@ -308,14 +316,23 @@ pub async fn usage_daily(State(state): State<Arc<AppState>>) -> impl IntoRespons
                 })
             })
             .collect::<Vec<_>>(),
-        Err(_) => vec![],
+        Err(error) => return usage_query_error(error),
+    };
+    let today_cost = match today_cost {
+        Ok(cost) => cost,
+        Err(error) => return usage_query_error(error),
+    };
+    let first_event = match first_event {
+        Ok(date) => date,
+        Err(error) => return usage_query_error(error),
     };
 
     Json(serde_json::json!({
         "days": days_list,
-        "today_cost_usd": today_cost.unwrap_or(0.0),
-        "first_event_date": first_event.unwrap_or(None),
+        "today_cost_usd": today_cost,
+        "first_event_date": first_event,
     }))
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -713,9 +730,18 @@ pub async fn agent_budget_status(
     let quota = &entry.manifest.resources;
     let usage_store =
         librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().pool());
-    let hourly = usage_store.query_hourly(agent_id).unwrap_or(0.0);
-    let daily = usage_store.query_daily(agent_id).unwrap_or(0.0);
-    let monthly = usage_store.query_monthly(agent_id).unwrap_or(0.0);
+    let hourly = match usage_store.query_hourly(agent_id) {
+        Ok(value) => value,
+        Err(error) => return crate::extensions::with_agent_id(agent_id, usage_query_error(error)),
+    };
+    let daily = match usage_store.query_daily(agent_id) {
+        Ok(value) => value,
+        Err(error) => return crate::extensions::with_agent_id(agent_id, usage_query_error(error)),
+    };
+    let monthly = match usage_store.query_monthly(agent_id) {
+        Ok(value) => value,
+        Err(error) => return crate::extensions::with_agent_id(agent_id, usage_query_error(error)),
+    };
 
     // Token usage from scheduler
     let token_usage = state.kernel.scheduler_ref().get_usage(agent_id);
@@ -775,11 +801,10 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
 
     // Fetch all per-agent daily costs in a single GROUP BY query, then build a
     // lookup map so the registry join below is O(n) not O(n²).
-    let daily_costs: std::collections::HashMap<_, _> = usage_store
-        .query_all_agents_daily()
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
+    let daily_costs: std::collections::HashMap<_, _> = match usage_store.query_all_agents_daily() {
+        Ok(costs) => costs.into_iter().collect(),
+        Err(error) => return usage_query_error(error),
+    };
 
     // Use `list_arcs()` instead of `list()` so we get `Vec<Arc<AgentEntry>>`
     // back rather than a fresh owned clone of every entry. Each
@@ -819,6 +844,7 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
         offset: 0,
         limit: None,
     })
+    .into_response()
 }
 
 /// PUT /api/budget/agents/{id} — Update per-agent budget limits at runtime.
@@ -1116,9 +1142,18 @@ pub async fn user_budget_detail(
     let budget = user_cfg.and_then(|u| u.budget.clone());
 
     let usage_store = state.kernel.memory_substrate().usage();
-    let hourly = usage_store.query_user_hourly(user_id).unwrap_or(0.0);
-    let daily = usage_store.query_user_daily(user_id).unwrap_or(0.0);
-    let monthly = usage_store.query_user_monthly(user_id).unwrap_or(0.0);
+    let hourly = match usage_store.query_user_hourly(user_id) {
+        Ok(value) => value,
+        Err(error) => return usage_query_error(error),
+    };
+    let daily = match usage_store.query_user_daily(user_id) {
+        Ok(value) => value,
+        Err(error) => return usage_query_error(error),
+    };
+    let monthly = match usage_store.query_user_monthly(user_id) {
+        Ok(value) => value,
+        Err(error) => return usage_query_error(error),
+    };
 
     // Compute alert breach against the user's configured budget. When no
     // limit is set the percentage is 0 and `alert_breach` is false — the
@@ -1497,7 +1532,7 @@ fn exhaustion_reason_label(
         (status = 200, description = "Per-provider budget snapshot", body = crate::types::JsonObject)
     )
 )]
-pub async fn provider_budget_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn provider_budget_list(State(state): State<Arc<AppState>>) -> Response {
     let budget = state.kernel.budget_config();
     let usage_store =
         librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().pool());
@@ -1507,7 +1542,10 @@ pub async fn provider_budget_list(State(state): State<Arc<AppState>>) -> impl In
     // for free — caller relies on this for deterministic UI ordering.
     let mut providers: std::collections::BTreeSet<String> =
         budget.providers.keys().cloned().collect();
-    let observed = usage_store.query_distinct_providers().unwrap_or_default();
+    let observed = match usage_store.query_distinct_providers() {
+        Ok(providers) => providers,
+        Err(error) => return usage_query_error(error),
+    };
     for p in &observed {
         providers.insert(p.clone());
     }
@@ -1532,35 +1570,39 @@ pub async fn provider_budget_list(State(state): State<Arc<AppState>>) -> impl In
         })
         .unwrap_or_default();
 
-    let rows: Vec<serde_json::Value> = providers
+    let rows = providers
         .into_iter()
-        .map(|provider| {
-            let configured = budget.providers.get(&provider).cloned().unwrap_or_default();
-            let unconfigured = !budget.providers.contains_key(&provider);
-            let spend_hourly = usage_store.query_provider_hourly(&provider).unwrap_or(0.0);
-            let spend_daily = usage_store.query_provider_daily(&provider).unwrap_or(0.0);
-            let spend_monthly = usage_store.query_provider_monthly(&provider).unwrap_or(0.0);
-            let tokens_hourly = usage_store
-                .query_provider_tokens_hourly(&provider)
-                .unwrap_or(0);
-            let ex = exhaustion_snapshot.get(&provider);
-            serde_json::json!({
-                "provider": provider,
-                "unconfigured": unconfigured,
-                "cap_hourly_usd": configured.max_cost_per_hour_usd,
-                "cap_daily_usd": configured.max_cost_per_day_usd,
-                "cap_monthly_usd": configured.max_cost_per_month_usd,
-                "cap_tokens_per_hour": configured.max_tokens_per_hour,
-                "spend_hourly_usd": spend_hourly,
-                "spend_daily_usd": spend_daily,
-                "spend_monthly_usd": spend_monthly,
-                "tokens_this_hour": tokens_hourly,
-                "is_exhausted": ex.is_some(),
-                "exhaustion_reason": ex.map(|r| exhaustion_reason_label(r.reason)),
-                "exhaustion_remaining_ms": ex.and_then(|r| r.remaining_ms),
-            })
-        })
-        .collect();
+        .map(
+            |provider| -> librefang_types::error::LibreFangResult<serde_json::Value> {
+                let configured = budget.providers.get(&provider).cloned().unwrap_or_default();
+                let unconfigured = !budget.providers.contains_key(&provider);
+                let spend_hourly = usage_store.query_provider_hourly(&provider)?;
+                let spend_daily = usage_store.query_provider_daily(&provider)?;
+                let spend_monthly = usage_store.query_provider_monthly(&provider)?;
+                let tokens_hourly = usage_store.query_provider_tokens_hourly(&provider)?;
+                let ex = exhaustion_snapshot.get(&provider);
+                Ok(serde_json::json!({
+                    "provider": provider,
+                    "unconfigured": unconfigured,
+                    "cap_hourly_usd": configured.max_cost_per_hour_usd,
+                    "cap_daily_usd": configured.max_cost_per_day_usd,
+                    "cap_monthly_usd": configured.max_cost_per_month_usd,
+                    "cap_tokens_per_hour": configured.max_tokens_per_hour,
+                    "spend_hourly_usd": spend_hourly,
+                    "spend_daily_usd": spend_daily,
+                    "spend_monthly_usd": spend_monthly,
+                    "tokens_this_hour": tokens_hourly,
+                    "is_exhausted": ex.is_some(),
+                    "exhaustion_reason": ex.map(|r| exhaustion_reason_label(r.reason)),
+                    "exhaustion_remaining_ms": ex.and_then(|r| r.remaining_ms),
+                }))
+            },
+        )
+        .collect::<librefang_types::error::LibreFangResult<Vec<_>>>();
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(error) => return usage_query_error(error),
+    };
 
     let alert_threshold = budget.alert_threshold;
     (

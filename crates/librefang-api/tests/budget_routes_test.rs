@@ -867,3 +867,30 @@ async fn usage_summary_aggregates_across_agents() {
     assert_eq!(body["total_input_tokens"], 200);
     assert_eq!(body["total_output_tokens"], 400);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn usage_queries_fail_closed_when_storage_is_unavailable() {
+    let h = boot().await;
+    let id = register_agent(&h.state, "broken-store", ResourceQuota::default());
+    let conn = h.state.kernel.memory_substrate().pool().get().unwrap();
+    conn.execute("DROP TABLE usage_events", []).unwrap();
+    drop(conn);
+
+    let paths = vec![
+        "/api/usage".to_string(),
+        "/api/usage/summary".to_string(),
+        "/api/usage/by-model".to_string(),
+        "/api/usage/by-model/performance".to_string(),
+        "/api/usage/daily".to_string(),
+        "/api/budget/agents".to_string(),
+        format!("/api/budget/agents/{id}"),
+        "/api/budget/providers".to_string(),
+    ];
+    for path in paths {
+        let (status, body) = request(&h, Method::GET, &path, None).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{path}: {body}");
+        assert_eq!(body["code"], "usage_query_failed", "{path}: {body}");
+        assert_eq!(body["message"], "Internal server error", "{path}: {body}");
+        assert!(!body.to_string().contains("usage_events"), "{path}: {body}");
+    }
+}
