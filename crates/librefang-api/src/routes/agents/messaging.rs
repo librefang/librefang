@@ -139,7 +139,21 @@ pub async fn send_message(
 
     // Resolve file attachments into image content blocks
     if !req.attachments.is_empty() {
-        let image_blocks = resolve_attachments(&state, &req.attachments);
+        let image_blocks = match resolve_attachments(
+            &state,
+            &req.attachments,
+            api_user.as_ref().map(|user| &user.0),
+        )
+        .await
+        {
+            Ok(blocks) => blocks,
+            Err(denied) => {
+                tracing::warn!(file_id = %denied.file_id, "message attachment access denied");
+                return ApiErrorResponse::forbidden("You are not authorized to access this upload")
+                    .with_code("upload_access_denied")
+                    .into_response();
+            }
+        };
         if !image_blocks.is_empty() {
             // Snapshot the agent's persistent (registry) session id as
             // the last-resort fallback in
@@ -472,7 +486,21 @@ pub async fn send_message_stream(
         build_streaming_kernel_args(&req, session_id_override);
 
     if !req.attachments.is_empty() {
-        let image_blocks = resolve_attachments(&state, &req.attachments);
+        let image_blocks = match resolve_attachments(
+            &state,
+            &req.attachments,
+            api_user.as_ref().map(|user| &user.0),
+        )
+        .await
+        {
+            Ok(blocks) => blocks,
+            Err(denied) => {
+                tracing::warn!(file_id = %denied.file_id, "stream attachment access denied");
+                return ApiErrorResponse::forbidden("You are not authorized to access this upload")
+                    .with_code("upload_access_denied")
+                    .into_response();
+            }
+        };
         if !image_blocks.is_empty() {
             let fallback_session_id = state
                 .kernel

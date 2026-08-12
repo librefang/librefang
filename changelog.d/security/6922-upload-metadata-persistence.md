@@ -1,0 +1,1 @@
+Persist upload ownership metadata across restarts, enforce the same owner checks when attachments enter agent messages, explicitly mark daemon-generated images as shared, move upload serving off Tokio workers, and report the configured upload limit accurately (#6922) (@houko)

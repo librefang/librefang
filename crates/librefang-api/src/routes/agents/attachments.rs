@@ -112,10 +112,16 @@ fn file_saved_block(
 ///     inlined (the path block below still points the agent at the bytes).
 ///
 /// In ALL cases a `[File: <name>] saved to <path>` block (see [`file_saved_block`]) is appended so the agent always knows the on-disk path of the raw upload — this is the parity fix that lets the agent attach the file to a vault / transcribe it / read it, for every file type.
-pub fn resolve_attachments(
+#[derive(Debug)]
+pub struct AttachmentAccessDenied {
+    pub file_id: String,
+}
+
+pub async fn resolve_attachments(
     state: &AppState,
     attachments: &[AttachmentRef],
-) -> Vec<librefang_types::message::ContentBlock> {
+    caller: Option<&crate::middleware::AuthenticatedApiUser>,
+) -> Result<Vec<librefang_types::message::ContentBlock>, AttachmentAccessDenied> {
     use base64::Engine;
 
     let upload_dir = state
@@ -126,8 +132,29 @@ pub fn resolve_attachments(
     let mut blocks = Vec::new();
 
     for att in attachments {
-        // Look up metadata from the upload registry
-        let meta = UPLOAD_REGISTRY.get(&att.file_id);
+        // Validate file_id is a UUID to prevent path traversal.
+        if uuid::Uuid::parse_str(&att.file_id).is_err() {
+            continue;
+        }
+
+        // Resolve durable ownership metadata before trusting any client-supplied attachment fields.
+        // The in-memory registry is only a cache and may be empty after restart.
+        let meta = if let Some(meta) = UPLOAD_REGISTRY.get(&att.file_id) {
+            Some(meta.clone())
+        } else {
+            let loaded = load_upload_meta(&upload_dir, &att.file_id).await;
+            if let Some(ref meta) = loaded {
+                UPLOAD_REGISTRY.insert(att.file_id.clone(), meta.clone());
+            }
+            loaded
+        };
+        if !upload_access_allowed(meta.as_ref(), caller) {
+            tracing::warn!(file_id = %att.file_id, "attachment access denied");
+            return Err(AttachmentAccessDenied {
+                file_id: att.file_id.clone(),
+            });
+        }
+
         let (raw_content_type, filename) = if let Some(ref m) = meta {
             (m.content_type.clone(), m.filename.clone())
         } else if !att.content_type.is_empty() {
@@ -142,23 +169,23 @@ pub fn resolve_attachments(
         // and silently drop the attachment.
         let content_type = librefang_types::media::mime_base(&raw_content_type);
 
-        // Validate file_id is a UUID to prevent path traversal
-        if uuid::Uuid::parse_str(&att.file_id).is_err() {
-            continue;
-        }
-
         // Reconstruct the `<uuid>.<ext>` on-disk name written by the producer
         // (#6530), tolerating legacy bare-`<uuid>` files and the `<uuid>.*`
         // probe for generated images. Skip the attachment if nothing is on disk.
-        let Some(file_path) =
-            resolve_existing_upload_path(&upload_dir, &att.file_id, &raw_content_type, &filename)
+        let Some(file_path) = resolve_existing_upload_path_async(
+            &upload_dir,
+            &att.file_id,
+            &raw_content_type,
+            &filename,
+        )
+        .await
         else {
             tracing::debug!(file_id = %att.file_id, "attachment not found on disk; skipping");
             continue;
         };
 
         if content_type.starts_with("image/") {
-            match std::fs::read(&file_path) {
+            match tokio::fs::read(&file_path).await {
                 Ok(data) => {
                     let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
                     tracing::info!(
@@ -180,7 +207,7 @@ pub fn resolve_attachments(
                 }
             }
         } else if content_type == "application/pdf" {
-            match std::fs::read(&file_path) {
+            match tokio::fs::read(&file_path).await {
                 Ok(data) => {
                     let header = format!("[Attached PDF: {} ({} bytes)]", filename, data.len());
                     let body = match librefang_kernel::pdf_text::extract_text_from_pdf(&data) {
@@ -213,7 +240,7 @@ pub fn resolve_attachments(
                 }
             }
         } else if is_text_like_attachment(&content_type, &filename) {
-            match std::fs::read(&file_path) {
+            match tokio::fs::read(&file_path).await {
                 Ok(data) => {
                     let raw = String::from_utf8_lossy(&data);
                     let total_chars = raw.chars().count();
@@ -253,33 +280,23 @@ pub fn resolve_attachments(
         } else {
             // Unsupported/binary type: we can't inline its content, but the file IS on disk and the agent may still want to act on it (attach to a vault, hand to a file-reader tool).
             // Surface a note + the path block instead of silently dropping the attachment.
-            // Guarded on existence so we never advertise a path to a missing file.
-            if file_path.exists() {
-                tracing::info!(
-                    file_id = %att.file_id,
-                    content_type = %content_type,
-                    filename = %filename,
-                    "Attachment type not inlined; surfacing on-disk path only"
-                );
-                blocks.push(librefang_types::message::ContentBlock::Text {
-                    text: format!(
-                        "[Attached file: {filename} ({content_type})] — content not inlined for this type; the raw file is available on disk."
-                    ),
-                    provider_metadata: None,
-                });
-                blocks.push(file_saved_block(&filename, &file_path));
-            } else {
-                tracing::warn!(
-                    file_id = %att.file_id,
-                    content_type = %content_type,
-                    filename = %filename,
-                    "Attachment type not wired into the agent loop and file missing on disk; skipping"
-                );
-            }
+            tracing::info!(
+                file_id = %att.file_id,
+                content_type = %content_type,
+                filename = %filename,
+                "Attachment type not inlined; surfacing on-disk path only"
+            );
+            blocks.push(librefang_types::message::ContentBlock::Text {
+                text: format!(
+                    "[Attached file: {filename} ({content_type})] — content not inlined for this type; the raw file is available on disk."
+                ),
+                provider_metadata: None,
+            });
+            blocks.push(file_saved_block(&filename, &file_path));
         }
     }
 
-    blocks
+    Ok(blocks)
 }
 
 /// Pre-insert attachment content blocks (image / extracted-text-from-PDF /

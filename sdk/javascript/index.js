@@ -106,6 +106,15 @@ class LibreFang {
         try { yield JSON.parse(data); } catch { yield { raw: data }; }
       }
     }
+    // A clean EOF can arrive without a trailing newline, leaving the last event in the buffer.
+    // Parse it here rather than dropping it; the loop above only fires on a newline.
+    const trailing = buffer.trim();
+    if (trailing.startsWith("data: ")) {
+      const data = trailing.slice(6);
+      if (data !== "[DONE]") {
+        try { yield JSON.parse(data); } catch { yield { raw: data }; }
+      }
+    }
   }
 }
 

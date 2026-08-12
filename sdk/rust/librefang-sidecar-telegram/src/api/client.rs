@@ -8,6 +8,7 @@
 
 use super::error::{Error, Result};
 use super::types::{ApiResponse, GetFileResult, PollResult, SendMessageResult, UpdatesResponse};
+use reqwest::header::{HeaderValue, RETRY_AFTER};
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -112,17 +113,16 @@ impl BotClient {
         for attempt in 0..2 {
             let resp = self.http.post(&url).json(payload).send().await?;
             let status = resp.status();
+            let retry_after_header = resp.headers().get(RETRY_AFTER).cloned();
             let body = resp.text().await?;
             if status.is_success() {
                 let parsed: ApiResponse<Value> = serde_json::from_str(&body)?;
                 if parsed.ok {
                     return Ok(parsed.result.unwrap_or(Value::Null));
                 }
-                let retry_after = parsed
-                    .parameters
-                    .as_ref()
-                    .and_then(|p| p.retry_after)
-                    .unwrap_or(RETRY_AFTER_DEFAULT_SECS);
+                let body_retry_after = parsed.parameters.as_ref().and_then(|p| p.retry_after);
+                let retry_after =
+                    resolve_retry_after(retry_after_header.as_ref(), body_retry_after);
                 if attempt == 0
                     && parsed.error_code == Some(429)
                     && retry_after <= MAX_RETRY_AFTER_SECS
@@ -137,7 +137,10 @@ impl BotClient {
                 });
             } else if status.as_u16() == 429 && attempt == 0 {
                 // Some 429s come back with non-2xx HTTP status; honour Retry-After header or fall back to default — but cap so a multi-hour flood-wait doesn't stall the loop.
-                let retry_after = resp_retry_after_default(body.as_str());
+                let retry_after = resolve_retry_after(
+                    retry_after_header.as_ref(),
+                    body_retry_after(body.as_str()),
+                );
                 if retry_after > MAX_RETRY_AFTER_SECS {
                     return Err(Error::Api {
                         method: method.into(),
@@ -488,17 +491,16 @@ impl BotClient {
             }
             let resp = self.http.post(&url).multipart(form).send().await?;
             let status = resp.status();
+            let retry_after_header = resp.headers().get(RETRY_AFTER).cloned();
             let body = resp.text().await?;
             if status.is_success() {
                 let parsed: ApiResponse<Value> = serde_json::from_str(&body)?;
                 if parsed.ok {
                     return Ok(parsed.result.unwrap_or(Value::Null));
                 }
-                let retry_after = parsed
-                    .parameters
-                    .as_ref()
-                    .and_then(|p| p.retry_after)
-                    .unwrap_or(RETRY_AFTER_DEFAULT_SECS);
+                let body_retry_after = parsed.parameters.as_ref().and_then(|p| p.retry_after);
+                let retry_after =
+                    resolve_retry_after(retry_after_header.as_ref(), body_retry_after);
                 if attempt == 0
                     && parsed.error_code == Some(429)
                     && retry_after <= MAX_RETRY_AFTER_SECS
@@ -512,7 +514,10 @@ impl BotClient {
                     description: self.redact(parsed.description.unwrap_or_default()),
                 });
             } else if status.as_u16() == 429 && attempt == 0 {
-                let retry_after = resp_retry_after_default(body.as_str());
+                let retry_after = resolve_retry_after(
+                    retry_after_header.as_ref(),
+                    body_retry_after(body.as_str()),
+                );
                 if retry_after > MAX_RETRY_AFTER_SECS {
                     return Err(Error::Api {
                         method: method.into(),
@@ -534,10 +539,58 @@ impl BotClient {
     }
 }
 
-/// Try to parse a Retry-After value out of a non-2xx 429 body, falling back to the default.
-fn resp_retry_after_default(body: &str) -> u64 {
+/// Resolve any 429 delay using HTTP delta-seconds first, then Telegram's JSON value, then the conservative local default.
+/// A syntactically numeric header that overflows `u64` is saturated so the caller's flood-wait cap rejects it; unsupported HTTP-date/non-numeric forms fall through to the JSON value.
+fn resolve_retry_after(header: Option<&HeaderValue>, body_retry_after: Option<u64>) -> u64 {
+    let header_retry_after = header
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .map(|value| value.parse::<u64>().unwrap_or(u64::MAX));
+    header_retry_after
+        .or(body_retry_after)
+        .unwrap_or(RETRY_AFTER_DEFAULT_SECS)
+}
+
+fn body_retry_after(body: &str) -> Option<u64> {
     serde_json::from_str::<ApiResponse<Value>>(body)
         .ok()
-        .and_then(|p| p.parameters.and_then(|x| x.retry_after))
-        .unwrap_or(RETRY_AFTER_DEFAULT_SECS)
+        .and_then(|response| response.parameters.and_then(|params| params.retry_after))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+
+    #[test]
+    fn retry_after_prefers_header_then_body_then_default() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("19"));
+        assert_eq!(resolve_retry_after(headers.get(RETRY_AFTER), Some(7)), 19);
+
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("not-seconds"));
+        assert_eq!(resolve_retry_after(headers.get(RETRY_AFTER), Some(7)), 7);
+
+        assert_eq!(resolve_retry_after(None, None), 5);
+    }
+
+    #[test]
+    fn numeric_retry_after_overflow_remains_over_the_flood_wait_cap() {
+        let overflow = HeaderValue::from_static("18446744073709551616");
+        assert_eq!(resolve_retry_after(Some(&overflow), Some(7)), u64::MAX);
+
+        let above_cap = HeaderValue::from_static("301");
+        assert_eq!(resolve_retry_after(Some(&above_cap), Some(7)), 301);
+
+        let padded = HeaderValue::from_bytes(b" 19 ").expect("valid header whitespace");
+        assert_eq!(resolve_retry_after(Some(&padded), Some(7)), 19);
+    }
+
+    #[test]
+    fn json_retry_after_parser_supports_non_2xx_body_path() {
+        let body = r#"{"ok":false,"parameters":{"retry_after":7}}"#;
+        assert_eq!(body_retry_after(body), Some(7));
+        assert_eq!(body_retry_after("not-json"), None);
+    }
 }

@@ -508,7 +508,14 @@ When clearing more than ~10 PRs:
   ```
 
   Leave runs whose branch no longer exists alone — a deleted branch means the PR already merged or closed, and its checks are nobody's gate.
+
+  **Never cancel a run whose `head_sha` *is* its branch's tip, even to free capacity.**
+  `CI Gate` fails on `cancelled` exactly as it does on `failure`, and it does not re-evaluate when the lane is later re-run: the gate stays red while every lane above it reads green.
+  Cancelling live runs to unblock one urgent PR left 25 healthy PRs looking broken, each showing `CI Gate: one or more lanes failed or were cancelled` as its only red check, and each needing a fresh push to clear.
+  The superseded-run rule above is safe precisely because it never touches a tip.
 - **A stalled queue is not a CI failure.** Before diagnosing a PR as broken, confirm jobs are actually executing. `runner_name` empty across the board (`gh api repos/librefang/librefang/actions/runs/<id>/jobs --jq '.jobs[].runner_name'`) means unassigned, i.e. starved for capacity, not failing.
+- **`CI Gate` red with every lane green means the gate saw a cancellation, not a defect.**
+  Read the gate's own log before touching the branch: `CI Gate: one or more lanes failed or were cancelled` with no failing lane is a stale verdict, cleared by re-running CI (update-branch or an empty push), not by changing code.
 
 ### Two green PRs can still break `main` together
 

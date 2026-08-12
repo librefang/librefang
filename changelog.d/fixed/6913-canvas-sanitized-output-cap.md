@@ -1,0 +1,1 @@
+Canvas sanitization now enforces its configured byte limit before appending each output fragment, preventing entity escaping from temporarily growing a rejected document several times beyond the limit. (#6913) (@houko)
