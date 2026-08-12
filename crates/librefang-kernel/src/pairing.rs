@@ -57,9 +57,8 @@ pub struct PairingManager {
     config: PairingConfig,
     pending: DashMap<String, PairingRequest>,
     devices: DashMap<String, PairedDevice>,
-    /// Serializes the token-consume, device-cap check, and device insert as
-    /// one transaction. DashMap makes each operation safe individually but
-    /// cannot make this multi-map redemption sequence atomic.
+    /// Serializes the token-consume, device-cap check, and device insert as one transaction.
+    /// DashMap makes each operation safe individually but cannot make this multi-map redemption sequence atomic.
     redemption_lock: Mutex<()>,
     persist: Option<PersistFn>,
 }
@@ -169,9 +168,8 @@ impl PairingManager {
         let device_id = device_info.device_id.clone();
         self.devices.insert(device_id.clone(), device_info.clone());
 
-        // The security-sensitive state transition is complete. Persistence
-        // callbacks may perform blocking I/O and must not serialize unrelated
-        // future redemptions.
+        // The security-sensitive state transition is complete.
+        // Persistence callbacks may perform blocking I/O and must not serialize unrelated future redemptions.
         drop(redemption_guard);
 
         // Persist to database
