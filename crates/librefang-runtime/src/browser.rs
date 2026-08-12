@@ -1896,6 +1896,13 @@ mod tests {
     /// Ported from the JS the script runs, because the traversal itself needs a live DOM.
     #[test]
     fn test_nested_lists_keep_their_own_bullets() {
+        // The port models the script; this checks the script still does what is modelled.
+        // Reverting the fold to the two-filter form would leave the port validating itself and passing.
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("emit((opened ? '  ' : '- ') + own, true)"),
+            "the item's own text must be emitted in runs, so a sub-list keeps its place between them"
+        );
+
         /// A list item as the page writes it: runs of its own text and sub-lists, in source order.
         enum Part {
             Text(&'static str),
@@ -2005,6 +2012,16 @@ mod tests {
     /// Anchoring on the first article's ancestors instead of searching the tree misses a grid that sits beside a featured card rather than under it.
     #[test]
     fn test_root_selection_finds_a_container_of_repeated_cards() {
+        // As above: the port is only evidence while it and the script agree on the rule.
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("candidates.push({ node, carriers })"),
+            "selection must collect every qualifying node, not stop at the first branch that has one"
+        );
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("c.node.contains(o.node)"),
+            "a candidate containing another must lose to it, which is what keeps selection off the whole page"
+        );
+
         struct Node {
             tag: &'static str,
             name: &'static str,
@@ -2637,6 +2654,12 @@ mod tests {
     /// Ported from the JS the script runs, because the extraction itself needs a live browser: an operator sizing `max_content_chars` to a context window gets a real ceiling, and the marker reports the pre-truncation length so the model can tell how much it is missing rather than only that something was lost (#6624).
     #[test]
     fn test_truncation_marker_fits_inside_the_cap() {
+        // As above: this port predates the others and had nothing tying it to the script either.
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("... (truncated, ' + total + ' chars total)"),
+            "the marker must report the pre-truncation length, which is what makes it worth its own characters"
+        );
+
         fn truncate(content: &str, cap: usize) -> String {
             if content.chars().count() <= cap {
                 return content.to_string();
