@@ -646,7 +646,10 @@ async fn skills_install_already_installed_returns_409() {
     )
     .await;
     assert_eq!(second_status, StatusCode::CONFLICT, "{second_body:?}");
-    assert_eq!(second_body["status"], "already_installed", "{second_body:?}");
+    assert_eq!(
+        second_body["status"], "already_installed",
+        "{second_body:?}"
+    );
     assert!(
         second_body["error"]
             .as_str()
