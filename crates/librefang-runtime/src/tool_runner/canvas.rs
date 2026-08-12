@@ -275,6 +275,21 @@ fn parse_tag_close(html: &str) -> Option<(String, usize)> {
     Some((name, 2 + close_pos + 1))
 }
 
+fn append_sanitized_html(
+    output: &mut String,
+    fragment: &str,
+    max_bytes: usize,
+) -> Result<(), String> {
+    let next_len = output.len().saturating_add(fragment.len());
+    if next_len > max_bytes {
+        return Err(format!(
+            "Sanitized HTML too large: {next_len} bytes (max {max_bytes})"
+        ));
+    }
+    output.push_str(fragment);
+    Ok(())
+}
+
 pub fn sanitize_canvas_html(html: &str, max_bytes: usize) -> Result<String, String> {
     sanitize_canvas_html_with_tags(html, max_bytes, &[])
 }
@@ -325,9 +340,9 @@ pub fn sanitize_canvas_html_with_tags(
             if bytes[pos..].starts_with(b"</") {
                 if let Some((name, consumed)) = parse_tag_close(&html[pos..]) {
                     if is_allowed_tag(&name, allowed_tags) {
-                        result.push_str("</");
-                        result.push_str(&name);
-                        result.push('>');
+                        append_sanitized_html(&mut result, "</", max_bytes)?;
+                        append_sanitized_html(&mut result, &name, max_bytes)?;
+                        append_sanitized_html(&mut result, ">", max_bytes)?;
                     }
                     pos += consumed;
                     continue;
@@ -336,26 +351,26 @@ pub fn sanitize_canvas_html_with_tags(
             if let Some((name, attrs, consumed)) = parse_tag_open(&html[pos..]) {
                 if is_allowed_tag(&name, allowed_tags) {
                     let safe_attrs = strip_dangerous_attrs(&attrs);
-                    result.push('<');
-                    result.push_str(&name);
+                    append_sanitized_html(&mut result, "<", max_bytes)?;
+                    append_sanitized_html(&mut result, &name, max_bytes)?;
                     if !safe_attrs.is_empty() {
-                        result.push(' ');
-                        result.push_str(&safe_attrs);
+                        append_sanitized_html(&mut result, " ", max_bytes)?;
+                        append_sanitized_html(&mut result, &safe_attrs, max_bytes)?;
                     }
                     if is_void_tag(&name) {
-                        result.push_str(" /");
+                        append_sanitized_html(&mut result, " /", max_bytes)?;
                     }
-                    result.push('>');
+                    append_sanitized_html(&mut result, ">", max_bytes)?;
                 }
                 pos += consumed;
                 continue;
             }
-            result.push_str("&lt;");
+            append_sanitized_html(&mut result, "&lt;", max_bytes)?;
             pos += 1;
             continue;
         }
         if bytes[pos] == b'>' {
-            result.push_str("&gt;");
+            append_sanitized_html(&mut result, "&gt;", max_bytes)?;
             pos += 1;
             continue;
         }
@@ -376,12 +391,12 @@ pub fn sanitize_canvas_html_with_tags(
                 };
                 if valid {
                     let entity = &html[pos..pos + 2 + semi];
-                    result.push_str(entity);
+                    append_sanitized_html(&mut result, entity, max_bytes)?;
                     pos += 2 + semi;
                     continue;
                 }
             }
-            result.push_str("&amp;");
+            append_sanitized_html(&mut result, "&amp;", max_bytes)?;
             pos += 1;
             continue;
         }
@@ -389,15 +404,7 @@ pub fn sanitize_canvas_html_with_tags(
         while pos < bytes.len() && bytes[pos] != b'<' && bytes[pos] != b'>' && bytes[pos] != b'&' {
             pos += 1;
         }
-        result.push_str(&html[start..pos]);
-    }
-
-    if result.len() > max_bytes {
-        return Err(format!(
-            "Sanitized HTML too large: {} bytes (max {})",
-            result.len(),
-            max_bytes
-        ));
+        append_sanitized_html(&mut result, &html[start..pos], max_bytes)?;
     }
 
     Ok(result)
@@ -483,6 +490,26 @@ pub(super) async fn tool_canvas_present(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_sanitized_append_rejects_before_growing_output() {
+        let mut output = String::from("1234");
+        let error = append_sanitized_html(&mut output, "56", 5).unwrap_err();
+
+        assert_eq!(output, "1234");
+        assert!(error.contains("Sanitized HTML too large"));
+    }
+
+    #[test]
+    fn sanitizer_enforces_output_cap_during_escaping() {
+        for html in ["<", ">", "&"] {
+            let error = sanitize_canvas_html(html, html.len()).unwrap_err();
+            assert!(
+                error.contains("Sanitized HTML too large"),
+                "{html:?}: {error}"
+            );
+        }
+    }
 
     #[test]
     fn sanitizer_rejects_mutation_xss_url_encodings() {

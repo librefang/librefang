@@ -13,16 +13,13 @@ channel webhook redelivery silently created two of something.
 | No `Idempotency-Key` header | Handler runs as before. No state recorded. |
 | First request with key `K` (2xx response) | Response cached for 24h under `(K, sha256(body))`. |
 | First request with key `K` (4xx / 5xx) | Not cached. Slot stays free; clients can retry. |
+| Concurrent request with key `K` + same body | `409 Conflict` with `code = "idempotency_key_in_use"`; the second handler does not run. |
 | Repeat with key `K` + same body | Replays cached `(status, body)` byte-for-byte. Inner handler does **not** run. |
 | Repeat with key `K` + different body | `409 Conflict` with `code = "idempotency_key_conflict"`. |
 | Empty / oversize / non-printable key | `400 Bad Request` with `code = "idempotency_key_invalid"`. |
 
-The 24-hour window is the recommended default from the issue; long
-enough to absorb realistic dashboard / webhook redelivery races, short
-enough that a key the operator forgets about doesn't pin replayable
-state forever. `expires_at = created_at + 86400`. Expired rows are
-deleted lazily on the next lookup that hits the same key, plus
-opportunistically after every cache miss.
+The 24-hour replay window starts when a successful handler completes; it is long enough to absorb realistic dashboard / webhook redelivery races without retaining completed responses indefinitely.
+Expired completed rows are deleted lazily on lookup and by opportunistic pruning, which is limited to once per minute per shared store.
 
 Body identity is sha256 over the raw JSON bytes the handler received
 (not the parsed value) so a re-serialised body with reordered keys
@@ -69,24 +66,20 @@ CREATE INDEX idx_idempotency_keys_expires_at
     ON idempotency_keys(expires_at);
 ```
 
-The store reuses `MemorySubstrate::usage_conn()` so every byte sits
-under the same WAL pool — no separate database file, no second open
-call. First-writer-wins is enforced via `INSERT OR IGNORE`, so a race
-between two duplicate requests resolves deterministically: whichever
-writer's `INSERT` lands first owns the canonical reply.
+The store reuses the `MemorySubstrate` SQLite pool so every byte sits under one WAL pool — no separate database file and no second database.
+Reservation uses `BEGIN IMMEDIATE` plus `INSERT OR IGNORE` with `response_status = 0` as the pending sentinel and a random owner token in `response_body`.
+The transaction has exactly one owner before any handler starts, so concurrent same-key requests cannot both perform side effects.
+Only that token's owner may complete or release the row, preventing a superseded request from modifying a replacement reservation.
+Successful handlers replace their pending row with the replayable status and body; non-success and cancelled handlers release it.
+
+Pending reservations do not use the replay TTL and are not reclaimed automatically.
+This keeps a handler that legitimately runs for more than 24 hours from losing its reservation to a retry.
+If the process exits abnormally before the guard can release the row, the key remains fail-closed until an operator verifies the original side effect and explicitly removes that orphaned pending row.
 
 ## Failure modes
 
-- **Lookup error**: the middleware logs and falls through to "execute
-  the handler anyway, don't cache". A corrupt cache row can never
-  block real traffic.
-- **Persist error after the handler succeeded**: logged at `warn`, the
-  successful response is still returned. The next duplicate request
-  re-executes the handler — the same property as a non-2xx first
-  response.
-- **Concurrent in-flight duplicates**: both requests run the handler;
-  whichever finishes first writes the cache row, the loser's `INSERT
-  OR IGNORE` is a no-op. Both clients see a 2xx, but they may not be
-  byte-identical (e.g. two `agent_id`s). This is the same property as
-  Stripe's idempotency-key implementation; for stronger semantics
-  (single-flight) callers should serialize at the dispatcher.
+- **Reservation error before execution**: the middleware returns `503 idempotency_store_unavailable` and does not run the handler because it cannot promise deduplication.
+- **Completion error after a successful handler**: the middleware returns the same 503 and leaves the pending reservation in place, failing closed instead of making a completed side effect immediately retriable.
+- **Invalid system time or persisted status**: the store rejects the operation instead of inventing an expiry timestamp or truncating the corrupt status.
+- **Concurrent in-flight duplicate with the same body**: returns `409 idempotency_key_in_use` without starting the second handler, matching Stripe's documented conflict behavior.
+- **Cancellation or panic**: the reservation guard releases its token-owned pending row, so a later retry can make a new attempt.

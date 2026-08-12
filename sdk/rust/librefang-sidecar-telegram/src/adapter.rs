@@ -6,7 +6,7 @@ use crate::api::{BotClient, Error};
 use crate::dispatcher::{
     dispatch_content, is_message_not_modified, is_parse_entities_error, send_text,
 };
-use crate::reaction::map_reaction;
+use crate::reaction::{map_reaction, DoneReactionPolicy};
 use crate::translator::{extract_sender, sender_from_user, update_to_event};
 use async_trait::async_trait;
 use librefang_sidecar::{Command, EmitFn, SendCommand, SidecarAdapter};
@@ -64,7 +64,7 @@ fn streaming_enabled() -> bool {
 pub struct TelegramAdapter {
     client: Arc<BotClient>,
     allowlist: AllowList,
-    clear_done_reaction: bool,
+    done_reaction_policy: DoneReactionPolicy,
     /// Per-stream state for `stream_start` / `stream_delta` / `stream_end`.
     /// Keyed by stream_id; tracks the message_id we are editing, the accumulated text, and the last-edit time so deltas can be throttled.
     streams: Arc<Mutex<HashMap<String, StreamState>>>,
@@ -113,7 +113,7 @@ impl TelegramAdapter {
         )?;
         let client = Arc::new(BotClient::new(token)?);
         let allowlist = AllowList::from_env_value(std::env::var("ALLOWED_USERS").ok().as_deref());
-        let clear_done_reaction = std::env::var("TELEGRAM_CLEAR_DONE_REACTION")
+        let done_reaction_policy = if std::env::var("TELEGRAM_CLEAR_DONE_REACTION")
             .ok()
             .map(|s| {
                 matches!(
@@ -121,11 +121,16 @@ impl TelegramAdapter {
                     "1" | "true" | "yes" | "on"
                 )
             })
-            .unwrap_or(false);
+            .unwrap_or(false)
+        {
+            DoneReactionPolicy::Suppress
+        } else {
+            DoneReactionPolicy::Emit
+        };
         Ok(Self {
             client,
             allowlist,
-            clear_done_reaction,
+            done_reaction_policy,
             streams: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -309,7 +314,7 @@ impl SidecarAdapter for TelegramAdapter {
                     "on_command Reaction chat={chat_id} msg={message_id} reaction={}",
                     r.reaction
                 );
-                let emojis = map_reaction(&r.reaction, self.clear_done_reaction);
+                let emojis = map_reaction(&r.reaction, self.done_reaction_policy);
                 let reactions: Vec<Value> = emojis
                     .into_iter()
                     .map(|e| json!({"type": "emoji", "emoji": e}))
@@ -605,7 +610,7 @@ mod tests {
         TelegramAdapter {
             client: Arc::new(BotClient::new("123456:test-token").expect("dummy client")),
             allowlist: AllowList::from_env_value(None),
-            clear_done_reaction: false,
+            done_reaction_policy: DoneReactionPolicy::Emit,
             streams: Arc::new(Mutex::new(HashMap::new())),
         }
     }

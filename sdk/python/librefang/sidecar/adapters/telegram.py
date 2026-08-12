@@ -72,6 +72,10 @@ TELEGRAM_MSG_LIMIT = 4096
 # Throttle streamed editMessageText (mirrors the Rust adapter's 1s).
 STREAM_EDIT_INTERVAL = 1.0
 RETRY_AFTER_DEFAULT_SECS = 2
+# Cap how long we will sleep on a 429 retry_after from Telegram.
+# A flood-wait can return hours; sleeping that long would stall the entire produce loop with no cancellation.
+# Anything above this skips the retry and returns the original 429 response, matching telegram.rs's MAX_RETRY_AFTER_SECS.
+MAX_RETRY_AFTER_SECS = 300
 # Backoff cap for the `produce()` reconnect loop on transient network
 # / DNS failures (#5111). Matches the convention every other polling
 # sidecar (bluesky / discord / line / mastodon / mattermost /
@@ -697,6 +701,14 @@ def _is_ogg_opus(data: bytes) -> bool:
 
 
 def _extract_retry_after(body, default: int) -> int:
+    """Resolve a 429 delay: HTTP delta-seconds ``Retry-After`` header first (stashed by ``_api_post`` / ``_multipart`` as ``_retry_after_header``), then Telegram's JSON ``parameters.retry_after``, then ``default``.
+    Mirrors ``telegram.rs``'s ``resolve_retry_after``: a header that isn't a bare non-negative integer (HTTP-date form, a decimal, a stray sign) falls through to the JSON value instead of raising or producing a negative delay."""
+    if isinstance(body, dict):
+        header = body.get("_retry_after_header")
+        if isinstance(header, str):
+            stripped = header.strip()
+            if stripped and stripped.isascii() and stripped.isdigit():
+                return int(stripped)
     try:
         v = body if isinstance(body, dict) else json.loads(body)
         ra = v.get("parameters", {}).get("retry_after")
@@ -728,9 +740,8 @@ def _api_get(url: str, params: dict, timeout: float) -> dict:
 
 
 def _api_post(url: str, payload: dict, timeout: float) -> dict:
-    """POST a JSON body. Returns ``{"_http": code, ...}`` on an HTTP
-    error instead of raising, so callers can implement Telegram's
-    documented 400/429 recovery paths exactly like the Rust adapter."""
+    """POST a JSON body. Returns ``{"_http": code, ...}`` on an HTTP error instead of raising, so callers can implement Telegram's documented 400/429 recovery paths exactly like the Rust adapter.
+    Also stashes any ``Retry-After`` response header as ``_retry_after_header`` (on both the 2xx-but-``ok:false`` path and the non-2xx path) so ``_extract_retry_after`` can honour it ahead of the JSON body's ``parameters.retry_after``, matching ``telegram.rs``'s header-first resolution."""
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
@@ -739,7 +750,11 @@ def _api_post(url: str, payload: dict, timeout: float) -> dict:
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-            return json.loads(resp.read().decode("utf-8", "replace"))
+            parsed = json.loads(resp.read().decode("utf-8", "replace"))
+            retry_after_header = resp.headers.get("Retry-After")
+            if retry_after_header is not None:
+                parsed["_retry_after_header"] = retry_after_header
+            return parsed
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace")
         try:
@@ -747,6 +762,9 @@ def _api_post(url: str, payload: dict, timeout: float) -> dict:
         except ValueError:
             parsed = {"ok": False, "description": body}
         parsed["_http"] = e.code
+        retry_after_header = e.headers.get("Retry-After")
+        if retry_after_header is not None:
+            parsed["_retry_after_header"] = retry_after_header
         return parsed
 
 
@@ -773,7 +791,11 @@ def _multipart(url: str, fields: dict, file_field: str, filename: str,
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-            return json.loads(resp.read().decode("utf-8", "replace"))
+            parsed = json.loads(resp.read().decode("utf-8", "replace"))
+            retry_after_header = resp.headers.get("Retry-After")
+            if retry_after_header is not None:
+                parsed["_retry_after_header"] = retry_after_header
+            return parsed
     except urllib.error.HTTPError as e:
         b = e.read().decode("utf-8", "replace")
         try:
@@ -781,6 +803,9 @@ def _multipart(url: str, fields: dict, file_field: str, filename: str,
         except ValueError:
             parsed = {"ok": False, "description": b}
         parsed["_http"] = e.code
+        retry_after_header = e.headers.get("Retry-After")
+        if retry_after_header is not None:
+            parsed["_retry_after_header"] = retry_after_header
         return parsed
 
 
@@ -828,11 +853,16 @@ class TelegramAdapter(SidecarAdapter):
         )
 
     def _call_retrying(self, method: str, payload: dict) -> dict:
-        """`_call` + a single 429 retry honouring `retry_after`
-        (mirrors api_send_media_request)."""
+        """`_call` + a single 429 retry honouring `retry_after` (mirrors api_send_media_request).
+        A flood-wait above `MAX_RETRY_AFTER_SECS` skips the sleep and returns the original 429 response instead of stalling the caller indefinitely."""
         resp = self._call(method, payload)
         if resp.get("_http") == 429:
             delay = _extract_retry_after(resp, RETRY_AFTER_DEFAULT_SECS)
+            if delay > MAX_RETRY_AFTER_SECS:
+                log.warn("telegram rate limited; retry_after exceeds cap, "
+                         "not retrying",
+                         method=method, delay=delay)
+                return resp
             log.warn("telegram rate limited; retrying",
                      method=method, delay=delay)
             time.sleep(delay)
@@ -908,7 +938,13 @@ class TelegramAdapter(SidecarAdapter):
         resp = _multipart(url, fields, field, filename, mime, data,
                           SEND_TIMEOUT_SECS)
         if resp.get("_http") == 429:
-            time.sleep(_extract_retry_after(resp, RETRY_AFTER_DEFAULT_SECS))
+            delay = _extract_retry_after(resp, RETRY_AFTER_DEFAULT_SECS)
+            if delay > MAX_RETRY_AFTER_SECS:
+                log.warn("telegram rate limited; retry_after exceeds cap, "
+                         "not retrying",
+                         method=endpoint, delay=delay)
+                return resp
+            time.sleep(delay)
             resp = _multipart(url, fields, field, filename, mime, data,
                               SEND_TIMEOUT_SECS)
         return resp

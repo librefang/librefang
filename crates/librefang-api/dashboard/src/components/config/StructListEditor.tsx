@@ -47,7 +47,7 @@ function defaultItemFor(itemSchema: JsonSchema | undefined, root: ConfigSchemaRo
         ? rawType.find((t) => t !== "null")
         : rawType;
       const nullable = Array.isArray(rawType) && rawType.includes("null");
-      if (nullable && node.default === undefined) {
+      if (nullable) {
         // Optional fields default to null rather than to the zero-value of
         // the inner type — matches Rust's `Option::None` round-trip.
         out[k] = null;
@@ -161,6 +161,7 @@ function StructListRow({
   const [text, setText] = useState(() => JSON.stringify(item, null, 2));
   const [error, setError] = useState<string | null>(null);
   const lastEmittedRef = useRef<string>(text);
+  const lastEmittedCanonicalRef = useRef<string | null>(null);
   const isDirtyRef = useRef(false);
 
   // Keep the textarea in sync with external value updates (e.g. when a
@@ -168,6 +169,11 @@ function StructListRow({
   // user's in-progress edits.
   useEffect(() => {
     if (isDirtyRef.current) {
+      return;
+    }
+    const incomingCanonical = JSON.stringify(item);
+    if (incomingCanonical === lastEmittedCanonicalRef.current) {
+      lastEmittedCanonicalRef.current = null;
       return;
     }
     const incoming = JSON.stringify(item, null, 2);
@@ -184,6 +190,7 @@ function StructListRow({
       setError(null);
       onChange(parsed);
       lastEmittedRef.current = raw;
+      lastEmittedCanonicalRef.current = JSON.stringify(parsed);
       isDirtyRef.current = false;
     } catch (e) {
       setError((e as Error).message);
@@ -192,13 +199,13 @@ function StructListRow({
   }, [onChange]);
 
   const finishEdit = useCallback(() => {
-    if (text.trim() !== "") return;
+    if (text.trim() !== "" && error) return;
     const incoming = JSON.stringify(item, null, 2);
     setText(incoming);
     lastEmittedRef.current = incoming;
     isDirtyRef.current = false;
     setError(null);
-  }, [item, text]);
+  }, [error, item, text]);
 
   return (
     <div className="rounded-lg border border-border-subtle bg-main">
