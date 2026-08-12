@@ -397,9 +397,8 @@ pub struct AuditLog {
     /// repopulates the full window. Every mutation and read happens under
     /// the `entries` mutex, so `Relaxed` ordering is sufficient.
     persisted_rows: AtomicUsize,
-    /// Any failure encountered while reloading persisted rows. A partially
-    /// decoded audit trail must never verify as intact merely because the
-    /// malformed row was skipped by the SQLite iterator.
+    /// Any failure encountered while reloading persisted rows.
+    /// A partially decoded audit trail must never verify as intact merely because the malformed row was skipped by the SQLite iterator.
     load_error: Mutex<Option<String>>,
 }
 
@@ -728,8 +727,7 @@ impl AuditLog {
             anchor_path: None,
             chain_anchor: Mutex::new(recovered_anchor),
             max_in_memory_entries: AtomicUsize::new(0),
-            // Count every row yielded by SQLite, including malformed rows
-            // that could not be admitted to the in-memory chain.
+            // Count every row yielded by SQLite, including malformed rows that could not be admitted to the in-memory chain.
             persisted_rows: AtomicUsize::new(persisted_count),
             load_error: Mutex::new(load_error.clone()),
         };
