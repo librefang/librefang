@@ -43,6 +43,7 @@ pub struct GeminiCliDriver {
     cli_path: String,
     #[allow(dead_code)]
     skip_permissions: bool,
+    message_timeout_secs: u64,
     /// When `true` (the default), set `LIBREFANG_AGENT_ID`, `LIBREFANG_SESSION_ID`,
     /// and `LIBREFANG_STEP_ID` env vars on the spawned subprocess so operators can
     /// correlate process-tree entries with LibreFang agent sessions.
@@ -61,8 +62,15 @@ impl GeminiCliDriver {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "gemini".to_string()),
             skip_permissions,
+            message_timeout_secs: crate::cli_process::DEFAULT_MESSAGE_TIMEOUT_SECS,
             emit_caller_trace_headers: true,
         }
+    }
+
+    /// Set the default subprocess deadline. A per-request timeout overrides it.
+    pub fn with_message_timeout(mut self, timeout_secs: u64) -> Self {
+        self.message_timeout_secs = timeout_secs;
+        self
     }
 
     /// Control whether caller-trace env vars are injected into the spawned
@@ -210,13 +218,27 @@ impl LlmDriver for GeminiCliDriver {
 
         debug!(cli = %self.cli_path, "Spawning Gemini CLI");
 
-        let output = cmd.output().await.map_err(|e| {
-            LlmError::Http(format!(
-                "Gemini CLI not found or failed to start ({}). \
-                 Install the Google Gemini CLI and run: gemini",
-                e
-            ))
-        })?;
+        let timeout_secs = request.timeout_secs.unwrap_or(self.message_timeout_secs);
+        let output = match crate::cli_process::output_with_timeout(
+            &mut cmd,
+            std::time::Duration::from_secs(timeout_secs),
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(crate::cli_process::OutputError::TimedOut) => {
+                return Err(crate::cli_process::timeout_error(
+                    timeout_secs,
+                    "Gemini CLI",
+                ));
+            }
+            Err(crate::cli_process::OutputError::Io(e)) => {
+                return Err(LlmError::Http(format!(
+                    "Gemini CLI not found or failed to start ({e}). \
+                     Install the Google Gemini CLI and run: gemini"
+                )));
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -349,6 +371,16 @@ mod tests {
         let driver = GeminiCliDriver::new(None, false);
         assert_eq!(driver.cli_path, "gemini");
         assert!(!driver.skip_permissions);
+        assert_eq!(
+            driver.message_timeout_secs,
+            crate::cli_process::DEFAULT_MESSAGE_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn with_message_timeout_overrides_default() {
+        let driver = GeminiCliDriver::new(None, false).with_message_timeout(19);
+        assert_eq!(driver.message_timeout_secs, 19);
     }
 
     #[test]
