@@ -405,4 +405,28 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn japanese_locale_covers_every_english_error_key() {
+        fn message_keys(source: &str) -> std::collections::BTreeSet<&str> {
+            source
+                .lines()
+                .filter_map(|line| {
+                    let (key, _) = line.split_once('=')?;
+                    let key = key.trim();
+                    (!key.is_empty() && !key.starts_with('.') && !key.starts_with('#'))
+                        .then_some(key)
+                })
+                .collect()
+        }
+
+        let english = message_keys(EN_FTL);
+        let japanese = message_keys(JA_FTL);
+        let missing: Vec<_> = english.difference(&japanese).copied().collect();
+
+        assert!(
+            missing.is_empty(),
+            "Japanese error locale is missing keys: {missing:?}"
+        );
+    }
 }
