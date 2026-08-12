@@ -1821,10 +1821,8 @@ async fn handle_command(
                 Err(error) => {
                     tracing::error!(%error, "failed to query budget status");
                     return serde_json::json!({
-                        "type": "command_result",
-                        "command": cmd,
-                        "message": "Budget status is temporarily unavailable.",
-                        "error": true,
+                        "type": "error",
+                        "content": "Budget status is temporarily unavailable.",
                     });
                 }
             };
