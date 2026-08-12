@@ -28,6 +28,14 @@ use tracing::{debug, info, warn};
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+async fn run_chromium_discovery_job<F, T>(job: F) -> Result<T, tokio::task::JoinError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(job).await
+}
+
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const CDP_CONNECT_TIMEOUT_SECS: u64 = 15;
@@ -364,7 +372,10 @@ struct BrowserSession {
 impl BrowserSession {
     /// Launch Chromium and establish a CDP connection.
     async fn launch(config: &BrowserConfig) -> Result<Self, String> {
-        let chrome_path = find_chromium(config)?;
+        let discovery_config = config.clone();
+        let chrome_path = run_chromium_discovery_job(move || find_chromium(&discovery_config))
+            .await
+            .map_err(|error| format!("Chromium discovery task failed: {error}"))??;
         debug!(path = %chrome_path.display(), "Launching Chromium");
 
         let user_data_dir = tempfile::Builder::new()
@@ -1677,6 +1688,24 @@ fn render_page_body_inner(data: &serde_json::Value, content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chromium_discovery_job_does_not_block_the_async_worker() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let job = tokio::spawn(run_chromium_discovery_job(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+
+        tokio::time::timeout(Duration::from_secs(1), started_rx)
+            .await
+            .expect("Chromium discovery job did not start")
+            .expect("Chromium discovery job dropped its start signal");
+        release_tx.send(()).unwrap();
+        job.await.unwrap().unwrap();
+    }
 
     #[test]
     fn test_browser_config_defaults() {
