@@ -1,8 +1,7 @@
 use super::*;
 
-/// Hand lifecycle methods perform synchronous registry persistence and, for
-/// activation/deactivation, workspace and SQLite I/O. Keep that work off the
-/// async request worker.
+/// Hand lifecycle methods perform synchronous registry persistence and, for activation/deactivation, workspace and SQLite I/O.
+/// Keep that work off the async request worker.
 pub(super) async fn run_hand_lifecycle_job<F, T>(job: F) -> Result<T, tokio::task::JoinError>
 where
     F: FnOnce() -> T + Send + 'static,
