@@ -23,10 +23,7 @@ fn lock_a2a_recover<'a, T>(mutex: &'a Mutex<T>, state: &'static str) -> MutexGua
             state,
             "A2A task store lock poisoned; recovering inner state"
         );
-        // Clear the poison flag so recovery actually recovers: without this,
-        // every subsequent `lock()` on this mutex keeps returning `Err` for
-        // the lifetime of the process, and this warning fires on every single
-        // call site above, forever, instead of once at the actual failure.
+        // Clear the poison flag so recovery actually recovers: without this, every subsequent `lock()` on this mutex keeps returning `Err` for the lifetime of the process, and this warning fires on every single call site above, forever, instead of once at the actual failure.
         mutex.clear_poison();
         poisoned.into_inner()
     })
