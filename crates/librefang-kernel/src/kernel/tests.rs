@@ -4160,10 +4160,7 @@ fn atomic_write_leaves_no_tmp_file_on_success() {
 fn parent_dir_for_fsync_maps_bare_filename_to_current_dir() {
     use std::path::Path;
 
-    // The premise this resolution exists for: a bare filename has an
-    // empty-but-present parent, so `ok_or_else`-style handling would let
-    // `""` through to `File::open` and fail with ENOENT after the rename
-    // already succeeded.
+    // The premise this resolution exists for: a bare filename has an empty-but-present parent, so `ok_or_else`-style handling would let `""` through to `File::open` and fail with ENOENT after the rename already succeeded.
     assert_eq!(Path::new("agent.toml").parent(), Some(Path::new("")));
 
     assert_eq!(
