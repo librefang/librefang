@@ -1545,6 +1545,39 @@ mod tests {
         assert_eq!(sched.total_jobs(), 1);
     }
 
+    #[test]
+    fn concurrent_adds_respect_per_agent_limit() {
+        // MAX_JOBS_PER_AGENT = 50 in librefang-types.
+        const CONTENDERS: usize = 60;
+        let tmp = tempfile::tempdir().unwrap();
+        // Global limit set well above the per-agent cap so only the
+        // per-agent check can reject a contender.
+        let sched = std::sync::Arc::new(CronScheduler::new(tmp.path(), 1000));
+        let agent = AgentId::new();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(CONTENDERS));
+
+        let handles: Vec<_> = (0..CONTENDERS)
+            .map(|index| {
+                let sched = std::sync::Arc::clone(&sched);
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let mut job = make_job(agent);
+                    job.name = format!("concurrent-{index}");
+                    barrier.wait();
+                    sched.add_job(job, false).is_ok()
+                })
+            })
+            .collect();
+
+        let successes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(|success| *success)
+            .count();
+        assert_eq!(successes, 50);
+        assert_eq!(sched.total_jobs(), 50);
+    }
+
     // -- test_add_job_per_agent_limit ---------------------------------------
 
     #[test]
