@@ -234,6 +234,10 @@ impl CredentialPool {
     fn lock_inner(&self) -> MutexGuard<'_, CredentialPoolInner> {
         self.inner.lock().unwrap_or_else(|poisoned| {
             tracing::warn!("Credential pool lock poisoned; recovering inner state");
+            // `into_inner` recovers the guard but does not reset the mutex's
+            // poison flag. Clear it so one panic produces one warning rather
+            // than re-entering this recovery branch on every request forever.
+            self.inner.clear_poison();
             poisoned.into_inner()
         })
     }
@@ -588,7 +592,9 @@ mod tests {
         });
 
         assert!(poison.is_err());
+        assert!(pool.inner.is_poisoned());
         assert_eq!(pool.total_count(), 2);
+        assert!(!pool.inner.is_poisoned());
         assert_eq!(pool.snapshot()[0].request_count, 7);
 
         pool.mark_success("key-a");
