@@ -1397,14 +1397,9 @@ pub async fn hand_instance_browser(
             if let Some(data) = &resp.data {
                 url = data["url"].as_str().unwrap_or("").to_string();
                 title = data["title"].as_str().unwrap_or("").to_string();
-                content = data["content"].as_str().unwrap_or("").to_string();
-                // Truncate content to avoid huge payloads (UTF-8 safe)
-                if content.len() > 2000 {
-                    content = format!(
-                        "{}... (truncated)",
-                        librefang_types::truncate_str(&content, 2000)
-                    );
-                }
+                // Rendered with the link table rather than from `content` alone: the extraction emits `⟨n⟩` markers in the prose and the URLs beside it, so reading `content` by itself would show an operator markers with nothing to resolve them against, where this preview used to carry the destination inline.
+                // The payload budget applies to the prose, before the table is joined: the table runs to thousands of characters on a link-dense page, so a budget applied after the join would spend all of itself on URLs and show an operator none of the page.
+                content = librefang_kernel::browser::render_page_body_within(data, 2000);
             }
         }
         Ok(_) => {}  // Non-success: leave defaults
@@ -1452,6 +1447,7 @@ pub async fn hand_instance_browser(
 pub async fn hand_send_message(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(req): Json<MessageRequest>,
 ) -> impl IntoResponse {
     let (_instance, agent_id) = match resolve_hand_agent(&state, id) {
@@ -1482,7 +1478,25 @@ pub async fn hand_send_message(
     // hand path's behaviour byte-identical while closing the cross-chat
     // leak on the agent message path.
     if !req.attachments.is_empty() {
-        let image_blocks = super::agents::resolve_attachments(&state, &req.attachments);
+        let image_blocks = match super::agents::resolve_attachments(
+            &state,
+            &req.attachments,
+            api_user.as_ref().map(|user| &user.0),
+        )
+        .await
+        {
+            Ok(blocks) => blocks,
+            Err(denied) => {
+                tracing::warn!(file_id = %denied.file_id, "hand attachment access denied");
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "You are not authorized to access this upload",
+                        "code": "upload_access_denied"
+                    })),
+                );
+            }
+        };
         if !image_blocks.is_empty() {
             let fallback_session_id = state
                 .kernel
