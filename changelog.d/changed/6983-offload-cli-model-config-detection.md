@@ -1,0 +1,2 @@
+CLI passthrough model-config detection (Codex, Claude Code, Gemini CLI, Qwen Code) now runs on the blocking thread pool instead of the async request handler, since it reads files and environment variables from disk synchronously.
+All four probes are grouped into a single blocking task per request, and the reads are skipped entirely when an explicit `?tier=` filter excludes the synthesized `custom` rows they would produce (#6983) (@houko)
