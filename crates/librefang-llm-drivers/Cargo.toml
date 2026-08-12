@@ -30,11 +30,13 @@ hex = { workspace = true }
 zeroize = { workspace = true }
 dirs = { workspace = true }
 rand = { workspace = true }
+jsonwebtoken = { workspace = true }
 
 [dev-dependencies]
 serial_test = "4"
 tempfile = { workspace = true }
 wiremock = "0.6"
+rsa = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 tracing-subscriber = { workspace = true }
 
