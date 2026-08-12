@@ -13,6 +13,15 @@
 
 use super::*;
 
+fn lock_bindings(
+    bindings: &std::sync::Mutex<Vec<librefang_types::config::AgentBinding>>,
+) -> std::sync::MutexGuard<'_, Vec<librefang_types::config::AgentBinding>> {
+    bindings.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!("agent bindings lock poisoned; recovering inner state");
+        poisoned.into_inner()
+    })
+}
+
 impl LibreFangKernel {
     /// Install a [`crate::log_reload::LogLevelReloader`].
     ///
@@ -182,16 +191,12 @@ impl LibreFangKernel {
 
     /// List all agent bindings.
     pub fn list_bindings(&self) -> Vec<librefang_types::config::AgentBinding> {
-        self.mesh
-            .bindings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        lock_bindings(&self.mesh.bindings).clone()
     }
 
     /// Add a binding at runtime.
     pub fn add_binding(&self, binding: librefang_types::config::AgentBinding) {
-        let mut bindings = self.mesh.bindings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut bindings = lock_bindings(&self.mesh.bindings);
         bindings.push(binding);
         // Sort by specificity descending
         bindings.sort_by_key(|b| std::cmp::Reverse(b.match_rule.specificity()));
@@ -199,11 +204,48 @@ impl LibreFangKernel {
 
     /// Remove a binding by index, returns the removed binding if valid.
     pub fn remove_binding(&self, index: usize) -> Option<librefang_types::config::AgentBinding> {
-        let mut bindings = self.mesh.bindings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut bindings = lock_bindings(&self.mesh.bindings);
         if index < bindings.len() {
             Some(bindings.remove(index))
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn binding(agent: &str, channel: &str) -> librefang_types::config::AgentBinding {
+        librefang_types::config::AgentBinding {
+            agent: agent.to_string(),
+            match_rule: librefang_types::config::BindingMatchRule {
+                channel: Some(channel.to_string()),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn poisoned_bindings_lock_recovers_and_list_remains_mutable() {
+        let bindings = std::sync::Mutex::new(vec![binding("first", "matrix")]);
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut state = bindings.lock().unwrap();
+                    state.push(binding("second", "telegram"));
+                    panic!("poison bindings lock");
+                })
+                .join()
+        });
+
+        assert!(poison.is_err());
+        let mut recovered = lock_bindings(&bindings);
+        assert_eq!(recovered.len(), 2);
+        assert_eq!(recovered.remove(0).agent, "first");
+        recovered.push(binding("third", "discord"));
+        drop(recovered);
+        assert_eq!(lock_bindings(&bindings).len(), 2);
     }
 }
