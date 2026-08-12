@@ -1,0 +1,3 @@
+Move agent identity-file read, write, and delete filesystem operations for `GET/PUT/DELETE /api/agents/{id}/files/{filename}` onto the blocking pool via `tokio::task::spawn_blocking`.
+Path resolution, the `.identity/` current-layout preference with legacy root fallback, the filename whitelist, and the canonicalized-path containment check are all preserved, and the write path now goes through the API's shared `atomic_write` helper instead of a fixed temporary filename, removing a same-name race between concurrent writers.
+This keeps the axum worker thread from parking on disk I/O for these routes, mirroring the same offload already applied to SQLite writes and journal I/O (#6981) (@houko)
