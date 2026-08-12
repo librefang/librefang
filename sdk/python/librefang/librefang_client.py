@@ -14,6 +14,7 @@ Usage:
 """
 
 import json
+import socket
 import sys
 from typing import Any, Dict, Generator, Optional
 from urllib.request import urlopen, Request
@@ -89,7 +90,7 @@ class LibreFang:
         except HTTPError as e:
             body_text = e.read().decode() if e.fp else ""
             raise LibreFangError(f"HTTP {e.code}: {body_text}", e.code, body_text) from e
-        except TimeoutError as e:
+        except socket.timeout as e:
             raise LibreFangError(f"Request timed out after {self.timeout}s") from e
         except URLError as e:
             raise LibreFangError(f"Connection error: {e.reason}") from e
@@ -110,7 +111,7 @@ class LibreFang:
         except HTTPError as e:
             body_text = e.read().decode() if e.fp else ""
             raise LibreFangError(f"HTTP {e.code}: {body_text}", e.code, body_text) from e
-        except TimeoutError as e:
+        except socket.timeout as e:
             raise LibreFangError(f"Request timed out after {self.timeout}s") from e
         except URLError as e:
             raise LibreFangError(f"Connection error: {e.reason}") from e
