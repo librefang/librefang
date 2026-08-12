@@ -1043,11 +1043,25 @@ async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value 
     let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
     ]));
-    let db_ok = state
-        .kernel
-        .memory_substrate()
-        .structured_get(shared_id, "__health_check__")
-        .is_ok();
+    let substrate = Arc::clone(state.kernel.memory_substrate());
+    // The memory substrate exposes synchronous SQLite operations. Run the
+    // health probe and session count together on the blocking pool so the
+    // dashboard's frequent snapshot poll cannot stall a Tokio worker.
+    let db_result = tokio::task::spawn_blocking(move || {
+        let db_ok = substrate
+            .structured_get(shared_id, "__health_check__")
+            .is_ok();
+        let session_count = substrate.count_sessions().unwrap_or(0);
+        (db_ok, session_count)
+    })
+    .await;
+    let (db_ok, session_count) = match db_result {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::error!(%error, "dashboard database probe task failed");
+            (false, 0)
+        }
+    };
     let health_status = if db_ok { "ok" } else { "degraded" };
     let fts_only = state.kernel.config_ref().memory.fts_only.unwrap_or(false);
     let embedding_ok = fts_only || state.kernel.embedding().is_some();
@@ -1072,11 +1086,6 @@ async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value 
     // decoding every session blob just to call `.len()`. This is the
     // dashboard snapshot path (`/api/dashboard/snapshot`), hit on
     // every 5 s poll, so the cost compounded.
-    let session_count = state
-        .kernel
-        .memory_substrate()
-        .count_sessions()
-        .unwrap_or(0);
     let cfg = state.kernel.config_snapshot();
     // Runtime stats shared with `/api/status` — the dashboard RuntimePage
     // reads these out of the snapshot for its info panel and KPI tiles.
