@@ -85,20 +85,14 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     )
 )]
 pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::Response {
-    let home = state.kernel.home_dir();
-    let config_path = home.join("config.toml");
-
-    if config_path.exists() {
+    let config_path = state.kernel.home_dir().join("config.toml");
+    if tokio::fs::try_exists(&config_path).await.unwrap_or(false) {
         return Json(serde_json::json!({
             "status": "already_initialized",
             "message": "config.toml already exists"
         }))
         .into_response();
     }
-
-    // Ensure directories exist
-    let _ = std::fs::create_dir_all(home);
-    let _ = std::fs::create_dir_all(home.join("data"));
 
     // Detect best available provider
     let (provider, api_key_env) = if let Some((p, _model, env_var)) =
@@ -135,18 +129,48 @@ api_key_env = "{api_key_env}"
 "#
     );
 
-    if let Err(e) = crate::atomic_write(&config_path, config_content.as_bytes()) {
-        // Scrub the io error (audit: rusqlite-errors-leak) — path /
-        // permission detail stays in the log, generic body to client.
-        tracing::error!(error = %e, "failed to write config during init");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "status": "error",
-                "message": "Internal server error"
-            })),
-        )
+    if let Some(locked) = crate::routes::guard_config_write() {
+        return locked.into_response();
+    }
+    let _config_guard = state.config_write_lock.lock().await;
+    let home = state.kernel.home_dir().to_path_buf();
+    let write_result = tokio::task::spawn_blocking(move || {
+        write_quick_init_config(&home, config_content.as_bytes())
+    })
+    .await;
+    match write_result {
+        Ok(Ok(false)) => {
+            return Json(serde_json::json!({
+                "status": "already_initialized",
+                "message": "config.toml already exists"
+            }))
             .into_response();
+        }
+        Ok(Ok(true)) => {}
+        Ok(Err(e)) => {
+            // Scrub the io error (audit: rusqlite-errors-leak) — path /
+            // permission detail stays in the log, generic body to client.
+            tracing::error!(error = %e, "failed to write config during init");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "message": "Internal server error"
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "quick init config write task failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "message": "Internal server error"
+                })),
+            )
+                .into_response();
+        }
     }
 
     // Reload config so kernel picks up new settings. Surface failures (#3374) —
@@ -176,6 +200,36 @@ api_key_env = "{api_key_env}"
         "model": model,
     }))
     .into_response()
+}
+
+fn write_quick_init_config(home: &std::path::Path, contents: &[u8]) -> std::io::Result<bool> {
+    let config_path = home.join("config.toml");
+    if config_path.exists() {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(home)?;
+    std::fs::create_dir_all(home.join("data"))?;
+    crate::atomic_write(&config_path, contents)?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_quick_init_config;
+
+    #[test]
+    fn quick_init_write_is_create_once_and_preserves_existing_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+
+        assert!(write_quick_init_config(&home, b"first = true\n").unwrap());
+        assert!(home.join("data").is_dir());
+        assert!(!write_quick_init_config(&home, b"second = true\n").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(home.join("config.toml")).unwrap(),
+            "first = true\n"
+        );
+    }
 }
 
 /// POST /api/shutdown — Graceful shutdown.
