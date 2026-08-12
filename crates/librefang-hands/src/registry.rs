@@ -1184,7 +1184,10 @@ impl HandRegistry {
         }
 
         // Hold the lock for the duration of check + insert to prevent races.
-        let _guard = self.activate_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.activate_lock.lock().unwrap_or_else(|e| {
+            warn!("activate_with_id: activate_lock poisoned, recovering: {e}");
+            e.into_inner()
+        });
 
         // Check if already active — only block when instance_id is None
         // (single-instance mode). When Some(uuid) is passed, it's an explicit
@@ -1828,6 +1831,29 @@ fn check_option_available(provider_env: Option<&str>, binary: Option<&str>) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poisoned_activation_lock_recovers_and_activation_remains_usable() {
+        let reg = HandRegistry::new();
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _guard = reg.activate_lock.lock().unwrap();
+                    panic!("poison hand activation lock");
+                })
+                .join()
+        });
+        assert!(poison.is_err());
+
+        reg.reload_from_disk(&ensure_test_home());
+        let instance = reg.activate("clip", HashMap::new()).unwrap();
+        assert_eq!(instance.hand_id, "clip");
+        assert!(matches!(
+            reg.activate("clip", HashMap::new()),
+            Err(HandError::AlreadyActive(_))
+        ));
+        reg.deactivate(instance.instance_id).unwrap();
+    }
 
     /// Ensure the test home dir has synced registry content.
     /// resolve_home_dir_for_tests() handles sync internally via OnceLock.
