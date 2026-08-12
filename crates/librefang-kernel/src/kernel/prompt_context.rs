@@ -36,30 +36,44 @@ impl LibreFangKernel {
             }
         }
 
-        let metadata = CachedWorkspaceMetadata {
-            workspace_context: {
-                let mut ws_ctx =
-                    librefang_runtime::workspace_context::WorkspaceContext::detect(workspace);
-                Some(ws_ctx.build_context_section())
-            },
-            soul_md: read_identity_file(workspace, "SOUL.md"),
-            user_md: read_identity_file(workspace, "USER.md"),
-            memory_md: read_identity_file(workspace, "MEMORY.md"),
-            agents_md: read_identity_file(workspace, "AGENTS.md"),
-            bootstrap_md: read_identity_file(workspace, "BOOTSTRAP.md"),
-            identity_md: read_identity_file(workspace, "IDENTITY.md"),
-            heartbeat_md: if is_autonomous {
-                read_identity_file(workspace, "HEARTBEAT.md")
-            } else {
-                None
-            },
-            tools_md: read_identity_file(workspace, "TOOLS.md"),
-            created_at: std::time::Instant::now(),
+        let metadata = load_workspace_metadata(workspace, is_autonomous);
+        self.prompt_metadata_cache
+            .workspace
+            .insert(workspace.to_path_buf(), metadata.clone());
+        metadata
+    }
+
+    /// Async-worker-safe counterpart of [`Self::cached_workspace_metadata`].
+    /// Cache misses perform all workspace filesystem inspection on the
+    /// blocking pool; cache hits return without spawning a task.
+    pub(crate) async fn cached_workspace_metadata_async(
+        &self,
+        workspace: &Path,
+        is_autonomous: bool,
+    ) -> CachedWorkspaceMetadata {
+        if let Some(entry) = self.prompt_metadata_cache.workspace.get(workspace) {
+            if !entry.is_expired() {
+                return entry.clone();
+            }
+        }
+
+        let workspace = workspace.to_path_buf();
+        let metadata = match run_workspace_metadata_job({
+            let workspace = workspace.clone();
+            move || load_workspace_metadata(&workspace, is_autonomous)
+        })
+        .await
+        {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::warn!(%error, "workspace metadata task failed");
+                empty_workspace_metadata()
+            }
         };
 
         self.prompt_metadata_cache
             .workspace
-            .insert(workspace.to_path_buf(), metadata.clone());
+            .insert(workspace, metadata.clone());
         metadata
     }
 
@@ -371,5 +385,74 @@ impl LibreFangKernel {
             ));
         }
         context_parts.join("\n\n")
+    }
+}
+
+async fn run_workspace_metadata_job<F, T>(job: F) -> Result<T, tokio::task::JoinError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(job).await
+}
+
+fn load_workspace_metadata(workspace: &Path, is_autonomous: bool) -> CachedWorkspaceMetadata {
+    let workspace_context = {
+        let mut context = librefang_runtime::workspace_context::WorkspaceContext::detect(workspace);
+        Some(context.build_context_section())
+    };
+    CachedWorkspaceMetadata {
+        workspace_context,
+        soul_md: read_identity_file(workspace, "SOUL.md"),
+        user_md: read_identity_file(workspace, "USER.md"),
+        memory_md: read_identity_file(workspace, "MEMORY.md"),
+        agents_md: read_identity_file(workspace, "AGENTS.md"),
+        bootstrap_md: read_identity_file(workspace, "BOOTSTRAP.md"),
+        identity_md: read_identity_file(workspace, "IDENTITY.md"),
+        heartbeat_md: is_autonomous
+            .then(|| read_identity_file(workspace, "HEARTBEAT.md"))
+            .flatten(),
+        tools_md: read_identity_file(workspace, "TOOLS.md"),
+        created_at: std::time::Instant::now(),
+    }
+}
+
+fn empty_workspace_metadata() -> CachedWorkspaceMetadata {
+    CachedWorkspaceMetadata {
+        workspace_context: None,
+        soul_md: None,
+        user_md: None,
+        memory_md: None,
+        agents_md: None,
+        bootstrap_md: None,
+        identity_md: None,
+        heartbeat_md: None,
+        tools_md: None,
+        created_at: std::time::Instant::now(),
+    }
+}
+
+#[cfg(test)]
+mod workspace_metadata_tests {
+    use super::run_workspace_metadata_job;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspace_metadata_job_does_not_block_async_worker() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let job = tokio::spawn(run_workspace_metadata_job(move || {
+            let _ = started_tx.send(());
+            release_rx.recv().expect("test releases metadata job");
+        }));
+        started_rx.await.expect("metadata job started");
+
+        tokio::time::timeout(Duration::from_millis(250), tokio::task::yield_now())
+            .await
+            .expect("async worker must remain responsive");
+
+        release_tx.send(()).unwrap();
+        job.await.unwrap().unwrap();
     }
 }
