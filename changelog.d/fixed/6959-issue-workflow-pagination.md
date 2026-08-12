@@ -1,0 +1,2 @@
+Paginate the GitHub API queries in the issue-inactive and issue-pr-link workflows, which previously only read the first page of results.
+A repository with more than 100 open assigned issues could skip inactive-issue reminders for issues past the first page, and a repository with more than 100 open pull requests could have `has-pr` incorrectly stripped from an issue that a later-page PR still linked (#6959) (@houko)

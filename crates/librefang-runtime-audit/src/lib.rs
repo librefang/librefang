@@ -397,6 +397,9 @@ pub struct AuditLog {
     /// repopulates the full window. Every mutation and read happens under
     /// the `entries` mutex, so `Relaxed` ordering is sufficient.
     persisted_rows: AtomicUsize,
+    /// Any failure encountered while reloading persisted rows.
+    /// A partially decoded audit trail must never verify as intact merely because the malformed row was skipped by the SQLite iterator.
+    load_error: Mutex<Option<String>>,
 }
 
 /// Per-trim summary returned by [`AuditLog::trim`].
@@ -445,6 +448,7 @@ impl AuditLog {
             chain_anchor: Mutex::new(None),
             max_in_memory_entries: AtomicUsize::new(0),
             persisted_rows: AtomicUsize::new(0),
+            load_error: Mutex::new(None),
         }
     }
 
@@ -613,60 +617,92 @@ impl AuditLog {
     pub fn with_db(pool: Pool<SqliteConnectionManager>) -> Self {
         let mut entries = Vec::new();
         let mut tip = "0".repeat(64);
+        let mut load_error = None;
+        let mut persisted_count = 0;
 
         // Load existing entries from database. Schema v22 added the
         // `user_id` / `channel` columns; rows persisted before that
         // migration return NULL for both, which deserialises to `None`
         // and keeps the original hash intact (the hash function omits
         // absent fields, see `compute_entry_hash`).
-        if let Ok(db) = pool.get() {
-            let result = db.prepare(
+        match pool.get() {
+            Ok(db) => {
+                let result = db.prepare(
                 "SELECT seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash FROM audit_entries ORDER BY seq ASC",
             );
-            if let Ok(mut stmt) = result {
-                let rows = stmt.query_map([], |row| {
-                    let action_str: String = row.get(3)?;
-                    // Decode via `FromStr` (exhaustive over every variant).
-                    // A genuinely unknown string means the row was written by
-                    // a newer daemon whose enum this binary does not know; we
-                    // log it by name rather than silently coercing, because
-                    // any coercion recomputes a different `action.to_string()`
-                    // than the persisted one and would trip `verify_integrity`
-                    // with a false hash mismatch on every subsequent boot.
-                    let action = action_str.parse::<AuditAction>().unwrap_or_else(|e| {
-                        tracing::warn!(
-                            seq = row.get::<_, i64>(0).unwrap_or_default(),
-                            "Audit reload hit {e}; retaining the row but its hash \
+                match result {
+                    Ok(mut stmt) => {
+                        let rows = stmt.query_map([], |row| {
+                            let action_str: String = row.get(3)?;
+                            // Decode via `FromStr` (exhaustive over every variant).
+                            // A genuinely unknown string means the row was written by
+                            // a newer daemon whose enum this binary does not know; we
+                            // log it by name rather than silently coercing, because
+                            // any coercion recomputes a different `action.to_string()`
+                            // than the persisted one and would trip `verify_integrity`
+                            // with a false hash mismatch on every subsequent boot.
+                            let action = action_str.parse::<AuditAction>().unwrap_or_else(|e| {
+                                tracing::warn!(
+                                    seq = row.get::<_, i64>(0).unwrap_or_default(),
+                                    "Audit reload hit {e}; retaining the row but its hash \
                              will not recompute until this binary is upgraded to a \
                              version that knows the action"
-                        );
-                        AuditAction::ToolInvoke
-                    });
-                    let seq_raw: i64 = row.get(0)?;
-                    let seq = u64::try_from(seq_raw)
-                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, seq_raw))?;
-                    let user_id_str: Option<String> = row.get(6)?;
-                    let user_id = user_id_str.as_deref().and_then(|s| s.parse().ok());
-                    let channel: Option<String> = row.get(7)?;
-                    Ok(AuditEntry {
-                        seq,
-                        timestamp: row.get(1)?,
-                        agent_id: row.get(2)?,
-                        action,
-                        detail: row.get(4)?,
-                        outcome: row.get(5)?,
-                        user_id,
-                        channel,
-                        prev_hash: row.get(8)?,
-                        hash: row.get(9)?,
-                    })
-                });
-                if let Ok(rows) = rows {
-                    for entry in rows.flatten() {
-                        tip = entry.hash.clone();
-                        entries.push(entry);
+                                );
+                                AuditAction::ToolInvoke
+                            });
+                            let seq_raw: i64 = row.get(0)?;
+                            let seq = u64::try_from(seq_raw).map_err(|_| {
+                                rusqlite::Error::IntegralValueOutOfRange(0, seq_raw)
+                            })?;
+                            let user_id_str: Option<String> = row.get(6)?;
+                            let user_id = user_id_str.as_deref().and_then(|s| s.parse().ok());
+                            let channel: Option<String> = row.get(7)?;
+                            Ok(AuditEntry {
+                                seq,
+                                timestamp: row.get(1)?,
+                                agent_id: row.get(2)?,
+                                action,
+                                detail: row.get(4)?,
+                                outcome: row.get(5)?,
+                                user_id,
+                                channel,
+                                prev_hash: row.get(8)?,
+                                hash: row.get(9)?,
+                            })
+                        });
+                        match rows {
+                            Ok(rows) => {
+                                for (row_index, result) in rows.enumerate() {
+                                    persisted_count += 1;
+                                    match result {
+                                        Ok(entry) => {
+                                            tip = entry.hash.clone();
+                                            entries.push(entry);
+                                        }
+                                        Err(error) => {
+                                            let message = format!(
+                                                "failed to decode audit row at ordered index {row_index}: {error}"
+                                            );
+                                            tracing::error!(%error, row_index, "Audit reload skipped a malformed row");
+                                            load_error.get_or_insert(message);
+                                        }
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                load_error = Some(format!("failed to query audit rows: {error}"));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        load_error = Some(format!("failed to prepare audit reload query: {error}"));
                     }
                 }
+            }
+            Err(error) => {
+                load_error = Some(format!(
+                    "failed to acquire audit database connection: {error}"
+                ));
             }
         }
 
@@ -691,9 +727,9 @@ impl AuditLog {
             anchor_path: None,
             chain_anchor: Mutex::new(recovered_anchor),
             max_in_memory_entries: AtomicUsize::new(0),
-            // Every loaded row is a persisted row; at boot the in-memory
-            // window and the DB population are identical.
-            persisted_rows: AtomicUsize::new(count),
+            // Count every row yielded by SQLite, including malformed rows that could not be admitted to the in-memory chain.
+            persisted_rows: AtomicUsize::new(persisted_count),
+            load_error: Mutex::new(load_error.clone()),
         };
 
         // Verify chain integrity on load. Logged at WARN: the message itself
@@ -704,7 +740,7 @@ impl AuditLog {
         // path fires routinely after every untracked restart. Keeping it
         // at ERROR (the original level) made `grep ERROR daemon.log`
         // useless on dev hosts (#5478).
-        if count > 0 {
+        if count > 0 || load_error.is_some() {
             if let Err(e) = log.verify_integrity() {
                 tracing::warn!(
                     "Audit trail integrity check failed on boot: {e}. \
@@ -972,6 +1008,15 @@ impl AuditLog {
     /// Returns `Ok(())` if the chain is intact, or `Err(msg)` describing
     /// the first inconsistency found.
     pub fn verify_integrity(&self) -> Result<(), String> {
+        if let Some(error) = self
+            .load_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            return Err(format!("audit trail was only partially loaded: {error}"));
+        }
+
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         // When the retention trim job has dropped a prefix, the first
         // surviving entry's `prev_hash` points at the last dropped

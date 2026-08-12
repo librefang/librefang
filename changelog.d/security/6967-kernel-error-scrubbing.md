@@ -1,0 +1,2 @@
+`From<KernelOpError> for ApiErrorResponse` echoed the kernel's `Display` string straight into the HTTP body for every 500 and 503 response, so an `Internal` or `Unavailable` variant could surface database paths, file paths, or other internal state to the client.
+Server-error responses now return a fixed generic message (`Internal server error` / `Service unavailable`) while the full error is still logged server-side via `tracing::error!`; 4xx responses keep their actionable, client-caused message unchanged (#6967) (@houko)

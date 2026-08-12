@@ -67,7 +67,11 @@ flyctl volumes create librefang_data \
   --size 1 \
   --yes
 
-# --- 6. Set secrets (optional) ---
+# --- 6. Set authentication and provider secrets ---
+LIBREFANG_ACCESS_KEY=$(openssl rand -hex 32)
+printf 'LIBREFANG_API_KEY=%s\n' "$LIBREFANG_ACCESS_KEY" \
+  | flyctl secrets import --app "$APP_NAME"
+
 PROVIDER_NAMES=(
   "OpenAI"
   "Anthropic"
@@ -194,7 +198,10 @@ ok "LibreFang is live!"
 echo ""
 echo "  Dashboard:  $APP_URL"
 echo "  API:        $APP_URL/api/health"
+echo "  API key:    $LIBREFANG_ACCESS_KEY"
 echo "  Manage:     flyctl dashboard --app $APP_NAME"
+echo ""
+warn "Save the API key now; it is stored as a Fly secret and cannot be read back."
 echo ""
 echo "  To add or change API keys later:"
 echo "    flyctl secrets set <PROVIDER>_API_KEY=your-key --app $APP_NAME"
