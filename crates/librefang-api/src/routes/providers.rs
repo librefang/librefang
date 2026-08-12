@@ -183,7 +183,7 @@ fn claude_code_profile_config_dir(
 }
 
 /// Detect, for every CLI passthrough provider, the model it is configured to run (read live from the tool's own config), as `(provider_id, label, model)`. `claude_profile_dir` is the resolved first profile dir from active claude-code rotation so detection reads the same `settings.json` the spawned CLI uses.
-fn detect_cli_configured_models(
+fn detect_cli_configured_models_blocking(
     claude_profile_dir: Option<&std::path::Path>,
 ) -> Vec<(&'static str, &'static str, String)> {
     let mut out = Vec::new();
@@ -200,6 +200,22 @@ fn detect_cli_configured_models(
         out.push(("qwen-code", "Qwen Code", m));
     }
     out
+}
+
+async fn detect_cli_configured_models(
+    claude_profile_dir: Option<std::path::PathBuf>,
+) -> Vec<(&'static str, &'static str, String)> {
+    match tokio::task::spawn_blocking(move || {
+        detect_cli_configured_models_blocking(claude_profile_dir.as_deref())
+    })
+    .await
+    {
+        Ok(models) => models,
+        Err(error) => {
+            tracing::warn!(%error, "CLI model config detection task failed");
+            Vec::new()
+        }
+    }
 }
 
 /// Synthesized catalog row for a CLI provider's live-detected model, or `None` when the id is already a catalog model (`id_already_known`) or filtered out by `available_only`. Dedup is against the *whole* catalog, not the (possibly tier-filtered) response slice, so a `?tier=custom` query can't re-surface a catalog default as a sentinel-0 row. Pure (no FS/env) so dedup/filter/shape stay unit-testable.
@@ -287,6 +303,17 @@ pub async fn list_models(
             tracing::warn!(%error, "EveryAPI live catalog unavailable; using registered snapshot");
         }
     }
+    let cli_tier_ok = tier_filter
+        .as_deref()
+        .map(|t| t == "custom")
+        .unwrap_or(true);
+    let cli_configured_models = if cli_tier_ok {
+        let claude_profile_dir =
+            claude_code_profile_config_dir(&state.kernel.config_ref().default_model);
+        detect_cli_configured_models(claude_profile_dir).await
+    } else {
+        Vec::new()
+    };
     let catalog = state.kernel.model_catalog_ref().load();
 
     // Pre-compute the live-discovered model ID set per local provider so we
@@ -402,16 +429,8 @@ pub async fn list_models(
         .collect();
 
     // Surface the model each CLI passthrough provider is configured to run, read live from its own config (DeepSeek via Codex's config.toml, a Kimi id via Claude Code's ANTHROPIC_MODEL / settings.json, a Gemini preview via GEMINI_MODEL, an OpenAI-compatible id via Qwen Code) since the static catalog only ships the tool's defaults. Synthesized rows are `custom` tier, so honour an explicit tier filter.
-    let cli_tier_ok = tier_filter
-        .as_deref()
-        .map(|t| t == "custom")
-        .unwrap_or(true);
     if cli_tier_ok {
-        let claude_profile_dir =
-            claude_code_profile_config_dir(&state.kernel.config_ref().default_model);
-        for (provider, label, configured) in
-            detect_cli_configured_models(claude_profile_dir.as_deref())
-        {
+        for (provider, label, configured) in cli_configured_models {
             let in_scope = provider_filter
                 .as_deref()
                 .map(|p| p == provider)
@@ -646,11 +665,12 @@ pub async fn get_model(
             // codex-cli/deepseek-chat) is not in the catalog, so find_model
             // misses it. Resolve it the same way list_models does so the list
             // and detail endpoints agree on the ids the API advertises.
+            drop(catalog);
             let claude_dir =
                 claude_code_profile_config_dir(&state.kernel.config_ref().default_model);
-            for (provider, label, configured) in detect_cli_configured_models(claude_dir.as_deref())
-            {
+            for (provider, label, configured) in detect_cli_configured_models(claude_dir).await {
                 if format!("{provider}/{configured}").eq_ignore_ascii_case(&id) {
+                    let catalog = state.kernel.model_catalog_ref().load();
                     let available = catalog
                         .get_provider(provider)
                         .map(|p| p.auth_status.is_available())
