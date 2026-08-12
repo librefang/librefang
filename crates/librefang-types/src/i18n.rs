@@ -226,6 +226,12 @@ mod tests {
     fn spanish_translation() {
         let t = ErrorTranslator::new("es");
         assert_eq!(t.t("api-error-agent-not-found"), "Agente no encontrado");
+        assert_eq!(t.t("api-error-agent-invalid-id"), "ID de agente no válido");
+        assert_eq!(t.t("api-error-session-not-found"), "Sesión no encontrada");
+        assert_eq!(
+            t.t("api-error-rate-limited"),
+            "Límite de solicitudes excedido. Inténtelo de nuevo más tarde."
+        );
     }
 
     #[test]
