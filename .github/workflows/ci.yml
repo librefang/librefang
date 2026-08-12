@@ -120,7 +120,7 @@ jobs:
           # `openapi-drift` job still gates direct edits.
           RUST=false;    has '^(crates/|Cargo\.(toml|lock)$|xtask/|openapi\.json$|sdk/)' && RUST=true
           DOCS=false;    has '^(docs/|.*\.md$)'                                       && DOCS=true
-          CI=false;      has '^\.github/workflows/'                                   && CI=true
+          CI=false;      has '^(\.github/workflows/|\.devcontainer/|scripts/tests/test_release_tag_workflow_safety\.py$)' && CI=true
           INSTALL=false; has '^web/public/install\.(sh|ps1)$|^scripts/tests/install_sh_test\.sh$' && INSTALL=true
           # The WASM-skill guest SDK and its example are independent
           # workspaces (own `[workspace]` roots), so the main RUST lane —
@@ -208,7 +208,7 @@ jobs:
 
           # Directly-touched crates (no downstream fan-out — on purpose).
           DIRECT=$(printf '%s\n' "$CHANGED" \
-            | sed -n 's|^crates/\([^/]*\)/.*|\1|p' \
+            | sed -n 's|^crates/\([A-Za-z0-9_-][A-Za-z0-9_-]*\)/.*|\1|p' \
             | sort -u | tr '\n' ' ')
 
           # xtask isn't under `crates/`, so the regex above misses it.
@@ -246,9 +246,11 @@ jobs:
         with:
           fetch-depth: 0
       - name: Reject static/react/ in PR
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
           # Only flag added or modified files (not deletions — cleanup PRs are OK)
-          ADDED=$(git diff --diff-filter=AM --name-only origin/${{ github.base_ref }}...HEAD -- 'crates/librefang-api/static/react/' || true)
+          ADDED=$(git diff --diff-filter=AM --name-only "origin/${BASE_REF}...HEAD" -- 'crates/librefang-api/static/react/' || true)
           if [ -n "$ADDED" ]; then
             echo "::error::PR adds/modifies dashboard build artifacts (static/react/). These are auto-built by CI — remove them from your commits."
             echo "Fix: git rm --cached crates/librefang-api/static/react/ && git commit --amend"
@@ -266,6 +268,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -308,6 +311,13 @@ jobs:
           PY
       - name: Check release workflow input safety
         run: python3 scripts/tests/test_release_tag_workflow_safety.py
+      - name: Install actionlint
+        run: |
+          mkdir -p "$RUNNER_TEMP/actionlint-bin"
+          GOBIN="$RUNNER_TEMP/actionlint-bin" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          echo "$RUNNER_TEMP/actionlint-bin" >> "$GITHUB_PATH"
+      - name: Check report workflow hardening
+        run: python3 scripts/tests/test_workflow_report_hardening.py
       - name: Check formatting
         run: cargo xtask fmt
       - name: Check API error response shape (issue #3505)
@@ -328,12 +338,13 @@ jobs:
       - name: Ensure dashboard build dir exists
         run: mkdir -p crates/librefang-api/static/react
       - name: Build + clippy
+        env:
+          CRATES: ${{ needs.changes.outputs.crates }}
         run: |
           if [ "${{ needs.changes.outputs.full_run }}" = "true" ]; then
             echo "Full build + clippy (workspace)…"
             cargo xtask ci --no-test --no-web
           else
-            CRATES="${{ needs.changes.outputs.crates }}"
             if [ -z "$CRATES" ]; then
               echo "No crates affected — skipping build + clippy."
               exit 0
@@ -367,6 +378,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.skill_sdk == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -401,6 +413,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.sidecar_rust == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -663,11 +676,12 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: 10
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
@@ -711,7 +725,7 @@ jobs:
           fetch-depth: 0
       - name: Install trufflehog
         run: |
-          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin v3.88.23
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/690e5c7aff8347c3885096f3962a0633d9129607/scripts/install.sh | sh -s -- -b /usr/local/bin v3.88.23
       - name: Scan for secrets
         run: |
           trufflehog filesystem . \
@@ -867,12 +881,13 @@ jobs:
             patchelf \
             libdbus-1-dev libsecret-1-dev pkg-config
       - name: Run unit tests (lib + bin)
+        env:
+          CRATES: ${{ needs.changes.outputs.crates }}
         run: |
           if [ "${{ needs.changes.outputs.full_test }}" = "true" ]; then
             echo "Running workspace unit tests (lib+bin, full run)…"
             cargo nextest run --workspace -E 'kind(lib) | kind(bin)' --no-fail-fast --no-tests=pass
           else
-            CRATES="${{ needs.changes.outputs.crates }}"
             if [ -z "$CRATES" ]; then
               echo "No crates affected — nothing to run."
               exit 0
@@ -945,12 +960,13 @@ jobs:
             patchelf
       - name: Build tests
         if: steps.gate.outputs.skip != 'true'
+        env:
+          CRATES: ${{ needs.changes.outputs.crates }}
         run: |
           if [ "${{ needs.changes.outputs.full_test }}" = "true" ]; then
             echo "Building workspace tests (full run, shard ${{ matrix.shard }}/4)…"
             cargo test --workspace --no-run -j 2
           else
-            CRATES="${{ needs.changes.outputs.crates }}"
             if [ -z "$CRATES" ]; then
               echo "No crates affected — skipping build."
               exit 0
@@ -963,6 +979,7 @@ jobs:
       - name: Run tests
         if: steps.gate.outputs.skip != 'true'
         env:
+          CRATES: ${{ needs.changes.outputs.crates }}
           RUST_TEST_THREADS: "1"
         run: |
           if [ "${{ needs.changes.outputs.full_test }}" = "true" ]; then
@@ -974,7 +991,6 @@ jobs:
             cargo nextest run --workspace --no-fail-fast \
               --partition hash:${{ matrix.shard }}/4
           else
-            CRATES="${{ needs.changes.outputs.crates }}"
             if [ -z "$CRATES" ]; then
               echo "No crates affected — nothing to run."
               exit 0

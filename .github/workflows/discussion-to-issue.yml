@@ -28,6 +28,7 @@ jobs:
   # ── Auto-promote new discussions ─────────────────────────────────
   auto-promote:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: >-
       github.event_name == 'discussion' &&
       (
@@ -51,17 +52,31 @@ jobs:
   # ── Manual /to-issue command from maintainers ────────────────────
   manual-promote:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: >-
       github.event_name == 'discussion_comment' &&
-      contains(github.event.comment.body, '/to-issue') &&
+      startsWith(github.event.comment.body, '/to-issue') &&
       (
         github.event.comment.author_association == 'OWNER' ||
         github.event.comment.author_association == 'MEMBER' ||
         github.event.comment.author_association == 'COLLABORATOR'
       )
     steps:
+      - name: Validate command token
+        id: command
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          command=${COMMENT_BODY%%[[:space:]]*}
+          if [ "$command" = "/to-issue" ]; then
+            echo "valid=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.command.outputs.valid == 'true'
       - name: Create issue from discussion
+        if: steps.command.outputs.valid == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -76,7 +91,11 @@ jobs:
   # ── Backfill: scheduled + manual ─────────────────────────────────
   backfill:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: discussion-backfill
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Backfill existing discussions
@@ -93,6 +112,9 @@ jobs:
           else
             cats=("$INPUT_CATEGORY")
           fi
+
+          failures_file=$(mktemp)
+          trap 'rm -f "$failures_file"' EXIT
 
           for CAT in "${cats[@]}"; do
             echo "=== Scanning category: ${CAT} ==="
@@ -115,8 +137,18 @@ jobs:
                 DISC_NUMBER="$num" DISC_TITLE="$title" DISC_URL="$url" \
                   DISC_AUTHOR="$author" DISC_CATEGORY="$CAT" \
                   bash .github/scripts/discussion-to-issue.sh \
-                  || echo "  (skipped or failed)"
+                  || {
+                    echo "  (FAILED for discussion #${num})"
+                    echo "$num" >> "$failures_file"
+                  }
 
                 sleep 2
               done
           done
+
+          if [ -s "$failures_file" ]; then
+            failure_count=$(wc -l < "$failures_file" | tr -d ' ')
+            echo "Backfill finished with ${failure_count} failure(s):"
+            sed 's/^/  #/' "$failures_file"
+            exit 1
+          fi

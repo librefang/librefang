@@ -10,7 +10,7 @@ pub enum Error {
         code: i32,
         description: String,
     },
-    Decode(String),
+    Decode(serde_json::Error),
     Io(std::io::Error),
     Other(String),
 }
@@ -35,6 +35,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Http(e) => Some(e),
+            Error::Decode(e) => Some(e),
             Error::Io(e) => Some(e),
             _ => None,
         }
@@ -56,8 +57,29 @@ impl From<std::io::Error> for Error {
 
 impl From<serde_json::Error> for Error {
     fn from(e: serde_json::Error) -> Self {
-        Error::Decode(e.to_string())
+        Error::Decode(e)
     }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_decode_error_remains_in_the_source_chain() {
+        let decode_error = serde_json::from_str::<serde_json::Value>("{")
+            .expect_err("fixture must be invalid JSON");
+        let expected_line = decode_error.line();
+        let expected_column = decode_error.column();
+        let error = Error::from(decode_error);
+
+        let source = std::error::Error::source(&error).expect("typed decode source");
+        let source = source
+            .downcast_ref::<serde_json::Error>()
+            .expect("source must remain serde_json::Error");
+        assert_eq!(source.line(), expected_line);
+        assert_eq!(source.column(), expected_column);
+    }
+}
