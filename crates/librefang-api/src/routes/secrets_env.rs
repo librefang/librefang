@@ -90,7 +90,7 @@ pub fn upsert_secret(path: &Path, key: &str, value: &str) -> Result<(), String> 
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(".secrets.env.tmp.{}.{seq}", std::process::id()));
-    {
+    let write_result = (|| -> Result<(), String> {
         let mut f = fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -105,9 +105,24 @@ pub fn upsert_secret(path: &Path, key: &str, value: &str) -> Result<(), String> 
         }
         f.write_all(out.as_bytes())
             .map_err(|e| format!("write {tmp:?}: {e}"))?;
-        f.sync_all().ok();
+        f.sync_all().map_err(|e| format!("sync {tmp:?}: {e}"))?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
     }
-    fs::rename(&tmp, path).map_err(|e| format!("rename {tmp:?} -> {path:?}: {e}"))?;
+
+    if let Err(error) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("rename {tmp:?} -> {path:?}: {error}"));
+    }
+
+    #[cfg(unix)]
+    fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| format!("sync parent directory {parent:?}: {e}"))?;
+
     Ok(())
 }
 
@@ -145,5 +160,10 @@ mod tests {
         let path = dir.path().join("secrets.env");
         upsert_secret(&path, "OPENAI_API_KEY", "sk-123").unwrap();
         assert_eq!(read(&path), "OPENAI_API_KEY=sk-123\n");
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "successful writes must not leave secret-bearing staging files"
+        );
     }
 }
