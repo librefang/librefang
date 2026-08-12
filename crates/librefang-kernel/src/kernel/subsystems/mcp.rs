@@ -9,7 +9,6 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use dashmap::DashMap;
 use librefang_extensions::catalog::McpCatalog;
 use librefang_extensions::health::HealthMonitor;
 use librefang_runtime::mcp::McpConnection;
@@ -17,6 +16,8 @@ use librefang_runtime::mcp_oauth::{McpAuthStates, McpOAuthProvider};
 use librefang_types::config::McpServerConfigEntry;
 use librefang_types::tool::ToolDefinition;
 use std::sync::atomic::AtomicU64;
+
+pub(crate) const MAX_MCP_SUMMARY_CACHE_ENTRIES: usize = 256;
 
 /// Focused MCP API.
 pub trait McpSubsystemApi: Send + Sync {
@@ -49,9 +50,9 @@ pub struct McpSubsystem {
     /// MCP tool definitions cache (populated after connections are
     /// established).
     pub(crate) mcp_tools: std::sync::Mutex<Vec<ToolDefinition>>,
-    /// Rendered MCP summary cache keyed by allowlist + mcp_generation;
-    /// skips Mutex + re-render on hit.
-    pub(crate) mcp_summary_cache: DashMap<String, (u64, String)>,
+    /// Bounded rendered MCP summary cache keyed by allowlist + mcp_generation.
+    pub(crate) mcp_summary_cache:
+        parking_lot::Mutex<std::collections::HashMap<String, (u64, String)>>,
     /// MCP catalog — read-only set of server templates shipped by the
     /// registry. Lock-free reads via `ArcSwap`; writes use `rcu()`.
     pub(crate) mcp_catalog: ArcSwap<McpCatalog>,
@@ -79,7 +80,7 @@ impl McpSubsystem {
             mcp_auth_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             mcp_oauth_provider,
             mcp_tools: std::sync::Mutex::new(Vec::new()),
-            mcp_summary_cache: DashMap::new(),
+            mcp_summary_cache: parking_lot::Mutex::new(std::collections::HashMap::new()),
             mcp_catalog: ArcSwap::from_pointee(mcp_catalog),
             mcp_health,
             effective_mcp_servers: std::sync::RwLock::new(effective_mcp_servers),

@@ -8021,6 +8021,41 @@ fn mcp_summary_cache_key_is_order_independent() {
 }
 
 #[test]
+fn mcp_summary_cache_is_bounded_across_distinct_allowlists() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("librefang-mcp-cache-bound-test");
+    std::fs::create_dir_all(home.join("data")).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home.clone(),
+        data_dir: home.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    kernel
+        .tools_ref()
+        .lock()
+        .unwrap()
+        .push(librefang_types::tool::ToolDefinition {
+            name: "mcp_server_tool".to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        });
+
+    let cap = super::subsystems::mcp::MAX_MCP_SUMMARY_CACHE_ENTRIES;
+    for index in 0..=cap {
+        let _ = kernel.build_mcp_summary(&[format!("server-{index}")]);
+    }
+
+    let cache = kernel.mcp.mcp_summary_cache.lock();
+    assert!(
+        cache.len() <= cap,
+        "caller-controlled allowlists must not grow the cache past {cap} entries"
+    );
+    assert!(cache.contains_key(&format!("server-{cap}")));
+}
+
+#[test]
 fn available_tools_mcp_section_is_sorted_across_connect_orders() {
     // Regression for #3765: connect / hot-reload order of MCP servers must
     // not mutate the LLM tool definition list, otherwise provider prompt
