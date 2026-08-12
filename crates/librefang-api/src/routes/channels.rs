@@ -1158,10 +1158,11 @@ pub async fn delete_sidecar_channel(
     // Rewrite config.toml under the same lock that gates configure and POST /api/config/set.
     let removed = {
         let _config_guard = state.config_write_lock.lock().await;
-        let remove_path = config_path.clone();
+        // `config_path` isn't read again after this block, so move it straight into the
+        // blocking task instead of cloning; `name` is still needed below for the 404 message.
         let remove_name = name.clone();
         tokio::task::spawn_blocking(move || {
-            super::sidecar_toml::remove_sidecar_block(&remove_path, &remove_name)
+            super::sidecar_toml::remove_sidecar_block(&config_path, &remove_name)
         })
         .await
         .map_err(|e| {
