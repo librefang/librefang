@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 const ROUTING_EXCLUDED_TEMPLATES: &[&str] = &["assistant"];
 const GENERIC_ENGLISH_WORDS: &[&str] = &[
@@ -175,19 +175,24 @@ struct HandRouteCacheEntry {
 static HAND_ROUTE_CACHE: OnceLock<Mutex<Option<HandRouteCacheEntry>>> = OnceLock::new();
 static HAND_ROUTE_HOME_DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
+fn lock_router_state<'a, T>(mutex: &'a Mutex<T>, state: &'static str) -> MutexGuard<'a, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!(state, "router state lock poisoned; recovering inner state");
+        poisoned.into_inner()
+    })
+}
+
 /// Set the LibreFang home directory used for hand-route candidate loading.
 pub fn set_hand_route_home_dir(home_dir: &Path) {
     let slot = HAND_ROUTE_HOME_DIR.get_or_init(|| Mutex::new(None));
-    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = lock_router_state(slot, "hand_route_home_dir");
     *guard = Some(home_dir.to_path_buf());
 }
 
 /// Invalidate the hand route cache (call alongside `invalidate_manifest_cache`).
 pub fn invalidate_hand_route_cache() {
     if let Some(cache) = HAND_ROUTE_CACHE.get() {
-        if let Ok(mut guard) = cache.lock() {
-            *guard = None;
-        }
+        *lock_router_state(cache, "hand_route_cache") = None;
     }
 }
 
@@ -195,7 +200,7 @@ fn hand_route_candidates() -> Arc<Vec<HandRouteCandidate>> {
     let home_dir = resolve_hand_route_home_dir();
     let home_dir_key = Some(home_dir.to_string_lossy().to_string());
     let cache = HAND_ROUTE_CACHE.get_or_init(|| Mutex::new(None));
-    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = lock_router_state(cache, "hand_route_cache");
     if let Some(ref cached) = *guard {
         if cached.home_dir == home_dir_key {
             return Arc::clone(&cached.candidates);
@@ -212,7 +217,7 @@ fn hand_route_candidates() -> Arc<Vec<HandRouteCandidate>> {
 
 fn resolve_hand_route_home_dir() -> PathBuf {
     if let Some(slot) = HAND_ROUTE_HOME_DIR.get() {
-        let guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = lock_router_state(slot, "hand_route_home_dir");
         if let Some(home_dir) = guard.as_ref() {
             return home_dir.clone();
         }
@@ -354,9 +359,7 @@ static TEMPLATE_RULE_CACHE: OnceLock<Mutex<Option<TemplateRuleCacheEntry>>> = On
 /// [`invalidate_manifest_cache`] / [`invalidate_hand_route_cache`]).
 pub fn invalidate_template_rule_cache() {
     if let Some(cache) = TEMPLATE_RULE_CACHE.get() {
-        if let Ok(mut guard) = cache.lock() {
-            *guard = None;
-        }
+        *lock_router_state(cache, "template_rule_cache") = None;
     }
 }
 
@@ -369,7 +372,7 @@ fn template_rules() -> Arc<Vec<RouteRule>> {
     let home_dir = resolve_hand_route_home_dir();
     let home_dir_key = Some(home_dir.to_string_lossy().to_string());
     let cache = TEMPLATE_RULE_CACHE.get_or_init(|| Mutex::new(None));
-    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = lock_router_state(cache, "template_rule_cache");
     if let Some(ref cached) = *guard {
         if cached.home_dir == home_dir_key {
             return Arc::clone(&cached.rules);
@@ -705,9 +708,7 @@ static MANIFEST_CACHE: OnceLock<Mutex<Option<ManifestCacheEntry>>> = OnceLock::n
 /// next routing call. Call this after config hot-reload or agent changes.
 pub fn invalidate_manifest_cache() {
     if let Some(cache) = MANIFEST_CACHE.get() {
-        if let Ok(mut guard) = cache.lock() {
-            *guard = None;
-        }
+        *lock_router_state(cache, "manifest_cache") = None;
     }
 }
 
@@ -736,7 +737,7 @@ pub fn all_template_descriptions(agents_dir: &Path) -> Vec<(String, String)> {
 
 fn manifest_route_candidates(agents_dir: &Path) -> Arc<Vec<ManifestRouteCandidate>> {
     let cache = MANIFEST_CACHE.get_or_init(|| Mutex::new(None));
-    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = lock_router_state(cache, "manifest_cache");
     if let Some((ref cached_path, ref cached)) = *guard {
         if cached_path == agents_dir {
             return Arc::clone(cached);
@@ -923,7 +924,7 @@ static REGEX_CACHE: OnceLock<Mutex<RegexCache>> = OnceLock::new();
 
 fn regex_matches(message: &str, pattern: &str) -> bool {
     let cache = REGEX_CACHE.get_or_init(|| Mutex::new(RegexCache::new()));
-    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = lock_router_state(cache, "regex_cache");
     // None == compile error → never matches. Mirrors the historical
     // "never-match sentinel" branch but without the panic-risk of
     // the previous `Regex::new("(?!x)x").unwrap()` (regex_lite
@@ -1165,6 +1166,26 @@ fn dedupe(values: Vec<String>) -> Vec<String> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn poisoned_router_state_lock_recovers_and_remains_usable() {
+        let state = Mutex::new(vec!["cached"]);
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut state = state.lock().unwrap();
+                    state.push("stale");
+                    panic!("poison router state lock");
+                })
+                .join()
+        });
+
+        assert!(poison.is_err());
+        let mut recovered = lock_router_state(&state, "test_cache");
+        assert_eq!(&*recovered, &["cached", "stale"]);
+        recovered.clear();
+        assert!(recovered.is_empty());
+    }
 
     fn ensure_registry() {
         use std::sync::Once;
