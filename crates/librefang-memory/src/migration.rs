@@ -60,22 +60,18 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Take a backup first; an incorrect choice will mis-route subsequent
     // ALTER TABLEs.
     if current_version > 0 {
-        let migrations_table_exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master \
+        let migrations_table_exists: bool = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master \
                  WHERE type='table' AND name='migrations'",
-                [],
-                |row| row.get::<_, i64>(0).map(|n| n > 0),
-            )
-            .unwrap_or(false);
+            [],
+            |row| row.get::<_, i64>(0).map(|n| n > 0),
+        )?;
         if migrations_table_exists {
-            let table_max: u32 = conn
-                .query_row(
-                    "SELECT IFNULL(MAX(version), 0) FROM migrations",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0);
+            let table_max: u32 = conn.query_row(
+                "SELECT IFNULL(MAX(version), 0) FROM migrations",
+                [],
+                |row| row.get(0),
+            )?;
             if table_max > current_version {
                 return Err(rusqlite::Error::SqliteFailure(
                     rusqlite::ffi::Error {
@@ -2044,6 +2040,34 @@ mod tests {
             msg.contains(&SCHEMA_VERSION.to_string()),
             "error must surface the pragma user_version ({SCHEMA_VERSION}) for operator recovery, got: {msg}"
         );
+    }
+
+    /// The ladder guard must fail closed when the audit table exists but its
+    /// schema cannot answer `MAX(version)`. Treating that query failure as
+    /// zero would bypass the consistency check and let migrations continue
+    /// from an unverified base.
+    #[test]
+    fn test_run_migrations_propagates_audit_table_query_errors() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE migrations (
+                 wrong_column INTEGER NOT NULL
+             );
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+
+        let error = run_migrations(&conn)
+            .expect_err("malformed migrations audit table must stop the migration ladder");
+
+        assert!(
+            error.to_string().contains("no such column: version"),
+            "unexpected error: {error}"
+        );
+        let user_version: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version, 1, "failed guard must not advance the ladder");
     }
 
     /// Happy path: a freshly migrated DB has `MAX(migrations.version) ==
