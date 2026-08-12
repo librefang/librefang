@@ -21,7 +21,9 @@
 
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use tracing::{debug, info, warn};
 
@@ -380,8 +382,85 @@ fn upsert_mcp_server_from_template(
     }
 
     let toml_string = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
-    std::fs::write(config_path, toml_string).map_err(|e| e.to_string())?;
+    durable_atomic_write(config_path, toml_string.as_bytes()).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn durable_atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "target path has no filename",
+        )
+    })?;
+    let mut staging_name = file_name.to_os_string();
+    staging_name.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let staging = parent.join(staging_name);
+
+    let result = (|| -> std::io::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+            let mode = std::fs::metadata(path)
+                .ok()
+                .map(|metadata| metadata.permissions().mode())
+                .unwrap_or(0o600);
+            options.mode(mode);
+        }
+        let mut file = options.open(&staging)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        replace_file(&staging, path)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_file(staging: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::rename(staging, target)
+}
+
+#[cfg(windows)]
+fn replace_file(staging: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let staging: Vec<u16> = staging.as_os_str().encode_wide().chain(Some(0)).collect();
+    let target: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: Both pointers reference live, NUL-terminated UTF-16 buffers.
+    let replaced = unsafe {
+        MoveFileExW(
+            staging.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
@@ -415,6 +494,43 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let result = migrate_if_needed(tmp.path()).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn durable_atomic_write_replaces_config_without_staging_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        write(&path, "old = true\n");
+
+        durable_atomic_write(&path, b"new = true\n").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new = true\n");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_atomic_write_preserves_config_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        write(&path, "old = true\n");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        durable_atomic_write(&path, b"new = true\n").unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+
+        let new_path = tmp.path().join("new-config.toml");
+        durable_atomic_write(&new_path, b"secret = true\n").unwrap();
+        assert_eq!(
+            std::fs::metadata(&new_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
