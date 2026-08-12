@@ -1060,9 +1060,8 @@ fn default_memory_acl(role: UserRole) -> UserMemoryAccess {
     }
 }
 
-/// Gate decision for an unrecognised sender. Mirrors design decision #2
-/// (default-allow with minimal perms): allow well-known read-only tools,
-/// require approval for anything else.
+/// Gate decision for an unrecognised sender.
+/// Mirrors design decision #2 (default-allow with minimal perms): allow only passive local inspection, and require approval for network access or capability discovery.
 fn guest_gate(tool_name: &str) -> UserToolGate {
     const READ_ONLY_TOOLS: &[&str] = &[
         "file_read",
@@ -1070,12 +1069,8 @@ fn guest_gate(tool_name: &str) -> UserToolGate {
         "code_search",
         "glob",
         "grep",
-        "web_search",
-        "web_fetch",
         "list_agents",
         "list_skills",
-        "tool_load",
-        "tool_search",
     ];
     if READ_ONLY_TOOLS.contains(&tool_name) {
         UserToolGate::Allow
@@ -1486,6 +1481,31 @@ mod tests {
         let unsafe_ =
             mgr.resolve_user_tool_decision("shell_exec", Some("guest42"), Some("telegram"), false);
         assert!(matches!(unsafe_, UserToolGate::NeedsApproval { .. }));
+    }
+
+    #[test]
+    fn rbac_unknown_sender_requires_approval_for_network_and_tool_discovery() {
+        let mgr = AuthManager::with_tool_groups(
+            &[user_with_policy(
+                "Alice",
+                "owner",
+                "1",
+                None,
+                None,
+                None,
+                HashMap::new(),
+            )],
+            &[],
+        );
+
+        for tool in ["web_search", "web_fetch", "tool_load", "tool_search"] {
+            let gate =
+                mgr.resolve_user_tool_decision(tool, Some("unrecognized"), Some("telegram"), false);
+            assert!(
+                matches!(gate, UserToolGate::NeedsApproval { .. }),
+                "unrecognized sender must not invoke {tool} without approval: {gate:?}"
+            );
+        }
     }
 
     /// H6 regression: two users sharing the same platform-id on

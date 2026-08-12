@@ -4,18 +4,13 @@
 //! `Idempotency-Key: <opaque-string>` header. When set, the handler runs
 //! through [`run_idempotent`], which:
 //!
-//! 1. Looks up `(key)` in the persistent store.
-//! 2. **Cache miss**: executes the inner handler, then persists the
-//!    successful 2xx response under `(key, body_hash)` for 24 hours.
-//!    Non-2xx responses are not cached so a transient failure (rate
-//!    limit, downstream blip) does not poison the slot — clients can
-//!    retry the same key and get a real attempt.
-//! 3. **Cache hit, same body**: replays the cached `(status, body)`
-//!    without re-executing the handler.
-//! 4. **Cache hit, different body**: returns 409 Conflict. The
-//!    `Idempotency-Key` is the operator-supplied dedup token and a
-//!    different payload under the same key is a programming error
-//!    (e.g. UI accidentally reuses an old key after editing the form).
+//! 1. Atomically reserves `(key)` in the persistent store.
+//! 2. **Reservation acquired**: executes the inner handler, then completes the reservation with the successful 2xx response for 24 hours.
+//!    Non-2xx responses are not cached so a transient failure (rate limit, downstream blip) does not poison the slot — clients can retry the same key and get a real attempt.
+//! 3. **Concurrent reservation, same body**: returns 409 without running the handler.
+//! 4. **Cache hit, same body**: replays the cached `(status, body)` without re-executing the handler.
+//! 5. **Cache hit, different body**: returns 409 Conflict.
+//!    The `Idempotency-Key` is the operator-supplied dedup token and a different payload under the same key is a programming error (e.g. UI accidentally reuses an old key after editing the form).
 //!
 //! Body identity is sha256 over the raw JSON bytes the handler
 //! received. We hash bytes, not parsed JSON, so a re-serialised body
@@ -29,7 +24,9 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use librefang_memory::idempotency::{CachedResponse, IdempotencyStore};
+use librefang_memory::idempotency::{
+    CachedResponse, IdempotencyStore, Reservation, ReservationToken, PENDING_STATUS,
+};
 use sha2::{Digest, Sha256};
 
 /// Maximum length of a client-supplied `Idempotency-Key`. Bounded so a
@@ -84,6 +81,68 @@ pub fn body_conflict_response() -> Response {
     (StatusCode::CONFLICT, Json(payload)).into_response()
 }
 
+/// 409 response returned while the first request for this key is still running.
+pub fn request_in_progress_response() -> Response {
+    let payload = serde_json::json!({
+        "error": "A request with this Idempotency-Key is already in progress",
+        "code": "idempotency_key_in_use",
+        "type": "idempotency_key_in_use",
+    });
+    (StatusCode::CONFLICT, Json(payload)).into_response()
+}
+
+fn store_unavailable_response() -> Response {
+    let payload = serde_json::json!({
+        "error": "Idempotency storage is unavailable",
+        "code": "idempotency_store_unavailable",
+        "type": "idempotency_store_unavailable",
+    });
+    (StatusCode::SERVICE_UNAVAILABLE, Json(payload)).into_response()
+}
+
+struct ReservationGuard<'a> {
+    store: &'a dyn IdempotencyStore,
+    key: &'a str,
+    body_hash: &'a str,
+    token: ReservationToken,
+    armed: bool,
+}
+
+impl<'a> ReservationGuard<'a> {
+    fn new(
+        store: &'a dyn IdempotencyStore,
+        key: &'a str,
+        body_hash: &'a str,
+        token: ReservationToken,
+    ) -> Self {
+        Self {
+            store,
+            key,
+            body_hash,
+            token,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ReservationGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Err(error) = self.store.release(self.key, self.body_hash, &self.token) {
+                tracing::error!(
+                    key = self.key,
+                    %error,
+                    "failed to release abandoned idempotency reservation"
+                );
+            }
+        }
+    }
+}
+
 /// Wrap a handler closure with idempotency semantics.
 ///
 /// `key_header` is `None` when the caller did not send an
@@ -129,42 +188,55 @@ where
 
     let body_hash = hash_body(body_bytes);
 
-    // Lookup. On lookup error we degrade to "execute anyway, don't
-    // cache" so a corrupt cache row can never block real traffic.
-    let prior = match store.lookup(key) {
-        Ok(p) => p,
+    // Reserve before starting the handler.
+    // The SQLite implementation performs expiration cleanup, insert, and existing-row lookup under one immediate transaction, so same-key requests cannot both observe a miss.
+    let reservation = match store.reserve(key, &body_hash) {
+        Ok(reservation) => reservation,
         Err(e) => {
-            tracing::warn!(error = %e, "idempotency lookup failed; bypassing cache");
-            let (status, body) = f().await;
-            return build_response(status, body);
+            tracing::error!(key, error = %e, "idempotency reservation failed");
+            return store_unavailable_response();
         }
     };
 
-    if let Some(existing) = prior {
-        if existing.body_hash != body_hash {
-            return body_conflict_response();
+    let token = match reservation {
+        Reservation::Existing(existing) => {
+            if existing.body_hash != body_hash {
+                return body_conflict_response();
+            }
+            if existing.response.status == PENDING_STATUS {
+                return request_in_progress_response();
+            }
+            let Ok(status) = StatusCode::from_u16(existing.response.status) else {
+                tracing::error!(
+                    key,
+                    status = existing.response.status,
+                    "idempotency cache contains an invalid HTTP status"
+                );
+                return store_unavailable_response();
+            };
+            return build_response(status, existing.response.body);
         }
-        // Same key, same body → replay.
-        return build_response(
-            StatusCode::from_u16(existing.response.status)
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            existing.response.body,
-        );
-    }
+        Reservation::Acquired { token } => token,
+    };
 
-    // Miss — execute the handler. Cache only successful 2xx responses;
-    // 4xx/5xx remain retriable so a transient failure does not poison
-    // the slot.
+    let mut guard = ReservationGuard::new(store, key, &body_hash, token);
     let (status, body) = f().await;
     if status.is_success() {
         let cached = CachedResponse {
             status: status.as_u16(),
             body: body.clone(),
         };
-        if let Err(e) = store.put(key, &body_hash, &cached) {
-            tracing::warn!(error = %e, "idempotency persist failed; response returned without caching");
+        if let Err(e) = store.complete(key, &body_hash, &guard.token, &cached) {
+            // Keep the pending row instead of making the key reusable after the side effect already happened.
+            // This remains fail-closed until an operator has verified the side effect and removes the orphan.
+            guard.disarm();
+            tracing::error!(key, error = %e, "idempotency completion failed");
+            return store_unavailable_response();
         }
+        guard.disarm();
     }
+    // A non-2xx response leaves the guard armed, releasing the reservation so the key remains retriable.
+    // Cancellation and panic take the same Drop path.
     // Opportunistic prune so the table self-trims.
     if let Err(e) = store.prune_expired() {
         tracing::debug!(error = %e, "idempotency prune_expired failed");
@@ -209,25 +281,80 @@ mod tests {
     #[derive(Default)]
     struct MemStore {
         rows: Mutex<std::collections::HashMap<String, StoredRecord>>,
+        fail_reserve: std::sync::atomic::AtomicBool,
+        fail_complete: std::sync::atomic::AtomicBool,
     }
     impl IdempotencyStore for MemStore {
         fn lookup(&self, key: &str) -> Result<Option<StoredRecord>, IdempotencyError> {
             Ok(self.rows.lock().unwrap().get(key).cloned())
         }
-        fn put(
+        fn reserve(&self, key: &str, body_hash: &str) -> Result<Reservation, IdempotencyError> {
+            if self.fail_reserve.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(IdempotencyError::Invariant(
+                    "injected reserve failure".to_string(),
+                ));
+            }
+            let mut rows = self.rows.lock().unwrap();
+            if let Some(existing) = rows.get(key) {
+                return Ok(Reservation::Existing(existing.clone()));
+            }
+            let token = ReservationToken::new();
+            rows.insert(
+                key.to_string(),
+                StoredRecord {
+                    body_hash: body_hash.to_string(),
+                    response: CachedResponse {
+                        status: PENDING_STATUS,
+                        body: token.as_bytes().to_vec(),
+                    },
+                },
+            );
+            Ok(Reservation::Acquired { token })
+        }
+        fn complete(
             &self,
             key: &str,
             body_hash: &str,
+            token: &ReservationToken,
             response: &CachedResponse,
         ) -> Result<(), IdempotencyError> {
-            self.rows
-                .lock()
-                .unwrap()
-                .entry(key.to_string())
-                .or_insert_with(|| StoredRecord {
-                    body_hash: body_hash.to_string(),
-                    response: response.clone(),
-                });
+            if self.fail_complete.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(IdempotencyError::Invariant(
+                    "injected complete failure".to_string(),
+                ));
+            }
+            let mut rows = self.rows.lock().unwrap();
+            let row = rows.get_mut(key).ok_or_else(|| {
+                IdempotencyError::Invariant("test reservation missing".to_string())
+            })?;
+            if row.body_hash != body_hash
+                || row.response.status != PENDING_STATUS
+                || row.response.body != token.as_bytes()
+            {
+                return Err(IdempotencyError::Invariant(
+                    "test reservation ownership mismatch".to_string(),
+                ));
+            }
+            *row = StoredRecord {
+                body_hash: body_hash.to_string(),
+                response: response.clone(),
+            };
+            Ok(())
+        }
+        fn release(
+            &self,
+            key: &str,
+            body_hash: &str,
+            token: &ReservationToken,
+        ) -> Result<(), IdempotencyError> {
+            let mut rows = self.rows.lock().unwrap();
+            if rows.get(key).is_some_and(|row| {
+                row.body_hash == body_hash
+                    && row.response.status == PENDING_STATUS
+                    && row.response.body == token.as_bytes()
+            }) {
+                rows.remove(key);
+            }
             Ok(())
         }
         fn prune_expired(&self) -> Result<(), IdempotencyError> {
@@ -293,6 +420,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_same_key_executes_handler_once() {
+        let store = MemStore::default();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+
+        let first = run_idempotent(&store, Some("in-flight"), b"{}", || async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            entered_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            (StatusCode::CREATED, b"first".to_vec())
+        });
+        let second = async {
+            entered_rx.await.unwrap();
+            let response = run_idempotent(&store, Some("in-flight"), b"{}", || async {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (StatusCode::CREATED, b"second".to_vec())
+            })
+            .await;
+            release_tx.send(()).unwrap();
+            response
+        };
+
+        let (first_response, second_response) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                tokio::join!(first, second)
+            })
+            .await
+            .expect("condition-synchronized requests must complete");
+
+        assert_eq!(first_response.status(), StatusCode::CREATED);
+        assert_eq!(second_response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(second_response.into_body(), 4096)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["code"], "idempotency_key_in_use");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_handler_releases_pending_reservation() {
+        let store = std::sync::Arc::new(MemStore::default());
+        let task_store = store.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            run_idempotent(&*task_store, Some("cancelled"), b"{}", || async {
+                entered_tx.send(()).unwrap();
+                std::future::pending::<(StatusCode, Vec<u8>)>().await
+            })
+            .await
+        });
+
+        entered_rx.await.unwrap();
+        assert_eq!(
+            store
+                .lookup("cancelled")
+                .unwrap()
+                .expect("pending reservation")
+                .response
+                .status,
+            PENDING_STATUS
+        );
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(store.lookup("cancelled").unwrap().is_none());
+
+        let retry = run_idempotent(&*store, Some("cancelled"), b"{}", || async {
+            (StatusCode::CREATED, b"retry".to_vec())
+        })
+        .await;
+        assert_eq!(retry.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
     async fn non_2xx_responses_are_not_cached() {
         let s = MemStore::default();
         let calls = std::sync::atomic::AtomicUsize::new(0);
@@ -310,5 +512,53 @@ mod tests {
         let r2 = run_idempotent(&s, Some("retry-me"), b"{}", mk_ok).await;
         assert_eq!(r2.status(), StatusCode::CREATED);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn reserve_failure_does_not_run_handler() {
+        let store = MemStore::default();
+        store
+            .fail_reserve
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+
+        let response = run_idempotent(&store, Some("reserve-fails"), b"{}", || async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (StatusCode::CREATED, b"created".to_vec())
+        })
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn complete_failure_fails_closed_without_reexecuting_handler() {
+        let store = MemStore::default();
+        store
+            .fail_complete
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let handler = || async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (StatusCode::CREATED, b"created".to_vec())
+        };
+
+        let first = run_idempotent(&store, Some("complete-fails"), b"{}", handler).await;
+        assert_eq!(first.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            store
+                .lookup("complete-fails")
+                .unwrap()
+                .expect("pending row retained")
+                .response
+                .status,
+            PENDING_STATUS
+        );
+
+        let retry = run_idempotent(&store, Some("complete-fails"), b"{}", handler).await;
+        assert_eq!(retry.status(), StatusCode::CONFLICT);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

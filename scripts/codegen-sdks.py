@@ -232,6 +232,17 @@ class LibreFang:
                             yield json.loads(data_str)
                         except json.JSONDecodeError:
                             yield {"raw": data_str}
+            # A clean EOF can arrive without a trailing newline, leaving the last event in the buffer.
+            # Parse it here rather than dropping it; the loop above only fires on a newline.
+            if buffer:
+                line = buffer.decode().strip()
+                if line.startswith("data: "):
+                    data_str = line[6:]
+                    if data_str != "[DONE]":
+                        try:
+                            yield json.loads(data_str)
+                        except json.JSONDecodeError:
+                            yield {"raw": data_str}
         finally:
             active_error = sys.exc_info()[0] is not None
             try:
@@ -384,6 +395,15 @@ class LibreFang {
         if (!trimmed.startsWith("data: ")) continue;
         const data = trimmed.slice(6);
         if (data === "[DONE]") return;
+        try { yield JSON.parse(data); } catch { yield { raw: data }; }
+      }
+    }
+    // A clean EOF can arrive without a trailing newline, leaving the last event in the buffer.
+    // Parse it here rather than dropping it; the loop above only fires on a newline.
+    const trailing = buffer.trim();
+    if (trailing.startsWith("data: ")) {
+      const data = trailing.slice(6);
+      if (data !== "[DONE]") {
         try { yield JSON.parse(data); } catch { yield { raw: data }; }
       }
     }
@@ -574,7 +594,11 @@ func (c *Client) stream(method, path string, body interface{}, query map[string]
 \t\t\t}
 \t\t\tbodyBytes = b
 \t\t}
-\t\treq, _ := http.NewRequest(method, urlStr, bytes.NewReader(bodyBytes))
+\t\treq, err := http.NewRequest(method, urlStr, bytes.NewReader(bodyBytes))
+\t\tif err != nil {
+\t\t\tch <- map[string]interface{}{"error": fmt.Sprintf("new request: %v", err), "status": 0}
+\t\t\treturn
+\t\t}
 \t\tfor k, v := range c.Headers {
 \t\t\treq.Header.Set(k, v)
 \t\t}
@@ -742,7 +766,7 @@ _RUST_LIB_HEADER = """\
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -756,6 +780,9 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn build_url<'a>(
     client: &Client,
@@ -797,7 +824,9 @@ async fn do_req(
     query: &[(&str, Option<&str>)],
 ) -> Result<Value> {
     let url = build_url(client, base_url, path_segments.iter().copied())?;
-    let req = client.request(method, url);
+    let req = client
+        .request(method, url)
+        .timeout(DEFAULT_REQUEST_TIMEOUT);
     let filtered: Vec<(&str, &str)> = query
         .iter()
         .filter_map(|(k, v)| v.map(|vv| (*k, vv)))
@@ -820,8 +849,9 @@ fn do_stream(
     method: reqwest::Method,
     body: Option<Value>,
     query: Vec<(String, Option<String>)>,
-) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+) -> tokio::sync::mpsc::Receiver<Value> {
+    const STREAM_CHANNEL_CAPACITY: usize = 256;
+    let (tx, rx) = tokio::sync::mpsc::channel(STREAM_CHANNEL_CAPACITY);
     tokio::spawn(async move {
         let url = match build_url(&client, &base_url, path_segments.iter().map(String::as_str)) {
             Ok(url) => url,
@@ -833,7 +863,7 @@ fn do_stream(
                 let _ = tx.send(serde_json::json!({
                     "error": error,
                     "status": 0,
-                }));
+                })).await;
                 return;
             }
         };
@@ -844,23 +874,29 @@ fn do_stream(
             .collect();
         let req = if filtered.is_empty() { req } else { req.query(&filtered) };
         let req = if let Some(b) = body { req.json(&b) } else { req };
-        let res = match req.send().await {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = tx.send(serde_json::json!({
-                    "error": e.to_string(),
-                    "status": 0,
-                }));
-                return;
+        let res = tokio::select! {
+            _ = tx.closed() => return,
+            result = req.send() => match result {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(serde_json::json!({
+                        "error": e.to_string(),
+                        "status": 0,
+                    })).await;
+                    return;
+                }
             }
         };
         if !res.status().is_success() {
             let status = res.status().as_u16();
-            let body = res.text().await.unwrap_or_default();
+            let body = tokio::select! {
+                _ = tx.closed() => return,
+                body = res.text() => body.unwrap_or_default(),
+            };
             let _ = tx.send(serde_json::json!({
                 "error": format!("HTTP {}: {}", status, body),
                 "status": status,
-            }));
+            })).await;
             return;
         }
         // Accumulate raw bytes so multi-byte UTF-8 codepoints are not split
@@ -870,23 +906,27 @@ fn do_stream(
         const MAX_SSE_LINE: usize = 8 * 1024 * 1024;
         let mut stream = res.bytes_stream();
         let mut buffer: Vec<u8> = Vec::new();
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = match chunk_result {
-                Ok(chunk) => chunk,
-                Err(e) => {
-                    let _ = tx.send(serde_json::json!({
-                        "error": format!("stream error: {}", e),
-                        "status": 0,
-                    }));
-                    return;
-                }
+        loop {
+            let chunk = tokio::select! {
+                _ = tx.closed() => return,
+                next = stream.next() => match next {
+                    Some(Ok(chunk)) => chunk,
+                    Some(Err(e)) => {
+                        let _ = tx.send(serde_json::json!({
+                            "error": format!("stream error: {}", e),
+                            "status": 0,
+                        })).await;
+                        return;
+                    }
+                    None => break,
+                },
             };
             buffer.extend_from_slice(&chunk);
             if buffer.len() > MAX_SSE_LINE {
                 let _ = tx.send(serde_json::json!({
                     "error": format!("SSE line exceeded {} bytes", MAX_SSE_LINE),
                     "status": 0,
-                }));
+                })).await;
                 return;
             }
             while let Some(pos) = buffer.iter().position(|&b| b == b'\\n') {
@@ -894,21 +934,48 @@ fn do_stream(
                 let line = match std::str::from_utf8(&line_bytes) {
                     Ok(s) => s.trim(),
                     Err(e) => {
-                        let _ = tx.send(serde_json::json!({
+                        if tx.send(serde_json::json!({
                             "error": format!("invalid utf-8 in SSE line at byte {}", e.valid_up_to()),
                             "status": 0,
-                        }));
+                        })).await.is_err() {
+                            return;
+                        }
                         continue;
                     }
                 };
                 if let Some(data) = line.strip_prefix("data: ") {
                     if data == "[DONE]" { return; }
                     match serde_json::from_str::<Value>(data) {
-                        Ok(v) => { let _ = tx.send(v); }
+                        Ok(v) => {
+                            if tx.send(v).await.is_err() { return; }
+                        }
                         Err(_) => {
-                            let _ = tx.send(serde_json::json!({"raw": data}));
+                            if tx.send(serde_json::json!({"raw": data})).await.is_err() {
+                                return;
+                            }
                         }
                     }
+                }
+            }
+        }
+        // A clean EOF can arrive without a trailing newline, leaving the last event in the buffer.
+        // Parse it here rather than dropping it; the loop above only fires on a newline.
+        if !buffer.is_empty() {
+            match std::str::from_utf8(&buffer) {
+                Ok(line) => {
+                    if let Some(data) = line.trim().strip_prefix("data: ") {
+                        if data != "[DONE]" {
+                            let event = serde_json::from_str::<Value>(data)
+                                .unwrap_or_else(|_| serde_json::json!({"raw": data}));
+                            let _ = tx.send(event).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(serde_json::json!({
+                        "error": format!("invalid utf-8 in SSE line at byte {}", e.valid_up_to()),
+                        "status": 0,
+                    })).await;
                 }
             }
         }
@@ -952,7 +1019,11 @@ def gen_rust(tag_ops: dict) -> str:
 
     out += "impl LibreFang {\n"
     out += "    pub fn new(base_url: impl Into<String>) -> Self {\n"
-    out += "        Self::with_client(base_url, Client::new())\n"
+    out += "        let client = Client::builder()\n"
+    out += "            .connect_timeout(DEFAULT_CONNECT_TIMEOUT)\n"
+    out += "            .build()\n"
+    out += '            .expect("failed to build HTTP client");\n'
+    out += "        Self::with_client(base_url, client)\n"
     out += "    }\n\n"
     out += "    /// Creates an SDK client using a caller-configured HTTP client.\n"
     out += "    ///\n"
@@ -1014,7 +1085,7 @@ def gen_rust(tag_ops: dict) -> str:
                     query_arg = f"vec![{q_items}]"
                 else:
                     query_arg = "Vec::new()"
-                out += f"\n    pub fn {op_id}({sig}) -> tokio::sync::mpsc::UnboundedReceiver<Value> {{\n"
+                out += f"\n    pub fn {op_id}({sig}) -> tokio::sync::mpsc::Receiver<Value> {{\n"
                 out += f"        do_stream(self.client.clone(), self.base_url.clone(), {path_arg}, {method_const}, {body_arg}, {query_arg})\n"
                 out += "    }\n"
             else:

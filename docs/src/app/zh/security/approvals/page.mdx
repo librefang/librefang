@@ -65,7 +65,7 @@ totp_tools = []                        # 留空表示审批列表内所有工具
 
 由于 RBAC 先运行，它给出的「需要审批」结论会在 `trusted_senders` 免审批被查阅之前就先生效。
 因此，当配置了 `[[users]]` 而某个发送者**不是** `api` 通道上已注册的用户时（REST `POST /api/agents/{id}/message` 请求正是走 `api` 通道），该发送者会落入内置的 guest gate（`guest_gate`）。
-guest gate 只放行一小组只读工具（文件读取、搜索、`web_fetch` 等），对其余一切都返回「需要审批」——包括本属低风险的 `memory_store` / `memory_recall`。
+guest gate 只放行一小组只读工具（文件读取、搜索、`list_agents` / `list_skills` 等），对其余一切都返回「需要审批」——包括本属低风险的 `memory_store` / `memory_recall`，也包括作为网络访问与能力发现而被拦截的 `web_search` / `web_fetch` / `tool_load` / `tool_search`（#6908）。
 由此得出一个反直觉的结果：一个列入 `trusted_senders`、但**未**同时注册为 `api` 通道上 `[[users]]` 的 ID，其 `memory_*` 调用仍会被拦截，因为 guest gate 在 `trusted_senders` 免审批生效之前就已强制审批。
 
 **解决办法——把该操作者注册为绑定到 `api` 通道的用户**，并授予覆盖其所用工具的策略：

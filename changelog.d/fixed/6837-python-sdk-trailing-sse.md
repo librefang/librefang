@@ -1,0 +1,3 @@
+Fixed the generated Python SDK dropping a final server-sent event when a stream ended without a trailing newline, the same defect class fixed for the Rust SDK in this release.
+`_stream` split incoming bytes on `\n` and only processed complete lines, so a clean EOF right after the last `data: ` line left it sitting unprocessed in the leftover buffer.
+The trailing-buffer flush now decodes as strictly as the per-line decode in the main loop above it, instead of silently replacing truncated multi-byte UTF-8 with a `�` placeholder and yielding a `{"raw": ...}` event that hid the corruption (#6837) (@houko)

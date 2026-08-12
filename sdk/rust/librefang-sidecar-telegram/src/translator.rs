@@ -109,11 +109,29 @@ fn media_placeholder(label: &str, duration_secs: Option<u32>, caption: Option<&s
     TgContent::Text(format!("[{label}{dur}{cap}]"))
 }
 
+/// Render a `getFile` failure for logging.
+/// Debug-formats the file id and error so embedded control characters (newlines, ANSI escapes) are escaped rather than able to forge extra log lines.
+fn file_lookup_error_log(file_id: &str, error: &impl std::fmt::Display) -> String {
+    let rendered_error = error.to_string();
+    format!("[telegram] getFile failed for file_id {file_id:?}: {rendered_error:?}")
+}
+
+/// Render an `answerCallbackQuery` failure for logging, with the same control-character escaping as `file_lookup_error_log`.
+fn callback_ack_error_log(callback_id: &str, error: &impl std::fmt::Display) -> String {
+    let rendered_error = error.to_string();
+    format!(
+        "[telegram] answerCallbackQuery failed for callback_id {callback_id:?}: {rendered_error:?}"
+    )
+}
+
 /// Best-effort file-id → public URL. Returns None on lookup failure (the caller falls back to a text placeholder).
 pub async fn file_url(client: &BotClient, file_id: &str) -> Option<String> {
     match client.get_file(file_id).await {
         Ok(res) => res.file_path.map(|p| client.file_url(&p)),
-        Err(_) => None,
+        Err(error) => {
+            eprintln!("{}", file_lookup_error_log(file_id, &error));
+            None
+        }
     }
 }
 
@@ -237,6 +255,17 @@ pub async fn extract_content(client: &BotClient, msg: &Message) -> Option<TgCont
     None
 }
 
+fn photo_reply_upgrade(content: &TgContent, prefix: &str, url: String) -> Option<TgContent> {
+    let TgContent::Text(text) = content else {
+        return None;
+    };
+    Some(TgContent::Image {
+        url,
+        caption: Some(format!("{prefix}{text}")),
+        mime_type: Some("image/jpeg".into()),
+    })
+}
+
 /// Reply context: prefix `[Replying to <sender>: "..."]` to a text-shaped TgContent. If the replied-to message is itself a photo AND the current content is plain Text, the function upgrades it to an Image carrying the replied photo's URL — without this the agent never sees the photo the user is reacting to. Mirrors the Python adapter's `_apply_reply` behaviour.
 pub async fn apply_reply(client: &BotClient, content: TgContent, msg: &Message) -> TgContent {
     let Some(reply) = msg.reply_to_message.as_ref() else {
@@ -258,14 +287,9 @@ pub async fn apply_reply(client: &BotClient, content: TgContent, msg: &Message) 
     if matches!(&content, TgContent::Text(_)) {
         if let Some(photo) = reply.photo.last() {
             if let Some(url) = file_url(client, &photo.file_id).await {
-                let TgContent::Text(t) = content else {
-                    unreachable!("matched above")
-                };
-                return TgContent::Image {
-                    url,
-                    caption: Some(format!("{prefix}{t}")),
-                    mime_type: Some("image/jpeg".into()),
-                };
+                if let Some(upgraded) = photo_reply_upgrade(&content, &prefix, url) {
+                    return upgraded;
+                }
             }
         }
     }
@@ -494,34 +518,28 @@ pub enum TgContent {
 /// callback_query update → ButtonCallback content event.
 pub fn callback_event(cq: &CallbackQuery) -> Option<Value> {
     let user = cq.from.as_ref()?;
+    let message = cq.message.as_ref()?;
+    if message.chat.id == 0 {
+        return None;
+    }
     let action = cq.data.clone().unwrap_or_default();
-    let message_text = cq.message.as_ref().and_then(|m| m.text.clone());
+    let message_text = message.text.clone();
     let content = TgContent::ButtonCallback {
         action,
         message_text,
     };
     let sender = sender_from_user(user);
-    let chat_id = cq
-        .message
-        .as_ref()
-        .map(|m| m.chat.id.to_string())
-        .unwrap_or_default();
+    let chat_id = message.chat.id.to_string();
     // Without is_group, a group-button callback looks like a DM and mis-routes the agent reply (DM session instead of group session).
-    let is_group = cq
-        .message
-        .as_ref()
-        .map(|m| matches!(m.chat.chat_type.as_str(), "group" | "supergroup"))
-        .unwrap_or(false);
+    let is_group = matches!(message.chat.chat_type.as_str(), "group" | "supergroup");
     // Same string contract as `build_metadata` (#6564). Read once and reused
     // below for the top-level slot, rather than matching on `cq.message` twice.
-    let message_id = cq.message.as_ref().map(|m| m.message_id.to_string());
+    let message_id = message.message_id.to_string();
     let mut metadata = serde_json::Map::new();
     metadata.insert("chat_id".into(), json!(chat_id.clone()));
     metadata.insert("platform".into(), json!("telegram"));
     metadata.insert("callback_query_id".into(), json!(cq.id.clone()));
-    if let Some(id) = &message_id {
-        metadata.insert("message_id".into(), json!(id));
-    }
+    metadata.insert("message_id".into(), json!(message_id.clone()));
     metadata.insert("sender_user_id".into(), json!(sender.user_id.clone()));
     if let Some(uname) = &sender.username {
         metadata.insert("sender_username".into(), json!(uname));
@@ -531,13 +549,10 @@ pub fn callback_event(cq: &CallbackQuery) -> Option<Value> {
         .channel_id(chat_id)
         .platform("telegram")
         .is_group(is_group)
+        // Populate the canonical top-level id too, matching `message_event` and the Python adapter's callback path.
+        // Without it the daemon synthesises a random UUID for `platform_message_id`, which cannot address a Telegram message.
+        .message_id(message_id)
         .metadata(metadata);
-    // Populate the canonical top-level id too, matching `message_event` and the
-    // Python adapter's callback path. Without it the daemon synthesises a random
-    // UUID for `platform_message_id`, which cannot address a Telegram message.
-    if let Some(id) = message_id {
-        builder = builder.message_id(id);
-    }
     if let Some(uname) = sender.username {
         builder = builder.username(uname);
     }
@@ -611,7 +626,9 @@ pub async fn update_to_event(client: &BotClient, update: &Update) -> Option<Valu
         let client = client.clone();
         let cq_id = cq.id.clone();
         tokio::spawn(async move {
-            let _ = client.answer_callback_query(&cq_id).await;
+            if let Err(error) = client.answer_callback_query(&cq_id).await {
+                eprintln!("{}", callback_ack_error_log(&cq_id, &error));
+            }
         });
         return callback_event(cq);
     }
@@ -625,6 +642,62 @@ pub async fn update_to_event(client: &BotClient, update: &Update) -> Option<Valu
 mod tests {
     use super::*;
     use crate::api::types::MessageEntity;
+
+    #[test]
+    fn file_lookup_error_log_identifies_the_failed_file() {
+        let error = crate::api::Error::Other("temporary getFile failure".into());
+        assert_eq!(
+            file_lookup_error_log("telegram-file-42", &error),
+            "[telegram] getFile failed for file_id \"telegram-file-42\": \"temporary getFile failure\""
+        );
+
+        let injected = crate::api::Error::Other("bad\r\n[telegram] fake\u{1b}[31m".into());
+        let line = file_lookup_error_log("file\nspoof", &injected);
+        assert!(!line.contains('\n'));
+        assert!(!line.contains('\r'));
+        assert!(!line.contains('\u{1b}'));
+        assert!(line.contains("\\r\\n"));
+        assert!(line.contains("\\u{1b}"));
+    }
+
+    #[test]
+    fn callback_ack_error_log_is_identifiable_and_control_escaped() {
+        let error = crate::api::Error::Other("timeout\r\nforged\u{1b}[31m".into());
+        let line = callback_ack_error_log("callback\nspoof", &error);
+        assert_eq!(
+            line,
+            "[telegram] answerCallbackQuery failed for callback_id \"callback\\nspoof\": \"timeout\\r\\nforged\\u{1b}[31m\""
+        );
+        assert!(!line.contains('\n'));
+        assert!(!line.contains('\r'));
+        assert!(!line.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn photo_reply_upgrade_is_explicitly_text_only() {
+        let upgraded = photo_reply_upgrade(
+            &TgContent::Text("answer".into()),
+            "[Reply]\n",
+            "https://example.com/photo.jpg".into(),
+        )
+        .expect("text reply upgrades to image");
+        match upgraded {
+            TgContent::Image { url, caption, .. } => {
+                assert_eq!(url, "https://example.com/photo.jpg");
+                assert_eq!(caption.as_deref(), Some("[Reply]\nanswer"));
+            }
+            _ => panic!("expected image upgrade"),
+        }
+
+        assert!(photo_reply_upgrade(
+            &TgContent::Sticker {
+                file_id: "sticker".into()
+            },
+            "[Reply]\n",
+            "https://example.com/photo.jpg".into(),
+        )
+        .is_none());
+    }
 
     fn cmd_msg(text: &str, length: i64) -> Message {
         Message {
@@ -761,6 +834,32 @@ mod tests {
             "got {:?}",
             params["metadata"]["message_id"]
         );
+    }
+
+    #[test]
+    fn callback_event_requires_chat_context() {
+        let mut cq = CallbackQuery {
+            id: "cbq-without-message".into(),
+            from: Some(User {
+                id: 42,
+                is_bot: false,
+                first_name: "Ada".into(),
+                last_name: None,
+                username: Some("ada".into()),
+            }),
+            message: None,
+            chat_instance: "ci".into(),
+            data: Some("prov:deepseek".into()),
+        };
+
+        assert_eq!(callback_event(&cq), None);
+
+        cq.message = Some(Message {
+            message_id: 1,
+            chat: Chat::default(),
+            ..Default::default()
+        });
+        assert_eq!(callback_event(&cq), None);
     }
 
     #[test]

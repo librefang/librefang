@@ -66,7 +66,7 @@ When an approval times out, the action falls through to `timeout_fallback`:
 
 Because RBAC runs first, a "needs approval" verdict from it wins before the `trusted_senders` bypass is ever consulted.
 So when `[[users]]` is configured and a sender is **not** a registered user on the `api` channel — the channel REST `POST /api/agents/{id}/message` requests arrive on — that sender falls to the built-in guest gate (`guest_gate`).
-The guest gate allows only a small read-only set (file reads, search, `web_fetch`, …) and returns "needs approval" for everything else — including `memory_store` / `memory_recall`, which are otherwise low-risk.
+The guest gate allows only a small read-only set (file reads, search, `list_agents` / `list_skills`, …) and returns "needs approval" for everything else — including `memory_store` / `memory_recall`, which are otherwise low-risk, and including `web_search` / `web_fetch` / `tool_load` / `tool_search`, which are gated as network access and capability discovery (#6908).
 The surprising consequence: an ID listed in `trusted_senders` that is not *also* a registered `[[users]]` on the `api` channel still has its `memory_*` calls gated, because the guest gate forced approval before `trusted_senders` could waive it.
 
 **Fix — register the operator as a user bound to the `api` channel**, with a tool policy covering the tools it drives:

@@ -2,6 +2,15 @@
 
 use tracing::warn;
 
+static URL_PATTERN: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
+    regex_lite::Regex::new(r#"https?://[^\s<>\[\](){}|\\^`"']+[^\s<>\[\](){}|\\^`"'.,;:!?\-)]"#)
+        .expect("URL regex is valid")
+});
+
+fn url_pattern() -> &'static regex_lite::Regex {
+    &URL_PATTERN
+}
+
 /// Configuration for link understanding (re-exported from types).
 pub use librefang_types::media::LinkConfig;
 
@@ -20,16 +29,10 @@ pub struct LinkSummary {
 /// Returns up to `max` valid, unique URLs that do not contain private literal targets or restricted hostnames.
 /// Any later fetch must still use the shared WebFetch SSRF resolver and pinned transport to validate DNS at connect time.
 pub fn extract_urls(text: &str, max: usize) -> Vec<String> {
-    // Simple but effective URL regex
-    let url_pattern = regex_lite::Regex::new(
-        r#"https?://[^\s<>\[\](){}|\\^`"']+[^\s<>\[\](){}|\\^`"'.,;:!?\-)]"#,
-    )
-    .expect("URL regex is valid");
-
     let mut seen = std::collections::HashSet::new();
     let mut urls = Vec::new();
 
-    for m in url_pattern.find_iter(text) {
+    for m in url_pattern().find_iter(text) {
         let url = m.as_str().to_string();
 
         // Deduplicate
@@ -155,6 +158,11 @@ pub fn build_link_context(text: &str, config: &LinkConfig) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn url_pattern_is_shared_across_extractions() {
+        assert!(std::ptr::eq(url_pattern(), url_pattern()));
+    }
 
     #[test]
     fn test_extract_urls_basic() {

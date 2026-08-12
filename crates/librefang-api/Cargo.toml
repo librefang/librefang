@@ -97,6 +97,7 @@ wiremock = "0.6"
 # Storage-failure route tests (#6653 / #6654): the goals routes must answer a substrate read failure with a 500 rather than an empty 200, and the only way to make `structured_get` fail from outside `librefang-memory` is to write a non-JSON blob straight through the connection pool that `MemorySubstrate::pool()` already exposes.
 # Test-only; the same workspace version the memory crate compiles.
 rusqlite = { workspace = true }
+tokio-tungstenite = { workspace = true }
 
 [features]
 # Default = telemetry only. Channel adapters all run as out-of-process

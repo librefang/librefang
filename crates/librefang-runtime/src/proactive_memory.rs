@@ -361,7 +361,7 @@ pub struct LlmMemoryExtractor {
     /// in that case the OpenAI driver's substring fallback resolves the
     /// policy by model name.
     kernel_handle:
-        std::sync::Mutex<Option<std::sync::Weak<dyn crate::kernel_handle::KernelHandle>>>,
+        parking_lot::Mutex<Option<std::sync::Weak<dyn crate::kernel_handle::KernelHandle>>>,
 }
 
 impl LlmMemoryExtractor {
@@ -382,8 +382,21 @@ impl LlmMemoryExtractor {
             driver,
             model,
             prompt_caching,
-            kernel_handle: std::sync::Mutex::new(None),
+            kernel_handle: parking_lot::Mutex::new(None),
         }
+    }
+
+    fn lock_kernel_handle_slot(
+        &self,
+    ) -> parking_lot::MutexGuard<'_, Option<std::sync::Weak<dyn crate::kernel_handle::KernelHandle>>>
+    {
+        self.kernel_handle.lock()
+    }
+
+    fn kernel_handle(&self) -> Option<std::sync::Arc<dyn crate::kernel_handle::KernelHandle>> {
+        self.lock_kernel_handle_slot()
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
     }
 
     /// Store a weak handle to the kernel so the extractor can look up
@@ -401,9 +414,7 @@ impl LlmMemoryExtractor {
         &self,
         handle: std::sync::Weak<dyn crate::kernel_handle::KernelHandle>,
     ) {
-        if let Ok(mut slot) = self.kernel_handle.lock() {
-            *slot = Some(handle);
-        }
+        *self.lock_kernel_handle_slot() = Some(handle);
     }
 
     /// Resolve the `reasoning_echo_policy` for the given model via the
@@ -412,10 +423,7 @@ impl LlmMemoryExtractor {
     /// isn't in the catalog — the driver's substring fallback handles
     /// those cases.
     fn echo_policy_for(&self, model: &str) -> librefang_types::model_catalog::ReasoningEchoPolicy {
-        self.kernel_handle
-            .lock()
-            .ok()
-            .and_then(|slot| slot.as_ref()?.upgrade())
+        self.kernel_handle()
             .map(|k| k.reasoning_echo_policy_for(model))
             .unwrap_or_default()
     }
@@ -442,10 +450,7 @@ impl LlmMemoryExtractor {
     /// (see `ProactiveMemoryOverrides::extraction_model` doc).
     fn resolve_model_for_agent(&self, agent_id: &str) -> String {
         let Some(override_spec) = self
-            .kernel_handle
-            .lock()
-            .ok()
-            .and_then(|slot| slot.as_ref()?.upgrade())
+            .kernel_handle()
             .and_then(|k| k.proactive_memory_extraction_model_for(agent_id))
         else {
             return self.model.clone();
@@ -488,7 +493,7 @@ impl LlmMemoryExtractor {
         // Skip system messages — only include user and assistant roles.
         // Cap total text to ~8000 chars to avoid exceeding extraction model context.
         const MAX_EXTRACTION_CHARS: usize = 8000;
-        let mut conversation_text = String::new();
+        let mut conversation_text = String::with_capacity(MAX_EXTRACTION_CHARS);
         for msg in messages {
             let role = msg
                 .get("role")
@@ -517,7 +522,8 @@ impl LlmMemoryExtractor {
                 _ => String::new(),
             };
             if !content.is_empty() {
-                conversation_text.push_str(&format!("{role}: {content}\n"));
+                use std::fmt::Write as _;
+                let _ = writeln!(conversation_text, "{role}: {content}");
                 if conversation_text.len() > MAX_EXTRACTION_CHARS {
                     let mut safe_end = MAX_EXTRACTION_CHARS;
                     while safe_end > 0 && !conversation_text.is_char_boundary(safe_end) {
@@ -1090,6 +1096,24 @@ mod tests {
             access_count: None,
             agent_id: None,
         }
+    }
+
+    #[test]
+    fn kernel_handle_slot_remains_usable_after_holder_panics() {
+        let extractor = LlmMemoryExtractor::new(
+            Arc::new(CannedLlmDriver {
+                response: r#"{"memories":[],"relations":[]}"#.to_string(),
+            }),
+            "test-model".to_string(),
+        );
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _slot = extractor.lock_kernel_handle_slot();
+            panic!("poison the kernel handle lock");
+        }));
+        assert!(panic.is_err());
+
+        assert!(extractor.lock_kernel_handle_slot().is_none());
     }
 
     fn make_fragment(
