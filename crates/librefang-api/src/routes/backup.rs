@@ -339,12 +339,18 @@ pub async fn create_backup(
 #[utoipa::path(get, path = "/api/backups", tag = "system", responses((status = 200, description = "List backups", body = Vec<serde_json::Value>)))]
 pub async fn list_backups(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let backups_dir = state.kernel.home_dir().join("backups");
-    if !backups_dir.exists() {
-        return Json(serde_json::json!({"backups": [], "total": 0}));
+    match tokio::task::spawn_blocking(move || list_backups_blocking(&backups_dir)).await {
+        Ok(body) => Json(body).into_response(),
+        Err(error) => {
+            ApiErrorResponse::internal_scrub(format!("backup listing task failed: {error}"))
+                .into_response()
+        }
     }
+}
 
+fn list_backups_blocking(backups_dir: &std::path::Path) -> serde_json::Value {
     let mut backups: Vec<serde_json::Value> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&backups_dir) {
+    if let Ok(entries) = std::fs::read_dir(backups_dir) {
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("zip") {
@@ -387,7 +393,7 @@ pub async fn list_backups(State(state): State<Arc<AppState>>) -> impl IntoRespon
     });
 
     let total = backups.len();
-    Json(serde_json::json!({"backups": backups, "total": total}))
+    serde_json::json!({"backups": backups, "total": total})
 }
 
 fn is_invalid_backup_filename(filename: &str) -> bool {
@@ -421,6 +427,14 @@ fn find_backup_path(
     Ok(None)
 }
 
+fn delete_backup_blocking(backups_dir: &std::path::Path, filename: &str) -> std::io::Result<bool> {
+    let Some(backup_path) = find_backup_path(backups_dir, filename)? else {
+        return Ok(false);
+    };
+    std::fs::remove_file(backup_path)?;
+    Ok(true)
+}
+
 /// DELETE /api/backups/{filename} — Delete a specific backup.
 #[utoipa::path(delete, path = "/api/backups/{filename}", tag = "system", params(("filename" = String, Path, description = "Backup filename")), responses((status = 200, description = "Backup deleted")))]
 pub async fn delete_backup(
@@ -428,43 +442,52 @@ pub async fn delete_backup(
     Path(filename): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     // Sanitize filename to prevent path traversal
     if is_invalid_backup_filename(&filename) {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         return ApiErrorResponse::bad_request(t.t("api-error-backup-invalid-filename"))
             .into_json_tuple();
     }
     if !filename.ends_with(".zip") {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         return ApiErrorResponse::bad_request(t.t("api-error-backup-must-be-zip"))
             .into_json_tuple();
     }
 
     let backups_dir = state.kernel.home_dir().join("backups");
-    let backup_path = match find_backup_path(&backups_dir, &filename) {
-        Ok(Some(path)) => path,
-        Ok(None) => {
+    let filename_for_task = filename.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        delete_backup_blocking(&backups_dir, &filename_for_task)
+    })
+    .await;
+    match result {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
             return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
                 .into_json_tuple();
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
             return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
                 .into_json_tuple();
         }
-        Err(e) => {
+        Ok(Err(e)) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
             return ApiErrorResponse::internal(t.t_args(
                 "api-error-backup-delete-failed",
                 &[("error", &e.to_string())],
             ))
             .into_json_tuple();
         }
-    };
-
-    if let Err(e) = std::fs::remove_file(&backup_path) {
-        return ApiErrorResponse::internal(t.t_args(
-            "api-error-backup-delete-failed",
-            &[("error", &e.to_string())],
-        ))
-        .into_json_tuple();
+        Err(e) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+            return ApiErrorResponse::internal(t.t_args(
+                "api-error-backup-delete-failed",
+                &[("error", &format!("backup delete task failed: {e}"))],
+            ))
+            .into_json_tuple();
+        }
     }
 
     tracing::info!("Backup deleted: {filename}");
