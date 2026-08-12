@@ -253,12 +253,9 @@ fn acquire_skill_lock(skill_dir: &Path) -> Result<std::fs::File, SkillError> {
     Ok(lock_file)
 }
 
-/// Install a local skill directory while holding the same per-skill lock used
-/// by evolution and uninstall operations.
+/// Install a local skill directory while holding the same per-skill lock used by evolution and uninstall operations.
 ///
-/// The destination existence check is deliberately performed after locking so
-/// two concurrent installers cannot both pass the check and copy into the same
-/// partially populated directory.
+/// The destination existence check is deliberately performed after locking so two concurrent installers cannot both pass the check and copy into the same partially populated directory.
 pub fn install_local_skill(source: &Path, skill_dir: &Path) -> Result<(), SkillError> {
     let _lock = acquire_skill_lock(skill_dir)?;
     if skill_dir.exists() {
