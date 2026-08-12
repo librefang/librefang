@@ -3942,33 +3942,21 @@ mod dashboard_login_totp_lockout_tests {
     const DASH_USER: &str = "admin";
     const DASH_PASS: &str = "correct horse battery staple";
 
-    /// Syntactically-valid master key: base64 of exactly 32 bytes, so it decodes
-    /// to the `[u8; 32]` the vault expects rather than failing key resolution.
+    /// Syntactically-valid master key: base64 of exactly 32 bytes, so it decodes to the `[u8; 32]` the vault expects rather than failing key resolution.
     const TEST_VAULT_KEY: &str = "dGVzdC12YXVsdC1rZXktZm9yLXRvdHAtbG9ja291dHM=";
 
     /// Pin the vault master key for this process before any test boots a kernel.
     ///
-    /// Both tests below call `LibreFangKernel::boot_with_config`, which initialises
-    /// the credential vault. Each gets its own `home_dir` tempdir, but the *key* does
-    /// not come from there: `resolve_master_key` (crates/librefang-extensions/src/vault.rs:703)
-    /// reads `LIBREFANG_VAULT_KEY` and otherwise falls back to a store that is shared
-    /// beyond the test's tempdir. With neither pinned, `init()` and a later
-    /// `resolve_master_key()` can settle on different keys and the freshly written
-    /// vault fails to decrypt — the failure is which test loses the race, not which
-    /// test is wrong, which is why CI showed a different one failing on each lane
-    /// (`Test / Unit (lib+bin)` blamed the new test, `Test / Ubuntu (shard 1/4)` the
-    /// pre-existing one).
+    /// Both tests below call `LibreFangKernel::boot_with_config`, which initialises the credential vault.
+    /// Each gets its own `home_dir` tempdir, but the *key* does not come from there: `resolve_master_key` (crates/librefang-extensions/src/vault.rs:703) reads `LIBREFANG_VAULT_KEY` and otherwise falls back to a store that is shared beyond the test's tempdir.
+    /// With neither pinned, `init()` and a later `resolve_master_key()` can settle on different keys and the freshly written vault fails to decrypt — the failure is which test loses the race, not which test is wrong, which is why CI showed a different one failing on each lane (`Test / Unit (lib+bin)` blamed the new test, `Test / Ubuntu (shard 1/4)` the pre-existing one).
     ///
-    /// Setting the env var takes the documented env-first branch of `resolve_master_key`,
-    /// so `init()` and every later resolution agree by construction. It is set once and
-    /// never removed: unsetting it on drop would reopen the same race for whichever test
-    /// is still running.
+    /// Setting the env var takes the documented env-first branch of `resolve_master_key`, so `init()` and every later resolution agree by construction.
+    /// It is set once and never removed: unsetting it on drop would reopen the same race for whichever test is still running.
     fn pin_vault_key() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            // SAFETY: a `Once` makes this the only writer of this variable in the
-            // process, and it runs before either test constructs a kernel, so no
-            // other thread can observe a torn value.
+            // SAFETY: a `Once` makes this the only writer of this variable in the process, and it runs before either test constructs a kernel, so no other thread can observe a torn value.
             unsafe {
                 std::env::set_var("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY);
             }

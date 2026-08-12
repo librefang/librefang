@@ -3213,9 +3213,7 @@ mod tests {
         assert!(msg.contains("No pending approval matching"));
     }
 
-    /// The channel adapter must consume the same persistent atomic claim as
-    /// HTTP/login surfaces: a valid code approves one request, then the same
-    /// code is rejected for a distinct pending request.
+    /// The channel adapter must consume the same persistent atomic claim as HTTP/login surfaces: a valid code approves one request, then the same code is rejected for a distinct pending request.
     #[tokio::test(flavor = "multi_thread")]
     async fn channel_approval_rejects_replayed_totp_code() {
         use librefang_testing::MockKernelBuilder;

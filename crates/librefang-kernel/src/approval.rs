@@ -870,9 +870,8 @@ impl ApprovalManager {
         self.insert_pending_request(req, Some(deferred))
     }
 
-    /// Register a manually-created approval without blocking for its eventual
-    /// decision. Unlike [`Self::request_approval`], successful return means the
-    /// request is already visible in the pending queue.
+    /// Register a manually-created approval without blocking for its eventual decision.
+    /// Unlike [`Self::request_approval`], successful return means the request is already visible in the pending queue.
     pub fn submit_manual_request(&self, req: ApprovalRequest) -> Result<uuid::Uuid, String> {
         self.insert_pending_request(req, None)
     }
@@ -1990,11 +1989,8 @@ impl ApprovalManager {
 
     /// Atomically claim a verified TOTP code for one action.
     ///
-    /// The conditional UPSERT is the serialization point: a live row is left
-    /// unchanged (zero affected rows), while a missing or expired row is
-    /// written (one affected row). This remains correct across async tasks and
-    /// multiple daemon processes sharing the same SQLite database, unlike a
-    /// process-local check-then-record mutex.
+    /// The conditional UPSERT is the serialization point: a live row is left unchanged (zero affected rows), while a missing or expired row is written (one affected row).
+    /// This remains correct across async tasks and multiple daemon processes sharing the same SQLite database, unlike a process-local check-then-record mutex.
     pub fn claim_totp_code_used_for(
         &self,
         code: &str,

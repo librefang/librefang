@@ -194,12 +194,9 @@ async fn approve_and_reject_agree_on_missing_id_status() {
 // Finding #18 — one single-use TOTP code approves at most one action
 // ---------------------------------------------------------------------------
 
-/// Fire many concurrent `approve` requests, each for a distinct pending
-/// approval but all carrying the *same* single-use TOTP code. The atomic
-/// replay-table claim must let exactly ONE succeed; every other must be
-/// rejected as replay. Without the fix (non-atomic check-then-record),
-/// multiple requests can observe the code as unused before any records it and
-/// more than one approval succeeds.
+/// Fire many concurrent `approve` requests, each for a distinct pending approval but all carrying the *same* single-use TOTP code.
+/// The atomic replay-table claim must let exactly ONE succeed; every other must be rejected as replay.
+/// Without the fix (non-atomic check-then-record), multiple requests can observe the code as unused before any records it and more than one approval succeeds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_approvals_consume_totp_code_exactly_once() {
     let h = boot();
