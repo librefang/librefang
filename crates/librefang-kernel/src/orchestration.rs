@@ -232,9 +232,18 @@ static QUALITY_REGEX_CACHE: std::sync::OnceLock<
     std::sync::Mutex<HashMap<String, regex_lite::Regex>>,
 > = std::sync::OnceLock::new();
 
+fn lock_quality_regex_cache(
+    cache: &std::sync::Mutex<HashMap<String, regex_lite::Regex>>,
+) -> std::sync::MutexGuard<'_, HashMap<String, regex_lite::Regex>> {
+    cache.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!("quality regex cache lock poisoned; recovering compiled patterns");
+        poisoned.into_inner()
+    })
+}
+
 fn matches_quality_regex(pattern: &str, output: &str) -> bool {
     let cache = QUALITY_REGEX_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = lock_quality_regex_cache(cache);
     let entry = map.entry(pattern.to_string()).or_insert_with(|| {
         regex_lite::Regex::new(pattern).unwrap_or_else(|_| {
             // Never-match sentinel: an invalid pattern fails the gate forever.
@@ -454,6 +463,27 @@ mod humantime_millis {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poisoned_quality_regex_cache_recovers_and_remains_usable() {
+        let cache = std::sync::Mutex::new(HashMap::new());
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut patterns = cache.lock().unwrap();
+                    patterns.insert("old".to_string(), regex_lite::Regex::new("old").unwrap());
+                    panic!("poison quality regex cache");
+                })
+                .join()
+        });
+
+        assert!(poison.is_err());
+        let mut recovered = lock_quality_regex_cache(&cache);
+        assert!(recovered["old"].is_match("old value"));
+        recovered.insert("new".to_string(), regex_lite::Regex::new("new").unwrap());
+        drop(recovered);
+        assert!(lock_quality_regex_cache(&cache)["new"].is_match("new value"));
+    }
 
     // -- QualityCheck -------------------------------------------------------
 
