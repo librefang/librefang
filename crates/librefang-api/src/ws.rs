@@ -415,6 +415,14 @@ pub async fn agent_ws(
         }
     }
 
+    let root_user = || crate::middleware::AuthenticatedApiUser {
+        name: "root".to_string(),
+        role: crate::middleware::UserRole::Owner,
+        user_id: librefang_types::agent::UserId(crate::middleware::ROOT_API_KEY_USER_ID),
+    };
+    // Mirror the HTTP middleware's no-auth attribution.
+    // Uploads created by the local dashboard in this mode are owned by the synthetic root principal, so the WS path must carry the same identity when attaching them.
+    let mut authenticated_user = (!auth_required).then(root_user);
     if auth_required {
         // SECURITY (#3610): Loud reject if a client still sends `?token=` in
         // the WS URL. The credential leaks into proxy access logs and browser
@@ -450,14 +458,34 @@ pub async fn agent_ws(
                     crate::password_hash::DEFAULT_SESSION_TTL_SECS,
                 )
             });
-            session_auth = sessions.contains_key(token_str);
+            let session = sessions.get(token_str).cloned();
+            session_auth = session.is_some();
+            if let Some(session) = session {
+                if let (Some(name), Some(role)) = (session.user_name, session.user_role) {
+                    authenticated_user = Some(crate::middleware::AuthenticatedApiUser {
+                        user_id: librefang_types::agent::UserId::from_name(&name),
+                        name,
+                        role: crate::middleware::UserRole::from_str_role(&role),
+                    });
+                }
+            }
             drop(sessions);
 
             // Check per-user API keys (hashed with Argon2).
             if !session_auth {
-                user_key_auth = user_api_keys.iter().any(|user| {
+                if let Some(user) = user_api_keys.iter().find(|user| {
                     crate::password_hash::verify_password(token_str, &user.api_key_hash)
-                });
+                }) {
+                    user_key_auth = true;
+                    authenticated_user = Some(crate::middleware::AuthenticatedApiUser {
+                        name: user.name.clone(),
+                        role: user.role,
+                        user_id: user.user_id,
+                    });
+                }
+            }
+            if api_auth {
+                authenticated_user = Some(root_user());
             }
         }
 
@@ -588,7 +616,12 @@ pub async fn agent_ws(
     };
     upgrade
         .on_upgrade(move |socket| {
-            handle_agent_ws(socket, state, agent_id, id_str, ip, guard, explicit_session)
+            let client = WsClientContext {
+                client_ip: ip,
+                explicit_session,
+                authenticated_user,
+            };
+            handle_agent_ws(socket, state, agent_id, id_str, guard, client)
         })
         .into_response()
 }
@@ -601,15 +634,22 @@ pub async fn agent_ws(
 ///
 /// The `_guard` is an RAII handle that decrements the per-IP connection
 /// counter when this function returns (connection closes).
+struct WsClientContext {
+    client_ip: IpAddr,
+    explicit_session: Option<SessionId>,
+    authenticated_user: Option<crate::middleware::AuthenticatedApiUser>,
+}
+
 async fn handle_agent_ws(
     socket: WebSocket,
     state: Arc<AppState>,
     agent_id: AgentId,
     id_str: String,
-    client_ip: IpAddr,
     _guard: WsConnectionGuard,
-    explicit_session: Option<SessionId>,
+    client: WsClientContext,
 ) {
+    let client_ip = client.client_ip;
+    let explicit_session = client.explicit_session;
     // Per-connection identity. Lets us distinguish concurrent reconnects
     // (same agent_id, different conn_id) from a single client retrying.
     let conn_id = uuid::Uuid::new_v4().simple().to_string();
@@ -881,17 +921,9 @@ async fn handle_agent_ws(
                 // from "proxy IP" to "real client IP" on the very first
                 // request after operators flip the flags on. No-op when the
                 // flags are off (defaults).
-                if handle_text_message(
-                    &sender,
-                    &state,
-                    agent_id,
-                    &text,
-                    &verbose,
-                    client_ip,
-                    explicit_session,
-                )
-                .await
-                .is_err()
+                if handle_text_message(&sender, &state, agent_id, &text, &verbose, &client)
+                    .await
+                    .is_err()
                 {
                     // A frame send failed inside the handler; the helper has
                     // already pushed a 1011 close frame, so just tear down the
@@ -968,8 +1000,7 @@ async fn handle_text_message(
     agent_id: AgentId,
     text: &str,
     verbose: &Arc<AtomicU8>,
-    client_ip: IpAddr,
-    explicit_session: Option<SessionId>,
+    client: &WsClientContext,
 ) -> Result<(), WsClosed> {
     // Parse the message
     let parsed: serde_json::Value = match serde_json::from_str(text) {
@@ -1088,12 +1119,32 @@ async fn handle_text_message(
                     .filter_map(|a| serde_json::from_value(a.clone()).ok())
                     .collect();
                 if !refs.is_empty() {
-                    let image_blocks = crate::routes::resolve_attachments(state, &refs);
+                    let image_blocks =
+                        match crate::routes::resolve_attachments(
+                            state,
+                            &refs,
+                            client.authenticated_user.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(blocks) => blocks,
+                            Err(_) => {
+                                return send_json_or_close(sender, &stamp_message_id(
+                                    serde_json::json!({
+                                        "type": "error",
+                                        "content": "You are not authorized to access this upload",
+                                        "code": "upload_access_denied"
+                                    }),
+                                    message_id.as_deref(),
+                                ))
+                                .await;
+                            }
+                        };
                     if !image_blocks.is_empty() {
                         has_images = true;
                         let webui_sender = librefang_channels::types::SenderContext {
                             channel: librefang_kernel::SYSTEM_CHANNEL_WEBUI.to_string(),
-                            user_id: client_ip.to_string(),
+                            user_id: client.client_ip.to_string(),
                             display_name: "Web UI".to_string(),
                             use_canonical_session: true,
                             ..Default::default()
@@ -1108,7 +1159,7 @@ async fn handle_text_message(
                             state.kernel.as_ref(),
                             agent_id,
                             Some(&webui_sender),
-                            explicit_session,
+                            client.explicit_session,
                             fallback_session_id,
                             image_blocks,
                         );
@@ -1175,7 +1226,7 @@ async fn handle_text_message(
                 // channel-sender keying, session continuity that keys on it —
                 // re-keys from proxy IP to real client IP the moment the flags
                 // flip on. No-op when the flags are off (defaults).
-                user_id: client_ip.to_string(),
+                user_id: client.client_ip.to_string(),
                 display_name: "Web UI".to_string(),
                 is_group: false,
                 was_mentioned: false,
@@ -1204,7 +1255,7 @@ async fn handle_text_message(
                     Some(kernel_handle),
                     sender_ctx.clone(),
                     thinking_override,
-                    explicit_session,
+                    client.explicit_session,
                 )
                 .await
             {
@@ -1460,7 +1511,7 @@ async fn handle_text_message(
                             // actually used so the frontend can pin ?sessionId=
                             // in the URL — making subsequent navigations and
                             // reloads land on the same conversation.
-                            if explicit_session.is_none() {
+                            if client.explicit_session.is_none() {
                                 if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
                                     resp_json["session_id"] =
                                         serde_json::json!(entry.session_id.to_string());

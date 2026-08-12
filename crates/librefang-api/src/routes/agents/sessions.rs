@@ -990,7 +990,20 @@ pub async fn export_session_trajectory(
     let (body, content_type, ext): (String, &'static str, &'static str) = if format == "jsonl" {
         (bundle.to_jsonl(), "application/x-ndjson", "jsonl")
     } else {
-        (bundle.to_json().to_string(), "application/json", "json")
+        let json = match bundle.to_json() {
+            Ok(json) => json,
+            Err(error) => {
+                tracing::error!(%error, "failed to serialize trajectory bundle");
+                let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+                let msg = t.t_args(&err_generic_key, &[("error", &error.to_string())]);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": msg})),
+                )
+                    .into_response();
+            }
+        };
+        (json.to_string(), "application/json", "json")
     };
 
     let filename = format!("trajectory-{}.{}", session_id.0, ext);

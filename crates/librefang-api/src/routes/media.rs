@@ -78,7 +78,7 @@ fn resolve_driver(
 ///
 /// The file is registered in the shared `UPLOAD_REGISTRY` so the existing
 /// `serve_upload` handler returns the correct `Content-Type`.
-fn save_upload(
+async fn save_upload(
     state: &AppState,
     data: &[u8],
     filename: &str,
@@ -90,25 +90,31 @@ fn save_upload(
         .config_ref()
         .channels
         .effective_file_download_dir();
-    std::fs::create_dir_all(&upload_dir)
+    tokio::fs::create_dir_all(&upload_dir)
+        .await
         .map_err(|e| format!("Failed to create upload directory: {e}"))?;
     // Persist as `<uuid>.<ext>` (#6530); the registry entry below stores the
     // content type so serve_upload reconstructs the same name.
     let on_disk = librefang_types::media::on_disk_name(&file_id, content_type, filename);
-    std::fs::write(upload_dir.join(&on_disk), data)
+    let file_path = upload_dir.join(&on_disk);
+    tokio::fs::write(&file_path, data)
+        .await
         .map_err(|e| format!("Failed to write upload file: {e}"))?;
 
-    // Register metadata so serve_upload returns the correct content type.
-    // Daemon-generated media has no human owner — leave `uploaded_by` empty
-    // so any authenticated caller can fetch it (#3361).
-    super::agents::UPLOAD_REGISTRY.insert(
-        file_id.clone(),
-        super::agents::UploadMeta {
-            filename: filename.to_string(),
-            content_type: content_type.to_string(),
-            uploaded_by: None,
-        },
-    );
+    // Persist and register metadata so serve_upload retains the correct type and explicit shared-access policy across daemon restarts.
+    let meta = super::agents::UploadMeta {
+        filename: filename.to_string(),
+        content_type: content_type.to_string(),
+        // Daemon-generated media has no human owner — leave it shared.
+        uploaded_by: None,
+    };
+    if let Err(error) = super::agents::persist_upload_meta(&upload_dir, &file_id, &meta).await {
+        if let Err(cleanup_error) = tokio::fs::remove_file(&file_path).await {
+            tracing::warn!(%cleanup_error, file_id, "failed to clean up generated upload");
+        }
+        return Err(error);
+    }
+    super::agents::UPLOAD_REGISTRY.insert(file_id.clone(), meta);
 
     Ok(format!("/api/uploads/{file_id}"))
 }
@@ -158,7 +164,7 @@ pub async fn generate_image(
         };
 
         let filename = format!("image_{i}.png");
-        match save_upload(&state, &bytes, &filename, "image/png") {
+        match save_upload(&state, &bytes, &filename, "image/png").await {
             Ok(url) => {
                 image_urls.push(serde_json::json!({
                     "url": url,
@@ -220,7 +226,7 @@ pub async fn synthesize_speech(
     };
     let filename = format!("speech.{}", result.format);
 
-    match save_upload(&state, &result.audio_data, &filename, content_type) {
+    match save_upload(&state, &result.audio_data, &filename, content_type).await {
         Ok(url) => Json(serde_json::json!({
             "url": url,
             "format": result.format,
@@ -363,7 +369,7 @@ pub async fn generate_music(
     };
     let filename = format!("music.{}", result.format);
 
-    match save_upload(&state, &result.audio_data, &filename, content_type) {
+    match save_upload(&state, &result.audio_data, &filename, content_type).await {
         Ok(url) => Json(serde_json::json!({
             "url": url,
             "format": result.format,

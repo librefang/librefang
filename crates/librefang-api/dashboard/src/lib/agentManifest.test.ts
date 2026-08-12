@@ -173,6 +173,95 @@ describe("agentManifest validator", () => {
     form.model.model = "gpt-4o";
     expect(validateManifestForm(form)).toEqual([]);
   });
+
+  it("requires a cron expression for periodic schedules", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.schedule = { mode: "periodic", cron: "   " };
+
+    expect(validateManifestForm(form)).toContain("schedule.cron");
+  });
+
+  it.each(["", "{not-json"])(
+    "requires valid JSON for json_schema response format: %j",
+    (schema) => {
+      const form = emptyManifestForm();
+      form.name = "agent";
+      form.model.provider = "openai";
+      form.model.model = "gpt-4o";
+      form.response_format = { mode: "json_schema", name: "response", schema, strict: false };
+
+      expect(validateManifestForm(form)).toContain("response_format.schema");
+    },
+  );
+
+  it.each([
+    "[]",
+    '"string"',
+    "42",
+    "null",
+    '{"const":null}',
+    '{"const":9007199254740993}',
+    '{"maximum":1e400}',
+    '{"minimum":1e-400}',
+  ])(
+    "rejects schemas that TOML cannot preserve: %s",
+    (schema) => {
+      const form = emptyManifestForm();
+      form.name = "agent";
+      form.model.provider = "openai";
+      form.model.model = "gpt-4o";
+      form.response_format = { mode: "json_schema", name: "response", schema, strict: false };
+
+      expect(validateManifestForm(form)).toContain("response_format.schema");
+    },
+  );
+
+  it.each([
+    "true",
+    "false",
+    '{"type":"null"}',
+    '{"const":"9007199254740993"}',
+    '{"type":"object","properties":{}}',
+  ])(
+    "accepts and round-trips supported JSON Schema: %s",
+    (schema) => {
+      const form = emptyManifestForm();
+      form.name = "agent";
+      form.model.provider = "openai";
+      form.model.model = "gpt-4o";
+      form.response_format = { mode: "json_schema", name: "response", schema, strict: false };
+
+      expect(validateManifestForm(form)).not.toContain("response_format.schema");
+      const parsed = parseManifestToml(serializeManifestForm(form));
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok || parsed.form.response_format.mode !== "json_schema") return;
+      expect(JSON.parse(parsed.form.response_format.schema)).toEqual(JSON.parse(schema));
+    },
+  );
+
+  it("preserves the largest safe integer in a schema", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.response_format = {
+      mode: "json_schema",
+      name: "response",
+      schema: '{"maximum":9007199254740991}',
+      strict: false,
+    };
+
+    expect(validateManifestForm(form)).not.toContain("response_format.schema");
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("maximum = 9007199254740991");
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok || parsed.form.response_format.mode !== "json_schema") return;
+    expect(parsed.form.response_format.schema).toContain("9007199254740991");
+  });
 });
 
 describe("agentManifest parser", () => {

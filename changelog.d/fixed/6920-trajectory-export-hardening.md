@@ -1,0 +1,1 @@
+Harden trajectory export by using the existing audited SHA-256 dependency, preserving hexadecimal identifiers during blob redaction, respecting workspace path-component boundaries, and surfacing JSON serialization failures (#6920) (@houko)
