@@ -518,6 +518,33 @@ mod tests {
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
     }
 
+    /// A crash or a rename failure between the staging write and the publish
+    /// step must not leave debris behind, and it must not touch the target
+    /// at all — the whole point of staging-then-renaming is that a caller
+    /// interrupted mid-migration can retry against an untouched original.
+    /// Forces the rename/`MoveFileExW` step to fail by making the target
+    /// path an existing directory (renaming a regular file onto a directory
+    /// always fails), mirroring
+    /// `librefang_api::routes::sidecar_toml::atomic_write_removes_staging_file_when_rename_fails`.
+    #[test]
+    fn durable_atomic_write_removes_staging_file_when_rename_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target_dir = tmp.path().join("config.toml");
+        std::fs::create_dir(&target_dir).unwrap();
+
+        durable_atomic_write(&target_dir, b"new = true\n").unwrap_err();
+
+        assert!(
+            target_dir.is_dir(),
+            "a failed publish must leave the original target untouched"
+        );
+        assert_eq!(
+            std::fs::read_dir(tmp.path()).unwrap().count(),
+            1,
+            "a failed rename must not leave a staging file behind"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn durable_atomic_write_preserves_config_permissions() {
