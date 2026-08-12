@@ -146,6 +146,8 @@ class LibreFang:
                             yield json.loads(data_str)
                         except json.JSONDecodeError:
                             yield {"raw": data_str}
+        except socket.timeout as e:
+            raise LibreFangError(f"Request timed out after {self.timeout}s") from e
         finally:
             active_error = sys.exc_info()[0] is not None
             try:

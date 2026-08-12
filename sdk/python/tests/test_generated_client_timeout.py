@@ -77,3 +77,26 @@ def test_stream_open_wraps_response_timeout_as_libre_fang_error(monkeypatch):
 
     with pytest.raises(LibreFangError, match="timed out after 1.0s"):
         list(client._stream("GET", "/events"))
+
+
+class StalledStreamResponse:
+    # urlopen() succeeds and headers arrive, but the connection goes quiet partway through the body — the exact "stalled socket read" case the bounded timeout exists to catch, distinct from a timeout during connection setup.
+    headers = {"content-type": "text/event-stream"}
+
+    def read(self, *_args):
+        raise socket.timeout("timed out")
+
+    def close(self):
+        pass
+
+
+def test_stream_body_read_wraps_response_timeout_as_libre_fang_error(monkeypatch):
+    monkeypatch.setattr(
+        client_module,
+        "urlopen",
+        lambda _request, *, timeout: StalledStreamResponse(),
+    )
+    client = LibreFang("http://example.test", timeout=1.0)
+
+    with pytest.raises(LibreFangError, match="timed out after 1.0s"):
+        list(client._stream("GET", "/events"))

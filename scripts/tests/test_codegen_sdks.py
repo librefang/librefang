@@ -95,6 +95,8 @@ def main():
     )
     assert_in("DEFAULT_TIMEOUT = 30.0", py, "python-default-timeout")
     assert py.count("urlopen(req, timeout=self.timeout)") == 2
+    # A stalled body read (timeout mid-stream, after urlopen() already succeeded) must be wrapped the same as a timeout during connection setup — not just the initial urlopen() call inside _stream.
+    assert py.count('raise LibreFangError(f"Request timed out after {self.timeout}s") from e') == 3
     assert_in('"error": fmt.Sprintf("new request: %v", err)', go, "go-stream-request-error")
     assert_not_in("req, _ := http.NewRequest", go, "go-no-discarded-stream-request-error")
     assert_in('buffer = b""', py, "python-byte-buffer")
