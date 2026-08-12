@@ -24,11 +24,18 @@ fn test_audit_log_recovers_poisoned_chain_locks_with_integrity_intact() {
             .join()
     });
     assert!(tip_poison.is_err());
+    assert!(log.entries.is_poisoned());
+    assert!(log.tip.is_poisoned());
 
     log.record("agent-1", AuditAction::ShellExec, "after poison", "ok");
     assert_eq!(log.len(), 2);
     assert!(log.verify_integrity().is_ok());
     assert_eq!(log.tip_hash(), log.recent(1)[0].hash);
+
+    // The first post-panic access must clear the poison flag via `clear_poison()`, not just unwrap around it with `into_inner()`.
+    // Otherwise every later call through `lock_audit_recover` for that same lock re-enters the poisoned branch and re-emits the `warn!` for the rest of the process instead of recovering once.
+    assert!(!log.entries.is_poisoned());
+    assert!(!log.tip.is_poisoned());
 }
 
 #[test]

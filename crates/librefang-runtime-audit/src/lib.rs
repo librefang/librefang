@@ -21,6 +21,9 @@ use std::sync::{Mutex, MutexGuard};
 fn lock_audit_recover<'a, T>(mutex: &'a Mutex<T>, state: &'static str) -> MutexGuard<'a, T> {
     mutex.lock().unwrap_or_else(|poisoned| {
         tracing::warn!(state, "audit log lock poisoned; recovering inner state");
+        // `into_inner()` only unwraps this guard; it does not reset the mutex's poison flag.
+        // Without `clear_poison()`, every future access through this helper would re-enter this branch and re-log forever for that same lock.
+        mutex.clear_poison();
         poisoned.into_inner()
     })
 }
