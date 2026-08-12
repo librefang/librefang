@@ -37,7 +37,8 @@ use librefang_types::media::{
 };
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use tracing::warn;
 
 // ── Error type ─────────────────────────────────────────────────────────
 
@@ -166,6 +167,26 @@ pub struct MediaDriverCache {
     media_providers: RwLock<Vec<String>>,
 }
 
+fn read_media_state<'a, T>(lock: &'a RwLock<T>, state: &'static str) -> RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|poisoned| {
+        warn!(
+            state,
+            "media driver state read lock poisoned; recovering inner state"
+        );
+        poisoned.into_inner()
+    })
+}
+
+fn write_media_state<'a, T>(lock: &'a RwLock<T>, state: &'static str) -> RwLockWriteGuard<'a, T> {
+    lock.write().unwrap_or_else(|poisoned| {
+        warn!(
+            state,
+            "media driver state write lock poisoned; recovering inner state"
+        );
+        poisoned.into_inner()
+    })
+}
+
 impl MediaDriverCache {
     /// Create a cache with no provider URL overrides.
     pub fn new() -> Self {
@@ -222,9 +243,7 @@ impl MediaDriverCache {
                 media_provs.push(builtin.to_string());
             }
         }
-        if let Ok(mut list) = self.media_providers.write() {
-            *list = media_provs;
-        }
+        *write_media_state(&self.media_providers, "media_providers") = media_provs;
     }
 
     /// Get or create a cached driver for the given provider.
@@ -238,7 +257,7 @@ impl MediaDriverCache {
     ) -> Result<Arc<dyn MediaDriver>, MediaError> {
         // Resolve base_url: explicit arg > provider_urls map > driver default
         let resolved_url = base_url.map(|u| u.to_string()).or_else(|| {
-            let urls = self.provider_urls.read().unwrap_or_else(|e| e.into_inner());
+            let urls = read_media_state(&self.provider_urls, "provider_urls");
             urls.get(provider)
                 .cloned()
                 // Also check the canonical name for aliases ("google" → "gemini")
@@ -270,10 +289,7 @@ impl MediaDriverCache {
         &self,
         capability: MediaCapability,
     ) -> Result<Arc<dyn MediaDriver>, MediaError> {
-        let providers = self
-            .media_providers
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let providers = read_media_state(&self.media_providers, "media_providers");
         for provider in providers.iter() {
             if let Ok(driver) = self.get_or_create(provider, None) {
                 if driver.is_configured() && driver.capabilities().contains(&capability) {
@@ -297,9 +313,7 @@ impl MediaDriverCache {
     /// Accepts any map type that can be iterated as `(String, String)` pairs,
     /// including both `HashMap` and `BTreeMap`.
     pub fn update_provider_urls(&self, urls: impl IntoIterator<Item = (String, String)>) {
-        if let Ok(mut map) = self.provider_urls.write() {
-            *map = urls.into_iter().collect();
-        }
+        *write_media_state(&self.provider_urls, "provider_urls") = urls.into_iter().collect();
         self.cache.clear();
     }
 }
@@ -353,6 +367,42 @@ fn create_media_driver(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poisoned_media_state_locks_recover_and_hot_reload_still_applies() {
+        let cache = MediaDriverCache::new();
+        let urls_poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut urls = cache.provider_urls.write().unwrap();
+                    urls.insert("stale".to_string(), "https://stale.invalid".to_string());
+                    panic!("poison media provider URLs lock");
+                })
+                .join()
+        });
+        assert!(urls_poison.is_err());
+
+        cache
+            .update_provider_urls([("custom".to_string(), "https://media.example/v1".to_string())]);
+        assert!(cache.get_or_create("custom", None).is_ok());
+
+        let providers_poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut providers = cache.media_providers.write().unwrap();
+                    providers.clear();
+                    panic!("poison media providers lock");
+                })
+                .join()
+        });
+        assert!(providers_poison.is_err());
+        assert!(read_media_state(&cache.media_providers, "media_providers").is_empty());
+        *write_media_state(&cache.media_providers, "media_providers") = vec!["custom".into()];
+        assert_eq!(
+            read_media_state(&cache.media_providers, "media_providers").as_slice(),
+            ["custom"]
+        );
+    }
 
     #[test]
     fn test_media_error_display() {
