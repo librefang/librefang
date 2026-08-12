@@ -16,7 +16,8 @@ pub async fn list_agent_files(
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let resolved_lang = super::resolve_lang(lang.as_ref());
+    let t = ErrorTranslator::new(resolved_lang);
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -53,14 +54,18 @@ pub async fn list_agent_files(
         }
     };
 
+    // `ErrorTranslator` is `!Send`, so it must be dropped before the
+    // `.await` and re-created afterwards, matching the established
+    // pattern in `get_agent_file` below (#3579).
     drop(t);
     let files = match tokio::task::spawn_blocking(move || list_identity_files(&workspace)).await {
         Ok(files) => files,
         Err(error) => {
-            return ApiErrorResponse::internal_scrub(format!(
-                "agent identity file listing task failed: {error}"
-            ))
-            .into_json_tuple();
+            let t = ErrorTranslator::new(resolved_lang);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": scrub_500(&error, &t)})),
+            );
         }
     };
 
