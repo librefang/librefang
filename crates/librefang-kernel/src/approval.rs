@@ -1178,20 +1178,14 @@ impl ApprovalManager {
 
     /// Resolve all pending requests belonging to a specific session.
     ///
-    /// This mirrors Hermes-Agent's `resolve_gateway_approval(session_key,
-    /// choice, resolve_all=True)`: every request whose `session_id` matches
-    /// is attempted with the given decision.
+    /// This mirrors Hermes-Agent's `resolve_gateway_approval(session_key, choice, resolve_all=True)`: every request whose `session_id` matches is attempted with the given decision.
     /// Resolution is best-effort rather than transactional; concurrent changes and per-item errors are skipped.
     ///
-    /// Returns the number of requests resolved (0 if the session had nothing
-    /// pending).  This method does NOT spawn handle_approval_resolution for
-    /// deferred payloads — callers that need deferred execution handling should
-    /// use resolve_tool_approval (kernel) in a loop instead.
+    /// Returns the number of requests resolved (0 if the session had nothing pending).
+    /// This method does NOT spawn handle_approval_resolution for deferred payloads — callers that need deferred execution handling should use resolve_tool_approval (kernel) in a loop instead.
     ///
-    /// TOTP is not enforced here: resolve() is called with totp_verified=false,
-    /// so TOTP-required requests will return Err and not be counted.  Callers
-    /// who want TOTP pre-enforcement should check policy.tool_requires_totp()
-    /// before calling this method.
+    /// TOTP is not enforced here: resolve() is called with totp_verified=false, so TOTP-required requests will return Err and not be counted.
+    /// Callers who want TOTP pre-enforcement should check policy.tool_requires_totp() before calling this method.
     pub fn resolve_all_for_session(
         &self,
         session_id: &str,
