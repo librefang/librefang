@@ -175,9 +175,8 @@ impl MessageJournal {
     /// async reactor; the lock is `tokio::sync::Mutex`, so we can hold it
     /// across the `.await` without blocking other tokio tasks (only other
     /// journal mutators queue, which is what we want).
-    /// Returns `true` only after the entry is durable and present in the
-    /// in-memory recovery index. Callers must not dispatch when this returns
-    /// `false`, otherwise the write-ahead guarantee has been lost.
+    /// Returns `true` only after the entry is durable and present in the in-memory recovery index.
+    /// Callers must not dispatch when this returns `false`, otherwise the write-ahead guarantee has been lost.
     pub async fn record(&self, entry: JournalEntry) -> bool {
         let line = match serde_json::to_string(&entry) {
             Ok(l) => l,
