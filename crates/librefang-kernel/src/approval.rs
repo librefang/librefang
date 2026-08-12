@@ -14,7 +14,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;
 use tokio::sync::broadcast;
-use totp_rs::{Algorithm, Secret, TOTP};
+use totp_rs::{Algorithm, Builder as TotpBuilder, Secret};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -1480,21 +1480,18 @@ impl ApprovalManager {
         code: &str,
         issuer: &str,
     ) -> Result<bool, String> {
-        let secret = Secret::Encoded(secret_base32.to_string());
-        let raw = secret
-            .to_bytes()
+        let secret = Secret::try_from_base32(secret_base32)
             .map_err(|e| format!("Invalid TOTP secret: {e}"))?;
-        let totp = TOTP::new(
-            Algorithm::SHA1,
-            6,
-            TOTP_SKEW_STEPS,
-            TOTP_STEP_SECS,
-            raw,
-            Some(issuer.to_string()),
-            String::new(),
-        )
-        .map_err(|e| format!("TOTP init error: {e}"))?;
-        Ok(totp.check_current(code).unwrap_or(false))
+        let totp = TotpBuilder::new()
+            .with_algorithm(Algorithm::SHA1)
+            .with_skew(TOTP_SKEW_STEPS as u16)
+            .with_step_duration(TOTP_STEP_SECS)
+            .with_secret(secret)
+            .with_issuer(Some(issuer.to_string()))
+            .build()
+            .map_err(|e| format!("TOTP init error: {e}"))?;
+        // `check_current` now returns the matched skew step (`Option<u64>`) instead of a bare bool (totp-rs 6.0 changed this so callers can enforce single-use-per-step themselves); this call site only needs pass/fail, and single-use enforcement already lives in the replay-claim table (see `claim_totp_code_used_for`).
+        Ok(totp.check_current(code).is_some())
     }
 
     /// Instance wrapper around [`Self::verify_totp_code_with_issuer`].
@@ -1540,24 +1537,20 @@ impl ApprovalManager {
         issuer: &str,
         account: &str,
     ) -> Result<(String, String, String), String> {
-        let secret = Secret::generate_secret();
-        let base32 = secret.to_encoded().to_string();
-        let raw = secret
-            .to_bytes()
-            .map_err(|e| format!("Secret encoding error: {e}"))?;
-        let totp = TOTP::new(
-            Algorithm::SHA1,
-            6,
-            1,
-            30,
-            raw,
-            Some(issuer.to_string()),
-            account.to_string(),
-        )
-        .map_err(|e| format!("TOTP init error: {e}"))?;
-        let uri = totp.get_url();
+        let secret = Secret::generate();
+        let base32 = secret.to_base32();
+        let totp = TotpBuilder::new()
+            .with_algorithm(Algorithm::SHA1)
+            .with_skew(1)
+            .with_step_duration(30)
+            .with_secret(secret)
+            .with_issuer(Some(issuer.to_string()))
+            .with_account_name(account.to_string())
+            .build()
+            .map_err(|e| format!("TOTP init error: {e}"))?;
+        let uri = totp.to_url().map_err(|e| format!("TOTP URL error: {e}"))?;
         let qr_b64 = totp
-            .get_qr_base64()
+            .to_qr_base64()
             .map_err(|e| format!("QR generation error: {e}"))?;
         Ok((base32, uri, qr_b64))
     }
@@ -3578,19 +3571,17 @@ mod tests {
         assert!(uri.contains("LibreFang"));
 
         // 2. Generate a valid code from the secret
-        let totp_secret = Secret::Encoded(secret.clone());
-        let raw = totp_secret.to_bytes().unwrap();
-        let totp = TOTP::new(
-            Algorithm::SHA1,
-            6,
-            1,
-            30,
-            raw,
-            Some("LibreFang".to_string()),
-            "test".to_string(),
-        )
-        .unwrap();
-        let valid_code = totp.generate_current().unwrap();
+        let totp_secret = Secret::try_from_base32(&secret).unwrap();
+        let totp = TotpBuilder::new()
+            .with_algorithm(Algorithm::SHA1)
+            .with_skew(1)
+            .with_step_duration(30)
+            .with_secret(totp_secret)
+            .with_issuer(Some("LibreFang".to_string()))
+            .with_account_name("test".to_string())
+            .build()
+            .unwrap();
+        let valid_code = totp.generate_current().to_string();
 
         // 3. Verify the code against our verify function
         assert!(ApprovalManager::verify_totp_code(&secret, &valid_code).unwrap());

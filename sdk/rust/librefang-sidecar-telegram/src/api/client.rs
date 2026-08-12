@@ -33,18 +33,27 @@ pub struct BotClient {
 impl BotClient {
     pub fn new(token: impl Into<String>) -> Result<Self> {
         let token = token.into();
+        let api_root = format!("https://api.telegram.org/bot{token}");
+        let file_root = format!("https://api.telegram.org/file/bot{token}");
+        Self::with_roots(token, api_root, file_root)
+    }
+
+    pub(crate) fn with_roots(
+        token: impl Into<String>,
+        api_root: impl Into<String>,
+        file_root: impl Into<String>,
+    ) -> Result<Self> {
+        let token = token.into();
         if token.trim().is_empty() {
             return Err(Error::Other("TELEGRAM_BOT_TOKEN is empty".into()));
         }
         let http = Client::builder()
             .timeout(Duration::from_secs(SEND_TIMEOUT_SECS))
             .build()?;
-        let api_root = format!("https://api.telegram.org/bot{token}");
-        let file_root = format!("https://api.telegram.org/file/bot{token}");
         Ok(Self {
             http,
-            api_root,
-            file_root,
+            api_root: api_root.into(),
+            file_root: file_root.into(),
             token,
         })
     }
@@ -158,9 +167,7 @@ impl BotClient {
                 });
             }
         }
-        unreachable!(
-            "call_json loop body either returns or `continue`s; the for-2 range cannot exhaust"
-        )
+        Err(retry_loop_exhausted(method))
     }
 
     pub async fn call_typed<T: Serialize + ?Sized, R: serde::de::DeserializeOwned>(
@@ -535,8 +542,14 @@ impl BotClient {
                 });
             }
         }
-        unreachable!("send_multipart loop body either returns or `continue`s; the for-2 range cannot exhaust")
+        Err(retry_loop_exhausted(method))
     }
+}
+
+fn retry_loop_exhausted(method: &str) -> Error {
+    Error::Other(format!(
+        "Telegram API retry loop exhausted unexpectedly for method {method}"
+    ))
 }
 
 /// Resolve any 429 delay using HTTP delta-seconds first, then Telegram's JSON value, then the conservative local default.
@@ -592,5 +605,17 @@ mod tests {
         let body = r#"{"ok":false,"parameters":{"retry_after":7}}"#;
         assert_eq!(body_retry_after(body), Some(7));
         assert_eq!(body_retry_after("not-json"), None);
+    }
+
+    #[test]
+    fn exhausted_retry_loop_is_a_recoverable_method_error() {
+        let error = retry_loop_exhausted("sendDocument");
+        match error {
+            Error::Other(message) => {
+                assert!(message.contains("sendDocument"));
+                assert!(message.contains("retry loop exhausted"));
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 }

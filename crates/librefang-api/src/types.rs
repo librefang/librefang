@@ -720,9 +720,9 @@ pub struct AgentListQuery {
     pub order: Option<String>,
     /// Include hand agents in the response (default: false).
     pub include_hands: Option<bool>,
-    /// Filter agents by owner (matches manifest.author). When the authenticated
-    /// caller is a plain User role, this is auto-populated with their username
-    /// so that non-admin users only see agents they authored.
+    /// Filter agents by owner (matches manifest.author).
+    /// When the authenticated caller is a plain User role, this is unconditionally overridden with their own username — including over any value the client supplied — so a non-admin caller can only ever see agents they authored.
+    /// Admin/Owner callers, and requests admitted only via the trusted no-auth compatibility mode, keep whatever value they supplied, if any.
     pub owner: Option<String>,
 }
 
