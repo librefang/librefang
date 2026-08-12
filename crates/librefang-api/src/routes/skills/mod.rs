@@ -1076,13 +1076,17 @@ pub(crate) fn remove_secret_env(path: &std::path::Path, key: &str) -> Result<(),
 
 /// Atomically replace `path` with `content`, ensuring the resulting
 /// inode is mode `0600` (Unix) from creation — never observable at
-/// the process umask. Writes to a sibling `.tmp` file first to keep
+/// the process umask. Writes to a sibling temp file first to keep
 /// the rename within the same filesystem (so `rename(2)` is
-/// atomic). On non-Unix targets the helper still uses the temp +
-/// rename shape so partial writes can't tear the file; the
-/// per-permissions bit is a no-op (Windows ACLs are inherited from
-/// the parent directory, which lives under the daemon-UID user
-/// profile).
+/// atomic). The temp file name is suffixed with the process ID and
+/// a per-process atomic counter so concurrent callers never open
+/// the same staging file and truncate each other's write. On
+/// non-Unix targets the helper still uses the temp + rename shape
+/// so partial writes can't tear the file; the per-permissions bit
+/// is a no-op (Windows ACLs are inherited from the parent
+/// directory, which lives under the daemon-UID user profile). On
+/// Unix, the parent directory is fsynced after a successful rename
+/// so the replacement survives a crash immediately afterward.
 fn atomic_write_secret_file(path: &std::path::Path, content: String) -> Result<(), std::io::Error> {
     use std::io::Write as _;
     let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
