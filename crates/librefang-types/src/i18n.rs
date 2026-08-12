@@ -238,11 +238,82 @@ mod tests {
     fn french_translation() {
         let t = ErrorTranslator::new("fr");
         assert_eq!(t.t("api-error-agent-not-found"), "Agent non trouvé");
+        assert_eq!(
+            t.t("api-error-agent-spawn-failed"),
+            "Échec de la création de l'agent"
+        );
+        assert_eq!(
+            t.t("api-error-context-report-failed"),
+            "Échec du rapport de contexte"
+        );
+        assert_eq!(t.t("api-error-agent-already-exists"), "L'agent existe déjà");
+        assert_eq!(
+            t.t("api-error-template-invalid-name"),
+            "Nom de modèle non valide"
+        );
+        assert_eq!(
+            t.t("api-error-manifest-signature-mismatch"),
+            "Le contenu du manifeste signé ne correspond pas à manifest_toml"
+        );
+        assert_eq!(
+            t.t("api-error-manifest-signature-failed"),
+            "Échec de la vérification de la signature du manifeste"
+        );
         assert_eq!(t.t("api-error-auth-invalid-key"), "Clé API non valide");
+        assert_eq!(
+            t.t("api-error-auth-missing-header"),
+            "En-tête Authorization: Bearer <api_key> manquant"
+        );
+        assert_eq!(
+            t.t("api-error-auth-missing"),
+            "La clé API de ce fournisseur n'est pas configurée"
+        );
+        assert_eq!(
+            t.t("api-error-session-load-failed"),
+            "Échec du chargement de la session"
+        );
         assert_eq!(t.t("api-error-session-not-found"), "Session non trouvée");
+        assert_eq!(
+            t.t("api-error-workflow-execution-failed"),
+            "Échec de l'exécution du workflow"
+        );
+        assert_eq!(
+            t.t("api-error-trigger-invalid-pattern"),
+            "Modèle de déclencheur non valide"
+        );
+        assert_eq!(
+            t.t("api-error-trigger-registration-failed"),
+            "Échec de l'enregistrement du déclencheur (agent non trouvé ?)"
+        );
+        assert_eq!(
+            t.t("api-error-trigger-invalid-id"),
+            "ID de déclencheur non valide"
+        );
+        assert_eq!(t.t("api-error-trigger-not-found"), "Déclencheur non trouvé");
+        assert_eq!(
+            t.t("api-error-budget-update-failed"),
+            "Échec de la mise à jour du budget"
+        );
+        assert_eq!(
+            t.t("api-error-cron-invalid-id"),
+            "ID de tâche planifiée non valide"
+        );
+        assert_eq!(
+            t.t("api-error-cron-not-found"),
+            "Tâche planifiée non trouvée"
+        );
+        assert_eq!(t.t("api-error-not-found"), "Ressource non trouvée");
         assert_eq!(
             t.t("api-error-rate-limited"),
             "Limite de requêtes dépassée. Veuillez réessayer plus tard."
+        );
+        assert_eq!(
+            t.t_args("api-error-workflow-step-needs-agent", &[("step", "run")]),
+            "L'étape 'run' nécessite 'agent_id' ou 'agent_name'"
+        );
+        assert_eq!(
+            t.t_args("api-error-config-parse-failed", &[("error", "boom")]),
+            "Échec de l'analyse de la configuration : boom"
         );
     }
 
