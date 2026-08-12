@@ -1,0 +1,2 @@
+Close a gap in the agent-ownership scoping this release also adds: `GET /api/agents` only injected `?owner=<caller>` when the query parameter was absent, so a non-admin caller could still list another user's agents by supplying `?owner=<other-user>` explicitly.
+  Non-admin callers now always have `owner` pinned to their own username, regardless of any value supplied in the query string; Admin/Owner callers and the trusted no-auth compatibility mode are unaffected (#6753) (@houko)

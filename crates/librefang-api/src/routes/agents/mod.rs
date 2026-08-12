@@ -1798,9 +1798,10 @@ mod monitoring_tests {
         let (state, _tmp) = monitoring_test_app_state();
         let agent_id = spawn_monitoring_test_agent(&state, "metrics-shape");
 
-        let (status, body) =
-            json_response(agent_metrics(State(state), Path(agent_id.to_string()), None).await)
-                .await;
+        let (status, body) = json_response(
+            agent_metrics(State(state), None, Path(agent_id.to_string()), None).await,
+        )
+        .await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["agent_id"], agent_id.to_string());
@@ -1814,7 +1815,7 @@ mod monitoring_tests {
         let (state, _tmp) = monitoring_test_app_state();
 
         let (status, body) = json_response(
-            agent_metrics(State(state), Path(AgentId::new().to_string()), None).await,
+            agent_metrics(State(state), None, Path(AgentId::new().to_string()), None).await,
         )
         .await;
 
@@ -1844,9 +1845,10 @@ mod monitoring_tests {
         let mut params = HashMap::new();
         params.insert("level".to_string(), "custom_error".to_string());
 
-        let (status, body) =
-            json_response(agent_logs(State(state), Path(agent_id_str), None, Query(params)).await)
-                .await;
+        let (status, body) = json_response(
+            agent_logs(State(state), None, Path(agent_id_str), None, Query(params)).await,
+        )
+        .await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["count"], 1);

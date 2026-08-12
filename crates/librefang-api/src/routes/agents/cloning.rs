@@ -34,6 +34,7 @@ fn default_clone_true() -> bool {
 #[allow(private_interfaces)]
 pub async fn clone_agent(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<CloneAgentRequest>,
@@ -74,6 +75,14 @@ pub async fn clone_agent(
             );
         }
     };
+    // Owner-scoping (#6753): `agent_clone` in `middleware::user_role_allows_request` deliberately lets any `User`-role caller POST `/clone` on an arbitrary agent id, unlike most other mutations, which require Admin+.
+    // The clone keeps the source's `author` (not the caller's), so a non-owner still can't read it back through the agent-scoped routes above afterwards, but without this check a non-owner could still trigger unauthorized cloning of another user's agent by guessing/enumerating its UUID — spawning a duplicate agent process, copying its identity/skill/tool/workspace files onto a new instance, and consuming resources under the source owner's identity without their consent.
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
 
     // Deep-clone manifest with new name
     let mut cloned_manifest = source.manifest.clone();
