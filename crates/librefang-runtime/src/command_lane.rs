@@ -73,15 +73,22 @@ pub struct CommandQueue {
 
 impl CommandQueue {
     fn read_lane(&self, lane: Lane) -> RwLockReadGuard<'_, LaneSlot> {
-        self.slot(lane).read().unwrap_or_else(|poisoned| {
+        let lock = self.slot(lane);
+        lock.read().unwrap_or_else(|poisoned| {
             warn!(lane = %lane, "command lane read lock poisoned; recovering inner state");
+            // `into_inner()` only unwraps this guard; it does not reset the
+            // lock's poison flag, so without `clear_poison()` every future
+            // access re-enters this branch and re-logs forever.
+            lock.clear_poison();
             poisoned.into_inner()
         })
     }
 
     fn write_lane(&self, lane: Lane) -> RwLockWriteGuard<'_, LaneSlot> {
-        self.slot(lane).write().unwrap_or_else(|poisoned| {
+        let lock = self.slot(lane);
+        lock.write().unwrap_or_else(|poisoned| {
             warn!(lane = %lane, "command lane write lock poisoned; recovering inner state");
+            lock.clear_poison();
             poisoned.into_inner()
         })
     }
@@ -236,7 +243,12 @@ mod tests {
         });
 
         assert!(poison.is_err());
+        assert!(queue.main.is_poisoned());
         assert_eq!(queue.semaphore_for_lane(Lane::Main).available_permits(), 3);
+        // The first post-panic access must clear the poison flag, not just
+        // unwrap around it — otherwise every subsequent access re-triggers
+        // the recovery branch (and its `warn!`) for the rest of the process.
+        assert!(!queue.main.is_poisoned());
         assert!(queue.resize_lane(Lane::Main, 5));
         let main = queue
             .occupancy()
