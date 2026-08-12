@@ -45,6 +45,8 @@ fn cache() -> &'static Mutex<HashMap<PathBuf, String>> {
 fn lock_cache() -> MutexGuard<'static, HashMap<PathBuf, String>> {
     cache().lock().unwrap_or_else(|poisoned| {
         warn!("Agent context cache lock poisoned; recovering cached context");
+        // `into_inner()` only unwraps this guard; it does not reset the mutex's poison flag, so without `clear_poison()` every future access re-enters this branch and re-logs forever.
+        cache().clear_poison();
         poisoned.into_inner()
     })
 }
@@ -490,10 +492,13 @@ mod tests {
         })
         .join();
         assert!(poison.is_err());
+        assert!(cache().is_poisoned());
 
         let path = fresh_workspace("poison_recovery").join(CONTEXT_FILENAME);
         store_cached(&path, "first cached value");
         assert_eq!(get_cached(&path).as_deref(), Some("first cached value"));
+        // The first post-panic access must clear the poison flag, not just unwrap around it — otherwise every subsequent access re-triggers the recovery branch (and its `warn!`) for the rest of the process.
+        assert!(!cache().is_poisoned());
 
         store_cached(&path, "updated cached value");
         assert_eq!(get_cached(&path).as_deref(), Some("updated cached value"));
