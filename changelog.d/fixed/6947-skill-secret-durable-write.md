@@ -1,0 +1,2 @@
+Skill secret writes staged to a fixed `.tmp` sibling name, so concurrent writers to the same `secrets.env` could clobber each other's staging file, and a write or sync failure left that 0600 secret-bearing staging file behind on disk.
+The staging file now gets a name unique per process and call, is removed on any write or sync failure, and the parent directory is fsynced after the atomic rename on Unix so a completed write survives a crash immediately afterward (#6947) (@houko)
