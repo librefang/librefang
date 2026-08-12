@@ -1,5 +1,121 @@
 use super::*;
 
+#[derive(Debug)]
+enum IdentityFileError {
+    Workspace,
+    NotFound,
+    Traversal,
+    Io(std::io::Error),
+}
+
+fn resolve_identity_file(
+    workspace: &std::path::Path,
+    filename: &str,
+) -> Result<std::path::PathBuf, IdentityFileError> {
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|_| IdentityFileError::Workspace)?;
+    let identity_candidate = workspace.join(".identity").join(filename);
+    let candidate = if identity_candidate.exists() {
+        identity_candidate
+    } else {
+        workspace.join(filename)
+    };
+    let canonical = candidate
+        .canonicalize()
+        .map_err(|_| IdentityFileError::NotFound)?;
+    if !canonical.starts_with(&workspace) {
+        return Err(IdentityFileError::Traversal);
+    }
+    Ok(canonical)
+}
+
+fn read_identity_file(
+    workspace: &std::path::Path,
+    filename: &str,
+) -> Result<String, IdentityFileError> {
+    let path = resolve_identity_file(workspace, filename)?;
+    std::fs::read_to_string(path).map_err(IdentityFileError::Io)
+}
+
+fn write_identity_file(
+    workspace: &std::path::Path,
+    filename: &str,
+    content: &[u8],
+) -> Result<(), IdentityFileError> {
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|_| IdentityFileError::Workspace)?;
+    let identity_dir = workspace.join(".identity");
+    std::fs::create_dir_all(&identity_dir).map_err(IdentityFileError::Io)?;
+    let identity_dir = identity_dir.canonicalize().map_err(IdentityFileError::Io)?;
+    if !identity_dir.starts_with(&workspace) {
+        return Err(IdentityFileError::Traversal);
+    }
+    crate::atomic_write(&identity_dir.join(filename), content).map_err(IdentityFileError::Io)
+}
+
+fn delete_identity_file(
+    workspace: &std::path::Path,
+    filename: &str,
+) -> Result<(), IdentityFileError> {
+    let path = resolve_identity_file(workspace, filename)?;
+    std::fs::remove_file(path).map_err(IdentityFileError::Io)
+}
+
+#[cfg(test)]
+mod identity_file_io_tests {
+    use super::*;
+
+    #[test]
+    fn identity_file_helpers_round_trip_current_layout() {
+        let temp = tempfile::tempdir().unwrap();
+
+        write_identity_file(temp.path(), "SOUL.md", b"hello").unwrap();
+        assert_eq!(read_identity_file(temp.path(), "SOUL.md").unwrap(), "hello");
+        assert!(temp.path().join(".identity/SOUL.md").is_file());
+        assert_eq!(
+            std::fs::read_dir(temp.path().join(".identity"))
+                .unwrap()
+                .count(),
+            1
+        );
+
+        delete_identity_file(temp.path(), "SOUL.md").unwrap();
+        assert!(matches!(
+            read_identity_file(temp.path(), "SOUL.md"),
+            Err(IdentityFileError::NotFound)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_file_helpers_reject_symlink_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join(".identity")).unwrap();
+        std::fs::write(outside.path().join("secret"), "secret").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret"),
+            temp.path().join(".identity/SOUL.md"),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            read_identity_file(temp.path(), "SOUL.md"),
+            Err(IdentityFileError::Traversal)
+        ));
+        assert!(matches!(
+            delete_identity_file(temp.path(), "SOUL.md"),
+            Err(IdentityFileError::Traversal)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("secret")).unwrap(),
+            "secret"
+        );
+    }
+}
+
 /// GET /api/agents/{id}/files — List workspace identity files.
 #[utoipa::path(
     get,
@@ -144,55 +260,37 @@ pub async fn get_agent_file(
         }
     };
 
-    // Resolve canonical path: prefer .identity/ (current layout), fall back to workspace root
-    let ws_canonical = match workspace.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
+    drop(t);
+    let filename_for_task = filename.clone();
+    let read_result =
+        tokio::task::spawn_blocking(move || read_identity_file(&workspace, &filename_for_task))
+            .await;
+    let t = ErrorTranslator::new(resolved_lang);
+    let content = match read_result {
+        Ok(Ok(content)) => content,
+        Ok(Err(IdentityFileError::Workspace)) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": t.t("api-error-file-workspace-error")})),
             );
         }
-    };
-
-    let identity_path = workspace.join(".identity").join(&filename);
-    let file_path = if identity_path.exists() {
-        identity_path
-    } else {
-        workspace.join(&filename)
-    };
-
-    let canonical = match file_path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
+        Ok(Err(IdentityFileError::Traversal)) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": t.t("api-error-file-path-traversal")})),
+            );
+        }
+        Ok(Err(IdentityFileError::NotFound | IdentityFileError::Io(_))) => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": t.t("api-error-file-not-found")})),
             );
         }
-    };
-
-    if !canonical.starts_with(&ws_canonical) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": t.t("api-error-file-path-traversal")})),
-        );
-    }
-
-    // Off-runtime read so this axum handler never parks a tokio worker
-    // thread on a slow disk (#3579). `ErrorTranslator` is `!Send`, so it
-    // must be dropped before the `.await` and re-created afterwards or
-    // axum's `Handler` bound fails to compile.
-    drop(t);
-    let read_result = tokio::fs::read_to_string(&canonical).await;
-    let t = ErrorTranslator::new(resolved_lang);
-    let content = match read_result {
-        Ok(c) => c,
-        Err(_) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-file-not-found")})),
-            );
+        Err(error) => {
+            return ApiErrorResponse::internal_scrub(format!(
+                "agent identity file read task failed: {error}"
+            ))
+            .into_json_tuple();
         }
     };
 
@@ -283,58 +381,43 @@ pub async fn set_agent_file(
         }
     };
 
-    // Security: verify workspace path and target stays inside it
-    let ws_canonical = match workspace.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
+    let size_bytes = req.content.len();
+    let content = req.content.into_bytes();
+    let filename_for_task = filename.clone();
+    drop(t);
+    let result = tokio::task::spawn_blocking(move || {
+        write_identity_file(&workspace, &filename_for_task, &content)
+    })
+    .await;
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(IdentityFileError::Workspace)) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": t.t("api-error-file-workspace-error")})),
             );
         }
-    };
-
-    // Always write to .identity/ (current layout)
-    let identity_dir = workspace.join(".identity");
-    if let Err(e) = std::fs::create_dir_all(&identity_dir) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
-        );
-    }
-    let file_path = identity_dir.join(&filename);
-
-    // Security: ensure .identity/ is inside the workspace
-    let check_path = identity_dir
-        .canonicalize()
-        .map(|p| p.join(&filename))
-        .unwrap_or_else(|_| file_path.clone());
-    if !check_path.starts_with(&ws_canonical) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": t.t("api-error-file-path-traversal")})),
-        );
-    }
-
-    // Atomic write: write to .tmp, then rename
-    let tmp_path = identity_dir.join(format!(".{filename}.tmp"));
-    if let Err(e) = std::fs::write(&tmp_path, &req.content) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
-        );
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, &file_path) {
-        if let Err(e) = std::fs::remove_file(&tmp_path) {
-            tracing::warn!("Failed to remove temporary file: {e}");
+        Ok(Err(IdentityFileError::Traversal)) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": t.t("api-error-file-path-traversal")})),
+            );
         }
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
-        );
+        Ok(Err(IdentityFileError::Io(error))) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": scrub_500(&error, &t)})),
+            );
+        }
+        Ok(Err(IdentityFileError::NotFound)) => unreachable!(),
+        Err(error) => {
+            return ApiErrorResponse::internal_scrub(format!(
+                "agent identity file write task failed: {error}"
+            ))
+            .into_json_tuple();
+        }
     }
-
-    let size_bytes = req.content.len();
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -401,45 +484,44 @@ pub async fn delete_agent_file(
         }
     };
 
-    let ws_canonical = match workspace.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
+    let filename_for_task = filename.clone();
+    drop(t);
+    let result =
+        tokio::task::spawn_blocking(move || delete_identity_file(&workspace, &filename_for_task))
+            .await;
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(IdentityFileError::Workspace)) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": t.t("api-error-file-workspace-error")})),
             );
         }
-    };
-
-    // Resolve path: prefer .identity/ (current layout), fall back to workspace root
-    let identity_candidate = workspace.join(".identity").join(&filename);
-    let file_path = if identity_candidate.exists() {
-        identity_candidate
-    } else {
-        workspace.join(&filename)
-    };
-
-    let canonical = match file_path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
+        Ok(Err(IdentityFileError::NotFound)) => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": t.t("api-error-file-not-found")})),
             );
         }
-    };
-    if !canonical.starts_with(&ws_canonical) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": t.t("api-error-file-path-traversal")})),
-        );
-    }
-
-    if let Err(e) = std::fs::remove_file(&canonical) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
-        );
+        Ok(Err(IdentityFileError::Traversal)) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": t.t("api-error-file-path-traversal")})),
+            );
+        }
+        Ok(Err(IdentityFileError::Io(error))) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": scrub_500(&error, &t)})),
+            );
+        }
+        Err(error) => {
+            return ApiErrorResponse::internal_scrub(format!(
+                "agent identity file delete task failed: {error}"
+            ))
+            .into_json_tuple();
+        }
     }
 
     (
