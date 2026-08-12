@@ -1,0 +1,2 @@
+Stop channel message dispatch when the recovery journal fails to persist an entry, instead of logging the failure and continuing as if the write-ahead record existed.
+`MessageJournal::record` now returns `true` only once the entry is durable and indexed, and both `dispatch_message` and `dispatch_with_blocks` abort with a user-facing retry notice on `false` rather than proceeding without crash-recovery coverage (#7040) (@houko)
