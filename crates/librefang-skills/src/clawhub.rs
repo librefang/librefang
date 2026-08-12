@@ -728,100 +728,97 @@ impl ClawHubClient {
             })??
         };
 
-        // Step 2-3: Detect format and convert (operate on tmp_dir throughout)
-        let mut all_warnings = Vec::new();
-        let mut tool_translations = Vec::new();
-        let mut is_prompt_only = false;
+        // Conversion, security scans, manifest writes, failure cleanup, and
+        // final promotion all walk or mutate the extracted directory. Keep
+        // the complete post-extraction phase off Tokio worker threads too.
+        let result = {
+            let tmp_dir = tmp_dir.clone();
+            let skill_dir = skill_dir.clone();
+            let slug = slug.to_string();
+            tokio::task::spawn_blocking(move || -> Result<ClawHubInstallResult, SkillError> {
+                let mut all_warnings = Vec::new();
+                let mut tool_translations = Vec::new();
+                let mut is_prompt_only = false;
 
-        let manifest = if is_skillmd || openclaw_compat::detect_skillmd(&tmp_dir) {
-            let converted = openclaw_compat::convert_skillmd(&tmp_dir)?;
-            tool_translations = converted.tool_translations;
-            is_prompt_only =
-                converted.manifest.runtime.runtime_type == crate::SkillRuntime::PromptOnly;
+                let manifest = if is_skillmd || openclaw_compat::detect_skillmd(&tmp_dir) {
+                    let converted = openclaw_compat::convert_skillmd(&tmp_dir)?;
+                    tool_translations = converted.tool_translations;
+                    is_prompt_only =
+                        converted.manifest.runtime.runtime_type == crate::SkillRuntime::PromptOnly;
 
-            // Step 5: Prompt injection scan
-            let prompt_warnings = SkillVerifier::scan_prompt_content(&converted.prompt_context);
-            if prompt_warnings
-                .iter()
-                .any(|w| w.severity == WarningSeverity::Critical)
-            {
-                // Block installation of skills with critical prompt injection
-                let critical_msgs: Vec<_> = prompt_warnings
-                    .iter()
-                    .filter(|w| w.severity == WarningSeverity::Critical)
-                    .map(|w| w.message.clone())
-                    .collect();
+                    let prompt_warnings =
+                        SkillVerifier::scan_prompt_content(&converted.prompt_context);
+                    if prompt_warnings
+                        .iter()
+                        .any(|warning| warning.severity == WarningSeverity::Critical)
+                    {
+                        let critical_msgs = prompt_warnings
+                            .iter()
+                            .filter(|warning| warning.severity == WarningSeverity::Critical)
+                            .map(|warning| warning.message.clone())
+                            .collect::<Vec<_>>();
+                        let _ = std::fs::remove_dir_all(&tmp_dir);
+                        return Err(SkillError::SecurityBlocked(format!(
+                            "Skill blocked due to prompt injection: {}",
+                            critical_msgs.join("; ")
+                        )));
+                    }
+                    all_warnings.extend(prompt_warnings);
 
-                // Clean up the temporary directory on blocked install.
-                let _ = std::fs::remove_dir_all(&tmp_dir);
+                    openclaw_compat::write_prompt_context(&tmp_dir, &converted.prompt_context)?;
+                    for bin in &converted.required_bins {
+                        if which_check(bin).is_none() {
+                            all_warnings.push(SkillWarning {
+                                severity: WarningSeverity::Warning,
+                                message: format!("Required binary not found: {bin}"),
+                            });
+                        }
+                    }
+                    converted.manifest
+                } else if openclaw_compat::detect_openclaw_skill(&tmp_dir) {
+                    openclaw_compat::convert_openclaw_skill(&tmp_dir)?
+                } else {
+                    let _ = std::fs::remove_dir_all(&tmp_dir);
+                    return Err(SkillError::InvalidManifest(
+                        "Downloaded content is not a recognized skill format".to_string(),
+                    ));
+                };
 
-                return Err(SkillError::SecurityBlocked(format!(
-                    "Skill blocked due to prompt injection: {}",
-                    critical_msgs.join("; ")
-                )));
-            }
-            all_warnings.extend(prompt_warnings);
+                all_warnings.extend(SkillVerifier::security_scan(&manifest));
+                openclaw_compat::write_librefang_manifest(&tmp_dir, &manifest)?;
 
-            // Write prompt context into tmp_dir
-            openclaw_compat::write_prompt_context(&tmp_dir, &converted.prompt_context)?;
-
-            // Step 6: Binary dependency check
-            for bin in &converted.required_bins {
-                if which_check(bin).is_none() {
-                    all_warnings.push(SkillWarning {
-                        severity: WarningSeverity::Warning,
-                        message: format!("Required binary not found: {bin}"),
-                    });
+                if let Err(violations) = crate::supply_chain::scan(&tmp_dir) {
+                    let _ = std::fs::remove_dir_all(&tmp_dir);
+                    let summary = violations
+                        .iter()
+                        .map(|violation| violation.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(SkillError::SecurityBlocked(format!(
+                        "supply-chain audit failed for '{slug}': {summary}"
+                    )));
                 }
-            }
 
-            converted.manifest
-        } else if openclaw_compat::detect_openclaw_skill(&tmp_dir) {
-            openclaw_compat::convert_openclaw_skill(&tmp_dir)?
-        } else {
-            // Remove the orphaned temp dir before returning the error.
-            let _ = std::fs::remove_dir_all(&tmp_dir);
-            return Err(SkillError::InvalidManifest(
-                "Downloaded content is not a recognized skill format".to_string(),
-            ));
-        };
+                if skill_dir.exists() {
+                    std::fs::remove_dir_all(&skill_dir)?;
+                }
+                std::fs::rename(&tmp_dir, &skill_dir)?;
 
-        // Step 4: Manifest security scan
-        let manifest_warnings = SkillVerifier::security_scan(&manifest);
-        all_warnings.extend(manifest_warnings);
-
-        // Step 7: Write skill.toml into tmp_dir
-        openclaw_compat::write_librefang_manifest(&tmp_dir, &manifest)?;
-
-        // Step 8: Supply-chain audit before promotion — a rejected bundle never reaches the live skill dir.
-        if let Err(violations) = crate::supply_chain::scan(&tmp_dir) {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
-            let summary = violations
-                .iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(SkillError::SecurityBlocked(format!(
-                "supply-chain audit failed for '{slug}': {summary}"
-            )));
-        }
-
-        // Atomic promotion: remove the previous version (if any) and rename
-        // the fully-prepared temp directory into the final skill directory.
-        // If rename() fails the tmp dir is left behind; the next install will
-        // clean it up via the pre-install check at the top of this function.
-        if skill_dir.exists() {
-            std::fs::remove_dir_all(&skill_dir)?;
-        }
-        std::fs::rename(&tmp_dir, &skill_dir)?;
-
-        let result = ClawHubInstallResult {
-            skill_name: manifest.skill.name.clone(),
-            version: manifest.skill.version.clone(),
-            slug: slug.to_string(),
-            warnings: all_warnings,
-            tool_translations,
-            is_prompt_only,
+                Ok(ClawHubInstallResult {
+                    skill_name: manifest.skill.name.clone(),
+                    version: manifest.skill.version.clone(),
+                    slug,
+                    warnings: all_warnings,
+                    tool_translations,
+                    is_prompt_only,
+                })
+            })
+            .await
+            .map_err(|e| {
+                SkillError::Io(std::io::Error::other(format!(
+                    "post-extraction task join: {e}"
+                )))
+            })??
         };
 
         info!(
@@ -1164,5 +1161,29 @@ mod tests {
             "expected a supply-chain SecurityBlocked error, got: {err:?}"
         );
         assert!(!target.join("evil-skill").exists());
+    }
+
+    #[tokio::test]
+    async fn install_promotes_prepared_skill_and_removes_staging_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = ClawHubClient::new(dir.path().join("cache"));
+        let target = dir.path().join("skills");
+        std::fs::create_dir_all(&target).unwrap();
+        let body = b"---\nname: safe-skill\ndescription: safe test skill\nversion: 1.2.3\n---\n# Safe Skill\nUse this skill safely.\n";
+
+        let result = client
+            .install_with_expected_sha256("safe-skill", &target, body, None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.skill_name, "safe-skill");
+        assert_eq!(result.version, env!("CARGO_PKG_VERSION"));
+        assert!(target.join("safe-skill").join("skill.toml").is_file());
+        assert!(target.join("safe-skill").join("SKILL.md").is_file());
+        let entries = std::fs::read_dir(&target)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![std::ffi::OsString::from("safe-skill")]);
     }
 }
