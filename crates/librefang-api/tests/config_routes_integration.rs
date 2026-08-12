@@ -1374,6 +1374,38 @@ async fn health_detail_daily_spend_percent_reflects_configured_cap() {
     );
 }
 
+/// A `budget_status` query failure must surface `/api/health/detail` as a
+/// scrubbed 500 too, not a 200 with fabricated zero-spend numbers baked into
+/// the `budget` section.
+/// Regression companion to `budget_status_returns_500_when_usage_query_fails`
+/// in `budget_routes_test.rs`, which covers the same failure at `GET
+/// /api/budget` (#7037).
+#[tokio::test(flavor = "multi_thread")]
+async fn health_detail_returns_500_when_budget_query_fails() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    h.state
+        .kernel
+        .memory_substrate()
+        .pool()
+        .get()
+        .unwrap()
+        .execute("DROP TABLE usage_events", [])
+        .unwrap();
+
+    let (status, body) = send(h.app.clone(), auth_get("/api/health/detail")).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let rendered = String::from_utf8_lossy(&body);
+    assert!(
+        !rendered.contains("usage_events") && !rendered.contains("no such table"),
+        "response body must not leak SQL identifiers: {rendered}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // #5186 boot-path golden — stale renamed channel key fails boot loudly.
 //
