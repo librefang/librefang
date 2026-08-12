@@ -12,6 +12,7 @@ use super::*;
 )]
 pub async fn list_agent_files(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -35,6 +36,12 @@ pub async fn list_agent_files(
             );
         }
     };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
 
     let workspace = match entry.manifest.workspace {
         Some(ref ws) => ws.clone(),
@@ -86,6 +93,7 @@ pub async fn list_agent_files(
 )]
 pub async fn get_agent_file(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path((id, filename)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -100,6 +108,13 @@ pub async fn get_agent_file(
             );
         }
     };
+
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
 
     // Validate filename whitelist
     if !KNOWN_IDENTITY_FILES.contains(&filename.as_str()) {

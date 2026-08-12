@@ -104,6 +104,10 @@ async fn start_test_server_with_provider(
             axum::routing::get(routes::get_agent_session),
         )
         .route(
+            "/api/uploads/{file_id}",
+            axum::routing::get(routes::serve_upload),
+        )
+        .route(
             "/api/agents/{id}/sessions/{session_id}/trajectory",
             axum::routing::get(routes::export_session_trajectory),
         )
@@ -1042,6 +1046,11 @@ async fn test_agent_session_empty() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["message_count"], 0);
     assert_eq!(body["messages"].as_array().unwrap().len(), 0);
+    assert!(
+        body.get("label").is_some(),
+        "empty session must include label"
+    );
+    assert!(body["label"].is_null());
 }
 
 /// Regression test for the cross-agent session-read guard added in PR #3071.
@@ -1134,6 +1143,8 @@ memory_write = ["self.*"]
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(error["error"]["message"], "Invalid session ID");
 
     // Same-agent round-trip: A's id with A's own session_id → 200.
     let resp = client
@@ -1157,6 +1168,73 @@ memory_write = ["self.*"]
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["session_id"].as_str().unwrap(), a_session_id);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_agent_session_reuses_materialized_history_images() {
+    use base64::Engine as _;
+    use librefang_types::agent::AgentId;
+    use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    let spawned: serde_json::Value = resp.json().await.unwrap();
+    let agent_id: AgentId = spawned["agent_id"].as_str().unwrap().parse().unwrap();
+
+    let substrate = server.state.kernel.memory_substrate();
+    let mut session = substrate.create_session(agent_id).unwrap();
+    session.messages.push(Message {
+        role: Role::User,
+        content: MessageContent::Blocks(vec![ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(b"history image"),
+        }]),
+        pinned: false,
+        timestamp: None,
+    });
+    substrate.save_session(&session).unwrap();
+
+    let url = format!(
+        "{}/api/agents/{}/session?session_id={}",
+        server.base_url, agent_id, session.id.0
+    );
+    let first: serde_json::Value = client.get(&url).send().await.unwrap().json().await.unwrap();
+    let second: serde_json::Value = client.get(&url).send().await.unwrap().json().await.unwrap();
+    let first_id = first["messages"][0]["images"][0]["file_id"]
+        .as_str()
+        .unwrap();
+    let second_id = second["messages"][0]["images"][0]["file_id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(first_id, second_id);
+
+    let download = client
+        .get(format!("{}/api/uploads/{first_id}", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(download.status(), StatusCode::OK);
+    assert_eq!(download.bytes().await.unwrap().as_ref(), b"history image");
+
+    let upload_dir = server
+        .state
+        .kernel
+        .config_ref()
+        .channels
+        .effective_file_download_dir();
+    let image_path = upload_dir.join(librefang_types::media::on_disk_name(
+        first_id,
+        "image/png",
+        "",
+    ));
+    assert_eq!(std::fs::read(&image_path).unwrap(), b"history image");
+    std::fs::remove_file(image_path).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
