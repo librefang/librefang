@@ -1269,6 +1269,13 @@ pub struct WorkflowEngine {
     operator_resume_notify: Arc<DashMap<WorkflowRunId, Arc<tokio::sync::Notify>>>,
 }
 
+fn lock_workflow_persistence(lock: &std::sync::Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
+    lock.lock().unwrap_or_else(|poisoned| {
+        warn!("workflow persistence lock poisoned; recovering write serialization");
+        poisoned.into_inner()
+    })
+}
+
 /// Format the error returned when a workflow step's `agent_resolver` returns
 /// `None` — i.e. the referenced registry agent does not exist (or, for
 /// `StepAgent::ById`, the UUID is malformed / unregistered).
@@ -1765,7 +1772,7 @@ impl WorkflowEngine {
 
     /// Persist completed/failed/paused runs to JSON via atomic write (legacy path).
     fn persist_runs_to_json(&self) {
-        let _guard = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock_workflow_persistence(&self.persist_lock);
         let path = match &self.persist_path {
             Some(p) => p,
             None => return,
@@ -6720,6 +6727,26 @@ fn row_to_workflow_run(row: &WorkflowRunRow) -> Result<WorkflowRun, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poisoned_workflow_persistence_lock_recovers_and_remains_exclusive() {
+        let lock = std::sync::Mutex::new(());
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _guard = lock.lock().unwrap();
+                    panic!("poison workflow persistence lock");
+                })
+                .join()
+        });
+
+        assert!(poison.is_err());
+        let recovered = lock_workflow_persistence(&lock);
+        assert!(lock.try_lock().is_err());
+        drop(recovered);
+        let recovered_again = lock_workflow_persistence(&lock);
+        drop(recovered_again);
+    }
 
     fn test_workflow() -> Workflow {
         Workflow {
