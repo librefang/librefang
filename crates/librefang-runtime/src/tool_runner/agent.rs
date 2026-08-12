@@ -265,20 +265,20 @@ pub(super) async fn tool_agent_spawn(
 ) -> ToolResult {
     let kh = require_kernel_typed(kernel)?;
 
-    // Ephemeral spawn runs the agent loop inline on the caller's task, so
-    // each nesting level stacks another ~56 KB of future (#6659). Reject
-    // before we build the request, same as agent_send.
-    let max_depth = kh.max_agent_call_depth();
-    let current_depth = super::current_agent_depth();
-    if current_depth >= max_depth {
-        return Err(ToolError::PermissionDenied(format!(
-            "Inter-agent call depth exceeded (max {max_depth}). \
-             A->B->C chain is too deep. Use the task queue or a permanent agent instead."
-        )));
-    }
-
     // Ephemeral path: spawn a temporary worker, run task, return result directly
     if input["ephemeral"].as_bool().unwrap_or(false) {
+        // Ephemeral spawn runs the agent loop inline on the caller's task, so
+        // each nesting level stacks another ~56 KB of future (#6659). Reject
+        // before we build the request, same as agent_send.
+        let max_depth = kh.max_agent_call_depth();
+        let current_depth = super::current_agent_depth();
+        if current_depth >= max_depth {
+            return Err(ToolError::PermissionDenied(format!(
+                "Inter-agent call depth exceeded (max {max_depth}). \
+                 A->B->C chain is too deep. Use the task queue or a permanent agent instead."
+            )));
+        }
+
         let message = input["message"]
             .as_str()
             .ok_or(ToolError::MissingParameter("message"))?;
