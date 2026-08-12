@@ -1143,12 +1143,29 @@ impl LibreFangKernel {
             &agent_def.manifest,
             &merged,
         ) {
-            let _ = self.skills.hand_registry.restore_agent_runtime_override(
+            if let Err(restore_err) = self.skills.hand_registry.restore_agent_runtime_override(
                 instance.instance_id,
                 &role,
                 previous,
-            );
-            let _ = self.persist_hand_state_result();
+            ) {
+                warn!(
+                    hand = %instance.hand_id,
+                    instance = %instance.instance_id,
+                    role = %role,
+                    agent = %agent_id,
+                    error = %restore_err,
+                    "Failed to restore hand runtime override after live registry update failed"
+                );
+            } else if let Err(persist_err) = self.persist_hand_state_result() {
+                warn!(
+                    hand = %instance.hand_id,
+                    instance = %instance.instance_id,
+                    role = %role,
+                    agent = %agent_id,
+                    error = %persist_err,
+                    "Restored hand runtime override in memory but failed to persist rollback; a restart may replay the unapplied override"
+                );
+            }
             return Err(err);
         }
         Ok(())
@@ -1280,12 +1297,29 @@ impl LibreFangKernel {
                 })();
 
                 if let Err(err) = apply_result {
-                    let _ = self.skills.hand_registry.restore_agent_runtime_override(
-                        instance.instance_id,
-                        &role,
-                        previous,
-                    );
-                    let _ = self.persist_hand_state_result();
+                    if let Err(restore_err) = self
+                        .skills
+                        .hand_registry
+                        .restore_agent_runtime_override(instance.instance_id, &role, previous)
+                    {
+                        warn!(
+                            hand = %instance.hand_id,
+                            instance = %instance.instance_id,
+                            role = %role,
+                            agent = %agent_id,
+                            error = %restore_err,
+                            "Failed to restore cleared hand runtime override after live registry reset failed"
+                        );
+                    } else if let Err(persist_err) = self.persist_hand_state_result() {
+                        warn!(
+                            hand = %instance.hand_id,
+                            instance = %instance.instance_id,
+                            role = %role,
+                            agent = %agent_id,
+                            error = %persist_err,
+                            "Restored cleared hand runtime override in memory but failed to persist rollback; a restart may replay the unapplied clear"
+                        );
+                    }
                     return Err(err);
                 }
             } else {
