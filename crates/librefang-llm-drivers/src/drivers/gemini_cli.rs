@@ -389,6 +389,45 @@ mod tests {
         assert_eq!(driver.message_timeout_secs, 19);
     }
 
+    #[cfg(unix)]
+    fn sleeping_cli() -> tempfile::TempPath {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, b"#!/bin/sh\nsleep 30\n").unwrap();
+        let mut permissions = file.as_file().metadata().unwrap().permissions();
+        permissions.set_mode(0o700);
+        file.as_file().set_permissions(permissions).unwrap();
+        // Convert to a `TempPath` (file still on disk, deleted on drop) so
+        // this process no longer holds the file open for writing. Spawning
+        // the path directly as a subprocess otherwise fails with `ETXTBSY`
+        // ("Text file busy") because Linux refuses to exec a file that has
+        // a writable fd open anywhere, including in the exec-ing process.
+        file.into_temp_path()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn complete_honors_request_timeout() {
+        let cli = sleeping_cli();
+        let driver = GeminiCliDriver::new(Some(cli.to_string_lossy().into_owned()), false);
+        let request = CompletionRequest {
+            model: "gemini-cli".to_string(),
+            timeout_secs: Some(0),
+            ..Default::default()
+        };
+
+        let error = driver.complete(request).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            LlmError::TimedOut {
+                inactivity_secs: 0,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn test_new_with_custom_path() {
         let driver = GeminiCliDriver::new(Some("/usr/local/bin/gemini".to_string()), true);
