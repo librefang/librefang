@@ -76,8 +76,7 @@ fn list_identity_files(workspace: &std::path::Path) -> Vec<serde_json::Value> {
     KNOWN_IDENTITY_FILES
         .iter()
         .map(|&name| {
-            // Check .identity/ first (current layout), then workspace root
-            // (pre-migration fallback).
+            // Check .identity/ first (current layout), then workspace root (pre-migration fallback)
             let identity_path = workspace.join(".identity").join(name);
             let path = if identity_path.exists() {
                 identity_path
