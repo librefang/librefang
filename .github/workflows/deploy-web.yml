@@ -69,4 +69,4 @@ jobs:
           # injection vector — #3938 hardened release.yml and
           # discussion-to-issue.yml the same way but missed this site.
           HEAD_REF: ${{ github.head_ref || github.ref_name }}
-        run: npx -y wrangler@4 pages deploy web/dist --project-name=librefang --branch="$HEAD_REF"
+        run: npx -y wrangler@4.121.0 pages deploy web/dist --project-name=librefang --branch="$HEAD_REF"
