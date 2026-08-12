@@ -218,7 +218,7 @@ rand = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 
 # TOTP
-totp-rs = { version = "5", features = ["gen_secret", "otpauth", "qr"] }
+totp-rs = { version = "6", features = ["gen_secret", "otpauth", "qr"] }
 
 # JWT validation
 #
