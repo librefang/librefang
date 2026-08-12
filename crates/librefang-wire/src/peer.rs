@@ -31,6 +31,11 @@ type HmacSha256 = Hmac<Sha256>;
 /// A shared secret holder can choose arbitrary node IDs, so this cap prevents identity churn from becoming an unbounded memory primitive.
 const MAX_RATE_LIMIT_PEERS: usize = 10_000;
 
+/// Maximum length, in bytes, of a `peer_id` admitted as a rate-limiter map key.
+/// `node_id` is attacker-controlled cleartext carried in the wire handshake, so without this cap each of the `MAX_RATE_LIMIT_PEERS` slots could be sized up to `MAX_MESSAGE_SIZE`, turning the entry-count cap into a memory-amplification vector rather than a real bound.
+/// Legitimate node IDs are UUIDs (36 bytes); this leaves generous room for non-UUID identifiers while keeping worst-case map memory in the low megabytes.
+const MAX_PEER_ID_LEN: usize = 256;
+
 /// SECURITY: Time-windowed nonce tracker to prevent OFP handshake replay attacks.
 ///
 /// Stores seen nonces with their timestamps. Nonces older than the window
@@ -161,6 +166,17 @@ impl PeerRateLimiter {
     /// human-readable message if the peer has been rate-limited. The internal
     /// counters are updated on every call regardless of the outcome.
     pub fn check_message(&self, peer_id: &str) -> Result<(), String> {
+        if peer_id.len() > MAX_PEER_ID_LEN {
+            warn!(
+                peer_id_len = peer_id.len(),
+                limit = MAX_PEER_ID_LEN,
+                "OFP: peer_id exceeds maximum length; rejecting before rate-limiter admission"
+            );
+            return Err(format!(
+                "peer_id exceeds maximum length of {MAX_PEER_ID_LEN} bytes"
+            ));
+        }
+
         let now = Instant::now();
         let one_minute = Duration::from_secs(60);
 
@@ -219,6 +235,17 @@ impl PeerRateLimiter {
         let Some(max_tokens) = self.max_tokens_per_hour else {
             return Ok(()); // Token budget not configured
         };
+
+        if peer_id.len() > MAX_PEER_ID_LEN {
+            warn!(
+                peer_id_len = peer_id.len(),
+                limit = MAX_PEER_ID_LEN,
+                "OFP: peer_id exceeds maximum length; rejecting before token-limiter admission"
+            );
+            return Err(format!(
+                "peer_id exceeds maximum length of {MAX_PEER_ID_LEN} bytes"
+            ));
+        }
 
         let now = Instant::now();
         let one_hour = Duration::from_secs(3600);
@@ -2403,6 +2430,36 @@ mod tests {
 
         assert!(error.contains("capacity"));
         assert_eq!(limiter.token_peer_count(), MAX_RATE_LIMIT_PEERS);
+    }
+
+    #[test]
+    fn peer_message_limiter_rejects_oversized_peer_id_without_admitting_it() {
+        let limiter = PeerRateLimiter::new(10, None);
+        let oversized = "x".repeat(MAX_PEER_ID_LEN + 1);
+
+        let error = limiter.check_message(&oversized).unwrap_err();
+
+        assert!(error.contains("maximum length"));
+        assert_eq!(
+            limiter.message_peer_count(),
+            0,
+            "an oversized peer_id must never reach the map, or its length becomes a memory-amplification vector"
+        );
+    }
+
+    #[test]
+    fn peer_token_limiter_rejects_oversized_peer_id_without_admitting_it() {
+        let limiter = PeerRateLimiter::new(0, Some(1_000));
+        let oversized = "x".repeat(MAX_PEER_ID_LEN + 1);
+
+        let error = limiter.record_tokens(&oversized, 1).unwrap_err();
+
+        assert!(error.contains("maximum length"));
+        assert_eq!(
+            limiter.token_peer_count(),
+            0,
+            "an oversized peer_id must never reach the map, or its length becomes a memory-amplification vector"
+        );
     }
 
     // ── Per-message HMAC tests ───────────────────────────────────────────
