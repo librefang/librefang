@@ -1816,7 +1816,18 @@ async fn handle_command(
         }
         "budget" => {
             let budget = state.kernel.budget_config();
-            let status = state.kernel.metering_ref().budget_status(&budget);
+            let status = match state.kernel.metering_ref().budget_status(&budget) {
+                Ok(status) => status,
+                Err(error) => {
+                    tracing::error!(%error, "failed to query budget status");
+                    return serde_json::json!({
+                        "type": "command_result",
+                        "command": cmd,
+                        "message": "Budget status is temporarily unavailable.",
+                        "error": true,
+                    });
+                }
+            };
             let fmt = |v: f64| -> String {
                 if v > 0.0 {
                     format!("${v:.2}")
