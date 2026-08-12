@@ -374,7 +374,8 @@ Deploy on GCP always-free tier (e2-micro). See [deploy/gcp/README.md](https://gi
 ```bash
 cd deploy/gcp
 cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars with your project_id and API keys
+# Edit terraform.tfvars with your project_id, a restricted source CIDR,
+# a generated LibreFang API key, and provider keys
 terraform init && terraform apply
 ```
 
