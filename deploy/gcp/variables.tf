@@ -26,7 +26,7 @@ variable "allowed_source_cidr" {
   type        = string
 
   validation {
-    condition = can(cidrhost(var.allowed_source_cidr, 0)) &&
+    condition     = can(cidrhost(var.allowed_source_cidr, 0)) &&
       var.allowed_source_cidr != "0.0.0.0/0" &&
       var.allowed_source_cidr != "::/0"
     error_message = "allowed_source_cidr must be a valid restricted CIDR; public 0.0.0.0/0 and ::/0 are forbidden."
