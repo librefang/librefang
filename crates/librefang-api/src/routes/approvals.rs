@@ -342,7 +342,7 @@ pub async fn create_approval(
             .into_response(),
         Ok(Err(error)) => ApiErrorResponse::bad_request(error).into_response(),
         Err(error) => {
-            ApiErrorResponse::internal(format!("Approval registration task failed: {error}"))
+            ApiErrorResponse::internal_scrub(format!("Approval registration task failed: {error}"))
                 .into_response()
         }
     }
@@ -486,7 +486,7 @@ pub async fn approve_request(
                                     .into_response();
                                 }
                                 Err(error) => {
-                                    return ApiErrorResponse::internal(error)
+                                    return ApiErrorResponse::internal_scrub(error)
                                         .into_json_tuple()
                                         .into_response();
                                 }
@@ -1189,7 +1189,8 @@ pub async fn totp_setup(
                                         .into_json_tuple();
                                     }
                                     Err(error) => {
-                                        return ApiErrorResponse::internal(error).into_json_tuple();
+                                        return ApiErrorResponse::internal_scrub(error)
+                                            .into_json_tuple();
                                     }
                                 }
                             }
@@ -1329,7 +1330,7 @@ pub async fn totp_confirm(
                     )
                     .into_json_tuple();
                 }
-                Err(error) => return ApiErrorResponse::internal(error).into_json_tuple(),
+                Err(error) => return ApiErrorResponse::internal_scrub(error).into_json_tuple(),
             }
             if let Err(e) = state.kernel.vault_set("totp_confirmed", "true") {
                 return ApiErrorResponse::internal(e).into_json_tuple();
@@ -1462,7 +1463,7 @@ pub async fn totp_revoke(
                             .into_json_tuple();
                         }
                         Err(error) => {
-                            return ApiErrorResponse::internal(error).into_json_tuple();
+                            return ApiErrorResponse::internal_scrub(error).into_json_tuple();
                         }
                     }
                 }
