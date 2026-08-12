@@ -1,2 +1,0 @@
-`DELETE /api/channels/sidecar/{name}` rewrote `config.toml` inline on the axum/tokio worker handling the request, so the read, TOML parse, and durable atomic write all ran on the async executor and could stall other requests scheduled on that worker for the duration of the disk I/O.
-The rewrite now runs on `tokio::task::spawn_blocking`, still performed while holding `config_write_lock` so it continues to serialize against `configure` and `POST /api/config/set`; delete, reload, and error behavior are unchanged (#6991) (@houko)
