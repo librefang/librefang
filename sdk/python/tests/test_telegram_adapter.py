@@ -708,15 +708,9 @@ async def test_produce_recovers_after_startup_network_failure(monkeypatch):
                         lambda msg, **kw: warn_calls.append((msg, kw)))
 
     task = asyncio.create_task(a.produce(lambda _ev: None))
-    # Drive the loop until the observable side-effects appear — poll1 → warn →
-    # sleep(0) → poll2 → info(recovered) — bounding the wait by wall-clock
-    # rather than by a fixed number of event-loop turns.
-    # How many turns one produce() iteration costs is not fixed: it depends on
-    # how the executor schedules the polling thread, so any constant races on a
-    # loaded runner and the failure mode is a confusing "only saw N" assertion
-    # rather than a timeout.
-    # `fake_sleep` consumes no real time, so this loop spins freely and the
-    # deadline only bounds the pathological case.
+    # Drive the loop until the observable side-effects appear — poll1 → warn → sleep(0) → poll2 → info(recovered) — bounding the wait by wall-clock rather than by a fixed number of event-loop turns.
+    # How many turns one produce() iteration costs is not fixed: it depends on how the executor schedules the polling thread, so any constant races on a loaded runner and the failure mode is a confusing "only saw N" assertion rather than a timeout.
+    # `fake_sleep` consumes no real time, so this loop spins freely and the deadline only bounds the pathological case.
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
         await real_sleep(0)
@@ -766,12 +760,8 @@ async def test_produce_backoff_is_capped_at_max(monkeypatch):
     monkeypatch.setattr(tg.log, "warn", lambda *_a, **_kw: None)
 
     task = asyncio.create_task(a.produce(lambda _ev: None))
-    # The doubling sequence 1, 2, 4, 8, 16, 32, 60, 60, 60 caps after 7
-    # failures, so wait for the cap itself to show up rather than for a fixed
-    # number of event-loop turns to elapse.
-    # A saturated CI runner drove only 3 of those 7 iterations within 64 turns,
-    # failing on `got [1.0, 2.0, 4.0]` — the loop was healthy, the tick budget
-    # was not.
+    # The doubling sequence 1, 2, 4, 8, 16, 32, 60, 60, 60 caps after 7 failures, so wait for the cap itself to show up rather than for a fixed number of event-loop turns to elapse.
+    # A saturated CI runner drove only 3 of those 7 iterations within 64 turns, failing on `got [1.0, 2.0, 4.0]` — the loop was healthy, the tick budget was not.
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
         await real_sleep(0)
@@ -823,9 +813,7 @@ async def test_produce_treats_longpoll_timeout_as_normal(monkeypatch):
     monkeypatch.setattr(tg.log, "info", lambda *_a, **_kw: None)
 
     task = asyncio.create_task(a.produce(lambda _ev: None))
-    # Wait for the fourth poll to actually happen rather than for 32 event-loop
-    # turns to elapse — the same tick-budget race that broke the two tests
-    # above, which surfaced here as `only saw 3 polls`.
+    # Wait for the fourth poll to actually happen rather than for 32 event-loop turns to elapse — the same tick-budget race that broke the two tests above, which surfaced here as `only saw 3 polls`.
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
         await real_sleep(0)
