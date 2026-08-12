@@ -955,7 +955,9 @@ impl UsageStore {
                 })
             })
             .map_err(LibreFangError::memory)?;
-        let out: Vec<UserSpendRanking> = rows.filter_map(|r| r.ok()).collect();
+        let out = rows
+            .collect::<rusqlite::Result<Vec<UserSpendRanking>>>()
+            .map_err(LibreFangError::memory)?;
         Ok(out)
     }
 
@@ -1830,5 +1832,23 @@ mod tests {
         assert_eq!(ranking[1].user_id, alice.to_string());
         assert!((ranking[0].daily_cost_usd - 12.5).abs() < 1e-9);
         assert!((ranking[1].daily_cost_usd - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_user_ranking_surfaces_row_decode_errors() {
+        let store = setup();
+        let conn = store.pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms, user_id) \
+             VALUES ('bad-ranking-row', 'agent', datetime('now'), 'model', 'provider', 0, 0, 1.0, 0, 0, X'80')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert!(
+            store.query_user_ranking(Some(10)).is_err(),
+            "malformed ranking rows must fail the query instead of disappearing"
+        );
     }
 }

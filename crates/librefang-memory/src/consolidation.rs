@@ -140,7 +140,8 @@ impl ConsolidationEngine {
             let rows = stmt
                 .query_map([], |row| row.get::<_, String>(0))
                 .map_err(LibreFangError::memory)?;
-            rows.filter_map(|r| r.ok()).collect()
+            rows.collect::<rusqlite::Result<Vec<String>>>()
+                .map_err(LibreFangError::memory)?
         };
 
         // One outer transaction wraps every merge in this run so we pay a
@@ -190,8 +191,8 @@ impl ConsolidationEngine {
                     },
                 )
                 .map_err(LibreFangError::memory)?
-                .filter_map(|r| r.ok())
-                .collect();
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(LibreFangError::memory)?;
 
             // Pre-lowercase content once per row. The inner loop is O(N²)
             // and `text_similarity` lowercases its inputs on every call —
