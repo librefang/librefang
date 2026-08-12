@@ -162,11 +162,8 @@ impl ProactiveMemoryStore {
         self.config.read().unwrap_or_else(|poisoned| {
             tracing::warn!("proactive memory config read lock poisoned; recovering inner state");
             let guard = poisoned.into_inner();
-            // `into_inner()` only unwraps the guard; it leaves the lock's
-            // poison flag set. Without this, every later call through this
-            // helper would keep re-entering this branch and re-emitting the
-            // warning above for the rest of the process, even though the
-            // state has already been recovered.
+            // `into_inner()` only unwraps the guard; it leaves the lock's poison flag set.
+            // Without this, every later call through this helper would keep re-entering this branch and re-emitting the warning above for the rest of the process, even though the state has already been recovered.
             self.config.clear_poison();
             guard
         })
