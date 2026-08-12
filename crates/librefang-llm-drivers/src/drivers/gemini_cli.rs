@@ -125,7 +125,12 @@ impl GeminiCliDriver {
 
     /// Build the CLI arguments for a given request.
     pub fn build_args(&self, prompt: &str, model: &str) -> Vec<String> {
-        let mut args = vec!["-p".to_string(), prompt.to_string()];
+        let mut args = vec![
+            "-p".to_string(),
+            prompt.to_string(),
+            "--output-format".to_string(),
+            "json".to_string(),
+        ];
 
         let model_flag = Self::model_flag(model);
         if let Some(ref m) = model_flag {
@@ -171,6 +176,61 @@ impl GeminiCliDriver {
             "gemini-2.5-flash" | "flash" => Some("gemini-2.5-flash".to_string()),
             _ => Some(stripped.to_string()),
         }
+    }
+
+    /// Parse the single JSON object produced by `gemini --output-format json`.
+    ///
+    /// Gemini CLI reports session-wide metrics per model. Aggregate every
+    /// model entry because a single agent turn may route work across multiple
+    /// models. Thoughts are billable output tokens, matching the Gemini API
+    /// driver's metering convention.
+    fn parse_json_output(stdout: &str) -> Result<(String, TokenUsage), String> {
+        let output: serde_json::Value = serde_json::from_str(stdout)
+            .map_err(|error| format!("invalid Gemini CLI JSON output: {error}"))?;
+
+        let text = output
+            .get("response")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Gemini CLI JSON output did not include a response".to_string())?
+            .to_string();
+
+        let mut usage = TokenUsage::default();
+        if let Some(models) = output
+            .pointer("/stats/models")
+            .and_then(serde_json::Value::as_object)
+        {
+            for model in models.values() {
+                let tokens = model.get("tokens").unwrap_or(&serde_json::Value::Null);
+                usage.input_tokens = usage.input_tokens.saturating_add(
+                    tokens
+                        .get("prompt")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                );
+                usage.output_tokens = usage
+                    .output_tokens
+                    .saturating_add(
+                        tokens
+                            .get("candidates")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0),
+                    )
+                    .saturating_add(
+                        tokens
+                            .get("thoughts")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0),
+                    );
+                usage.cache_read_input_tokens = usage.cache_read_input_tokens.saturating_add(
+                    tokens
+                        .get("cached")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                );
+            }
+        }
+
+        Ok((text, usage))
     }
 
     /// Apply security env filtering to a command.
@@ -283,7 +343,11 @@ impl LlmDriver for GeminiCliDriver {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let text = stdout.trim().to_string();
+        let (text, usage) = Self::parse_json_output(&stdout).map_err(|message| LlmError::Api {
+            status: 502,
+            message,
+            code: None,
+        })?;
 
         Ok(CompletionResponse {
             content: vec![ContentBlock::Text {
@@ -292,11 +356,7 @@ impl LlmDriver for GeminiCliDriver {
             }],
             stop_reason: StopReason::EndTurn,
             tool_calls: Vec::new(),
-            usage: TokenUsage {
-                input_tokens: 0,
-                output_tokens: 0,
-                ..Default::default()
-            },
+            usage,
             actual_provider: None,
             actual_model: None,
         })
@@ -407,6 +467,24 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn json_cli() -> tempfile::TempPath {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(
+            &mut file,
+            br##"#!/bin/sh
+printf '%s\n' '{"response":"hello from gemini","stats":{"models":{"gemini-test":{"tokens":{"prompt":42,"candidates":7,"cached":12,"thoughts":3}}}}}'
+"##,
+        )
+        .unwrap();
+        let mut permissions = file.as_file().metadata().unwrap().permissions();
+        permissions.set_mode(0o700);
+        file.as_file().set_permissions(permissions).unwrap();
+        file.into_temp_path()
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn complete_honors_request_timeout() {
         let cli = sleeping_cli();
@@ -426,6 +504,28 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn complete_returns_json_message_and_usage() {
+        let cli = json_cli();
+        let driver = GeminiCliDriver::new(Some(cli.to_string_lossy().into_owned()), false);
+        let response = driver
+            .complete(CompletionRequest {
+                model: "gemini-cli".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            &response.content[0],
+            ContentBlock::Text { text, .. } if text == "hello from gemini"
+        ));
+        assert_eq!(response.usage.input_tokens, 42);
+        assert_eq!(response.usage.output_tokens, 10);
+        assert_eq!(response.usage.cache_read_input_tokens, 12);
     }
 
     #[test]
@@ -448,6 +548,34 @@ mod tests {
         assert!(args.contains(&"test prompt".to_string()));
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"gemini-2.5-pro".to_string()));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--output-format", "json"]));
+    }
+
+    #[test]
+    fn parse_json_output_aggregates_model_usage() {
+        let output = r#"{
+            "response": "final answer",
+            "stats": {"models": {
+                "gemini-pro": {"tokens": {"prompt": 100, "candidates": 10, "cached": 80, "thoughts": 20}},
+                "gemini-flash": {"tokens": {"prompt": 30, "candidates": 5, "cached": 0, "thoughts": 2}}
+            }}
+        }"#;
+
+        let (text, usage) = GeminiCliDriver::parse_json_output(output).unwrap();
+
+        assert_eq!(text, "final answer");
+        assert_eq!(usage.input_tokens, 130);
+        assert_eq!(usage.output_tokens, 37);
+        assert_eq!(usage.cache_read_input_tokens, 80);
+    }
+
+    #[test]
+    fn parse_json_output_rejects_malformed_or_missing_response() {
+        assert!(GeminiCliDriver::parse_json_output("not-json").is_err());
+        let error = GeminiCliDriver::parse_json_output(r#"{"stats": {}}"#).unwrap_err();
+        assert!(error.contains("response"));
     }
 
     #[test]
