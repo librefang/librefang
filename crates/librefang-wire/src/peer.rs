@@ -27,9 +27,8 @@ use tracing::{debug, error, info, warn};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Maximum distinct peer identities retained in each active rate-limit
-/// window. A shared secret holder can choose arbitrary node IDs, so this cap
-/// prevents identity churn from becoming an unbounded memory primitive.
+/// Maximum distinct peer identities retained in each active rate-limit window.
+/// A shared secret holder can choose arbitrary node IDs, so this cap prevents identity churn from becoming an unbounded memory primitive.
 const MAX_RATE_LIMIT_PEERS: usize = 10_000;
 
 /// SECURITY: Time-windowed nonce tracker to prevent OFP handshake replay attacks.
@@ -128,8 +127,7 @@ impl Default for NonceTracker {
 ///    When a peer has consumed `max_llm_tokens_per_peer_per_hour` tokens in
 ///    the current hour window its subsequent messages are also rejected.
 ///
-/// Both counters are stored in `DashMap` so they are shared safely across all
-/// Tokio tasks that serve connections from the same peer node.
+/// Both counters are stored in a mutex-guarded `HashMap`, bounded at `MAX_RATE_LIMIT_PEERS` distinct peer identities, so they are shared safely across all Tokio tasks that serve connections from the same peer node.
 #[derive(Clone)]
 pub struct PeerRateLimiter {
     /// Tracks (message_count, window_start) per peer_id for rate limiting.
