@@ -122,11 +122,8 @@ pub(crate) async fn kill_on_timeout(child: &mut tokio::process::Child) {
 
 /// Run a command while draining both output pipes and enforcing a hard deadline.
 ///
-/// On timeout the child (and, where the platform allows, its whole process
-/// tree — see `kill_on_timeout`) is killed and reaped before this function
-/// returns. Pipe readers are aborted as well, so descendants that inherited
-/// stdout/stderr cannot keep the request alive after the direct child has
-/// exited.
+/// On timeout the child (and, where the platform allows, its whole process tree — see `kill_on_timeout`) is killed and reaped before this function returns.
+/// Pipe readers are aborted as well, so descendants that inherited stdout/stderr cannot keep the request alive after the direct child has exited.
 pub(crate) async fn output_with_timeout(
     command: &mut Command,
     duration: Duration,

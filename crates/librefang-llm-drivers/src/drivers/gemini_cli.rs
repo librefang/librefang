@@ -67,7 +67,8 @@ impl GeminiCliDriver {
         }
     }
 
-    /// Set the default subprocess deadline. A per-request timeout overrides it.
+    /// Set the default subprocess deadline.
+    /// A per-request timeout overrides it.
     pub fn with_message_timeout(mut self, timeout_secs: u64) -> Self {
         self.message_timeout_secs = timeout_secs;
         self
