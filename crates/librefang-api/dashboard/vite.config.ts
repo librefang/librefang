@@ -1,4 +1,4 @@
-import { defineConfig, createLogger } from "vite";
+import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath } from "node:url";
@@ -7,13 +7,6 @@ import { resolve, dirname } from "node:path";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const reactRoot = resolve(__dirname, "node_modules/react");
 const reactDomRoot = resolve(__dirname, "node_modules/react-dom");
-
-const logger = createLogger();
-const origError = logger.error.bind(logger);
-logger.error = (msg, opts) => {
-  if (typeof msg === "string" && msg.includes("proxy error")) return;
-  origError(msg, opts);
-};
 
 // Every React-consuming dep MUST be pre-bundled up-front so Vite doesn't
 // re-optimize mid-session when a lazy route first pulls one. Re-optimization
@@ -44,7 +37,6 @@ const SINGLETON_DEPS = [
 ];
 
 export default defineConfig({
-  customLogger: logger,
   plugins: [react(), tailwindcss()],
   base: "/dashboard/",
   resolve: {
@@ -103,13 +95,6 @@ export default defineConfig({
         ws: true,
         timeout: 300_000,
         proxyTimeout: 300_000,
-        configure: (proxy) => {
-          type Emitter = { on(event: string, fn: (...args: never[]) => void): void };
-          const p = proxy as unknown as Emitter;
-          p.on("error", () => {});
-          p.on("proxyReq", (proxyReq: Emitter) => { proxyReq.on("error", () => {}); });
-          p.on("proxyRes", (proxyRes: Emitter) => { proxyRes.on("error", () => {}); });
-        }
       }
     }
   },
