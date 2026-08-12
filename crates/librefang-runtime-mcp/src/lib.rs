@@ -311,10 +311,22 @@ static UNKNOWN_RULE_SET_WARNED: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashSet<String>>,
 > = std::sync::OnceLock::new();
 
+fn lock_unknown_rule_set_warnings(
+    cell: &std::sync::Mutex<std::collections::HashSet<String>>,
+) -> std::sync::MutexGuard<'_, std::collections::HashSet<String>> {
+    cell.lock().unwrap_or_else(|poisoned| {
+        warn!(
+            target: "librefang_runtime_mcp::taint",
+            "unknown taint rule-set warning cache lock poisoned; recovering inner state"
+        );
+        poisoned.into_inner()
+    })
+}
+
 fn warn_unknown_rule_set_once(set_name: &str, tool_name: &str) {
     let cell = UNKNOWN_RULE_SET_WARNED
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-    let mut warned = cell.lock().unwrap_or_else(|e| e.into_inner());
+    let mut warned = lock_unknown_rule_set_warnings(cell);
     if warned.insert(set_name.to_string()) {
         warn!(
             target: "librefang_runtime_mcp::taint",
@@ -3696,6 +3708,27 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn poisoned_unknown_rule_warning_cache_recovers_and_deduplicates() {
+        let warned = std::sync::Mutex::new(std::collections::HashSet::new());
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut state = warned.lock().unwrap();
+                    state.insert("existing".to_string());
+                    panic!("poison unknown rule warning cache");
+                })
+                .join()
+        });
+
+        assert!(poison.is_err());
+        let mut recovered = lock_unknown_rule_set_warnings(&warned);
+        assert!(!recovered.insert("existing".to_string()));
+        assert!(recovered.insert("new".to_string()));
+        drop(recovered);
+        assert_eq!(lock_unknown_rule_set_warnings(&warned).len(), 2);
+    }
 
     // ── MCP outbound taint scanning ──────────────────────────────────────
 
