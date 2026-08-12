@@ -51,8 +51,16 @@ pub struct McpSubsystem {
     /// established).
     pub(crate) mcp_tools: std::sync::Mutex<Vec<ToolDefinition>>,
     /// Bounded rendered MCP summary cache keyed by allowlist + mcp_generation.
+    ///
+    /// `BTreeMap`, not `HashMap` (#3298): cached values are the rendered
+    /// strings this crate hands straight to the LLM system prompt, and
+    /// this crate's taboo list bans `HashMap` in any field that ends up
+    /// there. Iteration order is moot here (the cache is only ever
+    /// point-looked-up by key, never iterated to build output), but the
+    /// rule is enforced at the type level so a future caller that *does*
+    /// iterate it can't reintroduce nondeterminism silently.
     pub(crate) mcp_summary_cache:
-        parking_lot::Mutex<std::collections::HashMap<String, (u64, String)>>,
+        parking_lot::Mutex<std::collections::BTreeMap<String, (u64, String)>>,
     /// MCP catalog — read-only set of server templates shipped by the
     /// registry. Lock-free reads via `ArcSwap`; writes use `rcu()`.
     pub(crate) mcp_catalog: ArcSwap<McpCatalog>,
@@ -80,7 +88,7 @@ impl McpSubsystem {
             mcp_auth_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             mcp_oauth_provider,
             mcp_tools: std::sync::Mutex::new(Vec::new()),
-            mcp_summary_cache: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            mcp_summary_cache: parking_lot::Mutex::new(std::collections::BTreeMap::new()),
             mcp_catalog: ArcSwap::from_pointee(mcp_catalog),
             mcp_health,
             effective_mcp_servers: std::sync::RwLock::new(effective_mcp_servers),
