@@ -133,6 +133,30 @@ pub(crate) fn resolve_lang(lang: Option<&axum::Extension<RequestLanguage>>) -> &
     lang.map(|l| l.0 .0).unwrap_or(i18n::DEFAULT_LANGUAGE)
 }
 
+/// Whether the current API principal may access an agent-scoped resource.
+///
+/// Admin and Owner roles can inspect every agent.
+/// Lower roles are limited to agents whose manifest author matches their authenticated name.
+/// `None` remains allowed for the explicitly trusted loopback/no-auth deployment mode, matching the existing API compatibility contract.
+///
+/// An agent that is not in the registry is denied to every principal, including Admin: an agent-scoped resource addressed by an id that resolves to nothing is reported as 404 rather than served, so id enumeration cannot distinguish "exists but not yours" from "does not exist".
+pub(crate) fn can_access_agent(
+    state: &AppState,
+    agent_id: librefang_types::agent::AgentId,
+    api_user: Option<&axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> bool {
+    let Some(entry) = state.kernel.agent_registry().get(agent_id) else {
+        return false;
+    };
+    let Some(user) = api_user else {
+        return true;
+    };
+    if user.0.role >= crate::middleware::UserRole::Admin {
+        return true;
+    }
+    entry.manifest.author.eq_ignore_ascii_case(&user.0.name)
+}
+
 /// Shared application state.
 ///
 /// `kernel` is `Arc<dyn KernelApi>` (#3566) — method calls into the kernel

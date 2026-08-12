@@ -203,6 +203,11 @@ pub struct AuthenticatedApiUser {
     pub user_id: UserId,
 }
 
+/// Marks requests admitted solely by the explicitly trusted loopback/no-auth deployment mode.
+/// Most routes treat these as Owner-equivalent for local single-user compatibility, while especially sensitive handlers (notably the audit ledger) can still require an actual credential.
+#[derive(Clone, Copy, Debug)]
+pub struct TrustedNoAuthCaller;
+
 /// Endpoints that mutate kernel-wide configuration, user accounts, or
 /// daemon lifecycle. `librefang_kernel::auth::Action::{ModifyConfig,
 /// ManageUsers}` requires `UserRole::Owner` at the kernel layer; the
@@ -1752,6 +1757,7 @@ pub async fn auth(
                 role: UserRole::Owner,
                 user_id: UserId(ROOT_API_KEY_USER_ID),
             });
+            request.extensions_mut().insert(TrustedNoAuthCaller);
             return next.run(request).await;
         }
         return Response::builder()

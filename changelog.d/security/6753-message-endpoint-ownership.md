@@ -1,0 +1,3 @@
+Close the last cross-owner gap in this release's agent-ownership scoping: `POST /api/agents/{id}/message` and `/message/stream` checked only that the target agent existed, not that the caller owned it.
+  `agent_message` is one of the few RBAC carve-outs that let a plain `User`-role caller reach an arbitrary agent id, so without this check a non-owner could drive a full LLM turn — tool execution and budget spend included — on another user's agent by guessing or enumerating its UUID.
+  Both handlers now apply the same `can_access_agent` ownership check already used for the read-only routes and for `/clone` (#6753) (@houko)

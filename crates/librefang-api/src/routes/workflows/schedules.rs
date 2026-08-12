@@ -14,8 +14,32 @@ use super::*;
         (status = 200, description = "List schedules", body = crate::types::JsonObject)
     )
 )]
-pub async fn list_schedules(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_schedules(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> impl IntoResponse {
     let jobs = state.kernel.cron().list_all_jobs();
+    // Owner-scoping (#6753 follow-up): same cross-owner read leak as `/api/cron/jobs` — post-filter to jobs on agents the caller authors.
+    // Mirrors `list_triggers` / `list_cron_jobs`.
+    let restrict_to: Option<String> = match api_user.as_ref() {
+        Some(u) if u.0.role < crate::middleware::UserRole::Admin => Some(u.0.name.clone()),
+        _ => None,
+    };
+    let jobs: Vec<_> = if let Some(ref user_name) = restrict_to {
+        let owned_ids: std::collections::HashSet<AgentId> = state
+            .kernel
+            .agent_registry()
+            .list()
+            .iter()
+            .filter(|e| e.manifest.author.eq_ignore_ascii_case(user_name))
+            .map(|e| e.id)
+            .collect();
+        jobs.into_iter()
+            .filter(|j| owned_ids.contains(&j.agent_id))
+            .collect()
+    } else {
+        jobs
+    };
     let schedules: Vec<serde_json::Value> = jobs.iter().map(cron_job_to_schedule_json).collect();
     let total = schedules.len();
     Json(crate::types::PaginatedResponse {
@@ -30,6 +54,7 @@ pub async fn list_schedules(State(state): State<Arc<AppState>>) -> impl IntoResp
 #[utoipa::path(get, path = "/api/schedules/{id}", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), responses((status = 200, description = "Schedule details", body = crate::types::JsonObject)))]
 pub async fn get_schedule(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let job_id = match parse_cron_job_id(&id) {
@@ -37,8 +62,10 @@ pub async fn get_schedule(
         Err(e) => return e,
     };
     match state.kernel.cron().get_job(job_id) {
-        Some(job) => (StatusCode::OK, Json(cron_job_to_schedule_json(&job))),
-        None => ApiErrorResponse::not_found(format!("Schedule '{id}' not found")).into_json_tuple(),
+        Some(job) if super::super::can_access_agent(&state, job.agent_id, api_user.as_ref()) => {
+            (StatusCode::OK, Json(cron_job_to_schedule_json(&job)))
+        }
+        _ => ApiErrorResponse::not_found(format!("Schedule '{id}' not found")).into_json_tuple(),
     }
 }
 

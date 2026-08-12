@@ -1,0 +1,2 @@
+Enforce ownership checks across agent-scoped reads and require an authenticated Admin or Owner credential for audit-ledger access, preventing cross-owner disclosure of prompts, configuration, files, sessions, traces, logs, delivery history, cron jobs, and schedules.
+  Trusted credential-free deployments retain their existing compatibility for other routes but can no longer read the audit ledger without an explicit administrator credential (#6753) (@houko)
