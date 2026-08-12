@@ -28,11 +28,12 @@
 //! edit by hand, but it is human-readable for emergency surgery.
 
 use chrono::{DateTime, Utc};
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use librefang_types::agent::AgentId;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use tracing::{debug, warn};
 
 /// File name used inside `home_dir`.
@@ -180,28 +181,24 @@ impl AgentIdentityRegistry {
     /// to be authoritative for the running process even if the disk is
     /// momentarily wedged.
     pub fn register_if_absent(&self, name: &str, canonical_uuid: AgentId) -> AgentId {
-        if let Some(existing) = self.map.get(name) {
-            return existing.canonical_uuid;
-        }
-        let entry = AgentIdentityRecord {
-            canonical_uuid,
-            created_at: Utc::now(),
+        let (final_uuid, inserted) = match self.map.entry(name.to_string()) {
+            Entry::Occupied(existing) => (existing.get().canonical_uuid, false),
+            Entry::Vacant(vacant) => {
+                let record = AgentIdentityRecord {
+                    canonical_uuid,
+                    created_at: Utc::now(),
+                };
+                (vacant.insert(record).canonical_uuid, true)
+            }
         };
-        // Race-window: between the `get` above and the insert below, another
-        // thread could register the same name. `entry().or_insert_with` would
-        // be cleaner, but DashMap's `entry` API holds a write guard for the
-        // duration of the closure — fine here since the closure is cheap.
-        let final_uuid = self
-            .map
-            .entry(name.to_string())
-            .or_insert(entry)
-            .canonical_uuid;
-        if let Err(e) = self.persist() {
-            warn!(
-                name,
-                error = %e,
-                "agent_identities.toml: persist failed (in-memory entry retained)"
-            );
+        if inserted {
+            if let Err(e) = self.persist() {
+                warn!(
+                    name,
+                    error = %e,
+                    "agent_identities.toml: persist failed (in-memory entry retained)"
+                );
+            }
         }
         final_uuid
     }
@@ -235,7 +232,7 @@ impl AgentIdentityRegistry {
             Some(p) => p,
             None => return Ok(()),
         };
-        let _guard = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.persist_lock.lock();
 
         let snapshot: std::collections::BTreeMap<String, AgentIdentityRecord> = self
             .map
@@ -287,7 +284,7 @@ mod tests {
         let bob_uuid = AgentId::from_name("bob");
         let returned = reg.register_if_absent("alice", alice_uuid);
         assert_eq!(returned, alice_uuid);
-        reg.register_if_absent("bob", bob_uuid);
+        assert_eq!(reg.register_if_absent("bob", bob_uuid), bob_uuid);
         assert_eq!(reg.len(), 2);
 
         // Re-load — same path — should reproduce the same entries.
@@ -312,6 +309,39 @@ mod tests {
             got2, first,
             "second register must not clobber the canonical UUID"
         );
+    }
+
+    #[test]
+    fn concurrent_registration_of_same_name_persists_one_winner() {
+        const CONTENDERS: usize = 16;
+
+        let dir = tempdir().unwrap();
+        let reg = std::sync::Arc::new(AgentIdentityRegistry::load(dir.path()));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(CONTENDERS));
+        let handles: Vec<_> = (0..CONTENDERS)
+            .map(|index| {
+                let reg = std::sync::Arc::clone(&reg);
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let candidate = AgentId::from_name(&format!("candidate-{index}"));
+                    barrier.wait();
+                    reg.register_if_absent("shared-name", candidate)
+                })
+            })
+            .collect();
+
+        let returned: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("registration thread panicked"))
+            .collect();
+        let winner = returned[0];
+        assert!(returned.iter().all(|id| *id == winner));
+        assert_eq!(reg.len(), 1);
+        assert_eq!(reg.get("shared-name"), Some(winner));
+
+        let reloaded = AgentIdentityRegistry::load(dir.path());
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded.get("shared-name"), Some(winner));
     }
 
     #[test]
@@ -384,7 +414,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let reg = AgentIdentityRegistry::load(dir.path());
         for name in ["c", "a", "b"] {
-            reg.register_if_absent(name, AgentId::from_name(name));
+            let expected = AgentId::from_name(name);
+            assert_eq!(reg.register_if_absent(name, expected), expected);
         }
         let listed: Vec<String> = reg.list().keys().cloned().collect();
         assert_eq!(

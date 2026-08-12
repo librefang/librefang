@@ -13,40 +13,39 @@ permissions:
 jobs:
   report:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Generate weekly report
         id: report
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
-          REPO="librefang/librefang"
+          set -euo pipefail
+
           SINCE=$(date -u -d '7 days ago' +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -v-7d +%Y-%m-%dT00:00:00Z)
-          WEEK=$(date -u -d 'last monday' +%Y-%m-%d 2>/dev/null || date -u -v-monday +%Y-%m-%d)
+          WEEK="${SINCE%%T*}"
           TODAY=$(date -u +%Y-%m-%d)
 
           echo "Collecting stats since $SINCE..."
 
           # Merged PRs
-          MERGED_PRS=$(gh pr list --repo $REPO --state merged --search "merged:>=$SINCE" --json number,title,author --limit 50)
+          MERGED_PRS=$(gh pr list --repo "$REPO" --state merged --search "merged:>=$SINCE" --json number,title,author --limit 50)
           MERGED_COUNT=$(echo "$MERGED_PRS" | jq length)
 
           # Opened issues
-          OPENED_ISSUES=$(gh issue list --repo $REPO --state all --search "created:>=$SINCE" --json number,title,labels --limit 50)
+          OPENED_ISSUES=$(gh issue list --repo "$REPO" --state all --search "created:>=$SINCE" --json number,title,labels --limit 50)
           OPENED_COUNT=$(echo "$OPENED_ISSUES" | jq length)
 
           # Closed issues
-          CLOSED_ISSUES=$(gh issue list --repo $REPO --state closed --search "closed:>=$SINCE" --json number,title --limit 50)
+          CLOSED_ISSUES=$(gh issue list --repo "$REPO" --state closed --search "closed:>=$SINCE" --json number,title --limit 50)
           CLOSED_COUNT=$(echo "$CLOSED_ISSUES" | jq length)
 
-          # New contributors (first PR merged this week)
-          NEW_CONTRIBUTORS=$(echo "$MERGED_PRS" | jq -r '.[].author.login' | sort -u)
-
           # Stars
-          STARS=$(gh api repos/$REPO --jq '.stargazers_count')
+          STARS=$(gh api "repos/$REPO" --jq '.stargazers_count')
 
           # Open good-first-issues
-          GFI_COUNT=$(gh issue list --repo $REPO --label "good first issue" --state open --json number --jq 'length')
+          GFI_COUNT=$(gh issue list --repo "$REPO" --label "good first issue" --state open --json number --jq 'length')
 
           # Build markdown report
           cat > /tmp/report.md << REPORT_EOF
@@ -66,52 +65,69 @@ jobs:
 
           # Add merged PRs section
           if [ "$MERGED_COUNT" -gt 0 ]; then
-            echo "## Merged PRs" >> /tmp/report.md
-            echo "" >> /tmp/report.md
-            echo "$MERGED_PRS" | jq -r '.[] | "- \(.title) (#\(.number)) @\(.author.login)"' >> /tmp/report.md
-            echo "" >> /tmp/report.md
+            {
+              echo "## Merged PRs"
+              echo ""
+              echo "$MERGED_PRS" | jq -r '.[] | "- \(.title) (#\(.number)) @\(.author.login)"'
+              echo ""
+            } >> /tmp/report.md
           fi
 
           # Add new issues section
           if [ "$OPENED_COUNT" -gt 0 ]; then
-            echo "## New Issues" >> /tmp/report.md
-            echo "" >> /tmp/report.md
-            echo "$OPENED_ISSUES" | jq -r '.[] | "- \(.title) (#\(.number))"' >> /tmp/report.md
-            echo "" >> /tmp/report.md
+            {
+              echo "## New Issues"
+              echo ""
+              echo "$OPENED_ISSUES" | jq -r '.[] | "- \(.title) (#\(.number))"'
+              echo ""
+            } >> /tmp/report.md
           fi
 
           # Add call to action
-          cat >> /tmp/report.md << 'CTA_EOF'
+          cat >> /tmp/report.md << CTA_EOF
           ## Get Involved
 
-          - 🆕 Check [good first issues](https://github.com/librefang/librefang/labels/good%20first%20issue)
-          - 💬 Join [Discussions](https://github.com/librefang/librefang/discussions)
-          - 📖 Read the [Contributing Guide](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md)
+          - 🆕 Check [good first issues](https://github.com/$REPO/labels/good%20first%20issue)
+          - 💬 Join [Discussions](https://github.com/$REPO/discussions)
+          - 📖 Read the [Contributing Guide](https://github.com/$REPO/blob/main/CONTRIBUTING.md)
           CTA_EOF
 
           # Clean up leading whitespace from heredoc indentation
           sed -i 's/^          //' /tmp/report.md
 
-          echo "report_path=/tmp/report.md" >> "$GITHUB_OUTPUT"
-          echo "week=$WEEK" >> "$GITHUB_OUTPUT"
-          echo "today=$TODAY" >> "$GITHUB_OUTPUT"
-          echo "merged_count=$MERGED_COUNT" >> "$GITHUB_OUTPUT"
-          echo "opened_count=$OPENED_COUNT" >> "$GITHUB_OUTPUT"
-          echo "closed_count=$CLOSED_COUNT" >> "$GITHUB_OUTPUT"
-          echo "stars=$STARS" >> "$GITHUB_OUTPUT"
-          echo "gfi_count=$GFI_COUNT" >> "$GITHUB_OUTPUT"
+          {
+            echo "report_path=/tmp/report.md"
+            echo "week=$WEEK"
+            echo "today=$TODAY"
+            echo "merged_count=$MERGED_COUNT"
+            echo "opened_count=$OPENED_COUNT"
+            echo "closed_count=$CLOSED_COUNT"
+            echo "stars=$STARS"
+            echo "gfi_count=$GFI_COUNT"
+          } >> "$GITHUB_OUTPUT"
 
           cat /tmp/report.md
 
       - name: Post to GitHub Discussions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
-          REPO_ID=$(gh api repos/librefang/librefang --jq '.node_id')
-          CAT_ID=$(gh api graphql -f query='{ repository(owner:"librefang", name:"librefang") { discussionCategories(first:20) { nodes { id, name } } } }' --jq '.data.repository.discussionCategories.nodes[] | select(.name=="Announcements") | .id')
+          set -euo pipefail
+
+          OWNER=${REPO%%/*}
+          NAME=${REPO#*/}
+          REPO_ID=$(gh api "repos/$REPO" --jq '.node_id')
+          # $owner and $name below are GraphQL variables, not shell variables.
+          # shellcheck disable=SC2016
+          CAT_ID=$(gh api graphql \
+            -f query='query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { discussionCategories(first: 20) { nodes { id, name } } } }' \
+            -f owner="$OWNER" \
+            -f name="$NAME" \
+            --jq '.data.repository.discussionCategories.nodes[] | select(.name=="Announcements") | .id')
 
           if [ -n "$CAT_ID" ]; then
-            BODY=$(cat /tmp/report.md | jq -Rs .)
+            BODY=$(jq -Rs . < /tmp/report.md)
             gh api graphql -f query="
               mutation {
                 createDiscussion(input: {
@@ -131,7 +147,10 @@ jobs:
       - name: Post to Discord
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
+
           if [ -z "$DISCORD_WEBHOOK_URL" ]; then
             echo "No Discord webhook configured, skipping"
             exit 0
@@ -143,11 +162,11 @@ jobs:
           📌 PRs merged: **${{ steps.report.outputs.merged_count }}** | Issues opened: **${{ steps.report.outputs.opened_count }}** | Issues closed: **${{ steps.report.outputs.closed_count }}**
           ⭐ Stars: **${{ steps.report.outputs.stars }}** | Good first issues: **${{ steps.report.outputs.gfi_count }}**
 
-          👉 [Full report](https://github.com/librefang/librefang/discussions) | [Contribute](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md)"
+          👉 [Full report](https://github.com/$REPO/discussions) | [Contribute](https://github.com/$REPO/blob/main/CONTRIBUTING.md)"
 
           # Clean indentation
-          CONTENT=$(echo "$CONTENT" | sed 's/^          //')
+          CONTENT=${CONTENT//$'\n          '/$'\n'}
 
-          curl -s -H "Content-Type: application/json" \
+          curl --fail-with-body --silent --show-error -H "Content-Type: application/json" \
             -d "{\"content\": $(echo "$CONTENT" | jq -Rs .)}" \
             "$DISCORD_WEBHOOK_URL"

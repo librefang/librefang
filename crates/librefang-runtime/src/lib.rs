@@ -110,6 +110,7 @@ pub mod tool_runner;
 pub mod trace_store;
 pub use tool_classifier::classify_tool;
 pub mod tts;
+pub(crate) mod uploaded_file;
 pub mod web_cache;
 pub mod web_content;
 pub mod web_fetch;

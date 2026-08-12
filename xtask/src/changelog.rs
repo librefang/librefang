@@ -1,10 +1,19 @@
 use crate::common::repo_root;
 use clap::Parser;
+#[cfg(windows)]
+use process_wrap::std::JobObject;
+#[cfg(unix)]
+use process_wrap::std::ProcessGroup;
+use process_wrap::std::{ChildWrapper, CommandWrap};
 use regex::Regex;
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::sync::{mpsc, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Parser, Debug)]
 pub struct ChangelogArgs {
@@ -40,41 +49,276 @@ pub(crate) const FRAGMENT_DIR: &str = "changelog.d";
 
 /// The heading of the curated section contributors append to.
 const UNRELEASED_HEADING: &str = "## [Unreleased]";
+const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+const GH_TIMEOUT: Duration = Duration::from_secs(30);
+const CLAUDE_TIMEOUT: Duration = Duration::from_secs(120);
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const COMMAND_KILL_GRACE: Duration = Duration::from_millis(250);
 
-fn find_latest_stable_tag(root: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["tag", "--sort=-creatordate"])
-        .current_dir(root)
-        .output()
-        .ok()?;
+fn spawn_output_reader<R>(mut reader: R) -> mpsc::Receiver<Result<Vec<u8>, String>>
+where
+    R: Read + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = reader
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+            .map_err(|error| error.to_string());
+        let _ = sender.send(result);
+    });
+    receiver
+}
+
+fn take_reader_result(
+    receiver: &mpsc::Receiver<Result<Vec<u8>, String>>,
+    output: &mut Option<Vec<u8>>,
+    stream_name: &str,
+) -> Result<(), String> {
+    if output.is_some() {
+        return Ok(());
+    }
+    match receiver.try_recv() {
+        Ok(Ok(bytes)) => {
+            *output = Some(bytes);
+            Ok(())
+        }
+        Ok(Err(error)) => Err(format!("failed to read command {stream_name}: {error}")),
+        Err(mpsc::TryRecvError::Empty) => Ok(()),
+        Err(mpsc::TryRecvError::Disconnected) => Err(format!(
+            "command {stream_name} reader stopped before returning output"
+        )),
+    }
+}
+
+fn fail_and_terminate(child: &mut dyn ChildWrapper, description: &str, error: String) -> String {
+    match child.start_kill() {
+        Ok(()) => error,
+        Err(kill_error) => format!(
+            "{error}; additionally failed to terminate the process tree for {description}: {kill_error}"
+        ),
+    }
+}
+
+fn take_completed_output(
+    status: &mut Option<std::process::ExitStatus>,
+    stdout: &mut Option<Vec<u8>>,
+    stderr: &mut Option<Vec<u8>>,
+) -> Option<Output> {
+    if status.is_none() || stdout.is_none() || stderr.is_none() {
+        return None;
+    }
+    Some(Output {
+        status: status.take().expect("status was checked above"),
+        stdout: stdout.take().expect("stdout was checked above"),
+        stderr: stderr.take().expect("stderr was checked above"),
+    })
+}
+
+fn command_output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Output, String> {
+    let description = format!("{command:?}");
+    let raw_command = std::mem::replace(command, Command::new(""));
+    let mut command = CommandWrap::from(raw_command);
+    #[cfg(unix)]
+    command.wrap(ProcessGroup::leader());
+    #[cfg(windows)]
+    command.wrap(JobObject);
+    command
+        .command_mut()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to spawn {description}: {error}"))?;
+    let stdout_reader = spawn_output_reader(
+        child
+            .stdout()
+            .take()
+            .expect("stdout was configured as piped"),
+    );
+    let stderr_reader = spawn_output_reader(
+        child
+            .stderr()
+            .take()
+            .expect("stderr was configured as piped"),
+    );
+    let started = Instant::now();
+    let mut status = None;
+    let mut stdout = None;
+    let mut stderr = None;
+
+    while started.elapsed() < timeout {
+        if status.is_none() {
+            status = match child.try_wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    return Err(fail_and_terminate(
+                        child.as_mut(),
+                        &description,
+                        format!("failed while waiting for {description}: {error}"),
+                    ));
+                }
+            };
+        }
+        if let Err(error) = take_reader_result(&stdout_reader, &mut stdout, "stdout") {
+            return Err(fail_and_terminate(child.as_mut(), &description, error));
+        }
+        if let Err(error) = take_reader_result(&stderr_reader, &mut stderr, "stderr") {
+            return Err(fail_and_terminate(child.as_mut(), &description, error));
+        }
+        if let Some(output) = take_completed_output(&mut status, &mut stdout, &mut stderr) {
+            return Ok(output);
+        }
+        thread::sleep(COMMAND_POLL_INTERVAL.min(timeout.saturating_sub(started.elapsed())));
+    }
+
+    // Close a race where the command and both readers finished exactly as the deadline expired, before sending a kill signal to a now-empty group.
+    if status.is_none() {
+        status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                return Err(fail_and_terminate(
+                    child.as_mut(),
+                    &description,
+                    format!("failed while waiting for {description}: {error}"),
+                ));
+            }
+        };
+    }
+    if let Err(error) = take_reader_result(&stdout_reader, &mut stdout, "stdout") {
+        return Err(fail_and_terminate(child.as_mut(), &description, error));
+    }
+    if let Err(error) = take_reader_result(&stderr_reader, &mut stderr, "stderr") {
+        return Err(fail_and_terminate(child.as_mut(), &description, error));
+    }
+    if let Some(output) = take_completed_output(&mut status, &mut stdout, &mut stderr) {
+        return Ok(output);
+    }
+
+    child.start_kill().map_err(|error| {
+        format!(
+            "command timed out after {}s and its process tree could not be terminated: {description}: {error}",
+            timeout.as_secs_f64()
+        )
+    })?;
+
+    // Give the killed tree a short, bounded opportunity to close its pipes and be reaped.
+    // Never turn timeout cleanup into another unbounded wait.
+    let cleanup_deadline = Instant::now() + COMMAND_KILL_GRACE;
+    let mut cleanup_error = None;
+    while Instant::now() < cleanup_deadline {
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(child_status) => status = child_status,
+                Err(error) => {
+                    cleanup_error = Some(format!("failed to reap the terminated command: {error}"));
+                    break;
+                }
+            }
+        }
+        if let Err(error) = take_reader_result(&stdout_reader, &mut stdout, "stdout") {
+            cleanup_error = Some(error);
+            break;
+        }
+        if let Err(error) = take_reader_result(&stderr_reader, &mut stderr, "stderr") {
+            cleanup_error = Some(error);
+            break;
+        }
+        if status.is_some() && stdout.is_some() && stderr.is_some() {
+            break;
+        }
+        thread::sleep(COMMAND_POLL_INTERVAL);
+    }
+
+    let cleanup_suffix = cleanup_error
+        .map(|error| format!("; cleanup error: {error}"))
+        .unwrap_or_default();
+    Err(format!(
+        "command timed out after {}s: {description}{cleanup_suffix}",
+        timeout.as_secs_f64(),
+    ))
+}
+
+fn pr_number_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"#(\d+)").unwrap())
+}
+
+fn breaking_title_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\w+(?:\([^)]*\))?!:").unwrap())
+}
+
+fn conventional_title_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^(\w+)(?:\([^)]*\))?[!]?:\s*(.*)").unwrap())
+}
+
+fn skip_title_res() -> &'static [Regex; 3] {
+    static RES: OnceLock<[Regex; 3]> = OnceLock::new();
+    RES.get_or_init(|| {
+        [
+            Regex::new(r"(?i)Update contributors and star history").unwrap(),
+            Regex::new(r"^v?\d+\.\d+\.\d+").unwrap(),
+            Regex::new(r"(?i)^release:").unwrap(),
+        ]
+    })
+}
+
+fn find_latest_stable_tag(root: &Path) -> Result<Option<String>, String> {
+    let output = command_output_with_timeout(
+        Command::new("git")
+            .args(["tag", "--sort=-creatordate"])
+            .current_dir(root),
+        GIT_TIMEOUT,
+    )?;
+    if !output.status.success() {
+        return Err(format!(
+            "git tag failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
     let stdout = String::from_utf8_lossy(&output.stdout);
     let version_re = Regex::new(r"^v[0-9]").unwrap();
     let prerelease_re = Regex::new(r"(alpha|beta|rc)").unwrap();
     for line in stdout.lines() {
         let tag = line.trim();
         if version_re.is_match(tag) && !prerelease_re.is_match(tag) {
-            return Some(tag.to_string());
+            return Ok(Some(tag.to_string()));
         }
     }
-    None
+    Ok(None)
 }
 
-fn extract_pr_numbers(root: &Path, git_range: &str) -> Vec<u64> {
+fn require_pr_numbers(pr_numbers: Vec<u64>, git_range: &str) -> Result<Vec<u64>, String> {
+    if pr_numbers.is_empty() {
+        Err(format!(
+            "No PRs found in non-empty release range {git_range}"
+        ))
+    } else {
+        Ok(pr_numbers)
+    }
+}
+
+fn extract_pr_numbers(root: &Path, git_range: &str) -> Result<Vec<u64>, String> {
     let args = if git_range == "HEAD" {
         vec!["log", "--oneline", "HEAD"]
     } else {
         vec!["log", "--oneline", git_range]
     };
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .ok();
-    let stdout = match output {
-        Some(o) => String::from_utf8_lossy(&o.stdout).to_string(),
-        None => return vec![],
-    };
-    parse_pr_numbers(&stdout)
+    let output = command_output_with_timeout(
+        Command::new("git").args(args).current_dir(root),
+        GIT_TIMEOUT,
+    )?;
+    if !output.status.success() {
+        return Err(format!(
+            "git log failed for {git_range}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(parse_pr_numbers(&String::from_utf8_lossy(&output.stdout)))
 }
 
 /// Pull the PR number out of each `git log --oneline` subject.
@@ -87,11 +331,11 @@ fn extract_pr_numbers(root: &Path, git_range: &str) -> Vec<u64> {
 /// the release notes; the old "every `#N` in the whole log" approach pulled
 /// them in and resolved them to ancient or unmerged PRs.
 fn parse_pr_numbers(log: &str) -> Vec<u64> {
-    let re = Regex::new(r"#(\d+)").unwrap();
     let mut nums: Vec<u64> = log
         .lines()
         .filter_map(|line| {
-            re.captures_iter(line)
+            pr_number_re()
+                .captures_iter(line)
                 .last()
                 .and_then(|cap| cap.get(1)?.as_str().parse().ok())
         })
@@ -110,26 +354,34 @@ struct PrInfo {
     breaking: bool,
 }
 
-fn fetch_pr_info(num: u64) -> Option<PrInfo> {
-    let output = Command::new("gh")
-        .args([
+fn fetch_pr_info(num: u64) -> Result<PrInfo, String> {
+    let output = command_output_with_timeout(
+        Command::new("gh").args([
             "pr",
             "view",
             &num.to_string(),
             "--json",
             "number,title,author",
-        ])
-        .output()
-        .ok()?;
+        ]),
+        GH_TIMEOUT,
+    )?;
     if !output.status.success() {
-        return None;
+        return Err(format!(
+            "gh pr view {num} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    let title = json["title"].as_str()?.to_string();
-    let breaking_re = Regex::new(r"^\w+(?:\([^)]*\))?!:").unwrap();
-    Some(PrInfo {
-        number: json["number"].as_u64()?,
-        breaking: breaking_re.is_match(&title),
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("invalid gh JSON for PR #{num}: {error}"))?;
+    let title = json["title"]
+        .as_str()
+        .ok_or_else(|| format!("gh JSON for PR #{num} has no title"))?
+        .to_string();
+    Ok(PrInfo {
+        number: json["number"]
+            .as_u64()
+            .ok_or_else(|| format!("gh JSON for PR #{num} has no number"))?,
+        breaking: breaking_title_re().is_match(&title),
         title,
         author: json["author"]["login"].as_str().unwrap_or("").to_string(),
     })
@@ -149,12 +401,7 @@ fn classify_prefix(prefix: &str) -> &'static str {
 }
 
 fn should_skip(title: &str) -> bool {
-    let patterns = [
-        Regex::new(r"(?i)Update contributors and star history").unwrap(),
-        Regex::new(r"^v?\d+\.\d+\.\d+").unwrap(),
-        Regex::new(r"(?i)^release:").unwrap(),
-    ];
-    patterns.iter().any(|re| re.is_match(title))
+    skip_title_res().iter().any(|re| re.is_match(title))
 }
 
 const CATEGORY_ORDER: &[&str] = &[
@@ -182,7 +429,6 @@ const PRIMARY_CATEGORIES: &[&str] = &["Added", "Fixed", "Changed", "Performance"
 /// `<details>` block. An empty set is the pre-#6628 behaviour: every PR in range
 /// gets a generated line.
 fn generate_classified_output(prs: &[PrInfo], suppressed: &BTreeSet<u64>) -> String {
-    let conv_re = Regex::new(r"^(\w+)(?:\([^)]*\))?[!]?:\s*(.*)").unwrap();
     let mut categories: std::collections::HashMap<&str, Vec<String>> =
         std::collections::HashMap::new();
 
@@ -203,7 +449,7 @@ fn generate_classified_output(prs: &[PrInfo], suppressed: &BTreeSet<u64>) -> Str
             format!(" (@{})", pr.author)
         };
 
-        let (category, desc) = if let Some(caps) = conv_re.captures(title) {
+        let (category, desc) = if let Some(caps) = conventional_title_re().captures(title) {
             let prefix = caps.get(1).unwrap().as_str().to_lowercase();
             let desc_part = caps.get(2).unwrap().as_str().trim().to_string();
             let cat = classify_prefix(&prefix);
@@ -263,7 +509,6 @@ fn generate_classified_output(prs: &[PrInfo], suppressed: &BTreeSet<u64>) -> Str
 /// title carries the `!` marker (`feat!:`, `fix(scope)!:`, etc.). Returns
 /// `None` when there are none — the section is omitted entirely.
 fn generate_breaking_changes(prs: &[PrInfo]) -> Option<String> {
-    let conv_re = Regex::new(r"^(\w+)(?:\([^)]*\))?!:\s*(.*)").unwrap();
     let mut bullets = Vec::new();
     for pr in prs {
         if !pr.breaking || should_skip(pr.title.trim()) {
@@ -274,7 +519,7 @@ fn generate_breaking_changes(prs: &[PrInfo]) -> Option<String> {
         } else {
             format!(" (@{})", pr.author)
         };
-        let desc = conv_re
+        let desc = conventional_title_re()
             .captures(pr.title.trim())
             .and_then(|c| c.get(2).map(|m| m.as_str().trim().to_string()))
             .unwrap_or_else(|| pr.title.trim().to_string());
@@ -334,6 +579,17 @@ fn generate_stats_line(prs: &[PrInfo], base_tag: Option<&str>) -> Option<String>
     ))
 }
 
+/// Validate and format a `claude`-generated Highlights block.
+/// Rejects output that does not open with exactly `### Highlights`, or that carries any other markdown heading, so a prompt-injected heading (`## [Unreleased]`, a forged `### Fixed`, etc.) can never reach the assembled changelog.
+fn format_highlights_output(raw: &str) -> Option<String> {
+    let text = raw.trim();
+    let mut lines = text.lines();
+    if lines.next()? != "### Highlights" || lines.any(|line| line.trim_start().starts_with('#')) {
+        return None;
+    }
+    Some(format!("{text}\n\n"))
+}
+
 /// Summarize the classified changelog into a `### Highlights` block via local
 /// `claude` CLI. Returns `None` if claude isn't installed, the call fails, or
 /// the response is empty — never propagates errors to gate the release.
@@ -342,7 +598,11 @@ fn generate_highlights(classified: &str) -> Option<String> {
         return None;
     }
 
-    if Command::new("claude").arg("--version").output().is_err() {
+    let version = command_output_with_timeout(
+        Command::new("claude").arg("--version"),
+        Duration::from_secs(10),
+    );
+    if !version.is_ok_and(|output| output.status.success()) {
         println!("  claude CLI not available, skipping Highlights generation");
         return None;
     }
@@ -357,33 +617,34 @@ fn generate_highlights(classified: &str) -> Option<String> {
         classified
     );
 
-    let output = Command::new("claude")
-        .args([
-            "-p",
-            "--model",
-            "claude-sonnet-4-6",
-            "--output-format",
-            "text",
-            &prompt,
-        ])
-        .env_remove("CLAUDECODE")
-        .output()
-        .ok()?;
+    let output = match command_output_with_timeout(
+        Command::new("claude")
+            .args([
+                "-p",
+                "--model",
+                "claude-sonnet-4-6",
+                "--output-format",
+                "text",
+                &prompt,
+            ])
+            .env_remove("CLAUDECODE"),
+        CLAUDE_TIMEOUT,
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("  {error}; skipping Highlights generation");
+            return None;
+        }
+    };
 
     if !output.status.success() {
         println!("  claude call failed, skipping Highlights generation");
         return None;
     }
 
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
+    let Some(block) = format_highlights_output(&String::from_utf8_lossy(&output.stdout)) else {
+        eprintln!("  claude returned an invalid Highlights block; skipping it");
         return None;
-    }
-
-    let block = if text.starts_with("### Highlights") {
-        format!("{}\n\n", text)
-    } else {
-        format!("### Highlights\n\n{}\n\n", text)
     };
     println!("  Generated Highlights via claude");
     Some(block)
@@ -821,12 +1082,13 @@ fn render_changelog(content: &str, version: &str, section: &str) -> String {
             return result;
         }
         content.to_string()
-    } else if let Some(m) = dated_heading_re
-        .find(content)
-        .or_else(|| heading_re.find(content))
-    {
+    } else if let Some(m) = dated_heading_re.find(content).or_else(|| {
+        heading_re
+            .find_iter(content)
+            .find(|heading| !content[heading.start()..].starts_with(UNRELEASED_HEADING))
+    }) {
         // Insert before the first dated release heading so a leading `## [Unreleased]` section stays on top.
-        // Fall back to the first heading of any kind when no dated release exists yet.
+        // If there is no dated heading, skip the Unreleased heading itself and insert before any later custom section.
         let pos = m.start();
         let mut result = String::new();
         result.push_str(&content[..pos]);
@@ -1205,7 +1467,10 @@ pub fn run(args: ChangelogArgs) -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
     let changelog_path = root.join("CHANGELOG.md");
 
-    let base_tag = args.base_tag.or_else(|| find_latest_stable_tag(&root));
+    let base_tag = match args.base_tag {
+        Some(tag) => Some(tag),
+        None => find_latest_stable_tag(&root)?,
+    };
 
     println!(
         "Generating changelog: {} (since {})",
@@ -1213,9 +1478,15 @@ pub fn run(args: ChangelogArgs) -> Result<(), Box<dyn std::error::Error>> {
         base_tag.as_deref().unwrap_or("beginning")
     );
 
-    // Check for gh CLI
-    if Command::new("gh").arg("--version").output().is_err() {
-        return Err("gh CLI required".into());
+    // Check for gh CLI without allowing a wedged executable to block release tooling.
+    let gh_version =
+        command_output_with_timeout(Command::new("gh").arg("--version"), Duration::from_secs(10))?;
+    if !gh_version.status.success() {
+        return Err(format!(
+            "gh CLI check failed: {}",
+            String::from_utf8_lossy(&gh_version.stderr).trim()
+        )
+        .into());
     }
 
     let git_range = match &base_tag {
@@ -1223,17 +1494,13 @@ pub fn run(args: ChangelogArgs) -> Result<(), Box<dyn std::error::Error>> {
         None => "HEAD".to_string(),
     };
 
-    let pr_numbers = extract_pr_numbers(&root, &git_range);
+    let pr_numbers = require_pr_numbers(extract_pr_numbers(&root, &git_range)?, &git_range)?;
 
-    if pr_numbers.is_empty() {
-        println!("No PRs found in range {}", git_range);
-    }
-
-    // Fetch PR info
+    // Fetch every PR fail-closed: partial metadata would silently publish an incomplete release section.
     let prs: Vec<PrInfo> = pr_numbers
         .iter()
-        .filter_map(|&num| fetch_pr_info(num))
-        .collect();
+        .map(|&num| fetch_pr_info(num))
+        .collect::<Result<_, _>>()?;
 
     // Lift the curated `[Unreleased]` prose out first: which PRs it already
     // documents decides which generated entries the dated section may repeat, and
@@ -1290,12 +1557,7 @@ pub fn run(args: ChangelogArgs) -> Result<(), Box<dyn std::error::Error>> {
     if !drained.curated.is_empty() {
         // Count PRs actually in range, not references found: curated prose cites
         // plenty of older PRs that were never going to get a generated entry here.
-        // Strictly the PRs in range that `gh` returned metadata for: `prs` is
-        // `extract_pr_numbers` over `git_range` filtered through `fetch_pr_info`,
-        // which drops a number silently when the lookup fails. A dropped in-range
-        // PR therefore counts as already-shipped and over-reports below, which is
-        // the benign direction — a spurious "consider pruning" line, never a
-        // wrongly written file.
+        // Metadata collection is fail-closed, so `prs` contains every extracted in-range PR or generation returned before touching the changelog.
         let in_range: BTreeSet<u64> = prs.iter().map(|p| p.number).collect();
         let suppressed_in_range = suppressed.intersection(&in_range).count();
         // Broken out by bullet, because the totals mean different things. Nothing
@@ -1349,16 +1611,20 @@ pub fn run(args: ChangelogArgs) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bullet_excerpt, collect_fragments_in, curated_pr_refs, drain_unreleased,
-        generate_classified_output, parse_pr_numbers, prose_dropped_by_regeneration,
-        render_changelog, render_fragment_bullet, unreleased_bullet_blocks,
-        verify_no_curated_bullet_lost, write_changelog, GeneratedSections, PrInfo, FRAGMENT_DIR,
-        FRAGMENT_SECTIONS, UNRELEASED_HEADING,
+        bullet_excerpt, collect_fragments_in, command_output_with_timeout, curated_pr_refs,
+        drain_unreleased, extract_pr_numbers, format_highlights_output, generate_classified_output,
+        parse_pr_numbers, prose_dropped_by_regeneration, render_changelog, render_fragment_bullet,
+        require_pr_numbers, unreleased_bullet_blocks, verify_no_curated_bullet_lost,
+        write_changelog, GeneratedSections, PrInfo, FRAGMENT_DIR, FRAGMENT_SECTIONS,
+        UNRELEASED_HEADING,
     };
     use std::collections::BTreeSet;
     use std::fs;
+    use std::io::Write;
     use std::path::PathBuf;
+    use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
 
     fn first_section_heading(s: &str) -> &str {
         s.lines().find(|l| l.starts_with("## [")).unwrap()
@@ -2347,6 +2613,162 @@ mod tests {
         // Existing content is preserved verbatim.
         assert!(out.contains("- pending (#9) (@me)"));
         assert!(out.contains("- old (#1) (@me)"));
+    }
+
+    #[test]
+    fn keeps_unreleased_on_top_for_first_release_without_dated_heading() {
+        let content = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- pending (#9) (@me)\n";
+        let section = "## [2026.2.2] - 2026-02-02\n\n### Fixed\n\n- thing (#10) (@me)\n";
+        let out = render_changelog(content, "2026.2.2", section);
+
+        assert_eq!(first_section_heading(&out), "## [Unreleased]");
+        assert!(out.find("## [Unreleased]").unwrap() < out.find("## [2026.2.2]").unwrap());
+    }
+
+    #[test]
+    fn rejects_structural_headings_in_generated_highlights() {
+        let injected = "### Highlights\n\n- **Safe** — summary\n\n## [Unreleased]\n\n- injected";
+        assert!(format_highlights_output(injected).is_none());
+        assert!(format_highlights_output("### Highlights\n\n  ## [Unreleased]").is_none());
+        assert!(format_highlights_output("# Changelog\n\n- replacement").is_none());
+    }
+
+    #[test]
+    fn accepts_well_formed_generated_highlights() {
+        let text = "### Highlights\n\n- **Feature** — concise summary";
+        assert_eq!(format_highlights_output(text), Some(format!("{text}\n\n")));
+    }
+
+    #[test]
+    fn extract_pr_numbers_reports_git_failure() {
+        let tree = make_tree("");
+        let error = extract_pr_numbers(&tree.0, "missing-tag..HEAD").unwrap_err();
+        assert!(error.contains("git log"), "{error}");
+    }
+
+    #[test]
+    fn rejects_an_empty_pr_range_before_writing() {
+        let error = require_pr_numbers(Vec::new(), "v1..HEAD").unwrap_err();
+        assert!(error.contains("No PRs found"), "{error}");
+    }
+
+    #[test]
+    fn command_timeout_terminates_hung_child() {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        let module = module_path!().split_once("::").unwrap().1;
+        command
+            .args(["--exact", &format!("{module}::timeout_probe")])
+            .env("LIBREFANG_CHANGELOG_TIMEOUT_PROBE", "1");
+        let error =
+            command_output_with_timeout(&mut command, Duration::from_millis(50)).unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+    }
+
+    #[test]
+    fn timeout_probe() {
+        if std::env::var_os("LIBREFANG_CHANGELOG_TIMEOUT_PROBE").is_some() {
+            std::thread::sleep(Duration::from_secs(10));
+        }
+    }
+
+    #[test]
+    fn command_timeout_covers_descendants_holding_output_pipes() {
+        let module = module_path!().split_once("::").unwrap().1;
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", &format!("{module}::descendant_pipe_probe")])
+            .env("LIBREFANG_CHANGELOG_DESCENDANT_PROBE", "1");
+
+        let started = Instant::now();
+        let error =
+            command_output_with_timeout(&mut command, Duration::from_millis(100)).unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn descendant_pipe_probe() {
+        if std::env::var_os("LIBREFANG_CHANGELOG_DESCENDANT_PROBE").is_none() {
+            return;
+        }
+        let module = module_path!().split_once("::").unwrap().1;
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("{module}::pipe_holder_probe")])
+            .env("LIBREFANG_CHANGELOG_PIPE_HOLDER", "1")
+            .spawn()
+            .unwrap();
+        std::thread::spawn(move || child.wait());
+    }
+
+    #[test]
+    fn pipe_holder_probe() {
+        if std::env::var_os("LIBREFANG_CHANGELOG_PIPE_HOLDER").is_some() {
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    }
+
+    #[test]
+    fn command_capture_drains_large_stdout_and_stderr() {
+        let module = module_path!().split_once("::").unwrap().1;
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", &format!("{module}::large_output_probe")])
+            .env("LIBREFANG_CHANGELOG_LARGE_OUTPUT_PROBE", "1");
+        let output = command_output_with_timeout(&mut command, Duration::from_secs(5)).unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.len() >= 1024 * 1024);
+        assert!(output.stderr.len() >= 1024 * 1024);
+    }
+
+    #[test]
+    fn command_capture_preserves_a_stream_that_finishes_first() {
+        let module = module_path!().split_once("::").unwrap().1;
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", &format!("{module}::staggered_output_probe")])
+            .env("LIBREFANG_CHANGELOG_STAGGERED_PROBE", "1");
+
+        let output = command_output_with_timeout(&mut command, Duration::from_secs(2)).unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("delayed stderr"));
+    }
+
+    #[test]
+    fn staggered_output_probe() {
+        if std::env::var_os("LIBREFANG_CHANGELOG_STAGGERED_PROBE").is_none() {
+            return;
+        }
+        let module = module_path!().split_once("::").unwrap().1;
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("{module}::delayed_stderr_probe"),
+                "--nocapture",
+            ])
+            .env("LIBREFANG_CHANGELOG_DELAYED_STDERR_PROBE", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        std::thread::spawn(move || child.wait());
+    }
+
+    #[test]
+    fn delayed_stderr_probe() {
+        if std::env::var_os("LIBREFANG_CHANGELOG_DELAYED_STDERR_PROBE").is_some() {
+            std::thread::sleep(Duration::from_millis(100));
+            eprintln!("delayed stderr");
+        }
+    }
+
+    #[test]
+    fn large_output_probe() {
+        if std::env::var_os("LIBREFANG_CHANGELOG_LARGE_OUTPUT_PROBE").is_none() {
+            return;
+        }
+        let bytes = vec![b'x'; 1024 * 1024];
+        std::io::stdout().write_all(&bytes).unwrap();
+        std::io::stderr().write_all(&bytes).unwrap();
     }
 
     #[test]

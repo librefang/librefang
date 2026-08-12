@@ -40,8 +40,12 @@ static RE_ATTR: Lazy<Regex> = Lazy::new(|| {
 });
 
 fn href_is_safe(href: &str) -> bool {
-    let lower = href.trim().to_ascii_lowercase();
-    ALLOWED_HREF_SCHEMES.iter().any(|s| lower.starts_with(s))
+    let trimmed = href.trim();
+    ALLOWED_HREF_SCHEMES.iter().any(|scheme| {
+        trimmed
+            .get(..scheme.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+    })
 }
 
 fn escape_attr_value(v: &str) -> String {
@@ -218,6 +222,8 @@ mod tests {
     fn accepts_safe_href() {
         let s = sanitize_telegram_html("<a href=\"https://example.com\">x</a>");
         assert!(s.contains("<a href=\"https://example.com\">"));
+        assert!(href_is_safe(" HTTPS://example.com "));
+        assert!(!href_is_safe("éttps://example.com"));
     }
 
     #[test]
