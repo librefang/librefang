@@ -89,6 +89,8 @@ class LibreFang:
         except HTTPError as e:
             body_text = e.read().decode() if e.fp else ""
             raise LibreFangError(f"HTTP {e.code}: {body_text}", e.code, body_text) from e
+        except TimeoutError as e:
+            raise LibreFangError(f"Request timed out after {self.timeout}s") from e
         except URLError as e:
             raise LibreFangError(f"Connection error: {e.reason}") from e
 
@@ -108,6 +110,8 @@ class LibreFang:
         except HTTPError as e:
             body_text = e.read().decode() if e.fp else ""
             raise LibreFangError(f"HTTP {e.code}: {body_text}", e.code, body_text) from e
+        except TimeoutError as e:
+            raise LibreFangError(f"Request timed out after {self.timeout}s") from e
         except URLError as e:
             raise LibreFangError(f"Connection error: {e.reason}") from e
 

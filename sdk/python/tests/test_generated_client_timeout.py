@@ -1,5 +1,7 @@
+import pytest
+
 from librefang import librefang_client as client_module
-from librefang.librefang_client import LibreFang
+from librefang.librefang_client import LibreFang, LibreFangError
 
 
 class FakeResponse:
@@ -50,3 +52,26 @@ def test_client_allows_timeout_override(monkeypatch):
     list(client._stream("GET", "/events"))
 
     assert timeouts == [4.5, 4.5]
+
+
+def test_request_wraps_response_timeout_as_libre_fang_error(monkeypatch):
+    # urlopen raises a bare TimeoutError (not URLError) when the connection succeeds but the server is too slow to send a response within the timeout window — this is the exact case a bounded timeout exists to catch, so it must surface through the SDK's own error type rather than leaking a raw stdlib exception past the client's error contract.
+    def timed_out(_request, *, timeout):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(client_module, "urlopen", timed_out)
+    client = LibreFang("http://example.test", timeout=1.0)
+
+    with pytest.raises(LibreFangError, match="timed out after 1.0s"):
+        client._request("GET", "/health")
+
+
+def test_stream_open_wraps_response_timeout_as_libre_fang_error(monkeypatch):
+    def timed_out(_request, *, timeout):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(client_module, "urlopen", timed_out)
+    client = LibreFang("http://example.test", timeout=1.0)
+
+    with pytest.raises(LibreFangError, match="timed out after 1.0s"):
+        list(client._stream("GET", "/events"))
