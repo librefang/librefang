@@ -1186,6 +1186,11 @@ impl HandRegistry {
         // Hold the lock for the duration of check + insert to prevent races.
         let _guard = self.activate_lock.lock().unwrap_or_else(|e| {
             warn!("activate_with_id: activate_lock poisoned, recovering: {e}");
+            // `into_inner()` only unwraps this guard; it does not reset the lock's
+            // poison flag, so without `clear_poison()` every future call would
+            // re-enter this branch and re-log forever (see #7013 for the same
+            // fix applied to `CommandQueue`'s locks).
+            self.activate_lock.clear_poison();
             e.into_inner()
         });
 
@@ -1844,9 +1849,14 @@ mod tests {
                 .join()
         });
         assert!(poison.is_err());
+        assert!(reg.activate_lock.is_poisoned());
 
         reg.reload_from_disk(&ensure_test_home());
         let instance = reg.activate("clip", HashMap::new()).unwrap();
+        // The first post-panic access must clear the poison flag, not just
+        // unwrap around it — otherwise every subsequent call re-enters the
+        // recovery branch (and its `warn!`) for the rest of the process.
+        assert!(!reg.activate_lock.is_poisoned());
         assert_eq!(instance.hand_id, "clip");
         assert!(matches!(
             reg.activate("clip", HashMap::new()),
