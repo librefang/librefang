@@ -75,4 +75,20 @@ describe("StructListEditor", () => {
     expect(textarea).toHaveValue('{\n  "name": "before"\n}');
     expect(onChange).not.toHaveBeenCalled();
   });
+
+  it("preserves valid compact JSON until blur despite the parent echo", () => {
+    function ControlledEditor() {
+      const [items, setItems] = useState<unknown[]>([{ name: "before" }]);
+      return <StructListEditor value={items} onChange={setItems} />;
+    }
+    render(<ControlledEditor />);
+    fireEvent.click(screen.getByRole("button", { name: "Expand" }));
+    const textarea = screen.getByRole("textbox");
+
+    fireEvent.change(textarea, { target: { value: '{"name":"after"}' } });
+
+    expect(textarea).toHaveValue('{"name":"after"}');
+    fireEvent.blur(textarea);
+    expect(textarea).toHaveValue('{\n  "name": "after"\n}');
+  });
 });

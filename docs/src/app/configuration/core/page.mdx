@@ -801,7 +801,7 @@ max_workflow_secs = 3600
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `cooldown_secs` | u64 | `5` | Minimum seconds between consecutive firings of the same trigger. Prevents chatty triggers from saturating the agent loop. |
+| `cooldown_secs` | u64 | `5` | Minimum seconds between consecutive firings of the same window. Prevents chatty triggers from saturating the agent loop. Patterns that name a subject — task board, memory key, agent lifecycle — hold one window per subject, so two different tasks completing a second apart both fire. |
 | `max_per_event` | usize | `10` | Maximum triggers that may fire from a single event. Excess matches log a warning and are dropped. |
 | `max_depth` | usize | `5` | Maximum recursion depth — when a trigger fires another trigger, depth increments. Past `max_depth` the chain aborts with a warning. |
 | `max_workflow_secs` | u64 | `3600` | Wall-clock cap on a single workflow spawned by a trigger. |

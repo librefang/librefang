@@ -109,7 +109,10 @@ fn lane_regexes() -> &'static LaneRegexes {
         rust: regex::Regex::new(r"^(crates/|Cargo\.(toml|lock)$|xtask/|openapi\.json$|sdk/)")
             .expect("static regex"),
         docs: regex::Regex::new(r"^(docs/|.*\.md$)").expect("static regex"),
-        ci: regex::Regex::new(r"^\.github/workflows/").expect("static regex"),
+        ci: regex::Regex::new(
+            r"^(\.github/workflows/|\.devcontainer/|scripts/tests/test_release_tag_workflow_safety\.py$)",
+        )
+        .expect("static regex"),
         install: regex::Regex::new(
             r"^web/public/install\.(sh|ps1)$|^scripts/tests/install_sh_test\.sh$",
         )
@@ -448,6 +451,17 @@ mod tests {
         assert!(l.ci);
         assert!(!l.rust);
         assert!(!l.workspace_cargo);
+    }
+
+    #[test]
+    fn repository_automation_paths_flag_ci_lane() {
+        for path in [
+            ".devcontainer/devcontainer.json",
+            "scripts/tests/test_release_tag_workflow_safety.py",
+        ] {
+            let lanes = lanes_from(&[path]);
+            assert!(lanes.ci, "expected CI lane for {path}");
+        }
     }
 
     #[test]

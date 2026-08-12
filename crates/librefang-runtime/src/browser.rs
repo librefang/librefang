@@ -775,6 +775,11 @@ impl BrowserSession {
     }
 
     async fn cmd_click(&self, selector: &str, max_content_chars: usize) -> BrowserResponse {
+        // A `⟨n⟩` marker from the extracted content identifies one exact link, which the text fallback below cannot: matching on a substring of the link text resolves to the wrong element for 28% of the links on a page like Hacker News, because the first element *containing* that text wins.
+        // The brackets are what the extraction emits, so a bracketed selector is unambiguous and is taken here.
+        if let Some(id) = parse_link_marker(selector) {
+            return self.click_link_marker(id, max_content_chars).await;
+        }
         let sel_json = serde_json::to_string(selector).unwrap_or_default();
         let js = format!(
             r#"(() => {{
@@ -801,6 +806,15 @@ impl BrowserSession {
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or(val);
                 if parsed["success"].as_bool() == Some(false) {
+                    // A bare `12` is a marker only once nothing on the page answers to it as a selector.
+                    // Taking it as a marker up front would capture a page's own numeric link text — a pagination `5`, a numbered tab — which the text path has always been able to click, and would click whichever link happens to hold that id instead, silently and with no way to tell.
+                    // Trying it here keeps that path intact and still absorbs a model that copied the number out of the prose without its brackets.
+                    if let Some(id) = parse_bare_marker(selector) {
+                        let by_marker = self.click_link_marker(id, max_content_chars).await;
+                        if by_marker.success {
+                            return by_marker;
+                        }
+                    }
                     return BrowserResponse::err(
                         parsed["error"]
                             .as_str()
@@ -809,6 +823,78 @@ impl BrowserSession {
                     );
                 }
                 // Wait briefly for any navigation triggered by click
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                self.wait_for_load().await;
+                match self.page_info(max_content_chars).await {
+                    Ok(info) => BrowserResponse::ok(info),
+                    Err(_) => BrowserResponse::ok(parsed),
+                }
+            }
+            Err(e) => BrowserResponse::err(format!("Click failed: {e}")),
+        }
+    }
+
+    /// Click the link a `⟨n⟩` marker refers to.
+    ///
+    /// The marker's meaning is defined by the extraction script's numbering, so the script is re-run to resolve it rather than re-deriving the traversal here: a second copy of the walk would be free to drift from the one that produced the number.
+    ///
+    /// That rules out the *code* drifting, not the page.
+    /// Ids are positions in a walk of the live DOM, so a page that changes between the read the model saw and this click — a lazy-loaded card, an infinite scroll, a banner unmounting — can hand the same id to a different link, and the click then lands somewhere real but unintended rather than erroring.
+    /// Resolving against the table from the earlier read instead would trade that for a staler failure and needs the read's table carried on the session, which is a larger change than this one; the tool description tells the model to re-read a page it expects to have moved.
+    async fn click_link_marker(&self, id: usize, max_content_chars: usize) -> BrowserResponse {
+        let extracted = match self
+            .cdp
+            .run_js(&extract_content_js(max_content_chars))
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => return BrowserResponse::err(format!("Click failed: {e}")),
+        };
+        let parsed: serde_json::Value = extracted
+            .as_str()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(extracted);
+        let url = parsed["links"]
+            .as_array()
+            .and_then(|links| {
+                links
+                    .iter()
+                    .find(|l| l["id"].as_u64() == Some(id as u64))
+                    .and_then(|l| l["url"].as_str())
+            })
+            .map(|s| s.to_string());
+        let Some(url) = url else {
+            return BrowserResponse::err(format!(
+                "No link {id} on this page; re-read the page for current link markers"
+            ));
+        };
+
+        let url_json = serde_json::to_string(&url).unwrap_or_default();
+        let js = format!(
+            r#"(() => {{
+    // The table stores same-origin links as a path, so resolve before comparing.
+    const want = new URL({url_json}, location.href).href;
+    const el = Array.from(document.querySelectorAll('a[href]')).find(a => a.href === want);
+    if (!el) return JSON.stringify({{success: false, error: 'Link no longer on page: ' + want}});
+    el.scrollIntoView({{block: 'center'}});
+    el.click();
+    return JSON.stringify({{success: true, tag: el.tagName, url: want, text: el.textContent.substring(0, 100).trim()}});
+}})()"#
+        );
+        match self.cdp.run_js(&js).await {
+            Ok(val) => {
+                let parsed: serde_json::Value = val
+                    .as_str()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or(val);
+                if parsed["success"].as_bool() == Some(false) {
+                    return BrowserResponse::err(
+                        parsed["error"]
+                            .as_str()
+                            .unwrap_or("Click failed")
+                            .to_string(),
+                    );
+                }
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 self.wait_for_load().await;
                 match self.page_info(max_content_chars).await {
@@ -1003,6 +1089,9 @@ impl BrowserSession {
             "title": parsed["title"],
             "url": parsed["url"],
             "content": content_text,
+            // Separate fields rather than a section appended to `content`: a caller that reads `content` today is unaffected, `cmd_click` gets the marker-to-URL map machine-readable instead of parsing it back out of prose, and a caller that only needs to read can ignore them.
+            "links": content_obj["links"].clone(),
+            "links_base": content_obj["links_base"].clone(),
         }))
     }
 }
@@ -1346,6 +1435,35 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
     if (!root) root = clone.querySelector('article, .content, #content');
     if (!root) root = clone;
 
+    // Links are emitted as a marker into a deduplicated table returned beside the content rather than inlined at each occurrence.
+    // Measured on this page set, separating the URLs from the prose is what pays (70-84% off the link payload); deduplication alone buys 1.5-7.6% and costs 4-5% on a page with no repeats.
+    const links = [];
+    const linkIds = new Map();
+    // An anchor used as a click hook rather than as navigation — a bare `#` href, or a `javascript:` one — is not a destination, and every one of them on a page resolves to the same string.
+    // Deduplicating on that string would give two unrelated controls the same marker, so `Reply` and `Delete` would both read as ⟨5⟩ and a click on it would land on whichever comes first in the DOM.
+    // They are left as plain text: the table is for links the model can navigate, and a control with no destination has nothing to put in it.
+    function isNavigable(node) {
+        const raw = node.getAttribute('href') || '';
+        // A scheme is case-insensitive, and a browser ignores ASCII whitespace inside one, so `JavaScript:`, a leading space and a tab in the middle all reach the same place.
+        // Compared with those removed, since the point is what the anchor does, not how it was spelled.
+        const scheme = raw.replace(/[\u0000-\u0020]/g, '').toLowerCase();
+        if (scheme.startsWith('javascript:')) return false;
+        // A bare `#`, or a fragment that goes nowhere on its own.
+        return !(scheme === '#' || scheme === '');
+    }
+    function linkMarker(href) {
+        let id = linkIds.get(href);
+        if (id === undefined) { id = links.length + 1; linkIds.set(href, id); links.push(href); }
+        return '⟨' + id + '⟩';
+    }
+    // Text taken off the page, with anything shaped like one of our markers defused.
+    // A marker is actionable — `browser_click` takes one — so a page that prints a literal ⟨2⟩ in its own text would be handing the model a link it never wrote, attached to whatever text it likes, and would pull that link back into the table even where the real marker was cut.
+    // The page's characters are kept, since the text is still what the page says; only their power to read as a marker is removed.
+    // A marker cannot form across a join either: ids are digits, and every join in this walk puts a newline or a space between two pieces.
+    function plain(text) {
+        return text.replace(/⟨(\d+)⟩/g, '($1)');
+    }
+
     const lines = [];
     // Parallel to `lines`: whether that line is a bullet a nested `li` already emitted.
     // A list item folds its children onto one line, and it has to fold only its *own* text — re-folding a sub-list's bullets would put their `- ` markers mid-sentence.
@@ -1356,7 +1474,7 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
     const BLOCK = ['p','div','section','tr','article'];
     function walk(node) {
         if (node.nodeType === 3) {
-            const t = node.textContent.trim();
+            const t = plain(node.textContent.trim());
             if (t) emit(t);
             return;
         }
@@ -1364,24 +1482,36 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
         const tag = node.tagName.toLowerCase();
         if (['h1','h2','h3','h4','h5','h6'].includes(tag)) {
             const level = '#'.repeat(parseInt(tag[1]));
-            emit('\n' + level + ' ' + node.textContent.trim());
+            emit('\n' + level + ' ' + plain(node.textContent.trim()));
             return;
         }
         if (tag === 'a' && node.href && node.textContent.trim()) {
-            emit('[' + node.textContent.trim() + '](' + node.href + ')');
+            emit(plain(node.textContent.trim()) + (isNavigable(node) ? linkMarker(node.href) : ''));
             return;
         }
         if (tag === 'li') {
             // Recurse rather than flattening to `textContent`: returning here dropped the destination of every link inside a list item, which on a Wikipedia article is 1100 of 1723 links and on a results page is all of them.
             // The item's own text folds back onto one line so a bullet still reads as a bullet, while bullets from a nested list stay on their own lines and gain a level of indent.
+            // Source order is kept across the two: an item whose sub-list sits between two runs of its own text keeps that text where the page put it, rather than having everything before the sub-list joined to everything after it.
             const start = lines.length;
             for (const child of node.childNodes) walk(child);
             const produced = lines.splice(start);
             const flags = isBullet.splice(start);
-            const own = produced.filter((_, i) => !flags[i]).join(' ').replace(/\s+/g, ' ').trim();
-            const nested = produced.filter((_, i) => flags[i]);
-            if (own) emit('- ' + own, true);
-            for (const n of nested) emit('  ' + n, true);
+            let run = [];
+            let opened = false;
+            const flush = () => {
+                const own = run.join(' ').replace(/\s+/g, ' ').trim();
+                run = [];
+                if (!own) return;
+                // The first run of the item's own text is the bullet; anything after a sub-list is a continuation of it, indented to sit under the same bullet.
+                emit((opened ? '  ' : '- ') + own, true);
+                opened = true;
+            };
+            for (let i = 0; i < produced.length; i++) {
+                if (flags[i]) { flush(); emit('  ' + produced[i], true); opened = true; }
+                else run.push(produced[i]);
+            }
+            flush();
             return;
         }
         if (tag === 'br') { emit(''); return; }
@@ -1391,17 +1521,96 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
     }
     walk(root);
 
-    let content = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    const content = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
     const cap = __MAX_CONTENT_CHARS__;
-    if (content.length > cap) {
+
+    // Same-origin links are listed as their path alone, against the `url` already in this response.
+    // Most links on a page point back into it — 1383 of 1383 on a Wikipedia article — so repeating the origin per entry is the single largest avoidable cost in the table.
+    // Anything cross-origin stays absolute, since that is the part a model reading a link most needs to see.
+    const origin = location.origin || '';
+    function shorten(href) {
+        return origin && href.startsWith(origin + '/') ? href.slice(origin.length) : href;
+    }
+    // Only the links the surviving prose can still refer to: a marker past the cut is unreachable, and listing its URL would spend context on a link the model cannot see.
+    function tableFor(text) {
+        // One pass collecting the ids actually present, rather than a scan of the text per link: the budget search below calls this repeatedly, and a per-link `includes` over a long article is quadratic in the size of the page.
+        const present = new Set();
+        const re = /⟨(\d+)⟩/g;
+        let m;
+        while ((m = re.exec(text)) !== null) present.add(+m[1]);
+        const kept = [];
+        for (let i = 0; i < links.length; i++) {
+            if (!present.has(i + 1)) continue;
+            kept.push({ id: i + 1, url: shorten(links[i]) });
+        }
+        return kept;
+    }
+    // What the table costs once rendered, matching how the tool layer prints an entry.
+    function tableCost(kept) {
+        let n = 0;
+        for (const e of kept) n += ('⟨' + e.id + '⟩ ' + e.url + '\n').length;
+        return n;
+    }
+    function cut(text, budget) {
+        if (text.length <= budget) return text;
         // The marker is part of what the model receives, so it counts against the cap: cut far enough back that content + marker lands within `cap`, and the operator's number is a real ceiling on what reaches the context.
         // The marker's own length varies with the total it prints, so it is measured rather than approximated by a reserved constant.
-        const total = content.length;
+        const total = text.length;
         const marker = '\n... (truncated, ' + total + ' chars total)';
-        content = content.substring(0, Math.max(0, cap - marker.length)) + marker;
+        return text.substring(0, Math.max(0, budget - marker.length)) + marker;
     }
-    return JSON.stringify({title, url, content});
+
+    // `cap` bounds prose *and* table together.
+    // The table is a second thing the extraction sends, so budgeting only the prose would hand an operator who sized the cap to a context window a payload well past it — on a link-dense article the table alone is larger than the default cap.
+    // Trimming the prose is what shrinks the table, since the table lists only surviving markers, so the two are solved together rather than by dropping entries and leaving markers in the prose that resolve to nothing.
+    //
+    // Searched rather than subtracted: cutting prose drops markers, which drops table entries too, so one corrective subtraction overshoots badly — 34k against a 50k cap on a Wikipedia-shaped page, a third of the operator's budget left unspent.
+    // A longer cut is a prefix of a longer one still, so the surviving marker set only grows with the budget and the total is monotone, which is what makes the search valid.
+    function attempt(budget) {
+        const out = cut(content, budget);
+        const kept = tableFor(out);
+        return { out, kept, total: out.length + tableCost(kept) };
+    }
+    let best = attempt(cap);
+    if (best.total > cap) {
+        let lo = 0, hi = cap;
+        best = attempt(0);
+        for (let i = 0; i < 24 && lo < hi; i++) {
+            const mid = Math.floor((lo + hi + 1) / 2);
+            const a = attempt(mid);
+            if (a.total <= cap) { best = a; lo = mid; } else { hi = mid - 1; }
+        }
+    }
+    return JSON.stringify({title, url, content: best.out, links: best.kept, links_base: origin});
 })()"#;
+
+/// Read a link marker in the form the extracted content writes it, `⟨12⟩`.
+///
+/// The brackets are what makes it unambiguous, so only the bracketed form is a marker outright.
+/// A bare number is handled by `parse_bare_marker`, after the selector paths have had their turn.
+fn parse_link_marker(selector: &str) -> Option<usize> {
+    let s = selector.trim();
+    let digits = s
+        .strip_prefix('\u{27e8}')
+        .and_then(|r| r.strip_suffix('\u{27e9}'))?;
+    parse_marker_id(digits)
+}
+
+/// Read a bare `12` as a marker id.
+///
+/// Only meaningful once nothing on the page answers to it as a selector: a page's own numeric link text — a pagination `5`, a numbered tab — has always been clickable through the text path, and claiming it as a marker up front would click an unrelated link instead.
+/// `12` inside a longer string is never a marker, so a class like `.col-12` stays a CSS selector.
+fn parse_bare_marker(selector: &str) -> Option<usize> {
+    parse_marker_id(selector.trim())
+}
+
+fn parse_marker_id(digits: &str) -> Option<usize> {
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // Ids start at 1, so 0 is not a marker.
+    digits.parse().ok().filter(|&n| n > 0)
+}
 
 /// Build the page-extraction script for a given cap.
 ///
@@ -1412,6 +1621,58 @@ pub(crate) fn extract_content_js(max_content_chars: usize) -> String {
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
+
+/// Render extracted page content together with its link table.
+///
+/// The extraction returns the two separately — prose carrying `⟨n⟩` markers, and a deduplicated marker-to-URL table — so that a caller reading `content` is unaffected and `browser_click` resolves a marker from data rather than by parsing prose.
+/// Anything that shows the prose to a reader has to join them, though: markers with no table to resolve them against are worse than the inline links they replaced.
+/// This is that join, shared so the dashboard's page preview and the tool result cannot drift apart on how a page reads.
+pub fn render_page_body(data: &serde_json::Value) -> String {
+    render_page_body_inner(data, data["content"].as_str().unwrap_or(""))
+}
+
+/// The same body with the prose cut to `prose_chars` first, for a surface that shows a preview rather than the page.
+///
+/// The cut has to come before the join, not after it: the table is 4k characters on an aggregator and 80k on a link-dense article, so a budget applied to the joined string would spend all of itself on URLs and show none of the page.
+/// Only the links the shortened prose still refers to are listed, which is the same rule the extraction applies at its own cap — a marker past the cut is unreachable, so its URL is only noise.
+pub fn render_page_body_within(data: &serde_json::Value, prose_chars: usize) -> String {
+    let content = data["content"].as_str().unwrap_or("");
+    if content.chars().count() <= prose_chars {
+        return render_page_body_inner(data, content);
+    }
+    let cut: String = content.chars().take(prose_chars).collect();
+    render_page_body_inner(data, &format!("{cut}... (truncated)"))
+}
+
+fn render_page_body_inner(data: &serde_json::Value, content: &str) -> String {
+    let Some(links) = data["links"].as_array().filter(|l| !l.is_empty()) else {
+        return content.to_string();
+    };
+    // Only the links this prose still refers to.
+    // At full length that is every one of them, since the extraction already listed only its own surviving markers; on a shortened preview it is what keeps the table in proportion to the prose above it.
+    let entries: Vec<String> = links
+        .iter()
+        .filter_map(|l| Some((l["id"].as_u64()?, l["url"].as_str()?)))
+        .filter(|(id, _)| content.contains(&format!("\u{27e8}{id}\u{27e9}")))
+        .map(|(id, url)| format!("\u{27e8}{id}\u{27e9} {url}\n"))
+        .collect();
+    if entries.is_empty() {
+        return content.to_string();
+    }
+
+    let base = data["links_base"].as_str().unwrap_or("");
+    let mut out = String::with_capacity(content.len() + entries.len() * 48);
+    out.push_str(content);
+    out.push_str("\n\nLinks (click with browser_click, e.g. \u{27e8}1\u{27e9})");
+    if !base.is_empty() {
+        out.push_str(&format!("; paths are relative to {base}"));
+    }
+    out.push('\n');
+    for e in entries {
+        out.push_str(&e);
+    }
+    out
+}
 
 #[cfg(test)]
 mod tests {
@@ -1631,68 +1892,82 @@ mod tests {
     /// Ported from the JS the script runs, because the traversal itself needs a live DOM.
     #[test]
     fn test_nested_lists_keep_their_own_bullets() {
-        /// One list item: its own text, plus any sub-list beneath it.
-        struct Item {
-            text: &'static str,
-            subs: Vec<Item>,
+        /// A list item as the page writes it: runs of its own text and sub-lists, in source order.
+        enum Part {
+            Text(&'static str),
+            Sub(Vec<Part>),
         }
-        fn item(text: &'static str, subs: Vec<Item>) -> Item {
-            Item { text, subs }
-        }
+        use Part::{Sub, Text};
 
-        /// The `li` branch's fold: own text onto one line, a sub-list's bullets kept and indented.
-        fn render(item: &Item) -> Vec<String> {
-            let (mut lines, mut flags): (Vec<String>, Vec<bool>) = (vec![], vec![]);
-            if !item.text.is_empty() {
-                lines.push(item.text.to_string());
-                flags.push(false);
-            }
-            for sub in &item.subs {
-                for line in render(sub) {
-                    lines.push(line);
-                    flags.push(true);
+        /// The `li` branch's fold: own text onto one line, a sub-list's bullets kept, indented, and left where the page put them.
+        fn render(parts: &[Part]) -> Vec<String> {
+            // `(line, came from a nested li)`, in the order the walk produced them.
+            let mut produced: Vec<(String, bool)> = Vec::new();
+            for part in parts {
+                match part {
+                    Text(t) => produced.push(((*t).to_string(), false)),
+                    Sub(inner) => produced.extend(render(inner).into_iter().map(|l| (l, true))),
                 }
             }
-            let own: Vec<&str> = lines
-                .iter()
-                .zip(&flags)
-                .filter(|(_, nested)| !**nested)
-                .map(|(l, _)| l.as_str())
-                .collect();
-            let own = own.join(" ");
-            let nested: Vec<String> = lines
-                .iter()
-                .zip(&flags)
-                .filter(|(_, nested)| **nested)
-                .map(|(l, _)| format!("  {l}"))
-                .collect();
 
-            let mut out = Vec::new();
-            if !own.is_empty() {
-                out.push(format!("- {own}"));
+            let mut out: Vec<String> = Vec::new();
+            let mut run: Vec<&str> = Vec::new();
+            let mut opened = false;
+            // The first run of the item's own text is the bullet; a run after a sub-list is a continuation of it.
+            let flush = |run: &mut Vec<&str>, out: &mut Vec<String>, opened: &mut bool| {
+                let own = run.join(" ");
+                run.clear();
+                if own.trim().is_empty() {
+                    return;
+                }
+                out.push(format!("{}{own}", if *opened { "  " } else { "- " }));
+                *opened = true;
+            };
+            for (line, nested) in &produced {
+                if *nested {
+                    flush(&mut run, &mut out, &mut opened);
+                    out.push(format!("  {line}"));
+                    opened = true;
+                } else {
+                    run.push(line);
+                }
             }
-            out.extend(nested);
+            flush(&mut run, &mut out, &mut opened);
             out
         }
 
         assert_eq!(
-            render(&item(
-                "Fruits",
-                vec![item("Apple", vec![]), item("Banana", vec![])]
-            )),
+            render(&[
+                Text("Fruits"),
+                Sub(vec![Text("Apple")]),
+                Sub(vec![Text("Banana")])
+            ]),
             vec!["- Fruits", "  - Apple", "  - Banana"],
             "a sub-list must stay a sub-list rather than collapsing into its parent's line"
         );
         assert_eq!(
-            render(&item("A", vec![item("B", vec![item("C", vec![])])])),
+            render(&[Text("A"), Sub(vec![Text("B"), Sub(vec![Text("C")])])]),
             vec!["- A", "  - B", "    - C"],
             "each level of nesting earns one level of indent"
         );
-        // The flat case the fold exists for is unchanged.
+        // A sub-list between two runs of the item's own text: joining all the text first would move `Outro` above the sub-list it follows on the page.
         assert_eq!(
-            render(&item("Just an item", vec![])),
-            vec!["- Just an item"]
+            render(&[
+                Text("Intro"),
+                Sub(vec![Text("Sub A")]),
+                Sub(vec![Text("Sub B")]),
+                Text("Outro")
+            ]),
+            vec!["- Intro", "  - Sub A", "  - Sub B", "  Outro"],
+            "text after a sub-list must stay after it"
         );
+        // An item with no text of its own: everything under it is a continuation of nothing, which is what the page wrote.
+        assert_eq!(
+            render(&[Sub(vec![Text("Sub")]), Text("After")]),
+            vec!["  - Sub", "  After"]
+        );
+        // The flat case the fold exists for is unchanged.
+        assert_eq!(render(&[Text("Just an item")]), vec!["- Just an item"]);
     }
 
     /// Feed entries must be separated from one another.
@@ -1914,6 +2189,404 @@ mod tests {
             ],
         );
         assert_eq!(chosen(&two_feeds), Some("first"));
+    }
+
+    /// Links are emitted as a marker into a table, not inlined into the prose.
+    #[test]
+    fn test_links_are_emitted_as_markers() {
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("linkMarker(node.href)"),
+            "the anchor branch must emit a marker"
+        );
+        assert!(
+            !EXTRACT_CONTENT_JS_TEMPLATE.contains("'](' + node.href + ')'"),
+            "inlining the href per occurrence is what the marker table replaces"
+        );
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("linkIds.get(href)"),
+            "a repeated URL must reuse its id rather than being listed again"
+        );
+    }
+
+    /// A repeated URL is one entry with one id, numbered in the order the walk first meets it.
+    ///
+    /// Ported from `linkMarker`/`linkIds`, because the numbering happens during a DOM walk.
+    /// The order is the property worth pinning: the ids reach the model's context, so a table that renumbered between two runs over the same page would be a different prompt each time.
+    #[test]
+    fn test_repeated_urls_share_one_marker_in_first_seen_order() {
+        fn assign(hrefs: &[&str]) -> (Vec<usize>, Vec<String>) {
+            let mut ids: Vec<(String, usize)> = Vec::new();
+            let mut table: Vec<String> = Vec::new();
+            let markers = hrefs
+                .iter()
+                .map(|href| match ids.iter().find(|(h, _)| h == href) {
+                    Some((_, id)) => *id,
+                    None => {
+                        table.push((*href).to_string());
+                        ids.push(((*href).to_string(), table.len()));
+                        table.len()
+                    }
+                })
+                .collect();
+            (markers, table)
+        }
+
+        let (markers, table) = assign(&["/a", "/b", "/a", "/a", "/c"]);
+        assert_eq!(
+            markers,
+            vec![1, 2, 1, 1, 3],
+            "a repeated href must reuse the id it was first given"
+        );
+        assert_eq!(
+            table,
+            vec!["/a", "/b", "/c"],
+            "one entry per distinct href, in the order the walk first met it"
+        );
+
+        // The same input twice is the same table: ids come from walk order, not from a hash.
+        assert_eq!(assign(&["/x", "/y", "/x"]), assign(&["/x", "/y", "/x"]));
+    }
+
+    /// A preview budget cuts the prose, not the joined page.
+    ///
+    /// The table is thousands of characters on a link-dense page — 4,028 on Hacker News, 8,274 on a Wikipedia article — so a budget applied after the join would spend all of itself on URLs and show none of the page.
+    /// Cutting first also drops the links the shortened prose can no longer refer to, the same rule the extraction applies at its own cap.
+    #[test]
+    fn test_preview_budget_cuts_prose_before_the_table_is_joined() {
+        let page = serde_json::json!({
+            "content": format!("{}\u{27e8}1\u{27e9} tail \u{27e8}2\u{27e9}", "w".repeat(60)),
+            "links": [
+                {"id": 1, "url": "/one"},
+                {"id": 2, "url": "/two"},
+            ],
+            "links_base": "https://example.com",
+        });
+
+        // Wide enough for everything: both entries listed.
+        let full = render_page_body_within(&page, 10_000);
+        assert_eq!(full, render_page_body(&page));
+        assert!(full.contains("\u{27e8}1\u{27e9} /one"));
+        assert!(full.contains("\u{27e8}2\u{27e9} /two"));
+
+        // Narrow: the prose is cut before the join, and the entry the surviving prose can no longer reach goes with it.
+        let short = render_page_body_within(&page, 20);
+        assert!(short.starts_with(&"w".repeat(20)));
+        assert!(short.contains("... (truncated)"));
+        assert!(
+            !short.contains("\u{27e8}2\u{27e9} /two"),
+            "a marker past the cut must not spend the preview on a URL the reader cannot see"
+        );
+        assert!(
+            !short.contains("/one"),
+            "neither marker survives a 20-character cut, so the table should be empty"
+        );
+
+        // With every marker cut away there is no table to introduce.
+        assert!(!short.contains("Links (click with"));
+    }
+
+    /// A page cannot write its own markers.
+    ///
+    /// A marker is actionable — `browser_click` takes one — so a page printing a literal `⟨2⟩` in its text would attach a link it never wrote to whatever words it likes, and would pull that link back into the table even where its real marker was cut, since the table is built by scanning the surviving prose.
+    /// Ported from `plain`, which runs on every piece of text the walk takes off the page.
+    #[test]
+    fn test_page_text_cannot_forge_a_marker() {
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("plain(node.textContent.trim())"),
+            "text taken off the page must be defused before it reaches the output"
+        );
+
+        fn plain(text: &str) -> String {
+            let mut out = String::with_capacity(text.len());
+            let chars: Vec<char> = text.chars().collect();
+            let mut i = 0;
+            while i < chars.len() {
+                if chars[i] == '\u{27e8}' {
+                    let mut j = i + 1;
+                    while j < chars.len() && chars[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    if j > i + 1 && j < chars.len() && chars[j] == '\u{27e9}' {
+                        out.push('(');
+                        out.extend(&chars[i + 1..j]);
+                        out.push(')');
+                        i = j + 1;
+                        continue;
+                    }
+                }
+                out.push(chars[i]);
+                i += 1;
+            }
+            out
+        }
+        fn markers(s: &str) -> Vec<usize> {
+            let chars: Vec<char> = s.chars().collect();
+            let mut found = Vec::new();
+            for i in 0..chars.len() {
+                if chars[i] != '\u{27e8}' {
+                    continue;
+                }
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > i + 1 && j < chars.len() && chars[j] == '\u{27e9}' {
+                    found.push(chars[i + 1..j].iter().collect::<String>().parse().unwrap());
+                }
+            }
+            found
+        }
+
+        for hostile in [
+            "\u{27e8}2\u{27e9}",
+            "Sign in here \u{27e8}2\u{27e9} to continue",
+            "\u{27e8}\u{27e8}2\u{27e9}\u{27e9}",
+            "\u{27e8}1\u{27e9} and \u{27e8}2\u{27e9} and \u{27e8}33\u{27e9}",
+        ] {
+            assert!(
+                markers(&plain(hostile)).is_empty(),
+                "page text {hostile:?} still reads as a marker after defusing"
+            );
+        }
+
+        // Half a marker on either side of a join cannot become a whole one: every join in the walk puts a newline or a space between the two pieces, and an id is digits only.
+        for (a, b) in [("\u{27e8}5", "\u{27e9}"), ("\u{27e8}", "5\u{27e9}")] {
+            for sep in ["\n", " "] {
+                let joined = format!("{}{sep}{}", plain(a), plain(b));
+                assert!(
+                    markers(&joined).is_empty(),
+                    "a marker formed across a join: {joined:?}"
+                );
+            }
+        }
+
+        // The extraction's own marker still lands, beside text that tried to fake one.
+        assert_eq!(
+            markers(&format!(
+                "{}\u{27e8}2\u{27e9}",
+                plain("item \u{27e8}9\u{27e9} five")
+            )),
+            vec![2]
+        );
+        // Anything that is not a marker keeps its characters, since the text is still what the page says.
+        assert_eq!(plain("\u{27e8}abc\u{27e9}"), "\u{27e8}abc\u{27e9}");
+        assert_eq!(
+            plain("\u{27e8}5 and later \u{27e9}"),
+            "\u{27e8}5 and later \u{27e9}"
+        );
+    }
+
+    /// An anchor with no destination is left out of the table.
+    ///
+    /// A bare `#` or a `javascript:` href is a click hook, and every one of them on a page resolves to the same string, so deduplicating on it would hand two unrelated controls the same marker and a click would land on whichever came first in the DOM.
+    #[test]
+    fn test_placeholder_hrefs_are_not_marked() {
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("isNavigable(node) ? linkMarker(node.href) : ''"),
+            "an anchor that is not a destination must reach the prose as plain text"
+        );
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("scheme.startsWith('javascript:')"),
+            "a javascript: href is a click hook, not a link"
+        );
+
+        // Ported from `isNavigable`, over the `href` attribute as written on the page.
+        // A scheme is case-insensitive and a browser ignores ASCII whitespace inside one, so the comparison is against the attribute with those removed.
+        fn navigable(raw: &str) -> bool {
+            let scheme: String = raw
+                .chars()
+                .filter(|c| *c > ' ')
+                .collect::<String>()
+                .to_lowercase();
+            !(scheme.starts_with("javascript:") || scheme == "#" || scheme.is_empty())
+        }
+        assert!(!navigable("#"));
+        assert!(!navigable("javascript:void(0)"));
+        // Spelling is not what makes it a link: a browser reaches the same place from all of these.
+        assert!(!navigable("JavaScript:void(0)"));
+        assert!(!navigable("  javascript:doThing()"));
+        assert!(!navigable("java\tscript:doThing()"));
+        assert!(!navigable("java\nscript:doThing()"));
+        assert!(!navigable(" # "));
+        assert!(!navigable(""));
+        assert!(navigable("/newest"));
+        assert!(navigable("https://example.com/"));
+        // A fragment that names something on the page is still somewhere to go.
+        assert!(navigable("#install"));
+    }
+
+    /// A same-origin link is listed as its path, and anything cross-origin keeps its origin.
+    ///
+    /// Ported from `shorten`, which needs `location.origin`.
+    /// This is where the table's size comes from — nearly every link on a page points back into it — so the shortening is the part worth pinning, along with the case that must *not* shorten.
+    #[test]
+    fn test_same_origin_links_are_stored_as_a_path() {
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("shorten(links[i])"),
+            "the table must store the shortened form, not the absolute URL"
+        );
+
+        fn shorten<'a>(origin: &str, href: &'a str) -> &'a str {
+            if !origin.is_empty() && href.starts_with(&format!("{origin}/")) {
+                &href[origin.len()..]
+            } else {
+                href
+            }
+        }
+        let origin = "https://news.ycombinator.com";
+        assert_eq!(
+            shorten(origin, "https://news.ycombinator.com/newest"),
+            "/newest"
+        );
+        assert_eq!(shorten(origin, "https://news.ycombinator.com/"), "/");
+        // Cross-origin stays absolute: the origin is the part a model most needs to see.
+        assert_eq!(
+            shorten(origin, "https://example.com/newest"),
+            "https://example.com/newest"
+        );
+        // A different origin that merely starts with the same text must not be mistaken for one of ours.
+        assert_eq!(
+            shorten(origin, "https://news.ycombinator.com.evil.test/x"),
+            "https://news.ycombinator.com.evil.test/x"
+        );
+        // The origin with nothing after it is not `origin + '/'`, so it is left alone.
+        assert_eq!(shorten(origin, origin), origin);
+        // A page served from `about:blank` or a `file:` URL has no origin to strip.
+        assert_eq!(
+            shorten("", "https://example.com/x"),
+            "https://example.com/x"
+        );
+    }
+
+    /// The cap bounds prose *and* link table, not prose alone.
+    ///
+    /// The table is a second thing the extraction sends, and on a link-dense article it is larger than the default cap on its own, so budgeting only the prose would hand an operator who sized `max_content_chars` to a context window a payload well past it (#6624).
+    #[test]
+    fn test_link_table_is_budgeted_against_the_cap() {
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("out.length + tableCost(kept)"),
+            "the rendered cost of the table must be measured against the cap"
+        );
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("content: best.out"),
+            "the returned content must be the budgeted cut, not the pre-budget prose"
+        );
+    }
+
+    /// The budget search holds the ceiling and does not leave most of it unspent.
+    ///
+    /// Ported from the JS the script runs, because the extraction itself needs a live browser — same shape as `test_truncation_marker_fits_inside_the_cap`.
+    /// The subtract-the-overflow form this replaces stayed under the cap but landed at 34k against 50k on a Wikipedia-shaped page, because cutting prose drops markers and so drops table entries faster than the prose itself shrank.
+    #[test]
+    fn test_budget_search_fills_the_cap_without_exceeding_it() {
+        /// One `⟨n⟩` marker per line, so a cut drops markers the way a real page does.
+        fn page(n_links: usize, prose_len: usize, url_len: usize) -> (String, Vec<String>) {
+            let links: Vec<String> = (0..n_links)
+                .map(|i| format!("/p/{}{i}", "x".repeat(url_len)))
+                .collect();
+            let filler = "w".repeat((prose_len / n_links.max(1)).max(1));
+            let content = (0..n_links)
+                .map(|i| format!("{filler}\u{27e8}{}\u{27e9}", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (content, links)
+        }
+        fn cut(text: &str, budget: usize) -> String {
+            if text.chars().count() <= budget {
+                return text.to_string();
+            }
+            let total = text.chars().count();
+            let marker = format!("\n... (truncated, {total} chars total)");
+            let keep = budget.saturating_sub(marker.chars().count());
+            format!("{}{marker}", text.chars().take(keep).collect::<String>())
+        }
+        fn table_cost(text: &str, links: &[String]) -> usize {
+            (0..links.len())
+                .filter(|i| text.contains(&format!("\u{27e8}{}\u{27e9}", i + 1)))
+                .map(|i| {
+                    format!("\u{27e8}{}\u{27e9} {}\n", i + 1, links[i])
+                        .chars()
+                        .count()
+                })
+                .sum()
+        }
+        /// `(total, was_truncated)` — a page that fits outright is not expected to fill the cap.
+        fn budgeted(content: &str, links: &[String], cap: usize) -> (usize, bool) {
+            let total = |budget: usize| {
+                let out = cut(content, budget);
+                out.chars().count() + table_cost(&out, links)
+            };
+            if total(cap) <= cap {
+                return (total(cap), false);
+            }
+            let (mut lo, mut hi, mut best) = (0usize, cap, total(0));
+            for _ in 0..24 {
+                if lo >= hi {
+                    break;
+                }
+                let mid = (lo + hi).div_ceil(2);
+                let t = total(mid);
+                if t <= cap {
+                    best = t;
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            (best, true)
+        }
+
+        // Shapes measured on #6624: a link-dense article whose table alone exceeds the default cap, a page that fits outright, and two caps far smaller than the page.
+        for (n_links, prose_len, cap, url_len) in [
+            (1383, 122_173, 50_000, 40),
+            (197, 14_612, 50_000, 30),
+            (500, 90_000, 5_000, 50),
+            (2000, 200_000, 1_000, 80),
+        ] {
+            let (content, links) = page(n_links, prose_len, url_len);
+            let (total, truncated) = budgeted(&content, &links, cap);
+            assert!(
+                total <= cap,
+                "cap {cap}: prose plus table is {total} chars, past the ceiling the operator set"
+            );
+            // Only where the page actually overflows: the HN-shaped row above fits whole at 23,904 and must not be padded out to the cap to satisfy this.
+            if truncated {
+                assert!(
+                    total * 100 >= cap * 95,
+                    "cap {cap}: only {total} chars used, leaving most of the operator's budget unspent"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_link_marker_accepts_the_form_the_content_emits() {
+        assert_eq!(parse_link_marker("\u{27e8}12\u{27e9}"), Some(12));
+        assert_eq!(parse_link_marker("  \u{27e8}3\u{27e9} "), Some(3));
+    }
+
+    /// A bare number is not a marker on sight — it is one only after the selector paths have failed.
+    ///
+    /// `cmd_click` has always been able to click a page's own numeric link text, a pagination `5` or a numbered tab.
+    /// Claiming a bare number as a marker before that path runs would click whichever link happens to hold that id instead, silently and with nothing to tell them apart.
+    #[test]
+    fn test_a_bare_number_is_only_a_marker_as_a_fallback() {
+        assert_eq!(parse_link_marker("12"), None, "no brackets, no marker");
+        assert_eq!(parse_bare_marker("12"), Some(12));
+        assert_eq!(parse_bare_marker(" 3 "), Some(3));
+    }
+
+    #[test]
+    fn test_parse_link_marker_leaves_selectors_alone() {
+        // The important one: a class containing digits must stay a CSS selector.
+        for selector in [".col-12", "a.link-3", "Sign in", "", "page 12"] {
+            assert_eq!(parse_link_marker(selector), None);
+            assert_eq!(parse_bare_marker(selector), None);
+        }
+        // Ids start at 1, so 0 is not a marker.
+        assert_eq!(parse_bare_marker("0"), None);
+        assert_eq!(parse_link_marker("\u{27e8}0\u{27e9}"), None);
+        assert_eq!(parse_link_marker("\u{27e8}\u{27e9}"), None);
     }
 
     /// The truncation marker counts against the cap rather than overshooting it.
