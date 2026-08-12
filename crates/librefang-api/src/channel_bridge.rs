@@ -9,6 +9,17 @@ use librefang_channels::router::AgentRouter;
 use librefang_channels::sidecar::SidecarAdapter;
 use librefang_channels::types::{ChannelAdapter, SenderContext};
 
+fn is_safe_manifest_name(name: &str) -> bool {
+    if name.contains(['/', '\\']) {
+        return false;
+    }
+    let mut components = std::path::Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(component)), None) if component == name
+    )
+}
+
 /// Sanitize LLM/driver errors into user-friendly messages for channel delivery.
 ///
 /// Prevents raw technical details (stack traces, driver internals, status codes)
@@ -929,6 +940,10 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn spawn_agent_by_name(&self, manifest_name: &str) -> Result<AgentId, String> {
+        if !is_safe_manifest_name(manifest_name) {
+            return Err("Invalid manifest name".to_string());
+        }
+
         // Look for manifest at ~/.librefang/workspaces/agents/{name}/agent.toml
         let manifest_path = self
             .kernel
@@ -3064,6 +3079,28 @@ pub async fn reload_channels_from_disk(
 mod tests {
     use super::*;
     use librefang_kernel::event_bus::EventBus;
+
+    #[test]
+    fn manifest_name_must_be_one_path_component() {
+        assert!(is_safe_manifest_name("research-agent"));
+        assert!(is_safe_manifest_name(".private-agent"));
+
+        for unsafe_name in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "nested/agent",
+            "nested\\agent",
+            "/tmp/agent",
+            "C:\\tmp\\agent",
+        ] {
+            assert!(
+                !is_safe_manifest_name(unsafe_name),
+                "accepted unsafe manifest name: {unsafe_name:?}"
+            );
+        }
+    }
 
     // ── seed_router_agent_names: defined-but-unspawned agents ─────
     //
