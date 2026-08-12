@@ -28,6 +28,102 @@ const SKILLHUB_INDEX_URL: &str =
 /// COS accelerate base URL for skill zip downloads.
 const SKILLHUB_COS_BASE: &str = "https://skillhub-1388575217.cos.accelerate.myqcloud.com";
 
+fn atomic_write_manifest(path: &Path, contents: &[u8]) -> Result<(), SkillError> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let parent = path.parent().ok_or_else(|| {
+        SkillError::InvalidManifest("Skillhub: skill.toml has no parent directory".to_string())
+    })?;
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = parent.join(format!(".skill.toml.tmp.{}.{}", std::process::id(), seq));
+
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(contents)?;
+        file.sync_all()
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(SkillError::InvalidManifest(format!(
+            "Skillhub: write skill.toml staging file: {error}"
+        )));
+    }
+
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(SkillError::InvalidManifest(format!(
+            "Skillhub: replace skill.toml: {error}"
+        )));
+    }
+
+    #[cfg(unix)]
+    std::fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|error| {
+            SkillError::InvalidManifest(format!(
+                "Skillhub: sync skill.toml parent directory: {error}"
+            ))
+        })?;
+
+    Ok(())
+}
+
+fn patch_skillhub_provenance(
+    skill_dir: &Path,
+    slug: &str,
+    version: &str,
+) -> Result<(), SkillError> {
+    let manifest_path = skill_dir.join("skill.toml");
+    if !manifest_path.exists() {
+        return Ok(());
+    }
+
+    let toml_str = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        SkillError::InvalidManifest(format!(
+            "Skillhub: read skill.toml for provenance patch: {e}"
+        ))
+    })?;
+    let mut manifest: crate::SkillManifest = toml::from_str(&toml_str).map_err(|e| {
+        SkillError::InvalidManifest(format!(
+            "Skillhub: parse skill.toml for provenance patch: {e}"
+        ))
+    })?;
+    manifest.source = Some(crate::SkillSource::Skillhub {
+        slug: slug.to_string(),
+        version: version.to_string(),
+    });
+    let updated = toml::to_string_pretty(&manifest).map_err(|e| {
+        SkillError::InvalidManifest(format!(
+            "Skillhub: serialize skill.toml for provenance patch: {e}"
+        ))
+    })?;
+    atomic_write_manifest(&manifest_path, updated.as_bytes())
+}
+
+fn patch_or_cleanup_skillhub_install(
+    skill_dir: PathBuf,
+    slug: String,
+    version: String,
+) -> Result<(), SkillError> {
+    if let Err(error) = patch_skillhub_provenance(&skill_dir, &slug, &version) {
+        if let Err(cleanup_err) = std::fs::remove_dir_all(&skill_dir) {
+            warn!(
+                slug = %slug,
+                skill_dir = %skill_dir.display(),
+                error = %cleanup_err,
+                "Skillhub: provenance patch failed AND cleanup failed; skill directory left on disk with wrong source provenance, manual removal needed"
+            );
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Search response types (SkillHub-native format)
 // ---------------------------------------------------------------------------
@@ -283,55 +379,15 @@ impl SkillhubClient {
         // failure we tear down the freshly-extracted skill directory so the
         // installer doesn't leave a manifest with the wrong provenance behind.
         let skill_dir = target_dir.join(slug);
-        let manifest_path = skill_dir.join("skill.toml");
-        if manifest_path.exists() {
-            let patch_result = (|| -> Result<(), SkillError> {
-                let toml_str = std::fs::read_to_string(&manifest_path).map_err(|e| {
-                    SkillError::InvalidManifest(format!(
-                        "Skillhub: read skill.toml for provenance patch: {e}"
-                    ))
-                })?;
-                let mut manifest: crate::SkillManifest =
-                    toml::from_str(&toml_str).map_err(|e| {
-                        SkillError::InvalidManifest(format!(
-                            "Skillhub: parse skill.toml for provenance patch: {e}"
-                        ))
-                    })?;
-                manifest.source = Some(crate::SkillSource::Skillhub {
-                    slug: slug.to_string(),
-                    version: result.version.clone(),
-                });
-                let updated = toml::to_string_pretty(&manifest).map_err(|e| {
-                    SkillError::InvalidManifest(format!(
-                        "Skillhub: serialize skill.toml for provenance patch: {e}"
-                    ))
-                })?;
-                std::fs::write(&manifest_path, updated).map_err(|e| {
-                    SkillError::InvalidManifest(format!(
-                        "Skillhub: write skill.toml for provenance patch: {e}"
-                    ))
-                })?;
-                Ok(())
-            })();
-
-            if let Err(e) = patch_result {
-                // Clean up the half-installed skill: it has the wrong source
-                // provenance recorded and would mislead upgrade/sync logic.
-                // Don't swallow the cleanup failure too — operator needs to
-                // know if a manual `rm -rf` is required.
-                if let Err(cleanup_err) = std::fs::remove_dir_all(&skill_dir) {
-                    warn!(
-                        slug = %slug,
-                        skill_dir = %skill_dir.display(),
-                        error = %cleanup_err,
-                        "Skillhub: provenance patch failed AND cleanup failed; \
-                         skill directory left on disk with wrong source provenance, \
-                         manual rm needed"
-                    );
-                }
-                return Err(e);
-            }
-        }
+        let patch_slug = slug.to_string();
+        let patch_version = result.version.clone();
+        tokio::task::spawn_blocking(move || {
+            patch_or_cleanup_skillhub_install(skill_dir, patch_slug, patch_version)
+        })
+        .await
+        .map_err(|e| {
+            SkillError::InvalidManifest(format!("Skillhub provenance patch task failed: {e}"))
+        })??;
 
         Ok(result)
     }
@@ -542,5 +598,51 @@ mod tests {
             percent_encode("hello-world_2.0~test"),
             "hello-world_2.0~test"
         );
+    }
+
+    #[test]
+    fn provenance_patch_is_atomic_and_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("example");
+        std::fs::create_dir(&skill_dir).unwrap();
+        let manifest_path = skill_dir.join("skill.toml");
+        std::fs::write(
+            &manifest_path,
+            "[skill]\nname = \"example\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+        )
+        .unwrap();
+
+        patch_or_cleanup_skillhub_install(
+            skill_dir.clone(),
+            "example-skill".to_string(),
+            "2.0.0".to_string(),
+        )
+        .unwrap();
+
+        let manifest: crate::SkillManifest =
+            toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        assert!(matches!(
+            manifest.source,
+            Some(crate::SkillSource::Skillhub { slug, version })
+                if slug == "example-skill" && version == "2.0.0"
+        ));
+        assert_eq!(std::fs::read_dir(&skill_dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn malformed_manifest_removes_half_installed_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("broken");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("skill.toml"), "not = [valid").unwrap();
+
+        let result = patch_or_cleanup_skillhub_install(
+            skill_dir.clone(),
+            "broken".to_string(),
+            "1.0.0".to_string(),
+        );
+
+        assert!(matches!(result, Err(SkillError::InvalidManifest(_))));
+        assert!(!skill_dir.exists());
     }
 }
