@@ -11,9 +11,8 @@ const TEXT_TRUNCATION_MARKER: &str =
 /// for the streaming download in `resolve_url_attachments`.
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 
-/// Keep CPU-heavy PDF parsing off Tokio workers and bound how many parser
-/// jobs can occupy the blocking pool at once. Additional requests wait
-/// asynchronously without consuming a runtime worker thread.
+/// Keep CPU-heavy PDF parsing off Tokio workers and bound how many parser jobs can occupy the blocking pool at once.
+/// Additional requests wait asynchronously without consuming a runtime worker thread.
 const MAX_CONCURRENT_PDF_EXTRACTIONS: usize = 2;
 static PDF_EXTRACTION_PERMITS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| {
@@ -30,8 +29,7 @@ where
         .await
         .map_err(|_| "PDF extraction queue is unavailable".to_string())?;
     tokio::task::spawn_blocking(move || {
-        // Keep the permit in the blocking closure so request cancellation
-        // cannot release capacity while a detached parser is still running.
+        // Keep the permit in the blocking closure so request cancellation cannot release capacity while a detached parser is still running.
         let _permit = permit;
         job()
     })
@@ -529,8 +527,7 @@ mod tests {
             }
         }));
 
-        // A blocking closure executed inline would deadlock this single-thread
-        // runtime before the async task could release it.
+        // A blocking closure executed inline would deadlock this single-thread runtime before the async task could release it.
         tokio::task::yield_now().await;
         let (lock, ready) = &*gate;
         *lock.lock().unwrap() = true;
