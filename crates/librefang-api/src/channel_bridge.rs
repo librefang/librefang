@@ -645,7 +645,13 @@ fn resolve_no_pending_message(
     // Audit log is sorted DESC by `decided_at`; cap the scan to a small
     // recent window since duplicate-click races are sub-second. 64 is
     // generous and bounds the SQL cost.
-    let recent = approvals.query_audit(64, 0, None, None);
+    let recent = match approvals.query_audit(64, 0, None, None) {
+        Ok(recent) => recent,
+        Err(error) => {
+            tracing::warn!(%error, "failed to query approval audit for duplicate resolution");
+            Vec::new()
+        }
+    };
     if let Some(entry) = recent.iter().find(|e| e.request_id.starts_with(id_prefix)) {
         let short = &entry.request_id[..8.min(entry.request_id.len())];
         let actor = entry.decided_by.as_deref().unwrap_or("(unknown)");
