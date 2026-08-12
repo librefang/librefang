@@ -87,6 +87,42 @@ async fn registry_schema_by_type(
 /// identifier cannot overflow a path-component limit on any target filesystem.
 const MAX_REGISTRY_IDENTIFIER_LEN: usize = 128;
 
+#[derive(Debug)]
+enum RegistryContentWriteError {
+    AlreadyExists,
+    Io(std::io::Error),
+}
+
+fn persist_registry_content(
+    target: &std::path::Path,
+    content: &[u8],
+    allow_overwrite: bool,
+) -> Result<Option<Vec<u8>>, RegistryContentWriteError> {
+    if !allow_overwrite && target.exists() {
+        return Err(RegistryContentWriteError::AlreadyExists);
+    }
+    let previous = if target.exists() {
+        Some(std::fs::read(target).map_err(RegistryContentWriteError::Io)?)
+    } else {
+        None
+    };
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(RegistryContentWriteError::Io)?;
+    }
+    crate::atomic_write(target, content).map_err(RegistryContentWriteError::Io)?;
+    Ok(previous)
+}
+
+fn rollback_registry_content(
+    target: &std::path::Path,
+    previous: Option<&[u8]>,
+) -> std::io::Result<()> {
+    match previous {
+        Some(content) => crate::atomic_write(target, content),
+        None => std::fs::remove_file(target),
+    }
+}
+
 /// Validate a registry content identifier against `^[a-zA-Z0-9._-]+$` with a
 /// length cap of [`MAX_REGISTRY_IDENTIFIER_LEN`].
 ///
@@ -207,31 +243,6 @@ async fn create_registry_content(
         }
     };
 
-    // Don't overwrite existing content unless explicitly allowed.
-    //
-    // The message names the actions a caller can actually take. It used to
-    // point only at `?allow_overwrite=true`, which the dashboard never sends —
-    // so a user who hit this on a built-in provider (trying to give the keyless
-    // `vllm` entry an API key) was told to do something no UI surface offers
-    // (#6703). For providers the answer is almost never "replace the file":
-    // the per-provider key / URL / discovery endpoints edit the live entry
-    // without touching the registry-managed TOML, which the boot-time registry
-    // sync would revert anyway.
-    if target.exists() && !allow_overwrite {
-        let remedy = if content_type == "provider" {
-            format!(
-                " — set its API key with POST /api/providers/{identifier}/key, its endpoint with PUT /api/providers/{identifier}/url, or replace the whole definition with PUT /api/registry/content/provider"
-            )
-        } else {
-            format!(" — replace the whole definition with PUT /api/registry/content/{content_type}")
-        };
-        return ApiErrorResponse::conflict(format!(
-            "{content_type} '{identifier}' already exists{remedy}"
-        ))
-        .into_json_tuple()
-        .into_response();
-    }
-
     // For providers: extract the `api_key` value (if present) before writing TOML.
     // The actual key is stored in secrets.env, NOT in the provider TOML file.
     let api_key_to_save: Option<(String, String)> = if content_type == "provider" {
@@ -282,19 +293,52 @@ async fn create_registry_content(
         }
     };
 
-    // Create parent directories and write file
-    if let Some(parent) = target.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return ApiErrorResponse::internal(e.to_string())
+    // Serialize the no-overwrite check with the durable replacement. Without
+    // the shared guard, two concurrent POSTs can both observe an absent target
+    // and silently overwrite one another. The fsync-based writer is blocking,
+    // so perform the filesystem transaction off the async runtime worker.
+    let _write_guard = state.config_write_lock.lock().await;
+    let write_target = target.clone();
+    let write_content = toml_string.into_bytes();
+    let write_result = tokio::task::spawn_blocking(move || {
+        persist_registry_content(&write_target, &write_content, allow_overwrite)
+    })
+    .await;
+    let previous_content = match write_result {
+        Ok(Ok(previous)) => previous,
+        Ok(Err(RegistryContentWriteError::AlreadyExists)) => {
+            // The message names the actions a caller can actually take. For
+            // providers the answer is usually to edit the live key or URL,
+            // not replace a registry-managed definition (#6703).
+            let remedy = if content_type == "provider" {
+                format!(
+                    " — set its API key with POST /api/providers/{identifier}/key, its endpoint with PUT /api/providers/{identifier}/url, or replace the whole definition with PUT /api/registry/content/provider"
+                )
+            } else {
+                format!(
+                    " — replace the whole definition with PUT /api/registry/content/{content_type}"
+                )
+            };
+            return ApiErrorResponse::conflict(format!(
+                "{content_type} '{identifier}' already exists{remedy}"
+            ))
+            .into_json_tuple()
+            .into_response();
+        }
+        Ok(Err(RegistryContentWriteError::Io(error))) => {
+            tracing::error!(%error, "failed to persist registry content");
+            return ApiErrorResponse::internal("failed to persist registry content")
                 .into_json_tuple()
                 .into_response();
         }
-    }
-    if let Err(e) = std::fs::write(&target, &toml_string) {
-        return ApiErrorResponse::internal(e.to_string())
+        Err(error) => {
+            return ApiErrorResponse::internal_scrub(format!(
+                "registry content write task failed: {error}"
+            ))
             .into_json_tuple()
             .into_response();
-    }
+        }
+    };
 
     // For provider files, refresh the in-memory model catalog so new models
     // and provider config changes are available immediately.
@@ -303,7 +347,17 @@ async fn create_registry_content(
         // is immediately recognized as configured.
         if let Some((env_var, key_value)) = &api_key_to_save {
             let secrets_path = state.kernel.home_dir().join("secrets.env");
-            if let Err(e) = write_secret_env(&secrets_path, env_var, key_value) {
+            let env_var_for_write = env_var.clone();
+            let key_value_for_write = key_value.clone();
+            let secret_result = tokio::task::spawn_blocking(move || {
+                write_secret_env(&secrets_path, &env_var_for_write, &key_value_for_write)
+            })
+            .await;
+            if let Err(e) = secret_result.unwrap_or_else(|e| {
+                Err(std::io::Error::other(format!(
+                    "secret write task failed: {e}"
+                )))
+            }) {
                 tracing::warn!("Failed to write API key to secrets.env: {e}");
             }
             // Serialized through the process-global env write guard (#5142):
@@ -312,14 +366,20 @@ async fn create_registry_content(
         }
 
         let target_for_closure = target.clone();
+        let kernel = state.kernel.clone();
         // The trait method returns `()`; capture the load result via a
         // surrounding `&mut Option<_>` (per the `model_catalog_update` contract).
-        let mut merge_result: Option<Result<usize, String>> = None;
-        let sink = &mut merge_result;
-        state.kernel.model_catalog_update(&mut move |catalog| {
-            *sink = Some(catalog.load_catalog_file(&target_for_closure));
-            catalog.detect_auth();
-        });
+        let merge_result = tokio::task::spawn_blocking(move || {
+            let mut merge_result: Option<Result<usize, String>> = None;
+            let sink = &mut merge_result;
+            kernel.model_catalog_update(&mut move |catalog| {
+                *sink = Some(catalog.load_catalog_file(&target_for_closure));
+                catalog.detect_auth();
+            });
+            merge_result
+        })
+        .await
+        .unwrap_or_else(|error| Some(Err(format!("catalog load task failed: {error}"))));
         // Invalidate cached LLM drivers — URLs/keys may have changed.
         state.kernel.clear_driver_cache();
 
@@ -330,7 +390,18 @@ async fn create_registry_content(
         // parse warning on every daemon boot — and surface the error so the
         // operator can correct the definition.
         if let Some(Err(e)) = merge_result {
-            let _ = std::fs::remove_file(&target);
+            let rollback_target = target.clone();
+            let rollback_result = tokio::task::spawn_blocking(move || {
+                rollback_registry_content(&rollback_target, previous_content.as_deref())
+            })
+            .await;
+            if let Err(error) = rollback_result.unwrap_or_else(|error| {
+                Err(std::io::Error::other(format!(
+                    "registry rollback task failed: {error}"
+                )))
+            }) {
+                tracing::error!(%error, "failed to roll back rejected provider definition");
+            }
             return ApiErrorResponse::bad_request(format!(
                 "Provider definition was rejected and not saved: {e}"
             ))
@@ -614,6 +685,42 @@ mod identifier_validation_tests {
         assert!(
             !is_valid_registry_identifier(&over),
             "129 chars must be rejected"
+        );
+    }
+}
+
+#[cfg(test)]
+mod registry_content_write_tests {
+    use super::*;
+
+    #[test]
+    fn creates_and_atomically_replaces_without_staging_residue() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("providers/example.toml");
+
+        assert_eq!(
+            persist_registry_content(&target, b"first", false).unwrap(),
+            None
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"first");
+
+        let error = persist_registry_content(&target, b"rejected", false).unwrap_err();
+        assert!(matches!(error, RegistryContentWriteError::AlreadyExists));
+        assert_eq!(std::fs::read(&target).unwrap(), b"first");
+
+        assert_eq!(
+            persist_registry_content(&target, b"second", true).unwrap(),
+            Some(b"first".to_vec())
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"second");
+
+        rollback_registry_content(&target, Some(b"first")).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"first");
+        rollback_registry_content(&target, None).unwrap();
+        assert!(!target.exists());
+        assert_eq!(
+            std::fs::read_dir(target.parent().unwrap()).unwrap().count(),
+            0
         );
     }
 }
