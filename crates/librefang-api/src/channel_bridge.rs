@@ -1025,14 +1025,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         display_name: &str,
         username: Option<&str>,
     ) -> Result<(), String> {
-        self.kernel.memory_substrate().roster().upsert(
-            channel,
-            chat_id,
-            user_id,
-            display_name,
-            username,
-        );
-        Ok(())
+        self.kernel
+            .memory_substrate()
+            .roster()
+            .upsert(channel, chat_id, user_id, display_name, username)
+            .map_err(|error| error.to_string())
     }
 
     async fn uptime_info(&self) -> String {
