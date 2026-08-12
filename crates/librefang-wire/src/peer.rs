@@ -166,21 +166,26 @@ impl PeerRateLimiter {
     /// human-readable message if the peer has been rate-limited. The internal
     /// counters are updated on every call regardless of the outcome.
     pub fn check_message(&self, peer_id: &str) -> Result<(), String> {
-        if peer_id.len() > MAX_PEER_ID_LEN {
-            warn!(
-                peer_id_len = peer_id.len(),
-                limit = MAX_PEER_ID_LEN,
-                "OFP: peer_id exceeds maximum length; rejecting before rate-limiter admission"
-            );
-            return Err(format!(
-                "peer_id exceeds maximum length of {MAX_PEER_ID_LEN} bytes"
-            ));
-        }
-
         let now = Instant::now();
         let one_minute = Duration::from_secs(60);
 
         if self.max_msgs_per_minute > 0 {
+            // Mirrors `record_tokens`: the length cap only matters once we are
+            // about to touch `msg_counts`, so it lives inside this guard rather
+            // than ahead of it. Checking it unconditionally would reject
+            // oversized peer IDs even with message rate limiting disabled
+            // (`max_msgs_per_minute == 0`), where no map growth is possible.
+            if peer_id.len() > MAX_PEER_ID_LEN {
+                warn!(
+                    peer_id_len = peer_id.len(),
+                    limit = MAX_PEER_ID_LEN,
+                    "OFP: peer_id exceeds maximum length; rejecting before rate-limiter admission"
+                );
+                return Err(format!(
+                    "peer_id exceeds maximum length of {MAX_PEER_ID_LEN} bytes"
+                ));
+            }
+
             let mut counts = self
                 .msg_counts
                 .lock()
@@ -2445,6 +2450,20 @@ mod tests {
             0,
             "an oversized peer_id must never reach the map, or its length becomes a memory-amplification vector"
         );
+    }
+
+    #[test]
+    fn peer_message_limiter_skips_length_check_when_disabled() {
+        // With message rate limiting off (max_msgs_per_minute == 0),
+        // msg_counts is never touched, so an oversized peer_id poses no
+        // memory-amplification risk and must not be rejected. Mirrors
+        // record_tokens' behavior when max_tokens_per_hour is None.
+        let limiter = PeerRateLimiter::new(0, None);
+        let oversized = "x".repeat(MAX_PEER_ID_LEN + 1);
+
+        limiter.check_message(&oversized).unwrap();
+
+        assert_eq!(limiter.message_peer_count(), 0);
     }
 
     #[test]
