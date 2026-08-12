@@ -1,0 +1,3 @@
+User-management writes to `config.toml` (create/update/delete user, key rotation, provider-key changes) previously read, backed up, and wrote the file with blocking `std::fs` calls directly on the async request-handling task.
+Under load this could stall the Tokio worker thread the request landed on for the duration of the disk I/O, delaying unrelated requests scheduled on the same worker.
+The read and backup steps now go through `tokio::fs`, and the durable atomic write moves onto the blocking thread pool via `spawn_blocking`, with the existing config/API-key lock ordering and corrupt-config protection unchanged (#6985) (@houko)
