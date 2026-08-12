@@ -29,6 +29,45 @@ use crate::workflow::WorkflowEngine;
 use super::workspace_setup::migrate_legacy_agent_dirs;
 use super::LibreFangKernel;
 
+fn read_accessor_state<'a, T>(
+    lock: &'a std::sync::RwLock<T>,
+    state: &'static str,
+) -> std::sync::RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|poisoned| {
+        warn!(
+            state,
+            "kernel accessor read lock poisoned; recovering inner state"
+        );
+        poisoned.into_inner()
+    })
+}
+
+fn write_accessor_state<'a, T>(
+    lock: &'a std::sync::RwLock<T>,
+    state: &'static str,
+) -> std::sync::RwLockWriteGuard<'a, T> {
+    lock.write().unwrap_or_else(|poisoned| {
+        warn!(
+            state,
+            "kernel accessor write lock poisoned; recovering inner state"
+        );
+        poisoned.into_inner()
+    })
+}
+
+fn lock_accessor_state<'a, T>(
+    lock: &'a std::sync::Mutex<T>,
+    state: &'static str,
+) -> std::sync::MutexGuard<'a, T> {
+    lock.lock().unwrap_or_else(|poisoned| {
+        warn!(
+            state,
+            "kernel accessor lock poisoned; recovering inner state"
+        );
+        poisoned.into_inner()
+    })
+}
+
 pub(super) fn should_refresh_openrouter_catalog_after_error(
     manifest: &librefang_types::agent::AgentManifest,
     error: &str,
@@ -544,11 +583,10 @@ impl LibreFangKernel {
                             // Hot-migrate the effective default to another live free model.
                             // Explicitly selected agent models remain pinned.
                             let current = {
-                                let guard = kernel
-                                    .llm
-                                    .default_model_override
-                                    .read()
-                                    .unwrap_or_else(|e| e.into_inner());
+                                let guard = read_accessor_state(
+                                    &kernel.llm.default_model_override,
+                                    "default_model_override",
+                                );
                                 guard.clone().unwrap_or_else(|| {
                                     kernel.config.load().default_model.clone()
                                 })
@@ -573,11 +611,10 @@ impl LibreFangKernel {
                                     ..current
                                 };
                                 {
-                                    let mut guard = kernel
-                                        .llm
-                                        .default_model_override
-                                        .write()
-                                        .unwrap_or_else(|e| e.into_inner());
+                                    let mut guard = write_accessor_state(
+                                        &kernel.llm.default_model_override,
+                                        "default_model_override",
+                                    );
                                     *guard = Some(migrated.clone());
                                 }
                                 let failures = kernel.sync_default_model_agents(
@@ -909,7 +946,7 @@ impl LibreFangKernel {
             Ok(h) => h,
             Err(_) => return None,
         };
-        let guard = handle.read().unwrap_or_else(|e| e.into_inner());
+        let guard = read_accessor_state(&handle, "credential_vault");
         if !guard.is_unlocked() {
             // Vault file did not exist when the cache was populated and no
             // `set()` has initialised it yet — nothing to read.
@@ -927,7 +964,7 @@ impl LibreFangKernel {
     /// security is unchanged. Creates the vault if it does not exist.
     pub fn vault_set(&self, key: &str, value: &str) -> Result<(), String> {
         let handle = self.vault_handle()?;
-        let mut guard = handle.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = write_accessor_state(&handle, "credential_vault");
         if !guard.is_unlocked() {
             // Vault did not exist at cache-population time; create it now.
             guard
@@ -1015,11 +1052,10 @@ impl LibreFangKernel {
     /// - `Err(e)`    — vault read/write error, or vault_set failed (#3633).
     pub fn vault_redeem_recovery_code(&self, code: &str) -> Result<bool, String> {
         // Hold the mutex for the entire read-verify-write sequence.
-        let _guard = self
-            .security
-            .vault_recovery_codes_mutex
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = lock_accessor_state(
+            &self.security.vault_recovery_codes_mutex,
+            "vault_recovery_codes",
+        );
 
         let stored = match self.vault_get("totp_recovery_codes") {
             Some(s) => s,
@@ -1542,6 +1578,40 @@ mod tests {
         fn make_writer(&'a self) -> Self::Writer {
             self.clone()
         }
+    }
+
+    #[test]
+    fn poisoned_accessor_state_locks_recover_and_remain_usable() {
+        let rw_state = std::sync::RwLock::new(vec!["loaded"]);
+        let rw_poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut state = rw_state.write().unwrap();
+                    state.push("stale");
+                    panic!("poison accessor rwlock");
+                })
+                .join()
+        });
+        assert!(rw_poison.is_err());
+        assert_eq!(
+            &*read_accessor_state(&rw_state, "test_state"),
+            &["loaded", "stale"]
+        );
+        write_accessor_state(&rw_state, "test_state").clear();
+        assert!(read_accessor_state(&rw_state, "test_state").is_empty());
+
+        let mutex_state = std::sync::Mutex::new(vec!["cached"]);
+        let mutex_poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _state = mutex_state.lock().unwrap();
+                    panic!("poison accessor mutex");
+                })
+                .join()
+        });
+        assert!(mutex_poison.is_err());
+        lock_accessor_state(&mutex_state, "test_state").clear();
+        assert!(lock_accessor_state(&mutex_state, "test_state").is_empty());
     }
 
     /// Lazily install a process-wide tracing subscriber that captures every
