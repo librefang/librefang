@@ -1,0 +1,3 @@
+Replace the hand-rolled RSA-SHA256 signer used to sign Vertex AI service-account JWTs with the workspace-vetted `jsonwebtoken` RS256 implementation.
+The removed code carried its own PEM/ASN.1 parser, PKCS#1 v1.5 padding, and a from-scratch big-integer modular-exponentiation routine — none of which had received the scrutiny a cryptographic primitive needs, and any subtle bug there (padding, timing, or big-integer arithmetic) could have corrupted or leaked the OAuth2 assertion used to authenticate to Google Cloud.
+The service-account claim set and OAuth assertion exchange are unchanged; new coverage signs with a generated PKCS#8 RSA key and verifies with the corresponding public key, and separately asserts that an invalid private key is rejected (#6941) (@houko)
