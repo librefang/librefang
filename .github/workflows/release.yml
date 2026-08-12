@@ -567,7 +567,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
           # Cache the kernel workspace AND the sidecar's separate target/.
@@ -664,7 +664,7 @@ jobs:
       - name: Install cross
         if: matrix.use_cross
         run: cargo install cross --locked
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
           # Cache the kernel workspace AND the sidecar's separate target/.
@@ -748,7 +748,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Install cross
         run: cargo install cross --locked
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-aarch64-linux-android-${{ env.RELEASE_TAG }}
       - name: Build CLI (Android aarch64)
@@ -808,7 +808,7 @@ jobs:
         # libdbus-1-dev is required by libdbus-sys, pulled in transitively
         # by the keyring crate's secret-service backend on glibc Linux.
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-mini-${{ matrix.target }}-${{ env.RELEASE_TAG }}
       - name: Build CLI (mini)
@@ -862,7 +862,7 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Install cross
         run: cargo install cross --locked
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
           # Cache the kernel workspace AND the sidecar's separate target/.
@@ -936,7 +936,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
           # Cache the kernel workspace AND the sidecar's separate target/.
@@ -995,7 +995,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-mini-${{ matrix.target }}-${{ env.RELEASE_TAG }}
       - name: Build CLI (mini)
@@ -1050,7 +1050,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-mini-${{ matrix.target }}-${{ env.RELEASE_TAG }}
       - name: Build CLI (mini)
@@ -1670,7 +1670,7 @@ jobs:
         with:
           node-version: 24
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: desktop-${{ matrix.platform.rust_target }}-${{ env.RELEASE_TAG }}
 
@@ -1888,7 +1888,7 @@ jobs:
         with:
           version: 10
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: mobile-android-${{ env.RELEASE_TAG }}
           restore-keys: |
@@ -2114,7 +2114,7 @@ jobs:
         with:
           version: 10
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: mobile-ios-${{ env.RELEASE_TAG }}
           restore-keys: |
