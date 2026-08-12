@@ -10,7 +10,7 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 /// Owner/repo path of the registry, shared by every forge.
 const REGISTRY_REPO_PATH: &str = "librefang/librefang-registry";
@@ -87,6 +87,13 @@ pub const DEFAULT_CACHE_TTL_SECS: u64 = 24 * 60 * 60; // 24 hours
 /// `spawn_blocking`, so a `std::sync::Mutex` is appropriate.
 static SYNC_LOCK: Mutex<()> = Mutex::new(());
 
+fn lock_registry_sync(mutex: &Mutex<()>) -> MutexGuard<'_, ()> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!("registry sync lock poisoned; recovering and serializing subsequent writes");
+        poisoned.into_inner()
+    })
+}
+
 /// Refresh only the `~/.librefang/registry/` checkout from upstream —
 /// no fan-out into `workspaces/`, `providers/`, `workflows/templates/`
 /// etc. Callers like `catalog_sync` want the repo refreshed without
@@ -102,7 +109,7 @@ pub fn refresh_registry_checkout(
     registry_mirror: &str,
     registry_host: Option<&str>,
 ) -> bool {
-    let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = lock_registry_sync(&SYNC_LOCK);
     let registry_cache = home_dir.join("registry");
 
     if registry_offline(std::env::var("LIBREFANG_REGISTRY_OFFLINE").ok().as_deref()) {
@@ -163,7 +170,7 @@ pub fn sync_registry(
     registry_mirror: &str,
     registry_host: Option<&str>,
 ) -> bool {
-    let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = lock_registry_sync(&SYNC_LOCK);
     let registry_cache = home_dir.join("registry");
 
     if registry_offline(std::env::var("LIBREFANG_REGISTRY_OFFLINE").ok().as_deref()) {
@@ -318,7 +325,7 @@ pub const REGISTRY_FIXTURE_DIR: &str =
 /// Panics on copy failure — a silently empty home is precisely the failure mode this exists to prevent.
 #[doc(hidden)]
 pub fn seed_registry_fixture_for_tests(home_dir: &Path) {
-    let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = lock_registry_sync(&SYNC_LOCK);
     let registry_cache = home_dir.join("registry");
     if let Err(e) = copy_dir_recursive(Path::new(REGISTRY_FIXTURE_DIR), &registry_cache) {
         panic!("failed to seed registry fixture from {REGISTRY_FIXTURE_DIR}: {e}");
@@ -887,6 +894,26 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poisoned_registry_sync_lock_recovers_and_remains_exclusive() {
+        let mutex = Mutex::new(());
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _guard = mutex.lock().unwrap();
+                    panic!("poison registry sync lock");
+                })
+                .join()
+        });
+
+        assert!(poison.is_err());
+        let guard = lock_registry_sync(&mutex);
+        assert!(mutex.try_lock().is_err());
+        drop(guard);
+        let recovered_again = lock_registry_sync(&mutex);
+        drop(recovered_again);
+    }
 
     /// The offline switch is truthy for anything except unset / empty / `0` / `false` (#6404).
     /// Tested through the pure parser so no test mutates process-global env.
