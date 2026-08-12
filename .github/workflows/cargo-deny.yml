@@ -46,8 +46,7 @@ jobs:
           - bans licenses sources
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      # Pin third-party actions to immutable commits; keep the release tag in
-      # the comment so dependency tooling can still identify the version.
+      # Pin third-party actions to immutable commits; keep the release tag in the comment so dependency tooling can still identify the version.
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check ${{ matrix.checks }}
