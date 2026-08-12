@@ -87,8 +87,7 @@ async fn post(
 /// so `generate_current()` produces a code the kernel will accept.
 fn totp_for(secret_base32: &str, issuer: &str) -> totp_rs::Totp {
     use totp_rs::{Algorithm, Builder as TotpBuilder, Secret};
-    let secret =
-        Secret::try_from_base32(secret_base32).expect("decode base32 secret");
+    let secret = Secret::try_from_base32(secret_base32).expect("decode base32 secret");
     TotpBuilder::new()
         .with_algorithm(Algorithm::SHA1)
         .with_skew(1)

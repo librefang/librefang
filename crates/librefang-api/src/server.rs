@@ -3955,8 +3955,7 @@ mod dashboard_login_totp_lockout_tests {
     /// the wrong-code (`Ok(false)`) branch deterministically.
     fn wrong_codes(secret_base32: &str, issuer: &str, count: usize) -> Vec<String> {
         use totp_rs::{Algorithm, Builder as TotpBuilder, Secret};
-        let secret =
-            Secret::try_from_base32(secret_base32).expect("decode base32 secret");
+        let secret = Secret::try_from_base32(secret_base32).expect("decode base32 secret");
         let totp = TotpBuilder::new()
             .with_algorithm(Algorithm::SHA1)
             .with_skew(1)

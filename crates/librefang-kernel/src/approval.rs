@@ -1548,9 +1548,7 @@ impl ApprovalManager {
             .with_account_name(account.to_string())
             .build()
             .map_err(|e| format!("TOTP init error: {e}"))?;
-        let uri = totp
-            .to_url()
-            .map_err(|e| format!("TOTP URL error: {e}"))?;
+        let uri = totp.to_url().map_err(|e| format!("TOTP URL error: {e}"))?;
         let qr_b64 = totp
             .to_qr_base64()
             .map_err(|e| format!("QR generation error: {e}"))?;
