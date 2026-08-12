@@ -26,7 +26,7 @@ def test_final_sse_event_without_newline_is_flushed_at_eof(monkeypatch):
     # No trailing "\n" after the last event — mirrors a server that closes
     # the connection immediately after writing its last `data: ` line.
     response = FakeStreamResponse([b'data: {"final":true}'])
-    monkeypatch.setattr(client_module, "urlopen", lambda _request: response)
+    monkeypatch.setattr(client_module, "urlopen", lambda _request, **_kwargs: response)
 
     events = list(LibreFang("http://example.test")._stream("GET", "/events"))
 
@@ -38,7 +38,7 @@ def test_trailing_done_marker_without_newline_stops_the_stream(monkeypatch):
     response = FakeStreamResponse([
         b'data: {"content":"first"}\n\ndata: [DONE]',
     ])
-    monkeypatch.setattr(client_module, "urlopen", lambda _request: response)
+    monkeypatch.setattr(client_module, "urlopen", lambda _request, **_kwargs: response)
 
     events = list(LibreFang("http://example.test")._stream("GET", "/events"))
 
@@ -49,7 +49,7 @@ def test_non_data_trailing_line_is_ignored(monkeypatch):
     # A trailing SSE comment/keepalive line (no "data: " prefix) at EOF must
     # not be surfaced as an event.
     response = FakeStreamResponse([b": keepalive"])
-    monkeypatch.setattr(client_module, "urlopen", lambda _request: response)
+    monkeypatch.setattr(client_module, "urlopen", lambda _request, **_kwargs: response)
 
     events = list(LibreFang("http://example.test")._stream("GET", "/events"))
 
@@ -64,7 +64,7 @@ def test_truncated_utf8_at_eof_raises_instead_of_silently_mangling(monkeypatch):
     # above it, so truncated data surfaces as a clear failure rather than a
     # `{"raw": "�"}` event that hides the corruption.
     response = FakeStreamResponse([b"data: " + bytes([0xE2])])
-    monkeypatch.setattr(client_module, "urlopen", lambda _request: response)
+    monkeypatch.setattr(client_module, "urlopen", lambda _request, **_kwargs: response)
 
     with pytest.raises(UnicodeDecodeError):
         list(LibreFang("http://example.test")._stream("GET", "/events"))
