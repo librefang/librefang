@@ -1,5 +1,84 @@
 use super::*;
 
+fn patch_skill_provenance(
+    manifest_path: &std::path::Path,
+    source: librefang_skills::SkillSource,
+) -> Result<(), String> {
+    if !manifest_path.exists() {
+        return Ok(());
+    }
+
+    let toml_str = std::fs::read_to_string(manifest_path)
+        .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let mut manifest = toml::from_str::<librefang_skills::SkillManifest>(&toml_str)
+        .map_err(|e| format!("parse {}: {e}", manifest_path.display()))?;
+    manifest.source = Some(source);
+    let updated = toml::to_string_pretty(&manifest)
+        .map_err(|e| format!("serialize {}: {e}", manifest_path.display()))?;
+    crate::atomic_write(manifest_path, updated.as_bytes())
+        .map_err(|e| format!("write {}: {e}", manifest_path.display()))
+}
+
+async fn patch_skill_provenance_off_thread(
+    manifest_path: std::path::PathBuf,
+    source: librefang_skills::SkillSource,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || patch_skill_provenance(&manifest_path, source))
+        .await
+        .map_err(|e| format!("provenance patch task failed: {e}"))?
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::patch_skill_provenance;
+
+    #[test]
+    fn patches_manifest_atomically_without_staging_residue() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("skill.toml");
+        std::fs::write(
+            &path,
+            "[skill]\nname = \"example\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+        )
+        .unwrap();
+
+        patch_skill_provenance(
+            &path,
+            librefang_skills::SkillSource::ClawHub {
+                slug: "example-skill".to_string(),
+                version: "1.2.3".to_string(),
+            },
+        )
+        .unwrap();
+
+        let manifest: librefang_skills::SkillManifest =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(matches!(
+            manifest.source,
+            Some(librefang_skills::SkillSource::ClawHub { slug, version })
+                if slug == "example-skill" && version == "1.2.3"
+        ));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn missing_manifest_remains_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.toml");
+
+        patch_skill_provenance(
+            &path,
+            librefang_skills::SkillSource::ClawHubCn {
+                slug: "missing".to_string(),
+                version: "1.0.0".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert!(!path.exists());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ClawHub (OpenClaw ecosystem) endpoints
 // ---------------------------------------------------------------------------
@@ -359,51 +438,17 @@ pub async fn clawhub_install(
             // check miss the freshly installed skill — the hub's "Install"
             // button keeps showing as clickable until the user reloads. The
             // ClawHubCn handler already does this; bringing ClawHub in line.
-            let skill_dir = skills_dir.join(&req.slug);
-            let manifest_path = skill_dir.join("skill.toml");
-            if manifest_path.exists() {
-                match std::fs::read_to_string(&manifest_path) {
-                    Ok(toml_str) => {
-                        match toml::from_str::<librefang_skills::SkillManifest>(&toml_str) {
-                            Ok(mut manifest) => {
-                                manifest.source = Some(librefang_skills::SkillSource::ClawHub {
-                                    slug: req.slug.clone(),
-                                    version: result.version.clone(),
-                                });
-                                match toml::to_string_pretty(&manifest) {
-                                    Ok(updated) => {
-                                        if let Err(e) = std::fs::write(&manifest_path, updated) {
-                                            tracing::warn!(
-                                                slug = %req.slug,
-                                                path = %manifest_path.display(),
-                                                "Failed to write provenance to skill.toml: {e}"
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            slug = %req.slug,
-                                            "Failed to serialize skill manifest for provenance patch: {e}"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    slug = %req.slug,
-                                    "Failed to parse skill.toml for provenance patch: {e}"
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            slug = %req.slug,
-                            path = %manifest_path.display(),
-                            "Failed to read skill.toml for provenance patch: {e}"
-                        );
-                    }
-                }
+            let manifest_path = skills_dir.join(&req.slug).join("skill.toml");
+            let source = librefang_skills::SkillSource::ClawHub {
+                slug: req.slug.clone(),
+                version: result.version.clone(),
+            };
+            if let Err(e) = patch_skill_provenance_off_thread(manifest_path.clone(), source).await {
+                tracing::warn!(
+                    slug = %req.slug,
+                    path = %manifest_path.display(),
+                    "Failed to patch provenance in skill.toml: {e}"
+                );
             }
 
             // Reload so the kernel sees the patched provenance immediately —
@@ -745,51 +790,17 @@ pub async fn clawhub_cn_install(
         Ok(result) => {
             // Patch source provenance to ClawHubCn so the skill registry knows
             // this skill was installed from ClawHub and can surface update/version info.
-            let skill_dir = skills_dir.join(&req.slug);
-            let manifest_path = skill_dir.join("skill.toml");
-            if manifest_path.exists() {
-                match std::fs::read_to_string(&manifest_path) {
-                    Ok(toml_str) => {
-                        match toml::from_str::<librefang_skills::SkillManifest>(&toml_str) {
-                            Ok(mut manifest) => {
-                                manifest.source = Some(librefang_skills::SkillSource::ClawHubCn {
-                                    slug: req.slug.clone(),
-                                    version: result.version.clone(),
-                                });
-                                match toml::to_string_pretty(&manifest) {
-                                    Ok(updated) => {
-                                        if let Err(e) = std::fs::write(&manifest_path, updated) {
-                                            tracing::warn!(
-                                                slug = %req.slug,
-                                                path = %manifest_path.display(),
-                                                "Failed to write provenance to skill.toml: {e}"
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            slug = %req.slug,
-                                            "Failed to serialize skill manifest for provenance patch: {e}"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    slug = %req.slug,
-                                    "Failed to parse skill.toml for provenance patch: {e}"
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            slug = %req.slug,
-                            path = %manifest_path.display(),
-                            "Failed to read skill.toml for provenance patch: {e}"
-                        );
-                    }
-                }
+            let manifest_path = skills_dir.join(&req.slug).join("skill.toml");
+            let source = librefang_skills::SkillSource::ClawHubCn {
+                slug: req.slug.clone(),
+                version: result.version.clone(),
+            };
+            if let Err(e) = patch_skill_provenance_off_thread(manifest_path.clone(), source).await {
+                tracing::warn!(
+                    slug = %req.slug,
+                    path = %manifest_path.display(),
+                    "Failed to patch provenance in skill.toml: {e}"
+                );
             }
 
             let warnings: Vec<serde_json::Value> = result
