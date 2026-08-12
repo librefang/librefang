@@ -19,7 +19,10 @@ gcloud auth application-default login
 
 # Configure
 cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars with your project_id and API keys
+# Edit terraform.tfvars with your project_id, a restricted source CIDR,
+# a generated LibreFang API key, and provider keys
+# Current public IPv4: curl -4 https://ifconfig.me
+# API key:            openssl rand -hex 32
 
 # Deploy (~2 minutes)
 terraform init
@@ -34,7 +37,8 @@ Terraform will output:
 
 ```bash
 # Wait ~1 minute for cloud-init to finish, then:
-curl http://<external_ip>:4545/api/health
+curl -H "Authorization: Bearer <librefang_api_key>" \
+  http://<external_ip>:4545/api/health
 ```
 
 ## Teardown
@@ -57,7 +61,8 @@ terraform destroy
 │  │   :4545 ← dashboard/API  │  │
 │  └───────────────────────────┘  │
 │                                 │
-│  Firewall: SSH(22) + HTTP(4545) │
+│  Firewall: SSH(22) + API(4545)  │
+│  restricted to your source CIDR │
 └─────────────────────────────────┘
 ```
 
