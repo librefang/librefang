@@ -202,8 +202,7 @@ impl TraceStore {
 
     /// Look up a single trace by its trace_id.
     ///
-    /// Returns `Ok(None)` if no trace matches; `Err` if the lookup itself
-    /// fails (poisoned mutex, corrupt row, or other SQLite error).
+    /// Returns `Ok(None)` if no trace matches; `Err` if the lookup itself fails (poisoned mutex, corrupt row, or other SQLite error).
     pub fn query_by_trace_id(&self, trace_id: &str) -> rusqlite::Result<Option<serde_json::Value>> {
         let conn = self
             .conn
