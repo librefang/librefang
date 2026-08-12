@@ -807,6 +807,7 @@ fn create_driver_from_entry(
         )),
         ApiFormat::CodeWhale => Ok(Arc::new(
             codewhale::CodeWhaleDriver::new(config.base_url.clone(), config.skip_permissions)
+                .with_message_timeout(config.message_timeout_secs)
                 .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
         )),
         ApiFormat::ChatGpt => Ok(Arc::new(
