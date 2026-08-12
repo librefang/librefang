@@ -1,0 +1,2 @@
+`spawn_agent_by_name` built the agent manifest path directly from the channel-supplied manifest name, so a name containing `..`, a nested path, or an absolute path could resolve outside `~/.librefang/workspaces/agents/` and load an arbitrary `agent.toml` from elsewhere on disk.
+The manifest name is now validated to be exactly one normal path component before the lookup, rejecting empty names, `.`, `..`, embedded separators, and absolute paths on both Unix and Windows (#6950) (@houko)
