@@ -76,8 +76,8 @@ fn hex_val(b: u8) -> Option<u8> {
 ///
 /// The temp file receives a unique name derived from the process ID and a
 /// per-process monotonic counter so concurrent writers never share a staging
-/// file.  The file is `sync_all`-ed before the rename so a power loss between
-/// the two syscalls does not leave a zero-byte file in place of the original.
+/// file. The file is `sync_all`-ed before the rename. On Unix, the parent
+/// directory is synced after the rename so the new directory entry is durable.
 pub(crate) fn atomic_write(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -109,7 +109,37 @@ pub(crate) fn atomic_write(path: &std::path::Path, content: &[u8]) -> std::io::R
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
+
+    #[cfg(unix)]
+    {
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing parent directory")
+        })?;
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+
     Ok(())
+}
+
+#[cfg(test)]
+mod atomic_write_tests {
+    use super::atomic_write;
+
+    #[test]
+    fn replaces_existing_content_and_leaves_no_staging_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, b"old").expect("seed file");
+
+        atomic_write(&path, b"new content").expect("atomic write");
+
+        assert_eq!(std::fs::read(&path).expect("read result"), b"new content");
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read parent")
+            .map(|entry| entry.expect("directory entry").file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("config.toml")]);
+    }
 }
 
 #[cfg(windows)]
