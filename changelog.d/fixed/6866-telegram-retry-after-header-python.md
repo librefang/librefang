@@ -1,0 +1,3 @@
+Honored delta-seconds from Telegram HTTP `Retry-After` headers in the Python sidecar's `sendMessage` / multipart-upload retry paths before falling back to the JSON body or default backoff, matching the Rust adapter's fix.
+`_extract_retry_after` previously only read `parameters.retry_after` from the JSON body, so a server that only set the HTTP header (and omitted the JSON field) fell straight through to the 2s default instead of honoring the server's requested delay.
+Also capped the retry sleep at `MAX_RETRY_AFTER_SECS` (300s): the Python retry paths had no cap at all, so a flood-wait response with an extreme `retry_after` would have slept for that entire duration instead of skipping the retry, unlike the Rust adapter. (#6866) (@houko)

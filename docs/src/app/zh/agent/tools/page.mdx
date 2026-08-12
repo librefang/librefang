@@ -199,8 +199,8 @@ agent 不能硬删除已调度的任务:`schedule_delete` / `cron_cancel` 只会
 | `image_generate(prompt, size?, style?)` | 文生图(OpenAI / Replicate / Vertex)。 |
 | `image_analyze(image, question)` | 对已有图像做 vision Q&A。 |
 | `media_describe(image_or_video)` | 给已有媒体素材生成 caption / 描述。 |
-| `media_transcribe(audio_or_video, language?, prompt?)` | 音频转文本；也接受视频容器,服务端会提取其中的音轨。无法识别的扩展名会被拒绝。 |
-| `speech_to_text(audio_or_video, language?, prompt?)` | 支持的提供商和视频容器与 `media_transcribe` 相同;遇到无法识别的扩展名时不拒绝,而是退回一个宽松的猜测 MIME 类型。 |
+| `media_transcribe(audio_or_video, language?, prompt?, start_sec?, max_secs?, out_path?)` | 音频转文本；也接受视频容器,服务端会提取其中的音轨。无法识别的扩展名会被拒绝。`start_sec` / `max_secs` 只转写一个时间窗口,并在响应中返回 `has_more` / `next_start_sec` 以便继续；`out_path` 会把转写结果写入工作区文件,只返回路径、字节数、sha256 和一段预览。长录音两者都需要,详见下文。 |
+| `speech_to_text(audio_or_video, language?, prompt?)` | 支持的提供商和视频容器与 `media_transcribe` 相同;遇到无法识别的扩展名时不拒绝,而是退回一个宽松的猜测 MIME 类型。不支持时间窗口和 `out_path`,因此需要其中任何一项的长录音应改用 `media_transcribe`。 |
 | `text_to_speech(text, voice?)` | TTS 合成。 |
 | `music_generate(prompt, lyrics?)` | 音乐生成(Suno / Replicate)。 |
 | `video_generate(prompt, duration_secs?)` | 提交视频生成任务,返回 `task_id`。 |
@@ -208,6 +208,31 @@ agent 不能硬删除已调度的任务:`schedule_delete` / `cron_cancel` 只会
 | `canvas_present(html)` | 在 dashboard 渲染交互式 HTML canvas。 |
 
 provider 间成本和延迟差别很大 —— 在 `config.toml` 里配 `[media] providers` 控制每个工具走哪个 provider。
+
+### 转写长录音
+
+整场会议的转写结果无法通过单次工具返回完整送达 agent:超过 `[tool_results] spill_threshold_bytes`(默认 16 KB)的结果会被内核转存到 artifact store,agent 只拿到一个占位;而单次转写请求受一个不随输入长度变化的挂钟超时约束。
+这两个限制远早于任何文件大小限制被触及 —— 十分钟的录音提取出来只有两三兆音频。
+
+所以要按时间窗口转写,并写入文件:
+
+```
+media_transcribe(path="meeting.mp4", max_secs=600, out_path="meeting.txt")
+→ { "written_to": "...", "file_bytes": 16831, "has_more": true, "next_start_sec": 600.0, "window_preview": "..." }
+
+media_transcribe(path="meeting.mp4", start_sec=600, max_secs=600, out_path="meeting.txt")
+→ ... 只要 has_more 为 true 就继续
+```
+
+`start_sec` 为 0 的窗口会新建文件,后续窗口以换行分隔追加到同一个文件,因此多次调用会拼装成一份完整转写,而其内容始终不进入 agent 的上下文。
+推进时请使用 `next_start_sec` 而不是自行加 `max_secs`:seek 会落到关键帧上,且最后一个窗口偏短,所以只有实际产出的长度才是不会漂移的边界。
+
+也不要自行猜测 `start_sec`。
+如果窗口起点超出录音结尾约十秒以上,返回的并不是空结果:ffmpeg 会放弃 seek 并返回录音的开头,而这段内容看起来就像你所请求的那一段。
+这个余量是绝对值,不随录音长度按比例放大,因此在长录音上只占很小一部分——对一场四十五分钟的会议请求第五十分钟即可触发。
+
+如果调用超时,就调小 `max_secs`。
+一次请求能容纳多少媒体取决于 provider 的速度,自托管端点可能比托管服务慢一个数量级。
 
 ---
 

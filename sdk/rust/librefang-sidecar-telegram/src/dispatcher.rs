@@ -11,6 +11,12 @@ use serde_json::{json, Value};
 const PARSE_MODE_HTML: &str = "HTML";
 /// Bot API caption hard limit (per <https://core.telegram.org/bots/api#sendphoto>). Captions longer than this are truncated to fit before we hit the wire — Telegram rejects oversize captions with `MESSAGE_CAPTION_TOO_LONG` and there is no graceful fallback.
 const CAPTION_LIMIT_UTF16: usize = 1024;
+
+fn parse_message_id(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()))
+}
 /// Maximum FileData byte count we'll accept on the wire before erroring. Sized at 64 MiB — comfortably above cloud Bot API's 50 MB document ceiling and well below any plausible RAM exhaustion budget. Anything larger is either a producer bug or an attempt to OOM the sidecar.
 const FILE_DATA_BYTE_CAP: usize = 64 * 1024 * 1024;
 
@@ -45,6 +51,9 @@ fn truncate_raw_caption(raw: Option<&str>) -> Option<String> {
 }
 
 /// Send a text message (formatted + sanitised + chunked).
+///
+/// Delivery is not atomic when formatting produces multiple Telegram messages: chunks are sent sequentially, and an error on a later chunk is returned after earlier chunks have already been delivered.
+/// Telegram provides no rollback for those preceding messages, so callers must treat an error as possible partial delivery rather than as proof that the recipient saw nothing.
 pub async fn send_text(
     client: &BotClient,
     chat_id: i64,
@@ -423,9 +432,12 @@ pub async fn dispatch_content(
         "EditInteractive" => {
             let message_id = payload
                 .get("message_id")
-                .and_then(Value::as_str)
-                .and_then(|s| s.parse::<i64>().ok())
-                .ok_or_else(|| Error::Other("EditInteractive.message_id missing".into()))?;
+                .and_then(parse_message_id)
+                .ok_or_else(|| {
+                    Error::Other(
+                        "EditInteractive.message_id must be an integer or decimal string".into(),
+                    )
+                })?;
             let text = payload.get("text").and_then(Value::as_str).unwrap_or("");
             let keyboard = build_inline_keyboard(payload);
             let formatted = format_and_sanitize(text);
@@ -452,9 +464,12 @@ pub async fn dispatch_content(
         "DeleteMessage" => {
             let message_id = payload
                 .get("message_id")
-                .and_then(Value::as_str)
-                .and_then(|s| s.parse::<i64>().ok())
-                .ok_or_else(|| Error::Other("DeleteMessage.message_id missing".into()))?;
+                .and_then(parse_message_id)
+                .ok_or_else(|| {
+                    Error::Other(
+                        "DeleteMessage.message_id must be an integer or decimal string".into(),
+                    )
+                })?;
             client.delete_message(chat_id, message_id).await?;
         }
         "MediaGroup" => {
@@ -544,9 +559,9 @@ pub async fn dispatch_content(
 fn build_media_group(items: &[Value]) -> Result<Value> {
     let mut out: Vec<Value> = Vec::new();
     for item in items {
-        let Some(obj) = item.as_object() else {
-            continue;
-        };
+        let obj = item
+            .as_object()
+            .ok_or_else(|| Error::Other("MediaGroup item is not a JSON object".into()))?;
         if obj.len() != 1 {
             return Err(Error::Other(format!(
                 "MediaGroup item must be a single-key externally-tagged object, got {} keys",
@@ -568,7 +583,7 @@ fn build_media_group(items: &[Value]) -> Result<Value> {
         let media = payload
             .get("url")
             .and_then(Value::as_str)
-            .unwrap_or("")
+            .ok_or_else(|| Error::Other(format!("MediaGroup item {tag} missing url")))?
             .to_string();
         let raw_caption = payload.get("caption").and_then(Value::as_str);
         let formatted_caption = prepare_caption(raw_caption);
@@ -632,19 +647,157 @@ fn is_voice_filename(name: &str) -> bool {
 }
 
 fn looks_like_ogg_opus(bytes: &[u8]) -> bool {
-    if bytes.len() < 36 {
+    const OGG_FIXED_HEADER_LEN: usize = 27;
+    const OPUS_MAGIC: &[u8; 8] = b"OpusHead";
+
+    if bytes.len() < OGG_FIXED_HEADER_LEN
+        || &bytes[..4] != b"OggS"
+        || bytes[4] != 0
+        || bytes[5] & 0x01 != 0
+    {
         return false;
     }
-    if &bytes[0..4] != b"OggS" {
+
+    let segment_count = usize::from(bytes[26]);
+    let packet_start = OGG_FIXED_HEADER_LEN + segment_count;
+    if segment_count == 0 || bytes.len() < packet_start {
         return false;
     }
-    // OpusHead magic appears at byte 28 in a standard Ogg/Opus stream.
-    &bytes[28..36] == b"OpusHead"
+
+    let segment_table = &bytes[OGG_FIXED_HEADER_LEN..packet_start];
+    let page_body_len: usize = segment_table
+        .iter()
+        .map(|length| usize::from(*length))
+        .sum();
+    let Some(page_end) = packet_start.checked_add(page_body_len) else {
+        return false;
+    };
+    if bytes.len() < page_end {
+        return false;
+    }
+
+    let mut first_packet_len = 0_usize;
+    let mut first_packet_complete = false;
+    for segment_len in segment_table {
+        first_packet_len += usize::from(*segment_len);
+        if *segment_len < u8::MAX {
+            first_packet_complete = true;
+            break;
+        }
+    }
+
+    first_packet_complete
+        && first_packet_len >= OPUS_MAGIC.len()
+        && bytes[packet_start..].starts_with(OPUS_MAGIC)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ogg_page(segment_table: &[u8], body: &[u8]) -> Vec<u8> {
+        let mut page = vec![0_u8; 27];
+        page[..4].copy_from_slice(b"OggS");
+        page[26] = u8::try_from(segment_table.len()).expect("test segment count");
+        page.extend_from_slice(segment_table);
+        page.extend_from_slice(body);
+        page
+    }
+
+    #[test]
+    fn ogg_opus_detection_uses_the_first_packet_offset() {
+        let mut body = b"OpusHead".to_vec();
+        body.resize(19, 0);
+        assert!(looks_like_ogg_opus(&ogg_page(&[19], &body)));
+
+        let page = ogg_page(&[19, 0], &body);
+
+        assert!(looks_like_ogg_opus(&page));
+
+        let mut continued_packet = page.clone();
+        continued_packet[5] = 0x01;
+        assert!(!looks_like_ogg_opus(&continued_packet));
+
+        let misplaced = ogg_page(&[19], b"not-opusOpusHead....");
+        assert!(!looks_like_ogg_opus(&misplaced));
+        assert!(!looks_like_ogg_opus(&ogg_page(&[255], b"OpusHead")));
+    }
+
+    #[test]
+    fn ogg_opus_detection_rejects_every_truncation_without_panicking() {
+        // Malformed / short inputs that are nowhere near a valid page: must not panic on out-of-bounds slicing.
+        assert!(!looks_like_ogg_opus(&[]));
+        assert!(!looks_like_ogg_opus(b"OggS"));
+        assert!(!looks_like_ogg_opus(&[0_u8; 26]));
+        assert!(!looks_like_ogg_opus(b"RIFF....WAVEfmt "));
+
+        let mut short_header = vec![0_u8; 20];
+        short_header[..4].copy_from_slice(b"OggS");
+        assert!(!looks_like_ogg_opus(&short_header));
+
+        // Full fixed header claiming a segment table that is never actually supplied.
+        let mut truncated_segment_table = vec![0_u8; 27];
+        truncated_segment_table[..4].copy_from_slice(b"OggS");
+        truncated_segment_table[26] = 10;
+        assert!(!looks_like_ogg_opus(&truncated_segment_table));
+
+        // A network-truncated download can cut a genuine Ogg/Opus page off at any byte offset.
+        // Every prefix short of the full page must be rejected, and none of them may panic.
+        let mut body = b"OpusHead".to_vec();
+        body.resize(19, 0);
+        let full_page = ogg_page(&[19], &body);
+        for cut in 1..full_page.len() {
+            let truncated = &full_page[..full_page.len() - cut];
+            assert!(
+                !looks_like_ogg_opus(truncated),
+                "truncating the last {cut} byte(s) should not still look like a valid Opus page"
+            );
+        }
+        assert!(looks_like_ogg_opus(&full_page));
+    }
+
+    #[test]
+    fn media_group_rejects_non_object_items() {
+        let error = build_media_group(&[
+            json!({"Image": {"url": "https://example.com/one.jpg"}}),
+            json!("not-an-object"),
+        ])
+        .expect_err("malformed media group item must fail");
+
+        assert!(error
+            .to_string()
+            .contains("MediaGroup item is not a JSON object"));
+    }
+
+    #[test]
+    fn media_group_rejects_item_missing_url() {
+        let error = build_media_group(&[
+            json!({"Image": {"url": "https://example.com/one.jpg"}}),
+            json!({"Video": {"caption": "no url here"}}),
+        ])
+        .expect_err("media group item without a url must fail");
+
+        assert!(error
+            .to_string()
+            .contains("MediaGroup item Video missing url"));
+    }
+
+    #[test]
+    fn media_group_accepts_a_valid_variable_length_group() {
+        // Telegram's sendMediaGroup accepts 2-10 items; exercise both ends of that range.
+        let two = build_media_group(&[
+            json!({"Image": {"url": "https://example.com/one.jpg", "caption": "first"}}),
+            json!({"Video": {"url": "https://example.com/two.mp4", "duration_seconds": 12}}),
+        ])
+        .expect("a valid 2-item group must be accepted");
+        assert_eq!(two.as_array().map(Vec::len), Some(2));
+
+        let ten_items: Vec<Value> = (0..10)
+            .map(|i| json!({"Image": {"url": format!("https://example.com/{i}.jpg")}}))
+            .collect();
+        let ten = build_media_group(&ten_items).expect("a valid 10-item group must be accepted");
+        assert_eq!(ten.as_array().map(Vec::len), Some(10));
+    }
 
     #[test]
     fn location_coordinates_are_required_numbers() {
@@ -660,5 +813,15 @@ mod tests {
             let error = required_coordinate(&malformed, "lat").expect_err("invalid latitude");
             assert!(error.to_string().contains("Location.lat"));
         }
+    }
+
+    #[test]
+    fn message_id_accepts_integer_or_decimal_string() {
+        assert_eq!(parse_message_id(&json!(12345)), Some(12345));
+        assert_eq!(parse_message_id(&json!("12345")), Some(12345));
+        assert_eq!(parse_message_id(&json!(-7)), Some(-7));
+        assert_eq!(parse_message_id(&json!(12.5)), None);
+        assert_eq!(parse_message_id(&json!("9223372036854775808")), None);
+        assert_eq!(parse_message_id(&Value::Null), None);
     }
 }

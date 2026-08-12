@@ -24,19 +24,23 @@ function Harness({
   skillCatalog,
   toolCatalog,
   mcpCatalog,
+  initialState,
+  invalidFields = new Set(),
 }: {
   skillCatalog?: ManifestCatalogEntry[];
   toolCatalog?: ManifestCatalogEntry[];
   mcpCatalog?: ManifestCatalogEntry[];
+  initialState?: ManifestFormState;
+  invalidFields?: Set<string>;
 }) {
-  const [state, setState] = useState<ManifestFormState>(() => emptyManifestForm());
+  const [state, setState] = useState<ManifestFormState>(() => initialState ?? emptyManifestForm());
   return (
     <AgentManifestForm
       value={state}
       onChange={setState}
       providers={[{ name: "openai" }]}
       models={[{ provider: "openai", id: "gpt-4o" }]}
-      invalidFields={new Set()}
+      invalidFields={invalidFields}
       extras={emptyManifestExtras()}
       skillCatalog={skillCatalog}
       toolCatalog={toolCatalog}
@@ -44,6 +48,47 @@ function Harness({
     />
   );
 }
+
+describe("AgentManifestForm — validation feedback", () => {
+  it("opens scheduling errors and exposes the cron error to assistive technology", () => {
+    const state = emptyManifestForm();
+    state.schedule = { mode: "periodic", cron: "" };
+
+    render(<Harness initialState={state} invalidFields={new Set(["schedule.cron"])} />);
+
+    const input = screen.getByRole("textbox", { name: "agents.form.cron" });
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(input).toHaveAttribute("aria-required", "true");
+    expect(input).toHaveAccessibleDescription("agents.form.cron_required_error");
+    expect(input.closest("details")).toHaveAttribute("open");
+    expect(input.closest("details")?.querySelector("summary")).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+  });
+
+  it("opens response-format errors and exposes the schema error to assistive technology", () => {
+    const state = emptyManifestForm();
+    state.response_format = { mode: "json_schema", name: "response", schema: "", strict: false };
+
+    render(
+      <Harness
+        initialState={state}
+        invalidFields={new Set(["response_format.schema"])}
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox", { name: "agents.form.schema_body" });
+    expect(textarea).toHaveAttribute("aria-invalid", "true");
+    expect(textarea).toHaveAttribute("aria-required", "true");
+    expect(textarea).toHaveAccessibleDescription("agents.form.schema_invalid_error");
+    expect(textarea.closest("details")).toHaveAttribute("open");
+    expect(textarea.closest("details")?.querySelector("summary")).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+  });
+});
 
 describe("AgentManifestForm — tools/skills/mcp selection (#5246)", () => {
   it("clicking a tool option from the dropdown adds it as a chip", async () => {
@@ -139,5 +184,34 @@ describe("AgentManifestForm — tools/skills/mcp selection (#5246)", () => {
     const list = await screen.findByRole("listbox");
     expect(within(list).getByText("read_file")).toBeInTheDocument();
     expect(within(list).getByText("write_file")).toBeInTheDocument();
+  });
+});
+
+describe("AgentManifestForm — compact controls", () => {
+  it("clears duplicate text submitted to a tag input", async () => {
+    const user = userEvent.setup();
+    const state = emptyManifestForm();
+    state.mcp_servers = ["filesystem"];
+    render(<Harness initialState={state} />);
+
+    const removeButton = screen.getByRole("button", { name: "remove filesystem" });
+    const input = removeButton.parentElement?.parentElement?.querySelector("input");
+    expect(input).toBeInstanceOf(HTMLInputElement);
+    if (!(input instanceof HTMLInputElement)) return;
+
+    await user.type(input, "filesystem{Enter}");
+    expect(input).toHaveValue("");
+    expect(screen.getAllByRole("button", { name: "remove filesystem" })).toHaveLength(1);
+  });
+
+  it("gives the stream-thinking checkbox an accessible name", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    await user.click(screen.getByRole("checkbox", { name: "agents.form.thinking_enabled" }));
+
+    expect(
+      screen.getByRole("checkbox", { name: "agents.form.stream_thinking" }),
+    ).toBeInTheDocument();
   });
 });
