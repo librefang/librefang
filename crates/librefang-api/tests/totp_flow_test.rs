@@ -86,21 +86,17 @@ async fn get(h: &Harness, path: &str) -> (StatusCode, serde_json::Value) {
 
 /// Build a `TOTP` client that exactly mirrors `ApprovalManager::generate_totp_secret`
 /// so `generate_current()` produces a code the kernel will accept.
-fn totp_for(secret_base32: &str, issuer: &str) -> totp_rs::TOTP {
-    use totp_rs::{Algorithm, Secret, TOTP};
-    let raw = Secret::Encoded(secret_base32.to_string())
-        .to_bytes()
-        .expect("decode base32 secret");
-    TOTP::new(
-        Algorithm::SHA1,
-        6,
-        1,
-        30,
-        raw,
-        Some(issuer.to_string()),
-        String::new(),
-    )
-    .expect("totp init")
+fn totp_for(secret_base32: &str, issuer: &str) -> totp_rs::Totp {
+    use totp_rs::{Algorithm, Builder as TotpBuilder, Secret};
+    let secret = Secret::try_from_base32(secret_base32).expect("decode base32 secret");
+    TotpBuilder::new()
+        .with_algorithm(Algorithm::SHA1)
+        .with_skew(1)
+        .with_step_duration(30)
+        .with_secret(secret)
+        .with_issuer(Some(issuer.to_string()))
+        .build()
+        .expect("totp init")
 }
 
 fn current_code(h: &Harness) -> String {
@@ -110,9 +106,7 @@ fn current_code(h: &Harness) -> String {
         .vault_get("totp_secret")
         .expect("totp_secret in vault");
     let issuer = h.state.kernel.approvals().policy().totp_issuer.clone();
-    totp_for(&secret, &issuer)
-        .generate_current()
-        .expect("generate current code")
+    totp_for(&secret, &issuer).generate_current().to_string()
 }
 
 // ---------------------------------------------------------------------------

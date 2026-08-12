@@ -3954,20 +3954,16 @@ mod dashboard_login_totp_lockout_tests {
     /// clock skew during the test could land in), so every login attempt takes
     /// the wrong-code (`Ok(false)`) branch deterministically.
     fn wrong_codes(secret_base32: &str, issuer: &str, count: usize) -> Vec<String> {
-        use totp_rs::{Algorithm, Secret, TOTP};
-        let raw = Secret::Encoded(secret_base32.to_string())
-            .to_bytes()
-            .expect("decode base32 secret");
-        let totp = TOTP::new(
-            Algorithm::SHA1,
-            6,
-            1,
-            30,
-            raw,
-            Some(issuer.to_string()),
-            String::new(),
-        )
-        .expect("totp init");
+        use totp_rs::{Algorithm, Builder as TotpBuilder, Secret};
+        let secret = Secret::try_from_base32(secret_base32).expect("decode base32 secret");
+        let totp = TotpBuilder::new()
+            .with_algorithm(Algorithm::SHA1)
+            .with_skew(1)
+            .with_step_duration(30)
+            .with_secret(secret)
+            .with_issuer(Some(issuer.to_string()))
+            .build()
+            .expect("totp init");
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -3975,7 +3971,7 @@ mod dashboard_login_totp_lockout_tests {
         let mut forbidden = std::collections::HashSet::new();
         for dt in [-60i64, -30, 0, 30, 60] {
             let t = (now as i64 + dt).max(0) as u64;
-            forbidden.insert(totp.generate(t));
+            forbidden.insert(totp.generate(t).to_string());
         }
         let mut out = Vec::new();
         let mut n = 0u32;

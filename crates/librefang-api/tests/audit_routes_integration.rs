@@ -3,11 +3,11 @@
 //! Scope: only the audit slice. Other domains (budget/agents/skills/…) are
 //! out of scope here.
 //!
-//! Routes covered (handlers in `src/routes/audit.rs` + `src/routes/system.rs`):
+//! Routes covered (handlers in `src/routes/audit.rs`):
 //!   - `GET /api/audit/query`   (admin-gated, in audit.rs)
 //!   - `GET /api/audit/export`  (admin-gated, in audit.rs)
-//!   - `GET /api/audit/recent`  (system.rs — currently uncovered)
-//!   - `GET /api/audit/verify`  (system.rs — currently uncovered)
+//!   - `GET /api/audit/recent`  (admin-gated, in audit.rs)
+//!   - `GET /api/audit/verify`  (admin-gated, in audit.rs)
 //!
 //! What `api_integration_test.rs` already covers (intentionally NOT duplicated):
 //!   - anon → 401 on `/audit/query`
@@ -25,6 +25,7 @@
 //!   - `/audit/recent` returns the canonical `PaginatedResponse` shape
 //!     (`items`/`total`/`offset`/`limit`) plus `tip_hash`, and the `?n=` cap
 //!     (capped at 1000 by handler)
+//!   - `/audit/recent` and `/audit/verify` reject Viewer credentials
 //!   - `/audit/verify` returns `valid: true` on a fresh chain; `warning` field
 //!     surfaces when the chain is empty
 
@@ -130,6 +131,12 @@ fn build_audit_harness(api_key: &str, users: Vec<(&str, &str, &str)>) -> AuditHa
         state,
         _tmp: tmp,
     }
+}
+
+const AUDIT_ADMIN_KEY: &str = "alice-audit-admin-key";
+
+fn build_admin_audit_harness() -> AuditHarness {
+    build_audit_harness("master-key", vec![("Alice", "admin", AUDIT_ADMIN_KEY)])
 }
 
 /// Send a GET request through the router and return (status, body bytes).
@@ -626,12 +633,41 @@ async fn audit_export_rejects_viewer() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
+async fn audit_endpoints_reject_trusted_no_auth_mode() {
+    let h = build_audit_harness("", vec![]);
+    for path in [
+        "/api/audit/query",
+        "/api/audit/export?format=json",
+        "/api/audit/recent",
+        "/api/audit/verify",
+    ] {
+        let (status, _) = send_get(h.app.clone(), path, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn audit_recent_rejects_viewer() {
+    let h = build_audit_harness(
+        "master-key",
+        vec![("Eve", "viewer", "eve-audit-viewer-key")],
+    );
+    let (status, _) = send_get(
+        h.app.clone(),
+        "/api/audit/recent",
+        Some("eve-audit-viewer-key"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn audit_recent_returns_documented_shape() {
     // `/audit/recent` returns `PaginatedResponse{items,total,offset,limit}` plus `tip_hash`.
-    let h = build_audit_harness("", vec![]);
+    let h = build_admin_audit_harness();
     seed_audit_entries(&h.state);
 
-    let (status, bytes) = send_get(h.app.clone(), "/api/audit/recent", None).await;
+    let (status, bytes) = send_get(h.app.clone(), "/api/audit/recent", Some(AUDIT_ADMIN_KEY)).await;
     assert_eq!(status, StatusCode::OK);
     let body = body_json(&bytes);
     assert!(body["items"].is_array(), "must carry items[]");
@@ -652,9 +688,14 @@ async fn audit_recent_caps_n_at_1000() {
     // response size. We can't easily seed 1k entries in a unit test, so we
     // assert the structure stays valid at the cap and document the contract
     // (`n` is silently capped — there's no error).
-    let h = build_audit_harness("", vec![]);
+    let h = build_admin_audit_harness();
 
-    let (status, bytes) = send_get(h.app.clone(), "/api/audit/recent?n=999999", None).await;
+    let (status, bytes) = send_get(
+        h.app.clone(),
+        "/api/audit/recent?n=999999",
+        Some(AUDIT_ADMIN_KEY),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let body = body_json(&bytes);
     let entries = body["items"].as_array().expect("items[]");
@@ -670,11 +711,26 @@ async fn audit_recent_caps_n_at_1000() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
+async fn audit_verify_rejects_viewer() {
+    let h = build_audit_harness(
+        "master-key",
+        vec![("Eve", "viewer", "eve-audit-viewer-key")],
+    );
+    let (status, _) = send_get(
+        h.app.clone(),
+        "/api/audit/verify",
+        Some("eve-audit-viewer-key"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn audit_verify_reports_valid_on_fresh_chain() {
-    let h = build_audit_harness("", vec![]);
+    let h = build_admin_audit_harness();
     seed_audit_entries(&h.state);
 
-    let (status, bytes) = send_get(h.app.clone(), "/api/audit/verify", None).await;
+    let (status, bytes) = send_get(h.app.clone(), "/api/audit/verify", Some(AUDIT_ADMIN_KEY)).await;
     assert_eq!(status, StatusCode::OK);
     let body = body_json(&bytes);
     assert_eq!(
@@ -695,10 +751,10 @@ async fn audit_verify_omits_warning_when_chain_has_entries() {
     // kernel records its own startup events, so we only exercise the
     // populated path here; the empty-chain branch is covered by the
     // handler's own unit tests.
-    let h = build_audit_harness("", vec![]);
+    let h = build_admin_audit_harness();
     seed_audit_entries(&h.state);
 
-    let (status, bytes) = send_get(h.app.clone(), "/api/audit/verify", None).await;
+    let (status, bytes) = send_get(h.app.clone(), "/api/audit/verify", Some(AUDIT_ADMIN_KEY)).await;
     assert_eq!(status, StatusCode::OK);
     let body = body_json(&bytes);
     assert_eq!(body["valid"], serde_json::json!(true));
@@ -719,9 +775,9 @@ async fn audit_verify_surfaces_anchor_status_field() {
     // we expect anchor_enabled: true and anchor_status: "ok". We pin the
     // field names + happy-path value so a future refactor can't silently
     // drop the contract the dashboard relies on.
-    let h = build_audit_harness("", vec![]);
+    let h = build_admin_audit_harness();
     seed_audit_entries(&h.state);
-    let (status, bytes) = send_get(h.app.clone(), "/api/audit/verify", None).await;
+    let (status, bytes) = send_get(h.app.clone(), "/api/audit/verify", Some(AUDIT_ADMIN_KEY)).await;
     assert_eq!(status, StatusCode::OK);
     let body = body_json(&bytes);
     assert_eq!(
