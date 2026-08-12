@@ -74,10 +74,9 @@ fn hex_val(b: u8) -> Option<u8> {
 
 /// Write `content` to `path` atomically via a sibling temp file + rename.
 ///
-/// The temp file receives a unique name derived from the process ID and a
-/// per-process monotonic counter so concurrent writers never share a staging
-/// file. The file is `sync_all`-ed before the rename. On Unix, the parent
-/// directory is synced after the rename so the new directory entry is durable.
+/// The temp file receives a unique name derived from the process ID and a per-process monotonic counter so concurrent writers never share a staging file.
+/// The file is `sync_all`-ed before the rename.
+/// On Unix, the parent directory is synced after the rename so the new directory entry is durable.
 pub(crate) fn atomic_write(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
