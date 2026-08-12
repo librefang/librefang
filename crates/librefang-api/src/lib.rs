@@ -111,9 +111,16 @@ pub(crate) fn atomic_write(path: &std::path::Path, content: &[u8]) -> std::io::R
 
     #[cfg(unix)]
     {
-        let parent = path.parent().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing parent directory")
-        })?;
+        // `Path::parent()` returns `Some("")` (not `None`) for a bare
+        // relative filename like `config.toml` — `None` only happens for
+        // `/` or an empty path itself. Map that empty-but-present case to
+        // `.` so we still fsync the actual containing directory instead of
+        // failing `File::open("")` with ENOENT after the rename already
+        // succeeded.
+        let parent = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => std::path::Path::new("."),
+        };
         std::fs::File::open(parent)?.sync_all()?;
     }
 
