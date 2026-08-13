@@ -10,7 +10,7 @@
 //! `LibreFangKernel`'s private fields and inherent methods without any
 //! visibility surgery.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use librefang_types::agent::{AgentId, RunningSessionSnapshot, RunningSessionState, SessionId};
 use librefang_types::error::LibreFangError;
@@ -21,6 +21,24 @@ use crate::metering::MeteringEngine;
 
 use super::cron_script::atomic_write_toml;
 use super::LibreFangKernel;
+
+type AgentWatcherHandles = Vec<tokio::task::JoinHandle<()>>;
+
+fn lock_agent_watcher_slot(
+    slot: &Mutex<AgentWatcherHandles>,
+) -> MutexGuard<'_, AgentWatcherHandles> {
+    slot.lock().unwrap_or_else(|poisoned| {
+        warn!("Agent watcher slot mutex poisoned; recovering tracked tasks");
+        slot.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
+fn abort_agent_watcher_slot(slot: &Mutex<AgentWatcherHandles>) {
+    for handle in lock_agent_watcher_slot(slot).drain(..) {
+        handle.abort();
+    }
+}
 
 impl LibreFangKernel {
     /// Get session token usage and estimated cost for an agent.
@@ -576,25 +594,15 @@ impl LibreFangKernel {
             .entry(agent_id)
             .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
             .clone();
-        // The trailing `;` matters: without it the if-let is the function's
-        // tail expression, which keeps the LockResult's temporaries borrowing
-        // `slot` until function exit — and `slot` itself drops at the same
-        // point, tripping E0597. The semicolon ends the statement so the
-        // temporaries (and the guard) drop before `slot` does.
-        if let Ok(mut guard) = slot.lock() {
-            guard.retain(|h| !h.is_finished());
-            guard.push(handle);
-        };
+        let mut guard = lock_agent_watcher_slot(&slot);
+        guard.retain(|h| !h.is_finished());
+        guard.push(handle);
     }
 
     /// Abort and drop every tracked watcher task for `agent_id`.
     fn abort_agent_watchers(&self, agent_id: AgentId) {
         if let Some((_, slot)) = self.agents.agent_watchers.remove(&agent_id) {
-            if let Ok(mut guard) = slot.lock() {
-                for h in guard.drain(..) {
-                    h.abort();
-                }
-            }
+            abort_agent_watcher_slot(&slot);
         }
     }
 
@@ -764,4 +772,61 @@ impl LibreFangKernel {
     // Hand lifecycle (`activate_hand`, `deactivate_hand`, `pause_hand`,
     // `resume_hand`, `update_hand_agent_runtime_override`, …) lives in
     // `kernel::hands_lifecycle` since #4713 phase 3c.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{abort_agent_watcher_slot, lock_agent_watcher_slot, AgentWatcherHandles};
+    use std::sync::Mutex;
+
+    struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    fn tracked_task() -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _signal = DropSignal(Some(sender));
+            std::future::pending::<()>().await;
+        });
+        (handle, receiver)
+    }
+
+    #[tokio::test]
+    async fn agent_watcher_slot_recovers_tasks_after_poison_and_aborts_them() {
+        let slot = Mutex::new(AgentWatcherHandles::new());
+        let (first, first_dropped) = tracked_task();
+        let (second, second_dropped) = tracked_task();
+        tokio::task::yield_now().await;
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut guard = slot.lock().unwrap();
+            guard.push(first);
+            panic!("poison agent watcher slot");
+        }));
+        assert!(slot.is_poisoned());
+
+        lock_agent_watcher_slot(&slot).push(second);
+        assert!(!slot.is_poisoned());
+        abort_agent_watcher_slot(&slot);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), first_dropped)
+            .await
+            .expect("first recovered watcher was not aborted")
+            .expect("first watcher dropped without signaling");
+        tokio::time::timeout(std::time::Duration::from_secs(1), second_dropped)
+            .await
+            .expect("later watcher was not aborted")
+            .expect("later watcher dropped without signaling");
+        assert!(slot.lock().is_ok());
+    }
 }
