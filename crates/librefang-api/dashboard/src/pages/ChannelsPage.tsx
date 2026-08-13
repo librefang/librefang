@@ -316,7 +316,7 @@ function ChannelQrSection({ channelName, t }: { channelName: string; t: (key: st
               qrQuery.refetch();
             }}
           >
-            {t("common.retry") || "Retry"}
+            {t("common.retry", { defaultValue: "Retry" })}
           </Button>
         )}
       </div>
