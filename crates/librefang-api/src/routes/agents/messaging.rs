@@ -1,4 +1,18 @@
 use super::*;
+use librefang_types::config::DefaultModelConfig;
+use std::sync::{RwLock, RwLockReadGuard};
+
+fn read_message_default_model_override(
+    model_override: &RwLock<Option<DefaultModelConfig>>,
+) -> RwLockReadGuard<'_, Option<DefaultModelConfig>> {
+    model_override.read().unwrap_or_else(|poisoned| {
+        tracing::warn!(
+            "Agent message default-model override lock poisoned; recovering provider state"
+        );
+        model_override.clear_poison();
+        poisoned.into_inner()
+    })
+}
 
 /// POST /api/agents/:id/message — Send a message to an agent.
 #[utoipa::path(
@@ -84,11 +98,8 @@ pub async fn send_message(
         let registry = state.kernel.agent_registry();
         if let Some(entry) = registry.get(agent_id) {
             let dm = {
-                let dm_override = state
-                    .kernel
-                    .default_model_override_ref()
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner());
+                let dm_override =
+                    read_message_default_model_override(state.kernel.default_model_override_ref());
                 effective_default_model(
                     &state.kernel.config_ref().default_model,
                     dm_override.as_ref(),
@@ -413,6 +424,40 @@ pub async fn send_message(
             }
             .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod model_override_poison_tests {
+    use super::read_message_default_model_override;
+    use librefang_types::config::DefaultModelConfig;
+    use std::sync::RwLock;
+
+    #[test]
+    fn message_model_override_recovers_after_held_write_lock_panic() {
+        let expected = DefaultModelConfig {
+            provider: "private-provider".to_string(),
+            model: "private-model".to_string(),
+            api_key_env: "PRIVATE_API_KEY".to_string(),
+            ..DefaultModelConfig::default()
+        };
+        let model_override = RwLock::new(Some(expected.clone()));
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = model_override.write().unwrap();
+            panic!("poison message default-model override");
+        });
+        assert!(model_override.is_poisoned());
+
+        let recovered_guard = read_message_default_model_override(&model_override);
+        let recovered = recovered_guard.as_ref().expect("model override preserved");
+        assert_eq!(recovered.provider, expected.provider);
+        assert_eq!(recovered.model, expected.model);
+        assert_eq!(recovered.api_key_env, expected.api_key_env);
+        drop(recovered_guard);
+
+        assert!(!model_override.is_poisoned());
+        assert!(model_override.read().is_ok());
+        assert!(model_override.write().is_ok());
     }
 }
 
