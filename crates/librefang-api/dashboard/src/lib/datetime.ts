@@ -3,8 +3,8 @@
  * e.g. "3/24/2026, 10:30:00 AM"
  */
 export function formatDateTime(value: string | number | Date | undefined | null): string {
-  if (!value) return "-";
-  return new Date(value).toLocaleString();
+  const date = validDate(value);
+  return date ? date.toLocaleString() : "-";
 }
 
 /**
@@ -12,8 +12,8 @@ export function formatDateTime(value: string | number | Date | undefined | null)
  * e.g. "3/24/2026"
  */
 export function formatDate(value: string | number | Date | undefined | null): string {
-  if (!value) return "-";
-  return new Date(value).toLocaleDateString();
+  const date = validDate(value);
+  return date ? date.toLocaleDateString() : "-";
 }
 
 /**
@@ -21,8 +21,14 @@ export function formatDate(value: string | number | Date | undefined | null): st
  * e.g. "10:30:00 AM"
  */
 export function formatTime(value: string | number | Date | undefined | null): string {
-  if (!value) return "-";
-  return new Date(value).toLocaleTimeString();
+  const date = validDate(value);
+  return date ? date.toLocaleTimeString() : "-";
+}
+
+function validDate(value: string | number | Date | undefined | null): Date | undefined {
+  if (value === null || value === undefined || value === "") return undefined;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
 }
 
 /**
@@ -40,9 +46,11 @@ function getRtf(locale: string): Intl.RelativeTimeFormat {
 }
 
 export function formatRelativeTime(value: string | number | Date | undefined | null, locale?: string, nowMs?: number): string {
-  if (!value) return "-";
+  const date = validDate(value);
+  if (!date) return "-";
   const now = nowMs ?? Date.now();
-  const diff = now - new Date(value).getTime();
+  if (!Number.isFinite(now)) return "-";
+  const diff = now - date.getTime();
   const seconds = Math.floor(diff / 1000);
   const rtf = getRtf(locale ?? "en");
   if (seconds < 60) return rtf.format(-seconds, "second");
@@ -59,7 +67,8 @@ export function formatRelativeTime(value: string | number | Date | undefined | n
  * e.g. 90 → "1m", 3700 → "1h 1m", 90000 → "1d 1h"
  */
 export function formatUptime(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
+  if (!Number.isFinite(seconds) || seconds < 0) return "-";
+  if (seconds < 60) return `${Math.floor(seconds)}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
   return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`;

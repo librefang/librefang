@@ -1,0 +1,1 @@
+- Validate dashboard date and uptime inputs so epoch timestamps render correctly and malformed values use a stable placeholder. (@xiaomo)
