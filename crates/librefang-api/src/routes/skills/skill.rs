@@ -1289,12 +1289,20 @@ pub async fn get_supporting_file(
     };
 
     let requested = skill.path.join(rel_path);
-    let Ok(canonical) = requested.canonicalize() else {
-        return ApiErrorResponse::not_found(format!("File not found: {rel_path}"))
-            .into_json_tuple();
+    let canonical = match tokio::fs::canonicalize(&requested).await {
+        Ok(path) => path,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return ApiErrorResponse::not_found(format!("File not found: {rel_path}"))
+                .into_json_tuple();
+        }
+        Err(e) => return ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     };
-    let Ok(root) = skill.path.canonicalize() else {
-        return ApiErrorResponse::internal("Skill directory missing").into_json_tuple();
+    let root = match tokio::fs::canonicalize(&skill.path).await {
+        Ok(path) => path,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return ApiErrorResponse::internal("Skill directory missing").into_json_tuple();
+        }
+        Err(e) => return ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     };
     if !canonical.starts_with(&root) {
         return ApiErrorResponse::bad_request(format!(
@@ -1303,25 +1311,21 @@ pub async fn get_supporting_file(
         .into_json_tuple();
     }
 
-    // Size cap: even supporting files up to 1 MiB can exceed response
-    // limits in the browser. Truncate and advertise.
+    // Size cap: read at most one byte past the response limit so a huge or
+    // special file cannot consume unbounded memory before truncation.
     const MAX_BYTES: usize = 256 * 1024;
-    let content = match std::fs::read_to_string(&canonical) {
-        Ok(s) => s,
-        Err(e) => {
+    let (body, truncated) = match read_utf8_file_bounded(&canonical, MAX_BYTES).await {
+        Ok(result) => result,
+        Err(SupportingFileReadError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return ApiErrorResponse::not_found(format!("File not found: {rel_path}"))
+                .into_json_tuple();
+        }
+        Err(SupportingFileReadError::Io(e)) => {
             return ApiErrorResponse::internal_scrub(e).into_json_tuple();
         }
-    };
-    let (truncated, body) = if content.len() > MAX_BYTES {
-        let cut = content
-            .char_indices()
-            .take_while(|(i, _)| *i < MAX_BYTES)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
-        (true, content[..cut].to_string())
-    } else {
-        (false, content)
+        Err(SupportingFileReadError::InvalidUtf8(e)) => {
+            return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+        }
     };
 
     (
@@ -1333,6 +1337,67 @@ pub async fn get_supporting_file(
             "truncated": truncated,
         })),
     )
+}
+
+#[derive(Debug)]
+enum SupportingFileReadError {
+    Io(std::io::Error),
+    InvalidUtf8(std::string::FromUtf8Error),
+}
+
+async fn read_utf8_file_bounded(
+    path: &std::path::Path,
+    max_bytes: usize,
+) -> Result<(String, bool), SupportingFileReadError> {
+    use tokio::io::AsyncReadExt;
+
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(SupportingFileReadError::Io)?;
+    let mut bytes = Vec::with_capacity(max_bytes + 1);
+    file.take((max_bytes + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(SupportingFileReadError::Io)?;
+    let truncated = bytes.len() > max_bytes;
+    if truncated {
+        bytes.truncate(max_bytes);
+        // Do not split a valid UTF-8 scalar at the response boundary.
+        while std::str::from_utf8(&bytes).is_err_and(|e| e.error_len().is_none()) {
+            bytes.pop();
+        }
+    }
+    String::from_utf8(bytes)
+        .map(|content| (content, truncated))
+        .map_err(SupportingFileReadError::InvalidUtf8)
+}
+
+#[cfg(test)]
+mod supporting_file_read_tests {
+    use super::read_utf8_file_bounded;
+
+    #[tokio::test]
+    async fn bounded_read_stops_one_byte_past_limit() {
+        const LIMIT: usize = 8;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("large.md");
+        tokio::fs::write(&path, b"0123456789abcdef").await.unwrap();
+
+        let (content, truncated) = read_utf8_file_bounded(&path, LIMIT).await.unwrap();
+        assert_eq!(content, "01234567");
+        assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn bounded_read_does_not_split_utf8() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("utf8.md");
+        tokio::fs::write(&path, "abc界尾").await.unwrap();
+
+        let (content, truncated) = read_utf8_file_bounded(&path, 5).await.unwrap();
+        assert_eq!(content, "abc");
+        assert!(truncated);
+    }
 }
 
 /// POST /api/skills/{name}/evolve/update — full-rewrite prompt_context.
