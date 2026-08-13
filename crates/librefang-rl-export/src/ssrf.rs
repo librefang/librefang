@@ -296,7 +296,7 @@ fn blocked_v4(v4: Ipv4Addr) -> bool {
     // `loopback_or_private_v4`, so they are rejected even on the Atropos
     // loopback path. Kept in step with
     // `librefang_runtime_mcp::mcp_oauth::is_ssrf_blocked_host`.
-    (o[0] == 0 && o[1] == 0 && o[2] == 0 && o[3] == 0)          // 0.0.0.0 unspecified → loopback
+    o[0] == 0                                                   // 0.0.0.0/8 "this" network
         || (o[0] == 100 && (o[1] & 0xc0) == 64)                // 100.64.0.0/10 CGNAT (Alibaba IMDS)
         || (o[0] == 192 && o[1] == 0 && o[2] == 0 && o[3] == 192) // 192.0.0.192 Azure IMDS
         || o[0] == 127
@@ -394,6 +394,8 @@ mod tests {
         // including the Atropos loopback path, since none are RFC-1918 private.
         for url in [
             "http://0.0.0.0:8000/",          // unspecified → routes to loopback
+            "http://0.1.2.3:8000/",          // 0.0.0.0/8 "this" network
+            "http://[::ffff:0.1.2.3]:8000/", // embedded 0.0.0.0/8
             "http://100.100.100.200/",       // Alibaba Cloud IMDS (100.64/10 CGNAT)
             "http://192.0.0.192/",           // Azure IMDS alternative endpoint
             "http://metadata.aws.internal/", // AWS IMDS hostname
