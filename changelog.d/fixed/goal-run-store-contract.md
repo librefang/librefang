@@ -1,0 +1,1 @@
+- Preserve goal run start times and validate deterministic persistence metadata. (@xiaomo)
