@@ -243,14 +243,17 @@ fn is_ssrf_blocked_host_impl(host: &str, metadata_only: bool) -> bool {
 
     /// IPv4 embedded in an IPv6 address through one of the two forms
     /// that route packets to an IPv4 endpoint on the wire:
-    ///   * IPv4-mapped: `::ffff:x.x.x.x` (RFC 4291 §2.5.5.2)
+    ///   * IPv4-mapped/compatible: `::ffff:x.x.x.x` / `::x.x.x.x`
     ///   * NAT64:       `64:ff9b::x.x.x.x` (RFC 6052)
     ///
     /// Without these, `http://[::ffff:7f00:0001]/` bypasses the V4
     /// loopback check entirely — the daemon happily connects to
     /// 127.0.0.1 over an IPv6 socket.
     fn ipv6_embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
-        if let Some(v4) = v6.to_ipv4_mapped() {
+        if v6.is_unspecified() || v6.is_loopback() {
+            return None;
+        }
+        if let Some(v4) = v6.to_ipv4() {
             return Some(v4);
         }
         let s = v6.segments();
@@ -1260,6 +1263,12 @@ mod tests {
     fn well_known_url_blocks_ipv4_mapped_ipv6_loopback() {
         assert!(well_known_url("http://[::ffff:7f00:0001]/mcp").is_none());
         assert!(well_known_url("http://[::ffff:127.0.0.1]/mcp").is_none());
+    }
+
+    #[test]
+    fn well_known_url_blocks_ipv4_compatible_ipv6_loopback() {
+        assert!(well_known_url("http://[::127.0.0.1]/mcp").is_none());
+        assert!(well_known_url("http://[::7f00:1]/mcp").is_none());
     }
 
     #[test]

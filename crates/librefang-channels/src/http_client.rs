@@ -296,10 +296,13 @@ fn is_private_ipv6(v6: Ipv6Addr) -> bool {
 
 /// Extract an IPv4 address embedded in an IPv6 in the two ways an
 /// attacker can use to reach an IPv4 endpoint via an IPv6 host:
-/// IPv4-mapped (`::ffff:x.x.x.x`, RFC 4291 §2.5.5.2) and NAT64
+/// IPv4-mapped/compatible (`::ffff:x.x.x.x` / `::x.x.x.x`) and NAT64
 /// (`64:ff9b::x.x.x.x`, RFC 6052).
 fn ipv6_embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
-    if let Some(v4) = v6.to_ipv4_mapped() {
+    if v6.is_unspecified() || v6.is_loopback() {
+        return None;
+    }
+    if let Some(v4) = v6.to_ipv4() {
         return Some(v4);
     }
     let s = v6.segments();
@@ -586,6 +589,8 @@ mod tests {
             "http://[::ffff:7f00:1]/",
             "http://[::ffff:10.0.0.1]/",
             "http://[::ffff:169.254.169.254]/",
+            "http://[::127.0.0.1]/",
+            "http://[::7f00:1]/",
             "http://[64:ff9b::7f00:1]/",
             "http://[ff02::1]/", // multicast
         ] {
