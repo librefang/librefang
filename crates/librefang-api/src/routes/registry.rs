@@ -41,7 +41,7 @@ async fn registry_schema(State(state): State<Arc<AppState>>) -> impl IntoRespons
     match librefang_types::registry_schema::load_registry_schema(home_dir) {
         Some(schema) => match serde_json::to_value(&schema) {
             Ok(val) => Json(val).into_response(),
-            Err(e) => ApiErrorResponse::internal(e.to_string())
+            Err(e) => ApiErrorResponse::internal_scrub(e)
                 .into_json_tuple()
                 .into_response(),
         },
@@ -63,7 +63,7 @@ async fn registry_schema_by_type(
         Some(schema) => match schema.content_types.get(&content_type) {
             Some(ct) => match serde_json::to_value(ct) {
                 Ok(val) => Json(val).into_response(),
-                Err(e) => ApiErrorResponse::internal(e.to_string())
+                Err(e) => ApiErrorResponse::internal_scrub(e)
                     .into_json_tuple()
                     .into_response(),
             },
@@ -287,7 +287,7 @@ async fn create_registry_content(
     let toml_string = match toml::to_string_pretty(&toml_value) {
         Ok(s) => s,
         Err(e) => {
-            return ApiErrorResponse::internal(e.to_string())
+            return ApiErrorResponse::internal_scrub(e)
                 .into_json_tuple()
                 .into_response();
         }
@@ -692,6 +692,22 @@ mod identifier_validation_tests {
 #[cfg(test)]
 mod registry_content_write_tests {
     use super::*;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use http_body_util::BodyExt;
+
+    #[tokio::test]
+    async fn registry_serialization_errors_are_scrubbed() {
+        let internal = "TOML serializer failed at providers.secret_field";
+        let response = ApiErrorResponse::internal_scrub(internal).into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Internal server error"));
+        assert!(!body.contains(internal));
+        assert!(!body.contains("secret_field"));
+    }
 
     #[test]
     fn creates_and_atomically_replaces_without_staging_residue() {
