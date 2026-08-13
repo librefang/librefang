@@ -3640,13 +3640,7 @@ async fn test_user_budget_detail_fails_closed_when_storage_is_unavailable() {
     let server =
         start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
             .await;
-    let conn = server
-        .state
-        .kernel
-        .memory_substrate()
-        .pool()
-        .get()
-        .unwrap();
+    let conn = server.state.kernel.memory_substrate().pool().get().unwrap();
     conn.execute("DROP TABLE usage_events", []).unwrap();
     drop(conn);
 
