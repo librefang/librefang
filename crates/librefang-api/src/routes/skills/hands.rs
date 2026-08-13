@@ -360,15 +360,15 @@ pub async fn get_hand_manifest(
         home.join("workspaces").join(&hand_id).join("HAND.toml"),
     ];
 
-    let mut toml_content: Option<String> = None;
-    for path in &candidates {
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                toml_content = Some(content);
-                break;
-            }
+    let mut toml_content = match read_first_hand_manifest(&candidates).await {
+        Ok(content) => content,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to read hand manifest");
+            return ApiErrorResponse::internal_scrub(e)
+                .into_json_tuple()
+                .into_response();
         }
-    }
+    };
 
     // Fall back to re-serialising the in-memory definition so hands
     // installed via API (no on-disk HAND.toml) still get a useful
@@ -393,6 +393,81 @@ pub async fn get_hand_manifest(
         Body::from(text),
     )
         .into_response()
+}
+
+/// Read the first manifest in registry precedence order.
+///
+/// A missing candidate means that layout is not in use, while any other I/O
+/// error must stop the lookup. Falling through after a permission or device
+/// error would make the endpoint return a lower-priority or synthesized
+/// manifest that is not the definition the daemon attempted to load.
+async fn read_first_hand_manifest(
+    candidates: &[std::path::PathBuf],
+) -> std::io::Result<Option<String>> {
+    for path in candidates {
+        match tokio::fs::read_to_string(path).await {
+            Ok(content) => return Ok(Some(content)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod hand_manifest_read_tests {
+    use super::read_first_hand_manifest;
+
+    #[tokio::test]
+    async fn missing_candidates_allow_in_memory_fallback() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let candidates = [temp.path().join("missing-a"), temp.path().join("missing-b")];
+
+        assert_eq!(
+            read_first_hand_manifest(&candidates)
+                .await
+                .expect("missing files are not errors"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn returns_first_manifest_in_precedence_order() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let first = temp.path().join("first.toml");
+        let second = temp.path().join("second.toml");
+        tokio::fs::write(&first, "first")
+            .await
+            .expect("write first manifest");
+        tokio::fs::write(&second, "second")
+            .await
+            .expect("write second manifest");
+
+        assert_eq!(
+            read_first_hand_manifest(&[first, second])
+                .await
+                .expect("read manifest")
+                .as_deref(),
+            Some("first")
+        );
+    }
+
+    #[tokio::test]
+    async fn non_not_found_error_does_not_fall_through() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let unreadable_as_file = temp.path().join("directory");
+        tokio::fs::create_dir(&unreadable_as_file)
+            .await
+            .expect("create directory candidate");
+        let lower_priority = temp.path().join("lower.toml");
+        tokio::fs::write(&lower_priority, "lower")
+            .await
+            .expect("write lower-priority manifest");
+
+        read_first_hand_manifest(&[unreadable_as_file, lower_priority])
+            .await
+            .expect_err("read errors must not silently select a lower-priority manifest");
+    }
 }
 
 /// PUT /api/hands/{hand_id}/manifest — Overwrite the hand's HAND.toml.
