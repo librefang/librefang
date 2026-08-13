@@ -33,6 +33,7 @@ impl VaultSource {
             VaultSource::Shared(handle) => {
                 let guard = handle.read().unwrap_or_else(|poisoned| {
                     warn!("credential resolver vault read lock poisoned; recovering inner state");
+                    handle.clear_poison();
                     poisoned.into_inner()
                 });
                 f(&guard)
@@ -46,6 +47,7 @@ impl VaultSource {
             VaultSource::Shared(handle) => {
                 let mut guard = handle.write().unwrap_or_else(|poisoned| {
                     warn!("credential resolver vault write lock poisoned; recovering inner state");
+                    handle.clear_poison();
                     poisoned.into_inner()
                 });
                 f(&mut guard)
@@ -270,9 +272,26 @@ mod tests {
         });
 
         assert!(poison.is_err());
-        let mut source = VaultSource::Shared(handle);
+        assert!(handle.is_poisoned());
+        let mut source = VaultSource::Shared(Arc::clone(&handle));
         assert!(!source.with_read(CredentialVault::is_unlocked));
+        assert!(!handle.is_poisoned());
+        assert!(!handle.read().unwrap().is_unlocked());
+
+        let write_poison = std::thread::scope(|scope| {
+            let handle = Arc::clone(&handle);
+            scope
+                .spawn(move || {
+                    let _vault = handle.write().unwrap();
+                    panic!("poison shared credential vault lock again");
+                })
+                .join()
+        });
+        assert!(write_poison.is_err());
+        assert!(handle.is_poisoned());
         assert!(!source.with_write(|vault| vault.is_unlocked()));
+        assert!(!handle.is_poisoned());
+        assert!(!handle.write().unwrap().is_unlocked());
     }
 
     #[test]
