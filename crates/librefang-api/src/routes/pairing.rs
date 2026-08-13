@@ -66,16 +66,20 @@ fn resolve_pairing_base_url(
                     pairing.public_base_url is not set"
             .to_string());
     }
-    // Take the first comma-separated value, trim, and only accept it if
-    // the result is non-empty — header value `""` or `, https` would
-    // otherwise yield `://host`.
-    let scheme = headers
+    // Take the first comma-separated value and accept only web URL schemes.
+    // This header can be supplied by an untrusted client when the daemon is
+    // not behind a sanitizing proxy, so arbitrary schemes must never reach
+    // the mobile pairing payload.
+    let forwarded_scheme = headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.split(',').next())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("http");
+        .map(str::trim);
+    let scheme = match forwarded_scheme {
+        Some(value) if value.eq_ignore_ascii_case("https") => "https",
+        Some(value) if value.eq_ignore_ascii_case("http") => "http",
+        _ => "http",
+    };
     Ok(format!("{scheme}://{host}"))
 }
 
@@ -458,6 +462,22 @@ mod pairing_tests {
         let h = headers(&[("x-forwarded-proto", "")]);
         let resolved = resolve_pairing_base_url(None, &h, "host.local").unwrap();
         assert_eq!(resolved, "http://host.local");
+    }
+
+    #[test]
+    fn host_fallback_rejects_non_http_forwarded_schemes() {
+        for untrusted in ["javascript", "data", "file", "ftp"] {
+            let h = headers(&[("x-forwarded-proto", untrusted)]);
+            let resolved = resolve_pairing_base_url(None, &h, "host.local").unwrap();
+            assert_eq!(resolved, "http://host.local", "scheme: {untrusted}");
+        }
+    }
+
+    #[test]
+    fn host_fallback_normalizes_http_scheme_case() {
+        let h = headers(&[("x-forwarded-proto", "HTTPS")]);
+        let resolved = resolve_pairing_base_url(None, &h, "host.local").unwrap();
+        assert_eq!(resolved, "https://host.local");
     }
 
     #[test]
