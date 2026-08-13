@@ -70,7 +70,10 @@ impl RateLimitBucket {
         if self.limit == 0 {
             return 0.0;
         }
-        let used = self.limit.saturating_sub(self.remaining);
+        if self.remaining > self.limit {
+            return 1.0;
+        }
+        let used = self.limit - self.remaining;
         used as f64 / self.limit as f64
     }
 
@@ -148,8 +151,7 @@ impl RateLimitSnapshot {
         let get_u64 = |key: &str| -> u64 {
             lowered
                 .get(key)
-                .and_then(|v| v.trim().parse::<f64>().ok())
-                .map(|f| f as u64)
+                .and_then(|v| v.trim().parse::<u64>().ok())
                 .unwrap_or(0)
         };
 
@@ -394,13 +396,17 @@ fn parse_datetime_to_secs_from_now(s: &str) -> Option<f64> {
 /// Returns `None` if the string doesn't match the expected pattern.
 fn parse_iso8601_to_unix(s: &str) -> Option<f64> {
     // Minimum: "2026-01-22T12:34:56Z" = 20 chars
-    if s.len() < 20 {
+    if s.len() < 20 || !s.is_ascii() {
         return None;
     }
 
-    // Check rough shape: digits and dashes in date part
     let bytes = s.as_bytes();
-    if !(bytes[4] == b'-' && bytes[7] == b'-' && (bytes[10] == b'T' || bytes[10] == b't')) {
+    if !(bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && (bytes[10] == b'T' || bytes[10] == b't')
+        && bytes[13] == b':'
+        && bytes[16] == b':')
+    {
         return None;
     }
 
@@ -409,10 +415,16 @@ fn parse_iso8601_to_unix(s: &str) -> Option<f64> {
     let day: i64 = s[8..10].parse().ok()?;
     let hour: i64 = s[11..13].parse().ok()?;
     let minute: i64 = s[14..16].parse().ok()?;
+    if hour > 23 || minute > 59 {
+        return None;
+    }
     // seconds may include fractional part
     let sec_str = &s[17..];
     let (sec_frac, tz_str) = split_sec_and_tz(sec_str);
     let sec: f64 = sec_frac.parse().ok()?;
+    if !(0.0..60.0).contains(&sec) {
+        return None;
+    }
 
     let tz_offset_secs = parse_tz_offset(tz_str)?;
 
@@ -441,10 +453,17 @@ fn parse_tz_offset(s: &str) -> Option<f64> {
     if s.is_empty() || s.eq_ignore_ascii_case("z") {
         return Some(0.0);
     }
-    if (s.starts_with('+') || s.starts_with('-')) && s.len() >= 6 {
+    if s.is_ascii()
+        && s.len() == 6
+        && (s.starts_with('+') || s.starts_with('-'))
+        && s.as_bytes()[3] == b':'
+    {
         let sign: f64 = if s.starts_with('-') { -1.0 } else { 1.0 };
         let h: f64 = s[1..3].parse().ok()?;
         let m: f64 = s[4..6].parse().ok()?;
+        if h > 23.0 || m > 59.0 {
+            return None;
+        }
         return Some(sign * (h * 3600.0 + m * 60.0));
     }
     None
@@ -453,7 +472,17 @@ fn parse_tz_offset(s: &str) -> Option<f64> {
 /// Compute the number of days between the Unix epoch (1970-01-01) and the
 /// given calendar date using the proleptic Gregorian calendar.
 fn days_since_epoch(year: i64, month: i64, day: i64) -> Option<i64> {
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    let leap_year = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        2 if leap_year => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if !(1..=days_in_month).contains(&day) {
         return None;
     }
     // Use the algorithm from https://howardhinnant.github.io/date_algorithms.html
@@ -666,6 +695,24 @@ mod tests {
     }
 
     #[test]
+    fn test_usage_ratio_warns_on_inconsistent_remaining_above_limit() {
+        let bucket = RateLimitBucket {
+            limit: 100,
+            remaining: 101,
+            ..Default::default()
+        };
+        assert_eq!(bucket.usage_ratio(), 1.0);
+        assert!(bucket.is_warning());
+
+        let untouched = RateLimitBucket {
+            limit: 100,
+            remaining: 100,
+            ..Default::default()
+        };
+        assert_eq!(untouched.usage_ratio(), 0.0);
+    }
+
+    #[test]
     fn test_is_warning_threshold() {
         let not_warn = RateLimitBucket {
             limit: 100,
@@ -824,6 +871,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_integer_headers_reject_float_negative_scientific_and_overflow_values() {
+        let headers = headers_from_pairs(&[
+            ("x-ratelimit-limit-requests", "12.5"),
+            ("x-ratelimit-remaining-requests", "-1"),
+            ("x-ratelimit-limit-tokens", "1e3"),
+            ("x-ratelimit-remaining-tokens", "18446744073709551616"),
+        ]);
+        let snap = RateLimitSnapshot::from_headers(&headers).expect("schema is recognised");
+        assert_eq!(snap.requests_per_minute.limit, 0);
+        assert_eq!(snap.requests_per_minute.remaining, 0);
+        assert_eq!(snap.tokens_per_minute.limit, 0);
+        assert_eq!(snap.tokens_per_minute.remaining, 0);
+    }
+
     // ── Bug fix: ISO 8601 datetime and RFC 7231 HTTP-date reset headers ───
 
     #[test]
@@ -871,6 +933,32 @@ mod tests {
     fn test_parse_reset_value_unrecognised_returns_none() {
         assert!(parse_reset_value("not-a-date").is_none());
         assert!(parse_reset_value("").is_none());
+    }
+
+    #[test]
+    fn test_iso8601_parser_rejects_non_ascii_without_panicking() {
+        for value in ["2026-01-22T1é:34:56Z", "2026-01-22T12:34:56+é5:30"] {
+            assert!(parse_iso8601_to_unix(value).is_none(), "{value}");
+        }
+    }
+
+    #[test]
+    fn test_iso8601_parser_rejects_invalid_separators_and_ranges() {
+        for value in [
+            "2026-01-22T12-34:56Z",
+            "2026-01-22T12:34-56Z",
+            "2026-01-22T24:00:00Z",
+            "2026-01-22T12:60:00Z",
+            "2026-01-22T12:34:60Z",
+            "2026-01-22T12:34:56+24:00",
+            "2026-01-22T12:34:56+00:60",
+            "2026-01-22T12:34:56+00:00junk",
+            "2026-02-29T12:34:56Z",
+            "2026-04-31T12:34:56Z",
+        ] {
+            assert!(parse_iso8601_to_unix(value).is_none(), "{value}");
+        }
+        assert!(parse_iso8601_to_unix("2024-02-29T12:34:56Z").is_some());
     }
 
     #[test]
