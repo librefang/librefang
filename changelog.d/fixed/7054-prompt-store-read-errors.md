@@ -1,0 +1,1 @@
+- Propagate malformed prompt-version, experiment, variant, and metrics rows instead of replacing invalid UUID, JSON, or timestamp fields with default data. (@xiaomo)
