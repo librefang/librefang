@@ -1,4 +1,18 @@
 use super::*;
+use librefang_skills::registry::SkillRegistry;
+use std::sync::{RwLock, RwLockReadGuard};
+
+fn read_agent_skills_registry(
+    registry: &RwLock<SkillRegistry>,
+) -> RwLockReadGuard<'_, SkillRegistry> {
+    registry.read().unwrap_or_else(|poisoned| {
+        tracing::warn!(
+            "Agent skill-assignment registry lock poisoned; recovering installed skills"
+        );
+        registry.clear_poison();
+        poisoned.into_inner()
+    })
+}
 
 #[utoipa::path(
     put,
@@ -355,12 +369,7 @@ pub async fn get_agent_skills(
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
     }
-    let available = state
-        .kernel
-        .skill_registry_ref()
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .skill_names();
+    let available = read_agent_skills_registry(state.kernel.skill_registry_ref()).skill_names();
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -1288,5 +1297,32 @@ mod inert_allowlist_tests {
             ),
             v(&["web_search", "agent_spawn"])
         );
+    }
+}
+
+#[cfg(test)]
+mod skill_registry_poison_tests {
+    use super::read_agent_skills_registry;
+    use librefang_skills::registry::SkillRegistry;
+    use std::sync::RwLock;
+
+    #[test]
+    fn agent_skills_registry_recovers_after_held_write_lock_panic() {
+        let registry = RwLock::new(SkillRegistry::new(std::path::PathBuf::from(
+            "/tmp/agent-skills-registry-poison-test",
+        )));
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = registry.write().unwrap();
+            panic!("poison agent skill-assignment registry");
+        });
+        assert!(registry.is_poisoned());
+
+        assert!(read_agent_skills_registry(&registry)
+            .skill_names()
+            .is_empty());
+
+        assert!(!registry.is_poisoned());
+        assert!(registry.read().is_ok());
+        assert!(registry.write().is_ok());
     }
 }
