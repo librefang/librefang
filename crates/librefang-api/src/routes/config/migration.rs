@@ -1,5 +1,19 @@
 use super::*;
 
+fn migration_validation_error(
+    error: crate::validation::ValidationError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if error.status == StatusCode::INTERNAL_SERVER_ERROR {
+        tracing::error!(
+            error = %error.message,
+            "migration path validation failed internally"
+        );
+        return ApiErrorResponse::internal("Internal server error").into_json_tuple();
+    }
+
+    ApiErrorResponse::bad_request(error.message).into_json_tuple()
+}
+
 #[utoipa::path(
     get,
     path = "/api/migrate/detect",
@@ -82,7 +96,7 @@ pub async fn migrate_scan(
         true, // scan target must already exist
     ) {
         Ok(p) => p,
-        Err(e) => return ApiErrorResponse::bad_request(e.message).into_json_tuple(),
+        Err(error) => return migration_validation_error(error),
     };
 
     let scan = librefang_import::openclaw::scan_openclaw_workspace(&path);
@@ -141,7 +155,7 @@ pub async fn run_migrate(
         true, // source must already exist
     ) {
         Ok(p) => p,
-        Err(e) => return ApiErrorResponse::bad_request(e.message).into_json_tuple(),
+        Err(error) => return migration_validation_error(error),
     };
 
     let target_dir = if req.target_dir.trim().is_empty() {
@@ -154,7 +168,7 @@ pub async fn run_migrate(
             false, // target may not exist yet — migration creates it
         ) {
             Ok(p) => p,
-            Err(e) => return ApiErrorResponse::bad_request(e.message).into_json_tuple(),
+            Err(error) => return migration_validation_error(error),
         }
     };
 
@@ -214,5 +228,32 @@ pub async fn run_migrate(
             )
         }
         Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_validation_preserves_client_errors() {
+        let (status, body) = migration_validation_error(
+            crate::validation::ValidationError::bad_request("source is outside allowed roots"),
+        );
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["message"], "source is outside allowed roots");
+    }
+
+    #[test]
+    fn migration_validation_scrubs_internal_paths() {
+        let (status, body) = migration_validation_error(crate::validation::ValidationError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "allowed root '/srv/private' could not be canonicalized".to_string(),
+        });
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["message"], "Internal server error");
+        assert!(!body.to_string().contains("/srv/private"));
     }
 }
