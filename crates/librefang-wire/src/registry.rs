@@ -64,6 +64,7 @@ impl PeerRegistry {
     fn read_peers(&self) -> RwLockReadGuard<'_, HashMap<String, PeerEntry>> {
         self.peers.read().unwrap_or_else(|poisoned| {
             tracing::warn!("peer registry read lock poisoned; recovering inner state");
+            self.peers.clear_poison();
             poisoned.into_inner()
         })
     }
@@ -71,6 +72,7 @@ impl PeerRegistry {
     fn write_peers(&self) -> RwLockWriteGuard<'_, HashMap<String, PeerEntry>> {
         self.peers.write().unwrap_or_else(|poisoned| {
             tracing::warn!("peer registry write lock poisoned; recovering inner state");
+            self.peers.clear_poison();
             poisoned.into_inner()
         })
     }
@@ -375,11 +377,24 @@ mod tests {
         })
         .join();
         assert!(joined.is_err());
+        assert!(registry.peers.is_poisoned());
 
-        // A poisoned registry remains available, but every recovery is now
-        // observable through the warning emitted by the centralized helpers.
+        // The first read recovers the preserved state and clears the poison
+        // flag so later reads and writes use the ordinary lock path.
         assert_eq!(registry.total_count(), 1);
+        assert!(!registry.peers.is_poisoned());
+
+        let poisoner = registry.clone();
+        let joined = std::thread::spawn(move || {
+            let _guard = poisoner.peers.write().unwrap();
+            panic!("poison peer registry before write recovery");
+        })
+        .join();
+        assert!(joined.is_err());
+        assert!(registry.peers.is_poisoned());
+
         registry.add_peer(make_peer("node-2", vec![]));
         assert_eq!(registry.total_count(), 2);
+        assert!(!registry.peers.is_poisoned());
     }
 }
