@@ -421,10 +421,8 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
             mode
         };
         let mut file = options.open(&staging)?;
-        // `OpenOptionsExt::mode` is masked by the process umask on creation,
-        // so a umask that clears bits present in `mode` would silently
-        // produce a file more restrictive than the permissions we are meant
-        // to preserve. Force the exact bits explicitly, bypassing the umask.
+        // `OpenOptionsExt::mode` is masked by the process umask on creation, so a umask that clears bits present in `mode` would silently produce a file more restrictive than the permissions we are meant to preserve.
+        // Force the exact bits explicitly, bypassing the umask.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -518,14 +516,8 @@ mod tests {
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
     }
 
-    /// A crash or a rename failure between the staging write and the publish
-    /// step must not leave debris behind, and it must not touch the target
-    /// at all — the whole point of staging-then-renaming is that a caller
-    /// interrupted mid-migration can retry against an untouched original.
-    /// Forces the rename/`MoveFileExW` step to fail by making the target
-    /// path an existing directory (renaming a regular file onto a directory
-    /// always fails), mirroring
-    /// `librefang_api::routes::sidecar_toml::atomic_write_removes_staging_file_when_rename_fails`.
+    /// A crash or a rename failure between the staging write and the publish step must not leave debris behind, and it must not touch the target at all — the whole point of staging-then-renaming is that a caller interrupted mid-migration can retry against an untouched original.
+    /// Forces the rename/`MoveFileExW` step to fail by making the target path an existing directory (renaming a regular file onto a directory always fails), mirroring `librefang_api::routes::sidecar_toml::atomic_write_removes_staging_file_when_rename_fails`.
     #[test]
     fn durable_atomic_write_removes_staging_file_when_rename_fails() {
         let tmp = tempfile::tempdir().unwrap();
@@ -570,13 +562,8 @@ mod tests {
         );
     }
 
-    /// `OpenOptionsExt::mode` is masked by the process umask on creation, so
-    /// preserving the existing mode only by passing it to `.mode()` silently
-    /// drops any bit the umask also covers (e.g. group/other write under the
-    /// common 0o022 umask). This pins that the helper forces the exact
-    /// existing bits via an explicit `set_permissions` afterward, rather than
-    /// only working by coincidence when the existing mode happens not to
-    /// overlap the umask.
+    /// `OpenOptionsExt::mode` is masked by the process umask on creation, so preserving the existing mode only by passing it to `.mode()` silently drops any bit the umask also covers (e.g. group/other write under the common 0o022 umask).
+    /// This pins that the helper forces the exact existing bits via an explicit `set_permissions` afterward, rather than only working by coincidence when the existing mode happens not to overlap the umask.
     #[cfg(unix)]
     #[test]
     fn durable_atomic_write_preserves_bits_that_conflict_with_process_umask() {
