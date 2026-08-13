@@ -29,6 +29,20 @@ const HAND_EXEC_TIMEOUT_FLOOR_SECS: u64 = 300;
 /// Floor for `exec_policy.no_output_timeout_secs` on the same path — see [`HAND_EXEC_TIMEOUT_FLOOR_SECS`].
 const HAND_EXEC_NO_OUTPUT_TIMEOUT_FLOOR_SECS: u64 = 120;
 
+fn lock_hand_instance_recover(
+    lock: &std::sync::Mutex<()>,
+    instance_id: uuid::Uuid,
+) -> std::sync::MutexGuard<'_, ()> {
+    lock.lock().unwrap_or_else(|poisoned| {
+        warn!(
+            instance = %instance_id,
+            "hand_instance_lock poisoned, recovering write serialization"
+        );
+        lock.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
 impl LibreFangKernel {
     /// Activate a hand: check requirements, create instance, spawn agent.
     ///
@@ -137,13 +151,7 @@ impl LibreFangKernel {
         // Serialize the rest of activation against `update_hand_config` and the runtime-override paths: from here on we read this instance's config and write the live `AgentRegistry` entries it owns, and a settings save interleaving with the spawn loop would commit new values and then have them overwritten by the prompt this pass renders from its own snapshot.
         // Taken after `activate_with_id` because the instance id is only known once the instance exists.
         let lock = self.hand_instance_lock(instance.instance_id);
-        let _instance_guard = lock.lock().unwrap_or_else(|e| {
-            warn!(
-                instance = %instance.instance_id,
-                "hand_instance_lock poisoned, recovering: {e}"
-            );
-            e.into_inner()
-        });
+        let _instance_guard = lock_hand_instance_recover(&lock, instance.instance_id);
 
         // Re-read under the lock: a save that committed between `activate_with_id` and the lock acquisition is in the registry but not in the snapshot above, and rendering from the stale copy is exactly the #6636 symptom.
         let instance = self
@@ -659,13 +667,7 @@ impl LibreFangKernel {
     pub fn deactivate_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
         // Serialize against `update_hand_config` and the runtime-override paths: this tears down the very `AgentRegistry` entries a concurrent settings save is rewriting, and the save would otherwise leave a freshly rendered prompt on an agent that is being killed.
         let lock = self.hand_instance_lock(instance_id);
-        let guard = lock.lock().unwrap_or_else(|e| {
-            warn!(
-                instance = %instance_id,
-                "hand_instance_lock poisoned, recovering: {e}"
-            );
-            e.into_inner()
-        });
+        let guard = lock_hand_instance_recover(&lock, instance_id);
 
         let instance = self
             .skills.hand_registry
@@ -816,13 +818,7 @@ impl LibreFangKernel {
         }
 
         let lock = self.hand_instance_lock(instance_id);
-        let _guard = lock.lock().unwrap_or_else(|e| {
-            warn!(
-                instance = %instance_id,
-                "hand_instance_lock poisoned, recovering: {e}"
-            );
-            e.into_inner()
-        });
+        let _guard = lock_hand_instance_recover(&lock, instance_id);
 
         // Authoritative read: this is both the merge base and the rollback snapshot.
         let previous = self
@@ -1082,13 +1078,7 @@ impl LibreFangKernel {
         // `apply_hand_agent_runtime_override_to_registry` calls and leave
         // the live AgentRegistry inconsistent with `hand_state.json`.
         let lock = self.hand_instance_lock(instance.instance_id);
-        let _guard = lock.lock().unwrap_or_else(|e| {
-            warn!(
-                instance = %instance.instance_id,
-                "hand_instance_lock poisoned, recovering: {e}"
-            );
-            e.into_inner()
-        });
+        let _guard = lock_hand_instance_recover(&lock, instance.instance_id);
         // Re-read the instance under the lock so any concurrent
         // mutation (e.g. an in-flight clear) is reflected in the
         // `previous` snapshot used for rollback.
@@ -1202,13 +1192,7 @@ impl LibreFangKernel {
         // serialize per instance so PATCH and DELETE on the same hand
         // can't interleave their AgentRegistry writes.
         let lock = self.hand_instance_lock(instance.instance_id);
-        let _guard = lock.lock().unwrap_or_else(|e| {
-            warn!(
-                instance = %instance.instance_id,
-                "hand_instance_lock poisoned, recovering: {e}"
-            );
-            e.into_inner()
-        });
+        let _guard = lock_hand_instance_recover(&lock, instance.instance_id);
         // Re-read after taking the lock so a concurrent update isn't
         // silently overwritten by a stale snapshot.
         let instance = self
@@ -1371,5 +1355,33 @@ impl LibreFangKernel {
         }
         self.persist_hand_state();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn poisoned_hand_instance_lock_recovers_and_remains_exclusive() {
+        let lock = Arc::new(std::sync::Mutex::new(()));
+        let instance_id = uuid::Uuid::new_v4();
+        let poison_lock = Arc::clone(&lock);
+        let poison = std::thread::spawn(move || {
+            let _guard = poison_lock.lock().unwrap();
+            panic!("poison hand instance lock");
+        })
+        .join();
+        assert!(poison.is_err());
+        assert!(lock.is_poisoned());
+
+        let recovered = lock_hand_instance_recover(&lock, instance_id);
+        assert!(!lock.is_poisoned());
+        assert!(matches!(
+            lock.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+        drop(recovered);
+        assert!(lock.lock().is_ok());
     }
 }
