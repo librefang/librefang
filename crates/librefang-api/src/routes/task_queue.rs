@@ -197,13 +197,7 @@ pub async fn task_queue_list_root(
             if let Some(assignee) = params.get("assigned_to") {
                 tasks.retain(|t| t["assigned_to"].as_str().unwrap_or("") == assignee.as_str());
             }
-            // Apply limit
-            if let Some(limit_str) = params.get("limit") {
-                if let Ok(limit) = limit_str.parse::<usize>() {
-                    tasks.truncate(limit);
-                }
-            }
-            let total = tasks.len();
+            let total = truncate_task_page(&mut tasks, params.get("limit").map(String::as_str));
             (
                 StatusCode::OK,
                 Json(serde_json::json!({"tasks": tasks, "total": total})),
@@ -211,6 +205,14 @@ pub async fn task_queue_list_root(
         }
         Err(e) => map_kernel_op_err(e).into_json_tuple(),
     }
+}
+
+fn truncate_task_page(tasks: &mut Vec<serde_json::Value>, limit: Option<&str>) -> usize {
+    let total = tasks.len();
+    if let Some(limit) = limit.and_then(|value| value.parse::<usize>().ok()) {
+        tasks.truncate(limit);
+    }
+    total
 }
 
 /// POST /api/tasks — Enqueue a task on behalf of an external caller.
@@ -280,7 +282,8 @@ pub async fn task_queue_get(
 /// PATCH /api/tasks/{id} — Update task status.
 ///
 /// Body: `{"status": "pending"}` or `{"status": "cancelled"}`
-/// - `pending`: resets a failed/in_progress task so it can be re-claimed
+/// - `pending`: resets a failed task so it can be re-claimed; active tasks
+///   must not be re-queued because that can cause duplicate execution
 /// - `cancelled`: cancels a pending/in_progress task
 pub async fn task_queue_patch(
     State(state): State<Arc<AppState>>,
@@ -316,5 +319,20 @@ pub async fn task_queue_patch(
         ),
         Ok(false) => ApiErrorResponse::not_found(err_not_found).into_json_tuple(),
         Err(e) => map_kernel_op_err(e).into_json_tuple(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_task_page;
+
+    #[test]
+    fn limited_task_page_preserves_matching_total() {
+        let mut tasks = vec![serde_json::json!({}); 42];
+
+        let total = truncate_task_page(&mut tasks, Some("10"));
+
+        assert_eq!(total, 42);
+        assert_eq!(tasks.len(), 10);
     }
 }
