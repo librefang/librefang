@@ -49,6 +49,14 @@ describe("pickLatestSessionId", () => {
     ];
     expect(pickLatestSessionId(list)).toBe("dated");
   });
+
+  it("prefers a valid timestamp when an invalid date appears first", () => {
+    const list: SessionListItem[] = [
+      { session_id: "invalid", agent_id: "a1", created_at: "not-a-date" },
+      { session_id: "dated", agent_id: "a1", created_at: "2020-01-01T00:00:00Z" },
+    ];
+    expect(pickLatestSessionId(list)).toBe("dated");
+  });
 });
 
 describe("deriveDropdownActiveSessionId", () => {
