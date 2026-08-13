@@ -270,10 +270,9 @@ impl DangerousCommandChecker {
             return CheckResult::Safe;
         }
 
-        // Normalise before matching. Besides case and NULs, model the shell's
-        // common `$IFS` whitespace expansion. Otherwise a Full-policy command
-        // can spell `rm -rf /` as `rm${IFS}-rf${IFS}/` and evade every regex
-        // even though the shell executes the same destructive argv.
+        // Normalise before matching.
+        // Besides case and NULs, model the shell's common `$IFS` whitespace expansion.
+        // Otherwise a Full-policy command can spell `rm -rf /` as `rm${IFS}-rf${IFS}/` and evade every regex even though the shell executes the same destructive argv.
         let normalised = normalize_for_detection(command);
 
         for pat in DANGEROUS_PATTERNS {
@@ -321,8 +320,7 @@ fn normalize_for_detection(command: &str) -> String {
     while index < bytes.len() {
         if bytes[index..].starts_with(b"${ifs") {
             let suffix = index + 5;
-            // Accept the closing brace directly and the standard shell
-            // parameter-expansion operators (`${IFS%?}`, `${IFS:-...}`, …).
+            // Accept the closing brace directly and the standard shell parameter-expansion operators (`${IFS%?}`, `${IFS:-...}`, …).
             // Do not rewrite a different variable such as `${IFS_FILE}`.
             if suffix < bytes.len()
                 && matches!(

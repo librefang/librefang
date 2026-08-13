@@ -1540,8 +1540,7 @@ async fn test_shell_exec_full_mode_skips_approval_by_default() {
     assert_eq!(approvals, 0);
 }
 
-/// Full mode still runs the dangerous-command gate before spawning the shell,
-/// including its shell-expansion normalization.
+/// Full mode still runs the dangerous-command gate before spawning the shell, including its shell-expansion normalization.
 #[tokio::test]
 async fn test_shell_exec_full_mode_blocks_ifs_hidden_recursive_delete() {
     let policy = librefang_types::config::ExecPolicy {
