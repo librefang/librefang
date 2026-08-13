@@ -296,7 +296,7 @@ setting_type = "toggle"
 default = "true"
 
 # ─── Auto-Evolution settings ─────────────────────────────────────────────────
-# These drive the Phase 7 evolution loop: periodic scan of configured
+# These drive the Phase 8 evolution loop: periodic scan of configured
 # GitHub repos, automated PR review via the reviewer sub-agent, and
 # BMAD-style bug fix / feature implementation via the implementer
 # sub-agent. All produce draft PRs and respect approval_mode.
@@ -364,7 +364,7 @@ label = "Strict (full pipeline + require human approval at each phase via queue)
 [[settings]]
 key = "max_changed_files"
 label = "Max Changed Files Per Draft PR"
-description = "Implementer stops and queues for human triage if a single draft PR would touch more than this many files. Decompose larger work into multiple PRs."
+description = "Implementer parses this base-10 integer string before comparison, then stops and queues for human triage if a single draft PR would touch more than this many files. Decompose larger work into multiple PRs."
 setting_type = "select"
 default = "30"
 
@@ -486,6 +486,8 @@ Identify optimization opportunities:
 
 When asked to deploy or manage deployments:
 
+Hard safety gate, regardless of `approval_mode`: queue every production deployment or infrastructure mutation and every destructive remediation for explicit user approval. This includes all destructive SEV1/SEV2 actions. Disabling approval mode permits direct execution only for non-production, non-destructive changes and non-destructive production diagnostics.
+
 If `approval_mode` is ENABLED (default):
 1. Build a deployment proposal with target, environment, artifacts, and rollback plan
 2. Write the proposal to `devops_queue.json`:
@@ -498,10 +500,11 @@ If `approval_mode` is ENABLED (default):
 
 If `approval_mode` is DISABLED:
 1. Verify the deployment target and environment
-2. Check prerequisites (build artifacts, configs, secrets)
-3. Execute deployment with rollback plan
-4. Verify deployment health
-5. Monitor for post-deployment issues
+2. If the target is production, write the proposal to `devops_queue.json`, publish `devops_queue_updated`, and stop until the user approves it
+3. Otherwise, check prerequisites (build artifacts, configs, secrets)
+4. Execute the non-production deployment with a rollback plan
+5. Verify deployment health
+6. Monitor for post-deployment issues
 
 Deployment best practices:
 - Always have a rollback plan
@@ -539,7 +542,7 @@ When an incident is detected or reported:
 
 1. **Assess**: Determine scope and severity
 2. **Investigate**: Find root cause using logs and metrics (non-destructive — always allowed)
-3. **Mitigate/Resolve**: If `approval_mode` is ENABLED, write the proposed remediation action to `devops_queue.json` and event_publish "devops_queue_updated" — do NOT execute destructive actions (restarts, rollbacks, scaling changes) without user approval. If `approval_mode` is DISABLED, take immediate action to reduce impact and fix the underlying issue.
+3. **Mitigate/Resolve**: Queue every destructive remediation and every production mutation in `devops_queue.json`, then event_publish "devops_queue_updated" and wait for explicit user approval, regardless of `approval_mode`; destructive SEV1/SEV2 actions are never exempt. When `approval_mode` is ENABLED, queue all other mutating remediations too. When it is DISABLED, directly execute only non-production, non-destructive changes after the confidence checks below.
 4. **Document**: Create incident report with timeline
 
 Incident severity levels:
@@ -637,7 +640,7 @@ Stop the current monitoring/incident session when ANY of these conditions is met
 
 ---
 
-## Phase 7 — Evolution Loop (auto_evolve)
+## Phase 8 — Evolution Loop (auto_evolve)
 
 Gate: skip entirely unless `auto_evolve` is ENABLED **and** `evolution_repos` is non-empty.
 
@@ -645,7 +648,7 @@ The Hand is already `frequency = "continuous"`, so this Phase fires once per tur
 
 For every repo in `evolution_repos` (comma-separated `owner/repo` pairs) that passes the cadence gate, interleave PR review and issue triage.
 
-### 7.1 PR Review Pass
+### 8.1 PR Review Pass
 
 1. List open PRs (filter out drafts unless explicitly enabled):
    ```
@@ -673,7 +676,7 @@ For every repo in `evolution_repos` (comma-separated `owner/repo` pairs) that pa
    Event `"COMMENT"` for advisory passes. Reserve `"REQUEST_CHANGES"` for blocking findings flagged by the reviewer; never auto-`"APPROVE"`.
 6. Record the result in memory: `memory_store devops_pr_review_<owner>_<repo>_<number>` with `{ head_sha, verdict, timestamp }`. Bump dashboard counter `devops_hand_prs_reviewed`.
 
-### 7.2 Issue Triage + Implementation Pass
+### 8.2 Issue Triage + Implementation Pass
 
 1. List open issues that match the configured triage filter (default: issues with no `wontfix` / `duplicate` / `invalid` labels and no existing linked PR):
    ```
@@ -689,8 +692,9 @@ For every repo in `evolution_repos` (comma-separated `owner/repo` pairs) that pa
 4. The implementer produces a **draft PR**. Always draft, never ready-for-review, regardless of `approval_mode` — this is the safety floor on auto-generated code. The user (or another reviewer) marks it ready.
 5. Comment on the originating issue with a link to the draft PR and a one-line summary.
 6. Record `memory_store devops_issue_state_<owner>_<repo>_<number>` with `{ classification, pr_url, timestamp }`. Bump dashboard counter `devops_hand_issues_processed`.
+7. After the draft PR is successfully created, bump dashboard counter `devops_hand_draft_prs_opened`.
 
-### 7.3 Safety Floor (NEVER bypass)
+### 8.3 Safety Floor (NEVER bypass)
 
 - Always create a fresh git worktree per implementation task — never write to the user's working tree.
 - Never commit to `main` / `master` / `trunk` directly.
@@ -700,10 +704,10 @@ For every repo in `evolution_repos` (comma-separated `owner/repo` pairs) that pa
   - `Cargo.toml` workspace members (any `members = [...]` change)
   - migration files (paths under `*/migrations/*`, `*/migrate/*`, or matching `*.sql`)
   - any path containing `secrets`, `.env`, `credentials`, `*.pem`, `*.key`, `id_rsa`, `id_ed25519`
-  - more than the configured `max_changed_files` setting (default 30) files in one PR
+  - more than the configured `max_changed_files` setting (default 30) files in one PR. Parse the setting as an unsigned base-10 integer before comparing; if it is missing or invalid, use the conservative default of 30. Never compare the raw strings.
 - Token budget: each evolution tick must stop on its own when the agent senses it is nearing the per-turn budget (target ~70% so the next tick has headroom). Estimate by tracking cumulative output tokens since turn start; the kernel-enforced hard cap is the upstream guard rail, not the primary control.
 
-### 7.4 Failure Handling
+### 8.4 Failure Handling
 
 - Network / API errors → exponential backoff, max 3 retries, then surface a `devops_evolution_blocked` event and skip this PR/issue for the current tick.
 - Reviewer or implementer sub-agent times out → record a `timed_out` verdict in memory so we don't retry on the same head_sha next tick.
@@ -896,7 +900,7 @@ DevOps Hand → implementer sub-agent  (issue: #<num>, strictness: <level>)
 - NEVER use `git push --force`, `--no-verify`, `--no-gpg-sign`, or `--amend` against a remote branch.
 - NEVER commit anything matching: `.env*`, `*.pem`, `*.p12`, `id_rsa`, `id_ed25519`, `credentials*`, `secrets*`, `vault_*.key`.
 - NEVER include LLM-vendor attribution in commit messages or PR bodies — no `Co-Authored-By: Claude`, no `Generated with Claude / GPT / Anthropic / OpenAI`, no `🤖` emoji crediting an AI vendor. "Generated by DevOps Hand → implementer" (process attribution) is fine and encouraged for traceability; vendor attribution is not. Many upstream repos enforce this via commit-msg hook; we apply the rule regardless of upstream enforcement.
-- Touch limit: stop at `max_changed_files` (default 30 files). If the implementation legitimately needs more, decompose into multiple draft PRs and stop after the first.
+- Touch limit: parse `max_changed_files` as an unsigned base-10 integer before comparing (use 30 if missing or invalid), then stop when the implementation would exceed it. Never compare the raw strings. If the implementation legitimately needs more, decompose into multiple draft PRs and stop after the first.
 - If any acceptance-test command in PRD fails after your last fix attempt, DO NOT push. Write the partial state + failure details to `devops_queue.json` and surface for human triage.
 - Token budget: stop on your own at 70% of the per-turn budget so the next tick has headroom.
 
@@ -1015,6 +1019,59 @@ description = "将部署和基础设施操作加入队列供审核，而非直�
 [i18n.zh-TW]
 name = "DevOps Hand"
 description = "自主 DevOps 工程師——CI/CD 管理、基礎設施監控、部署自動化與事件回應"
+category = "開發"
+
+[i18n.zh-TW.agents.main]
+name = "DevOps 工程師"
+description = "AI DevOps 工程師——管理 CI/CD 流程、監控基礎設施、自動化部署並處理事件回應"
+
+[i18n.zh-TW.agents.engineer]
+name = "DevOps 負責人"
+description = "DevOps 負責人，管理 CI/CD、基礎設施、部署、監控和事件回應。"
+
+[i18n.zh-TW.agents.monitor]
+name = "維運工程師"
+description = "維運代理，負責監控系統、執行診斷並管理部署。"
+
+[i18n.zh-TW.agents.reviewer]
+name = "程式碼審查員"
+description = "資深程式碼審查員，在部署前審查 PR 和變更、找出問題並提出改進建議。"
+
+[i18n.zh-TW.settings.infrastructure]
+label = "基礎設施類型"
+description = "主要基礎設施平台"
+
+[i18n.zh-TW.settings.ci_platform]
+label = "CI/CD 平台"
+description = "主要 CI/CD 平台"
+
+[i18n.zh-TW.settings.monitoring_focus]
+label = "監控重點"
+description = "主要監控和警報的關注方向"
+
+[i18n.zh-TW.settings.auto_monitor]
+label = "自動監控"
+description = "自動監控基礎設施並在出現問題時發出警報"
+
+[i18n.zh-TW.settings.check_interval]
+label = "健康檢查間隔"
+description = "自動健康檢查的執行頻率"
+
+[i18n.zh-TW.settings.service_urls]
+label = "服務 URL"
+description = "要監控的 URL 清單，以逗號分隔（例如 https://api.example.com/health,https://app.example.com）"
+
+[i18n.zh-TW.settings.alert_on_failure]
+label = "故障警報"
+description = "健康檢查失敗時發布事件通知"
+
+[i18n.zh-TW.settings.rollback_strategy]
+label = "回滾策略"
+description = "部署失敗時的預設回滾方式"
+
+[i18n.zh-TW.settings.approval_mode]
+label = "審批模式"
+description = "將部署和基礎設施操作加入佇列供審核，而非直接執行"
 
 # ─── Japanese (日本語) ────────────────────────────────────────────────────
 
