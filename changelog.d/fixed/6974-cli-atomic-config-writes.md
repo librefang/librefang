@@ -1,0 +1,3 @@
+CLI commands that rewrite `config.toml`, channel configs, MCP server entries, and ChatGPT OAuth secrets used a plain truncating `fs::write`, so a crash or kill mid-write could leave a corrupt or empty file behind.
+These call sites now go through a shared `durable_atomic_write` helper that stages content in a unique sibling file, fsyncs it, and atomically replaces the target via `rename` on Unix or `MoveFileExW` on Windows, fsyncing the parent directory afterward on Unix so the replacement survives a crash.
+New secret files are created at 0600 and an existing file's permissions are now preserved exactly, including bits a restrictive process umask would otherwise silently strip from the creation mode (#6974) (@houko)

@@ -15,11 +15,24 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, MutexGuard as StdMutexGuard, OnceLock, RwLock};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tracing::{debug, error, info, warn};
+
+fn lock_std_recover<'a, T>(
+    mutex: &'a std::sync::Mutex<T>,
+    name: &'static str,
+) -> StdMutexGuard<'a, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        warn!(
+            lock = name,
+            "sidecar state lock poisoned; recovering inner state"
+        );
+        poisoned.into_inner()
+    })
+}
 
 /// Cap on a single inbound event line from a sidecar adapter. The inbound
 /// stream was previously read with the unbounded `lines()`, so a runaway
@@ -919,7 +932,7 @@ async fn spawn_once(
         *guard = Some(child);
     }
     {
-        let mut s = ctx.status.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = lock_std_recover(&ctx.status, "status");
         s.connected = true;
         s.started_at = Some(Utc::now());
     }
@@ -1178,9 +1191,7 @@ async fn spawn_once(
                                         metadata,
                                     };
                                     {
-                                        let mut s = status_clone
-                                            .lock()
-                                            .unwrap_or_else(|e| e.into_inner());
+                                        let mut s = lock_std_recover(&status_clone, "status");
                                         s.messages_received += 1;
                                         s.last_message_at = Some(Utc::now());
                                     }
@@ -1235,9 +1246,7 @@ async fn spawn_once(
                                         error = %params.message,
                                         "Sidecar adapter reported error"
                                     );
-                                    let mut s = status_clone
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner());
+                                    let mut s = lock_std_recover(&status_clone, "status");
                                     s.last_error = Some(params.message);
                                 }
                                 Ok(SidecarEvent::QrReady { params }) => {
@@ -1246,9 +1255,7 @@ async fn spawn_once(
                                         has_url = params.qr_url.is_some(),
                                         "Sidecar published QR for login"
                                     );
-                                    let mut s = status_clone
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner());
+                                    let mut s = lock_std_recover(&status_clone, "status");
                                     s.qr = Some(crate::types::QrState {
                                         status: crate::types::QrStatusKind::Pending,
                                         qr_code: params.qr_code,
@@ -1283,9 +1290,7 @@ async fn spawn_once(
                                         status = ?kind,
                                         "QR session transitioned"
                                     );
-                                    let mut s = status_clone
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner());
+                                    let mut s = lock_std_recover(&status_clone, "status");
                                     // Update in place when we already have a
                                     // session — keeps qr_code / qr_url stable
                                     // across transitions. Drop the cached
@@ -1334,9 +1339,7 @@ async fn spawn_once(
                                 adapter = %adapter_name,
                                 "Sidecar process stdout closed"
                             );
-                            let mut s = status_clone
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
+                            let mut s = lock_std_recover(&status_clone, "status");
                             s.connected = false;
                             exit = ReaderExit::ChildClosed;
                             break;
@@ -1346,9 +1349,7 @@ async fn spawn_once(
                                 adapter = %adapter_name,
                                 "Error reading sidecar stdout: {e}"
                             );
-                            let mut s = status_clone
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
+                            let mut s = lock_std_recover(&status_clone, "status");
                             s.connected = false;
                             s.last_error =
                                 Some(format!("stdout read error: {e}"));
@@ -1386,7 +1387,7 @@ async fn spawn_once(
 /// (missing required env var, bad token, etc.) all along.
 fn trip_circuit(ctx: &SpawnCtx, attempt: u32) {
     let prior = {
-        let mut s = ctx.status.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = lock_std_recover(&ctx.status, "status");
         s.connected = false;
         let prior = s.last_error.clone();
         s.last_error = Some(match prior.as_deref() {
@@ -1758,7 +1759,7 @@ impl ChannelAdapter for SidecarAdapter {
                     }
                     Err(e) => {
                         {
-                            let mut s = ctx.status.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut s = lock_std_recover(&ctx.status, "status");
                             s.connected = false;
                             s.last_error = Some(e.to_string());
                         }
@@ -1820,7 +1821,7 @@ impl ChannelAdapter for SidecarAdapter {
 
         // Update status
         {
-            let mut s = self.status.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = lock_std_recover(&self.status, "status");
             s.messages_sent += 1;
         }
 
@@ -1868,7 +1869,7 @@ impl ChannelAdapter for SidecarAdapter {
 
         // Update status
         {
-            let mut s = self.status.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = lock_std_recover(&self.status, "status");
             s.connected = false;
         }
 
@@ -1876,10 +1877,7 @@ impl ChannelAdapter for SidecarAdapter {
     }
 
     fn status(&self) -> ChannelStatus {
-        self.status
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        lock_std_recover(&self.status, "status").clone()
     }
 
     async fn send_typing(
@@ -1988,10 +1986,7 @@ impl ChannelAdapter for SidecarAdapter {
         // unconditionally; the stdout reader only ever forwards
         // `Typing` events the sidecar actually emits, so a sidecar
         // without typing simply leaves this receiver idle.
-        self.typing_rx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
+        lock_std_recover(&self.typing_rx, "typing_rx").take()
     }
 
     async fn send_in_thread(
@@ -2130,6 +2125,25 @@ fn derive_sidecar_sender_identity(
 mod tests {
     use super::*;
     use crate::types::{InteractiveButton, MediaGroupItem};
+
+    #[test]
+    fn std_sidecar_state_lock_recovers_after_poisoning() {
+        let status = Arc::new(std::sync::Mutex::new(ChannelStatus::default()));
+        let poisoner = Arc::clone(&status);
+        assert!(std::thread::spawn(move || {
+            let mut guard = poisoner.lock().unwrap();
+            guard.messages_sent = 7;
+            panic!("poison sidecar status lock");
+        })
+        .join()
+        .is_err());
+
+        let mut recovered = lock_std_recover(&status, "status");
+        assert_eq!(recovered.messages_sent, 7);
+        recovered.messages_sent += 1;
+        drop(recovered);
+        assert_eq!(lock_std_recover(&status, "status").messages_sent, 8);
+    }
 
     #[test]
     fn resolve_sidecar_command_prefers_home_bin_when_bundled_binary_present() {

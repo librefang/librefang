@@ -43,6 +43,7 @@ pub struct GeminiCliDriver {
     cli_path: String,
     #[allow(dead_code)]
     skip_permissions: bool,
+    message_timeout_secs: u64,
     /// When `true` (the default), set `LIBREFANG_AGENT_ID`, `LIBREFANG_SESSION_ID`,
     /// and `LIBREFANG_STEP_ID` env vars on the spawned subprocess so operators can
     /// correlate process-tree entries with LibreFang agent sessions.
@@ -61,8 +62,16 @@ impl GeminiCliDriver {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "gemini".to_string()),
             skip_permissions,
+            message_timeout_secs: crate::cli_process::DEFAULT_MESSAGE_TIMEOUT_SECS,
             emit_caller_trace_headers: true,
         }
+    }
+
+    /// Set the default subprocess deadline.
+    /// A per-request timeout overrides it.
+    pub fn with_message_timeout(mut self, timeout_secs: u64) -> Self {
+        self.message_timeout_secs = timeout_secs;
+        self
     }
 
     /// Control whether caller-trace env vars are injected into the spawned
@@ -210,13 +219,32 @@ impl LlmDriver for GeminiCliDriver {
 
         debug!(cli = %self.cli_path, "Spawning Gemini CLI");
 
-        let output = cmd.output().await.map_err(|e| {
-            LlmError::Http(format!(
-                "Gemini CLI not found or failed to start ({}). \
-                 Install the Google Gemini CLI and run: gemini",
-                e
-            ))
-        })?;
+        let timeout_secs = request.timeout_secs.unwrap_or(self.message_timeout_secs);
+        let output = match crate::cli_process::output_with_timeout(
+            &mut cmd,
+            std::time::Duration::from_secs(timeout_secs),
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(crate::cli_process::OutputError::TimedOut) => {
+                return Err(crate::cli_process::timeout_error(
+                    timeout_secs,
+                    "Gemini CLI",
+                ));
+            }
+            Err(crate::cli_process::OutputError::Spawn(e)) => {
+                return Err(LlmError::Http(format!(
+                    "Gemini CLI not found or failed to start ({e}). \
+                     Install the Google Gemini CLI and run: gemini"
+                )));
+            }
+            Err(crate::cli_process::OutputError::Io(e)) => {
+                return Err(LlmError::Http(format!(
+                    "Gemini CLI subprocess failed after starting: {e}"
+                )));
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -349,6 +377,55 @@ mod tests {
         let driver = GeminiCliDriver::new(None, false);
         assert_eq!(driver.cli_path, "gemini");
         assert!(!driver.skip_permissions);
+        assert_eq!(
+            driver.message_timeout_secs,
+            crate::cli_process::DEFAULT_MESSAGE_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn with_message_timeout_overrides_default() {
+        let driver = GeminiCliDriver::new(None, false).with_message_timeout(19);
+        assert_eq!(driver.message_timeout_secs, 19);
+    }
+
+    #[cfg(unix)]
+    fn sleeping_cli() -> tempfile::TempPath {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, b"#!/bin/sh\nsleep 30\n").unwrap();
+        let mut permissions = file.as_file().metadata().unwrap().permissions();
+        permissions.set_mode(0o700);
+        file.as_file().set_permissions(permissions).unwrap();
+        // Convert to a `TempPath` (file still on disk, deleted on drop) so
+        // this process no longer holds the file open for writing. Spawning
+        // the path directly as a subprocess otherwise fails with `ETXTBSY`
+        // ("Text file busy") because Linux refuses to exec a file that has
+        // a writable fd open anywhere, including in the exec-ing process.
+        file.into_temp_path()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn complete_honors_request_timeout() {
+        let cli = sleeping_cli();
+        let driver = GeminiCliDriver::new(Some(cli.to_string_lossy().into_owned()), false);
+        let request = CompletionRequest {
+            model: "gemini-cli".to_string(),
+            timeout_secs: Some(0),
+            ..Default::default()
+        };
+
+        let error = driver.complete(request).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            LlmError::TimedOut {
+                inactivity_secs: 0,
+                ..
+            }
+        ));
     }
 
     #[test]

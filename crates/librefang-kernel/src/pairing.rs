@@ -5,6 +5,7 @@
 
 use dashmap::DashMap;
 use librefang_types::config::PairingConfig;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -56,6 +57,9 @@ pub struct PairingManager {
     config: PairingConfig,
     pending: DashMap<String, PairingRequest>,
     devices: DashMap<String, PairedDevice>,
+    /// Serializes the token-consume, device-cap check, and device insert as one transaction.
+    /// DashMap makes each operation safe individually but cannot make this multi-map redemption sequence atomic.
+    redemption_lock: Mutex<()>,
     persist: Option<PersistFn>,
 }
 
@@ -65,6 +69,7 @@ impl PairingManager {
             config,
             pending: DashMap::new(),
             devices: DashMap::new(),
+            redemption_lock: Mutex::new(()),
             persist: None,
         }
     }
@@ -124,6 +129,8 @@ impl PairingManager {
         token: &str,
         device_info: PairedDevice,
     ) -> Result<PairedDevice, String> {
+        let redemption_guard = self.redemption_lock.lock();
+
         // SECURITY: Constant-time token comparison
         let found = self.pending.iter().find(|entry| {
             use subtle::ConstantTimeEq;
@@ -160,6 +167,10 @@ impl PairingManager {
         // Store the device
         let device_id = device_info.device_id.clone();
         self.devices.insert(device_id.clone(), device_info.clone());
+
+        // The security-sensitive state transition is complete.
+        // Persistence callbacks may perform blocking I/O and must not serialize unrelated future redemptions.
+        drop(redemption_guard);
 
         // Persist to database
         if let Some(ref persist) = self.persist {
@@ -341,6 +352,7 @@ impl PairingManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
 
     fn default_config() -> PairingConfig {
         PairingConfig::default()
@@ -423,6 +435,94 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(mgr.devices.len(), 1);
         assert!(mgr.pending.is_empty()); // Token consumed
+    }
+
+    #[test]
+    fn concurrent_redemption_consumes_token_exactly_once() {
+        const CONTENDERS: usize = 16;
+        let mgr = Arc::new(PairingManager::new(PairingConfig {
+            enabled: true,
+            max_devices: CONTENDERS,
+            ..Default::default()
+        }));
+        let request = mgr.create_pairing_request().unwrap();
+        let barrier = Arc::new(Barrier::new(CONTENDERS));
+
+        let handles: Vec<_> = (0..CONTENDERS)
+            .map(|index| {
+                let mgr = Arc::clone(&mgr);
+                let barrier = Arc::clone(&barrier);
+                let token = request.token.clone();
+                std::thread::spawn(move || {
+                    let now = chrono::Utc::now();
+                    let device = PairedDevice {
+                        device_id: format!("dev-{index}"),
+                        display_name: format!("Device {index}"),
+                        platform: "test".to_string(),
+                        paired_at: now,
+                        last_seen: now,
+                        push_token: None,
+                        api_key_hash: String::new(),
+                    };
+                    barrier.wait();
+                    mgr.complete_pairing(&token, device).is_ok()
+                })
+            })
+            .collect();
+
+        let successes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(|success| *success)
+            .count();
+        assert_eq!(successes, 1);
+        assert_eq!(mgr.devices.len(), 1);
+        assert!(mgr.pending.is_empty());
+    }
+
+    #[test]
+    fn concurrent_redemptions_respect_device_cap() {
+        const CONTENDERS: usize = MAX_PENDING_REQUESTS;
+        let mgr = Arc::new(PairingManager::new(PairingConfig {
+            enabled: true,
+            max_devices: 1,
+            ..Default::default()
+        }));
+        let requests: Vec<_> = (0..CONTENDERS)
+            .map(|_| mgr.create_pairing_request().unwrap())
+            .collect();
+        let barrier = Arc::new(Barrier::new(CONTENDERS));
+
+        let handles: Vec<_> = requests
+            .into_iter()
+            .enumerate()
+            .map(|(index, request)| {
+                let mgr = Arc::clone(&mgr);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let now = chrono::Utc::now();
+                    let device = PairedDevice {
+                        device_id: format!("cap-dev-{index}"),
+                        display_name: format!("Device {index}"),
+                        platform: "test".to_string(),
+                        paired_at: now,
+                        last_seen: now,
+                        push_token: None,
+                        api_key_hash: String::new(),
+                    };
+                    barrier.wait();
+                    mgr.complete_pairing(&request.token, device).is_ok()
+                })
+            })
+            .collect();
+
+        let successes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(|success| *success)
+            .count();
+        assert_eq!(successes, 1);
+        assert_eq!(mgr.devices.len(), 1);
     }
 
     #[test]

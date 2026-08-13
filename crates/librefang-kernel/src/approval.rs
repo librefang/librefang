@@ -11,7 +11,7 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex as StdMutex;
+use std::sync::{Mutex as StdMutex, MutexGuard, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
 use tokio::sync::broadcast;
 use totp_rs::{Algorithm, Builder as TotpBuilder, Secret};
@@ -120,6 +120,30 @@ pub enum TotpCodeClaim {
 }
 
 impl ApprovalManager {
+    fn read_policy(&self) -> RwLockReadGuard<'_, ApprovalPolicy> {
+        self.policy.read().unwrap_or_else(|poisoned| {
+            warn!("approval policy read lock poisoned; recovering inner state");
+            poisoned.into_inner()
+        })
+    }
+
+    fn write_policy(&self) -> RwLockWriteGuard<'_, ApprovalPolicy> {
+        self.policy.write().unwrap_or_else(|poisoned| {
+            warn!("approval policy write lock poisoned; recovering inner state");
+            poisoned.into_inner()
+        })
+    }
+
+    fn lock_state<'a, T>(mutex: &'a StdMutex<T>, state: &'static str) -> MutexGuard<'a, T> {
+        mutex.lock().unwrap_or_else(|poisoned| {
+            warn!(
+                state,
+                "approval state lock poisoned; recovering inner state"
+            );
+            poisoned.into_inner()
+        })
+    }
+
     fn pending_count_for_agent(&self, agent_id: &str) -> usize {
         self.pending
             .iter()
@@ -612,7 +636,7 @@ impl ApprovalManager {
     /// Entries in the `require_approval` list support wildcard patterns
     /// (e.g. `"file_*"` matches `"file_read"`, `"file_write"`, etc.).
     pub fn requires_approval(&self, tool_name: &str) -> bool {
-        let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+        let policy = self.read_policy();
         policy
             .require_approval
             .iter()
@@ -650,7 +674,7 @@ impl ApprovalManager {
         sender_id: Option<&str>,
         channel: Option<&str>,
     ) -> bool {
-        let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+        let policy = self.read_policy();
 
         // Trusted senders bypass channel deny rules ONLY for non-high-risk
         // tools. A channel deny on a Critical/High tool (shell_exec,
@@ -718,7 +742,7 @@ impl ApprovalManager {
         sender_id: Option<&str>,
         channel: Option<&str>,
     ) -> bool {
-        let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+        let policy = self.read_policy();
 
         // Trusted sender bypass: auto-approve low-risk tools only. High-risk
         // tools (Critical/High per `classify_risk` — shell_exec, file_write,
@@ -765,12 +789,7 @@ impl ApprovalManager {
     /// a timeout re-inserts the request with bumped `escalation_count` so the caller
     /// can re-notify and re-call this method.
     pub async fn request_approval(&self, req: ApprovalRequest) -> ApprovalDecision {
-        let fallback = self
-            .policy
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .timeout_fallback
-            .clone();
+        let fallback = self.read_policy().timeout_fallback.clone();
         let mut current_req = req;
 
         loop {
@@ -920,7 +939,7 @@ impl ApprovalManager {
         let mut escalated = Vec::new();
         let mut expired = Vec::new();
         let fallback = {
-            let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+            let policy = self.read_policy();
             policy.timeout_fallback.clone()
         };
 
@@ -1008,15 +1027,15 @@ impl ApprovalManager {
     ///   next success or on lockout expiry inside `record_totp_failure`.
     fn gc_expired_totp_entries(&self) {
         let grace_secs = {
-            let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+            let policy = self.read_policy();
             policy.totp_grace_period_secs
         };
         {
-            let mut grace = self.totp_grace.lock().unwrap_or_else(|e| e.into_inner());
+            let mut grace = Self::lock_state(&self.totp_grace, "totp_grace");
             grace.retain(|_, last| grace_secs > 0 && last.elapsed().as_secs() < grace_secs);
         }
         {
-            let mut failures = self.totp_failures.lock().unwrap_or_else(|e| e.into_inner());
+            let mut failures = Self::lock_state(&self.totp_failures, "totp_failures");
             failures.retain(|_, (_, lockout_start)| match lockout_start {
                 Some(started) => started.elapsed().as_secs() < TOTP_LOCKOUT_SECS,
                 None => true,
@@ -1047,7 +1066,7 @@ impl ApprovalManager {
         // Read policy once and hold the snapshot for both the gate check and
         // the grace-period recording below, avoiding a hot-reload race between
         // two separate lock acquisitions.
-        let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+        let policy = self.read_policy();
 
         // TOTP gate: only enforced on Approved decisions.
         // Peek at the pending request to get the tool_name for per-tool checks.
@@ -1138,7 +1157,7 @@ impl ApprovalManager {
             None => {
                 // Not pending. Distinguish "already resolved" (→ 409 at the api boundary) from "never existed / long expired" (→ 404).
                 // Check the in-memory `recent` ring first for the fast path, then fall back to the durable audit log so the answer stays stable after `recent` evicts the entry or the daemon restarts (issue #6492 Bug 3).
-                let recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
+                let recent = Self::lock_state(&self.recent, "recent");
                 let handler_info = recent.iter().find(|r| r.request.id == request_id).map(|r| {
                     let who = r.decided_by.as_deref().unwrap_or("unknown");
                     let decision = r.decision.as_str();
@@ -1266,7 +1285,7 @@ impl ApprovalManager {
 
     /// List recent non-pending approvals, newest first.
     pub fn list_recent(&self, limit: usize) -> Vec<ApprovalRecord> {
-        let recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
+        let recent = Self::lock_state(&self.recent, "recent");
         recent.iter().take(limit).cloned().collect()
     }
 
@@ -1408,15 +1427,12 @@ impl ApprovalManager {
     pub fn update_policy(&self, mut policy: ApprovalPolicy) {
         // Apply the `auto_approve` shorthand on the reload path too (#6492 Bug 1) so a `POST /api/config/reload` that flips `auto_approve = true` takes effect, mirroring the boot-time normalization in `new_with_db`.
         policy.apply_shorthands();
-        *self.policy.write().unwrap_or_else(|e| e.into_inner()) = policy;
+        *self.write_policy() = policy;
     }
 
     /// Get a copy of the current policy.
     pub fn policy(&self) -> ApprovalPolicy {
-        self.policy
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.read_policy().clone()
     }
 
     /// Classify the risk level of a tool invocation.
@@ -1463,7 +1479,7 @@ impl ApprovalManager {
 
     /// Check whether the current policy requires TOTP verification.
     pub fn requires_totp(&self) -> bool {
-        let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+        let policy = self.read_policy();
         policy.second_factor == SecondFactor::Totp
     }
 
@@ -1691,7 +1707,7 @@ impl ApprovalManager {
         if policy.totp_grace_period_secs == 0 {
             return false;
         }
-        let grace = self.totp_grace.lock().unwrap_or_else(|e| e.into_inner());
+        let grace = Self::lock_state(&self.totp_grace, "totp_grace");
         grace
             .get(sender_id)
             .is_some_and(|last| last.elapsed().as_secs() < policy.totp_grace_period_secs)
@@ -1699,10 +1715,10 @@ impl ApprovalManager {
 
     /// Record a successful TOTP verification for grace period tracking.
     fn record_totp_grace(&self, sender_id: &str) {
-        let mut grace = self.totp_grace.lock().unwrap_or_else(|e| e.into_inner());
+        let mut grace = Self::lock_state(&self.totp_grace, "totp_grace");
         grace.insert(sender_id.to_string(), Instant::now());
         // Clear failure counter on success
-        let mut failures = self.totp_failures.lock().unwrap_or_else(|e| e.into_inner());
+        let mut failures = Self::lock_state(&self.totp_failures, "totp_failures");
         failures.remove(sender_id);
         drop(failures);
         self.persist_totp_lockout_clear(sender_id);
@@ -1710,7 +1726,7 @@ impl ApprovalManager {
 
     /// Check if a sender is locked out due to too many TOTP failures.
     pub fn is_totp_locked_out(&self, sender_id: &str) -> bool {
-        let failures = self.totp_failures.lock().unwrap_or_else(|e| e.into_inner());
+        let failures = Self::lock_state(&self.totp_failures, "totp_failures");
         if let Some((count, lockout_start)) = failures.get(sender_id) {
             if *count >= TOTP_MAX_FAILURES {
                 // Locked out if within lockout window (measured from when threshold was reached)
@@ -1731,7 +1747,7 @@ impl ApprovalManager {
     /// course is to deny the request (fail-secure, fix for #3372 / #3584).
     #[allow(clippy::result_unit_err)]
     pub fn record_totp_failure(&self, sender_id: &str) -> Result<(), ()> {
-        let mut failures = self.totp_failures.lock().unwrap_or_else(|e| e.into_inner());
+        let mut failures = Self::lock_state(&self.totp_failures, "totp_failures");
         let entry = failures.entry(sender_id.to_string()).or_insert((0, None));
         // Reset counter if lockout window expired
         if entry
@@ -1779,14 +1795,11 @@ impl ApprovalManager {
     pub fn check_and_record_totp_failure(&self, sender_id: &str) -> Result<(), bool> {
         // Hold failure_rw_mutex across check+record to prevent concurrent requests
         // from both passing the lockout check when the counter is at threshold-1.
-        let _guard = self
-            .failure_rw_mutex
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = Self::lock_state(&self.failure_rw_mutex, "failure_rw_mutex");
 
         // Check lockout under the guard.
         {
-            let failures = self.totp_failures.lock().unwrap_or_else(|e| e.into_inner());
+            let failures = Self::lock_state(&self.totp_failures, "totp_failures");
             if let Some((count, lockout_start)) = failures.get(sender_id) {
                 if *count >= TOTP_MAX_FAILURES {
                     // Defense in depth: if the counter is already at threshold
@@ -2153,7 +2166,7 @@ impl ApprovalManager {
         };
         self.audit_log_write(&entry);
 
-        let mut recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
+        let mut recent = Self::lock_state(&self.recent, "recent");
         recent.push_front(ApprovalRecord {
             request,
             decision,
@@ -2203,6 +2216,37 @@ mod tests {
 
     fn default_manager() -> ApprovalManager {
         ApprovalManager::new(ApprovalPolicy::default())
+    }
+
+    #[test]
+    fn poisoned_approval_state_locks_recover_and_remain_usable() {
+        let manager = ApprovalManager::new(ApprovalPolicy::default());
+
+        let policy_poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut policy = manager.policy.write().unwrap();
+                    policy.require_approval.clear();
+                    panic!("poison approval policy lock");
+                })
+                .join()
+        });
+        assert!(policy_poison.is_err());
+        assert!(manager.policy().require_approval.is_empty());
+
+        manager.update_policy(ApprovalPolicy::default());
+        assert!(!manager.policy().require_approval.is_empty());
+
+        let recent_poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _recent = manager.recent.lock().unwrap();
+                    panic!("poison recent approvals lock");
+                })
+                .join()
+        });
+        assert!(recent_poison.is_err());
+        assert!(manager.list_recent(1).is_empty());
     }
 
     fn make_deferred(agent_id: &str) -> DeferredToolExecution {
@@ -3916,7 +3960,7 @@ mod tests {
         )
         .expect("first resolve succeeds");
         // Simulate the 100-slot ring buffer aging the entry out.
-        mgr.recent.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        ApprovalManager::lock_state(&mgr.recent, "recent").clear();
         let err = mgr
             .resolve(
                 id,

@@ -310,4 +310,4 @@ api-error-rate-limited = Rate limit exceeded. Try again later.
 # Used by 41+ HTTP 500 handlers as a stopgap until each route is moved to a
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
-api-error-generic = { $error }
+api-error-generic = An error occurred: { $error }

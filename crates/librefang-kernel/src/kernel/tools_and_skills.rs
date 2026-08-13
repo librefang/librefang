@@ -19,6 +19,42 @@
 use super::*;
 use super::{sanitize_reviewer_block, sanitize_reviewer_line, ReviewError};
 
+fn read_kernel_state<'a, T>(
+    lock: &'a std::sync::RwLock<T>,
+    state: &'static str,
+) -> std::sync::RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|poisoned| {
+        warn!(
+            state,
+            "kernel state read lock poisoned; recovering inner state"
+        );
+        poisoned.into_inner()
+    })
+}
+
+fn write_kernel_state<'a, T>(
+    lock: &'a std::sync::RwLock<T>,
+    state: &'static str,
+) -> std::sync::RwLockWriteGuard<'a, T> {
+    lock.write().unwrap_or_else(|poisoned| {
+        warn!(
+            state,
+            "kernel state write lock poisoned; recovering inner state"
+        );
+        poisoned.into_inner()
+    })
+}
+
+fn lock_kernel_state<'a, T>(
+    lock: &'a std::sync::Mutex<T>,
+    state: &'static str,
+) -> std::sync::MutexGuard<'a, T> {
+    lock.lock().unwrap_or_else(|poisoned| {
+        warn!(state, "kernel state lock poisoned; recovering inner state");
+        poisoned.into_inner()
+    })
+}
+
 /// Outcome of [`LibreFangKernel::reload_skills`], so callers can report an honest result instead of assuming the reload always fully succeeded (#6540).
 ///
 /// In Stable mode the registry is frozen: `frozen` is `true`, `refreshed` lists the already-loaded skills whose on-disk content was re-read (freeze-safe), and `skipped_new` lists brand-new skill directories that were found on disk but deliberately NOT loaded (they need an operator restart).
@@ -202,11 +238,7 @@ impl LibreFangKernel {
         let skill_tools = if skills_disabled {
             vec![]
         } else {
-            let registry = self
-                .skills
-                .skill_registry
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
+            let registry = read_kernel_state(&self.skills.skill_registry, "skill_registry");
             if skill_allowlist.is_empty() {
                 registry.all_tool_definitions()
             } else {
@@ -386,11 +418,7 @@ impl LibreFangKernel {
     /// In Stable mode the registry is frozen at boot and never gains new skills without an operator-initiated restart; rather than silently skipping the whole reload, this refreshes the on-disk content of already-loaded skills (the freeze-safe `reload_skill` path) and reports any brand-new skill directories it is deliberately not loading (#6540).
     /// Most callers invoke this for its side effect and ignore the return value.
     pub fn reload_skills(&self) -> SkillReloadOutcome {
-        let mut registry = self
-            .skills
-            .skill_registry
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut registry = write_kernel_state(&self.skills.skill_registry, "skill_registry");
         if registry.is_frozen() {
             // Frozen (Stable mode): do NOT add new skills — that boundary is intentional.
             // But refresh the content of already-loaded skills (freeze-safe) and surface any new on-disk dirs we are skipping, so the reload is honest rather than a silent no-op (#6540).
@@ -758,11 +786,7 @@ impl LibreFangKernel {
             .as_ref()
             .and_then(|w| w.upgrade())
             .map(|kernel| {
-                let reg = kernel
-                    .skills
-                    .skill_registry
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner());
+                let reg = read_kernel_state(&kernel.skills.skill_registry, "skill_registry");
                 // Sort deterministically by name — the HashMap iteration
                 // order would otherwise make `take(100)` drop a random
                 // skill when the catalog grows beyond the cap.
@@ -1031,11 +1055,7 @@ impl LibreFangKernel {
                         ReviewError::Permanent("Kernel dropped before update".to_string())
                     })?;
                 let skill = {
-                    let reg = kernel
-                        .skills
-                        .skill_registry
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner());
+                    let reg = read_kernel_state(&kernel.skills.skill_registry, "skill_registry");
                     reg.get(name).cloned()
                 };
                 let skill = match skill {
@@ -1138,11 +1158,7 @@ impl LibreFangKernel {
                         ReviewError::Permanent("Kernel dropped before patch".to_string())
                     })?;
                 let skill = {
-                    let reg = kernel
-                        .skills
-                        .skill_registry
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner());
+                    let reg = read_kernel_state(&kernel.skills.skill_registry, "skill_registry");
                     reg.get(name).cloned()
                 };
                 let skill = match skill {
@@ -1533,10 +1549,8 @@ impl LibreFangKernel {
         override_cfg: &librefang_types::config::ContextEngineTomlConfig,
     ) -> Option<&'static dyn librefang_runtime::context_engine::ContextEngine> {
         let key = context_engine_config_fingerprint(override_cfg)?;
-        let mut cache = self
-            .context_engine_overrides
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut cache =
+            lock_kernel_state(&self.context_engine_overrides, "context_engine_overrides");
         if let Some(engine) = cache.get(&key) {
             return Some(*engine);
         }
@@ -1779,6 +1793,41 @@ mod tests {
 
     fn agent(uuid_str: &str) -> AgentId {
         AgentId(uuid::Uuid::parse_str(uuid_str).unwrap())
+    }
+
+    #[test]
+    fn poisoned_kernel_state_locks_recover_and_remain_usable() {
+        let rw_state = std::sync::RwLock::new(vec!["loaded"]);
+        let rw_poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut state = rw_state.write().unwrap();
+                    state.push("stale");
+                    panic!("poison kernel rwlock");
+                })
+                .join()
+        });
+        assert!(rw_poison.is_err());
+        assert_eq!(
+            &*read_kernel_state(&rw_state, "test_registry"),
+            &["loaded", "stale"]
+        );
+        write_kernel_state(&rw_state, "test_registry").clear();
+        assert!(read_kernel_state(&rw_state, "test_registry").is_empty());
+
+        let mutex_state = std::sync::Mutex::new(vec!["cached"]);
+        let mutex_poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut state = mutex_state.lock().unwrap();
+                    state.push("stale");
+                    panic!("poison kernel mutex");
+                })
+                .join()
+        });
+        assert!(mutex_poison.is_err());
+        lock_kernel_state(&mutex_state, "test_cache").clear();
+        assert!(lock_kernel_state(&mutex_state, "test_cache").is_empty());
     }
 
     // ── canvas.enabled gate over the `canvas_present` builtin ───────────────

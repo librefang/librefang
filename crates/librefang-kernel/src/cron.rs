@@ -147,6 +147,9 @@ pub struct CronScheduler {
     home_dir: PathBuf,
     /// Global cap on total jobs across all agents (atomic for hot-reload).
     max_total_jobs: AtomicUsize,
+    /// Serializes capacity checks with insertion.
+    /// DashMap makes each map operation atomic, but a separate `len()` check otherwise lets concurrent creators exceed global and per-agent limits.
+    add_lock: std::sync::Mutex<()>,
     /// Serializes `persist()` writes so concurrent callers (cron loop, API
     /// routes, spawned cron tasks) don't corrupt the tmp file by interleaving
     /// `O_TRUNC`/write/rename on the same path.
@@ -165,6 +168,7 @@ impl CronScheduler {
             persist_path: home_dir.join("data").join("cron_jobs.json"),
             home_dir: home_dir.to_path_buf(),
             max_total_jobs: AtomicUsize::new(max_total_jobs),
+            add_lock: std::sync::Mutex::new(()),
             persist_lock: std::sync::Mutex::new(()),
         }
     }
@@ -294,6 +298,8 @@ impl CronScheduler {
     /// `one_shot` controls whether the job is removed after a single
     /// successful execution.
     pub fn add_job(&self, mut job: CronJob, one_shot: bool) -> LibreFangResult<CronJobId> {
+        let _add_guard = self.add_lock.lock().unwrap_or_else(|e| e.into_inner());
+
         // Global limit
         let max_jobs = self.max_total_jobs.load(Ordering::Relaxed);
         if self.jobs.len() >= max_jobs {
@@ -1508,6 +1514,68 @@ mod tests {
             msg.contains("limit"),
             "Expected global limit error, got: {msg}"
         );
+    }
+
+    #[test]
+    fn concurrent_adds_respect_global_limit() {
+        const CONTENDERS: usize = 16;
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = std::sync::Arc::new(CronScheduler::new(tmp.path(), 1));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(CONTENDERS));
+
+        let handles: Vec<_> = (0..CONTENDERS)
+            .map(|index| {
+                let sched = std::sync::Arc::clone(&sched);
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let mut job = make_job(AgentId::new());
+                    job.name = format!("concurrent-{index}");
+                    barrier.wait();
+                    sched.add_job(job, false).is_ok()
+                })
+            })
+            .collect();
+
+        let successes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(|success| *success)
+            .count();
+        assert_eq!(successes, 1);
+        assert_eq!(sched.total_jobs(), 1);
+    }
+
+    #[test]
+    fn concurrent_adds_respect_per_agent_limit() {
+        // MAX_JOBS_PER_AGENT = 50 in librefang-types.
+        const CONTENDERS: usize = 60;
+        let tmp = tempfile::tempdir().unwrap();
+        // Global limit set well above the per-agent cap so only the
+        // per-agent check can reject a contender.
+        let sched = std::sync::Arc::new(CronScheduler::new(tmp.path(), 1000));
+        let agent = AgentId::new();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(CONTENDERS));
+
+        let handles: Vec<_> = (0..CONTENDERS)
+            .map(|index| {
+                let sched = std::sync::Arc::clone(&sched);
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let mut job = make_job(agent);
+                    job.name = format!("concurrent-{index}");
+                    barrier.wait();
+                    sched.add_job(job, false).is_ok()
+                })
+            })
+            .collect();
+
+        let successes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(|success| *success)
+            .count();
+        assert_eq!(successes, 50);
+        assert_eq!(sched.total_jobs(), 50);
     }
 
     // -- test_add_job_per_agent_limit ---------------------------------------

@@ -17,6 +17,7 @@
 
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -113,6 +114,16 @@ pub struct ShutdownStatus {
     pub phases_completed: Vec<PhaseLog>,
 }
 
+fn lock_shutdown_state<'a, T>(mutex: &'a Mutex<T>, state: &'static str) -> MutexGuard<'a, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        warn!(
+            state,
+            "shutdown state lock poisoned; recovering inner state"
+        );
+        poisoned.into_inner()
+    })
+}
+
 impl ShutdownCoordinator {
     /// Create a new shutdown coordinator.
     pub fn new(config: ShutdownConfig) -> Self {
@@ -135,7 +146,7 @@ impl ShutdownCoordinator {
         if self.is_shutting_down.swap(true, Ordering::SeqCst) {
             return false; // Already shutting down.
         }
-        *self.started_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+        *lock_shutdown_state(&self.started_at, "started_at") = Some(Instant::now());
         info!(reason = %self.config.shutdown_reason, "Graceful shutdown initiated");
         true
     }
@@ -160,10 +171,7 @@ impl ShutdownCoordinator {
     /// Advance to the next phase. Records timing for the completed phase.
     pub fn advance_phase(&self, next: ShutdownPhase, success: bool, message: Option<String>) {
         let current = self.current_phase();
-        let elapsed = self
-            .started_at
-            .lock()
-            .unwrap()
+        let elapsed = lock_shutdown_state(&self.started_at, "started_at")
             .map(|s| s.elapsed().as_millis() as u64)
             .unwrap_or(0);
 
@@ -174,10 +182,7 @@ impl ShutdownCoordinator {
             message: message.clone(),
         };
 
-        self.phase_log
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(log);
+        lock_shutdown_state(&self.phase_log, "phase_log").push(log);
         self.current_phase.store(next as u8, Ordering::SeqCst);
 
         if success {
@@ -189,10 +194,7 @@ impl ShutdownCoordinator {
 
     /// Get a snapshot of shutdown status (for API/WS).
     pub fn status(&self) -> ShutdownStatus {
-        let elapsed = self
-            .started_at
-            .lock()
-            .unwrap()
+        let elapsed = lock_shutdown_state(&self.started_at, "started_at")
             .map(|s| s.elapsed().as_secs_f64())
             .unwrap_or(0.0);
 
@@ -201,19 +203,13 @@ impl ShutdownCoordinator {
             current_phase: self.current_phase().to_string(),
             elapsed_secs: elapsed,
             reason: self.config.shutdown_reason.clone(),
-            phases_completed: self
-                .phase_log
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
+            phases_completed: lock_shutdown_state(&self.phase_log, "phase_log").clone(),
         }
     }
 
     /// Check if the total timeout has been exceeded.
     pub fn is_timeout_exceeded(&self) -> bool {
-        self.started_at
-            .lock()
-            .unwrap()
+        lock_shutdown_state(&self.started_at, "started_at")
             .map(|s| s.elapsed() > self.config.total_timeout)
             .unwrap_or(false)
     }
@@ -253,6 +249,40 @@ impl ShutdownCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poisoned_shutdown_state_locks_recover_and_shutdown_continues() {
+        let coord = ShutdownCoordinator::new(ShutdownConfig::default());
+
+        let started_at_poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut started_at = coord.started_at.lock().unwrap();
+                    *started_at = Some(Instant::now());
+                    panic!("poison shutdown start lock");
+                })
+                .join()
+        });
+        assert!(started_at_poison.is_err());
+
+        let phase_log_poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _phase_log = coord.phase_log.lock().unwrap();
+                    panic!("poison shutdown phase log lock");
+                })
+                .join()
+        });
+        assert!(phase_log_poison.is_err());
+
+        assert!(coord.initiate());
+        coord.advance_phase(ShutdownPhase::Draining, true, None);
+        let status = coord.status();
+        assert!(status.is_shutting_down);
+        assert_eq!(status.current_phase, "draining");
+        assert_eq!(status.phases_completed.len(), 1);
+        assert!(!coord.is_timeout_exceeded());
+    }
 
     #[test]
     fn test_shutdown_config_defaults() {

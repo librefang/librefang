@@ -11,7 +11,7 @@ use crate::ExtensionResult;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
-use tracing::debug;
+use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 /// Backing store for a [`CredentialResolver`]'s vault — either an owned vault
@@ -31,7 +31,10 @@ impl VaultSource {
         match self {
             VaultSource::Owned(v) => f(v),
             VaultSource::Shared(handle) => {
-                let guard = handle.read().unwrap_or_else(|e| e.into_inner());
+                let guard = handle.read().unwrap_or_else(|poisoned| {
+                    warn!("credential resolver vault read lock poisoned; recovering inner state");
+                    poisoned.into_inner()
+                });
                 f(&guard)
             }
         }
@@ -41,7 +44,10 @@ impl VaultSource {
         match self {
             VaultSource::Owned(v) => f(v),
             VaultSource::Shared(handle) => {
-                let mut guard = handle.write().unwrap_or_else(|e| e.into_inner());
+                let mut guard = handle.write().unwrap_or_else(|poisoned| {
+                    warn!("credential resolver vault write lock poisoned; recovering inner state");
+                    poisoned.into_inner()
+                });
                 f(&mut guard)
             }
         }
@@ -246,6 +252,28 @@ fn prompt_secret(key: &str) -> Option<Zeroizing<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poisoned_shared_vault_lock_recovers_read_and_write_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = Arc::new(RwLock::new(CredentialVault::new(
+            dir.path().join("vault.enc"),
+        )));
+        let poison = std::thread::scope(|scope| {
+            let handle = Arc::clone(&handle);
+            scope
+                .spawn(move || {
+                    let _vault = handle.write().unwrap();
+                    panic!("poison shared credential vault lock");
+                })
+                .join()
+        });
+
+        assert!(poison.is_err());
+        let mut source = VaultSource::Shared(handle);
+        assert!(!source.with_read(CredentialVault::is_unlocked));
+        assert!(!source.with_write(|vault| vault.is_unlocked()));
+    }
 
     #[test]
     fn load_dotenv_basic() {

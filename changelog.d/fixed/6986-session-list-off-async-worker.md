@@ -1,0 +1,2 @@
+`GET /api/sessions` ran its `count_sessions` and `list_sessions_paginated` SQLite calls directly on the async handler, so a large or contended sessions table could stall the Tokio worker thread and delay every other request being served by it.
+Both calls now execute together on `tokio::task::spawn_blocking`, and a query or blocking-task failure is now logged server-side instead of being silently discarded (#6986) (@houko)

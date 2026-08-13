@@ -1,6 +1,13 @@
 # Required
 project_id = "my-gcp-project-id"
 
+# Restrict both SSH and the dashboard/API to your current public IPv4 address.
+# Find it with: curl -4 https://ifconfig.me
+allowed_source_cidr = "203.0.113.10/32"
+
+# Generate with: openssl rand -hex 32
+librefang_api_key = "replace-with-a-random-64-character-hex-key"
+
 # Optional (defaults shown)
 # region           = "us-central1"
 # zone             = "us-central1-a"

@@ -1,0 +1,3 @@
+Registry content creation raced on the no-overwrite check: two concurrent `POST /api/registry/content/{type}` calls for the same identifier could both observe an absent file and each write, silently discarding whichever write lost.
+The existence check and the write are now serialized under the same `config_write_lock` used by the other config-mutating endpoints, and the write itself goes through the fsync-based atomic writer instead of a plain `fs::write`.
+A rejected provider definition is now rolled back to its prior contents (rather than merely deleted), so a failed overwrite of an existing provider no longer leaves it missing (#6984) (@houko)

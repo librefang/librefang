@@ -107,12 +107,13 @@ impl DriverCache {
         let key_hash = hex::encode(&digest[..16]);
 
         format!(
-            "{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}",
             config.provider,
             key_hash,
             config.base_url.as_deref().unwrap_or(""),
             config.proxy_url.as_deref().unwrap_or(""),
-            config.request_timeout_secs.map_or(0, |s| s)
+            config.request_timeout_secs.map_or(0, |s| s),
+            config.message_timeout_secs,
         )
     }
 }
@@ -791,18 +792,22 @@ fn create_driver_from_entry(
         }
         ApiFormat::QwenCode => Ok(Arc::new(
             qwen_code::QwenCodeDriver::new(config.base_url.clone(), config.skip_permissions)
+                .with_message_timeout(config.message_timeout_secs)
                 .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
         )),
         ApiFormat::GeminiCli => Ok(Arc::new(
             gemini_cli::GeminiCliDriver::new(config.base_url.clone(), config.skip_permissions)
+                .with_message_timeout(config.message_timeout_secs)
                 .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
         )),
         ApiFormat::CodexCli => Ok(Arc::new(
             codex_cli::CodexCliDriver::new(config.base_url.clone(), config.skip_permissions)
+                .with_message_timeout(config.message_timeout_secs)
                 .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
         )),
         ApiFormat::CodeWhale => Ok(Arc::new(
             codewhale::CodeWhaleDriver::new(config.base_url.clone(), config.skip_permissions)
+                .with_message_timeout(config.message_timeout_secs)
                 .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
         )),
         ApiFormat::ChatGpt => Ok(Arc::new(
@@ -1193,9 +1198,9 @@ mod tests {
             ..DriverConfig::default()
         };
         let key = DriverCache::cache_key(&cfg);
-        // Shape: "openai|<hex>|||0"
+        // Shape: "openai|<hex>|||0|300"
         let parts: Vec<&str> = key.split('|').collect();
-        assert_eq!(parts.len(), 5, "cache key shape: {key}");
+        assert_eq!(parts.len(), 6, "cache key shape: {key}");
         let hash_segment = parts[1];
         assert_eq!(
             hash_segment.len(),
@@ -1226,6 +1231,21 @@ mod tests {
             api_key: Some("sk-key-b".to_string()),
             ..a.clone()
         };
+        assert_ne!(DriverCache::cache_key(&a), DriverCache::cache_key(&b));
+    }
+
+    #[test]
+    fn cache_key_distinguishes_message_timeouts() {
+        let a = DriverConfig {
+            provider: "codex-cli".to_string(),
+            message_timeout_secs: 30,
+            ..DriverConfig::default()
+        };
+        let b = DriverConfig {
+            message_timeout_secs: 90,
+            ..a.clone()
+        };
+
         assert_ne!(DriverCache::cache_key(&a), DriverCache::cache_key(&b));
     }
 

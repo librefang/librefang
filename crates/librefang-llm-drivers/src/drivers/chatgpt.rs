@@ -10,7 +10,7 @@
 //! - Refresh token in `CHATGPT_REFRESH_TOKEN` used for automatic renewal
 //! - Token is cached and reused until it expires
 
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
@@ -197,15 +197,22 @@ impl ChatGptTokenCache {
         }
     }
 
+    fn lock_cached(&self) -> MutexGuard<'_, Option<CachedSessionToken>> {
+        self.cached.lock().unwrap_or_else(|poisoned| {
+            warn!("ChatGPT token cache lock poisoned; recovering inner state");
+            poisoned.into_inner()
+        })
+    }
+
     /// Get a valid cached token, or None if expired/missing.
     pub fn get(&self) -> Option<CachedSessionToken> {
-        let lock = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = self.lock_cached();
         lock.as_ref().filter(|t| t.is_valid()).cloned()
     }
 
     /// Store a new token in the cache.
     pub fn set(&self, token: CachedSessionToken) {
-        let mut lock = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lock = self.lock_cached();
         *lock = Some(token);
     }
 
@@ -216,7 +223,7 @@ impl ChatGptTokenCache {
     /// token converge on a single refresh: first invalidates → all see None
     /// after the lock → leader refreshes → followers pick up the new token.
     pub fn invalidate_if_matches(&self, rejected: &str) {
-        let mut lock = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lock = self.lock_cached();
         if let Some(t) = lock.as_ref() {
             if t.token.as_str() == rejected {
                 *lock = None;
@@ -1217,6 +1224,34 @@ mod tests {
         let cached = cache.get();
         assert!(cached.is_some());
         assert_eq!(*cached.unwrap().token, "test-session-token");
+    }
+
+    #[test]
+    fn poisoned_token_cache_lock_recovers_and_cache_remains_usable() {
+        let cache = ChatGptTokenCache::new();
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut cached = cache.cached.lock().unwrap();
+                    *cached = Some(CachedSessionToken {
+                        token: Zeroizing::new("rejected".to_string()),
+                        expires_at: Instant::now() + Duration::from_secs(86400),
+                    });
+                    panic!("poison ChatGPT token cache lock");
+                })
+                .join()
+        });
+
+        assert!(poison.is_err());
+        assert_eq!(*cache.get().unwrap().token, "rejected");
+        cache.invalidate_if_matches("rejected");
+        assert!(cache.get().is_none());
+
+        cache.set(CachedSessionToken {
+            token: Zeroizing::new("fresh".to_string()),
+            expires_at: Instant::now() + Duration::from_secs(86400),
+        });
+        assert_eq!(*cache.get().unwrap().token, "fresh");
     }
 
     #[test]

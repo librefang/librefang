@@ -16,7 +16,8 @@ pub async fn list_agent_files(
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let resolved_lang = super::resolve_lang(lang.as_ref());
+    let t = ErrorTranslator::new(resolved_lang);
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -53,29 +54,62 @@ pub async fn list_agent_files(
         }
     };
 
-    let mut files = Vec::new();
-    for &name in KNOWN_IDENTITY_FILES {
-        // Check .identity/ first (current layout), then workspace root (pre-migration fallback)
-        let identity_path = workspace.join(".identity").join(name);
-        let path = if identity_path.exists() {
-            identity_path
-        } else {
-            workspace.join(name)
-        };
-        let (exists, size_bytes) = if path.exists() {
-            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            (true, size)
-        } else {
-            (false, 0u64)
-        };
-        files.push(serde_json::json!({
-            "name": name,
-            "exists": exists,
-            "size_bytes": size_bytes,
-        }));
-    }
+    // `ErrorTranslator` is `!Send`, so it must be dropped before the
+    // `.await` and re-created afterwards, matching the established
+    // pattern in `get_agent_file` below (#3579).
+    drop(t);
+    let files = match tokio::task::spawn_blocking(move || list_identity_files(&workspace)).await {
+        Ok(files) => files,
+        Err(error) => {
+            let t = ErrorTranslator::new(resolved_lang);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": scrub_500(&error, &t)})),
+            );
+        }
+    };
 
     (StatusCode::OK, Json(serde_json::json!({ "files": files })))
+}
+
+fn list_identity_files(workspace: &std::path::Path) -> Vec<serde_json::Value> {
+    KNOWN_IDENTITY_FILES
+        .iter()
+        .map(|&name| {
+            // Check .identity/ first (current layout), then workspace root (pre-migration fallback)
+            let identity_path = workspace.join(".identity").join(name);
+            let path = if identity_path.exists() {
+                identity_path
+            } else {
+                workspace.join(name)
+            };
+            let metadata = std::fs::metadata(path).ok();
+            serde_json::json!({
+                "name": name,
+                "exists": metadata.is_some(),
+                "size_bytes": metadata.map(|value| value.len()).unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod identity_file_list_tests {
+    use super::*;
+
+    #[test]
+    fn list_identity_files_prefers_current_layout_and_reports_sizes() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join(".identity")).unwrap();
+        std::fs::write(temp.path().join("SOUL.md"), "legacy").unwrap();
+        std::fs::write(temp.path().join(".identity/SOUL.md"), "current").unwrap();
+
+        let files = list_identity_files(temp.path());
+        let soul = files.iter().find(|file| file["name"] == "SOUL.md").unwrap();
+        assert_eq!(soul["exists"], true);
+        assert_eq!(soul["size_bytes"], 7);
+        assert!(files.iter().any(|file| file["exists"] == false));
+    }
 }
 
 /// GET /api/agents/{id}/files/{filename} — Read a workspace identity file.

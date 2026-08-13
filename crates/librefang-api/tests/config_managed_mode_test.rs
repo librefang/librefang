@@ -112,6 +112,16 @@ fn auth_put_json(path: &str, body: serde_json::Value) -> Request<Body> {
         .unwrap()
 }
 
+fn auth_patch_json(path: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method(Method::PATCH)
+        .uri(path)
+        .header(header::AUTHORIZATION, format!("Bearer {API_KEY}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
 /// Asserts the one documented refusal shape: `423` plus the structured body every guarded route shares.
 /// Factored out because the provider cases below assert it three times and a copy that drifted would silently stop checking the contract.
 fn assert_managed_refusal(status: StatusCode, body: &[u8]) {
@@ -241,6 +251,30 @@ async fn config_set_is_locked_in_managed_mode_and_leaves_the_file_untouched() {
         std::fs::read_to_string(&config_path).expect("config.toml still readable"),
         seed,
         "a refused write must not have opened, truncated, or rewritten the file"
+    );
+}
+
+/// Memory settings are deployment configuration too.
+/// Refuse the PATCH before reading or rewriting config.toml so managed deployments remain immutable.
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_config_patch_is_locked_in_managed_mode() {
+    let _guard = ManagedModeGuard::set().await;
+
+    let h = boot_router_with_api_key(API_KEY).await;
+    let config_path = h.home.join("config.toml");
+    let seed = format!("api_key = \"{API_KEY}\"\n[memory]\ndecay_rate = 0.1\n");
+    std::fs::write(&config_path, &seed).expect("seed config.toml");
+
+    let (status, body) = send(
+        h.app.clone(),
+        auth_patch_json("/api/memory/config", serde_json::json!({"decay_rate": 0.9})),
+    )
+    .await;
+
+    assert_managed_refusal(status, &body);
+    assert_eq!(
+        std::fs::read_to_string(config_path).expect("config.toml still readable"),
+        seed
     );
 }
 

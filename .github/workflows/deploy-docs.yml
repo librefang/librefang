@@ -65,4 +65,4 @@ jobs:
           # the run-block via shell expansion.  See deploy-web.yml for
           # the same fix; #3938 missed both deploy workflows.
           HEAD_REF: ${{ github.head_ref || github.ref_name }}
-        run: npx -y wrangler@4 pages deploy docs/out --project-name=librefang-docs --branch="$HEAD_REF"
+        run: npx -y wrangler@4.121.0 pages deploy docs/out --project-name=librefang-docs --branch="$HEAD_REF"

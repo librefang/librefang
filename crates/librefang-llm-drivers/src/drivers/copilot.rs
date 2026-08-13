@@ -3,7 +3,7 @@
 //! The Copilot API uses the OpenAI chat completions format, so this module
 //! handles token exchange and caching, then delegates to the OpenAI-compatible driver.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
@@ -50,15 +50,22 @@ impl CopilotTokenCache {
         }
     }
 
+    fn lock_cached(&self) -> MutexGuard<'_, Option<CachedToken>> {
+        self.cached.lock().unwrap_or_else(|poisoned| {
+            warn!("Copilot token cache lock poisoned; recovering inner state");
+            poisoned.into_inner()
+        })
+    }
+
     /// Get a valid cached token, or None if expired/missing.
     pub fn get(&self) -> Option<CachedToken> {
-        let lock = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = self.lock_cached();
         lock.as_ref().filter(|t| t.is_valid()).cloned()
     }
 
     /// Store a new token in the cache.
     pub fn set(&self, token: CachedToken) {
-        let mut lock = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lock = self.lock_cached();
         *lock = Some(token);
     }
 }
@@ -343,6 +350,35 @@ mod tests {
         let cached = cache.get();
         assert!(cached.is_some());
         assert_eq!(*cached.unwrap().token, "test-token");
+    }
+
+    #[test]
+    fn poisoned_token_cache_lock_recovers_and_accepts_replacement() {
+        let cache = CopilotTokenCache::new();
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut cached = cache.cached.lock().unwrap();
+                    *cached = Some(CachedToken {
+                        token: Zeroizing::new("old-token".to_string()),
+                        expires_at: Instant::now() + Duration::from_secs(3600),
+                        base_url: GITHUB_COPILOT_BASE_URL.to_string(),
+                    });
+                    panic!("poison Copilot token cache lock");
+                })
+                .join()
+        });
+
+        assert!(poison.is_err());
+        assert_eq!(*cache.get().unwrap().token, "old-token");
+        cache.set(CachedToken {
+            token: Zeroizing::new("fresh-token".to_string()),
+            expires_at: Instant::now() + Duration::from_secs(3600),
+            base_url: "https://proxy.example".to_string(),
+        });
+        let fresh = cache.get().unwrap();
+        assert_eq!(*fresh.token, "fresh-token");
+        assert_eq!(fresh.base_url, "https://proxy.example");
     }
 
     #[test]

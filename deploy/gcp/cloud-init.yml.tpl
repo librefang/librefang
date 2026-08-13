@@ -25,7 +25,8 @@ write_files:
       Type=simple
       User=librefang
       Environment=LIBREFANG_HOME=/data
-      Environment=LIBREFANG_BIND=0.0.0.0:4545
+      Environment=LIBREFANG_LISTEN=0.0.0.0:4545
+      Environment=LIBREFANG_API_KEY=${librefang_api_key}
       Environment=GROQ_API_KEY=${groq_api_key}
       Environment=OPENAI_API_KEY=${openai_api_key}
       Environment=ANTHROPIC_API_KEY=${anthropic_api_key}

@@ -11,6 +11,38 @@ const TEXT_TRUNCATION_MARKER: &str =
 /// for the streaming download in `resolve_url_attachments`.
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 
+/// Keep CPU-heavy PDF parsing off Tokio workers and bound how many parser jobs can occupy the blocking pool at once.
+/// Additional requests wait asynchronously without consuming a runtime worker thread.
+const MAX_CONCURRENT_PDF_EXTRACTIONS: usize = 2;
+static PDF_EXTRACTION_PERMITS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| {
+        std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PDF_EXTRACTIONS))
+    });
+
+async fn run_pdf_job<F, T>(job: F) -> Result<T, String>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let permit = std::sync::Arc::clone(&PDF_EXTRACTION_PERMITS)
+        .acquire_owned()
+        .await
+        .map_err(|_| "PDF extraction queue is unavailable".to_string())?;
+    tokio::task::spawn_blocking(move || {
+        // Keep the permit in the blocking closure so request cancellation cannot release capacity while a detached parser is still running.
+        let _permit = permit;
+        job()
+    })
+    .await
+    .map_err(|error| format!("PDF extraction task failed: {error}"))
+}
+
+async fn extract_pdf_text(data: Vec<u8>) -> Result<String, String> {
+    run_pdf_job(move || librefang_kernel::pdf_text::extract_text_from_pdf(&data))
+        .await
+        .and_then(|result| result)
+}
+
 /// Append `chunk` to `buf` unless doing so would push it past `cap`. Returns
 /// `false` (leaving `buf` unchanged) when the cap would be exceeded, so a
 /// streaming caller can abort before buffering an over-cap body.
@@ -210,7 +242,8 @@ pub async fn resolve_attachments(
             match tokio::fs::read(&file_path).await {
                 Ok(data) => {
                     let header = format!("[Attached PDF: {} ({} bytes)]", filename, data.len());
-                    let body = match librefang_kernel::pdf_text::extract_text_from_pdf(&data) {
+                    let size_bytes = data.len();
+                    let body = match extract_pdf_text(data).await {
                         Ok(text) => text,
                         Err(e) => {
                             tracing::warn!(
@@ -225,7 +258,7 @@ pub async fn resolve_attachments(
                     tracing::info!(
                         file_id = %att.file_id,
                         filename = %filename,
-                        size_bytes = data.len(),
+                        size_bytes,
                         extracted_chars = body.chars().count(),
                         "Resolved PDF attachment into Text block"
                     );
@@ -479,6 +512,35 @@ fn mime_from_url(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pdf_job_does_not_block_async_runtime() {
+        use std::sync::{Arc, Condvar, Mutex};
+
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let worker_gate = Arc::clone(&gate);
+        let job = tokio::spawn(run_pdf_job(move || {
+            let (lock, ready) = &*worker_gate;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = ready.wait(released).unwrap();
+            }
+        }));
+
+        // A blocking closure executed inline would deadlock this single-thread runtime before the async task could release it.
+        tokio::task::yield_now().await;
+        let (lock, ready) = &*gate;
+        *lock.lock().unwrap() = true;
+        ready.notify_one();
+
+        job.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_pdf_is_reported_from_blocking_worker() {
+        let error = extract_pdf_text(b"not a pdf".to_vec()).await.unwrap_err();
+        assert!(error.contains("PDF parse failed"));
+    }
 
     /// The `[File: <name>] saved to <path>` marker is the contract downstream agents parse to locate an uploaded file on disk.
     /// It must match the channel bridge's `FILE_SAVED_BLOCK_PREFIX` format, so pin the exact shape.

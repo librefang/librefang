@@ -4,6 +4,174 @@
 
 use crate::commands::prelude::*;
 
+/// Durably replace `path` with `content` using a unique sibling staging file.
+///
+/// The staging file is synced before rename and, on Unix, the containing
+/// directory is synced afterwards. Existing Unix permissions are preserved;
+/// callers may supply a restrictive creation mode for new secret files.
+pub(crate) fn durable_atomic_write(
+    path: &std::path::Path,
+    content: &[u8],
+    create_mode: u32,
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    #[cfg(not(unix))]
+    let _ = create_mode;
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => std::path::Path::new("."),
+    };
+    let file_name = path.file_name().ok_or(std::io::ErrorKind::InvalidInput)?;
+    let mut staging_name = file_name.to_os_string();
+    staging_name.push(format!(".{}.{sequence}.tmp", std::process::id()));
+    let staging = parent.join(staging_name);
+
+    let result = (|| -> std::io::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        let existing_mode = {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let existing_mode = std::fs::metadata(path)
+                .ok()
+                .map(|metadata| {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    metadata.permissions().mode()
+                })
+                .unwrap_or(create_mode);
+            options.mode(existing_mode);
+            existing_mode
+        };
+        let mut file = options.open(&staging)?;
+        // `OpenOptionsExt::mode` above is masked by the process umask on
+        // creation, so a umask that clears bits present in `existing_mode`
+        // (or in `create_mode`) would silently produce a file more
+        // restrictive than intended, contradicting the "preserve existing
+        // permissions" contract. Force the exact bits explicitly, which
+        // bypasses the umask.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            file.set_permissions(std::fs::Permissions::from_mode(existing_mode & 0o7777))?;
+        }
+        file.write_all(content)?;
+        file.sync_all()?;
+        replace_file(&staging, path)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_file(staging: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    std::fs::rename(staging, target)
+}
+
+#[cfg(windows)]
+fn replace_file(staging: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let staging: Vec<u16> = staging.as_os_str().encode_wide().chain(Some(0)).collect();
+    let target: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: Both paths are represented by valid, NUL-terminated UTF-16 buffers
+    // that remain alive for the duration of the call.
+    let replaced = unsafe {
+        MoveFileExW(
+            staging.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod durable_write_tests {
+    use super::*;
+
+    #[test]
+    fn durable_atomic_write_replaces_content_without_leaving_staging_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, b"old").unwrap();
+
+        durable_atomic_write(&path, b"new", 0o600).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("config.toml")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_atomic_write_preserves_existing_permissions_and_secures_new_secrets() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, b"old").unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o640)).unwrap();
+        durable_atomic_write(&config, b"new", 0o600).unwrap();
+        assert_eq!(
+            std::fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+
+        let secrets = dir.path().join("secrets.env");
+        durable_atomic_write(&secrets, b"TOKEN=secret\n", 0o600).unwrap();
+        assert_eq!(
+            std::fs::metadata(&secrets).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    /// `OpenOptionsExt::mode` is masked by the process umask on creation, so
+    /// preserving `existing_mode` only by passing it to `.mode()` silently
+    /// drops any bit the umask also covers (e.g. group/other write under the
+    /// common 0o022 umask). This pins that the helper forces the exact
+    /// existing bits via an explicit `set_permissions` afterward, rather than
+    /// only working by coincidence when the existing mode happens not to
+    /// overlap the umask.
+    #[cfg(unix)]
+    #[test]
+    fn durable_atomic_write_preserves_bits_that_conflict_with_process_umask() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.toml");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+        durable_atomic_write(&path, b"new", 0o600).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o666,
+            "existing permissions must survive the process umask"
+        );
+    }
+}
+
 /// Resolved daemon-connection context derived from config.toml — home dir,
 /// API key, and optional custom log dir. Shared by the status/daemon/logs
 /// command groups.

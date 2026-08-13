@@ -1,0 +1,2 @@
+`POST /api/init` checked and wrote `config.toml` with unsynchronized blocking `std::fs` calls directly on the async handler, so two concurrent requests could race past the existence check and one write could clobber the other, and every call blocked an async worker thread on disk I/O.
+The existence check now uses async metadata, the write path serializes on the same `config_write_lock` used by the other config-mutating routes and rechecks existence after acquiring it, and directory creation plus the atomic config write both run on Tokio's blocking pool (#6988) (@houko)

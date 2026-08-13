@@ -334,6 +334,13 @@ pub struct TriggerEngine {
     persist_lock: std::sync::Mutex<()>,
 }
 
+fn lock_trigger_persistence(lock: &std::sync::Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
+    lock.lock().unwrap_or_else(|poisoned| {
+        warn!("trigger persistence lock poisoned; recovering write serialization");
+        poisoned.into_inner()
+    })
+}
+
 impl TriggerEngine {
     /// Create a new trigger engine with default settings and no persistence.
     pub fn new() -> Self {
@@ -448,7 +455,7 @@ impl TriggerEngine {
     ///
     /// Does nothing when no persistence path is configured.
     pub fn persist(&self) -> LibreFangResult<()> {
-        let _guard = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock_trigger_persistence(&self.persist_lock);
         let path = match &self.persist_path {
             Some(p) => p,
             None => return Ok(()),
@@ -1799,6 +1806,26 @@ fn describe_event(event: &Event) -> String {
 mod tests {
     use super::*;
     use librefang_types::event::*;
+
+    #[test]
+    fn poisoned_trigger_persistence_lock_recovers_and_remains_exclusive() {
+        let lock = std::sync::Mutex::new(());
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _guard = lock.lock().unwrap();
+                    panic!("poison trigger persistence lock");
+                })
+                .join()
+        });
+
+        assert!(poison.is_err());
+        let recovered = lock_trigger_persistence(&lock);
+        assert!(lock.try_lock().is_err());
+        drop(recovered);
+        let recovered_again = lock_trigger_persistence(&lock);
+        drop(recovered_again);
+    }
 
     #[test]
     fn test_register_trigger() {

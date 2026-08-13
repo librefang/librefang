@@ -96,6 +96,27 @@ async fn post_json(
     (status, value)
 }
 
+async fn put_json(
+    app: &Router,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri(path)
+        .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, value)
+}
+
 /// The response `path` must be **relative** — must not start with the
 /// host's home_dir, and must not contain the OS-username-bearing
 /// `/Users/` or `/home/` prefixes from the canonical Unix layouts.
@@ -286,4 +307,29 @@ async fn provider_rejected_by_catalog_returns_400_and_leaves_no_file() {
         !file.exists(),
         "the rejected provider file must be rolled back, not left at {file:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rejected_provider_overwrite_restores_previous_file() {
+    let h = boot().await;
+    let path = h.home_dir.join("providers/existing-provider.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let previous = "[provider]\nid = \"existing-provider\"\ndisplay_name = \"Existing\"\nbase_url = \"https://example.invalid/v1\"\nkey_required = false\n";
+    std::fs::write(&path, previous).unwrap();
+
+    let body = serde_json::json!({
+        "id": "existing-provider",
+        "display_name": "Broken replacement",
+        "base_url": "https://example.invalid/v2",
+        "key_required": false,
+        "models": [{
+            "id": "broken-model",
+            "display_name": "Broken Model",
+            "context_window": "not-a-number"
+        }]
+    });
+    let (status, response) = put_json(&h.app, "/api/registry/content/provider", body).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), previous);
 }

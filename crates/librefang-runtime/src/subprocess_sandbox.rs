@@ -403,6 +403,95 @@ fn extract_base_command(cmd: &str) -> &str {
         .unwrap_or(first_word)
 }
 
+fn strip_executable_path(token: &str) -> &str {
+    token
+        .rsplit('/')
+        .next()
+        .unwrap_or(token)
+        .rsplit('\\')
+        .next()
+        .unwrap_or(token)
+}
+
+fn is_env_assignment(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    matches!(chars.next(), Some('_') | Some('a'..='z') | Some('A'..='Z'))
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// Return the command executed by a non-shell prefix wrapper.
+///
+/// `env` and `nohup` are executors rather than ordinary leaf commands. If
+/// only their outer names are checked, allowlisting either one silently
+/// allowlists every executable on the host. Opaque `env -S` payloads and
+/// malformed/unknown options are rejected because their command boundary
+/// cannot be proven by this deliberately small parser.
+fn inspect_prefix_wrapper(segment: &str) -> Result<Option<&str>, String> {
+    let mut args = segment.split_whitespace();
+    let Some(first) = args.next() else {
+        return Ok(None);
+    };
+
+    match strip_executable_path(first) {
+        "nohup" => {
+            let Some(mut command) = args.next() else {
+                return Err("nohup wrapper has no command".to_string());
+            };
+            if matches!(command, "--help" | "--version") {
+                return Ok(None);
+            }
+            if command == "--" {
+                command = args
+                    .next()
+                    .ok_or_else(|| "nohup wrapper has no command after '--'".to_string())?;
+            } else if command.starts_with('-') {
+                return Err(format!("nohup wrapper uses unsupported option '{command}'"));
+            }
+            Ok(Some(strip_executable_path(command)))
+        }
+        "env" => {
+            while let Some(arg) = args.next() {
+                match arg {
+                    "--" => {
+                        let command = args
+                            .next()
+                            .ok_or_else(|| "env wrapper has no command after '--'".to_string())?;
+                        return Ok(Some(strip_executable_path(command)));
+                    }
+                    "-" | "-i" | "--ignore-environment" | "-0" | "--null" => continue,
+                    "-S" | "--split-string" => {
+                        return Err(format!("env wrapper uses opaque command option '{arg}'"));
+                    }
+                    "-u" | "--unset" | "-C" | "--chdir" | "-a" | "--argv0" => {
+                        args.next().ok_or_else(|| {
+                            format!("env wrapper option '{arg}' is missing its value")
+                        })?;
+                    }
+                    _ if arg.starts_with("--unset=")
+                        || arg.starts_with("--chdir=")
+                        || arg.starts_with("--argv0=") => {}
+                    _ if (arg.starts_with("-u")
+                        || arg.starts_with("-C")
+                        || arg.starts_with("-a"))
+                        && arg.len() > 2 => {}
+                    _ if arg.starts_with('-') => {
+                        return Err(format!("env wrapper uses unsupported option '{arg}'"));
+                    }
+                    _ if is_env_assignment(arg) => continue,
+                    _ => return Ok(Some(strip_executable_path(arg))),
+                }
+            }
+            // `env` with only options/assignments prints the resulting
+            // environment and does not execute a nested command.
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Known shell wrappers that can execute inline scripts via flags.
 const SHELL_WRAPPERS: &[&str] = &["powershell", "pwsh", "cmd", "bash", "sh", "zsh"];
 
@@ -565,9 +654,15 @@ fn inspect_inner_script(script: &str, depth: usize) -> ShellWrapperInspection {
         // it is opaque or recursively nested.
         match inspect_shell_wrapper_inner(seg, depth) {
             ShellWrapperInspection::NotWrapper | ShellWrapperInspection::WrapperNoInline => {
-                let base = extract_base_command(seg);
-                if !base.is_empty() {
-                    commands.push(base.to_string());
+                match extract_all_commands_checked(seg) {
+                    Ok(segment_commands) => {
+                        commands.extend(segment_commands.into_iter().map(str::to_string));
+                    }
+                    Err(reason) => {
+                        return ShellWrapperInspection::WrapperOpaque(format!(
+                            "prefix wrapper with {reason}"
+                        ));
+                    }
                 }
             }
             ShellWrapperInspection::WrapperOpaque(reason) => {
@@ -659,7 +754,7 @@ fn split_script_segments(script: &str) -> Vec<&str> {
 
 /// Extract all commands from a shell command string.
 /// Handles pipes (`|`), semicolons (`;`), `&&`, and `||`.
-pub(crate) fn extract_all_commands(command: &str) -> Vec<&str> {
+fn extract_all_commands_checked(command: &str) -> Result<Vec<&str>, String> {
     let mut commands = Vec::new();
     // Split on pipe, semicolon, &&, ||
     // We need to split carefully: first split on ; and &&/||, then on |
@@ -682,12 +777,19 @@ pub(crate) fn extract_all_commands(command: &str) -> Vec<&str> {
         if !base.is_empty() {
             commands.push(base);
         }
+        if let Some(inner) = inspect_prefix_wrapper(segment)? {
+            commands.push(inner);
+        }
         if earliest_pos + earliest_len >= rest.len() {
             break;
         }
         rest = &rest[earliest_pos + earliest_len..];
     }
-    commands
+    Ok(commands)
+}
+
+pub(crate) fn extract_all_commands(command: &str) -> Vec<&str> {
+    extract_all_commands_checked(command).unwrap_or_default()
 }
 
 /// Validate a shell command against the exec policy.
@@ -737,7 +839,8 @@ pub fn validate_command_allowlist(command: &str, policy: &ExecPolicy) -> Result<
                 }
             }
 
-            let base_commands = extract_all_commands(command);
+            let base_commands = extract_all_commands_checked(command)
+                .map_err(|reason| format!("Command blocked: {reason}."))?;
             for base in &base_commands {
                 // Check safe_bins first
                 if policy.safe_bins.iter().any(|sb| sb == base) {
@@ -1294,6 +1397,18 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_all_commands_unwraps_env_and_nohup() {
+        assert_eq!(
+            extract_all_commands("/usr/bin/env -i -u TOKEN FOO=bar /usr/bin/curl example.com"),
+            vec!["env", "curl"]
+        );
+        assert_eq!(
+            extract_all_commands("/usr/bin/nohup -- /usr/bin/curl example.com"),
+            vec!["nohup", "curl"]
+        );
+    }
+
+    #[test]
     fn test_deny_mode_blocks() {
         let policy = ExecPolicy {
             mode: ExecSecurityMode::Deny,
@@ -1338,6 +1453,44 @@ mod tests {
         assert!(validate_command_allowlist("cargo build", &policy).is_ok());
         assert!(validate_command_allowlist("git status", &policy).is_ok());
         assert!(validate_command_allowlist("npm install", &policy).is_err());
+    }
+
+    #[test]
+    fn test_allowlist_prefix_wrappers_validate_inner_command() {
+        let policy = ExecPolicy {
+            allowed_commands: vec!["env".to_string(), "nohup".to_string(), "echo".to_string()],
+            ..ExecPolicy::default()
+        };
+
+        assert!(validate_command_allowlist("env FOO=bar echo hello", &policy).is_ok());
+        assert!(validate_command_allowlist("nohup -- echo hello", &policy).is_ok());
+        assert!(validate_command_allowlist("env FOO=bar curl example.com", &policy).is_err());
+        assert!(validate_command_allowlist("nohup curl example.com", &policy).is_err());
+    }
+
+    #[test]
+    fn test_allowlist_rejects_opaque_or_malformed_env_wrapper() {
+        let policy = ExecPolicy {
+            allowed_commands: vec!["env".to_string(), "echo".to_string()],
+            ..ExecPolicy::default()
+        };
+
+        assert!(validate_command_allowlist("env -S echo hello", &policy).is_err());
+        assert!(validate_command_allowlist("env --unknown echo hello", &policy).is_err());
+        assert!(validate_command_allowlist("env FOO=bar", &policy).is_ok());
+    }
+
+    #[test]
+    fn test_allowlist_unwraps_prefix_wrapper_inside_shell_wrapper() {
+        let policy = ExecPolicy {
+            allowed_commands: vec!["bash".to_string(), "env".to_string()],
+            ..ExecPolicy::default()
+        };
+
+        assert!(
+            validate_command_allowlist(r#"bash -c "env FOO=bar curl example.com""#, &policy)
+                .is_err()
+        );
     }
 
     #[test]
