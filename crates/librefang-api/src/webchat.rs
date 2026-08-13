@@ -484,10 +484,10 @@ pub async fn sync_dashboard(home_dir: &std::path::Path) {
 
     // Skip if already synced for this version
     let current_version = env!("CARGO_PKG_VERSION");
-    if let Ok(cached) = std::fs::read_to_string(&version_file) {
+    if let Ok(cached) = tokio::fs::read_to_string(&version_file).await {
         if cached.trim() == current_version {
             tracing::debug!("Dashboard already synced for v{current_version}");
-            let _ = std::fs::remove_file(&sync_error_file);
+            let _ = tokio::fs::remove_file(&sync_error_file).await;
             return;
         }
     }
@@ -509,15 +509,17 @@ pub async fn sync_dashboard(home_dir: &std::path::Path) {
                 "Dashboard sync skipped (HTTP {}), using embedded fallback",
                 r.status()
             );
-            let _ = std::fs::write(
+            let _ = tokio::fs::write(
                 &sync_error_file,
                 format!("dashboard sync skipped: HTTP {}", r.status()),
-            );
+            )
+            .await;
             return;
         }
         Err(e) => {
             tracing::debug!("Dashboard sync skipped ({e}), using embedded fallback");
-            let _ = std::fs::write(&sync_error_file, format!("dashboard sync skipped: {e}"));
+            let _ =
+                tokio::fs::write(&sync_error_file, format!("dashboard sync skipped: {e}")).await;
             return;
         }
     };
@@ -526,10 +528,47 @@ pub async fn sync_dashboard(home_dir: &std::path::Path) {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!("Failed to download dashboard: {e}");
-            let _ = std::fs::write(&sync_error_file, format!("dashboard download failed: {e}"));
+            let _ =
+                tokio::fs::write(&sync_error_file, format!("dashboard download failed: {e}")).await;
             return;
         }
     };
+
+    let install_home = home_dir.to_path_buf();
+    let install_result = tokio::task::spawn_blocking(move || {
+        install_dashboard(&install_home, &bytes, current_version)
+    })
+    .await;
+    match install_result {
+        Ok(Ok(())) => tracing::info!("Dashboard synced to v{current_version}"),
+        Ok(Err(e)) => {
+            tracing::warn!("Failed to install dashboard: {e}");
+            let _ =
+                tokio::fs::write(&sync_error_file, format!("dashboard install failed: {e}")).await;
+        }
+        Err(e) => {
+            tracing::warn!("Dashboard install task failed: {e}");
+            let _ = tokio::fs::write(
+                &sync_error_file,
+                format!("dashboard install task failed: {e}"),
+            )
+            .await;
+        }
+    }
+}
+
+/// Extract and install a downloaded dashboard archive.
+///
+/// This function performs blocking archive and filesystem operations and must
+/// run on Tokio's blocking pool when called from async startup code.
+fn install_dashboard(
+    home_dir: &std::path::Path,
+    bytes: &[u8],
+    current_version: &str,
+) -> std::io::Result<()> {
+    let dashboard_dir = home_dir.join("dashboard");
+    let version_file = dashboard_dir.join(".version");
+    let sync_error_file = dashboard_sync_error_path(home_dir);
 
     // Extract tarball
     let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(&bytes));
@@ -540,14 +579,14 @@ pub async fn sync_dashboard(home_dir: &std::path::Path) {
     if let Err(e) = std::fs::create_dir_all(&tmp_dir) {
         tracing::warn!("Failed to create tmp dir: {e}");
         let _ = std::fs::write(&sync_error_file, format!("dashboard tmp dir failed: {e}"));
-        return;
+        return Err(e);
     }
 
     if let Err(e) = archive.unpack(&tmp_dir) {
         tracing::warn!("Failed to extract dashboard archive: {e}");
         let _ = std::fs::write(&sync_error_file, format!("dashboard extract failed: {e}"));
         let _ = std::fs::remove_dir_all(&tmp_dir);
-        return;
+        return Err(e);
     }
 
     // Find the extracted directory (tarball root may have a prefix)
@@ -577,7 +616,7 @@ pub async fn sync_dashboard(home_dir: &std::path::Path) {
             tracing::warn!("Failed to back up old dashboard: {e}");
             let _ = std::fs::write(&sync_error_file, format!("dashboard backup failed: {e}"));
             let _ = std::fs::remove_dir_all(&tmp_dir);
-            return;
+            return Err(e);
         }
     }
 
@@ -591,7 +630,7 @@ pub async fn sync_dashboard(home_dir: &std::path::Path) {
                 let _ = std::fs::rename(&backup_dir, &dashboard_dir);
             }
             let _ = std::fs::remove_dir_all(&tmp_dir);
-            return;
+            return Err(e);
         }
     }
 
@@ -599,9 +638,9 @@ pub async fn sync_dashboard(home_dir: &std::path::Path) {
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
     // Write version marker
-    let _ = std::fs::write(&version_file, current_version);
+    std::fs::write(&version_file, current_version)?;
     let _ = std::fs::remove_file(&sync_error_file);
-    tracing::info!("Dashboard synced to v{current_version}");
+    Ok(())
 }
 
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
@@ -621,6 +660,39 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_dashboard_extracts_archive_and_writes_version() {
+        use std::io::Write;
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        {
+            let mut archive = tar::Builder::new(&mut encoder);
+            let body = b"<html>dashboard</html>";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, "dashboard-dist/index.html", body.as_slice())
+                .expect("append dashboard asset");
+            archive.finish().expect("finish tar archive");
+        }
+        encoder.flush().expect("flush gzip encoder");
+        let bytes = encoder.finish().expect("finish gzip archive");
+        let home = tempfile::tempdir().expect("tempdir");
+
+        install_dashboard(home.path(), &bytes, "test-version").expect("install dashboard");
+
+        assert_eq!(
+            std::fs::read(home.path().join("dashboard/index.html")).expect("read asset"),
+            b"<html>dashboard</html>"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("dashboard/.version")).expect("read version"),
+            "test-version"
+        );
+    }
 
     #[test]
     fn embedded_only_unset_is_false() {

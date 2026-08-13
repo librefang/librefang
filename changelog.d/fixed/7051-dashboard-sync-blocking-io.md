@@ -1,0 +1,1 @@
+- Move dashboard archive extraction and installation off Tokio's async worker threads. (@xiaomo)
