@@ -88,10 +88,17 @@ pub const DEFAULT_CACHE_TTL_SECS: u64 = 24 * 60 * 60; // 24 hours
 static SYNC_LOCK: Mutex<()> = Mutex::new(());
 
 fn lock_registry_sync(mutex: &Mutex<()>) -> MutexGuard<'_, ()> {
-    mutex.lock().unwrap_or_else(|poisoned| {
-        tracing::warn!("registry sync lock poisoned; recovering and serializing subsequent writes");
-        poisoned.into_inner()
-    })
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                "registry sync lock poisoned; recovering and serializing subsequent writes"
+            );
+            let guard = poisoned.into_inner();
+            mutex.clear_poison();
+            guard
+        }
+    }
 }
 
 /// Refresh only the `~/.librefang/registry/` checkout from upstream —
@@ -908,11 +915,13 @@ mod tests {
         });
 
         assert!(poison.is_err());
+        assert!(mutex.is_poisoned());
         let guard = lock_registry_sync(&mutex);
         assert!(mutex.try_lock().is_err());
         drop(guard);
-        let recovered_again = lock_registry_sync(&mutex);
-        drop(recovered_again);
+        assert!(!mutex.is_poisoned());
+        let ordinary_guard = mutex.lock().unwrap();
+        drop(ordinary_guard);
     }
 
     /// The offline switch is truthy for anything except unset / empty / `0` / `false` (#6404).
