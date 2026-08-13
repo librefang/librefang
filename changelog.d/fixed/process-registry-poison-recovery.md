@@ -1,0 +1,1 @@
+- Recover poisoned background process registry state so one panicking holder cannot permanently disable output tracking, lifecycle updates, queries, or cleanup. (@xiaomo)
