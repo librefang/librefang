@@ -26,7 +26,7 @@ use librefang_types::agent::SessionId;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// Hard cap on tracked paths per session. Bounded purely for memory safety on
 /// pathological agents that touch tens of thousands of unique files; under
@@ -179,11 +179,23 @@ fn registry() -> &'static Mutex<HashMap<SessionId, FileReadTracker>> {
     REG.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn recover_lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
+    match lock.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("file-read tracker registry lock poisoned; recovering state");
+            let guard = poisoned.into_inner();
+            lock.clear_poison();
+            guard
+        }
+    }
+}
+
 /// Run `f` against the tracker for `session_id`, creating an empty tracker on
 /// first access. The mutex is held across `f` so callers should keep the
 /// closure short.
 pub fn with_session<R>(session_id: SessionId, f: impl FnOnce(&mut FileReadTracker) -> R) -> R {
-    let mut guard = registry().lock().unwrap_or_else(|p| p.into_inner());
+    let mut guard = recover_lock(registry());
     let tracker = guard.entry(session_id).or_default();
     f(tracker)
 }
@@ -194,7 +206,7 @@ pub fn with_session<R>(session_id: SessionId, f: impl FnOnce(&mut FileReadTracke
 /// pass: the prior full file bodies have been summarised away, so the
 /// "see above for full content" stub would dangle if we kept the state.
 pub fn reset_session(session_id: SessionId) {
-    let mut guard = registry().lock().unwrap_or_else(|p| p.into_inner());
+    let mut guard = recover_lock(registry());
     if let Some(t) = guard.get_mut(&session_id) {
         t.reset();
     }
@@ -211,7 +223,7 @@ pub fn reset_session(session_id: SessionId) {
 /// — drop the whole entry. Context-compression GC remains the fallback for
 /// long-lived sessions that never hit the delete path.
 pub fn forget_session(session_id: &SessionId) {
-    let mut guard = registry().lock().unwrap_or_else(|p| p.into_inner());
+    let mut guard = recover_lock(registry());
     guard.remove(session_id);
 }
 
@@ -219,13 +231,40 @@ pub fn forget_session(session_id: &SessionId) {
 /// helper.
 #[cfg(test)]
 fn registry_len() -> usize {
-    registry().lock().unwrap_or_else(|p| p.into_inner()).len()
+    recover_lock(registry()).len()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn recover_lock_preserves_state_and_clears_poison() {
+        let lock = std::sync::Arc::new(Mutex::new(vec!["before"]));
+        let poison_target = std::sync::Arc::clone(&lock);
+
+        let panic = std::thread::spawn(move || {
+            let mut guard = poison_target.lock().unwrap();
+            guard.push("during-panic");
+            panic!("poison file-read tracker test lock");
+        })
+        .join();
+        assert!(panic.is_err());
+        assert!(lock.is_poisoned());
+
+        {
+            let mut guard = recover_lock(&lock);
+            assert_eq!(&*guard, &["before", "during-panic"]);
+            guard.push("after-recovery");
+        }
+
+        assert!(!lock.is_poisoned());
+        assert_eq!(
+            lock.lock().unwrap().as_slice(),
+            &["before", "during-panic", "after-recovery"]
+        );
+    }
 
     #[test]
     fn first_read_is_first_outcome() {
