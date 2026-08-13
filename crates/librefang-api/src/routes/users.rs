@@ -244,6 +244,13 @@ fn err_response(status: StatusCode, msg: impl Into<String>) -> axum::response::R
         .into_response()
 }
 
+/// Preserve the full operational error in server logs without exposing
+/// config paths, serializer details, or credential-store internals to API
+/// clients.
+fn internal_err_response(error: impl std::fmt::Display) -> axum::response::Response {
+    crate::types::ApiErrorResponse::internal_scrub(error).into_response()
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -368,7 +375,7 @@ pub async fn create_user(
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
-        Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+        Err(PersistError::Internal(m)) => internal_err_response(m),
         Err(PersistError::Managed) => crate::routes::managed_config_response(),
     }
 }
@@ -468,7 +475,7 @@ pub async fn update_user(
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
-        Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+        Err(PersistError::Internal(m)) => internal_err_response(m),
         Err(PersistError::Managed) => crate::routes::managed_config_response(),
     }
 }
@@ -505,7 +512,7 @@ pub async fn delete_user(
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
-        Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+        Err(PersistError::Internal(m)) => internal_err_response(m),
         Err(PersistError::Managed) => crate::routes::managed_config_response(),
     }
 }
@@ -714,7 +721,7 @@ pub async fn import_users(
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
-        Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+        Err(PersistError::Internal(m)) => internal_err_response(m),
         Err(PersistError::Managed) => crate::routes::managed_config_response(),
     }
 }
@@ -768,10 +775,7 @@ pub async fn rotate_user_key(
     let new_hash = match crate::password_hash::hash_password(&new_plaintext) {
         Ok(h) => h,
         Err(e) => {
-            return err_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("hash failed: {e}"),
-            );
+            return internal_err_response(format!("hash failed: {e}"));
         }
     };
 
@@ -814,7 +818,7 @@ pub async fn rotate_user_key(
                 PersistError::NotFound(m) => err_response(StatusCode::NOT_FOUND, m),
                 PersistError::BadRequest(m) => err_response(StatusCode::BAD_REQUEST, m),
                 PersistError::Conflict(m) => err_response(StatusCode::CONFLICT, m),
-                PersistError::Internal(m) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+                PersistError::Internal(m) => internal_err_response(m),
                 PersistError::Managed => crate::routes::managed_config_response(),
             };
         }
@@ -990,7 +994,7 @@ pub async fn set_user_provider_key(
         .kernel
         .set_user_provider_key(user_id, &provider, &req.api_key)
     {
-        return err_response(StatusCode::INTERNAL_SERVER_ERROR, e);
+        return internal_err_response(e);
     }
 
     // Audit the credential write. Detail names the actor and the target
@@ -1042,7 +1046,7 @@ pub async fn delete_user_provider_key(
 
     let removed = match state.kernel.remove_user_provider_key(user_id, &provider) {
         Ok(removed) => removed,
-        Err(e) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => return internal_err_response(e),
     };
 
     let actor = caller
@@ -1682,7 +1686,26 @@ pub async fn update_user_policy(
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
-        Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+        Err(PersistError::Internal(m)) => internal_err_response(m),
         Err(PersistError::Managed) => crate::routes::managed_config_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    #[tokio::test]
+    async fn internal_user_errors_are_scrubbed_from_http_body() {
+        let secret = "write failed: /srv/librefang/config.toml: permission denied";
+        let response = internal_err_response(secret);
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Internal server error"));
+        assert!(!body.contains(secret));
+        assert!(!body.contains("config.toml"));
     }
 }
