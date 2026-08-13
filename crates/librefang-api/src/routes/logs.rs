@@ -6,6 +6,8 @@ use axum::response::IntoResponse;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+type SseEventResult = Result<axum::response::sse::Event, std::convert::Infallible>;
+
 pub fn router() -> axum::Router<Arc<AppState>> {
     axum::Router::new().route("/logs/stream", axum::routing::get(logs_stream))
 }
@@ -37,9 +39,7 @@ pub async fn logs_stream(
         .unwrap_or_default()
         .to_lowercase();
 
-    let (tx, rx) = tokio::sync::mpsc::channel::<
-        Result<axum::response::sse::Event, std::convert::Infallible>,
-    >(256);
+    let (tx, rx) = tokio::sync::mpsc::channel::<SseEventResult>(256);
 
     // Subscribe to the kernel shutdown signal so this detached task can
     // exit promptly on daemon shutdown. Without this the only loop exit
@@ -65,6 +65,9 @@ pub async fn logs_stream(
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                _ = tx.closed() => {
+                    return; // Client disconnected while the audit log was quiet.
+                }
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
                         return; // Kernel shutting down — drop Arc<AppState>.
@@ -111,17 +114,24 @@ pub async fn logs_stream(
                     "outcome": entry.outcome,
                     "hash": entry.hash,
                 });
-                let data = serde_json::to_string(&json).unwrap_or_default();
+                let data = match serde_json::to_string(&json) {
+                    Ok(data) => data,
+                    Err(error) => {
+                        tracing::warn!(error = %error, seq = entry.seq, "Failed to serialize audit SSE event");
+                        continue;
+                    }
+                };
                 if tx.send(Ok(Event::default().data(data))).await.is_err() {
                     return; // Client disconnected
                 }
             }
 
             // Update tracking state
-            if let Some(last) = entries.last() {
-                last_seq = last.seq;
-            }
-            first_poll = false;
+            update_poll_cursor(
+                &mut first_poll,
+                &mut last_seq,
+                entries.last().map(|e| e.seq),
+            );
         }
     });
 
@@ -159,5 +169,49 @@ fn classify_audit_level(action: &str) -> &'static str {
         "warn"
     } else {
         "info"
+    }
+}
+
+fn update_poll_cursor(first_poll: &mut bool, last_seq: &mut u64, newest_seq: Option<u64>) {
+    if let Some(seq) = newest_seq {
+        *last_seq = seq;
+        *first_poll = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_initial_poll_keeps_bounded_backfill_mode() {
+        let mut first_poll = true;
+        let mut last_seq = 0;
+
+        update_poll_cursor(&mut first_poll, &mut last_seq, None);
+
+        assert!(first_poll);
+        assert_eq!(last_seq, 0);
+    }
+
+    #[test]
+    fn populated_initial_poll_establishes_cursor() {
+        let mut first_poll = true;
+        let mut last_seq = 0;
+
+        update_poll_cursor(&mut first_poll, &mut last_seq, Some(42));
+
+        assert!(!first_poll);
+        assert_eq!(last_seq, 42);
+    }
+
+    #[tokio::test]
+    async fn sender_detects_a_quiet_client_disconnect() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<SseEventResult>(1);
+        drop(rx);
+
+        tokio::time::timeout(std::time::Duration::from_millis(100), tx.closed())
+            .await
+            .expect("sender should observe a dropped SSE receiver");
     }
 }
