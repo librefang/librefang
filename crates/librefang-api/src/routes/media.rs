@@ -51,8 +51,14 @@ fn media_error_response(err: MediaError) -> ApiErrorResponse {
         MediaError::TaskNotFound(_) => (StatusCode::NOT_FOUND, "task_not_found"),
         MediaError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     };
+    let error = if status == StatusCode::INTERNAL_SERVER_ERROR {
+        tracing::error!(error = %err, "media request failed");
+        "Internal server error".to_string()
+    } else {
+        err.to_string()
+    };
     ApiErrorResponse {
-        error: err.to_string(),
+        error,
         code: Some(code.to_string()),
         r#type: None,
         details: None,
@@ -506,4 +512,26 @@ pub async fn list_media_providers(State(state): State<Arc<AppState>>) -> impl In
     Json(serde_json::json!({
         "providers": providers,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_media_errors_are_scrubbed_but_client_errors_are_preserved() {
+        let internal = media_error_response(MediaError::Other(
+            "failed to read /srv/librefang/media.key".to_string(),
+        ));
+        assert_eq!(internal.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(internal.code.as_deref(), Some("internal_error"));
+        assert_eq!(internal.error, "Internal server error");
+        assert!(!internal.error.contains("/srv/librefang"));
+
+        let invalid = media_error_response(MediaError::InvalidRequest(
+            "prompt must not be empty".to_string(),
+        ));
+        assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid.error, "Invalid request: prompt must not be empty");
+    }
 }
