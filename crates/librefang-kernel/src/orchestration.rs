@@ -235,10 +235,15 @@ static QUALITY_REGEX_CACHE: std::sync::OnceLock<
 fn lock_quality_regex_cache(
     cache: &std::sync::Mutex<HashMap<String, regex_lite::Regex>>,
 ) -> std::sync::MutexGuard<'_, HashMap<String, regex_lite::Regex>> {
-    cache.lock().unwrap_or_else(|poisoned| {
-        tracing::warn!("quality regex cache lock poisoned; recovering compiled patterns");
-        poisoned.into_inner()
-    })
+    match cache.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("quality regex cache lock poisoned; recovering compiled patterns");
+            let guard = poisoned.into_inner();
+            cache.clear_poison();
+            guard
+        }
+    }
 }
 
 fn matches_quality_regex(pattern: &str, output: &str) -> bool {
@@ -478,11 +483,13 @@ mod tests {
         });
 
         assert!(poison.is_err());
+        assert!(cache.is_poisoned());
         let mut recovered = lock_quality_regex_cache(&cache);
         assert!(recovered["old"].is_match("old value"));
         recovered.insert("new".to_string(), regex_lite::Regex::new("new").unwrap());
         drop(recovered);
-        assert!(lock_quality_regex_cache(&cache)["new"].is_match("new value"));
+        assert!(!cache.is_poisoned());
+        assert!(cache.lock().unwrap()["new"].is_match("new value"));
     }
 
     // -- QualityCheck -------------------------------------------------------
