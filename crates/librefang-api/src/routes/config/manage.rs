@@ -1047,40 +1047,40 @@ pub async fn export_config(State(state): State<Arc<AppState>>) -> impl IntoRespo
 
     let config_path = state.kernel.home_dir().join("config.toml");
 
-    let toml_content = if config_path.exists() {
-        match std::fs::read_to_string(&config_path) {
-            Ok(content) => content,
-            Err(e) => {
-                // Scrub the io error (audit: rusqlite-errors-leak).
-                tracing::error!(error = %e, "failed to read config for export");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    [(axum::http::header::CONTENT_TYPE, "application/json")],
-                    Body::from(
-                        serde_json::json!({"status": "error", "error": "Internal server error"})
-                            .to_string(),
-                    ),
-                )
-                    .into_response();
+    let toml_content = match tokio::fs::read_to_string(&config_path).await {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Fall back to serializing in-memory config only when there is no
+            // persisted file to export.
+            match toml::to_string_pretty(&**state.kernel.config_ref()) {
+                Ok(s) => s,
+                Err(e) => {
+                    // Scrub the serialize error (audit: rusqlite-errors-leak).
+                    tracing::error!(error = %e, "failed to serialize config for export");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        Body::from(
+                            serde_json::json!({"status": "error", "error": "Internal server error"})
+                                .to_string(),
+                        ),
+                    )
+                        .into_response();
+                }
             }
         }
-    } else {
-        // Fall back to serializing in-memory config
-        match toml::to_string_pretty(&**state.kernel.config_ref()) {
-            Ok(s) => s,
-            Err(e) => {
-                // Scrub the serialize error (audit: rusqlite-errors-leak).
-                tracing::error!(error = %e, "failed to serialize config for export");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    [(axum::http::header::CONTENT_TYPE, "application/json")],
-                    Body::from(
-                        serde_json::json!({"status": "error", "error": "Internal server error"})
-                            .to_string(),
-                    ),
-                )
-                    .into_response();
-            }
+        Err(e) => {
+            // Scrub the io error (audit: rusqlite-errors-leak).
+            tracing::error!(error = %e, "failed to read config for export");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                Body::from(
+                    serde_json::json!({"status": "error", "error": "Internal server error"})
+                        .to_string(),
+                ),
+            )
+                .into_response();
         }
     };
 
