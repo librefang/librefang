@@ -84,6 +84,19 @@ fn json_err(status: StatusCode, error: &str, message: impl AsRef<str>) -> Respon
         .into_response()
 }
 
+fn internal_error_response(
+    error_code: &'static str,
+    operation: &'static str,
+    error: &impl std::fmt::Display,
+) -> Response {
+    tracing::error!(%error, operation, "passkey request failed");
+    json_err(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        error_code,
+        "Internal server error.",
+    )
+}
+
 /// 503 when passkey login is not enabled / misconfigured.
 fn engine_unavailable() -> Response {
     json_err(
@@ -107,10 +120,10 @@ fn engine_error_response(e: PasskeyError) -> Response {
             "webauthn_failed",
             inner.to_string(),
         ),
-        PasskeyError::CorruptCredential(inner) => json_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
+        PasskeyError::CorruptCredential(inner) => internal_error_response(
             "corrupt_credential",
-            inner.to_string(),
+            "deserialize stored credential",
+            &inner,
         ),
     }
 }
@@ -168,13 +181,7 @@ pub(crate) async fn registration_options(
 
     let existing = match state.passkey_store.list_for_user(&user.name) {
         Ok(rows) => parse_stored_passkeys(&rows),
-        Err(e) => {
-            return json_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store_error",
-                e.to_string(),
-            )
-        }
+        Err(e) => return internal_error_response("store_error", "list credentials", &e),
     };
 
     match engine.start_registration(&user.name, &existing) {
@@ -225,13 +232,7 @@ pub(crate) async fn registration_verify(
     let credential_id = encode_credential_id(passkey.cred_id());
     let cred_json = match serde_json::to_string(&passkey) {
         Ok(s) => s,
-        Err(e) => {
-            return json_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "serialize_error",
-                e.to_string(),
-            )
-        }
+        Err(e) => return internal_error_response("serialize_error", "serialize credential", &e),
     };
     let label = body
         .label
@@ -245,11 +246,7 @@ pub(crate) async fn registration_verify(
         label,
     );
     if let Err(e) = state.passkey_store.insert(&record) {
-        return json_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store_error",
-            e.to_string(),
-        );
+        return internal_error_response("store_error", "insert credential", &e);
     }
 
     tracing::info!(user = %user.name, %credential_id, "passkey registered");
@@ -283,13 +280,7 @@ pub(crate) async fn authentication_options(
 
     let passkeys = match state.passkey_store.list_for_user(&principal) {
         Ok(rows) => parse_stored_passkeys(&rows),
-        Err(e) => {
-            return json_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store_error",
-                e.to_string(),
-            )
-        }
+        Err(e) => return internal_error_response("store_error", "list credentials", &e),
     };
     if passkeys.is_empty() {
         return json_err(
@@ -421,11 +412,7 @@ pub(crate) async fn list_credentials(
                 .collect();
             Json(serde_json::json!({ "credentials": items })).into_response()
         }
-        Err(e) => json_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store_error",
-            e.to_string(),
-        ),
+        Err(e) => internal_error_response("store_error", "list credentials", &e),
     }
 }
 
@@ -465,11 +452,27 @@ pub(crate) async fn revoke_credential(
             "not_found",
             "No such passkey credential for this account.",
         ),
-        Err(e) => json_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store_error",
-            e.to_string(),
-        ),
+        Err(e) => internal_error_response("store_error", "delete credential", &e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn internal_passkey_errors_are_scrubbed_from_http_body() {
+        let sensitive_error = "database /srv/librefang/passkeys.db is not writable";
+        let response = internal_error_response("store_error", "list credentials", &sensitive_error);
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("store_error"));
+        assert!(body.contains("Internal server error."));
+        assert!(!body.contains("/srv/librefang/passkeys.db"));
+        assert!(!body.contains("not writable"));
     }
 }
 
