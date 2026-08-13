@@ -300,6 +300,10 @@ mod tests {
                 result.contains("session DB corrupted"),
                 "lang '{lang}': api-error-generic must interpolate $error; got {result:?}",
             );
+            assert_ne!(
+                result, "session DB corrupted",
+                "lang '{lang}': api-error-generic must retain its localized error label",
+            );
         }
     }
 

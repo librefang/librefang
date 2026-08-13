@@ -1619,9 +1619,16 @@ pub async fn memory_config_patch(
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if let Some(locked) = crate::routes::guard_config_write() {
+        return locked;
+    }
+
+    // Keep the complete read-modify-write-reload transaction under the shared config lock.
+    // Otherwise two unrelated dashboard saves can read the same snapshot and the later write silently reverts the earlier one.
+    let _config_guard = state.config_write_lock.lock().await;
     let config_path = state.kernel.home_dir().join("config.toml");
 
-    let content = match std::fs::read_to_string(&config_path) {
+    let content = match tokio::fs::read_to_string(&config_path).await {
         Ok(c) => c,
         Err(e) => {
             return ApiErrorResponse::internal_scrub(e).into_json_tuple();
@@ -1708,9 +1715,24 @@ pub async fn memory_config_patch(
         }
     }
 
-    let new_content = toml::to_string_pretty(&table).unwrap_or_default();
-    if let Err(e) = std::fs::write(&config_path, &new_content) {
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+    let new_content = match toml::to_string_pretty(&table) {
+        Ok(content) => content,
+        Err(e) => return ApiErrorResponse::internal_scrub(e).into_json_tuple(),
+    };
+    let write_path = config_path.clone();
+    let write_result = tokio::task::spawn_blocking(move || {
+        crate::atomic_write(&write_path, new_content.as_bytes())
+    })
+    .await;
+    match write_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return ApiErrorResponse::internal_scrub(e).into_json_tuple(),
+        Err(e) => {
+            return ApiErrorResponse::internal_scrub(format!(
+                "memory config write task failed: {e}"
+            ))
+            .into_json_tuple();
+        }
     }
 
     // M12: hot-reload the new config so the running kernel picks up the

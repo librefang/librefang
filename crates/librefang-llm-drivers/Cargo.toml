@@ -33,6 +33,7 @@ zeroize = { workspace = true }
 dirs = { workspace = true }
 rand = { workspace = true }
 jsonwebtoken = { workspace = true }
+libc = "0.2"
 
 [dev-dependencies]
 serial_test = "4"

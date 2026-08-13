@@ -16,8 +16,9 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -25,6 +26,15 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Maximum distinct peer identities retained in each active rate-limit window.
+/// A shared secret holder can choose arbitrary node IDs, so this cap prevents identity churn from becoming an unbounded memory primitive.
+const MAX_RATE_LIMIT_PEERS: usize = 10_000;
+
+/// Maximum length, in bytes, of a `peer_id` admitted as a rate-limiter map key.
+/// `node_id` is attacker-controlled cleartext carried in the wire handshake, so without this cap each of the `MAX_RATE_LIMIT_PEERS` slots could be sized up to `MAX_MESSAGE_SIZE`, turning the entry-count cap into a memory-amplification vector rather than a real bound.
+/// Legitimate node IDs are UUIDs (36 bytes); this leaves generous room for non-UUID identifiers while keeping worst-case map memory in the low megabytes.
+const MAX_PEER_ID_LEN: usize = 256;
 
 /// SECURITY: Time-windowed nonce tracker to prevent OFP handshake replay attacks.
 ///
@@ -122,14 +132,13 @@ impl Default for NonceTracker {
 ///    When a peer has consumed `max_llm_tokens_per_peer_per_hour` tokens in
 ///    the current hour window its subsequent messages are also rejected.
 ///
-/// Both counters are stored in `DashMap` so they are shared safely across all
-/// Tokio tasks that serve connections from the same peer node.
+/// Both counters are stored in a mutex-guarded `HashMap`, bounded at `MAX_RATE_LIMIT_PEERS` distinct peer identities, so they are shared safely across all Tokio tasks that serve connections from the same peer node.
 #[derive(Clone)]
 pub struct PeerRateLimiter {
     /// Tracks (message_count, window_start) per peer_id for rate limiting.
-    msg_counts: Arc<DashMap<String, (u32, Instant)>>,
+    msg_counts: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
     /// Tracks (token_count, window_start) per peer_id for token budgeting.
-    token_counts: Arc<DashMap<String, (u64, Instant)>>,
+    token_counts: Arc<Mutex<HashMap<String, (u64, Instant)>>>,
     /// Maximum AgentMessages a single peer may send per 60-second window.
     /// `0` means unlimited.
     max_msgs_per_minute: u32,
@@ -144,8 +153,8 @@ impl PeerRateLimiter {
     /// `max_tokens_per_hour = None` disables token budget limiting.
     pub fn new(max_msgs_per_minute: u32, max_tokens_per_hour: Option<u64>) -> Self {
         Self {
-            msg_counts: Arc::new(DashMap::new()),
-            token_counts: Arc::new(DashMap::new()),
+            msg_counts: Arc::new(Mutex::new(HashMap::new())),
+            token_counts: Arc::new(Mutex::new(HashMap::new())),
             max_msgs_per_minute,
             max_tokens_per_hour,
         }
@@ -161,11 +170,38 @@ impl PeerRateLimiter {
         let one_minute = Duration::from_secs(60);
 
         if self.max_msgs_per_minute > 0 {
-            let mut entry = self
+            // Mirrors `record_tokens`: the length cap only matters once we are
+            // about to touch `msg_counts`, so it lives inside this guard rather
+            // than ahead of it. Checking it unconditionally would reject
+            // oversized peer IDs even with message rate limiting disabled
+            // (`max_msgs_per_minute == 0`), where no map growth is possible.
+            if peer_id.len() > MAX_PEER_ID_LEN {
+                warn!(
+                    peer_id_len = peer_id.len(),
+                    limit = MAX_PEER_ID_LEN,
+                    "OFP: peer_id exceeds maximum length; rejecting before rate-limiter admission"
+                );
+                return Err(format!(
+                    "peer_id exceeds maximum length of {MAX_PEER_ID_LEN} bytes"
+                ));
+            }
+
+            let mut counts = self
                 .msg_counts
-                .entry(peer_id.to_string())
-                .or_insert((0, now));
-            let (count, window_start) = &mut *entry;
+                .lock()
+                .map_err(|_| "Peer message rate limiter lock is poisoned".to_string())?;
+            if !counts.contains_key(peer_id) && counts.len() >= MAX_RATE_LIMIT_PEERS {
+                counts.retain(|_, (_, started)| now.duration_since(*started) < one_minute);
+                if counts.len() >= MAX_RATE_LIMIT_PEERS {
+                    warn!(
+                        peer_id,
+                        capacity = MAX_RATE_LIMIT_PEERS,
+                        "OFP: peer message rate limiter at capacity; rejecting new identity"
+                    );
+                    return Err("Peer rate limiter is at capacity; retry later".to_string());
+                }
+            }
+            let (count, window_start) = counts.entry(peer_id.to_string()).or_insert((0, now));
             if now.duration_since(*window_start) >= one_minute {
                 // New window — reset counter
                 *count = 1;
@@ -174,7 +210,7 @@ impl PeerRateLimiter {
                 *count += 1;
                 if *count > self.max_msgs_per_minute {
                     let rate = *count;
-                    drop(entry);
+                    drop(counts);
                     warn!(
                         peer_id = peer_id,
                         rate = rate,
@@ -205,14 +241,37 @@ impl PeerRateLimiter {
             return Ok(()); // Token budget not configured
         };
 
+        if peer_id.len() > MAX_PEER_ID_LEN {
+            warn!(
+                peer_id_len = peer_id.len(),
+                limit = MAX_PEER_ID_LEN,
+                "OFP: peer_id exceeds maximum length; rejecting before token-limiter admission"
+            );
+            return Err(format!(
+                "peer_id exceeds maximum length of {MAX_PEER_ID_LEN} bytes"
+            ));
+        }
+
         let now = Instant::now();
         let one_hour = Duration::from_secs(3600);
 
-        let mut entry = self
+        let mut counts = self
             .token_counts
-            .entry(peer_id.to_string())
-            .or_insert((0, now));
-        let (total, window_start) = &mut *entry;
+            .lock()
+            .map_err(|_| "Peer token limiter lock is poisoned".to_string())?;
+        if !counts.contains_key(peer_id) && counts.len() >= MAX_RATE_LIMIT_PEERS {
+            counts.retain(|_, (_, started)| now.duration_since(*started) < one_hour);
+            if counts.len() >= MAX_RATE_LIMIT_PEERS {
+                warn!(
+                    peer_id,
+                    capacity = MAX_RATE_LIMIT_PEERS,
+                    "OFP: peer token limiter at capacity; rejecting new identity"
+                );
+                return Err("Peer token limiter is at capacity; retry later".to_string());
+            }
+        }
+
+        let (total, window_start) = counts.entry(peer_id.to_string()).or_insert((0, now));
         if now.duration_since(*window_start) >= one_hour {
             // New hour window — reset
             *total = tokens_used;
@@ -221,7 +280,7 @@ impl PeerRateLimiter {
             *total += tokens_used;
             if *total > max_tokens {
                 let used = *total;
-                drop(entry);
+                drop(counts);
                 warn!(
                     peer_id = peer_id,
                     tokens_used = used,
@@ -235,6 +294,17 @@ impl PeerRateLimiter {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl PeerRateLimiter {
+    fn message_peer_count(&self) -> usize {
+        self.msg_counts.lock().unwrap().len()
+    }
+
+    fn token_peer_count(&self) -> usize {
+        self.token_counts.lock().unwrap().len()
     }
 }
 
@@ -2338,6 +2408,76 @@ mod tests {
         assert!(
             result.unwrap_err().contains("replay"),
             "expected replay error"
+        );
+    }
+
+    #[test]
+    fn peer_message_limiter_fails_closed_at_identity_capacity() {
+        let limiter = PeerRateLimiter::new(10, None);
+        for index in 0..MAX_RATE_LIMIT_PEERS {
+            limiter.check_message(&format!("peer-{index}")).unwrap();
+        }
+
+        let error = limiter.check_message("one-too-many").unwrap_err();
+
+        assert!(error.contains("capacity"));
+        assert_eq!(limiter.message_peer_count(), MAX_RATE_LIMIT_PEERS);
+    }
+
+    #[test]
+    fn peer_token_limiter_fails_closed_at_identity_capacity() {
+        let limiter = PeerRateLimiter::new(0, Some(1_000));
+        for index in 0..MAX_RATE_LIMIT_PEERS {
+            limiter.record_tokens(&format!("peer-{index}"), 1).unwrap();
+        }
+
+        let error = limiter.record_tokens("one-too-many", 1).unwrap_err();
+
+        assert!(error.contains("capacity"));
+        assert_eq!(limiter.token_peer_count(), MAX_RATE_LIMIT_PEERS);
+    }
+
+    #[test]
+    fn peer_message_limiter_rejects_oversized_peer_id_without_admitting_it() {
+        let limiter = PeerRateLimiter::new(10, None);
+        let oversized = "x".repeat(MAX_PEER_ID_LEN + 1);
+
+        let error = limiter.check_message(&oversized).unwrap_err();
+
+        assert!(error.contains("maximum length"));
+        assert_eq!(
+            limiter.message_peer_count(),
+            0,
+            "an oversized peer_id must never reach the map, or its length becomes a memory-amplification vector"
+        );
+    }
+
+    #[test]
+    fn peer_message_limiter_skips_length_check_when_disabled() {
+        // With message rate limiting off (max_msgs_per_minute == 0),
+        // msg_counts is never touched, so an oversized peer_id poses no
+        // memory-amplification risk and must not be rejected. Mirrors
+        // record_tokens' behavior when max_tokens_per_hour is None.
+        let limiter = PeerRateLimiter::new(0, None);
+        let oversized = "x".repeat(MAX_PEER_ID_LEN + 1);
+
+        limiter.check_message(&oversized).unwrap();
+
+        assert_eq!(limiter.message_peer_count(), 0);
+    }
+
+    #[test]
+    fn peer_token_limiter_rejects_oversized_peer_id_without_admitting_it() {
+        let limiter = PeerRateLimiter::new(0, Some(1_000));
+        let oversized = "x".repeat(MAX_PEER_ID_LEN + 1);
+
+        let error = limiter.record_tokens(&oversized, 1).unwrap_err();
+
+        assert!(error.contains("maximum length"));
+        assert_eq!(
+            limiter.token_peer_count(),
+            0,
+            "an oversized peer_id must never reach the map, or its length becomes a memory-amplification vector"
         );
     }
 

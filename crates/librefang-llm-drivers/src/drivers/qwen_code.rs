@@ -48,6 +48,7 @@ const SENSITIVE_SUFFIXES: &[&str] = &["_SECRET", "_TOKEN", "_PASSWORD"];
 pub struct QwenCodeDriver {
     cli_path: String,
     skip_permissions: bool,
+    message_timeout_secs: u64,
     /// When `true` (the default), set `LIBREFANG_AGENT_ID`, `LIBREFANG_SESSION_ID`,
     /// and `LIBREFANG_STEP_ID` env vars on the spawned subprocess so operators can
     /// correlate process-tree entries with LibreFang agent sessions.
@@ -74,8 +75,16 @@ impl QwenCodeDriver {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "qwen".to_string()),
             skip_permissions,
+            message_timeout_secs: crate::cli_process::DEFAULT_MESSAGE_TIMEOUT_SECS,
             emit_caller_trace_headers: true,
         }
+    }
+
+    /// Set the default subprocess deadline.
+    /// A per-request timeout overrides it.
+    pub fn with_message_timeout(mut self, timeout_secs: u64) -> Self {
+        self.message_timeout_secs = timeout_secs;
+        self
     }
 
     /// Control whether caller-trace env vars are injected into the spawned
@@ -712,16 +721,35 @@ impl QwenCodeDriver {
             "Spawning Qwen Code CLI"
         );
 
-        let output = cmd.output().await.map_err(|e| {
-            LlmError::Http(format!(
-                "Qwen Code CLI not found or failed to start ({}). \
-                 Install: npm install -g @qwen-code/qwen-code && qwen auth. \
-                 If the CLI is installed in a non-standard location, set \
-                 provider_urls.qwen-code in your LibreFang config.toml \
-                 (e.g. provider_urls.qwen-code = \"/path/to/qwen\")",
-                e
-            ))
-        })?;
+        let timeout_secs = request.timeout_secs.unwrap_or(self.message_timeout_secs);
+        let output = match crate::cli_process::output_with_timeout(
+            &mut cmd,
+            std::time::Duration::from_secs(timeout_secs),
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(crate::cli_process::OutputError::TimedOut) => {
+                return Err(crate::cli_process::timeout_error(
+                    timeout_secs,
+                    "Qwen Code CLI",
+                ));
+            }
+            Err(crate::cli_process::OutputError::Spawn(e)) => {
+                return Err(LlmError::Http(format!(
+                    "Qwen Code CLI not found or failed to start ({e}). \
+                     Install: npm install -g @qwen-code/qwen-code && qwen auth. \
+                     If the CLI is installed in a non-standard location, set \
+                     provider_urls.qwen-code in your LibreFang config.toml \
+                     (e.g. provider_urls.qwen-code = \"/path/to/qwen\")"
+                )));
+            }
+            Err(crate::cli_process::OutputError::Io(e)) => {
+                return Err(LlmError::Http(format!(
+                    "Qwen Code CLI subprocess failed after starting: {e}"
+                )));
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -821,6 +849,12 @@ impl QwenCodeDriver {
 
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        cmd.kill_on_drop(true);
+        // The CLI can background helper processes of its own; make it the
+        // leader of its own process group so a timeout kill (below) can
+        // reach the whole subtree via `crate::cli_process::kill_on_timeout`
+        // instead of leaking grandchildren as orphans.
+        crate::cli_process::set_process_group(&mut cmd);
 
         debug!(
             cli = %self.cli_path,
@@ -848,14 +882,14 @@ impl QwenCodeDriver {
         // Drain stderr in a background task to prevent deadlock when the
         // subprocess writes more than the OS pipe buffer can hold.
         let stderr = child.stderr.take();
-        let stderr_handle = tokio::spawn(async move {
+        let mut stderr_handle = crate::cli_process::AbortOnDrop::new(tokio::spawn(async move {
             let mut buf = String::new();
             if let Some(stderr) = stderr {
                 let mut reader = tokio::io::BufReader::new(stderr);
                 let _ = tokio::io::AsyncReadExt::read_to_string(&mut reader, &mut buf).await;
             }
             buf
-        });
+        }));
 
         let reader = tokio::io::BufReader::new(stdout);
         let mut lines = reader.lines();
@@ -872,11 +906,33 @@ impl QwenCodeDriver {
         // Set when a `tx.send(...)` fails — kill the child and stop reading
         // stdout so the CLI doesn't keep producing tokens for nobody (#3769).
         let mut receiver_dropped = false;
+        let timeout_secs = request.timeout_secs.unwrap_or(self.message_timeout_secs);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
-        while let Ok(Some(line)) = lines.next_line().await {
+        loop {
+            let line = match tokio::time::timeout_at(deadline, lines.next_line()).await {
+                Ok(Ok(Some(line))) => line,
+                Ok(Ok(None)) => break,
+                Ok(Err(error)) => {
+                    crate::cli_process::kill_on_timeout(&mut child).await;
+                    stderr_handle.abort();
+                    return Err(LlmError::Http(format!(
+                        "Qwen CLI stdout read failed: {error}"
+                    )));
+                }
+                Err(_) => {
+                    crate::cli_process::kill_on_timeout(&mut child).await;
+                    stderr_handle.abort();
+                    return Err(crate::cli_process::timeout_error_with_partial(
+                        timeout_secs,
+                        "Qwen Code CLI",
+                        full_text,
+                    ));
+                }
+            };
             if receiver_dropped {
                 tracing::debug!("streaming receiver dropped; cancelling Qwen CLI stream");
-                let _ = child.kill().await;
+                crate::cli_process::kill_on_timeout(&mut child).await;
                 break;
             }
             let trimmed = line.trim();
@@ -959,12 +1015,34 @@ impl QwenCodeDriver {
             }
         }
 
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| LlmError::Http(format!("Qwen CLI wait failed: {e}")))?;
+        let status = match tokio::time::timeout_at(deadline, child.wait()).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(error)) => {
+                stderr_handle.abort();
+                return Err(LlmError::Http(format!("Qwen CLI wait failed: {error}")));
+            }
+            Err(_) => {
+                crate::cli_process::kill_on_timeout(&mut child).await;
+                stderr_handle.abort();
+                return Err(crate::cli_process::timeout_error_with_partial(
+                    timeout_secs,
+                    "Qwen Code CLI",
+                    full_text.clone(),
+                ));
+            }
+        };
 
-        let stderr_output = stderr_handle.await.unwrap_or_default();
+        let stderr_output = match tokio::time::timeout_at(deadline, stderr_handle.join()).await {
+            Ok(result) => result.unwrap_or_default(),
+            Err(_) => {
+                stderr_handle.abort();
+                return Err(crate::cli_process::timeout_error_with_partial(
+                    timeout_secs,
+                    "Qwen Code CLI",
+                    full_text.clone(),
+                ));
+            }
+        };
 
         if !status.success() {
             let code = status.code().unwrap_or(1);
@@ -1098,6 +1176,46 @@ fn home_dir() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn sleeping_cli() -> tempfile::TempPath {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, b"#!/bin/sh\nsleep 30\n").unwrap();
+        let mut permissions = file.as_file().metadata().unwrap().permissions();
+        permissions.set_mode(0o700);
+        file.as_file().set_permissions(permissions).unwrap();
+        // Convert to a `TempPath` (file still on disk, deleted on drop) so
+        // this process no longer holds the file open for writing. Spawning
+        // the path directly as a subprocess otherwise fails with `ETXTBSY`
+        // ("Text file busy") because Linux refuses to exec a file that has
+        // a writable fd open anywhere, including in the exec-ing process.
+        file.into_temp_path()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stream_honors_request_timeout() {
+        let cli = sleeping_cli();
+        let driver = QwenCodeDriver::new(Some(cli.to_string_lossy().into_owned()), false);
+        let request = CompletionRequest {
+            model: "qwen-code".to_string(),
+            timeout_secs: Some(0),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+
+        let error = driver.stream(request, tx).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            LlmError::TimedOut {
+                inactivity_secs: 0,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn is_coding_agent_is_true() {

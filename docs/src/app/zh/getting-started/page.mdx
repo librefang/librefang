@@ -373,7 +373,8 @@ curl -sL https://raw.githubusercontent.com/librefang/librefang/main/deploy/fly/d
 ```bash
 cd deploy/gcp
 cp terraform.tfvars.example terraform.tfvars
-# 编辑 terraform.tfvars，填入 project_id 和 API keys
+# 编辑 terraform.tfvars，填入 project_id、限制访问的来源 CIDR、
+# 生成的 LibreFang API key，以及各服务商的 API keys
 terraform init && terraform apply
 ```
 

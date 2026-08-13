@@ -1366,24 +1366,21 @@ pub async fn config_set(
     // …) MUST abort — falling back to "" would silently drop every other
     // section in `config.toml` (agents, providers, taint rules, …) on the
     // next write. Same protection as `users::persist_users` (#3368).
-    let raw_content = if config_path.exists() {
-        match std::fs::read_to_string(&config_path) {
-            Ok(s) => s,
-            Err(e) => {
-                // Scrub the io error (audit: rusqlite-errors-leak) —
-                // path / permission detail stays in the log.
-                tracing::error!(error = %e, "could not read existing config.toml");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "status": "error",
-                        "error": "Internal server error"
-                    })),
-                );
-            }
+    let raw_content = match tokio::fs::read_to_string(&config_path).await {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            // Scrub the io error (audit: rusqlite-errors-leak) —
+            // path / permission detail stays in the log.
+            tracing::error!(%error, "could not read existing config.toml");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": "Internal server error"
+                })),
+            );
         }
-    } else {
-        String::new()
     };
     // Parse failure means the on-disk file is already corrupt — refuse to
     // write rather than overwriting with an empty document, which would
@@ -1499,23 +1496,39 @@ pub async fn config_set(
     }
 
     // Backup under backups/ before write (single rolling copy).
-    if config_path.exists() {
-        if let Some(home_dir) = config_path.parent() {
-            let backups_dir = home_dir.join("backups");
-            if std::fs::create_dir_all(&backups_dir).is_ok() {
-                let _ = std::fs::copy(&config_path, backups_dir.join("config.toml.prev"));
+    if let Some(home_dir) = config_path.parent() {
+        let backups_dir = home_dir.join("backups");
+        if tokio::fs::create_dir_all(&backups_dir).await.is_ok() {
+            match tokio::fs::copy(&config_path, backups_dir.join("config.toml.prev")).await {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => tracing::warn!(%error, "failed to back up config.toml"),
             }
         }
     }
 
     // Write back — preserves comments, whitespace, and key ordering
-    if let Err(e) = crate::atomic_write(&config_path, new_toml_str.as_bytes()) {
-        // Scrub the io error (audit: rusqlite-errors-leak).
-        tracing::error!(error = %e, "failed to write config.toml");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"status": "error", "error": "Internal server error"})),
-        );
+    let write_path = config_path.clone();
+    let write_bytes = new_toml_str.into_bytes();
+    let write_result =
+        tokio::task::spawn_blocking(move || crate::atomic_write(&write_path, &write_bytes)).await;
+    match write_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            // Scrub the io error (audit: rusqlite-errors-leak).
+            tracing::error!(%error, "failed to write config.toml");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"status": "error", "error": "Internal server error"})),
+            );
+        }
+        Err(error) => {
+            tracing::error!(%error, "config write task failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"status": "error", "error": "Internal server error"})),
+            );
+        }
     }
 
     // Trigger reload

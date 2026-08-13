@@ -434,7 +434,7 @@ pub(crate) fn cmd_channel_rm(name: &str) {
         );
         return;
     }
-    if let Err(e) = std::fs::write(&path, doc.to_string()) {
+    if let Err(e) = durable_atomic_write(&path, doc.to_string().as_bytes(), 0o600) {
         ui::error_with_fix(
             &i18n::t_args(
                 "channel-config-write-fail",

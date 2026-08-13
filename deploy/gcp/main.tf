@@ -38,7 +38,7 @@ resource "google_compute_firewall" "allow_ssh" {
     ports    = ["22"]
   }
 
-  source_ranges = ["0.0.0.0/0"]
+  source_ranges = [var.allowed_source_cidr]
   target_tags   = ["librefang"]
 }
 
@@ -51,7 +51,7 @@ resource "google_compute_firewall" "allow_http" {
     ports    = ["4545"]
   }
 
-  source_ranges = ["0.0.0.0/0"]
+  source_ranges = [var.allowed_source_cidr]
   target_tags   = ["librefang"]
 }
 
@@ -79,6 +79,7 @@ resource "google_compute_instance" "librefang" {
     ssh-keys  = "librefang:${file(pathexpand(var.ssh_pub_key_path))}"
     user-data = templatefile("${path.module}/cloud-init.yml.tpl", {
       librefang_version = var.librefang_version
+      librefang_api_key = var.librefang_api_key
       groq_api_key      = var.groq_api_key
       openai_api_key    = var.openai_api_key
       anthropic_api_key = var.anthropic_api_key

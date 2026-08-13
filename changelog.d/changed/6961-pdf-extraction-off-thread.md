@@ -1,0 +1,2 @@
+PDF text extraction for chat attachments now runs on Tokio's blocking pool instead of an async request worker, so a large or malformed PDF no longer stalls other in-flight requests on the same worker thread.
+Concurrent extractions are capped at two, with the semaphore permit held inside the blocking closure so a cancelled request cannot free capacity while its parser keeps running (#6961) (@houko)

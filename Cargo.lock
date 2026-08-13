@@ -4592,6 +4592,7 @@ dependencies = [
  "uuid",
  "walkdir",
  "which",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -4845,6 +4846,7 @@ dependencies = [
  "futures",
  "hex",
  "jsonwebtoken",
+ "libc",
  "librefang-http",
  "librefang-llm-driver",
  "librefang-types",

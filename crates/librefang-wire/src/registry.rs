@@ -8,7 +8,7 @@ use crate::message::RemoteAgentInfo;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// A tracked remote agent, enriched with the owning peer's identity.
 #[derive(Debug, Clone)]
@@ -61,21 +61,35 @@ impl PeerRegistry {
         }
     }
 
+    fn read_peers(&self) -> RwLockReadGuard<'_, HashMap<String, PeerEntry>> {
+        self.peers.read().unwrap_or_else(|poisoned| {
+            tracing::warn!("peer registry read lock poisoned; recovering inner state");
+            poisoned.into_inner()
+        })
+    }
+
+    fn write_peers(&self) -> RwLockWriteGuard<'_, HashMap<String, PeerEntry>> {
+        self.peers.write().unwrap_or_else(|poisoned| {
+            tracing::warn!("peer registry write lock poisoned; recovering inner state");
+            poisoned.into_inner()
+        })
+    }
+
     /// Register or update a peer after a successful handshake.
     pub fn add_peer(&self, entry: PeerEntry) {
-        let mut peers = self.peers.write().unwrap_or_else(|e| e.into_inner());
+        let mut peers = self.write_peers();
         peers.insert(entry.node_id.clone(), entry);
     }
 
     /// Remove a peer entirely.
     pub fn remove_peer(&self, node_id: &str) -> Option<PeerEntry> {
-        let mut peers = self.peers.write().unwrap_or_else(|e| e.into_inner());
+        let mut peers = self.write_peers();
         peers.remove(node_id)
     }
 
     /// Mark a peer as disconnected (but keep its entry for possible reconnect).
     pub fn mark_disconnected(&self, node_id: &str) {
-        let mut peers = self.peers.write().unwrap_or_else(|e| e.into_inner());
+        let mut peers = self.write_peers();
         if let Some(entry) = peers.get_mut(node_id) {
             entry.state = PeerState::Disconnected;
         }
@@ -83,7 +97,7 @@ impl PeerRegistry {
 
     /// Mark a peer as connected again.
     pub fn mark_connected(&self, node_id: &str) {
-        let mut peers = self.peers.write().unwrap_or_else(|e| e.into_inner());
+        let mut peers = self.write_peers();
         if let Some(entry) = peers.get_mut(node_id) {
             entry.state = PeerState::Connected;
         }
@@ -91,13 +105,13 @@ impl PeerRegistry {
 
     /// Get a snapshot of a specific peer.
     pub fn get_peer(&self, node_id: &str) -> Option<PeerEntry> {
-        let peers = self.peers.read().unwrap_or_else(|e| e.into_inner());
+        let peers = self.read_peers();
         peers.get(node_id).cloned()
     }
 
     /// Get all connected peers.
     pub fn connected_peers(&self) -> Vec<PeerEntry> {
-        let peers = self.peers.read().unwrap_or_else(|e| e.into_inner());
+        let peers = self.read_peers();
         peers
             .values()
             .filter(|p| p.state == PeerState::Connected)
@@ -107,13 +121,13 @@ impl PeerRegistry {
 
     /// Get all peers (connected + disconnected).
     pub fn all_peers(&self) -> Vec<PeerEntry> {
-        let peers = self.peers.read().unwrap_or_else(|e| e.into_inner());
+        let peers = self.read_peers();
         peers.values().cloned().collect()
     }
 
     /// Update the agent list for a peer (e.g., after an AgentSpawned notification).
     pub fn update_agents(&self, node_id: &str, agents: Vec<RemoteAgentInfo>) {
-        let mut peers = self.peers.write().unwrap_or_else(|e| e.into_inner());
+        let mut peers = self.write_peers();
         if let Some(entry) = peers.get_mut(node_id) {
             entry.agents = agents;
         }
@@ -121,7 +135,7 @@ impl PeerRegistry {
 
     /// Add a single agent to a peer's advertised list.
     pub fn add_agent(&self, node_id: &str, agent: RemoteAgentInfo) {
-        let mut peers = self.peers.write().unwrap_or_else(|e| e.into_inner());
+        let mut peers = self.write_peers();
         if let Some(entry) = peers.get_mut(node_id) {
             // Replace if agent with same ID already exists, otherwise push
             if let Some(existing) = entry.agents.iter_mut().find(|a| a.id == agent.id) {
@@ -134,7 +148,7 @@ impl PeerRegistry {
 
     /// Remove an agent from a peer's advertised list.
     pub fn remove_agent(&self, node_id: &str, agent_id: &str) {
-        let mut peers = self.peers.write().unwrap_or_else(|e| e.into_inner());
+        let mut peers = self.write_peers();
         if let Some(entry) = peers.get_mut(node_id) {
             entry.agents.retain(|a| a.id != agent_id);
         }
@@ -143,7 +157,7 @@ impl PeerRegistry {
     /// Find all remote agents matching a query (searches name, tags, description).
     pub fn find_agents(&self, query: &str) -> Vec<RemoteAgent> {
         let query_lower = query.to_lowercase();
-        let peers = self.peers.read().unwrap_or_else(|e| e.into_inner());
+        let peers = self.read_peers();
         let mut results = Vec::new();
 
         for peer in peers.values() {
@@ -171,7 +185,7 @@ impl PeerRegistry {
 
     /// Get all remote agents across all connected peers.
     pub fn all_remote_agents(&self) -> Vec<RemoteAgent> {
-        let peers = self.peers.read().unwrap_or_else(|e| e.into_inner());
+        let peers = self.read_peers();
         let mut results = Vec::new();
 
         for peer in peers.values() {
@@ -191,7 +205,7 @@ impl PeerRegistry {
 
     /// Number of connected peers.
     pub fn connected_count(&self) -> usize {
-        let peers = self.peers.read().unwrap_or_else(|e| e.into_inner());
+        let peers = self.read_peers();
         peers
             .values()
             .filter(|p| p.state == PeerState::Connected)
@@ -200,7 +214,7 @@ impl PeerRegistry {
 
     /// Total number of peers (including disconnected).
     pub fn total_count(&self) -> usize {
-        let peers = self.peers.read().unwrap_or_else(|e| e.into_inner());
+        let peers = self.read_peers();
         peers.len()
     }
 }
@@ -347,5 +361,25 @@ mod tests {
 
         let all = registry.all_remote_agents();
         assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn test_recovers_registry_state_after_lock_poisoning() {
+        let registry = PeerRegistry::new();
+        registry.add_peer(make_peer("node-1", vec![]));
+
+        let poisoner = registry.clone();
+        let joined = std::thread::spawn(move || {
+            let _guard = poisoner.peers.write().unwrap();
+            panic!("poison peer registry for recovery test");
+        })
+        .join();
+        assert!(joined.is_err());
+
+        // A poisoned registry remains available, but every recovery is now
+        // observable through the warning emitted by the centralized helpers.
+        assert_eq!(registry.total_count(), 1);
+        registry.add_peer(make_peer("node-2", vec![]));
+        assert_eq!(registry.total_count(), 2);
     }
 }

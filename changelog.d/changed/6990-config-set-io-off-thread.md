@@ -1,0 +1,3 @@
+`POST /api/config/set` read the existing `config.toml`, created the backup directory, copied the backup, and wrote the new file synchronously on the async worker thread handling the request.
+  The existing-config read and the backup copy now go through Tokio's async filesystem APIs, and the durable atomic write of the new config runs on Tokio's blocking pool instead of inline.
+  The missing-file case (no config to read or back up yet) is now handled via `ErrorKind::NotFound` instead of a synchronous `exists()` pre-check, preserving the same allowlist, TOML round-trip, validation, reload, and scrubbed-error behavior (#6990) (@houko)

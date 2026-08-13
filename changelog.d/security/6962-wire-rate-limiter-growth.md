@@ -1,0 +1,3 @@
+`PeerRateLimiter`'s message and token counters keyed on the peer-supplied `peer_id`, and a peer authenticated with a shared secret can pick any node ID it likes, so a malicious or misbehaving peer could grow both `DashMap`s without bound simply by rotating identities.
+Both counters now cap at 10,000 distinct identities per window, sweeping expired entries before admitting a new one and rejecting the new identity outright once the cap is still hit.
+A count-only cap still let an attacker inflate memory through key size rather than entry count, since `peer_id` is attacker-controlled and was otherwise bounded only by the 16 MiB wire message limit, so oversized peer IDs are now rejected before either map is touched at all (#6962) (@houko)

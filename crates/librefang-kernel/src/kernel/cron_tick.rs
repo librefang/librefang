@@ -41,8 +41,11 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
     loop {
         interval.tick().await;
         if kernel.agents.supervisor.is_shutting_down() {
-            // Persist on shutdown
-            let _ = kernel.workflows.cron_scheduler.persist();
+            // This is the scheduler's last chance to flush execution state.
+            // Keep shutdown moving, but never hide the durability failure.
+            if let Err(error) = kernel.workflows.cron_scheduler.persist() {
+                warn!(%error, "failed to persist cron scheduler during shutdown");
+            }
             break;
         }
 

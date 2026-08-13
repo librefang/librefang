@@ -6,6 +6,7 @@
 pub use librefang_llm_driver as llm_driver;
 pub use librefang_llm_driver::llm_errors;
 pub mod backoff;
+mod cli_process;
 pub use librefang_llm_driver::FailoverReason;
 pub mod credential_pool;
 pub mod drivers;

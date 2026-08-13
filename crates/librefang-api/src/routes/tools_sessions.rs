@@ -402,20 +402,36 @@ pub async fn list_sessions(
 ) -> impl IntoResponse {
     let offset = pagination.effective_offset();
     let limit = pagination.effective_limit();
-    let substrate = state.kernel.memory_substrate();
-    // Push pagination into SQLite so we don't deserialize every session blob (#3485).
-    let total = substrate.count_sessions().unwrap_or(0);
     // Snapshot of in-flight session IDs from the kernel runtime — the
     // SQLite substrate has no view into liveness, so we merge it in here
     // (#4290). Taken once per request before the SQL call so every row
     // sees a consistent view.
     let running = state.kernel.running_session_ids();
+    let substrate = Arc::clone(state.kernel.memory_substrate());
+    // Both calls use synchronous SQLite connections. Keep them together on
+    // the blocking pool so a large or contended sessions table cannot stall
+    // the Tokio worker serving unrelated requests.
+    let query_result = tokio::task::spawn_blocking(move || {
+        // Push pagination into SQLite so we don't deserialize every session
+        // blob (#3485).
+        let total = substrate.count_sessions().unwrap_or(0);
+        substrate
+            .list_sessions_paginated(Some(limit), offset)
+            .map(|items| (items, total, offset, limit))
+    })
+    .await;
     // Canonical paginated envelope (#3842): {items,total,offset,limit}.
-    let (mut items, total, offset_out, limit_out) =
-        match substrate.list_sessions_paginated(Some(limit), offset) {
-            Ok(items) => (items, total, offset, limit),
-            Err(_) => (Vec::new(), 0, 0, PaginationParams::DEFAULT_LIMIT),
-        };
+    let (mut items, total, offset_out, limit_out) = match query_result {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "failed to list sessions");
+            (Vec::new(), 0, 0, PaginationParams::DEFAULT_LIMIT)
+        }
+        Err(error) => {
+            tracing::error!(%error, "session list query task failed");
+            (Vec::new(), 0, 0, PaginationParams::DEFAULT_LIMIT)
+        }
+    };
     annotate_sessions_active(&mut items, &running);
     Json(crate::types::PaginatedResponse {
         items,
@@ -882,13 +898,22 @@ pub async fn search_sessions(
     let limit = pagination.effective_limit();
     let offset = pagination.effective_offset();
 
-    match state.kernel.memory_substrate().search_sessions_paginated(
-        &query,
-        agent_id.as_ref(),
-        Some(limit),
-        offset,
-    ) {
-        Ok(results) => {
+    let substrate = Arc::clone(state.kernel.memory_substrate());
+    // Same rationale as /api/sessions (#6986): this FTS5 query runs a
+    // synchronous SQLite connection, so keep it off the Tokio worker
+    // rather than blocking whichever one happens to serve this request.
+    let search_result = tokio::task::spawn_blocking(move || {
+        substrate.search_sessions_paginated(&query, agent_id.as_ref(), Some(limit), offset)
+    })
+    .await;
+
+    match search_result {
+        Err(error) => {
+            tracing::error!(%error, "session search query task failed");
+            ApiErrorResponse::internal(error.to_string()).into_json_tuple()
+        }
+        Ok(Err(e)) => ApiErrorResponse::internal(e.to_string()).into_json_tuple(),
+        Ok(Ok(results)) => {
             // Canonical paginated envelope (#3842): {items,total,offset,limit}.
             // The substrate has no count() for FTS5 search, so `total` is a
             // best-effort lower bound: when the page isn't full it is exact
@@ -923,6 +948,5 @@ pub async fn search_sessions(
                 ),
             )
         }
-        Err(e) => ApiErrorResponse::internal(e.to_string()).into_json_tuple(),
     }
 }

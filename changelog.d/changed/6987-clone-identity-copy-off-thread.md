@@ -1,0 +1,3 @@
+Move the identity-file path resolution, directory creation, and copy work performed by `POST /api/agents/{id}/clone` onto Tokio's blocking pool instead of running it inline on the async worker thread handling the request.
+The request's `ErrorTranslator` is dropped before awaiting the copy task, since it is `!Send` and would otherwise trip axum's `Handler` bound across the `spawn_blocking` await point; `agent_registry().get()` already hands back an owned clone rather than a lock guard, so no registry lock was ever held across the blocking work.
+Migrated `.identity/` files are still preferred over legacy workspace-root files, with the same fallback behaviour as before (#6987) (@houko)

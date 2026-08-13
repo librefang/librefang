@@ -12,6 +12,22 @@
 use crate::LibreFangKernel;
 use librefang_types::agent::UserId;
 
+fn read_vault_state<'a, T>(lock: &'a std::sync::RwLock<T>) -> std::sync::RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|poisoned| {
+        tracing::warn!("user provider credential vault read lock poisoned; recovering inner state");
+        poisoned.into_inner()
+    })
+}
+
+fn write_vault_state<'a, T>(lock: &'a std::sync::RwLock<T>) -> std::sync::RwLockWriteGuard<'a, T> {
+    lock.write().unwrap_or_else(|poisoned| {
+        tracing::warn!(
+            "user provider credential vault write lock poisoned; recovering inner state"
+        );
+        poisoned.into_inner()
+    })
+}
+
 /// Vault-key namespace for per-user provider credentials.
 ///
 /// Distinct from the MCP-OAuth (`mcp_oauth/…`) and reserved sentinel (`__sentinel__`) namespaces so the three never collide in the shared `vault.enc`.
@@ -86,7 +102,7 @@ impl LibreFangKernel {
     ) -> Result<bool, String> {
         let key = user_provider_vault_key(user_id, provider);
         let handle = self.vault_handle()?;
-        let mut guard = handle.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = write_vault_state(&handle);
         if !guard.is_unlocked() {
             // Vault file never materialised — nothing to remove.
             return Ok(false);
@@ -102,7 +118,7 @@ impl LibreFangKernel {
             Ok(h) => h,
             Err(_) => return Vec::new(),
         };
-        let guard = handle.read().unwrap_or_else(|e| e.into_inner());
+        let guard = read_vault_state(&handle);
         if !guard.is_unlocked() {
             return Vec::new();
         }
@@ -113,6 +129,25 @@ impl LibreFangKernel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poisoned_vault_lock_helpers_recover_read_and_write_access() {
+        let state = std::sync::RwLock::new(vec!["openai"]);
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut state = state.write().unwrap();
+                    state.push("anthropic");
+                    panic!("poison user provider vault lock");
+                })
+                .join()
+        });
+
+        assert!(poison.is_err());
+        assert_eq!(&*read_vault_state(&state), &["openai", "anthropic"]);
+        write_vault_state(&state).push("gemini");
+        assert_eq!(read_vault_state(&state).len(), 3);
+    }
 
     #[test]
     fn vault_key_is_namespaced_stable_and_isolated() {

@@ -1206,12 +1206,14 @@ where
     // taint rules, etc.) on the next write. The caller's
     // `backups/config.toml.prev` from the previous successful write is the
     // recovery point of last resort.
-    let raw = if config_path.exists() {
-        std::fs::read_to_string(&config_path).map_err(|e| {
-            PersistError::Internal(format!("could not read existing config.toml: {e}"))
-        })?
-    } else {
-        String::new()
+    let raw = match tokio::fs::read_to_string(&config_path).await {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(PersistError::Internal(format!(
+                "could not read existing config.toml: {error}"
+            )))
+        }
     };
     // Parse with `toml_edit` so we preserve comments / formatting / unrelated
     // sections. A parse failure means the on-disk file is already corrupt;
@@ -1262,11 +1264,13 @@ where
         )));
     }
 
-    if config_path.exists() {
-        if let Some(home_dir) = config_path.parent() {
-            let backups_dir = home_dir.join("backups");
-            if std::fs::create_dir_all(&backups_dir).is_ok() {
-                let _ = std::fs::copy(&config_path, backups_dir.join("config.toml.prev"));
+    if let Some(home_dir) = config_path.parent() {
+        let backups_dir = home_dir.join("backups");
+        if tokio::fs::create_dir_all(&backups_dir).await.is_ok() {
+            match tokio::fs::copy(&config_path, backups_dir.join("config.toml.prev")).await {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => tracing::warn!(%error, "failed to back up config.toml"),
             }
         }
     }
@@ -1289,8 +1293,12 @@ where
     // concurrent requests with the old key SHOULD fail).
     let mut user_keys_guard = state.user_api_keys.write().await;
 
-    crate::atomic_write(&config_path, new_toml.as_bytes())
-        .map_err(|e| PersistError::Internal(format!("write failed: {e}")))?;
+    let write_path = config_path.clone();
+    let write_bytes = new_toml.into_bytes();
+    tokio::task::spawn_blocking(move || crate::atomic_write(&write_path, &write_bytes))
+        .await
+        .map_err(|error| PersistError::Internal(format!("write task failed: {error}")))?
+        .map_err(|error| PersistError::Internal(format!("write failed: {error}")))?;
 
     if let Err(e) = state.kernel.reload_config().await {
         // The file is on disk; surface a soft error so the dashboard can

@@ -66,14 +66,17 @@ pub async fn clone_agent(
         );
     }
 
-    let source = match state.kernel.agent_registry().get(agent_id) {
-        Some(e) => e,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-            );
-        }
+    let (source_manifest, source_identity) = {
+        let source = match state.kernel.agent_registry().get(agent_id) {
+            Some(entry) => entry,
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+                );
+            }
+        };
+        (source.manifest.clone(), source.identity.clone())
     };
     // Owner-scoping (#6753): `agent_clone` in `middleware::user_role_allows_request` deliberately lets any `User`-role caller POST `/clone` on an arbitrary agent id, unlike most other mutations, which require Admin+.
     // The clone keeps the source's `author` (not the caller's), so a non-owner still can't read it back through the agent-scoped routes above afterwards, but without this check a non-owner could still trigger unauthorized cloning of another user's agent by guessing/enumerating its UUID — spawning a duplicate agent process, copying its identity/skill/tool/workspace files onto a new instance, and consuming resources under the source owner's identity without their consent.
@@ -85,7 +88,7 @@ pub async fn clone_agent(
     }
 
     // Deep-clone manifest with new name
-    let mut cloned_manifest = source.manifest.clone();
+    let mut cloned_manifest = source_manifest.clone();
     cloned_manifest.name = req.new_name.clone();
     cloned_manifest.workspace = None; // Let kernel assign a new workspace
 
@@ -111,32 +114,20 @@ pub async fn clone_agent(
         }
     };
 
-    // Copy workspace identity files from source to destination
-    let new_entry = state.kernel.agent_registry().get(new_id);
-    if let (Some(ref src_ws), Some(ref new_entry)) = (source.manifest.workspace, new_entry) {
-        if let Some(ref dst_ws) = new_entry.manifest.workspace {
-            // Security: canonicalize both paths
-            if let (Ok(src_can), Ok(dst_can)) = (src_ws.canonicalize(), dst_ws.canonicalize()) {
-                let src_identity = src_can.join(".identity");
-                let dst_identity = dst_can.join(".identity");
-                if let Err(e) = std::fs::create_dir_all(&dst_identity) {
-                    tracing::warn!("Failed to create identity directory for cloned agent: {e}");
-                }
-                for &fname in KNOWN_IDENTITY_FILES {
-                    // Source: prefer .identity/ (post-migration), fall back to workspace root
-                    let src_file = if src_identity.join(fname).exists() {
-                        src_identity.join(fname)
-                    } else {
-                        src_can.join(fname)
-                    };
-                    let dst_file = dst_identity.join(fname);
-                    if src_file.exists() {
-                        if let Err(e) = std::fs::copy(&src_file, &dst_file) {
-                            tracing::warn!("Failed to copy identity file {fname}: {e}");
-                        }
-                    }
-                }
-            }
+    // Copy workspace identity files from source to destination. Path
+    // resolution and file copies are synchronous, so keep them off the Tokio
+    // worker serving this request.
+    let source_workspace = source_manifest.workspace;
+    let destination_workspace = {
+        let destination = state.kernel.agent_registry().get(new_id);
+        destination.and_then(|entry| entry.manifest.workspace.clone())
+    };
+    drop(t);
+    if let (Some(src_ws), Some(dst_ws)) = (source_workspace, destination_workspace) {
+        if let Err(error) =
+            tokio::task::spawn_blocking(move || copy_clone_identity_files(&src_ws, &dst_ws)).await
+        {
+            tracing::error!(%error, "cloned agent identity copy task failed");
         }
     }
 
@@ -144,7 +135,7 @@ pub async fn clone_agent(
     if let Err(e) = state
         .kernel
         .agent_registry()
-        .update_identity(new_id, source.identity.clone())
+        .update_identity(new_id, source_identity)
     {
         tracing::warn!("Failed to copy agent identity: {e}");
     }
@@ -156,4 +147,60 @@ pub async fn clone_agent(
             "name": req.new_name,
         })),
     )
+}
+
+fn copy_clone_identity_files(src_ws: &std::path::Path, dst_ws: &std::path::Path) {
+    // Security: canonicalize both paths before constructing identity paths.
+    let (Ok(src_can), Ok(dst_can)) = (src_ws.canonicalize(), dst_ws.canonicalize()) else {
+        return;
+    };
+    let src_identity = src_can.join(".identity");
+    let dst_identity = dst_can.join(".identity");
+    if let Err(error) = std::fs::create_dir_all(&dst_identity) {
+        tracing::warn!(%error, "failed to create identity directory for cloned agent");
+    }
+    for &filename in KNOWN_IDENTITY_FILES {
+        // Source: prefer .identity/ (post-migration), fall back to workspace root.
+        let migrated_source = src_identity.join(filename);
+        let source = if migrated_source.exists() {
+            migrated_source
+        } else {
+            src_can.join(filename)
+        };
+        if source.exists() {
+            let destination = dst_identity.join(filename);
+            if let Err(error) = std::fs::copy(&source, destination) {
+                tracing::warn!(%error, %filename, "failed to copy cloned agent identity file");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clone_identity_files_prefer_migrated_and_fall_back_to_legacy_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        std::fs::create_dir_all(source.join(".identity")).expect("source identity dir");
+        std::fs::create_dir_all(&destination).expect("destination workspace");
+
+        std::fs::write(source.join("SOUL.md"), "legacy soul").expect("legacy soul");
+        std::fs::write(source.join(".identity/SOUL.md"), "migrated soul").expect("migrated soul");
+        std::fs::write(source.join("IDENTITY.md"), "legacy identity").expect("legacy identity");
+
+        copy_clone_identity_files(&source, &destination);
+
+        assert_eq!(
+            std::fs::read_to_string(destination.join(".identity/SOUL.md")).unwrap(),
+            "migrated soul"
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination.join(".identity/IDENTITY.md")).unwrap(),
+            "legacy identity"
+        );
+    }
 }
