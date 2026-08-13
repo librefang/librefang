@@ -5788,11 +5788,8 @@ async fn gc_sweep_aborts_orphaned_running_task_5142() {
     kernel.shutdown();
 }
 
-/// A live agent that starts one short-lived background watcher may never call
-/// `register_agent_watcher` again, so registration-time cleanup alone cannot
-/// reclaim the completed JoinHandle. The periodic sweep must drop completed
-/// handles while retaining tasks that are still running for `kill_agent` to
-/// abort later.
+/// A live agent that starts one short-lived background watcher may never call `register_agent_watcher` again, so registration-time cleanup alone cannot reclaim the completed JoinHandle.
+/// The periodic sweep must drop completed handles while retaining tasks that are still running for `kill_agent` to abort later.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gc_sweep_reaps_finished_agent_watchers() {
     let tmp = tempfile::tempdir().unwrap();

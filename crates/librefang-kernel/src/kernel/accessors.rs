@@ -1305,11 +1305,8 @@ impl LibreFangKernel {
             }
         }
 
-        // 2. agent_watchers — completed background tasks no longer need to be
-        // retained just so a future kill_agent can abort them. Registration
-        // also performs this cleanup opportunistically, but an agent that
-        // starts only one watcher would otherwise retain its finished
-        // JoinHandle for the rest of the daemon lifetime.
+        // 2. agent_watchers — completed background tasks no longer need to be retained just so a future kill_agent can abort them.
+        // Registration also performs this cleanup opportunistically, but an agent that starts only one watcher would otherwise retain its finished JoinHandle for the rest of the daemon lifetime.
         for slot in self.agents.agent_watchers.iter() {
             match slot.value().lock() {
                 Ok(mut handles) => {
