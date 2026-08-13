@@ -504,6 +504,26 @@ mod hand_manifest_read_tests {
     }
 }
 
+fn hand_manifest_update_error(
+    error: librefang_hands::HandError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match error {
+        librefang_hands::HandError::NotFound(id) => {
+            ApiErrorResponse::not_found(format!("Hand not found: {id}")).into_json_tuple()
+        }
+        // A disk write / IO failure is a server-side problem, not caller-fixable
+        // input — surface it as a scrubbed 500 rather than exposing paths and
+        // OS error details to the caller.
+        error @ librefang_hands::HandError::Io(_) => {
+            ApiErrorResponse::internal_scrub(error).into_json_tuple()
+        }
+        // Invalid TOML, id mismatch, and a failed supply-chain audit are all
+        // caller-fixable input problems — surface the message at 400 so the
+        // editor can show it inline.
+        error => ApiErrorResponse::bad_request(format!("{error}")).into_json_tuple(),
+    }
+}
+
 /// PUT /api/hands/{hand_id}/manifest — Overwrite the hand's HAND.toml.
 ///
 /// Admin/config-mutation endpoint — sits behind the authenticated middleware
@@ -557,18 +577,27 @@ pub async fn update_hand_manifest(
             let body = serde_json::to_value(&def).unwrap_or(serde_json::Value::Null);
             (StatusCode::OK, Json(body))
         }
-        Err(librefang_hands::HandError::NotFound(id)) => {
-            ApiErrorResponse::not_found(format!("Hand not found: {id}")).into_json_tuple()
-        }
-        // A disk write / IO failure is a server-side problem, not caller-fixable
-        // input — surface it as 500 rather than 400.
-        Err(e @ librefang_hands::HandError::Io(_)) => {
-            ApiErrorResponse::internal(format!("{e}")).into_json_tuple()
-        }
-        // Invalid TOML, id mismatch, and a failed supply-chain audit are all
-        // caller-fixable input problems — surface the message at 400 so the
-        // editor can show it inline.
-        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Err(error) => hand_manifest_update_error(error),
+    }
+}
+
+#[cfg(test)]
+mod update_manifest_error_tests {
+    use super::*;
+
+    #[test]
+    fn hand_manifest_io_errors_are_scrubbed_from_internal_responses() {
+        let source = librefang_hands::HandError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "secret/path/HAND.toml: permission denied",
+        ));
+
+        let (status, Json(body)) = hand_manifest_update_error(source);
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["message"], "Internal server error");
+        assert!(!body.to_string().contains("secret/path"));
+        assert!(!body.to_string().contains("permission denied"));
     }
 }
 
