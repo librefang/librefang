@@ -1,0 +1,1 @@
+- Move agent-template directory and manifest reads off synchronous filesystem APIs, and surface corrupt or unreadable listings instead of returning an empty or incomplete template list. (@xiaomo)

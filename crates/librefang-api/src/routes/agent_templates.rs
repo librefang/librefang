@@ -172,39 +172,69 @@ pub async fn list_agent_templates() -> impl IntoResponse {
     let agents_dir = super::system::librefang_home()
         .join("workspaces")
         .join("agents");
+    let templates = match load_agent_templates(&agents_dir).await {
+        Ok(templates) => templates,
+        Err(e) => return ApiErrorResponse::internal_scrub(e).into_json_tuple(),
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "templates": templates,
+            "total": templates.len(),
+        })),
+    )
+}
+
+async fn load_agent_templates(
+    agents_dir: &std::path::Path,
+) -> Result<Vec<serde_json::Value>, String> {
     let mut templates = Vec::new();
+    let mut entries = match tokio::fs::read_dir(agents_dir).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(templates),
+        Err(e) => return Err(format!("failed to list agent templates: {e}")),
+    };
 
-    if let Ok(entries) = std::fs::read_dir(&agents_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let manifest_path = path.join("agent.toml");
-                if manifest_path.exists() {
-                    let name = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-
-                    let description = std::fs::read_to_string(&manifest_path)
-                        .ok()
-                        .and_then(|content| toml::from_str::<AgentManifest>(&content).ok())
-                        .map(|m| m.description)
-                        .unwrap_or_default();
-
-                    templates.push(serde_json::json!({
-                        "name": name,
-                        "description": description,
-                    }));
-                }
-            }
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| format!("failed to read an agent template entry: {e}"))?
+    {
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|e| format!("failed to inspect an agent template entry: {e}"))?;
+        if !file_type.is_dir() {
+            continue;
         }
+
+        let path = entry.path();
+        let manifest_path = path.join("agent.toml");
+        let content = match tokio::fs::read_to_string(&manifest_path).await {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(format!(
+                    "failed to read agent template manifest {}: {e}",
+                    manifest_path.display()
+                ));
+            }
+        };
+        let manifest = toml::from_str::<AgentManifest>(&content).map_err(|e| {
+            format!(
+                "invalid agent template manifest {}: {e}",
+                manifest_path.display()
+            )
+        })?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        templates.push(serde_json::json!({
+            "name": name,
+            "description": manifest.description,
+        }));
     }
 
-    Json(serde_json::json!({
-        "templates": templates,
-        "total": templates.len(),
-    }))
+    Ok(templates)
 }
 
 /// GET /api/templates/:name — Get template details.
@@ -213,20 +243,19 @@ pub async fn get_agent_template(
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let lang = super::resolve_lang(lang.as_ref());
     if validate_template_name(&name).is_err() {
-        return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
+        return ApiErrorResponse::not_found(
+            ErrorTranslator::new(lang).t("api-error-template-not-found"),
+        )
+        .into_json_tuple();
     }
     let agents_dir = super::system::librefang_home()
         .join("workspaces")
         .join("agents");
     let manifest_path = agents_dir.join(&name).join("agent.toml");
 
-    if !manifest_path.exists() {
-        return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
-    }
-
-    match std::fs::read_to_string(&manifest_path) {
+    match tokio::fs::read_to_string(&manifest_path).await {
         Ok(content) => match toml::from_str::<AgentManifest>(&content) {
             Ok(manifest) => (
                 StatusCode::OK,
@@ -251,13 +280,22 @@ pub async fn get_agent_template(
             ),
             Err(e) => {
                 tracing::warn!("Invalid template manifest for '{name}': {e}");
-                ApiErrorResponse::internal(t.t("api-error-template-invalid-manifest"))
-                    .into_json_tuple()
+                ApiErrorResponse::internal(
+                    ErrorTranslator::new(lang).t("api-error-template-invalid-manifest"),
+                )
+                .into_json_tuple()
             }
         },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ApiErrorResponse::not_found(
+            ErrorTranslator::new(lang).t("api-error-template-not-found"),
+        )
+        .into_json_tuple(),
         Err(e) => {
             tracing::warn!("Failed to read template '{name}': {e}");
-            ApiErrorResponse::internal(t.t("api-error-template-read-failed")).into_json_tuple()
+            ApiErrorResponse::internal(
+                ErrorTranslator::new(lang).t("api-error-template-read-failed"),
+            )
+            .into_json_tuple()
         }
     }
 }
@@ -268,12 +306,12 @@ pub async fn get_agent_template_toml(
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let lang = super::resolve_lang(lang.as_ref());
     if validate_template_name(&name).is_err() {
         return (
             StatusCode::NOT_FOUND,
             [(axum::http::header::CONTENT_TYPE, "text/plain")],
-            t.t("api-error-template-not-found"),
+            ErrorTranslator::new(lang).t("api-error-template-not-found"),
         )
             .into_response();
     }
@@ -282,16 +320,7 @@ pub async fn get_agent_template_toml(
         .join("agents");
     let manifest_path = agents_dir.join(&name).join("agent.toml");
 
-    if !manifest_path.exists() {
-        return (
-            StatusCode::NOT_FOUND,
-            [(axum::http::header::CONTENT_TYPE, "text/plain")],
-            t.t("api-error-template-not-found"),
-        )
-            .into_response();
-    }
-
-    match std::fs::read_to_string(&manifest_path) {
+    match tokio::fs::read_to_string(&manifest_path).await {
         Ok(content) => (
             StatusCode::OK,
             [(
@@ -301,14 +330,44 @@ pub async fn get_agent_template_toml(
             content,
         )
             .into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+            StatusCode::NOT_FOUND,
+            [(axum::http::header::CONTENT_TYPE, "text/plain")],
+            ErrorTranslator::new(lang).t("api-error-template-not-found"),
+        )
+            .into_response(),
         Err(e) => {
             tracing::warn!("Failed to read template '{name}': {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 [(axum::http::header::CONTENT_TYPE, "text/plain")],
-                t.t("api-error-template-read-failed"),
+                ErrorTranslator::new(lang).t("api-error-template-read-failed"),
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod template_loading_tests {
+    use super::load_agent_templates;
+
+    #[tokio::test]
+    async fn missing_template_directory_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let templates = load_agent_templates(&tmp.path().join("missing"))
+            .await
+            .unwrap();
+        assert!(templates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn template_directory_read_errors_are_propagated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let not_a_directory = tmp.path().join("agents");
+        tokio::fs::write(&not_a_directory, "file").await.unwrap();
+
+        let error = load_agent_templates(&not_a_directory).await.unwrap_err();
+        assert!(error.contains("failed to list agent templates"));
     }
 }
