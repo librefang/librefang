@@ -58,6 +58,34 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock, Weak};
 use tracing::{debug, error, info, instrument, warn};
 
+fn read_config_override<'a, T>(
+    lock: &'a std::sync::RwLock<T>,
+    state: &'static str,
+) -> std::sync::RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|poisoned| {
+        warn!(
+            state,
+            "kernel config override read lock poisoned; recovering inner state"
+        );
+        lock.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
+fn write_config_override<'a, T>(
+    lock: &'a std::sync::RwLock<T>,
+    state: &'static str,
+) -> std::sync::RwLockWriteGuard<'a, T> {
+    lock.write().unwrap_or_else(|poisoned| {
+        warn!(
+            state,
+            "kernel config override write lock poisoned; recovering inner state"
+        );
+        lock.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
 /// Per-trait `kernel_handle::*` impls live in their own files under
 /// `kernel/handles/` to keep this file from doubling as a trait-impl
 /// dumping ground. The submodules are descendants of `kernel`, so they

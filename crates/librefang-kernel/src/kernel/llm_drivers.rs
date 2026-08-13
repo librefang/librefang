@@ -169,11 +169,8 @@ impl LibreFangKernel {
         // over the boot-time config. This ensures that when a user saves a new
         // API key via the dashboard and the default provider is switched,
         // resolve_driver sees the updated provider/model/api_key_env.
-        let override_guard = self
-            .llm
-            .default_model_override
-            .read()
-            .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+        let override_guard =
+            read_config_override(&self.llm.default_model_override, "default_model_override");
         let effective_default = override_guard.as_ref().unwrap_or(&cfg.default_model);
         let default_provider = &effective_default.provider;
 
