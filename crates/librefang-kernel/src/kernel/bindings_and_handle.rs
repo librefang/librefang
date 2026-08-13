@@ -13,11 +13,12 @@
 
 use super::*;
 
-fn lock_bindings(
+pub(super) fn lock_bindings(
     bindings: &std::sync::Mutex<Vec<librefang_types::config::AgentBinding>>,
 ) -> std::sync::MutexGuard<'_, Vec<librefang_types::config::AgentBinding>> {
     bindings.lock().unwrap_or_else(|poisoned| {
         tracing::warn!("agent bindings lock poisoned; recovering inner state");
+        bindings.clear_poison();
         poisoned.into_inner()
     })
 }
@@ -241,11 +242,13 @@ mod tests {
         });
 
         assert!(poison.is_err());
+        assert!(bindings.is_poisoned());
         let mut recovered = lock_bindings(&bindings);
+        assert!(!bindings.is_poisoned());
         assert_eq!(recovered.len(), 2);
         assert_eq!(recovered.remove(0).agent, "first");
         recovered.push(binding("third", "discord"));
         drop(recovered);
-        assert_eq!(lock_bindings(&bindings).len(), 2);
+        assert_eq!(bindings.lock().unwrap().len(), 2);
     }
 }
