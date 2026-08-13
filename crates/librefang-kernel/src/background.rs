@@ -14,6 +14,16 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+fn lock_watchers_recover(
+    watchers: &std::sync::Mutex<Vec<JoinHandle<()>>>,
+) -> std::sync::MutexGuard<'_, Vec<JoinHandle<()>>> {
+    watchers.lock().unwrap_or_else(|poisoned| {
+        warn!("Background watcher lock poisoned; recovering inner state");
+        watchers.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
 /// Outer loop handle + any inner watcher handles spawned by that loop.
 struct AgentTaskEntry {
     outer: JoinHandle<()>,
@@ -349,10 +359,9 @@ impl BackgroundExecutor {
                                 }
                             }
                         });
-                        if let Ok(mut guards) = watcher_handles_loop.lock() {
-                            guards.retain(|h| !h.is_finished());
-                            guards.push(watcher_jh);
-                        }
+                        let mut guards = lock_watchers_recover(&watcher_handles_loop);
+                        guards.retain(|h| !h.is_finished());
+                        guards.push(watcher_jh);
                     }
 
                     // Self-cleanup on any break path (cap, shutdown, semaphore
@@ -503,10 +512,9 @@ impl BackgroundExecutor {
                                 }
                             }
                         });
-                        if let Ok(mut guards) = watcher_handles_loop.lock() {
-                            guards.retain(|h| !h.is_finished());
-                            guards.push(watcher_jh);
-                        }
+                        let mut guards = lock_watchers_recover(&watcher_handles_loop);
+                        guards.retain(|h| !h.is_finished());
+                        guards.push(watcher_jh);
                     }
 
                     // Self-cleanup on any break path (cap, shutdown, semaphore
@@ -543,10 +551,9 @@ impl BackgroundExecutor {
         if let Some((_, entry)) = self.tasks.remove(&agent_id) {
             entry.outer.abort();
             // Abort all tracked inner watcher tasks so they release LLM permits.
-            if let Ok(mut guards) = entry.watchers.lock() {
-                for watcher in guards.drain(..) {
-                    watcher.abort();
-                }
+            let mut guards = lock_watchers_recover(&entry.watchers);
+            for watcher in guards.drain(..) {
+                watcher.abort();
             }
             info!(id = %agent_id, "Background loop stopped");
         }
@@ -852,6 +859,46 @@ mod tests {
             |_id, _msg| tokio::spawn(async { TickOutcome::Ok }),
         );
         assert_eq!(executor.active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn stop_agent_recovers_poisoned_watcher_lock_and_releases_permit() {
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let executor = BackgroundExecutor::with_concurrency(shutdown_rx, 1);
+        let agent_id = AgentId::new();
+        let watchers = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let semaphore = executor.llm_semaphore.clone();
+        let (acquired_tx, acquired_rx) = tokio::sync::oneshot::channel();
+        let watcher = tokio::spawn(async move {
+            let _permit = semaphore.acquire_owned().await.unwrap();
+            let _ = acquired_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        acquired_rx.await.unwrap();
+        assert_eq!(executor.llm_semaphore.available_permits(), 0);
+
+        watchers.lock().unwrap().push(watcher);
+        let poisoned_watchers = watchers.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poisoned_watchers.lock().unwrap();
+            panic!("poison watcher lock");
+        });
+        assert!(watchers.is_poisoned());
+
+        executor.tasks.insert(
+            agent_id,
+            AgentTaskEntry {
+                outer: tokio::spawn(std::future::pending()),
+                watchers: watchers.clone(),
+            },
+        );
+
+        executor.stop_agent(agent_id);
+        tokio::task::yield_now().await;
+
+        assert!(!watchers.is_poisoned());
+        assert_eq!(executor.llm_semaphore.available_permits(), 1);
     }
 
     #[test]
