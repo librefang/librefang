@@ -888,14 +888,12 @@ fn is_zeronet_v4(ip: IpAddr) -> bool {
     matches!(ip, IpAddr::V4(v4) if v4.octets()[0] == 0)
 }
 
-/// Unwrap IPv4-mapped IPv6 (`::ffff:X.X.X.X`) to its IPv4 form. All other
+/// Unwrap IPv4-mapped or IPv4-compatible IPv6 to its IPv4 form. All other
 /// addresses are returned unchanged.
 fn canonical_ip(ip: IpAddr) -> IpAddr {
     match ip {
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => IpAddr::V4(v4),
-            None => IpAddr::V6(v6),
-        },
+        IpAddr::V6(v6) if v6.is_unspecified() || v6.is_loopback() => ip,
+        IpAddr::V6(v6) => v6.to_ipv4().map_or(IpAddr::V6(v6), IpAddr::V4),
         IpAddr::V4(_) => ip,
     }
 }
@@ -1544,6 +1542,14 @@ mod tests {
         assert_webhook_rejected("http://[::ffff:127.0.0.1]/");
         // ::ffff:7f00:1 — same address in compact hex form.
         assert_webhook_rejected("http://[::ffff:7f00:1]/");
+    }
+
+    #[test]
+    fn webhook_v4_compatible_v6_rejected() {
+        assert_webhook_rejected("http://[::127.0.0.1]/");
+        assert_webhook_rejected("http://[::7f00:1]/");
+        assert_webhook_rejected("http://[::1]/");
+        assert_webhook_rejected("http://[::]/");
     }
 
     #[test]

@@ -16,7 +16,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
+
+fn lock_audit_recover<'a, T>(mutex: &'a Mutex<T>, state: &'static str) -> MutexGuard<'a, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!(state, "audit log lock poisoned; recovering inner state");
+        // `into_inner()` only unwraps this guard; it does not reset the mutex's poison flag.
+        // Without `clear_poison()`, every future access through this helper would re-enter this branch and re-log forever for that same lock.
+        mutex.clear_poison();
+        poisoned.into_inner()
+    })
+}
 
 /// Default hard cap on the number of audit entries kept in memory when no
 /// operator-supplied `max_in_memory_entries` is configured.
@@ -527,9 +537,8 @@ impl AuditLog {
         // return `Err` in that case so `/api/audit/verify` surfaces it.
         match Self::read_anchor(&anchor_path) {
             Ok(Some(record)) => {
-                let current_tip = log.tip.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let current_seq =
-                    log.entries.lock().unwrap_or_else(|e| e.into_inner()).len() as u64;
+                let current_tip = lock_audit_recover(&log.tip, "tip").clone();
+                let current_seq = lock_audit_recover(&log.entries, "entries").len() as u64;
                 if record.hash != current_tip {
                     tracing::error!(
                         anchor_seq = record.seq,
@@ -550,8 +559,8 @@ impl AuditLog {
             Ok(None) => {
                 // First run with an anchor configured: seed it from the
                 // current tip so subsequent boots can detect tampering.
-                let tip = log.tip.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let seq = log.entries.lock().unwrap_or_else(|e| e.into_inner()).len() as u64;
+                let tip = lock_audit_recover(&log.tip, "tip").clone();
+                let seq = lock_audit_recover(&log.entries, "entries").len() as u64;
                 if let Err(e) = Self::write_anchor(&anchor_path, seq, &tip) {
                     tracing::warn!("Failed to initialise audit anchor {anchor_path:?}: {e}");
                 } else {
@@ -793,8 +802,8 @@ impl AuditLog {
         let outcome = outcome.into();
         let timestamp = Utc::now().to_rfc3339();
 
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        let mut tip = self.tip.lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries = lock_audit_recover(&self.entries, "entries");
+        let mut tip = lock_audit_recover(&self.tip, "tip");
 
         // Derive the next seq from the last entry, not `entries.len()`,
         // because a retention trim may have dropped a prefix — using
@@ -972,7 +981,7 @@ impl AuditLog {
             let overflow = entries.len() - soft_cap;
             let new_anchor = entries[overflow - 1].hash.clone();
             {
-                let mut anchor = self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
+                let mut anchor = lock_audit_recover(&self.chain_anchor, "chain_anchor");
                 *anchor = Some(new_anchor);
             }
             entries.drain(..overflow);
@@ -1008,25 +1017,16 @@ impl AuditLog {
     /// Returns `Ok(())` if the chain is intact, or `Err(msg)` describing
     /// the first inconsistency found.
     pub fn verify_integrity(&self) -> Result<(), String> {
-        if let Some(error) = self
-            .load_error
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
+        if let Some(error) = lock_audit_recover(&self.load_error, "load_error").as_ref() {
             return Err(format!("audit trail was only partially loaded: {error}"));
         }
 
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let entries = lock_audit_recover(&self.entries, "entries");
         // When the retention trim job has dropped a prefix, the first
         // surviving entry's `prev_hash` points at the last dropped
         // entry rather than the genesis sentinel. Seed the walk from
         // the chain anchor so the trim boundary verifies cleanly.
-        let anchor = self
-            .chain_anchor
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let anchor = lock_audit_recover(&self.chain_anchor, "chain_anchor").clone();
         let mut expected_prev = anchor.unwrap_or_else(|| "0".repeat(64));
 
         for entry in entries.iter() {
@@ -1127,12 +1127,12 @@ impl AuditLog {
     /// Returns the current tip hash (the hash of the most recent entry,
     /// or the genesis sentinel if the log is empty).
     pub fn tip_hash(&self) -> String {
-        self.tip.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        lock_audit_recover(&self.tip, "tip").clone()
     }
 
     /// Returns the number of entries in the log.
     pub fn len(&self) -> usize {
-        self.entries.lock().unwrap_or_else(|e| e.into_inner()).len()
+        lock_audit_recover(&self.entries, "entries").len()
     }
 
     /// Returns the configured external tip-anchor path, if any.
@@ -1147,15 +1147,12 @@ impl AuditLog {
 
     /// Returns whether the log is empty.
     pub fn is_empty(&self) -> bool {
-        self.entries
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_empty()
+        lock_audit_recover(&self.entries, "entries").is_empty()
     }
 
     /// Returns up to the most recent `n` entries (cloned).
     pub fn recent(&self, n: usize) -> Vec<AuditEntry> {
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let entries = lock_audit_recover(&self.entries, "entries");
         let start = entries.len().saturating_sub(n);
         entries[start..].to_vec()
     }
@@ -1179,7 +1176,7 @@ impl AuditLog {
     /// strictly increasing `seq` order; `record_with_context` is the
     /// only mutator and it monotonically allocates `seq` before push.
     pub fn since_seq(&self, cursor: u64) -> Vec<AuditEntry> {
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let entries = lock_audit_recover(&self.entries, "entries");
         let idx = entries.partition_point(|e| e.seq <= cursor);
         entries[idx..].to_vec()
     }
@@ -1210,7 +1207,7 @@ impl AuditLog {
         policy: &AuditRetentionConfig,
         now: chrono::DateTime<chrono::Utc>,
     ) -> TrimReport {
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries = lock_audit_recover(&self.entries, "entries");
 
         // Decide the prefix length to drop. We compute `drop_count`
         // first without mutating, then apply both the DB delete and the
@@ -1335,7 +1332,7 @@ impl AuditLog {
         // lock) sees a consistent (anchor, first_survivor) pair when
         // it acquires.
         {
-            let mut anchor = self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
+            let mut anchor = lock_audit_recover(&self.chain_anchor, "chain_anchor");
             *anchor = report.new_chain_anchor.clone();
         }
         entries.drain(..drop_count);
@@ -1348,7 +1345,7 @@ impl AuditLog {
         // "audit anchor mismatch" on the very next verification.
         if let Some(ref anchor_path) = self.anchor_path {
             let new_count = self.persisted_rows.load(Ordering::Relaxed) as u64;
-            let tip = self.tip.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let tip = lock_audit_recover(&self.tip, "tip").clone();
             if let Err(e) = Self::write_anchor(anchor_path, new_count, &tip) {
                 tracing::warn!(
                     path = ?anchor_path,
@@ -1382,7 +1379,7 @@ impl AuditLog {
         let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days as i64);
         let cutoff_str = cutoff.to_rfc3339();
 
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries = lock_audit_recover(&self.entries, "entries");
         let total = entries.len();
         if total == 0 {
             return 0;
@@ -1459,7 +1456,7 @@ impl AuditLog {
         // `entries[0].prev_hash` no longer matches the anchor —
         // verify_integrity would then raise a spurious "chain break".
         {
-            let mut anchor = self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
+            let mut anchor = lock_audit_recover(&self.chain_anchor, "chain_anchor");
             *anchor = Some(new_anchor);
         }
         entries.drain(..drop_count);
@@ -1471,7 +1468,7 @@ impl AuditLog {
         // itself does not move (we only drop a prefix).
         if let Some(ref anchor_path) = self.anchor_path {
             let new_count = self.persisted_rows.load(Ordering::Relaxed) as u64;
-            let tip = self.tip.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let tip = lock_audit_recover(&self.tip, "tip").clone();
             if let Err(e) = Self::write_anchor(anchor_path, new_count, &tip) {
                 tracing::warn!(
                     path = ?anchor_path,

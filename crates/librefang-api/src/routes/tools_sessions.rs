@@ -414,7 +414,7 @@ pub async fn list_sessions(
     let query_result = tokio::task::spawn_blocking(move || {
         // Push pagination into SQLite so we don't deserialize every session
         // blob (#3485).
-        let total = substrate.count_sessions().unwrap_or(0);
+        let total = substrate.count_sessions()?;
         substrate
             .list_sessions_paginated(Some(limit), offset)
             .map(|items| (items, total, offset, limit))
@@ -424,12 +424,12 @@ pub async fn list_sessions(
     let (mut items, total, offset_out, limit_out) = match query_result {
         Ok(Ok(result)) => result,
         Ok(Err(error)) => {
-            tracing::warn!(%error, "failed to list sessions");
-            (Vec::new(), 0, 0, PaginationParams::DEFAULT_LIMIT)
+            tracing::error!(%error, "failed to list sessions");
+            return ApiErrorResponse::internal("Failed to list sessions").into_response();
         }
         Err(error) => {
             tracing::error!(%error, "session list query task failed");
-            (Vec::new(), 0, 0, PaginationParams::DEFAULT_LIMIT)
+            return ApiErrorResponse::internal("Session list query task failed").into_response();
         }
     };
     annotate_sessions_active(&mut items, &running);
@@ -439,6 +439,7 @@ pub async fn list_sessions(
         offset: offset_out,
         limit: Some(limit_out),
     })
+    .into_response()
 }
 
 /// Inject an `"active": bool` field into each session JSON row by looking
@@ -910,9 +911,12 @@ pub async fn search_sessions(
     match search_result {
         Err(error) => {
             tracing::error!(%error, "session search query task failed");
-            ApiErrorResponse::internal(error.to_string()).into_json_tuple()
+            ApiErrorResponse::internal("Session search query task failed").into_json_tuple()
         }
-        Ok(Err(e)) => ApiErrorResponse::internal(e.to_string()).into_json_tuple(),
+        Ok(Err(error)) => {
+            tracing::error!(%error, "failed to search sessions");
+            ApiErrorResponse::internal("Failed to search sessions").into_json_tuple()
+        }
         Ok(Ok(results)) => {
             // Canonical paginated envelope (#3842): {items,total,offset,limit}.
             // The substrate has no count() for FTS5 search, so `total` is a

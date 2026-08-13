@@ -1,5 +1,39 @@
 use super::*;
 
+/// Hand lifecycle methods perform synchronous registry persistence and, for activation/deactivation, workspace and SQLite I/O.
+/// Keep that work off the async request worker.
+pub(super) async fn run_hand_lifecycle_job<F, T>(job: F) -> Result<T, tokio::task::JoinError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(job).await
+}
+
+#[cfg(test)]
+mod lifecycle_job_tests {
+    use super::run_hand_lifecycle_job;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lifecycle_job_does_not_block_the_async_worker() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let job = tokio::spawn(run_hand_lifecycle_job(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+
+        tokio::time::timeout(Duration::from_secs(1), started_rx)
+            .await
+            .expect("blocking job did not start")
+            .expect("blocking job dropped its start signal");
+        release_tx.send(()).unwrap();
+        job.await.unwrap().unwrap();
+    }
+}
+
 /// GET /api/hands — List all hand definitions (marketplace).
 #[utoipa::path(
     get,
@@ -360,15 +394,15 @@ pub async fn get_hand_manifest(
         home.join("workspaces").join(&hand_id).join("HAND.toml"),
     ];
 
-    let mut toml_content: Option<String> = None;
-    for path in &candidates {
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                toml_content = Some(content);
-                break;
-            }
+    let mut toml_content = match read_first_hand_manifest(&candidates).await {
+        Ok(content) => content,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to read hand manifest");
+            return ApiErrorResponse::internal_scrub(e)
+                .into_json_tuple()
+                .into_response();
         }
-    }
+    };
 
     // Fall back to re-serialising the in-memory definition so hands
     // installed via API (no on-disk HAND.toml) still get a useful
@@ -393,6 +427,81 @@ pub async fn get_hand_manifest(
         Body::from(text),
     )
         .into_response()
+}
+
+/// Read the first manifest in registry precedence order.
+///
+/// A missing candidate means that layout is not in use, while any other I/O
+/// error must stop the lookup. Falling through after a permission or device
+/// error would make the endpoint return a lower-priority or synthesized
+/// manifest that is not the definition the daemon attempted to load.
+async fn read_first_hand_manifest(
+    candidates: &[std::path::PathBuf],
+) -> std::io::Result<Option<String>> {
+    for path in candidates {
+        match tokio::fs::read_to_string(path).await {
+            Ok(content) => return Ok(Some(content)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod hand_manifest_read_tests {
+    use super::read_first_hand_manifest;
+
+    #[tokio::test]
+    async fn missing_candidates_allow_in_memory_fallback() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let candidates = [temp.path().join("missing-a"), temp.path().join("missing-b")];
+
+        assert_eq!(
+            read_first_hand_manifest(&candidates)
+                .await
+                .expect("missing files are not errors"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn returns_first_manifest_in_precedence_order() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let first = temp.path().join("first.toml");
+        let second = temp.path().join("second.toml");
+        tokio::fs::write(&first, "first")
+            .await
+            .expect("write first manifest");
+        tokio::fs::write(&second, "second")
+            .await
+            .expect("write second manifest");
+
+        assert_eq!(
+            read_first_hand_manifest(&[first, second])
+                .await
+                .expect("read manifest")
+                .as_deref(),
+            Some("first")
+        );
+    }
+
+    #[tokio::test]
+    async fn non_not_found_error_does_not_fall_through() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let unreadable_as_file = temp.path().join("directory");
+        tokio::fs::create_dir(&unreadable_as_file)
+            .await
+            .expect("create directory candidate");
+        let lower_priority = temp.path().join("lower.toml");
+        tokio::fs::write(&lower_priority, "lower")
+            .await
+            .expect("write lower-priority manifest");
+
+        read_first_hand_manifest(&[unreadable_as_file, lower_priority])
+            .await
+            .expect_err("read errors must not silently select a lower-priority manifest");
+    }
 }
 
 /// PUT /api/hands/{hand_id}/manifest — Overwrite the hand's HAND.toml.
@@ -974,8 +1083,9 @@ pub async fn pause_hand(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
-    match state.kernel.pause_hand(id) {
-        Ok(()) => match state.kernel.hands().get_instance(id) {
+    let kernel = Arc::clone(&state.kernel);
+    match run_hand_lifecycle_job(move || kernel.pause_hand(id)).await {
+        Ok(Ok(())) => match state.kernel.hands().get_instance(id) {
             // #3832: return the post-mutation entity instead of an ack envelope
             // so the dashboard can setQueryData without a follow-up GET.
             Some(instance) => (StatusCode::OK, Json(hand_instance_to_json(&instance))),
@@ -984,7 +1094,11 @@ pub async fn pause_hand(
                     .into_json_tuple()
             }
         },
-        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Ok(Err(e)) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Err(e) => {
+            tracing::error!(instance = %id, error = %e, "hand pause task failed");
+            ApiErrorResponse::internal("Hand pause task failed").into_json_tuple()
+        }
     }
 }
 
@@ -1004,8 +1118,9 @@ pub async fn resume_hand(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
-    match state.kernel.resume_hand(id) {
-        Ok(()) => match state.kernel.hands().get_instance(id) {
+    let kernel = Arc::clone(&state.kernel);
+    match run_hand_lifecycle_job(move || kernel.resume_hand(id)).await {
+        Ok(Ok(())) => match state.kernel.hands().get_instance(id) {
             // #3832: return the post-mutation entity instead of an ack envelope
             // so the dashboard can setQueryData without a follow-up GET.
             Some(instance) => (StatusCode::OK, Json(hand_instance_to_json(&instance))),
@@ -1014,7 +1129,11 @@ pub async fn resume_hand(
                     .into_json_tuple()
             }
         },
-        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Ok(Err(e)) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Err(e) => {
+            tracing::error!(instance = %id, error = %e, "hand resume task failed");
+            ApiErrorResponse::internal("Hand resume task failed").into_json_tuple()
+        }
     }
 }
 
@@ -1034,12 +1153,17 @@ pub async fn deactivate_hand(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
-    match state.kernel.deactivate_hand(id) {
-        Ok(()) => (
+    let kernel = Arc::clone(&state.kernel);
+    match run_hand_lifecycle_job(move || kernel.deactivate_hand(id)).await {
+        Ok(Ok(())) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "deactivated", "instance_id": id})),
         ),
-        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Ok(Err(e)) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Err(e) => {
+            tracing::error!(instance = %id, error = %e, "hand deactivation task failed");
+            ApiErrorResponse::internal("Hand deactivation task failed").into_json_tuple()
+        }
     }
 }
 
@@ -1252,7 +1376,14 @@ pub async fn update_hand_settings(
     )
 )]
 pub async fn reload_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let (added, updated) = state.kernel.reload_hands();
+    let kernel = Arc::clone(&state.kernel);
+    let (added, updated) = match run_hand_lifecycle_job(move || kernel.reload_hands()).await {
+        Ok(counts) => counts,
+        Err(e) => {
+            tracing::error!(error = %e, "hand reload task failed");
+            return ApiErrorResponse::internal("Hand reload task failed").into_json_tuple();
+        }
+    };
     let total = state.kernel.hands().list_definitions().len();
     (
         StatusCode::OK,

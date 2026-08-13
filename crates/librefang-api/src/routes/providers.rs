@@ -2497,11 +2497,41 @@ pub async fn set_provider_url(
         }
     }
 
-    // Update catalog in memory. Reconfiguring the URL is an explicit signal
-    // that the user wants this provider active, so undo any suppression set
-    // by a prior `delete_provider_key` (#4803) and refresh auth status —
-    // otherwise a suppressed local provider stays Missing even after the
-    // user re-points it at a reachable host.
+    // Persist both sections as one read-modify-write transaction. The shared
+    // lock prevents another config endpoint from committing a stale snapshot,
+    // while spawn_blocking keeps config parsing and the fsync-backed atomic
+    // replacement off the Tokio worker.
+    let config_path = state.kernel.home_dir().join("config.toml");
+    let _config_guard = state.config_write_lock.lock().await;
+    let persist_name = name.clone();
+    let persist_base_url = base_url.clone();
+    let persist_proxy_url = proxy_url.clone();
+    let persist_result = tokio::task::spawn_blocking(move || {
+        upsert_provider_urls(
+            &config_path,
+            &persist_name,
+            &persist_base_url,
+            persist_proxy_url.as_deref(),
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await;
+    match persist_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return ApiErrorResponse::internal_scrub(error).into_json_tuple(),
+        Err(error) => {
+            return ApiErrorResponse::internal_scrub(format!(
+                "provider URL persistence task failed: {error}"
+            ))
+            .into_json_tuple();
+        }
+    }
+    drop(_config_guard);
+
+    // Commit the live catalog only after config.toml is durable. A failed
+    // write therefore leaves both disk and runtime on the previous URL.
+    // Reconfiguring the URL is also an explicit signal that the user wants
+    // this provider active, so undo suppression from a prior key deletion.
     {
         let name_for_closure = name.clone();
         let base_url_for_closure = base_url.clone();
@@ -2526,17 +2556,6 @@ pub async fn set_provider_url(
             }
             catalog.detect_auth();
         });
-    }
-
-    // Persist to config.toml [provider_urls] section
-    let config_path = state.kernel.home_dir().join("config.toml");
-    if let Err(e) = upsert_provider_url(&config_path, &name, &base_url) {
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
-    }
-    if let Some(ref pu) = proxy_url {
-        if let Err(e) = upsert_provider_proxy_url(&config_path, &name, pu) {
-            tracing::warn!("Failed to persist proxy_url: {e}");
-        }
     }
 
     // Probe reachability at the new URL. Forward the configured api_key so
@@ -2997,11 +3016,12 @@ fn normalize_base_url_trims_whitespace() {
     );
 }
 
-/// Upsert a provider URL in the `[provider_urls]` section of config.toml.
-fn upsert_provider_url(
+/// Upsert a provider URL and optional proxy URL in one config.toml replacement.
+fn upsert_provider_urls(
     config_path: &std::path::Path,
     provider: &str,
     url: &str,
+    proxy_url: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml") {
         return Err(std::io::Error::new(
@@ -3049,55 +3069,31 @@ fn upsert_provider_url(
 
     urls_table.insert(provider.to_string(), toml::Value::String(url.to_string()));
 
+    if let Some(proxy_url) = proxy_url {
+        if !root.contains_key("provider_proxy_urls") {
+            root.insert(
+                "provider_proxy_urls".to_string(),
+                toml::Value::Table(toml::map::Map::new()),
+            );
+        }
+        let table = root
+            .get_mut("provider_proxy_urls")
+            .and_then(|v| v.as_table_mut())
+            .ok_or("provider_proxy_urls is not a table")?;
+
+        if proxy_url.is_empty() {
+            table.remove(provider);
+        } else {
+            table.insert(
+                provider.to_string(),
+                toml::Value::String(proxy_url.to_string()),
+            );
+        }
+    }
+
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-
-    let toml_str = toml::to_string_pretty(&doc)?;
-    crate::atomic_write(config_path, toml_str.as_bytes())?;
-    Ok(())
-}
-
-/// Persist a per-provider proxy URL to `[provider_proxy_urls]` in config.toml.
-fn upsert_provider_proxy_url(
-    config_path: &std::path::Path,
-    provider: &str,
-    proxy_url: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let content = if config_path.exists() {
-        std::fs::read_to_string(config_path)?
-    } else {
-        String::new()
-    };
-
-    let mut doc: toml::Value = if content.trim().is_empty() {
-        toml::Value::Table(toml::map::Map::new())
-    } else {
-        toml::from_str(&content)?
-    };
-
-    let root = doc.as_table_mut().ok_or("Config is not a TOML table")?;
-
-    if !root.contains_key("provider_proxy_urls") {
-        root.insert(
-            "provider_proxy_urls".to_string(),
-            toml::Value::Table(toml::map::Map::new()),
-        );
-    }
-    let table = root
-        .get_mut("provider_proxy_urls")
-        .and_then(|v| v.as_table_mut())
-        .ok_or("provider_proxy_urls is not a table")?;
-
-    if proxy_url.is_empty() {
-        table.remove(provider);
-    } else {
-        table.insert(
-            provider.to_string(),
-            toml::Value::String(proxy_url.to_string()),
-        );
-    }
-
     let toml_str = toml::to_string_pretty(&doc)?;
     crate::atomic_write(config_path, toml_str.as_bytes())?;
     Ok(())
@@ -3369,7 +3365,7 @@ pub async fn detect_ollama() -> impl IntoResponse {
 mod tests {
     use super::{
         parse_claude_code_settings_model, parse_codex_configured_model,
-        parse_gemini_style_settings_model, synthesized_cli_model_row,
+        parse_gemini_style_settings_model, synthesized_cli_model_row, upsert_provider_urls,
     };
     use crate::routes::agent_templates::{get_profile, list_profiles};
     use axum::body::Body;
@@ -3377,6 +3373,62 @@ mod tests {
     use axum::routing::get;
     use axum::Router;
     use tower::ServiceExt;
+
+    #[test]
+    fn provider_urls_persist_together_without_clobbering_other_sections() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[auth]\nmode = \"required\"\n\n[provider_urls]\nexisting = \"https://old.example/v1\"\n",
+        )
+        .unwrap();
+
+        upsert_provider_urls(
+            &config_path,
+            "custom",
+            "https://api.example/v1",
+            Some("socks5://127.0.0.1:1080"),
+        )
+        .unwrap();
+
+        let config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(config["auth"]["mode"].as_str(), Some("required"));
+        assert_eq!(
+            config["provider_urls"]["existing"].as_str(),
+            Some("https://old.example/v1")
+        );
+        assert_eq!(
+            config["provider_urls"]["custom"].as_str(),
+            Some("https://api.example/v1")
+        );
+        assert_eq!(
+            config["provider_proxy_urls"]["custom"].as_str(),
+            Some("socks5://127.0.0.1:1080")
+        );
+    }
+
+    #[test]
+    fn empty_provider_proxy_removes_only_that_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[provider_proxy_urls]\ncustom = \"http://old.example\"\nother = \"http://keep.example\"\n",
+        )
+        .unwrap();
+
+        upsert_provider_urls(&config_path, "custom", "https://api.example/v1", Some("")).unwrap();
+
+        let config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(config["provider_proxy_urls"].get("custom").is_none());
+        assert_eq!(
+            config["provider_proxy_urls"]["other"].as_str(),
+            Some("http://keep.example")
+        );
+    }
 
     #[test]
     fn codex_config_extracts_top_level_model_past_provider_blocks() {

@@ -165,6 +165,38 @@ async fn budget_status_returns_configured_limits_with_zero_spend() {
     assert_eq!(body["monthly_spend"], 0.0);
 }
 
+/// A `budget_status` query failure (e.g. a corrupted/missing usage table)
+/// must surface as a scrubbed 500, not a panic or a silently-zeroed 200.
+/// Regression companion to
+/// `librefang_kernel_metering::tests::budget_status_surfaces_usage_query_errors`,
+/// exercised here at the HTTP boundary via `ApiErrorResponse::internal_scrub`.
+#[tokio::test(flavor = "multi_thread")]
+async fn budget_status_returns_500_when_usage_query_fails() {
+    let h = boot().await;
+    h.state
+        .kernel
+        .memory_substrate()
+        .pool()
+        .get()
+        .unwrap()
+        .execute("DROP TABLE usage_events", [])
+        .unwrap();
+
+    let (status, body) = request(&h, Method::GET, "/api/budget", None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    // `ApiErrorResponse`'s custom `Serialize` impl emits both the flat
+    // compat field and the nested `error.message` envelope (#3639) —
+    // check both so this test does not silently pass or fail depending
+    // on which shape a future edit trims.
+    assert_eq!(body["message"], "Internal server error");
+    assert_eq!(body["error"]["message"], "Internal server error");
+    let rendered = body.to_string();
+    assert!(
+        !rendered.contains("usage_events") && !rendered.contains("no such table"),
+        "response body must not leak SQL identifiers: {body:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // PUT /api/budget — read-after-write + alias key acceptance
 // ---------------------------------------------------------------------------
@@ -193,6 +225,45 @@ async fn budget_put_then_get_reflects_update() {
     assert_eq!(body["hourly_limit"], 2.5);
     assert_eq!(body["daily_limit"], 25.0);
     assert_eq!(body["monthly_limit"], 250.0);
+}
+
+/// `PUT /api/budget` persists the new limits and then calls the same
+/// `budget_status` snapshot to build its response — a usage-store query
+/// failure there must surface as a scrubbed 500 too, not a silently-zeroed
+/// 200, even though the write itself (the config persist) succeeded.
+/// Regression companion to `budget_status_returns_500_when_usage_query_fails`
+/// above (#7037).
+#[tokio::test(flavor = "multi_thread")]
+async fn budget_put_returns_500_when_usage_query_fails() {
+    let h = boot().await;
+    h.state
+        .kernel
+        .memory_substrate()
+        .pool()
+        .get()
+        .unwrap()
+        .execute("DROP TABLE usage_events", [])
+        .unwrap();
+
+    let (status, body) = request(
+        &h,
+        Method::PUT,
+        "/api/budget",
+        Some(serde_json::json!({
+            "max_hourly_usd": 2.5,
+            "max_daily_usd": 25.0,
+            "max_monthly_usd": 250.0,
+            "alert_threshold": 0.5,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "put: {body:?}");
+    assert_eq!(body["message"], "Internal server error");
+    let rendered = body.to_string();
+    assert!(
+        !rendered.contains("usage_events") && !rendered.contains("no such table"),
+        "response body must not leak SQL identifiers: {body:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

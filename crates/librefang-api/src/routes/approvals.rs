@@ -1083,16 +1083,23 @@ pub async fn audit_log(
 ) -> impl IntoResponse {
     const MAX_AUDIT_LIMIT: usize = 500;
     let limit = params.limit.min(MAX_AUDIT_LIMIT);
-    let entries = state.kernel.approvals().query_audit(
+    let entries = match state.kernel.approvals().query_audit(
         limit,
         params.offset,
         params.agent_id.as_deref(),
         params.tool_name.as_deref(),
-    );
-    let total = state
+    ) {
+        Ok(entries) => entries,
+        Err(error) => return ApiErrorResponse::internal_scrub(error).into_response(),
+    };
+    let total = match state
         .kernel
         .approvals()
-        .audit_count(params.agent_id.as_deref(), params.tool_name.as_deref());
+        .audit_count(params.agent_id.as_deref(), params.tool_name.as_deref())
+    {
+        Ok(total) => total,
+        Err(error) => return ApiErrorResponse::internal_scrub(error).into_response(),
+    };
 
     Json(serde_json::json!({
         "items": entries,
@@ -1100,6 +1107,7 @@ pub async fn audit_log(
         "offset": params.offset,
         "limit": limit,
     }))
+    .into_response()
 }
 
 /// GET /api/approvals/count — Lightweight pending count for notification badges.

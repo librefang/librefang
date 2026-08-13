@@ -1315,8 +1315,8 @@ impl MemorySubstrate {
                     Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
                 })
                 .map_err(LibreFangError::memory)?
-                .filter_map(|r| r.ok())
-                .collect();
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(LibreFangError::memory)?;
 
             if stuck.is_empty() {
                 return Ok(Vec::new());
@@ -2184,6 +2184,46 @@ mod tests {
         // Second sweep is a no-op — stuck task is already pending.
         let reset_again = substrate.task_reset_stuck(60, 0).await.unwrap();
         assert!(reset_again.is_empty());
+    }
+
+    #[tokio::test]
+    async fn task_reset_stuck_surfaces_corrupt_retry_count() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let task_id = substrate
+            .task_post("Corrupt task", "Must not be skipped", Some("worker"), None)
+            .await
+            .unwrap();
+        substrate
+            .task_claim("worker", Some("worker"))
+            .await
+            .unwrap()
+            .expect("task claimed");
+
+        {
+            let conn = substrate.pool.get().unwrap();
+            let old_claim = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+            conn.execute(
+                "UPDATE task_queue SET claimed_at = ?1, retry_count = 'invalid' WHERE id = ?2",
+                rusqlite::params![old_claim, task_id],
+            )
+            .unwrap();
+        }
+
+        let error = substrate
+            .task_reset_stuck(60, 3)
+            .await
+            .expect_err("corrupt retry_count must fail the reset sweep");
+        assert!(error.to_string().contains("retry_count") || error.to_string().contains("column"));
+
+        let conn = substrate.pool.get().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM task_queue WHERE id = ?1",
+                rusqlite::params![task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "in_progress");
     }
 
     #[tokio::test]

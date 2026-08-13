@@ -158,7 +158,11 @@ impl ConsolidationLock {
         let (prior_mtime, holder_pid) = match fs::metadata(&self.path).await {
             Ok(meta) => {
                 let mtime = mtime_ms(&meta)?;
-                let body = fs::read_to_string(&self.path).await.unwrap_or_default();
+                let body = fs::read_to_string(&self.path).await.map_err(|e| {
+                    LibreFangError::Internal(format!(
+                        "auto_dream: read existing lock file failed: {e}"
+                    ))
+                })?;
                 let pid = parse_pid_from_body(&body);
                 (Some(mtime), pid)
             }
@@ -429,6 +433,22 @@ mod tests {
             "body should include uuid suffix, got {body:?}",
         );
         let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn acquire_propagates_existing_lock_read_error() {
+        let path = tmpfile("unreadable");
+        tokio::fs::create_dir(&path).await.unwrap();
+        let lock = ConsolidationLock::new(path.clone());
+
+        let error = lock.try_acquire().await.unwrap_err();
+
+        assert!(error.to_string().contains("read existing lock file"));
+        assert!(
+            path.is_dir(),
+            "failed acquisition must not replace the lock path"
+        );
+        tokio::fs::remove_dir(&path).await.unwrap();
     }
 
     #[tokio::test]

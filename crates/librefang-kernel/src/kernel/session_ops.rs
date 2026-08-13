@@ -1115,13 +1115,10 @@ impl LibreFangKernel {
                         &messages,
                     )
                     .await;
-                    persist_session_summary(
-                        memory.as_ref(),
-                        agent_id,
-                        session_id,
-                        workspace.as_deref(),
-                        &summary,
-                    );
+                    persist_session_summary_off_thread(
+                        memory, agent_id, session_id, workspace, summary,
+                    )
+                    .await;
                 });
             }
             Err(_) => {
@@ -1141,6 +1138,34 @@ impl LibreFangKernel {
                 );
             }
         }
+    }
+}
+
+/// Move the synchronous SQLite and filesystem summary writes off the Tokio worker that generated the summary.
+async fn persist_session_summary_off_thread(
+    memory: Arc<librefang_memory::MemorySubstrate>,
+    agent_id: AgentId,
+    session_id: SessionId,
+    workspace: Option<std::path::PathBuf>,
+    summary: String,
+) {
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        persist_session_summary(
+            memory.as_ref(),
+            agent_id,
+            session_id,
+            workspace.as_deref(),
+            &summary,
+        );
+    })
+    .await
+    {
+        warn!(
+            agent_id = %agent_id,
+            session_id = %session_id.0,
+            %error,
+            "Session summary persistence task failed"
+        );
     }
 }
 
@@ -1518,7 +1543,11 @@ fn persist_session_summary(
 
 #[cfg(test)]
 mod session_summary_tests {
-    use super::{build_trivial_session_summary, render_session_transcript};
+    use super::{
+        build_trivial_session_summary, persist_session_summary_off_thread,
+        render_session_transcript,
+    };
+    use librefang_types::agent::{AgentId, SessionId};
     use librefang_types::message::{ContentBlock, Message, Role};
 
     fn tool_use(name: &str, input_text: &str) -> Message {
@@ -1546,6 +1575,43 @@ mod session_summary_tests {
             status: librefang_types::tool::ToolExecutionStatus::default(),
             approval_request_id: None,
         }])
+    }
+
+    #[tokio::test]
+    async fn off_thread_persistence_writes_kv_and_workspace_mirror() {
+        let memory =
+            std::sync::Arc::new(librefang_memory::MemorySubstrate::open_in_memory(0.1).unwrap());
+        let agent_id = AgentId::new();
+        let session_id = SessionId::new();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir(workspace.path().join("memory")).unwrap();
+        let summary = "summary persisted off thread".to_string();
+
+        persist_session_summary_off_thread(
+            std::sync::Arc::clone(&memory),
+            agent_id,
+            session_id,
+            Some(workspace.path().to_path_buf()),
+            summary.clone(),
+        )
+        .await;
+
+        assert_eq!(
+            memory
+                .structured_get(agent_id, &format!("session_{}", session_id.0))
+                .unwrap(),
+            Some(serde_json::Value::String(summary.clone()))
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                workspace
+                    .path()
+                    .join("memory")
+                    .join(format!("session-{}.md", session_id.0))
+            )
+            .unwrap(),
+            summary
+        );
     }
 
     #[test]
@@ -1679,7 +1745,6 @@ mod session_summary_tests {
         CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent,
     };
     use librefang_testing::{FailingLlmDriver, MockLlmDriver};
-    use librefang_types::agent::{AgentId, SessionId};
     use librefang_types::message::{StopReason, TokenUsage};
     use std::time::Duration;
 

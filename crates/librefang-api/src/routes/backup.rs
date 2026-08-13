@@ -340,7 +340,11 @@ pub async fn create_backup(
 pub async fn list_backups(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let backups_dir = state.kernel.home_dir().join("backups");
     match tokio::task::spawn_blocking(move || list_backups_blocking(&backups_dir)).await {
-        Ok(body) => Json(body).into_response(),
+        Ok(Ok(body)) => Json(body).into_response(),
+        Ok(Err(error)) => {
+            ApiErrorResponse::internal_scrub(format!("backup listing failed: {error}"))
+                .into_response()
+        }
         Err(error) => {
             ApiErrorResponse::internal_scrub(format!("backup listing task failed: {error}"))
                 .into_response()
@@ -348,41 +352,45 @@ pub async fn list_backups(State(state): State<Arc<AppState>>) -> impl IntoRespon
     }
 }
 
-fn list_backups_blocking(backups_dir: &std::path::Path) -> serde_json::Value {
+fn list_backups_blocking(backups_dir: &std::path::Path) -> std::io::Result<serde_json::Value> {
     let mut backups: Vec<serde_json::Value> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(backups_dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("zip") {
-                continue;
-            }
-            let filename = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            let modified = std::fs::metadata(&path)
-                .and_then(|m| m.modified())
-                .ok()
-                .map(|t| {
-                    let dt: chrono::DateTime<chrono::Utc> = t.into();
-                    dt.to_rfc3339()
-                });
-
-            // Try to read manifest from the zip
-            let manifest = read_backup_manifest(&path);
-
-            backups.push(serde_json::json!({
-                "filename": filename,
-                "path": path.to_string_lossy(),
-                "size_bytes": size,
-                "modified_at": modified,
-                "components": manifest.as_ref().map(|m| &m.components),
-                "librefang_version": manifest.as_ref().map(|m| &m.librefang_version),
-                "created_at": manifest.as_ref().map(|m| &m.created_at),
-            }));
+    let entries = match std::fs::read_dir(backups_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(serde_json::json!({"backups": [], "total": 0}));
         }
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("zip") {
+            continue;
+        }
+        let filename = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let metadata = entry.metadata()?;
+        let size = metadata.len();
+        let modified = metadata.modified().ok().map(|t| {
+            let dt: chrono::DateTime<chrono::Utc> = t.into();
+            dt.to_rfc3339()
+        });
+
+        // Try to read manifest from the zip
+        let manifest = read_backup_manifest(&path);
+
+        backups.push(serde_json::json!({
+            "filename": filename,
+            "path": path.to_string_lossy(),
+            "size_bytes": size,
+            "modified_at": modified,
+            "components": manifest.as_ref().map(|m| &m.components),
+            "librefang_version": manifest.as_ref().map(|m| &m.librefang_version),
+            "created_at": manifest.as_ref().map(|m| &m.created_at),
+        }));
     }
 
     // Sort by filename descending (newest first since filenames contain timestamps)
@@ -393,7 +401,7 @@ fn list_backups_blocking(backups_dir: &std::path::Path) -> serde_json::Value {
     });
 
     let total = backups.len();
-    serde_json::json!({"backups": backups, "total": total})
+    Ok(serde_json::json!({"backups": backups, "total": total}))
 }
 
 fn is_invalid_backup_filename(filename: &str) -> bool {

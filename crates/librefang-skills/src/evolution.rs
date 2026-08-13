@@ -253,6 +253,48 @@ fn acquire_skill_lock(skill_dir: &Path) -> Result<std::fs::File, SkillError> {
     Ok(lock_file)
 }
 
+/// Install a local skill directory while holding the same per-skill lock used by evolution and uninstall operations.
+///
+/// The destination existence check is deliberately performed after locking so two concurrent installers cannot both pass the check and copy into the same partially populated directory.
+pub fn install_local_skill(source: &Path, skill_dir: &Path) -> Result<(), SkillError> {
+    let _lock = acquire_skill_lock(skill_dir)?;
+    if skill_dir.exists() {
+        let name = skill_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown");
+        return Err(SkillError::AlreadyInstalled(name.to_string()));
+    }
+
+    let result = copy_local_skill_recursive(source, skill_dir);
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(skill_dir);
+    }
+    result
+}
+
+fn copy_local_skill_recursive(source: &Path, destination: &Path) -> Result<(), SkillError> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            tracing::warn!(
+                path = %entry.path().display(),
+                "skipping symlink while installing skill"
+            );
+            continue;
+        }
+        let destination_path = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_local_skill_recursive(&entry.path(), &destination_path)?;
+        } else {
+            std::fs::copy(entry.path(), destination_path)?;
+        }
+    }
+    Ok(())
+}
+
 // ── Atomic file I/O ─────────────────────────────────────────────────
 
 /// Monotonic per-process counter used by `atomic_write` to derive a
@@ -270,9 +312,7 @@ static ATOMIC_WRITE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 /// a nanosecond timestamp so collisions are extremely unlikely even
 /// under concurrent callers targeting the same final path.
 fn atomic_write(path: &Path, content: &str) -> Result<(), SkillError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| SkillError::Io(std::io::Error::other("no parent directory")))?;
+    let parent = crate::resolve_parent_or_cwd(path);
     std::fs::create_dir_all(parent)?;
 
     // Keep the thread-id string to ASCII-safe chars — `ThreadId`'s
@@ -3120,6 +3160,39 @@ mod race_tests {
     use super::*;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    #[test]
+    fn local_install_rechecks_destination_after_acquiring_lock() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("source");
+        let destination = dir.path().join("race-skill");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "---\nname: race-skill\n---\n").unwrap();
+
+        let lock = acquire_skill_lock(&destination).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let source_for_thread = source.clone();
+        let destination_for_thread = destination.clone();
+        let installer = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            install_local_skill(&source_for_thread, &destination_for_thread)
+        });
+        started_rx.recv().unwrap();
+
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(destination.join("winner.txt"), "winner").unwrap();
+        drop(lock);
+
+        assert!(matches!(
+            installer.join().unwrap(),
+            Err(SkillError::AlreadyInstalled(name)) if name == "race-skill"
+        ));
+        assert_eq!(
+            std::fs::read_to_string(destination.join("winner.txt")).unwrap(),
+            "winner"
+        );
+        assert!(!destination.join("SKILL.md").exists());
+    }
 
     #[test]
     fn test_concurrent_updates_produce_unique_versions() {
