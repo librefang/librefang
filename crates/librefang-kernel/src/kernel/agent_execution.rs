@@ -71,7 +71,7 @@ impl LibreFangKernel {
 
         info!(agent = %entry.name, path = %wasm_path.display(), "Executing WASM agent");
 
-        let wasm_bytes = std::fs::read(&wasm_path).map_err(|e| {
+        let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
             KernelError::LibreFang(LibreFangError::Internal(format!(
                 "Failed to read WASM module '{}': {e}",
                 wasm_path.display()
