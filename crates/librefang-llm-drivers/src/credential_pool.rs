@@ -13,7 +13,7 @@
 //! a cooldown period (`exhausted_ttl`, default 1 hour) and excluded from selection
 //! until the period expires.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// Build the redacted hint for an API key. Returns `"****"` plus the last
@@ -227,6 +227,21 @@ pub struct CredentialPool {
 }
 
 impl CredentialPool {
+    /// Lock the pool, preserving the existing recovery behavior while making
+    /// poison recovery observable. Continuing is intentional: the pool state
+    /// remains structurally valid and dropping every configured credential
+    /// after an unrelated panic would cause a provider-wide outage.
+    fn lock_inner(&self) -> MutexGuard<'_, CredentialPoolInner> {
+        self.inner.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("Credential pool lock poisoned; recovering inner state");
+            // `into_inner` recovers the guard but does not reset the mutex's
+            // poison flag. Clear it so one panic produces one warning rather
+            // than re-entering this recovery branch on every request forever.
+            self.inner.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+
     /// Create a new pool from a list of `(api_key, priority)` pairs.
     ///
     /// Credentials are sorted by priority **descending** so that `FillFirst`
@@ -306,7 +321,7 @@ impl CredentialPool {
         // Lock the entire inner state so that the RoundRobin index read and
         // the credential selection happen atomically — no other thread can
         // advance the index between reading it and using it.
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = self.lock_inner();
         match self.strategy {
             PoolStrategy::FillFirst => Self::acquire_fill_first(&inner.credentials),
             PoolStrategy::RoundRobin => {
@@ -344,7 +359,7 @@ impl CredentialPool {
     /// For quota-exhausted (402) responses use [`mark_credit_exhausted`]
     /// instead — quota windows are typically daily, so the cooldown is longer.
     pub fn mark_exhausted(&self, api_key: &str) {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = self.lock_inner();
         let until = Instant::now() + self.exhausted_ttl;
         if let Some(c) = inner.credentials.iter_mut().find(|c| c.api_key == api_key) {
             c.exhausted_until = Some(until);
@@ -355,7 +370,7 @@ impl CredentialPool {
     /// exhausted). The credential is placed in cooldown for
     /// `credit_exhausted_ttl` (default 24 hours per #4965 spec).
     pub fn mark_credit_exhausted(&self, api_key: &str) {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = self.lock_inner();
         let until = Instant::now() + self.credit_exhausted_ttl;
         if let Some(c) = inner.credentials.iter_mut().find(|c| c.api_key == api_key) {
             c.exhausted_until = Some(until);
@@ -366,7 +381,7 @@ impl CredentialPool {
     /// Unlike [`mark_exhausted`] which uses a TTL-based cooldown, this marks the key as unavailable for the lifetime of the pool.
     /// Only a hot-reload that rebuilds the pool can recover the credential.
     pub fn mark_permanent(&self, api_key: &str) {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = self.lock_inner();
         if let Some(c) = inner.credentials.iter_mut().find(|c| c.api_key == api_key) {
             c.permanently_disabled = true;
             c.exhausted_until = None;
@@ -377,7 +392,7 @@ impl CredentialPool {
     /// Increments the credential's `request_count` and clears a temporary cooldown (e.g. if a provider recovered before the TTL expired).
     /// Permanent auth-failure markers remain until a configuration reload rebuilds the pool.
     pub fn mark_success(&self, api_key: &str) {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = self.lock_inner();
         if let Some(c) = inner.credentials.iter_mut().find(|c| c.api_key == api_key) {
             c.request_count = c.request_count.saturating_add(1);
             // Clear only temporary cooldowns.
@@ -390,7 +405,7 @@ impl CredentialPool {
 
     /// Number of currently available (non-exhausted) credentials.
     pub fn available_count(&self) -> usize {
-        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let inner = self.lock_inner();
         inner
             .credentials
             .iter()
@@ -400,7 +415,7 @@ impl CredentialPool {
 
     /// Total number of credentials in the pool (available + exhausted).
     pub fn total_count(&self) -> usize {
-        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let inner = self.lock_inner();
         inner.credentials.len()
     }
 
@@ -416,7 +431,7 @@ impl CredentialPool {
     /// and exhaustion status.  The list is sorted by priority descending,
     /// matching the internal ordering.
     pub fn snapshot(&self) -> Vec<CredentialSnapshot> {
-        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let inner = self.lock_inner();
         inner
             .credentials
             .iter()
@@ -508,7 +523,7 @@ impl CredentialPool {
     /// rather than panicking or wrapping silently to the wrong key.
     #[cfg(test)]
     fn replace_credentials_for_test(&self, new_keys: Vec<(String, u32)>) {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = self.lock_inner();
         let mut creds: Vec<PooledCredential> = new_keys
             .into_iter()
             .map(|(k, p)| PooledCredential::new(k, String::new(), p))
@@ -561,6 +576,30 @@ mod tests {
     fn make_pool(keys: &[(&str, u32)], strategy: PoolStrategy) -> CredentialPool {
         let keys = keys.iter().map(|(k, p)| (k.to_string(), *p)).collect();
         CredentialPool::new(keys, strategy)
+    }
+
+    #[test]
+    fn poisoned_pool_lock_recovers_for_reads_and_writes() {
+        let pool = make_pool(&[("key-a", 10), ("key-b", 5)], PoolStrategy::FillFirst);
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut inner = pool.inner.lock().unwrap();
+                    inner.credentials[0].request_count = 7;
+                    panic!("poison credential pool lock");
+                })
+                .join()
+        });
+
+        assert!(poison.is_err());
+        assert!(pool.inner.is_poisoned());
+        assert_eq!(pool.total_count(), 2);
+        assert!(!pool.inner.is_poisoned());
+        assert_eq!(pool.snapshot()[0].request_count, 7);
+
+        pool.mark_success("key-a");
+        assert_eq!(pool.snapshot()[0].request_count, 8);
+        assert_eq!(pool.acquire().as_deref(), Some("key-a"));
     }
 
     // ── FillFirst ─────────────────────────────────────────────────────────────

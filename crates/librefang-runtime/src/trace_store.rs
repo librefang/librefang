@@ -4,7 +4,7 @@
 //! post-mortem analysis of hook failures without relying on the in-memory
 //! ring buffer (which resets on restart).
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -144,10 +144,11 @@ impl TraceStore {
         hook: Option<&str>,
         limit: usize,
         only_failures: bool,
-    ) -> Vec<serde_json::Value> {
-        let Ok(conn) = self.conn.lock() else {
-            return vec![];
-        };
+    ) -> rusqlite::Result<Vec<serde_json::Value>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
 
         // Build parameterized WHERE clause — never interpolate user values directly.
         let mut conditions: Vec<&str> = Vec::new();
@@ -177,14 +178,12 @@ impl TraceStore {
              FROM hook_traces {where_clause} ORDER BY id DESC LIMIT {limit}"
         );
 
-        let Ok(mut stmt) = conn.prepare(&sql) else {
-            return vec![];
-        };
+        let mut stmt = conn.prepare(&sql)?;
 
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
 
-        stmt.query_map(param_refs.as_slice(), |row| {
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
             Ok(serde_json::json!({
                 "trace_id":        row.get::<_, String>(0)?,
                 "correlation_id":  row.get::<_, String>(1)?,
@@ -197,17 +196,18 @@ impl TraceStore {
                 "input_preview":   row.get::<_, Option<String>>(8)?,
                 "output_preview":  row.get::<_, Option<String>>(9)?,
             }))
-        })
-        .ok()
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default()
+        })?;
+        rows.collect()
     }
 
-    /// Look up a single trace by its trace_id. Returns None if not found.
-    pub fn query_by_trace_id(&self, trace_id: &str) -> Option<serde_json::Value> {
-        let Ok(conn) = self.conn.lock() else {
-            return None;
-        };
+    /// Look up a single trace by its trace_id.
+    ///
+    /// Returns `Ok(None)` if no trace matches; `Err` if the lookup itself fails (poisoned mutex, corrupt row, or other SQLite error).
+    pub fn query_by_trace_id(&self, trace_id: &str) -> rusqlite::Result<Option<serde_json::Value>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
         conn.query_row(
             "SELECT trace_id, correlation_id, plugin, hook, started_at, elapsed_ms, success, error, \
              input_preview, output_preview FROM hook_traces WHERE trace_id = ?1",
@@ -227,14 +227,15 @@ impl TraceStore {
                 }))
             },
         )
-        .ok()
+        .optional()
     }
 
     /// Count traces, optionally filtered by plugin and/or failure status.
-    pub fn count(&self, plugin: Option<&str>, only_failures: bool) -> i64 {
-        let Ok(conn) = self.conn.lock() else {
-            return 0;
-        };
+    pub fn count(&self, plugin: Option<&str>, only_failures: bool) -> rusqlite::Result<i64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
 
         // Build parameterized WHERE clause — never interpolate user values directly.
         let mut conditions: Vec<&str> = Vec::new();
@@ -259,7 +260,6 @@ impl TraceStore {
             params.iter().map(|p| p.as_ref()).collect();
 
         conn.query_row(&sql, param_refs.as_slice(), |r| r.get(0))
-            .unwrap_or(0)
     }
 
     /// Persist circuit breaker state for one key.
@@ -363,10 +363,10 @@ mod tests {
         store.insert_blocking("my-plugin", &make_trace("ingest", true));
         store.insert_blocking("my-plugin", &make_trace("ingest", false));
 
-        assert_eq!(store.count(None, false), 2);
-        assert_eq!(store.count(None, true), 1);
-        assert_eq!(store.count(Some("my-plugin"), false), 2);
-        assert_eq!(store.count(Some("other-plugin"), false), 0);
+        assert_eq!(store.count(None, false).unwrap(), 2);
+        assert_eq!(store.count(None, true).unwrap(), 1);
+        assert_eq!(store.count(Some("my-plugin"), false).unwrap(), 2);
+        assert_eq!(store.count(Some("other-plugin"), false).unwrap(), 0);
     }
 
     #[test]
@@ -378,13 +378,13 @@ mod tests {
         store.insert_blocking("plugin-b", &make_trace("after_turn", false));
         store.insert_blocking("plugin-a", &make_trace("assemble", true));
 
-        let all = store.query(None, None, 100, false);
+        let all = store.query(None, None, 100, false).unwrap();
         assert_eq!(all.len(), 3);
 
-        let plugin_a = store.query(Some("plugin-a"), None, 100, false);
+        let plugin_a = store.query(Some("plugin-a"), None, 100, false).unwrap();
         assert_eq!(plugin_a.len(), 2);
 
-        let failures = store.query(None, None, 100, true);
+        let failures = store.query(None, None, 100, true).unwrap();
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0]["plugin"], "plugin-b");
     }
@@ -401,7 +401,7 @@ mod tests {
                 &make_trace(if i % 2 == 0 { "ingest" } else { "after_turn" }, true),
             );
         }
-        assert!(store.count(None, false) <= 10_000);
+        assert!(store.count(None, false).unwrap() <= 10_000);
     }
 
     /// The async `insert` must run the SQLite work on a `spawn_blocking`
@@ -421,7 +421,7 @@ mod tests {
         // The insert lands synchronously from the caller's POV (await
         // resolves after the spawn_blocking task completes), so a
         // subsequent count must see it.
-        assert_eq!(store.count(Some("async-plugin"), false), 1);
+        assert_eq!(store.count(Some("async-plugin"), false).unwrap(), 1);
     }
 
     /// Concurrent async inserts must not panic or lose rows. With the
@@ -449,7 +449,7 @@ mod tests {
         for h in handles {
             h.await.unwrap();
         }
-        assert_eq!(store.count(Some("concurrent"), false), n as i64);
+        assert_eq!(store.count(Some("concurrent"), false).unwrap(), n as i64);
     }
 
     /// The prune step must NOT run on every insert (that was the original
@@ -473,7 +473,7 @@ mod tests {
         // (a) Insert one more row. The counter ticks to PRUNE_EVERY_N_INSERTS,
         //     so prune fires. With only 1 row in the table, prune is a no-op.
         store.insert_blocking("p", &make_trace("h", true));
-        assert_eq!(store.count(None, false), 1);
+        assert_eq!(store.count(None, false).unwrap(), 1);
 
         // (b) Insert PRUNE_EVERY_N_INSERTS - 1 more rows. None of these
         //     should trigger a prune (counter advances from N+1 to 2N-1,
@@ -481,11 +481,53 @@ mod tests {
         for _ in 0..(PRUNE_EVERY_N_INSERTS - 1) {
             store.insert_blocking("p", &make_trace("h", true));
         }
-        assert_eq!(store.count(None, false), PRUNE_EVERY_N_INSERTS as i64);
+        assert_eq!(
+            store.count(None, false).unwrap(),
+            PRUNE_EVERY_N_INSERTS as i64
+        );
 
         // (c) One more insert lands on the next prune boundary (2N).
         //     Since we're under the 10k cap, the table size is unchanged.
         store.insert_blocking("p", &make_trace("h", true));
-        assert_eq!(store.count(None, false), PRUNE_EVERY_N_INSERTS as i64 + 1);
+        assert_eq!(
+            store.count(None, false).unwrap(),
+            PRUNE_EVERY_N_INSERTS as i64 + 1
+        );
+    }
+
+    #[test]
+    fn query_errors_are_not_reported_as_empty_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TraceStore::open(&tmp.path().join("traces.db")).unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("DROP TABLE hook_traces", [])
+            .unwrap();
+
+        assert!(store.query(None, None, 100, false).is_err());
+        assert!(store.query_by_trace_id("test000000000000").is_err());
+        assert!(store.count(None, false).is_err());
+    }
+
+    #[test]
+    fn corrupt_trace_rows_are_not_silently_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TraceStore::open(&tmp.path().join("traces.db")).unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO hook_traces \
+                 (trace_id, correlation_id, plugin, hook, started_at, elapsed_ms, success) \
+                 VALUES ('test000000000000', '', X'00', 'hook', 'now', 1, 1)",
+                [],
+            )
+            .unwrap();
+
+        assert!(store.query(None, None, 100, false).is_err());
+        assert!(store.query_by_trace_id("test000000000000").is_err());
     }
 }

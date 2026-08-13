@@ -240,10 +240,8 @@ impl QwenCodeDriver {
     }
 
     /// Build the CLI arguments for a given request.
-    pub fn build_args(&self, prompt: &str, model: &str, streaming: bool) -> Vec<String> {
-        let mut args = vec!["-p".to_string(), prompt.to_string()];
-
-        args.push("--output-format".to_string());
+    pub fn build_args(&self, _prompt: &str, model: &str, streaming: bool) -> Vec<String> {
+        let mut args = vec!["--output-format".to_string()];
         if streaming {
             args.push("stream-json".to_string());
             args.push("--include-partial-messages".to_string());
@@ -722,8 +720,9 @@ impl QwenCodeDriver {
         );
 
         let timeout_secs = request.timeout_secs.unwrap_or(self.message_timeout_secs);
-        let output = match crate::cli_process::output_with_timeout(
+        let output = match crate::cli_process::output_with_input_timeout(
             &mut cmd,
+            prepared.text.as_bytes(),
             std::time::Duration::from_secs(timeout_secs),
         )
         .await
@@ -849,6 +848,7 @@ impl QwenCodeDriver {
 
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        cmd.stdin(std::process::Stdio::piped());
         cmd.kill_on_drop(true);
         // The CLI can background helper processes of its own; make it the
         // leader of its own process group so a timeout kill (below) can
@@ -873,6 +873,43 @@ impl QwenCodeDriver {
                 e
             ))
         })?;
+
+        let timeout_secs = request.timeout_secs.unwrap_or(self.message_timeout_secs);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+        // Qwen reads a non-TTY stdin stream as its one-shot prompt. Write and
+        // close it before consuming stdout; the CLI's readStdin phase does not
+        // begin model execution until EOF, so it cannot fill stdout while this
+        // write is in progress.
+        let write_result = if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            tokio::time::timeout_at(deadline, async {
+                stdin.write_all(prepared.text.as_bytes()).await?;
+                stdin.shutdown().await
+            })
+            .await
+        } else {
+            crate::cli_process::kill_on_timeout(&mut child).await;
+            return Err(LlmError::Http(
+                "Qwen CLI stdin was not available".to_string(),
+            ));
+        };
+        match write_result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                crate::cli_process::kill_on_timeout(&mut child).await;
+                return Err(LlmError::Http(format!(
+                    "Failed to write prompt to Qwen CLI stdin: {error}"
+                )));
+            }
+            Err(_) => {
+                crate::cli_process::kill_on_timeout(&mut child).await;
+                return Err(crate::cli_process::timeout_error(
+                    timeout_secs,
+                    "Qwen Code CLI",
+                ));
+            }
+        }
 
         let stdout = child
             .stdout
@@ -906,9 +943,6 @@ impl QwenCodeDriver {
         // Set when a `tx.send(...)` fails — kill the child and stop reading
         // stdout so the CLI doesn't keep producing tokens for nobody (#3769).
         let mut receiver_dropped = false;
-        let timeout_secs = request.timeout_secs.unwrap_or(self.message_timeout_secs);
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-
         loop {
             let line = match tokio::time::timeout_at(deadline, lines.next_line()).await {
                 Ok(Ok(Some(line))) => line,
@@ -1195,6 +1229,63 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn stdin_cli() -> tempfile::TempPath {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(
+            &mut file,
+            br##"#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    *private-prompt*) exit 8 ;;
+  esac
+done
+input=$(cat)
+case "$input" in
+  *private-prompt*) ;;
+  *) exit 9 ;;
+esac
+printf '%s\n' '{"result":"stdin received","usage":{"input_tokens":2,"output_tokens":3}}'
+"##,
+        )
+        .unwrap();
+        let mut permissions = file.as_file().metadata().unwrap().permissions();
+        permissions.set_mode(0o700);
+        file.as_file().set_permissions(permissions).unwrap();
+        file.into_temp_path()
+    }
+
+    #[cfg(unix)]
+    fn streaming_stdin_cli() -> tempfile::TempPath {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(
+            &mut file,
+            br##"#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    *private-stream-prompt*) exit 8 ;;
+  esac
+done
+input=$(cat)
+case "$input" in
+  *private-stream-prompt*) ;;
+  *) exit 9 ;;
+esac
+printf '%s\n' '{"type":"content","content":"stream stdin"}'
+printf '%s\n' '{"type":"done","usage":{"input_tokens":4,"output_tokens":5}}'
+"##,
+        )
+        .unwrap();
+        let mut permissions = file.as_file().metadata().unwrap().permissions();
+        permissions.set_mode(0o700);
+        file.as_file().set_permissions(permissions).unwrap();
+        file.into_temp_path()
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn stream_honors_request_timeout() {
         let cli = sleeping_cli();
@@ -1215,6 +1306,54 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn complete_pipes_prompt_without_putting_it_in_argv() {
+        let cli = stdin_cli();
+        let driver = QwenCodeDriver::new(Some(cli.to_string_lossy().into_owned()), false);
+        let response = driver
+            .complete(CompletionRequest {
+                model: "qwen-code".to_string(),
+                system: Some("private-prompt".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            &response.content[0],
+            ContentBlock::Text { text, .. } if text == "stdin received"
+        ));
+        assert_eq!(response.usage.input_tokens, 2);
+        assert_eq!(response.usage.output_tokens, 3);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stream_pipes_prompt_without_putting_it_in_argv() {
+        let cli = streaming_stdin_cli();
+        let driver = QwenCodeDriver::new(Some(cli.to_string_lossy().into_owned()), false);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let response = driver
+            .stream(
+                CompletionRequest {
+                    model: "qwen-code".to_string(),
+                    system: Some("private-stream-prompt".to_string()),
+                    ..Default::default()
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(StreamEvent::TextDelta { text }) if text == "stream stdin"
+        ));
+        assert_eq!(response.usage.input_tokens, 4);
+        assert_eq!(response.usage.output_tokens, 5);
     }
 
     #[test]
@@ -1689,6 +1828,7 @@ mod tests {
         assert!(args.contains(&"--yolo".to_string()));
         assert!(args.contains(&"json".to_string()));
         assert!(args.contains(&"--model".to_string()));
+        assert!(!args.iter().any(|arg| arg == "test prompt" || arg == "-p"));
     }
 
     #[test]

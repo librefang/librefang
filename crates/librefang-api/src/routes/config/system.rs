@@ -461,10 +461,14 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
     // Budget snapshot — already aggregated by MeteringEngine (single-row SQL
     // queries, all indexed). `daily_spend_percent` is `None` when no daily
     // cap is configured so monitors don't false-fire on undefined ratios.
-    let budget_status = state
+    let budget_status = match state
         .kernel
         .metering_ref()
-        .budget_status(&state.kernel.budget_config());
+        .budget_status(&state.kernel.budget_config())
+    {
+        Ok(status) => status,
+        Err(error) => return ApiErrorResponse::internal_scrub(error).into_response(),
+    };
     let daily_spend_percent = if budget_status.daily_limit > 0.0 {
         Some(budget_status.daily_pct * 100.0)
     } else {
@@ -525,6 +529,7 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "model_count": llm.model_count,
         },
     }))
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------

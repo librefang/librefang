@@ -1,0 +1,4 @@
+`Path::parent()` yields `Some("")` rather than `None` for a bare relative filename, and three recently added atomic writers treated that empty-but-present case as an error.
+In the cron script writer the parent is opened for the post-rename directory fsync, so an empty parent would fail with ENOENT after the rename had already succeeded — reporting failure for a write that landed on disk.
+In the Skillhub and skill-evolution writers it only anchors the staging file beside the target, where an empty parent happened to work because the join and the rename both resolved against the process directory, making the same-directory invariant that keeps the rename atomic hold by accident.
+All three now resolve an empty parent to `.`, matching the API crate's atomic writer, which already handled it (#7036) (@houko)

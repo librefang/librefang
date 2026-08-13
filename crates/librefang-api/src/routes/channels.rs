@@ -817,42 +817,57 @@ pub struct ConfigureSidecarBody {
 /// acceptable — the operator can either remove the comment or edit the
 /// included file directly as the 409 message recommends. Returns the list
 /// of include paths that contain at least one `[[sidecar_channels]]`
-/// header. Empty list = safe to write to root.
-fn included_files_with_sidecars(config_path: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let content = match std::fs::read_to_string(config_path) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
+/// header. A missing root config has no includes; every other read or parse
+/// failure is returned so the write-side safety check fails closed.
+async fn included_files_with_sidecars(
+    config_path: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let content = match tokio::fs::read_to_string(config_path).await {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(format!(
+                "failed to read root config {}: {e}",
+                config_path.display()
+            ));
+        }
     };
-    let doc: toml_edit::DocumentMut = match content.parse() {
-        Ok(d) => d,
-        Err(_) => return Vec::new(),
+    // Extract owned paths before the first include-file await. DocumentMut
+    // contains non-Send internals and must not be retained across a suspend
+    // point in this axum handler.
+    let include_paths = {
+        let doc: toml_edit::DocumentMut = content
+            .parse()
+            .map_err(|e| format!("failed to parse root config {}: {e}", config_path.display()))?;
+        // `include` may be a string array at the document root.
+        let Some(include_arr) = doc.get("include").and_then(|i| i.as_array()) else {
+            return Ok(Vec::new());
+        };
+        let parent = config_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        include_arr
+            .iter()
+            .filter_map(|entry| entry.as_str())
+            .map(|raw| {
+                if std::path::Path::new(raw).is_absolute() {
+                    std::path::PathBuf::from(raw)
+                } else {
+                    parent.join(raw)
+                }
+            })
+            .collect::<Vec<_>>()
     };
-    // `include` may be a string array at the document root.
-    let include_arr = match doc.get("include").and_then(|i| i.as_array()) {
-        Some(a) => a,
-        None => return Vec::new(),
-    };
-    let parent = config_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
     let mut hits = Vec::new();
-    for entry in include_arr.iter() {
-        let raw = match entry.as_str() {
-            Some(s) => s,
-            None => continue,
-        };
-        let path = if std::path::Path::new(raw).is_absolute() {
-            std::path::PathBuf::from(raw)
-        } else {
-            parent.join(raw)
-        };
-        if let Ok(body) = std::fs::read_to_string(&path) {
-            if body.contains("[[sidecar_channels]]") {
-                hits.push(path);
-            }
+    for path in include_paths {
+        let body = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| format!("failed to read included config {}: {e}", path.display()))?;
+        if body.contains("[[sidecar_channels]]") {
+            hits.push(path);
         }
     }
-    hits
+    Ok(hits)
 }
 
 /// `POST /api/channels/sidecar/{name}/configure` — save schema-driven
@@ -944,7 +959,9 @@ pub async fn configure_sidecar_channel(
     //     entry) and our behaviour (append a fresh root entry) would
     //     diverge without warning. The dashboard / docs steer the
     //     operator to the file that owns the existing block.
-    let shadowing = included_files_with_sidecars(&config_path);
+    let shadowing = included_files_with_sidecars(&config_path)
+        .await
+        .map_err(|e| ApiErrorResponse::internal_scrub(e).into_json_tuple())?;
     if !shadowing.is_empty() {
         let files = shadowing
             .iter()
@@ -1209,6 +1226,59 @@ pub async fn delete_sidecar_channel(
             .collect::<Vec<_>>(),
         "restart_required": plan.restart_required,
     })))
+}
+
+#[cfg(test)]
+mod included_sidecar_config_tests {
+    use super::included_files_with_sidecars;
+
+    #[tokio::test]
+    async fn missing_root_config_has_no_included_sidecars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hits = included_files_with_sidecars(&tmp.path().join("config.toml"))
+            .await
+            .unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unreadable_included_config_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("config.toml");
+        tokio::fs::write(&root, "include = [\"missing.toml\"]\n")
+            .await
+            .unwrap();
+
+        let error = included_files_with_sidecars(&root).await.unwrap_err();
+        assert!(error.contains("failed to read included config"));
+        assert!(error.contains("missing.toml"));
+    }
+
+    #[tokio::test]
+    async fn invalid_root_config_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("config.toml");
+        tokio::fs::write(&root, "include = [").await.unwrap();
+
+        let error = included_files_with_sidecars(&root).await.unwrap_err();
+        assert!(error.contains("failed to parse root config"));
+    }
+
+    #[tokio::test]
+    async fn included_sidecar_blocks_are_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("config.toml");
+        let included = tmp.path().join("channels.toml");
+        tokio::fs::write(&root, "include = [\"channels.toml\"]\n")
+            .await
+            .unwrap();
+        tokio::fs::write(&included, "[[sidecar_channels]]\nname = \"telegram\"\n")
+            .await
+            .unwrap();
+
+        let hits = included_files_with_sidecars(&root).await.unwrap();
+        assert_eq!(hits, vec![included]);
+    }
 }
 
 /// Serialize a channel's config to a JSON Value for pre-populating dashboard forms.

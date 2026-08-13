@@ -332,11 +332,14 @@ pub async fn usage_daily(State(state): State<Arc<AppState>>) -> impl IntoRespons
     )
 )]
 pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let status = state
+    match state
         .kernel
         .metering_ref()
-        .budget_status(&state.kernel.budget_config());
-    Json(status)
+        .budget_status(&state.kernel.budget_config())
+    {
+        Ok(status) => Json(status).into_response(),
+        Err(error) => ApiErrorResponse::internal_scrub(error).into_response(),
+    }
 }
 
 /// PUT /api/budget — Update global budget limits and persist to `config.toml`.
@@ -540,8 +543,10 @@ pub async fn update_budget(
         Some("api".to_string()),
     );
 
-    let status = state.kernel.metering_ref().budget_status(&new_budget);
-    Json(status).into_response()
+    match state.kernel.metering_ref().budget_status(&new_budget) {
+        Ok(status) => Json(status).into_response(),
+        Err(error) => ApiErrorResponse::internal_scrub(error).into_response(),
+    }
 }
 
 /// Failure modes for [`persist_budget`].

@@ -4155,6 +4155,36 @@ fn atomic_write_leaves_no_tmp_file_on_success() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn parent_dir_for_fsync_maps_bare_filename_to_current_dir() {
+    use std::path::Path;
+
+    // The premise this resolution exists for: a bare filename has an empty-but-present parent, so `ok_or_else`-style handling would let `""` through to `File::open` and fail with ENOENT after the rename already succeeded.
+    assert_eq!(Path::new("agent.toml").parent(), Some(Path::new("")));
+
+    assert_eq!(
+        super::cron_script::parent_dir_for_fsync(Path::new("agent.toml")),
+        Path::new("."),
+        "a bare filename must fsync the current directory, not \"\""
+    );
+    assert_eq!(
+        super::cron_script::parent_dir_for_fsync(Path::new("/")),
+        Path::new("."),
+        "a rootless path (parent() == None) must also fall back to \".\""
+    );
+    assert_eq!(
+        super::cron_script::parent_dir_for_fsync(Path::new("/srv/librefang/agent.toml")),
+        Path::new("/srv/librefang"),
+        "an absolute path must fsync its real containing directory"
+    );
+    assert_eq!(
+        super::cron_script::parent_dir_for_fsync(Path::new("nested/agent.toml")),
+        Path::new("nested"),
+        "a relative path with a directory component must keep that directory"
+    );
+}
+
 #[test]
 fn atomic_write_no_partial_state_under_concurrency() {
     // Spawn two threads racing to write the same path with very

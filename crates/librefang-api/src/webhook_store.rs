@@ -291,14 +291,14 @@ fn is_blocked_domain(lower: &str) -> bool {
         || lower.ends_with(".internal")
 }
 
-/// Unwrap IPv4-mapped IPv6 (`::ffff:X.X.X.X`) to its IPv4 form. All other
+/// Unwrap IPv4-mapped or IPv4-compatible IPv6 to its IPv4 form. All other
 /// addresses are returned unchanged.
 fn canonical_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
     match ip {
-        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => std::net::IpAddr::V4(v4),
-            None => std::net::IpAddr::V6(v6),
-        },
+        std::net::IpAddr::V6(v6) if v6.is_unspecified() || v6.is_loopback() => ip,
+        std::net::IpAddr::V6(v6) => v6
+            .to_ipv4()
+            .map_or(std::net::IpAddr::V6(v6), std::net::IpAddr::V4),
         std::net::IpAddr::V4(_) => ip,
     }
 }
@@ -704,6 +704,14 @@ mod tests {
         // these before the guard runs.
         assert!(validate_webhook_url("http://[::ffff:127.0.0.1]/hook").is_err());
         assert!(validate_webhook_url("http://[::ffff:7f00:1]/hook").is_err());
+    }
+
+    #[test]
+    fn validate_webhook_url_blocks_ipv4_compatible_ipv6_loopback() {
+        assert!(validate_webhook_url("http://[::127.0.0.1]/hook").is_err());
+        assert!(validate_webhook_url("http://[::7f00:1]/hook").is_err());
+        assert!(validate_webhook_url("http://[::1]/hook").is_err());
+        assert!(validate_webhook_url("http://[::]/hook").is_err());
     }
 
     #[test]

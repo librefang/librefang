@@ -7,8 +7,9 @@
 //! - Subagent: spawned child agents (3 concurrent)
 //! - Trigger: event-trigger dispatches (8 concurrent)
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::sync::Semaphore;
+use tracing::warn;
 
 /// Command lane type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +72,25 @@ pub struct CommandQueue {
 }
 
 impl CommandQueue {
+    fn read_lane(&self, lane: Lane) -> RwLockReadGuard<'_, LaneSlot> {
+        let lock = self.slot(lane);
+        lock.read().unwrap_or_else(|poisoned| {
+            warn!(lane = %lane, "command lane read lock poisoned; recovering inner state");
+            // `into_inner()` only unwraps this guard; it does not reset the lock's poison flag, so without `clear_poison()` every future access re-enters this branch and re-logs forever.
+            lock.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+
+    fn write_lane(&self, lane: Lane) -> RwLockWriteGuard<'_, LaneSlot> {
+        let lock = self.slot(lane);
+        lock.write().unwrap_or_else(|poisoned| {
+            warn!(lane = %lane, "command lane write lock poisoned; recovering inner state");
+            lock.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+
     /// Create a new command queue with default capacities.
     pub fn new() -> Self {
         Self::with_capacities(3, 2, 3, 8)
@@ -103,11 +123,7 @@ impl CommandQueue {
     /// detached `tokio::spawn` task — the returned `Arc<Semaphore>` is
     /// cheap to clone.
     pub fn semaphore_for_lane(&self, lane: Lane) -> Arc<Semaphore> {
-        self.slot(lane)
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .sem
-            .clone()
+        self.read_lane(lane).sem.clone()
     }
 
     /// Atomically swap in a fresh semaphore for `lane` sized to `new_capacity`
@@ -119,7 +135,7 @@ impl CommandQueue {
     /// concurrency block don't churn the queue.
     pub fn resize_lane(&self, lane: Lane, new_capacity: u32) -> bool {
         let new_capacity = new_capacity.max(1);
-        let mut guard = self.slot(lane).write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.write_lane(lane);
         if guard.capacity == new_capacity {
             return false;
         }
@@ -175,7 +191,7 @@ impl CommandQueue {
     /// read lower than the true number of in-flight tasks.
     pub fn occupancy(&self) -> Vec<LaneOccupancy> {
         let mk = |lane: Lane| {
-            let g = self.slot(lane).read().unwrap_or_else(|e| e.into_inner());
+            let g = self.read_lane(lane);
             LaneOccupancy {
                 lane,
                 active: g.capacity - g.sem.available_permits() as u32,
@@ -210,6 +226,34 @@ impl Default for CommandQueue {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[test]
+    fn poisoned_lane_lock_recovers_and_lane_remains_usable() {
+        let queue = CommandQueue::new();
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut slot = queue.main.write().unwrap();
+                    slot.capacity = 4;
+                    panic!("poison command lane lock");
+                })
+                .join()
+        });
+
+        assert!(poison.is_err());
+        assert!(queue.main.is_poisoned());
+        assert_eq!(queue.semaphore_for_lane(Lane::Main).available_permits(), 3);
+        // The first post-panic access must clear the poison flag, not just unwrap around it — otherwise every subsequent access re-triggers the recovery branch (and its `warn!`) for the rest of the process.
+        assert!(!queue.main.is_poisoned());
+        assert!(queue.resize_lane(Lane::Main, 5));
+        let main = queue
+            .occupancy()
+            .into_iter()
+            .find(|occupancy| occupancy.lane == Lane::Main)
+            .unwrap();
+        assert_eq!(main.capacity, 5);
+        assert_eq!(main.active, 0);
+    }
 
     #[tokio::test]
     async fn test_main_lane_submit() {

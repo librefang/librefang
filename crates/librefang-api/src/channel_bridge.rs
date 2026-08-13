@@ -645,7 +645,13 @@ fn resolve_no_pending_message(
     // Audit log is sorted DESC by `decided_at`; cap the scan to a small
     // recent window since duplicate-click races are sub-second. 64 is
     // generous and bounds the SQL cost.
-    let recent = approvals.query_audit(64, 0, None, None);
+    let recent = match approvals.query_audit(64, 0, None, None) {
+        Ok(recent) => recent,
+        Err(error) => {
+            tracing::warn!(%error, "failed to query approval audit for duplicate resolution");
+            Vec::new()
+        }
+    };
     if let Some(entry) = recent.iter().find(|e| e.request_id.starts_with(id_prefix)) {
         let short = &entry.request_id[..8.min(entry.request_id.len())];
         let actor = entry.decided_by.as_deref().unwrap_or("(unknown)");
@@ -1025,14 +1031,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         display_name: &str,
         username: Option<&str>,
     ) -> Result<(), String> {
-        self.kernel.memory_substrate().roster().upsert(
-            channel,
-            chat_id,
-            user_id,
-            display_name,
-            username,
-        );
-        Ok(())
+        self.kernel
+            .memory_substrate()
+            .roster()
+            .upsert(channel, chat_id, user_id, display_name, username)
+            .map_err(|error| error.to_string())
     }
 
     async fn uptime_info(&self) -> String {
@@ -2179,7 +2182,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     async fn budget_text(&self) -> String {
         let budget = self.kernel.budget_config();
-        let status = self.kernel.metering_ref().budget_status(&budget);
+        let status = match self.kernel.metering_ref().budget_status(&budget) {
+            Ok(status) => status,
+            Err(error) => {
+                tracing::error!(%error, "failed to query channel budget status");
+                return "Budget status is temporarily unavailable.".to_string();
+            }
+        };
 
         let fmt_limit = |v: f64| -> String {
             if v > 0.0 {

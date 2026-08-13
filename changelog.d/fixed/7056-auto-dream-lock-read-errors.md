@@ -1,0 +1,1 @@
+- Abort auto-dream lock acquisition when an existing lock file cannot be read instead of treating it as an unowned stale lock. (@xiaomo)

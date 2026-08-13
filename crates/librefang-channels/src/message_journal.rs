@@ -175,12 +175,14 @@ impl MessageJournal {
     /// async reactor; the lock is `tokio::sync::Mutex`, so we can hold it
     /// across the `.await` without blocking other tokio tasks (only other
     /// journal mutators queue, which is what we want).
-    pub async fn record(&self, entry: JournalEntry) {
+    /// Returns `true` only after the entry is durable and present in the in-memory recovery index.
+    /// Callers must not dispatch when this returns `false`, otherwise the write-ahead guarantee has been lost.
+    pub async fn record(&self, entry: JournalEntry) -> bool {
         let line = match serde_json::to_string(&entry) {
             Ok(l) => l,
             Err(e) => {
                 error!(error = %e, id = %entry.message_id, "Failed to serialize journal entry");
-                return;
+                return false;
             }
         };
         let mut inner = self.inner.lock().await;
@@ -191,14 +193,15 @@ impl MessageJournal {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 error!(error = %e, id = %entry.message_id, "Failed to write journal entry");
-                return;
+                return false;
             }
             Err(e) => {
                 error!(error = %e, id = %entry.message_id, "spawn_blocking panicked writing journal");
-                return;
+                return false;
             }
         }
         inner.pending.insert(entry.message_id.clone(), entry);
+        true
     }
 
     /// Record a terminal dispatch outcome.
@@ -728,6 +731,16 @@ mod tests {
 
         let pending = journal.pending_entries().await;
         assert_eq!(pending.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn record_reports_failure_and_does_not_index_unpersisted_entry() {
+        let dir = TempDir::new().unwrap();
+        let journal = MessageJournal::open(dir.path()).unwrap();
+        std::fs::create_dir(dir.path().join("message_journal.jsonl")).unwrap();
+
+        assert!(!journal.record(test_entry("msg-1")).await);
+        assert!(journal.pending_entries().await.is_empty());
     }
 
     #[tokio::test]

@@ -1,0 +1,3 @@
+`GET /api/sessions` swallowed a failed `count_sessions` call with `.unwrap_or(0)` and both it and `GET /api/sessions/search` fell back to an empty `200 OK` page on a database error, so a broken sessions table looked identical to "no sessions yet" from the client's side.
+`search_sessions` also leaked the raw SQLite error string (e.g. table names) straight into the response body via `ApiErrorResponse::internal(error.to_string())`.
+Both handlers now propagate the failure as a scrubbed `500` with a generic message, logging the real error server-side with `tracing::error!`, consistent with the rest of the file (#7041) (@houko)
