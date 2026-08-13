@@ -12540,8 +12540,7 @@ async fn compact_session_serializes_with_message_writers_without_self_deadlock()
         .expect("empty-session compaction should succeed");
     assert!(default_result.starts_with("No compaction needed"));
 
-    // An explicit channel/session entry point must wait behind that session's
-    // override-scoped writer rather than the unrelated agent lock.
+    // An explicit channel/session entry point must wait behind that session's override-scoped writer rather than the unrelated agent lock.
     let session_lock = kernel
         .agents
         .session_msg_locks
@@ -12569,9 +12568,8 @@ async fn compact_session_serializes_with_message_writers_without_self_deadlock()
         .expect("compaction task should not panic")
         .expect("empty-session compaction should succeed");
 
-    // Automatic compaction is called inside the turn that already owns the
-    // lock. Its task-local registration must make the compactor skip a second
-    // acquisition of the same non-reentrant mutex.
+    // Automatic compaction is called inside the turn that already owns the lock.
+    // Its task-local registration must make the compactor skip a second acquisition of the same non-reentrant mutex.
     let kernel_for_scope = Arc::clone(&kernel);
     librefang_runtime::held_agent_locks::scope(async move {
         let lock = kernel_for_scope

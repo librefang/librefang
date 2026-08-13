@@ -314,10 +314,8 @@ impl LibreFangKernel {
             .await
     }
 
-    /// Compact a session using the same lock domain selected by the caller's
-    /// message turn. An explicit session id does not by itself identify the
-    /// lock domain: agent-scoped turns also pass their resolved session id so
-    /// compaction operates on the exact in-turn session.
+    /// Compact a session using the same lock domain selected by the caller's message turn.
+    /// An explicit session id does not by itself identify the lock domain: agent-scoped turns also pass their resolved session id so compaction operates on the exact in-turn session.
     pub(crate) async fn compact_agent_session_in_lock_scope(
         &self,
         agent_id: AgentId,
@@ -331,16 +329,11 @@ impl LibreFangKernel {
             CompactionConfig,
         };
 
-        // Hold the same serialization lock that a message turn writing this
-        // session uses. Compaction awaits an LLM response between loading the
-        // session and replacing its messages; without this lock, a concurrent
-        // turn can save new messages during that window and the final
-        // compaction UPSERT silently overwrites them with its stale snapshot.
+        // Hold the same serialization lock that a message turn writing this session uses.
+        // Compaction awaits an LLM response between loading the session and replacing its messages; without this lock, a concurrent turn can save new messages during that window and the final compaction UPSERT silently overwrites them with its stale snapshot.
         //
-        // Automatic compaction runs inside an already-locked agent turn. The
-        // task-local held-lock registry lets that path avoid re-acquiring the
-        // same non-reentrant mutex while external API/channel callers wait for
-        // the active writer before taking their snapshot.
+        // Automatic compaction runs inside an already-locked agent turn.
+        // The task-local held-lock registry lets that path avoid re-acquiring the same non-reentrant mutex while external API/channel callers wait for the active writer before taking their snapshot.
         let _compaction_guard: Option<tokio::sync::OwnedMutexGuard<()>> = if agent_scoped {
             if librefang_runtime::held_agent_locks::is_held(agent_id) {
                 None
@@ -366,8 +359,7 @@ impl LibreFangKernel {
                 Some(lock.lock_owned().await)
             }
         } else {
-            // The public default-session entry point always sets
-            // `agent_scoped = true`; keep this defensive fallback aligned.
+            // The public default-session entry point always sets `agent_scoped = true`; keep this defensive fallback aligned.
             if librefang_runtime::held_agent_locks::is_held(agent_id) {
                 None
             } else {
