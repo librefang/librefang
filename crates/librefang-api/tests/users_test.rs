@@ -546,10 +546,8 @@ async fn users_create_refuses_to_overwrite_corrupt_config_toml() {
         StatusCode::INTERNAL_SERVER_ERROR,
         "expected 500 on corrupt config, got: {body:?}"
     );
-    assert!(
-        body["error"].as_str().unwrap_or("").contains("config.toml"),
-        "error should mention config.toml: {body:?}"
-    );
+    assert_eq!(body["message"], "Internal server error");
+    assert_eq!(body["error"]["message"], "Internal server error");
 
     // The corrupt file must still be on disk verbatim — we have NOT
     // silently replaced it with a stub document.
