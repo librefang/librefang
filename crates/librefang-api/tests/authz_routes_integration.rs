@@ -146,6 +146,29 @@ async fn authz_effective_viewer_role_is_forbidden() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn authz_check_viewer_denial_audit_names_check_endpoint() {
+    let h = boot_with_seed_users(vec![seed_user("Alice", "user")]);
+    let (status, _) = run(
+        &h,
+        req(
+            Method::GET,
+            "/api/authz/check?user=Alice&action=web_search",
+            Some(viewer_user("watcher")),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let entries = h._state.kernel.audit().recent(1);
+    assert_eq!(entries.len(), 1);
+    assert!(
+        entries[0].detail.contains("authz/check endpoint denied"),
+        "unexpected audit detail: {}",
+        entries[0].detail
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn authz_effective_admin_returns_snapshot_by_name() {
     let seed = UserConfig {
         name: "Alice".into(),
