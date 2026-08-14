@@ -51,8 +51,8 @@ jobs:
           # workflows (GitHub's recursion guard), so CI — and the required
           # "CI Gate" status check — would never run on this PR, leaving it
           # permanently unmergeable.
-          # WEBSITE_REPO_TOKEN must be a fine-grained PAT or GitHub App token
-          # limited to this repository with Contents and Pull requests: write.
+          # WEBSITE_REPO_TOKEN must be a fine-grained PAT limited to this
+          # repository with Contents and Pull requests: write.
           token: ${{ secrets.WEBSITE_REPO_TOKEN }}
           branch: chore/update-contributors-star-history
           commit-message: "docs: update contributors and star history"
