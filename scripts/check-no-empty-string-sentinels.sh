@@ -72,7 +72,7 @@ if command -v rg >/dev/null 2>&1; then
             --text --ignore-case --glob '*.rs' "$@"
     }
 else
-    GREP() { grep -RHnaiE --color=never --include='*.rs' "$@"; }
+    GREP() { grep -rHnaiE --color=never --include='*.rs' "$@"; }
 fi
 
 HARD_HITS=0
