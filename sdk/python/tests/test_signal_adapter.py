@@ -10,24 +10,33 @@ behaviour plus the four improvements documented in the module header
 exponential backoff).
 """
 
-import io
 import json
 import os
 import socket
-import urllib.error
 
 import pytest
 
+from librefang.sidecar.adapters import signal as sg
 
-os.environ.setdefault("SIGNAL_API_URL", "https://signal.test")
-os.environ.setdefault("SIGNAL_NUMBER", "+15555550100")
-os.environ.setdefault("SIGNAL_ALLOW_LOCAL", "1")
-from librefang.sidecar.adapters import signal as sg  # noqa: E402
-
-from _sidecar_fakes import _FakeResp, _FakeUrlopen, _HdrShim
+from _sidecar_fakes import _FakeUrlopen
 
 
 # ---- _FakeUrlopen scaffolding ----------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolated_signal_env(monkeypatch):
+    defaults = {
+        "SIGNAL_API_URL": "https://signal.test",
+        "SIGNAL_NUMBER": "+15555550100",
+        "SIGNAL_API_KEY": "",
+        "SIGNAL_ALLOWED_USERS": "",
+        "SIGNAL_ACCOUNT_ID": "",
+        "SIGNAL_POLL_INTERVAL_SECS": "",
+        "SIGNAL_ALLOW_LOCAL": "1",
+    }
+    for key, value in defaults.items():
+        monkeypatch.setenv(key, value)
 
 
 def _adapter(**env):
@@ -98,39 +107,33 @@ def test_poll_interval_invalid_falls_back_to_default():
     assert a.poll_interval == sg.DEFAULT_POLL_INTERVAL_SECS
 
 
-def test_missing_api_url_exits_2():
-    os.environ["SIGNAL_API_URL"] = ""
-    os.environ["SIGNAL_NUMBER"] = "+15555550100"
+def test_missing_api_url_exits_2(monkeypatch):
+    monkeypatch.setenv("SIGNAL_API_URL", "")
     with pytest.raises(SystemExit) as exc:
         sg.SignalAdapter()
     assert exc.value.code == 2
-    os.environ["SIGNAL_API_URL"] = "https://signal.test"
 
 
-def test_missing_number_exits_2():
-    os.environ["SIGNAL_NUMBER"] = ""
+def test_missing_number_exits_2(monkeypatch):
+    monkeypatch.setenv("SIGNAL_NUMBER", "")
     with pytest.raises(SystemExit) as exc:
         sg.SignalAdapter()
     assert exc.value.code == 2
-    os.environ["SIGNAL_NUMBER"] = "+15555550100"
 
 
-def test_loopback_url_rejected_without_allow_local():
-    os.environ["SIGNAL_API_URL"] = "http://127.0.0.1:8080"
-    os.environ["SIGNAL_ALLOW_LOCAL"] = "0"
+def test_loopback_url_rejected_without_allow_local(monkeypatch):
+    monkeypatch.setenv("SIGNAL_API_URL", "http://127.0.0.1:8080")
+    monkeypatch.setenv("SIGNAL_ALLOW_LOCAL", "0")
     with pytest.raises(SystemExit) as exc:
         sg.SignalAdapter()
     assert exc.value.code == 2
-    os.environ["SIGNAL_API_URL"] = "https://signal.test"
-    os.environ["SIGNAL_ALLOW_LOCAL"] = "1"
 
 
-def test_loopback_url_allowed_with_allow_local():
-    os.environ["SIGNAL_API_URL"] = "http://127.0.0.1:8080"
-    os.environ["SIGNAL_ALLOW_LOCAL"] = "1"
+def test_loopback_url_allowed_with_allow_local(monkeypatch):
+    monkeypatch.setenv("SIGNAL_API_URL", "http://127.0.0.1:8080")
+    monkeypatch.setenv("SIGNAL_ALLOW_LOCAL", "1")
     a = sg.SignalAdapter()
     assert a.api_url == "http://127.0.0.1:8080"
-    os.environ["SIGNAL_API_URL"] = "https://signal.test"
 
 
 # ---- SSRF guard ------------------------------------------------------
@@ -654,22 +657,22 @@ def test_producer_dedupes_repeated_timestamp(monkeypatch):
     # Compress poll cadence so the test finishes fast.
     a.poll_interval = 0.0
     emitted = []
-    def emit(ev):
-        emitted.append(ev)
-        if len(fake.calls) >= 2:
-            # We've consumed the script; ask the worker to stop.
+    original_poll_once = a._poll_once
+    poll_count = 0
+
+    def poll_once():
+        nonlocal poll_count
+        result = original_poll_once()
+        poll_count += 1
+        if poll_count == 2:
             a._shutdown.set()
-    # The worker exits once the shutdown event is set after the
-    # second poll. To make sure it actually exits even when the
-    # second envelope was deduped, also flip shutdown after a small
-    # sentinel call counter.
-    import threading
-    timer = threading.Timer(2.0, a._shutdown.set)
-    timer.start()
-    try:
-        a._producer_blocking(emit)
-    finally:
-        timer.cancel()
+        return result
+
+    monkeypatch.setattr(a, "_poll_once", poll_once)
+
+    a._producer_blocking(emitted.append)
+
+    assert poll_count == 2
     assert len(emitted) == 1
 
 
