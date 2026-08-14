@@ -271,6 +271,22 @@ describe("applyForeignTerminalFrame (#6390)", () => {
     expect(next[0].memories_used).toEqual(["used"]);
   });
 
+  it("keeps the existing token object when a foreign `response` omits both counts", () => {
+    const tokens = { input: 11, output: 22 };
+    const meteredBubble: TerminalRoutableMessage = {
+      ...bubbleA,
+      tokens,
+    };
+
+    const next = applyForeignTerminalFrame([meteredBubble], {
+      type: "response",
+      message_id: "bot-A",
+      content: "complete",
+    });
+
+    expect(next[0].tokens).toBe(tokens);
+  });
+
   it("accepts explicit zero and empty metadata from a foreign `response`", () => {
     const meteredBubble: TerminalRoutableMessage = {
       ...bubbleA,
