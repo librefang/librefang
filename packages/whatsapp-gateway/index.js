@@ -1417,7 +1417,7 @@ async function executeRelay(relay) {
 
   try {
     const sentRelay = await sock.sendMessage(jid, { text: markdownToWhatsApp(message) });
-    if (ECHO_TRACKER_ENABLED) echoTracker.track(message);
+    if (ECHO_TRACKER_ENABLED) echoTracker.track(jid, message);
 
     // F4: Audit log
     console.log(`[gateway] RELAY SENT | to: ${convo.pushName} (${convo.phone}) [${jid}] | message: "${message.substring(0, 100)}" | timestamp: ${new Date().toISOString()}`);
@@ -2056,7 +2056,7 @@ async function startConnection() {
       // (self-loop prevention when WhatsApp reflects our own message back
       // via sync/cross-device mirror). Flag `LIBREFANG_ECHO_TRACKER=off`
       // disables this gate. Only checks text bodies (never attachments).
-      if (ECHO_TRACKER_ENABLED && messageText && echoTracker.isEcho(messageText)) {
+      if (ECHO_TRACKER_ENABLED && messageText && echoTracker.isEcho(sender, messageText)) {
         console.log(JSON.stringify({
           event: 'echo_drop',
           body_excerpt: EchoTracker.normalize(messageText).slice(0, 80),
@@ -2272,7 +2272,7 @@ async function startConnection() {
               await localSock.sendMessage(sender, { text: formatted, edit: streamMsgKey });
             }
             streamEditFailures = 0;
-            if (ECHO_TRACKER_ENABLED) echoTracker.track(cleaned);
+            if (ECHO_TRACKER_ENABLED) echoTracker.track(sender, cleaned);
           } catch (err) {
             streamEditFailures += 1;
             console.warn(JSON.stringify({
@@ -2362,7 +2362,7 @@ async function startConnection() {
             // accept the last visible chunk as final instead.
             try {
               await s.sendMessage(jid, { text: finalText, edit: streamMsgKey });
-              if (ECHO_TRACKER_ENABLED) echoTracker.track(finalText);
+              if (ECHO_TRACKER_ENABLED) echoTracker.track(jid, finalText);
               console.log(JSON.stringify({
                 event: 'send_message_outbound',
                 kind: 'edit_final',
@@ -2394,7 +2394,7 @@ async function startConnection() {
           // already handles when sendOrEdit's entry-snapshot was null).
           try {
             const sent = await s.sendMessage(jid, { text: finalText });
-            if (ECHO_TRACKER_ENABLED) echoTracker.track(finalText);
+            if (ECHO_TRACKER_ENABLED) echoTracker.track(jid, finalText);
             console.log(JSON.stringify({
               event: 'send_message_outbound',
               kind: 'new_message',
@@ -2449,7 +2449,7 @@ async function startConnection() {
 
               // Send notification to primary owner
               await sock.sendMessage(OWNER_JID, { text: ownerNotif });
-              if (ECHO_TRACKER_ENABLED) echoTracker.track(ownerNotif);
+              if (ECHO_TRACKER_ENABLED) echoTracker.track(OWNER_JID, ownerNotif);
               console.log(`[gateway] NOTIFY_OWNER sent for ${pushName}: ${notif.reason}`);
             }
 
@@ -3404,7 +3404,7 @@ async function runCatchUpSweep() {
         try {
           const formatted = markdownToWhatsApp(response);
           await sock.sendMessage(msg.jid, { text: formatted });
-          if (ECHO_TRACKER_ENABLED) echoTracker.track(response);
+          if (ECHO_TRACKER_ENABLED) echoTracker.track(msg.jid, response);
           dbSaveMessage({ id: randomUUID(), jid: msg.jid, senderJid: ownJid, pushName: null, phone: msg.phone, text: response, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
         } catch (sendErr) {
           console.warn(`[gateway][catchup] Could not send catch-up reply to ${msg.jid}: ${sendErr.message}`);
@@ -3464,7 +3464,7 @@ async function sendMessage(to, text) {
 
   const formatted = markdownToWhatsApp(text);
   const sent = await sock.sendMessage(jid, { text: formatted });
-  if (ECHO_TRACKER_ENABLED) echoTracker.track(text);
+  if (ECHO_TRACKER_ENABLED) echoTracker.track(jid, text);
   // Save outbound message to DB (store formatted text to match what was delivered)
   dbSaveMessage({
     id: sent?.key?.id || randomUUID(),

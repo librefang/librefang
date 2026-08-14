@@ -10,13 +10,21 @@
  *
  * Decisions (see .planning/phases/03-chat-isolation-layer/03-CONTEXT.md §A):
  * - In-memory only, no persistence (Q6 locked).
+ * - Process-local correctness assumes one gateway worker/instance. A shared
+ *   store is required before horizontally-scaled workers can detect each
+ *   other's reflected sends.
  * - maxSize=100 default, LRU eviction on insertion-order.
+ * - Entries expire after five minutes even when traffic stays below maxSize.
+ * - Keys include the destination JID so common replies in separate chats do
+ *   not suppress each other.
  * - Normalization: lowercase + emoji strip + whitespace collapse + trailing
  *   punctuation strip so minor echo rewrites still match.
  */
 class EchoTracker {
-  constructor(maxSize = 100) {
+  constructor(maxSize = 100, ttlMs = 5 * 60 * 1000, now = Date.now) {
     this.max = Math.max(1, Number(maxSize) || 100);
+    this.ttlMs = Math.max(1, Number(ttlMs) || 5 * 60 * 1000);
+    this.now = now;
     this.map = new Map();
     this.lastSentAt = 0;
   }
@@ -31,31 +39,48 @@ class EchoTracker {
       .replace(/[.!?]+$/, '');
   }
 
-  track(body) {
-    const key = EchoTracker.normalize(body);
+  static key(recipientJid, body) {
+    const scope = typeof recipientJid === 'string' ? recipientJid.trim() : '';
+    const normalized = EchoTracker.normalize(body);
+    if (!scope || !normalized) return '';
+    return JSON.stringify([scope, normalized]);
+  }
+
+  pruneExpired(now) {
+    for (const [key, sentAt] of this.map) {
+      if (now - sentAt >= this.ttlMs) this.map.delete(key);
+    }
+  }
+
+  track(recipientJid, body) {
+    const key = EchoTracker.key(recipientJid, body);
     if (!key) return;
+    const now = this.now();
+    this.pruneExpired(now);
     // Refresh insertion order on re-track.
     if (this.map.has(key)) this.map.delete(key);
-    this.map.set(key, Date.now());
-    this.lastSentAt = Date.now();
+    this.map.set(key, now);
+    this.lastSentAt = now;
     while (this.map.size > this.max) {
       const oldest = this.map.keys().next().value;
       this.map.delete(oldest);
     }
   }
 
-  isEcho(body) {
-    const key = EchoTracker.normalize(body);
+  isEcho(recipientJid, body) {
+    const key = EchoTracker.key(recipientJid, body);
     if (!key) return false;
+    this.pruneExpired(this.now());
     return this.map.has(key);
   }
 
   size() {
+    this.pruneExpired(this.now());
     return this.map.size;
   }
 
   elapsedSinceLastSent() {
-    return this.lastSentAt ? Date.now() - this.lastSentAt : -1;
+    return this.lastSentAt ? this.now() - this.lastSentAt : -1;
   }
 
   reset() {

@@ -682,28 +682,36 @@ describe('echo tracker wiring (Phase 3 §A)', () => {
   it('integration: outbound track then inbound echo would drop (raw body)', () => {
     echoTracker.reset();
     // Simulate the outbound wire-in (every sock.sendMessage({ text }) is followed by track)
-    echoTracker.track('ciao');
+    echoTracker.track('alice@s.whatsapp.net', 'ciao');
     // Simulate the inbound gate condition with the same body
-    assert.equal(echoTracker.isEcho('ciao'), true,
+    assert.equal(echoTracker.isEcho('alice@s.whatsapp.net', 'ciao'), true,
       'inbound echo of just-sent message must be detected');
     assert.equal(echoTracker.size(), 1);
   });
 
   it('integration: normalization works through wiring (Hello. -> hello)', () => {
     echoTracker.reset();
-    echoTracker.track('Hello.');
-    assert.equal(echoTracker.isEcho('hello'), true,
+    echoTracker.track('alice@s.whatsapp.net', 'Hello.');
+    assert.equal(echoTracker.isEcho('alice@s.whatsapp.net', 'hello'), true,
       'normalized echo (case + trailing punct) must drop');
-    assert.equal(echoTracker.isEcho('HELLO!'), true);
+    assert.equal(echoTracker.isEcho('alice@s.whatsapp.net', 'HELLO!'), true);
   });
 
   it('integration: unrelated inbound is NOT dropped (no false positive)', () => {
     echoTracker.reset();
-    echoTracker.track('ciao');
-    assert.equal(echoTracker.isEcho('something else'), false,
+    echoTracker.track('alice@s.whatsapp.net', 'ciao');
+    assert.equal(echoTracker.isEcho('alice@s.whatsapp.net', 'something else'), false,
       'unrelated message must pass through (forwardToLibreFang would be called)');
     // tracker unchanged for non-matching probe
     assert.equal(echoTracker.size(), 1);
+  });
+
+  it('integration: identical short text in another JID is not an echo', () => {
+    echoTracker.reset();
+    echoTracker.track('alice@s.whatsapp.net', 'ok');
+    assert.equal(echoTracker.isEcho('bob@s.whatsapp.net', 'OK!'), false,
+      'echo fingerprints must not cross conversation boundaries');
+    assert.equal(echoTracker.isEcho('alice@s.whatsapp.net', 'OK!'), true);
   });
 
   it('flag gate: when LIBREFANG_ECHO_TRACKER=off, gate is bypassed', () => {
@@ -712,7 +720,7 @@ describe('echo tracker wiring (Phase 3 §A)', () => {
     const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'index.js'), 'utf8');
     // The gate must be wrapped in an ECHO_TRACKER_ENABLED check.
     assert.match(src,
-      /if\s*\(\s*ECHO_TRACKER_ENABLED\s*&&\s*messageText\s*&&\s*echoTracker\.isEcho/,
+      /if\s*\(\s*ECHO_TRACKER_ENABLED\s*&&\s*messageText\s*&&\s*echoTracker\.isEcho\(sender,/,
       'inbound gate must be flag-gated by ECHO_TRACKER_ENABLED');
     // Each track call must also be flag-gated.
     const trackCalls = src.match(/echoTracker\.track\(/g) || [];
@@ -740,6 +748,9 @@ describe('echo tracker wiring (Phase 3 §A)', () => {
     const trackCount = (src.match(/echoTracker\.track\(/g) || []).length;
     assert.equal(trackCount, 7,
       `expected 7 echoTracker.track() calls (one per outbound text site), got ${trackCount}`);
+    const scopedTrackCount = (src.match(/echoTracker\.track\([^,]+,/g) || []).length;
+    assert.equal(scopedTrackCount, 7,
+      'every outbound fingerprint must include its destination JID');
     });
 });
 
