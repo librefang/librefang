@@ -374,6 +374,11 @@ class WeComAdapter(SidecarAdapter):
         # that user; subsequent sends fall back to aibot_send_msg.
         self._pending_req_ids: dict[str, str] = {}
         self._pending_lock = threading.Lock()
+        # A passive-reply req_id is one-shot, including a restart-surviving
+        # hint round-tripped through ChannelUser.librefang_user.
+        self._consumed_req_ids = _SeenSet(
+            max_size=SEEN_MESSAGES_MAX, evict=SEEN_MESSAGES_EVICT,
+        )
 
         # Inbound dedupe on req_id (improvement #1).
         self._seen = _SeenSet(
@@ -424,6 +429,8 @@ class WeComAdapter(SidecarAdapter):
         # between inbound and reply), try the round-tripped hint.
         if req_id is None and req_id_hint:
             req_id = req_id_hint
+        if req_id is not None and not self._consumed_req_ids.mark(req_id):
+            req_id = None
         first = chunks[0]
         if req_id:
             self._send_queue.put(_build_reply_frame(req_id, first))
