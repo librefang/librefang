@@ -9,10 +9,17 @@ permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: auto-update-pr-branches
+  cancel-in-progress: false
+
 jobs:
   update-branches:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           # Use a PAT (not the default GITHUB_TOKEN) so the resulting merge
@@ -24,6 +31,12 @@ jobs:
           # that protection.
           github-token: ${{ secrets.WEBSITE_REPO_TOKEN }}
           script: |
+            const {
+              hasFailingStatus,
+              listCheckRuns,
+              listOpenPulls,
+            } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/auto-update-branches.js`);
+
             // Only update PRs whose CI is currently failing. Skipping
             // green / pending PRs avoids a cascade of redundant CI runs
             // every time main moves — the previous unconditional update
@@ -36,35 +49,15 @@ jobs:
             // (b) the merge queue / final pre-merge "Update branch" click
             // still re-validates against fresh main before the actual
             // merge.
-            const FAIL_CONCLUSIONS = new Set([
-              'failure',
-              'timed_out',
-              'action_required',
-              'startup_failure',
-              'cancelled',
-            ]);
-
-            const { data: prs } = await github.rest.pulls.list({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              per_page: 100,
-            });
+            const prs = await listOpenPulls(github, context.repo);
 
             for (const pr of prs) {
               const ref = pr.head.sha;
               let failing = false;
               try {
                 // GitHub Actions check runs (the primary signal for this repo).
-                const checks = await github.rest.checks.listForRef({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  ref,
-                  per_page: 100,
-                });
-                failing = checks.data.check_runs.some(
-                  (r) => r.conclusion && FAIL_CONCLUSIONS.has(r.conclusion),
-                );
+                const checks = await listCheckRuns(github, context.repo, ref);
+                failing = hasFailingStatus(checks, null);
                 // Fall through to legacy commit statuses (third-party CIs
                 // that post via the older statuses API rather than checks).
                 if (!failing) {
@@ -73,7 +66,7 @@ jobs:
                     repo: context.repo.repo,
                     ref,
                   });
-                  failing = status.data.state === 'failure';
+                  failing = hasFailingStatus([], status.data.state);
                 }
               } catch (e) {
                 console.log(`PR #${pr.number}: status query failed (${e.message}) — skipping`);
