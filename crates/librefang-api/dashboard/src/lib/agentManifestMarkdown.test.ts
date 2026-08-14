@@ -295,13 +295,21 @@ describe("generateManifestMarkdown", () => {
 
   it("formats decimal costs only", () => {
     const form = emptyManifestForm();
+    form.resources.max_cost_per_hour_usd = ".5";
+    form.resources.max_cost_per_day_usd = "1.";
+
+    const decimalMd = generateManifestMarkdown(form);
+
+    expect(decimalMd).toContain("| Max cost / hour | $0.50 |");
+    expect(decimalMd).toContain("| Max cost / day | $1.00 |");
+
     form.resources.max_cost_per_hour_usd = "1e2";
     form.resources.max_cost_per_day_usd = "0x10";
 
-    const md = generateManifestMarkdown(form);
+    const nonDecimalMd = generateManifestMarkdown(form);
 
-    expect(md).toContain("| Max cost / hour | 1e2 |");
-    expect(md).toContain("| Max cost / day | 0x10 |");
+    expect(nonDecimalMd).toContain("| Max cost / hour | 1e2 |");
+    expect(nonDecimalMd).toContain("| Max cost / day | 0x10 |");
   });
 
   it("records that an unknown schedule mode has no known details", () => {

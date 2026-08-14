@@ -298,7 +298,7 @@ const pushList = (lines: string[], heading: string, items: string[]): void => {
 const formatCost = (raw: string): string => {
   const trimmed = raw.trim();
   if (!trimmed) return "";
-  if (!/^\d+(?:\.\d+)?$/.test(trimmed)) return trimmed;
+  if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(trimmed)) return trimmed;
   const n = Number(trimmed);
   if (!Number.isFinite(n)) return trimmed;
   return `$${n.toFixed(2)}`;
