@@ -49,6 +49,11 @@ EOF
     exit 127
 fi
 
+if ! command -v git >/dev/null 2>&1; then
+    printf '%s\n' 'error: `git` is required to locate the LibreFang workspace.' >&2
+    exit 127
+fi
+
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 GIT_COMMON_DIR_ABS="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
 MAIN_REPO="$(dirname "$GIT_COMMON_DIR_ABS")"
@@ -76,14 +81,15 @@ if [[ "$(uname -s)" == "Linux" ]]; then
             -v librefang-cargo:/cargo \
             -v librefang-target:/target \
             "$IMAGE" \
-            sh -c "chown -R ${host_uid}:${host_gid} /cargo /target && touch '$marker'"
+            sh -c 'chown -R "$1:$2" /cargo /target && touch "$3"' \
+            sh "$host_uid" "$host_gid" "$marker"
     fi
     user_args=(--user "${host_uid}:${host_gid}")
 fi
 
 # Build the inner command with POSIX-safe single-quote escaping so args containing spaces or quotes survive the `sh -c` wrapper inside the container.
 # Synthesize a container-side gitconfig that `[include]`s the host's gitconfig (mounted at /tmp/host.gitconfig — see mounts below) for user.*/alias.* AND then overrides any `credential.helper` that hard-codes a host-only absolute path. The double `helper =` form first clears (resets) the included value, then installs a relative `!gh auth git-credential` that resolves in both /usr/bin/gh (container) and /opt/homebrew/bin/gh (macOS host PATH). This subsumes the previous `gh auth setup-git` call from #5827 — setup-git tried to write /home/dev/.gitconfig, but that path was mounted :ro from the host, so the write silently failed and the host helper kept winning. Direct synthesis at a writeable path is the only reliable fix.
-inner_cmd='export PATH=/usr/local/cargo/bin:$PATH'
+inner_cmd='export PATH="$CARGO_HOME/bin:$PATH"'
 inner_cmd+=' && if [ -f /tmp/host.gitconfig ]; then'
 inner_cmd+=' printf "[include]\n\tpath = /tmp/host.gitconfig\n[credential]\n\thelper =\n\thelper = !gh auth git-credential\n" > /home/dev/.gitconfig;'
 inner_cmd+=' fi'
@@ -94,19 +100,20 @@ for arg in "$@"; do
 done
 
 mounts=(-v "$REPO_ROOT:/work")
+HOST_HOME="${HOME:-}"
 # Mount the main repo at its host path so the `.git` text-file pointer inside a linked worktree resolves; skip when the worktree IS the main repo (would collide on the same target).
 if [[ "$MAIN_REPO" != "$REPO_ROOT" ]]; then
     mounts+=(-v "$MAIN_REPO:$MAIN_REPO")
 fi
 # Mount the host gitconfig at a side path (NOT directly at $GUEST_HOME/.gitconfig). The inner_cmd above writes a real gitconfig at $GUEST_HOME/.gitconfig that includes this one for user/alias settings but overrides any host-absolute-path credential helper. Mounting directly at $GUEST_HOME/.gitconfig:ro would block both the override and any in-container `git config` from working.
-if [[ -f "$HOME/.gitconfig" ]]; then
-    mounts+=(-v "$HOME/.gitconfig:/tmp/host.gitconfig:ro")
+if [[ -n "$HOST_HOME" && -f "$HOST_HOME/.gitconfig" ]]; then
+    mounts+=(-v "$HOST_HOME/.gitconfig:/tmp/host.gitconfig:ro")
 fi
-if [[ -d "$HOME/.ssh" ]]; then
-    mounts+=(-v "$HOME/.ssh:$GUEST_HOME/.ssh:ro")
+if [[ -n "$HOST_HOME" && -d "$HOST_HOME/.ssh" ]]; then
+    mounts+=(-v "$HOST_HOME/.ssh:$GUEST_HOME/.ssh:ro")
 fi
-if [[ -d "$HOME/.config/gh" ]]; then
-    mounts+=(-v "$HOME/.config/gh:$GUEST_HOME/.config/gh:ro")
+if [[ -n "$HOST_HOME" && -d "$HOST_HOME/.config/gh" ]]; then
+    mounts+=(-v "$HOST_HOME/.config/gh:$GUEST_HOME/.config/gh:ro")
 fi
 
 # Pull the gh token out of the host's keychain (macOS) or wherever `gh auth token` finds it, so the container authenticates even when `~/.config/gh/hosts.yml` carries no token.
