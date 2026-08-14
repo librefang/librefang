@@ -9,7 +9,6 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Fixed
 
-- Remove checked-in iOS placeholders before Tauri initialization, pin and cache Tauri CLI 2.11.4 consistently in smoke/release jobs, and fail early when expected Android NDK tools are absent. (@xiaomo)
 - Escape every TOML control character when the dashboard serializes agent manifest strings, preserving carriage returns, tabs, and other control bytes as valid round-trippable TOML instead of producing a manifest the daemon cannot parse. (@TechWizard9999)
 
 ## [2026.7.31] - 2026-07-31

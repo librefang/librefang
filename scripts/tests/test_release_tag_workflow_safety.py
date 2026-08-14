@@ -262,6 +262,12 @@ def main() -> None:
             for script in install_scripts
         ):
             raise SystemExit(f"{workflow_name} does not install the pinned Tauri CLI")
+        if any(
+            'test "$(cargo tauri --version)" = "tauri-cli $TAURI_CLI_VERSION"'
+            not in script
+            for script in install_scripts
+        ):
+            raise SystemExit(f"{workflow_name} does not verify the installed Tauri CLI")
         ios_init = next(
             (
                 step.get("run", "")

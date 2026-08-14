@@ -117,9 +117,10 @@ jobs:
 
       - name: Install Tauri CLI
         run: |
-          if ! command -v cargo-tauri >/dev/null; then
+          if [ "$(cargo tauri --version 2>/dev/null)" != "tauri-cli $TAURI_CLI_VERSION" ]; then
             cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
           fi
+          test "$(cargo tauri --version)" = "tauri-cli $TAURI_CLI_VERSION"
 
       - name: Build embedded dashboard assets
         working-directory: crates/librefang-api/dashboard
@@ -195,9 +196,10 @@ jobs:
 
       - name: Install Tauri CLI
         run: |
-          if ! command -v cargo-tauri >/dev/null; then
+          if [ "$(cargo tauri --version 2>/dev/null)" != "tauri-cli $TAURI_CLI_VERSION" ]; then
             cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
           fi
+          test "$(cargo tauri --version)" = "tauri-cli $TAURI_CLI_VERSION"
 
       - name: Build embedded dashboard assets
         working-directory: crates/librefang-api/dashboard
