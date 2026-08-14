@@ -10,10 +10,22 @@
 import type { ManifestExtras, ManifestFormState } from "./agentManifest";
 
 const escapeTableCell = (value: string): string =>
-  value.replace(/\|/g, "\\|").replace(/\r\n|\r|\n/g, " ");
+  value
+    .replace(/\\/g, "\\\\")
+    .replace(/`/g, "\\`")
+    .replace(/\|/g, "\\|")
+    .replace(/\r\n|\r|\n/g, " ");
+
+const longestBacktickRun = (content: string): number => {
+  let longestRun = 0;
+  for (const match of content.matchAll(/`+/g)) {
+    longestRun = Math.max(longestRun, match[0].length);
+  }
+  return longestRun;
+};
 
 const markdownCodeSpan = (content: string): string => {
-  const longestRun = Math.max(0, ...(content.match(/`+/g) ?? []).map((run) => run.length));
+  const longestRun = longestBacktickRun(content);
   const fence = "`".repeat(longestRun + 1);
   const needsPadding = content.startsWith("`") || content.endsWith("`");
   const padding = needsPadding ? " " : "";
@@ -21,7 +33,7 @@ const markdownCodeSpan = (content: string): string => {
 };
 
 const pushFencedBlock = (lines: string[], content: string, language = ""): void => {
-  const longestRun = Math.max(0, ...(content.match(/`+/g) ?? []).map((run) => run.length));
+  const longestRun = longestBacktickRun(content);
   const fence = "`".repeat(Math.max(3, longestRun + 1));
   lines.push(`${fence}${language}`, content, fence);
 };
@@ -48,9 +60,9 @@ export const generateManifestMarkdown = (
 
   const meta: string[] = [];
   if (form.author.trim()) meta.push(`**Author**: ${form.author.trim()}`);
-  if (form.module.trim()) meta.push(`**Module**: \`${form.module.trim()}\``);
+  if (form.module.trim()) meta.push(`**Module**: ${markdownCodeSpan(form.module.trim())}`);
   if (form.tags.length) {
-    meta.push(`**Tags**: ${form.tags.map((t) => `\`${t}\``).join(" ")}`);
+    meta.push(`**Tags**: ${form.tags.map(markdownCodeSpan).join(" ")}`);
   }
   meta.push(`**Enabled**: ${form.enabled ? "✓" : "✗"}`);
   if (meta.length) {
@@ -143,15 +155,15 @@ const pushAdvancedFormSections = (lines: string[], form: ManifestFormState): voi
   if (form.schedule.mode !== "reactive") {
     lines.push("## Schedule");
     lines.push("");
-    lines.push(`- **Mode**: \`${form.schedule.mode}\``);
+    lines.push(`- **Mode**: ${markdownCodeSpan(form.schedule.mode)}`);
     if (form.schedule.mode === "periodic") {
-      lines.push(`- **Cron**: \`${form.schedule.cron}\``);
+      lines.push(`- **Cron**: ${markdownCodeSpan(form.schedule.cron)}`);
     } else if (form.schedule.mode === "proactive") {
       if (form.schedule.conditions.length) {
-        lines.push(`- **Conditions**: ${form.schedule.conditions.map((c) => `\`${c}\``).join(", ")}`);
+        lines.push(`- **Conditions**: ${form.schedule.conditions.map(markdownCodeSpan).join(", ")}`);
       }
     } else if (form.schedule.mode === "continuous") {
-      lines.push(`- **Check interval**: \`${form.schedule.check_interval_secs}s\``);
+      lines.push(`- **Check interval**: ${markdownCodeSpan(`${form.schedule.check_interval_secs}s`)}`);
     } else {
       lines.push("- _Details for this schedule mode are not available._");
     }
@@ -206,7 +218,7 @@ const pushAdvancedFormSections = (lines: string[], form: ManifestFormState): voi
     lines.push("");
     form.context_injection.forEach((ci, i) => {
       lines.push(`**${i + 1}. ${ci.name || "(unnamed)"}** _(${ci.position})_`);
-      if (ci.condition) lines.push(`- **Condition**: \`${ci.condition}\``);
+      if (ci.condition) lines.push(`- **Condition**: ${markdownCodeSpan(ci.condition)}`);
       lines.push("");
       pushFencedBlock(lines, ci.content);
       lines.push("");
@@ -234,25 +246,25 @@ const pushAdvancedFormSections = (lines: string[], form: ManifestFormState): voi
 const pushLifecycleOverrides = (lines: string[], form: ManifestFormState): void => {
   const items: string[] = [];
   if (form.priority !== "Normal") {
-    items.push(`- **Priority**: \`${form.priority}\``);
+    items.push(`- **Priority**: ${markdownCodeSpan(form.priority)}`);
   }
   if (form.session_mode !== "persistent") {
-    items.push(`- **session_mode**: \`${form.session_mode}\``);
+    items.push(`- **session_mode**: ${markdownCodeSpan(form.session_mode)}`);
   }
   if (form.web_search_augmentation !== "auto") {
-    items.push(`- **web_search_augmentation**: \`${form.web_search_augmentation}\``);
+    items.push(`- **web_search_augmentation**: ${markdownCodeSpan(form.web_search_augmentation)}`);
   }
   if (form.exec_policy_shorthand) {
-    items.push(`- **exec_policy**: \`${form.exec_policy_shorthand}\``);
+    items.push(`- **exec_policy**: ${markdownCodeSpan(form.exec_policy_shorthand)}`);
   }
   if (form.pinned_model.trim()) {
-    items.push(`- **Pinned model**: \`${form.pinned_model.trim()}\``);
+    items.push(`- **Pinned model**: ${markdownCodeSpan(form.pinned_model.trim())}`);
   }
   if (form.workspace.trim()) {
-    items.push(`- **Workspace**: \`${form.workspace.trim()}\``);
+    items.push(`- **Workspace**: ${markdownCodeSpan(form.workspace.trim())}`);
   }
   if (form.allowed_plugins.length) {
-    items.push(`- **Allowed plugins**: ${form.allowed_plugins.map((p) => `\`${p}\``).join(", ")}`);
+    items.push(`- **Allowed plugins**: ${form.allowed_plugins.map(markdownCodeSpan).join(", ")}`);
   }
   if (form.skills_disabled) items.push("- ⚠️ **Skills disabled**");
   if (form.tools_disabled) items.push("- ⚠️ **Tools disabled**");
@@ -300,7 +312,7 @@ const renderExtras = (extras: ManifestExtras): string[] => {
     lines.push(`### ${label}`);
     lines.push("");
     for (const [key, value] of entries) {
-      lines.push(`- \`${key}\` = ${stringifyExtraValue(value)}`);
+      lines.push(`- ${markdownCodeSpan(key)} = ${stringifyExtraValue(value)}`);
     }
     lines.push("");
   };
@@ -318,18 +330,18 @@ const renderExtras = (extras: ManifestExtras): string[] => {
   renderTable("`[capabilities]` extras", extras.capabilities);
   for (const [key, value] of Object.entries(topNested)) {
     if (isArrayOfObjects(value)) {
-      lines.push(`### \`[[${key}]]\``);
+      lines.push(`### ${markdownCodeSpan(`[[${key}]]`)}`);
       lines.push("");
       const arr = value as Record<string, unknown>[];
       for (let i = 0; i < arr.length; i++) {
         lines.push(`**[${i}]**`);
         for (const [k, v] of Object.entries(arr[i])) {
-          lines.push(`- \`${k}\` = ${stringifyExtraValue(v)}`);
+          lines.push(`- ${markdownCodeSpan(k)} = ${stringifyExtraValue(v)}`);
         }
         lines.push("");
       }
     } else if (isPlainObject(value)) {
-      renderTable(`\`[${key}]\``, value as Record<string, unknown>);
+      renderTable(markdownCodeSpan(`[${key}]`), value as Record<string, unknown>);
     }
   }
   return lines;
@@ -348,7 +360,8 @@ const stringifyExtraValue = (value: unknown): string => {
     return markdownCodeSpan(String(value));
   }
   try {
-    return markdownCodeSpan(JSON.stringify(value));
+    const serialized = JSON.stringify(value);
+    return serialized === undefined ? "_(unrenderable)_" : markdownCodeSpan(serialized);
   } catch {
     return "_(unrenderable)_";
   }

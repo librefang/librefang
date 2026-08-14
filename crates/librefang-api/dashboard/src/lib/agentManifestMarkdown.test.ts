@@ -215,7 +215,7 @@ describe("generateManifestMarkdown", () => {
     form.resources.max_tool_calls_per_minute = "30|40\n50";
     form.fallback_models = [{
       _uid: "fallback-1",
-      provider: "open|router",
+      provider: "open|`router",
       model: "line-one\nline-two",
       api_key_env: "",
       base_url: "",
@@ -225,7 +225,7 @@ describe("generateManifestMarkdown", () => {
     const md = generateManifestMarkdown(form);
 
     expect(md).toContain("| Tool calls / minute | 30\\|40 50 |");
-    expect(md).toContain("| 1 | open\\|router | line-one line-two |");
+    expect(md).toContain("| 1 | open\\|\\`router | line-one line-two |");
   });
 
   it("chooses code fences longer than embedded backtick runs", () => {
@@ -259,6 +259,37 @@ describe("generateManifestMarkdown", () => {
 
     expect(generateManifestMarkdown(form, extras)).toContain(
       '- `note` = ``"before `code` after"``',
+    );
+  });
+
+  it("uses collision-resistant code spans for first-class inline values and extra keys", () => {
+    const form = emptyManifestForm();
+    const extras = emptyManifestExtras();
+    form.module = "builtin:`chat`";
+    form.schedule = { mode: "periodic", cron: "`*/5 * * * *`" };
+    extras.topLevel["tick`rate"] = 5;
+
+    const md = generateManifestMarkdown(form, extras);
+
+    expect(md).toContain("**Module**: `` builtin:`chat` ``");
+    expect(md).toContain("**Cron**: `` `*/5 * * * *` ``");
+    expect(md).toContain("- ``tick`rate`` = `5`");
+  });
+
+  it("handles many separate backtick runs without expanding them as function arguments", () => {
+    const form = emptyManifestForm();
+    form.model.system_prompt = "x`".repeat(150_000);
+
+    expect(() => generateManifestMarkdown(form)).not.toThrow();
+  });
+
+  it("renders unsupported extra values as unrenderable", () => {
+    const form = emptyManifestForm();
+    const extras = emptyManifestExtras();
+    (extras.topLevel as Record<string, unknown>).unsupported = Symbol("unsupported");
+
+    expect(generateManifestMarkdown(form, extras)).toContain(
+      "- `unsupported` = _(unrenderable)_",
     );
   });
 
