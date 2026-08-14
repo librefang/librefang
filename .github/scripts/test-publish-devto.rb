@@ -61,7 +61,14 @@ class DevtoPublishTest < Minitest::Test
     transport = lambda do |method, uri, _payload|
       calls << [method, uri.path, uri.query]
       page = URI.decode_www_form(uri.query).to_h.fetch("page")
-      body = page == "1" ? JSON.generate([{id: 1}, {id: 2}]) : "[]"
+      body = if page == "1"
+               JSON.generate([
+                 {id: 1, title: "One", canonical_url: "https://example.test/one"},
+                 {id: 2, title: "Two", canonical_url: "https://example.test/two"}
+               ])
+             else
+               "[]"
+             end
       [200, body]
     end
     client = DevtoPublish::Client.new(api_key: "secret", page_size: 2, transport: transport)
@@ -84,11 +91,16 @@ class DevtoPublishTest < Minitest::Test
     )
     assert_raises(DevtoPublish::Error) { invalid_inventory.all_articles }
 
+    invalid_match_fields = DevtoPublish::Client.new(
+      api_key: "secret", transport: ->(*) { [200, '[{"id":1,"title":[]}]'] }
+    )
+    assert_raises(DevtoPublish::Error) { invalid_match_fields.all_articles }
+
     duplicate_inventory = DevtoPublish::Client.new(
       api_key: "secret", page_size: 2,
       transport: lambda do |_, uri, _|
         page = URI.decode_www_form(uri.query).to_h.fetch("page")
-        page == "1" ? [200, '[{"id":1},{"id":2}]'] : [200, '[{"id":2}]']
+        page == "1" ? [200, '[{"id":1,"title":"One"},{"id":2,"title":"Two"}]'] : [200, '[{"id":2,"title":"Two"}]']
       end
     )
     assert_raises(DevtoPublish::Error) { duplicate_inventory.all_articles }
@@ -136,6 +148,12 @@ class DevtoPublishTest < Minitest::Test
       transport: ->(*) { [200, JSON.generate({id: 8, url: "https://dev.to/wrong"})] }
     )
     assert_raises(DevtoPublish::Error) { wrong_id.publish(article, id: 7) }
+
+    invalid_url = DevtoPublish::Client.new(
+      api_key: "secret",
+      transport: ->(*) { [200, JSON.generate({id: 7, url: ["not", "a", "url"]})] }
+    )
+    assert_raises(DevtoPublish::Error) { invalid_url.publish(article, id: 7) }
   ensure
     file&.close!
   end
@@ -219,6 +237,36 @@ class DevtoPublishTest < Minitest::Test
   ensure
     by_id&.close!
     by_url&.close!
+  end
+
+  def test_invalid_local_payloads_fail_before_remote_writes
+    invalid_metadata = [
+      "published: \"true\"\ntags: rust",
+      "published: true\ntags: [one, two, three, four, five]",
+      "published: true\ntags: [rust, rust]",
+      "published: true\ntags: rust\ndescription: [not, text]",
+      "published: true\ntags: rust\ncanonical_url: relative/path"
+    ]
+    client = FakeClient.new([])
+    publisher = DevtoPublish::Publisher.new(client: client, output: StringIO.new)
+
+    invalid_metadata.each do |metadata|
+      file = Tempfile.new(["article", ".md"])
+      begin
+        file.write(<<~ARTICLE)
+          ---
+          title: Invalid
+          #{metadata}
+          ---
+          Body
+        ARTICLE
+        file.close
+        assert_raises(DevtoPublish::Error) { publisher.run([file.path]) }
+      ensure
+        file.close!
+      end
+    end
+    assert_empty client.ids
   end
 
   private

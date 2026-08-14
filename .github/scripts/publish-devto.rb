@@ -34,8 +34,15 @@ module DevtoPublish
     raise Error, "#{path}: front matter must be a mapping" unless metadata.is_a?(Hash)
 
     title = metadata["title"]
-    published = metadata["published"] == true
-    if published && (title.nil? || title.to_s.strip.empty?)
+    unless title.nil? || title.is_a?(String)
+      raise Error, "#{path}: title must be a string"
+    end
+    published_value = metadata["published"]
+    unless published_value == true || published_value == false
+      raise Error, "#{path}: published must be a boolean"
+    end
+    published = published_value
+    if published && (title.nil? || title.strip.empty?)
       raise Error, "#{path}: published article has no title"
     end
 
@@ -47,6 +54,27 @@ module DevtoPublish
       raise Error, "#{path}: every tag must be a string"
     end
     tags = tags.map(&:strip).reject(&:empty?)
+    raise Error, "#{path}: articles support at most four tags" if tags.length > 4
+    raise Error, "#{path}: tags must be unique" if tags.uniq.length != tags.length
+
+    optional_strings = %w[description cover_image canonical_url].to_h do |field|
+      value = metadata[field]
+      unless value.nil? || value.is_a?(String)
+        raise Error, "#{path}: #{field} must be a string"
+      end
+      [field, value.to_s]
+    end
+    %w[cover_image canonical_url].each do |field|
+      value = optional_strings.fetch(field)
+      next if value.empty?
+
+      uri = URI.parse(value)
+      unless %w[http https].include?(uri.scheme) && !uri.host.to_s.empty?
+        raise Error, "#{path}: #{field} must be an absolute HTTP(S) URL"
+      end
+    rescue URI::InvalidURIError
+      raise Error, "#{path}: #{field} must be an absolute HTTP(S) URL"
+    end
 
     devto_id = metadata["devto_id"]
     if devto_id && (!devto_id.is_a?(Integer) || devto_id < 1)
@@ -70,10 +98,10 @@ module DevtoPublish
       path: path,
       title: title.to_s.strip,
       published: published,
-      description: metadata["description"].to_s,
+      description: optional_strings.fetch("description"),
       tags: tags,
-      cover_image: metadata["cover_image"].to_s,
-      canonical_url: metadata["canonical_url"].to_s,
+      cover_image: optional_strings.fetch("cover_image"),
+      canonical_url: optional_strings.fetch("canonical_url"),
       devto_id: devto_id,
       body_markdown: body_markdown
     )
@@ -98,7 +126,12 @@ module DevtoPublish
       loop do
         batch = request_json(:get, "articles/me/all?page=#{page}&per_page=#{@page_size}")
         raise Error, "Dev.to articles response is not an array" unless batch.is_a?(Array)
-        unless batch.all? { |item| item.is_a?(Hash) && item["id"].is_a?(Integer) && item["id"].positive? }
+        unless batch.all? do |item|
+            item.is_a?(Hash) &&
+            item["id"].is_a?(Integer) && item["id"].positive? &&
+            item["title"].is_a?(String) &&
+            (item["canonical_url"].nil? || item["canonical_url"].is_a?(String))
+        end
           raise Error, "Dev.to articles response contains an invalid article"
         end
 
@@ -134,7 +167,8 @@ module DevtoPublish
       response = request_json(method, path, payload)
       valid_id = response.is_a?(Hash) && response["id"].is_a?(Integer) && response["id"].positive?
       valid_id &&= response["id"] == id if id
-      unless valid_id && !response["url"].to_s.empty?
+      valid_url = response.is_a?(Hash) && response["url"].is_a?(String) && !response["url"].strip.empty?
+      unless valid_id && valid_url
         raise Error, "Dev.to #{method.upcase} response omitted article id or URL"
       end
       response
