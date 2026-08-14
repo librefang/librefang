@@ -34,6 +34,15 @@ describe("useCronJobs", () => {
     expect(api.listCronJobs).toHaveBeenCalledWith("");
   });
 
+  it("allows callers to disable an unfiltered query explicitly", () => {
+    const { result } = renderHook(() => useCronJobs(undefined, { enabled: false }), {
+      wrapper: createQueryClientWrapper().wrapper,
+    });
+
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(api.listCronJobs).not.toHaveBeenCalled();
+  });
+
   it("should be enabled when agentId is valid string, fetches data", async () => {
     const mockJobs = [
       { id: "job-1", enabled: true, name: "Test Job", schedule: "0 * * * *" },
