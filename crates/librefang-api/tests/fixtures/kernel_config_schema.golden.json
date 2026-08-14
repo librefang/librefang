@@ -4793,7 +4793,7 @@
       "type": "object",
       "properties": {
         "agent_ttl_days": {
-          "description": "AGENT-scope memories expire after this many days of no access.",
+          "description": "AGENT-scope memories expire after this many days of no access. Zero disables expiry.",
           "default": 30,
           "type": "integer",
           "format": "uint32",
@@ -4812,7 +4812,7 @@
           "type": "boolean"
         },
         "session_ttl_days": {
-          "description": "SESSION-scope memories expire after this many days of no access.",
+          "description": "SESSION-scope memories expire after this many days of no access. Zero disables expiry.",
           "default": 7,
           "type": "integer",
           "format": "uint32",

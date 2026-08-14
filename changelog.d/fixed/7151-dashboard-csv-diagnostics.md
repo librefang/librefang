@@ -1,0 +1,1 @@
+- Report malformed quoting, duplicate headers, and accurate source row numbers during dashboard user CSV imports. (#7151) (@houko)

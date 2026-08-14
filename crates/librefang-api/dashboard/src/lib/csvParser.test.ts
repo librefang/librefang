@@ -68,6 +68,28 @@ describe("parseCsvText", () => {
       ["1", "2"],
     ]);
   });
+
+  it("reports an unterminated quoted field", () => {
+    const out = parseCsvText('name,note\nalice,"unfinished\ncontent');
+    expect(out.errors).toEqual(["Record 2: unterminated quoted field."]);
+    expect(out.records[1]).toEqual(["alice", "unfinished\ncontent"]);
+  });
+
+  it("reports and preserves a quote inside an unquoted field", () => {
+    const out = parseCsvText('name,note\nalice,foo"bar,baz\n');
+    expect(out.errors).toEqual([
+      "Record 2: unexpected quote in an unquoted field; treating it literally.",
+    ]);
+    expect(out.records[1]).toEqual(["alice", 'foo"bar', "baz"]);
+  });
+
+  it("reports and preserves text after a closing quote", () => {
+    const out = parseCsvText('name,note\nalice,"quoted"suffix\n');
+    expect(out.errors).toEqual([
+      "Record 2: unexpected character after a closing quote; treating it literally.",
+    ]);
+    expect(out.records[1]).toEqual(["alice", "quotedsuffix"]);
+  });
 });
 
 describe("parseUsersCsv", () => {
@@ -138,6 +160,22 @@ describe("parseUsersCsv", () => {
     const csv = "name,role\nalice,admin\n\n\nbob,user\n";
     const out = parseUsersCsv(csv, ROLES);
     expect(out.rows.map(r => r.name)).toEqual(["alice", "bob"]);
+  });
+
+  it("keeps source row numbers after blank records are filtered", () => {
+    const csv = "name,role\nalice,admin\n\n,wizard\n";
+    const out = parseUsersCsv(csv, ROLES);
+    expect(out.errors).toContain("Row 4: missing name");
+  });
+
+  it("reports duplicate headers instead of silently discarding later values", () => {
+    const out = parseUsersCsv("name,role,telegram,telegram\nalice,user,first,second\n", ROLES);
+    expect(out.errors).toContain("Header: duplicate column 'telegram'.");
+  });
+
+  it("propagates CSV syntax diagnostics to the import preview", () => {
+    const out = parseUsersCsv('name,role\nalice,"admin', ROLES);
+    expect(out.errors).toContain("Record 2: unterminated quoted field.");
   });
 
   it("treats unknown columns as channel bindings", () => {
