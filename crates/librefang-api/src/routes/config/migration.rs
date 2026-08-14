@@ -3,15 +3,16 @@ use super::*;
 fn migration_validation_error(
     error: crate::validation::ValidationError,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if error.status == StatusCode::INTERNAL_SERVER_ERROR {
-        tracing::error!(
-            error = %error.message,
-            "migration path validation failed internally"
-        );
-        return ApiErrorResponse::internal("Internal server error").into_json_tuple();
+    let status = error.status;
+    if status.is_server_error() {
+        return ApiErrorResponse::internal_scrub(error.message)
+            .with_status(status)
+            .into_json_tuple();
     }
 
-    ApiErrorResponse::bad_request(error.message).into_json_tuple()
+    ApiErrorResponse::bad_request(error.message)
+        .with_status(status)
+        .into_json_tuple()
 }
 
 #[utoipa::path(
@@ -246,6 +247,16 @@ mod tests {
     }
 
     #[test]
+    fn migration_validation_preserves_non_400_client_status() {
+        let (status, body) = migration_validation_error(
+            crate::validation::ValidationError::payload_too_large("migration request too large"),
+        );
+
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(body["error"]["message"], "migration request too large");
+    }
+
+    #[test]
     fn migration_validation_scrubs_internal_paths() {
         let (status, body) = migration_validation_error(crate::validation::ValidationError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -253,6 +264,18 @@ mod tests {
         });
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["message"], "Internal server error");
+        assert!(!body.to_string().contains("/srv/private"));
+    }
+
+    #[test]
+    fn migration_validation_scrubs_and_preserves_other_server_statuses() {
+        let (status, body) = migration_validation_error(crate::validation::ValidationError {
+            status: StatusCode::BAD_GATEWAY,
+            message: "upstream path '/srv/private' failed".to_string(),
+        });
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(body["error"]["message"], "Internal server error");
         assert!(!body.to_string().contains("/srv/private"));
     }
