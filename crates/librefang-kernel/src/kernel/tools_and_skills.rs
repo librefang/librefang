@@ -184,6 +184,16 @@ impl LibreFangKernel {
             .filter(|t| Self::is_evolve_tool(&t.name))
             .cloned()
             .collect();
+        // `workflow_create` is a first-class capability: every agent gets
+        // it regardless of profile or capabilities.tools, mirroring the
+        // skill_evolve gate above. The tool is how agents author reusable
+        // workflows; gating it behind a manifest allowlist means curated
+        // profile-scoped manifests can never express the feature. Operators
+        // who want to block it use per-agent `tool_blocklist`.
+        let workflow_create_builtin: Option<ToolDefinition> = all_builtins
+            .iter()
+            .find(|t| t.name == "workflow_create")
+            .cloned();
 
         let mut all_tools: Vec<ToolDefinition> = if !tools_unrestricted {
             // Agent declares specific tools — only include matching builtins.
@@ -231,6 +241,15 @@ impl LibreFangKernel {
                 !Self::is_evolve_tool(&t.name)
                     || declared_tools.iter().any(|d| glob_matches(d, &t.name))
             });
+        }
+
+        // Inject `workflow_create` unconditionally (after the evolve gate so
+        // the two injection blocks stay independent). An explicit
+        // `tool_blocklist` entry still wins in Step 4.
+        if let Some(t) = workflow_create_builtin {
+            if !all_tools.iter().any(|existing| existing.name == t.name) {
+                all_tools.push(t);
+            }
         }
 
         // Step 2: Add skill-provided tools (filtered by agent's skill allowlist,
