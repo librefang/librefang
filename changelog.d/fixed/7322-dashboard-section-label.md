@@ -1,1 +1,1 @@
-- Let dashboard section-label callers reliably override layout classes and centralize compact-label typography tokens. (@xiaomo)
+- Let dashboard section-label callers reliably override layout classes, centralize compact-label typography, and harden Overview range, memoization, timestamp, and typed-navigation contracts. (@xiaomo)
