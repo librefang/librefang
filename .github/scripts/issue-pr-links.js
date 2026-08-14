@@ -42,4 +42,11 @@ async function getIssueOrNull(github, repo, number) {
   }
 }
 
-module.exports = { extractIssueNumbers, getIssueOrNull };
+function hasOpenPeerLink(openPrs, issueNumber, repo, eventPrNumber) {
+  return openPrs.some(
+    candidate => candidate.number !== eventPrNumber &&
+      extractIssueNumbers(candidate.body, repo).has(issueNumber),
+  );
+}
+
+module.exports = { extractIssueNumbers, getIssueOrNull, hasOpenPeerLink };
