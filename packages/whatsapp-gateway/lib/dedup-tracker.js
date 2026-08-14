@@ -21,6 +21,9 @@
  * WhatsApp's own retransmit window is a few seconds, so 60 s is generous.
  */
 function createDedupTracker({ windowMs = 60_000, now = () => Date.now() } = {}) {
+  if (typeof windowMs !== 'number' || !Number.isFinite(windowMs) || windowMs <= 0) {
+    throw new RangeError(`createDedupTracker: windowMs must be a positive number, got ${windowMs}`);
+  }
   const seen = new Map(); // id → timestamp
 
   function prune(nowMs = now()) {
