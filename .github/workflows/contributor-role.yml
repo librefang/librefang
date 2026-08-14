@@ -1,6 +1,11 @@
 name: Contributor Role
 
 on:
+  pull_request:
+    paths:
+      - '.github/scripts/contributor-announcement.sh'
+      - '.github/scripts/tests/contributor-announcement.test.sh'
+      - '.github/workflows/contributor-role.yml'
   pull_request_target:
     types: [closed]
 
@@ -9,18 +14,37 @@ on:
 #   - issues a read-only GitHub Search API call
 #   - posts to a Discord webhook
 # It never writes to the repository, never opens / labels / comments on PRs,
-# and never checks out untrusted code. Anything more than read is excess
-# privilege under `pull_request_target`. See #3547.
+# The PR validation job checks out untrusted code with read-only permissions
+# and no secrets. The announcement job checks out only the default branch.
+# Anything more than read is excess privilege under `pull_request_target`.
+# See #3547.
 permissions:
   contents: read
   pull-requests: read
 
 jobs:
-  assign-role:
-    if: github.event.pull_request.merged == true
+  validate:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Parse announcement helper and tests
+        run: |
+          bash -n .github/scripts/contributor-announcement.sh
+          sh -n .github/scripts/tests/contributor-announcement.test.sh
+      - name: Run announcement tests
+        run: .github/scripts/tests/contributor-announcement.test.sh
+
+  assign-role:
+    if: github.event_name == 'pull_request_target' && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
       - name: Announce in Discord
         shell: bash
         env:
@@ -31,36 +55,4 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
-          set -euo pipefail
-
-          if [[ -z "$DISCORD_WEBHOOK_URL" ]]; then exit 0; fi
-
-          AUTHOR="$PR_AUTHOR"
-          TITLE="$PR_TITLE"
-          NUMBER="$PR_NUMBER"
-          URL="$PR_URL"
-
-          # Exclude this PR explicitly. Search indexing may not include a merge
-          # immediately, but any older merged PR remains enough to classify the
-          # author as a returning contributor.
-          SEARCH_RESPONSE=$(gh api --method GET search/issues \
-            -f q="repo:${GITHUB_REPOSITORY} author:${AUTHOR} is:pr is:merged" \
-            -F per_page=2)
-          PRIOR_COUNT=$(jq -er --argjson current "$NUMBER" \
-            '[.items[] | select(.number != $current)] | length' \
-            <<< "$SEARCH_RESPONSE")
-
-          if (( PRIOR_COUNT == 0 )); then
-            printf -v CONTENT \
-              '🎉 **Welcome our newest contributor!** @%s just merged their first PR!\n\n**%s** ([#%s](%s))\n\nThank you for contributing to LibreFang! 🦊' \
-              "$AUTHOR" "$TITLE" "$NUMBER" "$URL"
-          else
-            printf -v CONTENT '✅ **PR Merged:** %s ([#%s](%s)) by @%s' \
-              "$TITLE" "$NUMBER" "$URL" "$AUTHOR"
-          fi
-
-          jq -n --arg content "$CONTENT" \
-            '{content: $content, allowed_mentions: {parse: []}}' | \
-            curl --fail-with-body --silent --show-error --max-time 20 \
-              -X POST -H 'Content-Type: application/json' \
-              --data-binary @- "$DISCORD_WEBHOOK_URL"
+          bash .github/scripts/contributor-announcement.sh
