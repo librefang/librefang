@@ -1,7 +1,7 @@
 pkgbase = librefang-desktop-bin
 	pkgdesc = Native LibreFang desktop app
 	pkgver = 2026.6.24_beta.23
-	pkgrel = 1
+	pkgrel = 2
 	url = https://librefang.ai
 	arch = x86_64
 	license = MIT
@@ -9,7 +9,7 @@ pkgbase = librefang-desktop-bin
 	depends = webkit2gtk-4.1
 	optdepends = python: first-party channel sidecar adapters when running a local daemon
 	optdepends = docker: Docker-backed tools and sandbox workflows when running a local daemon
-	provides = librefang-desktop
+	provides = librefang-desktop=2026.6.24_beta.23
 	conflicts = librefang-desktop
 	options = !debug
 	source = https://github.com/librefang/librefang/releases/download/v2026.6.24-beta.23/LibreFang_26.6.32263_amd64.deb
