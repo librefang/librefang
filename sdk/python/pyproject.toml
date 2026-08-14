@@ -17,14 +17,14 @@ classifiers = [
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
@@ -48,7 +48,7 @@ exclude = ["examples*"]
 [tool.setuptools.package-data]
 # `sidecar/template/*` ships the adapter scaffold the sidecar docs tell
 # users to copy — without this it is absent from the installed wheel.
-librefang = ["sidecar/template/*"]
+librefang = ["sidecar/template/*", "sidecar/template/**/*"]
 
 # `python_files = ["*.py"]` made pytest import every example *script*
 # as a test module (they target the legacy flat `librefang_sdk`
