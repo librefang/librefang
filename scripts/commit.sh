@@ -57,12 +57,21 @@ if ! mkdir "$WRAPPER_LOCK" 2>/dev/null; then
     echo "  Wait for it to finish, or remove the lock manually if stale." >&2
     exit 2
 fi
-WORK_TMP=$(mktemp -d "${TMPDIR:-/tmp}/librefang-commit.XXXXXX")
+WORK_TMP=""
 cleanup() {
     rmdir "$WRAPPER_LOCK" 2>/dev/null || true
-    rm -rf "$WORK_TMP"
+    if [ -n "$WORK_TMP" ]; then
+        rm -rf -- "$WORK_TMP" 2>/dev/null || true
+    fi
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if ! WORK_TMP=$(mktemp -d "${TMPDIR:-/tmp}/librefang-commit.XXXXXX"); then
+    echo "scripts/commit.sh: failed to create private formatting directory" >&2
+    exit 5
+fi
 
 # ---------------------------------------------------------------------------
 # 2. rustfmt on staged Rust blobs (only if rustfmt is on PATH).

@@ -57,6 +57,18 @@ grep -Fq 'fn still_working(   )' "$WORK/$FILE" || {
     exit 1
 }
 
+# A setup failure after lock acquisition must not strand the wrapper lock.
+MISSING_TMP="$WORK/missing-tmp-root"
+set +e
+(cd "$WORK" && TMPDIR="$MISSING_TMP" "$SCRIPT" -m 'test: temp setup fails') \
+    >/dev/null 2>&1
+tmp_status=$?
+set -e
+if [[ "$tmp_status" != 5 || -e "$WORK/.git/librefang-commit.lock" ]]; then
+    echo "FAIL: temp setup failure returned the wrong status or stranded the lock" >&2
+    exit 1
+fi
+
 mkdir "$WORK/.git/librefang-commit.lock"
 set +e
 lock_output=$(cd "$WORK" && "$SCRIPT" -m 'test: blocked' 2>&1)
