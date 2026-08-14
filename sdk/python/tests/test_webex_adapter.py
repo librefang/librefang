@@ -978,6 +978,31 @@ async def test_on_send_non_text_content_placeholder(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_on_send_text_content_is_authoritative(monkeypatch):
+    fake = _FakeUrlopen([(200, {"id": "REPLY_1"})])
+    monkeypatch.setattr(wa.urllib.request, "urlopen", fake)
+    a = _adapter()
+
+    await a.on_send(_SendCmd(
+        channel_id="ROOM_X", text="", content={"Text": "from content"},
+    ))
+
+    body = json.loads(fake.calls[0]["body_raw"])
+    assert body["text"] == "from content"
+
+
+@pytest.mark.asyncio
+async def test_on_send_empty_text_drops(monkeypatch):
+    fake = _FakeUrlopen([])
+    monkeypatch.setattr(wa.urllib.request, "urlopen", fake)
+    a = _adapter()
+
+    await a.on_send(_SendCmd(channel_id="ROOM_X", text="", content=None))
+
+    assert fake.calls == []
+
+
+@pytest.mark.asyncio
 async def test_on_send_empty_room_id_drops(monkeypatch):
     """No channel_id and no user.platform_id → silent drop with a
     warn log (no urllib call)."""
