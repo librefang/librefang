@@ -1,0 +1,1 @@
+- Reject malformed Hand metadata in the dashboard chat picker and preserve agents that hold multiple Hand roles or memberships. (@xiaomo)
