@@ -50,7 +50,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
-from typing import NamedTuple
+from typing import NamedTuple, NoReturn
 
 # GitHub usernames: 1-39 chars, [A-Za-z0-9-], cannot start with `-`. We don't
 # enforce the upper bound here — the convention itself has no bound — but we
@@ -328,14 +328,22 @@ def resolve_diff_range(args: argparse.Namespace) -> tuple[str, str]:
       2. env vars BASE_SHA / HEAD_SHA (set by CI)
       3. `git merge-base origin/main HEAD` and `HEAD`
     """
-    base = args.base or os.environ.get("BASE_SHA")
-    head = args.head or os.environ.get("HEAD_SHA")
-    if bool(base) != bool(head):
+    def reject_incomplete_range() -> NoReturn:
         sys.stderr.write(
             "Diff range is incomplete. Pass both --base and --head, set both "
             "BASE_SHA and HEAD_SHA, or leave both unset for auto-detection.\n"
         )
         sys.exit(2)
+
+    if bool(args.base) != bool(args.head):
+        reject_incomplete_range()
+    if args.base and args.head:
+        return (args.base, args.head)
+
+    base = os.environ.get("BASE_SHA")
+    head = os.environ.get("HEAD_SHA")
+    if bool(base) != bool(head):
+        reject_incomplete_range()
     if base and head:
         return (base, head)
     # Fallback: derive from local refs.

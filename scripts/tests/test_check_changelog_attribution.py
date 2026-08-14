@@ -99,9 +99,10 @@ class DiffParsingTests(unittest.TestCase):
         diff = "\n".join(
             (
                 "diff --git a/CHANGELOG.md b/CHANGELOG.md",
-                "@@ -1,0 +2,2 @@",
-                "+- Attributed. (@houko)",
+                "@@ -2 +2,2 @@",
+                "-- Replaced line without a newline.",
                 "\\ No newline at end of file",
+                "+- Attributed. (@houko)",
                 "+- Missing attribution.",
             )
         )
@@ -127,6 +128,9 @@ class DiffParsingTests(unittest.TestCase):
             (None, "head", {}),
             (None, None, {"BASE_SHA": "base"}),
             (None, None, {"HEAD_SHA": "head"}),
+            ("cli-base", None, {"HEAD_SHA": "env-head"}),
+            (None, "cli-head", {"BASE_SHA": "env-base"}),
+            ("cli-base", None, {"BASE_SHA": "env-base", "HEAD_SHA": "env-head"}),
         )
         for base, head, environment in cases:
             with (
@@ -138,6 +142,50 @@ class DiffParsingTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as caught:
                     mod.resolve_diff_range(args)
                 self.assertEqual(caught.exception.code, 2)
+
+    def test_staged_no_newline_marker_does_not_advance_post_image_line(self):
+        diff = "\n".join(
+            (
+                "diff --git a/CHANGELOG.md b/CHANGELOG.md",
+                "@@ -2 +2,2 @@",
+                "-- Replaced line without a newline.",
+                "\\ No newline at end of file",
+                "+- Attributed. (@houko)",
+                "+- Missing attribution.",
+            )
+        )
+        staged = "\n".join(
+            (
+                "## [Unreleased]",
+                "- Attributed. (@houko)",
+                "- Missing attribution.",
+                "## [2026.1.1]",
+            )
+        )
+        with patch.object(mod, "run_git", side_effect=(diff, staged)):
+            violations = mod.scan_staged_added_lines(ROOT)
+
+        self.assertEqual(
+            violations,
+            [mod.Violation("CHANGELOG.md", 3, "- Missing attribution.")],
+        )
+
+    def test_complete_cli_range_overrides_environment(self):
+        args = argparse.Namespace(base="cli-base", head="cli-head")
+        with patch.dict(os.environ, {"BASE_SHA": "env-only"}, clear=True):
+            self.assertEqual(
+                mod.resolve_diff_range(args),
+                ("cli-base", "cli-head"),
+            )
+
+    def test_complete_environment_range_is_used(self):
+        args = argparse.Namespace(base=None, head=None)
+        environment = {"BASE_SHA": "env-base", "HEAD_SHA": "env-head"}
+        with patch.dict(os.environ, environment, clear=True):
+            self.assertEqual(
+                mod.resolve_diff_range(args),
+                ("env-base", "env-head"),
+            )
 
 
 if __name__ == "__main__":
