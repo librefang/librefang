@@ -3465,7 +3465,7 @@ export function ChatPage() {
                       <span>{group.hand_name}</span>
                     </h4>
                     {group.agents.map((agent) =>
-                      renderAgentButton(agent, agent.role, agent.isCoordinator, `${group.hand_id}:${agent.role}:${agent.id}`),
+                      renderAgentButton(agent, agent.role, agent.isCoordinator, agent.membershipKey),
                     )}
                   </div>
                 ))}
@@ -3545,7 +3545,7 @@ export function ChatPage() {
                             <span>{group.hand_name}</span>
                           </h4>
                           {group.agents.map((agent) =>
-                            renderAgentButton(agent, agent.role, agent.isCoordinator, `${group.hand_id}:${agent.role}:${agent.id}`),
+                            renderAgentButton(agent, agent.role, agent.isCoordinator, agent.membershipKey),
                           )}
                         </div>
                       ))}

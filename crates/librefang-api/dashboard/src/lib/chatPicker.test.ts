@@ -253,4 +253,29 @@ describe("groupedPicker", () => {
       { hand: "beta", roles: ["researcher"] },
     ]);
   });
+
+  it("keeps identical recovered memberships keyed by instance", () => {
+    const agents = [agent("shared", "shared", { is_hand: true })];
+    const hands = [
+      hand("inst-1", "alpha", "Alpha", { main: "shared" }, "main"),
+      hand("inst-2", "alpha", "Alpha", { main: "shared" }, "main"),
+    ];
+
+    const members = groupedPicker(agents, hands, true).handGroups[0].agents;
+
+    expect(members).toHaveLength(2);
+    expect(new Set(members.map((member) => member.membershipKey)).size).toBe(2);
+  });
+
+  it("normalizes valid membership fields and rejects blank roles", () => {
+    const agents = [agent("a1", "main", { is_hand: true })];
+    const hands = [
+      hand("inst-1", "alpha", "Alpha", { "  main  ": "  a1  ", "   ": "a1" }, " main "),
+    ];
+
+    const members = groupedPicker(agents, hands, true).handGroups[0].agents;
+
+    expect(members).toHaveLength(1);
+    expect(members[0]).toMatchObject({ id: "a1", role: "main", isCoordinator: true });
+  });
 });
