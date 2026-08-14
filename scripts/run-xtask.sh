@@ -70,19 +70,22 @@ user_args=()
 if [[ "$(uname -s)" == "Linux" ]]; then
     host_uid=$(id -u)
     host_gid=$(id -g)
-    marker="/cargo/.owned-by-${host_uid}"
+    cargo_marker="/cargo/.owned-by-${host_uid}-${host_gid}"
+    target_marker="/target/.owned-by-${host_uid}-${host_gid}"
     if ! docker run --rm \
             -v librefang-cargo:/cargo \
+            -v librefang-target:/target \
             "$IMAGE" \
-            test -f "$marker" >/dev/null 2>&1; then
+            sh -c 'test -f "$1" && test -f "$2"' \
+            sh "$cargo_marker" "$target_marker" >/dev/null 2>&1; then
         echo "info: chowning librefang-cargo + librefang-target volumes to ${host_uid}:${host_gid} (one-time)" >&2
         docker run --rm \
             --user 0:0 \
             -v librefang-cargo:/cargo \
             -v librefang-target:/target \
             "$IMAGE" \
-            sh -c 'chown -R "$1:$2" /cargo /target && touch "$3"' \
-            sh "$host_uid" "$host_gid" "$marker"
+            sh -c 'chown -R "$1:$2" /cargo /target && touch "$3" "$4"' \
+            sh "$host_uid" "$host_gid" "$cargo_marker" "$target_marker"
     fi
     user_args=(--user "${host_uid}:${host_gid}")
 fi

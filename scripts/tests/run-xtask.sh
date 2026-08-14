@@ -12,7 +12,13 @@ cat >"$FIXTURE/bin/docker" <<'SH'
 if [ "$1 $2" = "image inspect" ]; then
     exit 0
 fi
-printf '%s\n' "$@" >"${DOCKER_ARGS_LOG:?}"
+{
+    printf '%s\n' '--- docker call ---'
+    printf '%s\n' "$@"
+} >>"${DOCKER_ARGS_LOG:?}"
+case "$*" in
+    *'test -f'*) exit "${DOCKER_MARKER_STATUS:-0}" ;;
+esac
 SH
 chmod +x "$FIXTURE/bin/docker"
 
@@ -37,24 +43,48 @@ esac
 SH
 cat >"$FIXTURE/bin/uname" <<'SH'
 #!/bin/sh
-printf '%s\n' Darwin
+printf '%s\n' "${FAKE_UNAME:-Darwin}"
 SH
-chmod +x "$FIXTURE/bin/git" "$FIXTURE/bin/uname"
+cat >"$FIXTURE/bin/id" <<'SH'
+#!/bin/sh
+case "$1" in
+    -u) printf '%s\n' 1234 ;;
+    -g) printf '%s\n' 5678 ;;
+    *) exit 2 ;;
+esac
+SH
+chmod +x "$FIXTURE/bin/git" "$FIXTURE/bin/uname" "$FIXTURE/bin/id"
 
 env -u HOME \
     PATH="$FIXTURE/bin:/usr/bin:/bin" \
     DOCKER_ARGS_LOG="$FIXTURE/docker.args" \
     LIBREFANG_RUST_FORCE_DOCKER=1 \
-    /bin/bash "$SCRIPT" release --dry-run
+    /bin/bash "$SCRIPT" release --dry-run 'arg with space' "single'quote" '$dollar'
 
 grep -F 'export PATH="$CARGO_HOME/bin:$PATH"' "$FIXTURE/docker.args" >/dev/null
 grep -F "'$FIXTURE/repo:/work'" "$FIXTURE/docker.args" >/dev/null 2>&1 || \
     grep -F "$FIXTURE/repo:/work" "$FIXTURE/docker.args" >/dev/null
+grep -Fq "'arg with space'" "$FIXTURE/docker.args"
+grep -Fq "'single'\\''quote'" "$FIXTURE/docker.args"
+grep -Fq "'\$dollar'" "$FIXTURE/docker.args"
 
-grep -Fq 'sh -c "chown -R ${host_uid}' "$SCRIPT" && {
-    echo "FAIL: chown values are still interpolated into the command string" >&2
+rm "$FIXTURE/docker.args"
+env -u HOME \
+    PATH="$FIXTURE/bin:/usr/bin:/bin" \
+    DOCKER_ARGS_LOG="$FIXTURE/docker.args" \
+    DOCKER_MARKER_STATUS=1 \
+    FAKE_UNAME=Linux \
+    LIBREFANG_RUST_FORCE_DOCKER=1 \
+    /bin/bash "$SCRIPT" release
+
+grep -Fq 'chown -R "$1:$2" /cargo /target && touch "$3" "$4"' \
+    "$FIXTURE/docker.args" || {
+    echo "FAIL: Linux ownership command was not passed literally" >&2
     exit 1
 }
-grep -Fq 'sh "$host_uid" "$host_gid" "$marker"' "$SCRIPT"
+grep -Fxq '1234' "$FIXTURE/docker.args"
+grep -Fxq '5678' "$FIXTURE/docker.args"
+grep -Fxq '/cargo/.owned-by-1234-5678' "$FIXTURE/docker.args"
+grep -Fxq '/target/.owned-by-1234-5678' "$FIXTURE/docker.args"
 
 echo "OK: run-xtask.sh"
