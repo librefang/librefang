@@ -18,8 +18,17 @@ function sendEvent(method, params) {
 }
 
 function handleCommand(cmd) {
+  if (!cmd || typeof cmd !== "object" || Array.isArray(cmd) || typeof cmd.method !== "string") {
+    sendEvent("error", { message: "Invalid command: expected an object with a string method" });
+    return;
+  }
+
   switch (cmd.method) {
-    case "send":
+    case "send": {
+      if (!cmd.params || typeof cmd.params !== "object" || Array.isArray(cmd.params)) {
+        sendEvent("error", { message: "Invalid send params: expected an object" });
+        return;
+      }
       sendEvent("message", {
         user_id: "echo-user",
         user_name: "Echo Bot (Node)",
@@ -27,8 +36,12 @@ function handleCommand(cmd) {
         channel_id: cmd.params?.channel_id || "default",
       });
       break;
+    }
     case "shutdown":
       process.exit(0);
+      break;
+    default:
+      sendEvent("error", { message: `Unsupported command: ${cmd.method}` });
   }
 }
 
