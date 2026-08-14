@@ -12,11 +12,21 @@ ok()    { printf "\033[1;32m✓\033[0m %s\n" "$1"; }
 warn()  { printf "\033[1;33m⚠\033[0m %s\n" "$1"; }
 err()   { printf "\033[1;31m✗\033[0m %s\n" "$1" >&2; exit 1; }
 
+WORK_DIR=""
+CURSOR_HIDDEN=0
+cleanup() {
+  if [ "$CURSOR_HIDDEN" -eq 1 ]; then
+    printf "\033[?25h" > /dev/tty 2>/dev/null || true
+  fi
+  if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
+    rm -rf -- "$WORK_DIR"
+  fi
+}
+trap cleanup EXIT
+
 # --- 1. Check / Install flyctl ---
 if ! command -v flyctl &>/dev/null; then
-  info "Installing flyctl..."
-  curl -sL https://fly.io/install.sh | sh
-  export PATH="$HOME/.fly/bin:$PATH"
+  err "flyctl not found. Install it from https://fly.io/docs/flyctl/install/ and rerun this script."
 fi
 ok "flyctl $(flyctl version 2>&1 | head -1 || echo 'installed')"
 
@@ -28,10 +38,10 @@ fi
 ok "Logged in as $(flyctl auth whoami)"
 
 # --- 3. Clone repo ---
-TMPDIR=$(mktemp -d)
+WORK_DIR=$(mktemp -d)
 info "Cloning LibreFang..."
-git clone --depth 1 "$REPO" "$TMPDIR/librefang"
-cd "$TMPDIR/librefang"
+git clone --depth 1 "$REPO" "$WORK_DIR/librefang"
+cd "$WORK_DIR/librefang"
 
 # --- 4. Name & create app ---
 while true; do
@@ -48,11 +58,13 @@ while true; do
   fi
 
   info "Creating Fly app: $APP_NAME (region: $REGION)..."
-  if flyctl apps create "$APP_NAME" --machines 2>/dev/null; then
+  if create_output=$(flyctl apps create "$APP_NAME" --machines 2>&1); then
     ok "App created: $APP_NAME"
     break
   else
-    warn "Name '$APP_NAME' is already taken. Please choose another name."
+    warn "Could not create app '$APP_NAME':"
+    printf '%s\n' "$create_output" >&2
+    warn "Choose another name or fix the Fly error and retry."
   fi
 done
 
@@ -102,7 +114,7 @@ tui_multiselect() {
 
   # Hide cursor
   printf "\033[?25l" > /dev/tty
-  trap 'printf "\033[?25h" > /dev/tty' RETURN
+  CURSOR_HIDDEN=1
 
   draw_menu() {
     for ((i = 0; i < count; i++)); do
@@ -166,6 +178,8 @@ tui_multiselect() {
     draw_menu
   done
   echo "" > /dev/tty
+  printf "\033[?25h" > /dev/tty
+  CURSOR_HIDDEN=0
 
   SELECTED_INDICES=()
   for ((i = 0; i < count; i++)); do
@@ -180,9 +194,11 @@ tui_multiselect
 for idx in "${SELECTED_INDICES[@]}"; do
   name="${PROVIDER_NAMES[$idx]}"
   env_var="${PROVIDER_KEYS[$idx]}"
-  read -rp "  $name ($env_var): " KEY_VAL < /dev/tty
+  read -rsp "  $name ($env_var): " KEY_VAL < /dev/tty
+  echo "" > /dev/tty
   if [ -n "$KEY_VAL" ]; then
-    flyctl secrets set "$env_var=$KEY_VAL" --app "$APP_NAME"
+    printf '%s=%s\n' "$env_var" "$KEY_VAL" | flyctl secrets import --app "$APP_NAME"
+    KEY_VAL=""
   fi
 done
 
@@ -206,6 +222,3 @@ echo ""
 echo "  To add or change API keys later:"
 echo "    flyctl secrets set <PROVIDER>_API_KEY=your-key --app $APP_NAME"
 echo ""
-
-# Cleanup
-rm -rf "$TMPDIR"

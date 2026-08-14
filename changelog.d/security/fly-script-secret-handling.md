@@ -1,0 +1,1 @@
+Keep Fly provider keys out of terminal echo and process arguments, remove the unverified installer pipeline, clean up terminal/temp state, and make uninstall discovery and partial failures fail closed. (@xiaomo)
