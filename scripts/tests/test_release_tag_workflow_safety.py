@@ -5,7 +5,9 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 import yaml
@@ -179,6 +181,40 @@ def main() -> None:
         dashboard_needs = [dashboard_needs]
     if "validate_release_tag" not in dashboard_needs:
         raise SystemExit("release-cli build_dashboard bypasses release tag validation")
+
+    release_tag_job = documents["release-tag.yml"].get("jobs", {}).get("tag", {})
+    if release_tag_job.get("timeout-minutes") != 10:
+        raise SystemExit("release-tag job does not have the expected timeout")
+    workspace_step = next(
+        (
+            step
+            for step in release_tag_job.get("steps", [])
+            if step.get("name") == "Verify tag matches workspace version"
+        ),
+        None,
+    )
+    workspace_script = workspace_step.get("run") if isinstance(workspace_step, dict) else None
+    if not isinstance(workspace_script, str) or "tomllib.load" not in workspace_script:
+        raise SystemExit("release-tag workflow does not parse workspace version as TOML")
+    manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+    current_version = manifest["workspace"]["package"]["version"]
+    workspace_environment = os.environ.copy()
+    workspace_environment["PATH"] = (
+        f"{Path(sys.executable).parent}{os.pathsep}{workspace_environment['PATH']}"
+    )
+    workspace_result = subprocess.run(
+        ["bash", "-eu", "-o", "pipefail", "-c", workspace_script],
+        cwd=ROOT,
+        env={**workspace_environment, "VERSION": f"v{current_version}"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if workspace_result.returncode != 0:
+        raise SystemExit(
+            "release-tag workspace-version gate rejected the current manifest: "
+            + workspace_result.stderr
+        )
 
     format_step = next(
         (

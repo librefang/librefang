@@ -66,6 +66,7 @@ _474 PRs from 5 contributors since v2026.7.31._
 
 ### Fixed
 
+- Parse manual release tags against Cargo.toml with Python’s TOML parser and bound the privileged tag-creation job to ten minutes. (@xiaomo)
 - Escape every TOML control character when the dashboard serializes agent manifest strings, preserving carriage returns, tabs, and other control bytes as valid round-trippable TOML instead of producing a manifest the daemon cannot parse. (@TechWizard9999)
 - `browser_read_page` no longer drops the destination of every link nested inside a list item, and no longer returns a single card from a feed or search-results page.
   The extraction script's `li` branch flattened the item to `textContent` and returned before descending, so a nested anchor reached the model as bare text with no URL — 1,100 of 1,723 anchors on the Rust Wikipedia article and 11 of 11 on a DuckDuckGo results page.
