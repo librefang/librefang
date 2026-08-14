@@ -20,7 +20,7 @@ title = "LibreFang gitleaks config"
 # Inherit gitleaks' built-in rule set; we only layer allowlist entries on top.
 useDefault = true
 
-[allowlist]
+[[allowlists]]
 description = "Paths and patterns where high-entropy strings are expected and are not real credentials."
 
 # File paths (matched against the path) where high-entropy strings are inherent
@@ -35,9 +35,7 @@ paths = [
   '''(^|/)go\.sum$''',
   '''(^|/)mise\.lock$''',
   '''(^|/)flake\.lock$''',
-  '''\.lock$''',
   # Generated / vendored artifacts.
-  '''^sdk/''',
   '''^openapi\.json$''',
   '''^crates/librefang-api/dashboard/dist/''',
   '''^crates/librefang-api/dashboard/node_modules/''',
@@ -54,45 +52,54 @@ paths = [
   '''(^|/)examples/''',
 ]
 
-# Matched against the detected secret value. Common placeholder shapes that
-# appear in docs and examples. Kept narrow so a real secret cannot hide behind
-# a generic prefix.
+# Matched against the complete detected secret value. Every entry is anchored
+# so a real credential cannot hide by containing a fixture as a substring.
 regexes = [
-  '''(?i)(example|dummy|placeholder|changeme|redacted|your[-_]?(api[-_]?)?(key|token|secret))''',
-  '''AKIA[0-9A-Z]{12}EXAMPLE''',
-  # `api_key_env` (and similar `*_env` config fields) hold an ENV VAR NAME, never
-  # the secret itself — an all-caps `[A-Z0-9_]` identifier with at least one
-  # underscore. Requiring an underscore keeps real AWS keys (AKIA…, no
-  # underscore) in scope. Covers the docs config examples and X_API_KEY-style
-  # source fixtures.
-  '''^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$''',
+  '''^AKIAIOSFODNN7EXAMPLE$''',
   # The canonical jwt.io HS256 example token (its fixed public signature),
   # embedded in JWT-handling tests and docs; not a real signing key.
-  '''SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c''',
+  '''^SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c$''',
   # The `Sec-WebSocket-Key` example value from RFC 6455 section 1.3 — base64 of the ASCII string "the sample nonce".
   # A WebSocket handshake nonce is client-generated per connection and carries no authorization; it is echoed back hashed as `Sec-WebSocket-Accept` purely to prove the peer speaks the protocol.
   # Used verbatim by the raw-socket upgrade tests, which have to write the handshake by hand.
-  '''dGhlIHNhbXBsZSBub25jZQ==''',
+  '''^dGhlIHNhbXBsZSBub25jZQ==$''',
   # Intentional fake credentials embedded in redaction / sanitization / driver
   # tests (the tests assert these get stripped) and one openfang→librefang doc
   # example. Each is a fixed literal or a tight test-only convention, so
   # allowlisting it cannot mask a real secret. The retired detect-secrets
   # baseline covered the same fixtures; add new test fixtures here if they trip
   # the scan, rather than reviving a per-finding snapshot.
-  '''sk-abc123xyz''',
-  '''sk-proj-abcdefg12345''',
-  '''sk-(open|libre)fang-abc123''',
-  '''test-nvidia-key-12345''',
-  '''ABCDEFGHIJ1234567890XYZ''',
-  '''(keep-me|strip-(groq|openai|gemini|suffix))-5006''',
+  '''^sk-abc123xyz$''',
+  '''^sk-proj-abcdefg12345$''',
+  '''^sk-(open|libre)fang-abc123$''',
+  '''^test-nvidia-key-12345$''',
+  '''^ABCDEFGHIJ1234567890XYZ$''',
+  '''^(keep-me|strip-(groq|openai|gemini|suffix))-5006$''',
+  # Exact environment-variable names and credential-shaped literals used by
+  # validation and redaction regressions. Full-value anchors keep unrelated
+  # credentials in scope even when they share a prefix or suffix.
+  '''^(MY_PROVIDER_API_KEY|X_API_KEY|FOO123_API_KEY|LIBREFANG_TEST_MISSING_KEY_ZXQ99|ANTHROPIC_API_KEY_[12])$''',
+  '''^your-api-key$''',
+  '''^ghp_S3nt1nelMustNeverAppearInAnyResponse$''',
+  '''^ghp_SECRETabcdef0123456789SECRETabcdef01$''',
+  '''^ghp_SECRETabcdef0123456789SECRETabcdef0123$''',
+  '''^ghp_abcdefghij1234567890abcdefghij123456$''',
+  '''^ghp_123456789012345678901234567890123456$''',
+  '''^sk_live_abcdef0123456789ABCDEF$''',
+  '''^sk-12345678901234567890123456789012$''',
+  '''^xoxb-0000-0000-xxxxxxxxxxxx$''',
+  '''^AIzaSyDummyGoogleKeyLooksLikeThis00$''',
+  '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c$''',
+  '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NSJ9\.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c$''',
 ]
 
-# A finding whose surrounding context contains one of these substrings is
-# ignored. Conservative list — only unambiguous test / placeholder markers.
+# Stopwords target the extracted secret itself, not the surrounding line.
+# Retain only the project's unambiguous test marker.
 stopwords = [
-  "example",
-  "EXAMPLE",
-  "dummy",
-  "placeholder",
   "test-only",
 ]
+
+[[allowlists]]
+description = "Pre-generated private key used only by the Google Chat adapter tests."
+targetRules = ["private-key"]
+paths = ['''^sdk/python/tests/test_google_chat_adapter\.py$''']
