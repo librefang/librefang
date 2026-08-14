@@ -15,7 +15,7 @@
 
 use librefang_types::config::ProxyConfig;
 use reqwest::Proxy;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 const USER_AGENT: &str = concat!("librefang/", env!("CARGO_PKG_VERSION"));
 
@@ -60,6 +60,41 @@ pub fn tls_config() -> rustls::ClientConfig {
 /// Global proxy configuration, updated on boot and hot-reload.
 static GLOBAL_PROXY: RwLock<Option<ProxyConfig>> = RwLock::new(None);
 
+fn read_proxy_recover(
+    proxy: &RwLock<Option<ProxyConfig>>,
+) -> RwLockReadGuard<'_, Option<ProxyConfig>> {
+    proxy.read().unwrap_or_else(|poisoned| {
+        tracing::warn!("Global proxy configuration lock poisoned; recovering inner state");
+        proxy.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
+fn write_proxy_recover(
+    proxy: &RwLock<Option<ProxyConfig>>,
+) -> (RwLockWriteGuard<'_, Option<ProxyConfig>>, bool) {
+    match proxy.write() {
+        Ok(guard) => (guard, false),
+        Err(poisoned) => {
+            tracing::warn!("Global proxy configuration lock poisoned; recovering inner state");
+            proxy.clear_poison();
+            (poisoned.into_inner(), true)
+        }
+    }
+}
+
+fn update_proxy(
+    proxy: &RwLock<Option<ProxyConfig>>,
+    cfg: ProxyConfig,
+    export_initial: impl FnOnce(&ProxyConfig),
+) {
+    let (mut guard, recovered) = write_proxy_recover(proxy);
+    if guard.is_none() && !recovered {
+        export_initial(&cfg);
+    }
+    *guard = Some(cfg);
+}
+
 /// Updates the global proxy configuration.
 ///
 /// Can be called multiple times (e.g. during hot-reload). Previous values
@@ -78,16 +113,13 @@ static GLOBAL_PROXY: RwLock<Option<ProxyConfig>> = RwLock::new(None);
 /// `GLOBAL_PROXY` only, avoiding the unsound `set_var` in a
 /// multi-threaded context.
 pub fn init_proxy(cfg: ProxyConfig) {
-    // Only export env vars during initial bootstrap (single-threaded context).
-    // During hot-reload GLOBAL_PROXY already has a value, and calling
-    // `std::env::set_var` from a multi-threaded tokio runtime is unsound.
-    let is_initial = GLOBAL_PROXY.read().map(|g| g.is_none()).unwrap_or(true);
-
-    if is_initial {
+    update_proxy(&GLOBAL_PROXY, cfg, |cfg| {
         // SAFETY: `is_initial` is only `true` during the synchronous bootstrap
         // call that happens before the tokio runtime (and its worker threads)
-        // are started.  No other thread exists yet at this point, so
-        // `set_var` cannot race with any concurrent reader.
+        // are started. Callers must preserve that bootstrap contract. The
+        // write guard additionally makes the initial check and state update
+        // one transaction. A poisoned lock never enters this branch because
+        // recovery can happen during hot reload, after worker threads exist.
         if let Some(ref url) = cfg.http_proxy {
             if !url.is_empty() {
                 if is_valid_proxy_url(url) {
@@ -126,11 +158,7 @@ pub fn init_proxy(cfg: ProxyConfig) {
                 }
             }
         }
-    }
-
-    if let Ok(mut guard) = GLOBAL_PROXY.write() {
-        *guard = Some(cfg);
-    }
+    });
 }
 
 /// Check if a proxy URL has a valid scheme.
@@ -143,10 +171,8 @@ fn is_valid_proxy_url(url: &str) -> bool {
 
 /// Return the active proxy config (global or default-empty).
 fn active_proxy() -> ProxyConfig {
-    GLOBAL_PROXY
-        .read()
-        .ok()
-        .and_then(|g| g.clone())
+    read_proxy_recover(&GLOBAL_PROXY)
+        .clone()
         .unwrap_or_default()
 }
 
@@ -306,6 +332,8 @@ pub fn build_http_client(proxy: &ProxyConfig) -> reqwest::ClientBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
 
     #[test]
     fn test_empty_proxy_config_builds_client() {
@@ -347,5 +375,85 @@ mod tests {
         assert!(!is_valid_proxy_url("ftp://proxy:21"));
         assert!(!is_valid_proxy_url("proxy:8080"));
         assert!(!is_valid_proxy_url(""));
+    }
+
+    #[test]
+    fn concurrent_proxy_updates_export_only_once() {
+        let proxy = Arc::new(RwLock::new(None));
+        let exports = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(8));
+        let mut threads = Vec::new();
+
+        for n in 0..8 {
+            let proxy = proxy.clone();
+            let exports = exports.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                update_proxy(
+                    &proxy,
+                    ProxyConfig {
+                        http_proxy: Some(format!("http://proxy-{n}.example.com")),
+                        ..ProxyConfig::default()
+                    },
+                    |_| {
+                        exports.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    },
+                );
+            }));
+        }
+
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        assert_eq!(exports.load(Ordering::SeqCst), 1);
+        assert!(proxy.read().unwrap().is_some());
+    }
+
+    #[test]
+    fn proxy_update_recovers_poison_without_exporting_environment() {
+        let proxy = Arc::new(RwLock::new(None));
+        let poisoned_proxy = proxy.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poisoned_proxy.write().unwrap();
+            panic!("poison proxy lock");
+        });
+        assert!(proxy.is_poisoned());
+
+        let exports = AtomicUsize::new(0);
+        let expected = ProxyConfig {
+            https_proxy: Some("http://recovered.example.com".to_string()),
+            ..ProxyConfig::default()
+        };
+        update_proxy(&proxy, expected.clone(), |_| {
+            exports.fetch_add(1, Ordering::SeqCst);
+        });
+
+        assert_eq!(exports.load(Ordering::SeqCst), 0);
+        assert!(!proxy.is_poisoned());
+        let guard = proxy.read().unwrap();
+        assert_eq!(guard.as_ref().unwrap().https_proxy, expected.https_proxy);
+    }
+
+    #[test]
+    fn proxy_read_recovers_and_clears_poison() {
+        let expected = ProxyConfig {
+            no_proxy: Some("localhost".to_string()),
+            ..ProxyConfig::default()
+        };
+        let proxy = Arc::new(RwLock::new(Some(expected.clone())));
+        let poisoned_proxy = proxy.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poisoned_proxy.write().unwrap();
+            panic!("poison proxy lock");
+        });
+
+        let guard = read_proxy_recover(&proxy);
+        assert_eq!(guard.as_ref().unwrap().no_proxy, expected.no_proxy);
+        drop(guard);
+        assert!(!proxy.is_poisoned());
+        assert!(proxy.read().is_ok());
     }
 }
