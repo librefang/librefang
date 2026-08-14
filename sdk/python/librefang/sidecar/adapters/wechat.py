@@ -354,6 +354,7 @@ class WeChatAdapter(SidecarAdapter):
         self._token_lock = threading.Lock()
         self._cursor = ""
         self._typing_ticket: Optional[str] = None
+        self._ticket_lock = threading.Lock()
         self._context_lock = threading.Lock()
         self._user_context_tokens: dict[str, str] = {}
         self._seen = _SeenSet(
@@ -596,7 +597,8 @@ class WeChatAdapter(SidecarAdapter):
             return
         v = body.get("typing_ticket")
         if isinstance(v, str) and v:
-            self._typing_ticket = v
+            with self._ticket_lock:
+                self._typing_ticket = v
 
     # ---- long-poll ---------------------------------------------------
 
@@ -683,7 +685,10 @@ class WeChatAdapter(SidecarAdapter):
                     retry_after=wait,
                 )
                 if self._shutdown.wait(wait):
-                    return
+                    raise RuntimeError(
+                        "wechat send interrupted by shutdown during 429 "
+                        "backoff; message may be partially delivered",
+                    )
                 status, resp, raw, hdrs = self._post_json(
                     "/ilink/bot/sendmessage", body, token=token,
                 )
@@ -716,7 +721,8 @@ class WeChatAdapter(SidecarAdapter):
         token = self._get_token()
         if token is None:
             return  # not logged in yet
-        ticket = self._typing_ticket
+        with self._ticket_lock:
+            ticket = self._typing_ticket
         if not ticket:
             return  # no ticket primed yet (getconfig pending)
         body = {"to_user_id": to_user_id, "typing_ticket": ticket}
@@ -831,6 +837,7 @@ class WeChatAdapter(SidecarAdapter):
 
         log.info("wechat starting message polling loop")
         backoff = self.initial_backoff_secs
+        login_backoff = self.initial_backoff_secs
         while not self._shutdown.is_set():
             token = self._get_token()
             if token is None:
@@ -846,11 +853,15 @@ class WeChatAdapter(SidecarAdapter):
                     if self._shutdown.is_set():
                         return
                     log.error("wechat QR re-login failed", error=str(e))
-                    if self._shutdown.wait(backoff):
+                    if self._shutdown.wait(login_backoff):
                         return
-                    backoff = min(backoff * 2.0, self.max_backoff_secs)
+                    login_backoff = min(
+                        login_backoff * 2.0, self.max_backoff_secs,
+                    )
                     continue
                 self._set_token(token)
+                backoff = self.initial_backoff_secs
+                login_backoff = self.initial_backoff_secs
                 continue
             try:
                 data = self._poll_updates(token)
@@ -873,7 +884,8 @@ class WeChatAdapter(SidecarAdapter):
 
             ticket = data.get("typing_ticket")
             if isinstance(ticket, str) and ticket:
-                self._typing_ticket = ticket
+                with self._ticket_lock:
+                    self._typing_ticket = ticket
 
             msgs = data.get("msgs")
             if isinstance(msgs, list):

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 
 import pytest
 
@@ -335,6 +336,18 @@ def test_send_text_429_retries_once(monkeypatch):
     a = _adapter()
     a._send_text("alice@im.wechat", "ctx", "hi")
     assert len(calls) == 2  # one 429 + one success
+
+
+def test_send_text_429_shutdown_reports_partial_delivery(monkeypatch):
+    monkeypatch.setattr(
+        wc, "_http_request",
+        lambda url, **kw: (429, None, b"rate limited", {"retry-after": "30"}),
+    )
+    a = _adapter()
+    a._shutdown.set()
+
+    with pytest.raises(RuntimeError, match="partially delivered"):
+        a._send_text("alice@im.wechat", "ctx", "hi")
 
 
 def test_send_text_request_body_shape(monkeypatch):
@@ -735,6 +748,67 @@ def test_send_typing_basic(monkeypatch):
     assert "/ilink/bot/sendtyping" in sent[0][0]
     body = sent[0][1]
     assert body == {"to_user_id": "alice@im.wechat", "typing_ticket": "tk_typing"}
+
+
+def test_send_typing_reads_ticket_under_lock(monkeypatch):
+    called = threading.Event()
+    monkeypatch.setattr(
+        wc, "_http_request",
+        lambda url, **kw: (called.set(), (200, {}, b"", {}))[1],
+    )
+    a = _adapter()
+    a._typing_ticket = "tk"
+    a._ticket_lock.acquire()
+    thread = threading.Thread(
+        target=a._send_typing, args=("alice@im.wechat",), daemon=True,
+    )
+    thread.start()
+    assert not called.wait(0.05)
+
+    a._ticket_lock.release()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert called.is_set()
+
+
+def test_qr_relogin_uses_separate_backoff_and_resets_poll_delay(monkeypatch):
+    a = _adapter(WECHAT_INITIAL_BACKOFF_SECS="2", WECHAT_MAX_BACKOFF_SECS="60")
+    waits: list[float] = []
+    polls = 0
+
+    class _StopLoop(BaseException):
+        pass
+
+    monkeypatch.setattr(a, "_refresh_typing_ticket", lambda token: None)
+
+    def _poll(_token):
+        nonlocal polls
+        polls += 1
+        if polls == 2:
+            with a._token_lock:
+                a.bot_token = None
+        raise RuntimeError("poll unavailable")
+
+    monkeypatch.setattr(a, "_poll_updates", _poll)
+    monkeypatch.setattr(
+        a, "_qr_login", lambda **kwargs: (_ for _ in ()).throw(
+            RuntimeError("login unavailable"),
+        ),
+    )
+
+    def _wait(delay):
+        waits.append(delay)
+        if len(waits) == 4:
+            raise _StopLoop()
+        return False
+
+    monkeypatch.setattr(a._shutdown, "wait", _wait)
+
+    with pytest.raises(_StopLoop):
+        a._poll_loop(lambda _event: None)
+
+    assert waits == [2.0, 4.0, 2.0, 4.0]
 
 
 def test_send_typing_no_ticket_no_call(monkeypatch):
