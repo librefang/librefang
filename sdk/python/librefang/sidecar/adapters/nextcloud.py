@@ -128,6 +128,13 @@ CHAT_FETCH_LIMIT = 100
 SEEN_MESSAGES_MAX = 10000
 SEEN_MESSAGES_EVICT = 5000
 
+
+class _RoomDiscoveryError(RuntimeError):
+    def __init__(self, message: str, *, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 def _parse_rooms(raw: str) -> list[str]:
     """Comma-separated room-token list. Strips whitespace and empty
     entries; preserves order. Empty input → empty list (means 'discover
@@ -374,9 +381,9 @@ class NextcloudAdapter(SidecarAdapter):
     def _list_joined_rooms(self) -> list[str]:
         """Discover joined room tokens via
         ``GET /ocs/v2.php/apps/spreed/api/v4/room?format=json``.
-        Returns an empty list (and logs a warning) on failure — the
-        producer loop then has nothing to poll and bails. Mirrors the
-        Rust adapter's `fetch_rooms` (nextcloud.rs:105-127)."""
+        Returns an empty list only when discovery succeeds and the bot has
+        joined no rooms. Transient and protocol failures are distinct so the
+        producer can apply the appropriate retry delay."""
         url = (
             f"{self.server_url}"
             f"/ocs/v2.php/apps/spreed/api/v4/room?format=json"
@@ -386,31 +393,23 @@ class NextcloudAdapter(SidecarAdapter):
                 url, headers=self._auth_headers(),
             )
         except urllib.error.URLError as e:
-            log.warn(
-                "nextcloud room list transport error",
-                error=str(e),
-            )
-            return []
+            raise _RoomDiscoveryError(
+                f"nextcloud room list transport error: {e}"
+            ) from e
         if status == 429:
-            # Same OCS bruteforce throttling can surface here. Sleeping
-            # is enough — discovery is one-shot, so we just yield no
-            # rooms and let the next producer-loop iteration retry.
             wait = self._retry_after_secs(resp_hdrs)
-            log.warn(
-                "nextcloud 429 on room discovery; sleeping",
-                retry_after_secs=wait,
+            raise _RoomDiscoveryError(
+                "nextcloud 429 on room discovery", retry_after=wait,
             )
-            time.sleep(wait)
-            return []
         if status != 200 or not isinstance(body, dict):
-            log.warn(
-                "nextcloud room list failed",
-                status=status,
+            raise _RoomDiscoveryError(
+                f"nextcloud room list failed with status {status}"
             )
-            return []
         data = body.get("ocs", {}).get("data")
         if not isinstance(data, list):
-            return []
+            raise _RoomDiscoveryError(
+                "nextcloud room list response missing ocs.data array"
+            )
         out: list[str] = []
         for room in data:
             if isinstance(room, dict):
@@ -418,6 +417,30 @@ class NextcloudAdapter(SidecarAdapter):
                 if isinstance(tok, str) and tok:
                     out.append(tok)
         return out
+
+    def _discover_rooms_until_available(self) -> list[str]:
+        """Retry transient discovery failures and genuine empty results."""
+        backoff = 1.0
+        while True:
+            try:
+                rooms = self._list_joined_rooms()
+            except _RoomDiscoveryError as e:
+                delay = e.retry_after if e.retry_after is not None else backoff
+                log.warn(
+                    "nextcloud room discovery failed; will retry",
+                    error=str(e), delay=delay,
+                )
+                time.sleep(delay)
+                backoff = min(backoff * 2, MAX_BACKOFF_SECS)
+                continue
+            if rooms:
+                return rooms
+            backoff = 1.0
+            log.warn(
+                "nextcloud: no joined rooms; discovery will retry",
+                delay=MAX_BACKOFF_SECS,
+            )
+            time.sleep(MAX_BACKOFF_SECS)
 
     # ---- dedupe ------------------------------------------------------
 
@@ -666,18 +689,7 @@ class NextcloudAdapter(SidecarAdapter):
         if self.allowed_rooms:
             rooms = list(self.allowed_rooms)
         else:
-            rooms = self._list_joined_rooms()
-            if not rooms:
-                log.warn(
-                    "nextcloud: no rooms to poll "
-                    "(no NEXTCLOUD_ROOMS configured and the room "
-                    "list endpoint returned empty); adapter will idle"
-                )
-                # Idle indefinitely — there's nothing useful to poll.
-                # The reader/shutdown path still terminates cleanly
-                # via the outer asyncio runtime.
-                while True:
-                    time.sleep(MAX_BACKOFF_SECS)
+            rooms = self._discover_rooms_until_available()
 
         # Initialise watermarks to 0 so the first poll uses
         # `lastKnownMessageId=0` (matching the Rust adapter's
