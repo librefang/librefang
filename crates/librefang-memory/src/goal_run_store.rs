@@ -67,6 +67,19 @@ impl GoalRunStore {
     /// `started_at` is likewise insert-only so later state snapshots cannot
     /// rewrite the run's true start time.
     pub fn save_run(&self, row: &GoalRunRow) -> LibreFangResult<()> {
+        self.upsert_run(row, false)
+    }
+
+    /// Atomically insert a newly started run or replace its durable predecessor.
+    ///
+    /// Unlike [`Self::save_run`], this updates `started_at` on conflict. This
+    /// lets a restarted goal establish a fresh lifetime without a separate
+    /// delete-and-insert window where a crash could lose both rows.
+    pub fn start_run(&self, row: &GoalRunRow) -> LibreFangResult<()> {
+        self.upsert_run(row, true)
+    }
+
+    fn upsert_run(&self, row: &GoalRunRow, replace_started_at: bool) -> LibreFangResult<()> {
         validate_row(row)?;
         let c = self.pool.get().map_err(LibreFangError::memory)?;
         c.execute(
@@ -83,6 +96,7 @@ impl GoalRunStore {
                 max_iterations = excluded.max_iterations,
                 last_progress = excluded.last_progress,
                 last_error = excluded.last_error,
+                started_at = CASE WHEN ?10 THEN excluded.started_at ELSE goal_runs.started_at END,
                 updated_at = excluded.updated_at",
             rusqlite::params![
                 row.goal_id,
@@ -94,6 +108,7 @@ impl GoalRunStore {
                 row.last_error,
                 row.started_at,
                 row.updated_at,
+                replace_started_at,
             ],
         )
         .map_err(|e| LibreFangError::memory_msg(format!("goal run save failed: {e}")))?;
@@ -294,6 +309,23 @@ mod tests {
         let loaded = store.get_run("goal-1").unwrap().unwrap();
         assert_eq!(loaded.started_at, "2026-05-06T00:00:00Z");
         assert_eq!(loaded.updated_at, "2026-05-07T00:00:00Z");
+    }
+
+    #[test]
+    fn start_atomically_replaces_predecessor_started_at() {
+        let store = in_memory_store();
+        let predecessor = sample_row("goal-1", "stopped");
+        store.save_run(&predecessor).unwrap();
+
+        let mut restarted = sample_row("goal-1", "running");
+        restarted.started_at = "2026-05-07T00:00:00Z".to_string();
+        restarted.updated_at = "2026-05-07T00:00:00Z".to_string();
+        store.start_run(&restarted).unwrap();
+
+        let loaded = store.get_run("goal-1").unwrap().unwrap();
+        assert_eq!(loaded.phase, "running");
+        assert_eq!(loaded.started_at, "2026-05-07T00:00:00Z");
+        assert_eq!(store.count_runs().unwrap(), 1);
     }
 
     #[test]

@@ -200,6 +200,15 @@ fn persist_run(store: &Option<GoalRunStore>, state: &GoalRunState) {
     }
 }
 
+/// Persist the first snapshot of a new run, replacing any durable predecessor
+/// in one SQLite statement so a crash cannot land between delete and insert.
+fn persist_new_run(store: &Option<GoalRunStore>, state: &GoalRunState) {
+    let Some(store) = store else { return };
+    if let Err(e) = store.start_run(&row_from_state(state)) {
+        warn!(goal_id = %state.goal_id, "Failed to persist new goal run state: {e}");
+    }
+}
+
 /// Drop the durable mirror once a run ends. Same failure policy as
 /// [`persist_run`]: log and swallow.
 fn delete_persisted_run(store: &Option<GoalRunStore>, goal_id: GoalId) {
@@ -344,15 +353,6 @@ impl GoalRunner {
         // Replace any prior run for this goal. `stop_locked` (not `stop`)
         // because we already hold `start_lock`, which is non-reentrant.
         self.stop_locked(goal_id);
-        // A terminal row can survive a second daemon restart without being
-        // reconstructed into `runs` (recovery only loads stale `running`
-        // rows). Remove any such durable predecessor before inserting the
-        // new run; otherwise the store's update path correctly preserves the
-        // predecessor's `started_at` and makes this run appear older than it
-        // is. The extra delete is harmless when `stop_locked` already removed
-        // a live or recovered in-memory entry.
-        delete_persisted_run(&self.store, goal_id);
-
         let now = Utc::now();
         let initial = GoalRunState {
             goal_id,
@@ -366,8 +366,10 @@ impl GoalRunner {
             updated_at: now,
         };
         // Persist the initial Running row before the first tick so a crash
-        // mid-tick still leaves a recoverable record at the next boot.
-        persist_run(&self.store, &initial);
+        // mid-tick still leaves a recoverable record at the next boot. The
+        // new-run upsert also atomically replaces a terminal predecessor's
+        // start time if one survived an earlier daemon restart.
+        persist_new_run(&self.store, &initial);
         let state = Arc::new(Mutex::new(initial));
         let stop = Arc::new(AtomicBool::new(false));
         let generation = self.next_gen.fetch_add(1, Ordering::SeqCst);
