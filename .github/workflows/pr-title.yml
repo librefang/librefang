@@ -4,10 +4,18 @@ on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
 
+permissions:
+  pull-requests: read
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   check-title:
     name: Validate PR title
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Check conventional commit format
         uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6
@@ -30,7 +38,7 @@ jobs:
             release
           # Allow scope like feat(cli): or fix(kernel):
           requireScope: false
-          # Enforce lowercase after prefix
+          # Require a non-empty subject; case is intentionally unrestricted.
           subjectPattern: ^.+$
           subjectPatternError: |
             PR title "{title}" doesn't follow conventional commit format.
