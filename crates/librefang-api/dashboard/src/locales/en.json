@@ -1323,6 +1323,7 @@
     "add": "Add",
     "filter_all": "All",
     "showing": "Showing {{count}} / {{total}}",
+    "search_result_cap": "first 50 matches",
     "no_memories": "No memories yet",
     "created": "Created",
     "config_title": "Memory Configuration",

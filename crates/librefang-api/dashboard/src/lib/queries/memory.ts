@@ -16,6 +16,8 @@ const REFRESH_MS = 30_000;
 const STALE_MS = 30_000;
 const CONFIG_STALE_MS = 300_000;
 const KV_STALE_MS = 30_000;
+export const MEMORY_PAGE_SIZE = 50;
+const MEMORY_SEARCH_LIMIT = 50;
 
 export const memoryQueries = {
 
@@ -37,25 +39,39 @@ export const memoryQueries = {
 
 
 
-// Propagates `proactive_enabled` from the list endpoint so the page can
-// decide whether to render proactive sections without making a second
-// request. The search endpoint does not expose this flag today; in search
-// mode we leave it `undefined` and let the page rely on the list-mode
-// response (search is hidden when proactive is disabled, so this never
-// becomes ambiguous in practice).
-export const memorySearchOrListQueryOptions = (search: string) =>
+// List mode uses the server's real offset/limit contract. Search has no
+// pagination or total today, so it deliberately returns a named bounded set.
+export interface MemorySearchOrListParams {
+  search: string;
+  agentId?: string;
+  offset?: number;
+  limit?: number;
+}
+
+export const memorySearchOrListQueryOptions = ({
+  search,
+  agentId,
+  offset = 0,
+  limit = MEMORY_PAGE_SIZE,
+}: MemorySearchOrListParams) =>
   queryOptions<{
     memories: MemoryItem[];
     total: number;
     proactive_enabled?: boolean;
   }>({
-    queryKey: memoryKeys.searchOrList(search),
+    queryKey: memoryKeys.searchOrList({ search, agentId, offset, limit }),
     queryFn: async () => {
       if (search.trim()) {
-        const items = await searchMemories({ query: search.trim(), limit: 50 });
+        // Search has no offset/total contract. Keep the server's bounded result
+        // explicit until that endpoint supports real pagination.
+        const items = await searchMemories({
+          query: search.trim(),
+          agentId,
+          limit: MEMORY_SEARCH_LIMIT,
+        });
         return { memories: items, total: items.length };
       }
-      const res = await listMemories({ offset: 0, limit: 10000 });
+      const res = await listMemories({ agentId, offset, limit });
       return {
         memories: res.memories ?? [],
         total: res.total ?? 0,
@@ -67,8 +83,11 @@ export const memorySearchOrListQueryOptions = (search: string) =>
     refetchIntervalInBackground: false, // #3393
   });
 
-export function useMemorySearchOrList(search: string) {
-  return useQuery(memorySearchOrListQueryOptions(search));
+export function useMemorySearchOrList(
+  params: MemorySearchOrListParams,
+  options: QueryOverrides = {},
+) {
+  return useQuery(withOverrides(memorySearchOrListQueryOptions(params), options));
 }
 
 // Per-agent KV memory store. Independent of proactive memory — works even
@@ -90,12 +109,12 @@ export function useAgentKvMemory(agentId: string, options: QueryOverrides = {}) 
   return useQuery(withOverrides(agentKvMemoryQueryOptions(agentId), options));
 }
 
-export function useMemoryStats(agentId?: string) {
-  return useQuery(memoryQueries.stats(agentId));
+export function useMemoryStats(agentId?: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(memoryQueries.stats(agentId), options));
 }
 
-export function useMemoryConfig() {
-  return useQuery(memoryQueries.config());
+export function useMemoryConfig(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(memoryQueries.config(), options));
 }
 
 /**

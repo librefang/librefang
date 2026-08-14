@@ -1,0 +1,1 @@
+Paginate dashboard memory records through the server, derive exact rail counts from statistics queries, and label the bounded search result set instead of silently sampling the first 100 records. (@xiaomo)

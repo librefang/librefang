@@ -34,6 +34,13 @@ import {
 } from "../../lib/mutations/autoDream";
 
 vi.mock("../../lib/queries/memory", () => ({
+  MEMORY_PAGE_SIZE: 50,
+  memoryQueries: {
+    stats: (agentId?: string) => ({
+      queryKey: ["memory", "stats", agentId],
+      queryFn: async () => ({ total: 0 }),
+    }),
+  },
   useMemoryStats: vi.fn(),
   useMemoryConfig: vi.fn(),
   useMemoryHealth: vi.fn(),
@@ -280,10 +287,8 @@ describe("MemoryPage (redesigned)", () => {
 
   it("renders scope summary with totals from useMemoryStats", () => {
     renderPage();
-    // STATS.total = 7 — rendered as the headline number in ScopeSummary
-    // (uniquely "7"; user/session/agent counts of 2/3/2 share digits with
-    // each other so assert on the unique total).
-    expect(screen.getByText("7")).toBeInTheDocument();
+    // STATS.total = 7 — rendered in the summary and records tab badge.
+    expect(screen.getAllByText("7")).toHaveLength(2);
     // session_count=3 is also unique among the breakdown chips.
     expect(screen.getByText("3")).toBeInTheDocument();
   });
@@ -293,6 +298,31 @@ describe("MemoryPage (redesigned)", () => {
     expect(screen.getByText("mem-aaaaaaaa")).toBeInTheDocument();
     expect(screen.getByText("mem-bbbbbbbb")).toBeInTheDocument();
     expect(screen.getByText("remember to water the plants")).toBeInTheDocument();
+  });
+
+  it("pages record-list requests through the server contract", () => {
+    useMemorySearchOrListMock.mockReturnValue({
+      data: { memories: MEMORIES, total: 120, proactive_enabled: true },
+      isLoading: false,
+      isError: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+    renderPage();
+
+    expect(useMemorySearchOrListMock).toHaveBeenLastCalledWith({
+      search: "",
+      agentId: undefined,
+      offset: 0,
+      limit: 50,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "common.next" }));
+    expect(useMemorySearchOrListMock).toHaveBeenLastCalledWith({
+      search: "",
+      agentId: undefined,
+      offset: 50,
+      limit: 50,
+    });
   });
 
   it("switches to KV tab when the KV tab button is clicked", () => {

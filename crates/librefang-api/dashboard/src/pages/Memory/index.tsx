@@ -9,9 +9,9 @@ import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import {
   useMemoryConfig,
-  useMemorySearchOrList,
   useMemoryStats,
   agentKvMemoryQueryOptions,
+  memoryQueries,
 } from "../../lib/queries/memory";
 import { useAgents } from "../../lib/queries/agents";
 import { useAutoDreamStatus } from "../../lib/queries/autoDream";
@@ -61,28 +61,35 @@ export function MemoryPage() {
   const memoryConfigQuery = useMemoryConfig();
 
   // Source of truth for "is proactive memory available right now":
-  //   1. /api/memory response carries `proactive_enabled` (preferred —
-  //      reflects runtime store presence, not just config intent).
+  //   1. /api/memory/stats carries `proactive_enabled` (preferred —
+  //      reflects runtime store presence without loading memory records).
   //   2. Fall back to /api/memory/config while the list query is in flight
   //      so the UI doesn't flicker the disabled notice during load.
   // While both are still loading we default to `true` to avoid flashing
   // the disabled notice on first paint.
-  const memoryQuery = useMemorySearchOrList("");
+  const globalStatsQuery = useMemoryStats();
   const proactiveEnabled =
-    memoryQuery.data?.proactive_enabled ??
+    globalStatsQuery.data?.proactive_enabled ??
     memoryConfigQuery.data?.proactive_memory?.enabled ??
     true;
 
-  // Pre-compute per-agent record counts from the unfiltered memory list so
-  // the rail can show "N mem" next to every agent without re-fetching.
+  // Stats use SQL COUNT queries. This keeps rail totals exact without loading
+  // and rendering the entire memory corpus in the browser.
+  const agentStatsQueries = useQueries({
+    queries: agents.map((agent) => ({
+      ...memoryQueries.stats(agent.id),
+      enabled: proactiveEnabled,
+    })),
+  });
   const recordsByAgentId = useMemo(() => {
     const m = new Map<string, number>();
-    (memoryQuery.data?.memories ?? []).forEach((mem) => {
-      if (mem.agent_id) m.set(mem.agent_id, (m.get(mem.agent_id) ?? 0) + 1);
+    agents.forEach((agent, index) => {
+      const total = agentStatsQueries[index]?.data?.total;
+      if (total !== undefined) m.set(agent.id, total);
     });
     return m;
-  }, [memoryQuery.data]);
-  const totalRecords = memoryQuery.data?.memories?.length ?? 0;
+  }, [agents, agentStatsQueries]);
+  const totalRecords = globalStatsQuery.data?.total ?? 0;
 
   // Per-agent KV: one `useQueries` observer set, owned at the page level so
   // the rail + scope summary + KV tab all share the same observers. Without
@@ -114,13 +121,15 @@ export function MemoryPage() {
     [kvCountByAgentId],
   );
 
-  // Scope summary needs stats narrowed to the selected agent. The endpoint
-  // accepts an agent id and otherwise returns the workspace aggregate; either
-  // way the response shape is MemoryStatsResponse so the UI doesn't branch.
-  const scopedStatsQuery = useMemoryStats(selectedAgentId);
   const scopedAgent = selectedAgentId
     ? agents.find((a) => a.id === selectedAgentId)
     : undefined;
+  const scopedAgentIndex = selectedAgentId
+    ? agents.findIndex((agent) => agent.id === selectedAgentId)
+    : -1;
+  const scopedStats = selectedAgentId
+    ? agentStatsQueries[scopedAgentIndex]?.data
+    : globalStatsQuery.data;
   const dreamForAgent = selectedAgentId
     ? autoDreamQuery.data?.agents.find((a) => a.agent_id === selectedAgentId)
     : undefined;
@@ -167,9 +176,9 @@ export function MemoryPage() {
         badge={t("memory.cognitive_layer")}
         title={t("memory.title")}
         subtitle={t("memory.subtitle")}
-        isFetching={memoryQuery.isFetching || agentsQuery.isFetching}
+        isFetching={globalStatsQuery.isFetching || agentsQuery.isFetching}
         onRefresh={() => {
-          void memoryQuery.refetch();
+          void globalStatsQuery.refetch();
           void agentsQuery.refetch();
           void autoDreamQuery.refetch();
         }}
@@ -200,7 +209,7 @@ export function MemoryPage() {
         <div className="flex-1 min-w-0 flex flex-col gap-4">
           <ScopeSummary
             scopedAgent={scopedAgent}
-            agentStats={scopedStatsQuery.data}
+            agentStats={scopedStats}
             autoDream={autoDreamQuery.data}
             dreamForAgent={dreamForAgent}
             kvCount={scopedKvCount}

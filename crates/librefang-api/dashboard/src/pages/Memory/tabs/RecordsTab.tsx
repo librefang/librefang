@@ -1,4 +1,4 @@
-import { useDeferredValue, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Database, Plus, Search, Trash2, X, Loader2 } from "lucide-react";
 import { Card } from "../../../components/ui/Card";
@@ -6,7 +6,7 @@ import { CardSkeleton } from "../../../components/ui/Skeleton";
 import { EmptyState } from "../../../components/ui/EmptyState";
 import { Button } from "../../../components/ui/Button";
 import { Input } from "../../../components/ui/Input";
-import { useMemorySearchOrList } from "../../../lib/queries/memory";
+import { MEMORY_PAGE_SIZE, useMemorySearchOrList } from "../../../lib/queries/memory";
 import { useCleanupMemories } from "../../../lib/mutations/memory";
 import { useUIStore } from "../../../lib/store";
 import type { MemoryItem } from "../../../api";
@@ -34,9 +34,18 @@ export function RecordsTab({
   const addToast = useUIStore((s) => s.addToast);
   const [search, setSearch] = useState("");
   const [levelFilter, setLevelFilter] = useState<string>("all");
+  const [page, setPage] = useState(0);
   const deferredSearch = useDeferredValue(search);
-  const memoryQuery = useMemorySearchOrList(deferredSearch);
+  const searching = !!deferredSearch.trim();
+  const memoryQuery = useMemorySearchOrList({
+    search: deferredSearch,
+    agentId: scopedAgentId,
+    offset: page * MEMORY_PAGE_SIZE,
+    limit: MEMORY_PAGE_SIZE,
+  });
   const cleanupMutation = useCleanupMemories();
+
+  useEffect(() => setPage(0), [scopedAgentId]);
 
   const allMemories = useMemo(
     () => memoryQuery.data?.memories ?? [],
@@ -44,10 +53,7 @@ export function RecordsTab({
   );
   const totalCount = memoryQuery.data?.total ?? 0;
 
-  const scopedMemories = useMemo(() => {
-    if (!scopedAgentId) return allMemories;
-    return allMemories.filter((m) => m.agent_id === scopedAgentId);
-  }, [allMemories, scopedAgentId]);
+  const scopedMemories = allMemories;
 
   const filteredMemories = useMemo(() => {
     if (levelFilter === "all") return scopedMemories;
@@ -78,13 +84,19 @@ export function RecordsTab({
         <div className="flex-1">
           <Input
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              setPage(0);
+            }}
             placeholder={t("common.search")}
             leftIcon={<Search className="w-4 h-4" />}
             rightIcon={
               search && (
                 <button
-                  onClick={() => setSearch("")}
+                  onClick={() => {
+                    setSearch("");
+                    setPage(0);
+                  }}
                   className="hover:text-text-main"
                   aria-label={t("common.clear_search", { defaultValue: "Clear search" })}
                 >
@@ -148,6 +160,11 @@ export function RecordsTab({
 
       <div className="text-xs text-text-dim">
         {t("memory.showing", { count: filteredMemories.length, total: totalCount })}
+        {searching && totalCount === MEMORY_PAGE_SIZE && (
+          <span className="ml-2 text-text-dim/60">
+            ({t("memory.search_result_cap", { defaultValue: "first 50 matches" })})
+          </span>
+        )}
         {scopedAgentId && (
           <span className="ml-2 text-text-dim/60">
             ({t("memory.records_filtered_to_agent", { defaultValue: "filtered to this agent" })})
@@ -179,11 +196,36 @@ export function RecordsTab({
           icon={<Database className="h-6 w-6" />}
         />
       ) : (
-        <div className="grid gap-4">
-          {filteredMemories.map((m) => (
-            <MemoryRecordCard key={m.id} memory={m} onEdit={onEdit} onDelete={onDelete} />
-          ))}
-        </div>
+        <>
+          <div className="grid gap-4">
+            {filteredMemories.map((m) => (
+              <MemoryRecordCard key={m.id} memory={m} onEdit={onEdit} onDelete={onDelete} />
+            ))}
+          </div>
+          {!searching && totalCount > MEMORY_PAGE_SIZE && (
+            <div className="flex items-center justify-end gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={page === 0 || memoryQuery.isFetching}
+                onClick={() => setPage((value) => Math.max(0, value - 1))}
+              >
+                {t("common.previous")}
+              </Button>
+              <span className="text-xs text-text-dim">
+                {page + 1} / {Math.ceil(totalCount / MEMORY_PAGE_SIZE)}
+              </span>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={(page + 1) * MEMORY_PAGE_SIZE >= totalCount || memoryQuery.isFetching}
+                onClick={() => setPage((value) => value + 1)}
+              >
+                {t("common.next")}
+              </Button>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
