@@ -10,7 +10,11 @@ name: PR Labels
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize, closed]
+    types: [opened, reopened, synchronize]
+
+concurrency:
+  group: pr-labels-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -19,10 +23,8 @@ permissions:
 jobs:
   # ── Area labels based on changed file paths ───────────────────────
   area:
-    if: >-
-      github.event_name == 'pull_request_target' &&
-      github.event.action != 'closed'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0
         with:
