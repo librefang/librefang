@@ -51,15 +51,16 @@ export function formatRelativeTime(value: string | number | Date | undefined | n
   const now = nowMs ?? Date.now();
   if (!Number.isFinite(now)) return "-";
   const diff = now - date.getTime();
-  const seconds = Math.floor(diff / 1000);
+  const direction = diff >= 0 ? -1 : 1;
+  const seconds = Math.floor(Math.abs(diff) / 1000);
   const rtf = getRtf(locale ?? "en");
-  if (seconds < 60) return rtf.format(-seconds, "second");
+  if (seconds < 60) return rtf.format(direction * seconds, "second");
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return rtf.format(-minutes, "minute");
+  if (minutes < 60) return rtf.format(direction * minutes, "minute");
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return rtf.format(-hours, "hour");
+  if (hours < 24) return rtf.format(direction * hours, "hour");
   const days = Math.floor(hours / 24);
-  return rtf.format(-days, "day");
+  return rtf.format(direction * days, "day");
 }
 
 /**

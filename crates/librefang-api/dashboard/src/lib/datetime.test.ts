@@ -22,6 +22,12 @@ describe("date formatting", () => {
     expect(formatRelativeTime(0, "en", Number.NaN)).toBe("-");
     expect(formatRelativeTime(0, "en", Number.POSITIVE_INFINITY)).toBe("-");
   });
+
+  it("selects hour and day units for future dates", () => {
+    const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+    expect(formatRelativeTime(2 * 60 * 60 * 1_000, "en", 0)).toBe(rtf.format(2, "hour"));
+    expect(formatRelativeTime(2 * 24 * 60 * 60 * 1_000, "en", 0)).toBe(rtf.format(2, "day"));
+  });
 });
 
 describe("formatUptime", () => {
