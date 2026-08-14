@@ -1,0 +1,1 @@
+- Wait for dashboard translation initialization before mounting and normalize detected regional locales to supported language codes. (@xiaomo)
