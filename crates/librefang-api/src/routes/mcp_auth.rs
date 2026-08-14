@@ -559,8 +559,9 @@ pub async fn auth_start(
     let pkce_state = format!("{flow_id}.{pkce_random}");
 
     // Store PKCE state in vault under per-flow keys for the callback to retrieve.
-    let flow_vault_key =
-        |field: &str| KernelOAuthProvider::vault_key(&format!("{server_url}:{flow_id}"), field);
+    let flow_key_prefix = format!("{server_url}:{flow_id}");
+    let mut flow_cleanup = FlowVaultCleanup::new(&provider, flow_key_prefix.clone());
+    let flow_vault_key = |field: &str| KernelOAuthProvider::vault_key(&flow_key_prefix, field);
     let store =
         |field: &str, value: &str| -> Result<(), librefang_kernel::mcp_oauth::McpOAuthError> {
             provider.vault_set(&flow_vault_key(field), value)
@@ -606,6 +607,9 @@ pub async fn auth_start(
             return ApiErrorResponse::internal_scrub(e).into_json_tuple();
         }
     }
+    // The callback now owns cleanup. Disarm only after every required field
+    // has been persisted; any earlier return removes partial PKCE state.
+    flow_cleanup.disarm();
 
     // Build authorization URL
     let mut auth_url = format!(
@@ -661,20 +665,38 @@ pub struct AuthCallbackParams {
 
 /// RAII cleanup for the per-flow vault entries written by `auth_start`.
 ///
+/// `auth_start` can fail after writing only part of the flow state, and
 /// `auth_callback` has many early returns (state mismatch, missing PKCE,
 /// SSRF block, token-exchange / parse failures, …) — previously only the
-/// success path removed the per-flow keys, so every failed or abandoned
-/// flow leaked the PKCE verifier and its metadata into the vault forever
-/// (the vault has no TTL). Dropping this guard removes all per-flow fields
-/// on ANY exit once `flow_key_prefix` is known. `vault_remove` is sync, so
-/// it is safe to call from `Drop`.
+/// success path removed the per-flow keys. Dropping an armed guard removes
+/// all per-flow fields on any start or callback failure once
+/// `flow_key_prefix` is known. `vault_remove` is sync, so it is safe to call
+/// from `Drop`.
 struct FlowVaultCleanup<'a> {
     provider: &'a KernelOAuthProvider,
     prefix: String,
+    armed: bool,
+}
+
+impl<'a> FlowVaultCleanup<'a> {
+    fn new(provider: &'a KernelOAuthProvider, prefix: String) -> Self {
+        Self {
+            provider,
+            prefix,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
 }
 
 impl Drop for FlowVaultCleanup<'_> {
     fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
         // Every field `auth_start` writes under `{server_url}:{flow_id}`.
         // `issuer_host` was previously omitted from the success-path cleanup
         // and leaked even on success (#5885-cluster low item).
@@ -779,10 +801,7 @@ pub async fn auth_callback(
     // Remove the per-flow vault entries on every exit from here on — failure,
     // abandonment, or success — not just the happy path. Declared after
     // `provider` so it drops first (while `provider` is still alive).
-    let _flow_cleanup = FlowVaultCleanup {
-        provider: &provider,
-        prefix: flow_key_prefix.clone(),
-    };
+    let _flow_cleanup = FlowVaultCleanup::new(&provider, flow_key_prefix.clone());
     let load = |field: &str| match provider
         .vault_get(&KernelOAuthProvider::vault_key(&flow_key_prefix, field))
     {
@@ -1902,10 +1921,7 @@ mod tests {
         // every per-flow field — including issuer_host, which the old
         // success-only loop omitted.
         {
-            let _guard = FlowVaultCleanup {
-                provider: &provider,
-                prefix: prefix.clone(),
-            };
+            let _guard = FlowVaultCleanup::new(&provider, prefix.clone());
         }
 
         for f in fields {
@@ -1918,6 +1934,30 @@ mod tests {
             );
         }
 
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn disarmed_flow_vault_cleanup_preserves_callback_state() {
+        std::env::set_var(
+            "LIBREFANG_VAULT_KEY",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        );
+        let home =
+            std::env::temp_dir().join(format!("lf-vault-disarm-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let provider = KernelOAuthProvider::new(home.clone());
+        let prefix = "https://mcp.example.com:caller-flow456".to_string();
+        let key = KernelOAuthProvider::vault_key(&prefix, "pkce_state");
+        provider.vault_set(&key, "state").unwrap();
+
+        {
+            let mut guard = FlowVaultCleanup::new(&provider, prefix);
+            guard.disarm();
+        }
+
+        assert_eq!(provider.vault_get(&key).unwrap().as_deref(), Some("state"));
+        provider.vault_remove(&key).unwrap();
         let _ = std::fs::remove_dir_all(&home);
     }
 }
