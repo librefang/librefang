@@ -1438,7 +1438,7 @@
     "topology_description": "高性能事件总线协调。",
     "total_channels": "总通道数",
     "connected": "已连接",
-    "events_today": "今日事件",
+    "recent_events": "最近事件（最多 50 条）",
     "uptime": "运行时间",
     "events": "事件",
     "events_desc": "实时消息事件。",
