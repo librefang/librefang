@@ -9,7 +9,6 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Fixed
 
-- Run Docker CI for every build-context source change, share its amd64 cache with releases, fail immediately on container exit, and probe both liveness and readiness. (@xiaomo)
 - Escape every TOML control character when the dashboard serializes agent manifest strings, preserving carriage returns, tabs, and other control bytes as valid round-trippable TOML instead of producing a manifest the daemon cannot parse. (@TechWizard9999)
 
 ## [2026.7.31] - 2026-07-31

@@ -29,6 +29,8 @@ on:
       - 'sdk/python/librefang/**'
       - 'deploy/**'
       - '.github/workflows/docker-build.yml'
+      - '.github/scripts/docker-smoke.sh'
+      - '.github/scripts/tests/docker-smoke.test.sh'
       # This workflow is the only place the Trivy composite action and its gate script actually execute — the ci.yml lane runs the script's self-test only.
       # Without these two entries an edit to either would first run on an unrelated future push that happens to touch the Dockerfile, turning `main` red with no link back to the change that broke it.
       - '.github/actions/trivy-image-scan/**'
@@ -63,8 +65,8 @@ jobs:
           file: Dockerfile
           load: true
           tags: librefang:ci
-          cache-from: type=gha,scope=linux-amd64
-          cache-to: type=gha,mode=max,scope=linux-amd64
+          cache-from: type=gha,scope=docker-build
+          cache-to: type=gha,mode=max,scope=docker-build
 
       - name: Boot container and probe liveness/readiness
         # First boot writes config and seeds the registry. The helper checks
