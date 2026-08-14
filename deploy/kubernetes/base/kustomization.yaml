@@ -20,4 +20,4 @@ labels:
 #   kustomize edit set image ghcr.io/librefang/librefang=ghcr.io/librefang/librefang:vYYYY.M.D
 images:
   - name: ghcr.io/librefang/librefang
-    newTag: latest
+    newTag: v2026.7.31
