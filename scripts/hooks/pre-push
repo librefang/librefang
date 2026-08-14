@@ -38,13 +38,15 @@ fi
 # per clone with `git config hook.protectedBranches 'main release'`.
 PROTECTED="${LIBREFANG_PROTECTED_BRANCHES:-$(git config --get hook.protectedBranches 2>/dev/null || true)}"
 PROTECTED="${PROTECTED:-main master}"
+ZERO40=0000000000000000000000000000000000000000
+ZERO64=0000000000000000000000000000000000000000000000000000000000000000
+set -f
 while read -r local_ref local_sha remote_ref remote_sha; do
     # The deletion sentinel is an all-zero object ID in the repository's hash
     # width (40 for SHA-1, 64 for SHA-256). Let deletion through for GitHub's
     # authoritative protection rules to decide.
     case "$local_sha" in
-        *[!0]*) ;;
-        *) continue ;;
+        "$ZERO40" | "$ZERO64") continue ;;
     esac
 
     for p in $PROTECTED; do
