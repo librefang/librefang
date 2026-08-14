@@ -1,1 +1,0 @@
-- Make memory decay sweeps atomic, surface malformed access timestamps, and document zero-TTL behavior. (@xiaomo)
