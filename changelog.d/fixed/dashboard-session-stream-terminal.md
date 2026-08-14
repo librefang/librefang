@@ -1,1 +1,0 @@
-Dashboard session lists now update truncation warnings reactively, and attached session streams stop reconnecting after terminal events while normalizing fallback event payloads consistently. (@xiaomo)
