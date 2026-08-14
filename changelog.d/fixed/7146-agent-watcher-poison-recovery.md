@@ -1,0 +1,1 @@
+- Recover poisoned per-agent watcher slots and close registration races so background tasks are aborted when agents stop. (#7146) (@houko)
