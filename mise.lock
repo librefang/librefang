@@ -65,5 +65,5 @@ checksum = "sha256:afc96009dc39fe23a835d65192049e6a995f342496b175585dc2beda7d42d
 url = "https://github.com/pnpm/pnpm/releases/download/v10.33.0/pnpm-win-x64.exe"
 
 [[tools.rust]]
-version = "1.92.0"
+version = "1.94.1"
 backend = "core:rust"
