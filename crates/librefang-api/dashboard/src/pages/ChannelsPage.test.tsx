@@ -260,6 +260,35 @@ describe("ChannelsPage", () => {
     expect(screen.getByRole("button", { name: "common.deselect" })).toBeInTheDocument();
   });
 
+  it("toggles only visible selections when the channel list is filtered", () => {
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({ name: "slack", display_name: "Slack" }),
+        makeChannel({ name: "telegram", display_name: "Telegram" }),
+      ]),
+    );
+    renderPage();
+    const slackCard = screen.getByText("Slack").closest("[role=button]");
+    expect(slackCard).not.toBeNull();
+    fireEvent.click(within(slackCard as HTMLElement).getByRole("button", { name: "common.select" }));
+    fireEvent.change(screen.getByPlaceholderText("common.search"), {
+      target: { value: "tele" },
+    });
+    expect(screen.queryByText("Slack")).not.toBeInTheDocument();
+    expect(screen.getByText("Telegram")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "channels.select_all" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "common.clear_search" }));
+    expect(screen.getAllByRole("button", { name: "common.deselect" })).toHaveLength(2);
+
+    fireEvent.change(screen.getByPlaceholderText("common.search"), {
+      target: { value: "slack" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "channels.select_all" }));
+    fireEvent.click(screen.getByRole("button", { name: "common.clear_search" }));
+    expect(screen.getAllByRole("button", { name: "common.deselect" })).toHaveLength(1);
+  });
+
   it("opens the picker drawer with unconfigured channels", () => {
     useChannelsMock.mockReturnValue(
       makeQuery<ChannelItem[]>([
@@ -600,6 +629,36 @@ describe("ChannelsPage", () => {
     });
     expect(screen.getByText("QR code expired")).toBeInTheDocument();
     expect(screen.getByText("common.retry")).toBeInTheDocument();
+  });
+
+  it("re-enables QR polling when the open details modal switches channels", async () => {
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({ name: "wechat", display_name: "WeChat" }),
+        makeChannel({ name: "telegram", display_name: "Telegram" }),
+      ]),
+    );
+    useChannelQrMock.mockImplementation((channelName: string) =>
+      makeQuery<QrState>({
+        status: channelName === "wechat" ? "expired" : "pending",
+        qr_code: `${channelName}-qr`,
+        updated_at: "2030-01-01T00:00:00Z",
+      }));
+    renderPage();
+    fireEvent.click(screen.getByText("WeChat"));
+    await waitFor(() =>
+      expect(useChannelQrMock).toHaveBeenLastCalledWith(
+        "wechat",
+        expect.objectContaining({ refetchInterval: false }),
+      ));
+
+    fireEvent.click(screen.getByText("Telegram"));
+    await waitFor(() =>
+      expect(useChannelQrMock).toHaveBeenLastCalledWith(
+        "telegram",
+        expect.objectContaining({ enabled: true, refetchInterval: undefined }),
+      ));
+    expect(screen.getByLabelText("mobile_pairing.qr_aria_label")).toBeInTheDocument();
   });
 
   it("hides the section and disables polling when the daemon returns 204 / null", async () => {

@@ -240,6 +240,11 @@ function ChannelQrSection({ channelName, t }: { channelName: string; t: (key: st
   // operator to react.
   const [terminal, setTerminal] = useState(false);
   const [noQrSession, setNoQrSession] = useState(false);
+  useEffect(() => {
+    setTerminal(false);
+    setNoQrSession(false);
+    renderedQrRef.current = null;
+  }, [channelName]);
   const qrQuery = useChannelQr(channelName, {
     enabled: !noQrSession,
     refetchInterval: terminal ? false : undefined,
@@ -849,11 +854,14 @@ export function ChannelsPage() {
     && filteredChannels.every((channel) => selectedIds.has(channel.name));
 
   const handleSelectAll = () => {
-    if (allSelected) {
-      setSelectedIds(new Set());
-    } else {
-      setSelectedIds(new Set(filteredChannels.map(c => c.name)));
-    }
+    setSelectedIds((previous) => {
+      const next = new Set(previous);
+      for (const channel of filteredChannels) {
+        if (allSelected) next.delete(channel.name);
+        else next.add(channel.name);
+      }
+      return next;
+    });
   };
 
   return (
@@ -895,7 +903,7 @@ export function ChannelsPage() {
         <div className="flex-1">
           <Input
             value={search}
-            onChange={(e) => { setSearch(e.target.value); setSelectedIds(new Set()); }}
+            onChange={(e) => setSearch(e.target.value)}
             placeholder={t("common.search")}
             leftIcon={<Search className="w-4 h-4" />}
             rightIcon={search && (
