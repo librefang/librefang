@@ -9,10 +9,15 @@ on:
     - cron: '0 0 * * 1'  # weekly Monday midnight UTC
   workflow_dispatch:
 
+concurrency:
+  group: label-sync
+  cancel-in-progress: false
+
 jobs:
   sync:
     name: Sync labels
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       issues: write
     steps:
