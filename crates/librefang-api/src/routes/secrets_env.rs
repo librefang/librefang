@@ -25,6 +25,35 @@ fn lock_secret_writes() -> MutexGuard<'static, ()> {
     }
 }
 
+fn write_secret_staging_file(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    // Exclusive creation prevents a pre-positioned file or symbolic link at
+    // the predictable staging path from being followed. An open failure means
+    // this call never owned the path, so the caller must not remove it.
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("create {path:?}: {error}"))?;
+    let write_result = file
+        .write_all(contents)
+        .map_err(|error| format!("write {path:?}: {error}"))
+        .and_then(|()| {
+            file.sync_all()
+                .map_err(|error| format!("sync {path:?}: {error}"))
+        });
+    if let Err(error) = write_result {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub fn upsert_secret(path: &Path, key: &str, value: &str) -> Result<(), String> {
     // The dotenv reader (`librefang_extensions::dotenv`) silently strips
     // a matched outer pair of `"..."` / `'...'` and processes escape
@@ -114,26 +143,7 @@ pub fn upsert_secret(path: &Path, key: &str, value: &str) -> Result<(), String> 
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(".secrets.env.tmp.{}.{seq}", std::process::id()));
-    let write_result = (|| -> Result<(), String> {
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut f = options
-            .open(&tmp)
-            .map_err(|e| format!("open {tmp:?}: {e}"))?;
-        f.write_all(out.as_bytes())
-            .map_err(|e| format!("write {tmp:?}: {e}"))?;
-        f.sync_all().map_err(|e| format!("sync {tmp:?}: {e}"))?;
-        Ok(())
-    })();
-    if let Err(error) = write_result {
-        let _ = fs::remove_file(&tmp);
-        return Err(error);
-    }
+    write_secret_staging_file(&tmp, out.as_bytes())?;
 
     if let Err(error) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
@@ -214,6 +224,35 @@ mod tests {
             1,
             "a read failure must not create a secret-bearing staging file"
         );
+    }
+
+    #[test]
+    fn preexisting_staging_file_is_not_overwritten_or_removed() {
+        let dir = TempDir::new().unwrap();
+        let staging = dir.path().join("staging");
+        fs::write(&staging, b"owned by another writer").unwrap();
+
+        let error = write_secret_staging_file(&staging, b"SECRET=value\n").unwrap_err();
+
+        assert!(error.contains("create"), "got: {error}");
+        assert_eq!(fs::read(&staging).unwrap(), b"owned by another writer");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preexisting_staging_symlink_is_not_followed_or_removed() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("target");
+        let staging = dir.path().join("staging");
+        fs::write(&target, b"safe").unwrap();
+        std::os::unix::fs::symlink(&target, &staging).unwrap();
+
+        assert!(write_secret_staging_file(&staging, b"SECRET=value\n").is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"safe");
+        assert!(fs::symlink_metadata(&staging)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]
