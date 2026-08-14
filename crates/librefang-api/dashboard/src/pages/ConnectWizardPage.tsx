@@ -90,26 +90,35 @@ export function ConnectWizardPage() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const creds = await getCredentials();
-      if (!creds || cancelled) return;
       try {
-        // lint-disable-next-line dashboard/no-inline-fetch -- one-shot probe at user-supplied URL, must not be cached
-        const resp = await fetch(`${creds.base_url}/api/health`, {
-          headers: { Authorization: `Bearer ${creds.api_key}` },
-          signal: AbortSignal.timeout(5_000),
-        });
+        const creds = await getCredentials();
+        if (!creds || cancelled) return;
+        let resp: Response;
+        try {
+          // lint-disable-next-line dashboard/no-inline-fetch -- one-shot probe at user-supplied URL, must not be cached
+          resp = await fetch(`${creds.base_url}/api/health`, {
+            headers: { Authorization: `Bearer ${creds.api_key}` },
+            signal: AbortSignal.timeout(5_000),
+          });
+        } catch {
+          if (!cancelled) await clearCredentials();
+          return;
+        }
         if (cancelled) return;
         if (resp.ok) {
           navigateToDashboard(creds.base_url);
         } else {
           await clearCredentials();
         }
-      } catch {
-        if (!cancelled) await clearCredentials();
+      } catch (err: unknown) {
+        if (!cancelled) {
+          setStep("error");
+          setErrorMsg(err instanceof Error ? err.message : t("connect_wizard.error_default_connect"));
+        }
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [t]);
 
   function handleManualSubmit() {
     const url = baseUrl.trim().replace(/\/$/, "");
@@ -141,11 +150,13 @@ export function ConnectWizardPage() {
     setStep("scanning");
     setErrorMsg("");
     try {
-      const raw = await scanQrCode();
-      if (!raw) {
+      const scan = await scanQrCode();
+      if (scan.status === "cancelled" || scan.status === "unsupported") {
         setStep("idle");
         return;
       }
+      if (scan.status === "error") throw scan.error;
+      const raw = scan.content;
       const payload = decodeQrPayload(raw);
       const pairingUrl = payload.base_url.replace(/\/$/, "");
 
