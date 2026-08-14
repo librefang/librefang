@@ -16,17 +16,18 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$REPO_ROOT"
 
 fail=0
+agents_list=$(mktemp "${TMPDIR:-/tmp}/librefang-agents-pair.XXXXXX")
+trap 'rm -f "$agents_list"' EXIT HUP INT TERM
 
-# Capture into a variable first so the loop body runs in the parent
-# shell — `find … | while` would put it in a subshell on POSIX,
-# making the `fail=1` assignment invisible to the outer scope.
-agents_files=$(find . -name AGENTS.md \
-    -not -path './AGENTS.md' \
-    -not -path './target/*' \
-    -not -path './node_modules/*' \
-    -not -path './.git/*' 2>/dev/null)
+# Keep the loop in the parent shell so `fail=1` remains visible. Prune
+# generated/VCS directories by name at any depth. Repository paths cannot
+# contain newlines under this collaboration contract, but may contain spaces.
+find . \
+    \( -type d \( -name .git -o -name target -o -name node_modules \) -prune \) -o \
+    \( -type f -name AGENTS.md ! -path './AGENTS.md' -print \) \
+    >"$agents_list" 2>/dev/null
 
-for agents in $agents_files; do
+while IFS= read -r agents; do
     dir=$(dirname "$agents")
     claude="$dir/CLAUDE.md"
 
@@ -43,14 +44,14 @@ for agents in $agents_files; do
     fi
 
     target=$(readlink "$claude")
-    if [ "$target" != "AGENTS.md" ]; then
-        echo "::error file=$claude::CLAUDE.md symlink points to '$target', expected 'AGENTS.md'."
+    if ! (cd "$dir" && [ CLAUDE.md -ef AGENTS.md ]); then
+        echo "::error file=$claude::CLAUDE.md symlink points to '$target', expected the sibling AGENTS.md."
         fail=1
         continue
     fi
 
     echo "ok: $agents <-> $claude"
-done
+done <"$agents_list"
 
 if [ "$fail" != "0" ]; then
     echo
