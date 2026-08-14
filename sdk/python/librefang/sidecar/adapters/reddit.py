@@ -111,6 +111,7 @@ import asyncio
 import base64
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -171,6 +172,15 @@ PLACEHOLDER_UA_FRAGMENTS = ("librefang-bot", "/u/your", "/u/example")
 # reset so we don't burn through the budget and trip a 429. Capped at
 # MAX_BACKOFF_SECS so we never block the poller for more than a minute.
 RATELIMIT_REMAINING_FLOOR = 10.0
+
+
+def _is_reddit_fullname(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and value.startswith(("t1_", "t3_", "t4_", "t5_"))
+        and " " not in value
+        and "/" not in value
+    )
 # Default Retry-After when Reddit 429s without the header (rare but
 # documented). 60 s matches Reddit's API guideline minimum back-off.
 RETRY_AFTER_DEFAULT_SECS = 60.0
@@ -373,6 +383,7 @@ class RedditAdapter(SidecarAdapter):
 
         # OAuth2 token cache: (access_token, monotonic_expiry_seconds).
         self._cached_token: tuple[str, float] | None = None
+        self._token_lock = threading.Lock()
         # Discovered at startup via _verify_credentials().
         self.own_username: str = ""
         # Dedupe set for already-seen comment IDs. Capped by
@@ -518,13 +529,20 @@ class RedditAdapter(SidecarAdapter):
 
     def _get_token(self) -> str:
         """Return a valid bearer token, fetching / refreshing as needed."""
-        if self._cached_token is not None:
-            token, expiry = self._cached_token
-            if time.monotonic() < expiry:
-                return token
-        token, expiry = self._fetch_token()
-        self._cached_token = (token, expiry)
-        return token
+        with self._token_lock:
+            if self._cached_token is not None:
+                token, expiry = self._cached_token
+                if time.monotonic() < expiry:
+                    return token
+            token, expiry = self._fetch_token()
+            self._cached_token = (token, expiry)
+            return token
+
+    def _invalidate_token(self, rejected_token: str) -> None:
+        with self._token_lock:
+            if (self._cached_token is not None
+                    and self._cached_token[0] == rejected_token):
+                self._cached_token = None
 
     def _verify_credentials(self) -> str:
         """Call ``GET /api/v1/me`` to validate the token and discover the
@@ -546,7 +564,7 @@ class RedditAdapter(SidecarAdapter):
 
     # ---- inbound: poll new comments per subreddit --------------------
 
-    def _mark_seen(self, comment_id: str) -> None:
+    def _mark_seen(self, comment_id: str) -> bool:
         """Return True iff freshly seen. Shim around :class:`librefang.sidecar.common.SeenSet`."""
         return self._seen.mark(comment_id)
 
@@ -577,7 +595,7 @@ class RedditAdapter(SidecarAdapter):
                 continue
             if status == 401:
                 # Clear the cached token; caller backs off and retries.
-                self._cached_token = None
+                self._invalidate_token(token)
                 raise RuntimeError("reddit 401 — token expired")
             if status == 429:
                 # Rate-limited mid-poll. Honour Retry-After (or our
@@ -637,11 +655,11 @@ class RedditAdapter(SidecarAdapter):
                     # the redundant-parse case).
                     self._mark_seen(comment_id)
                     continue
-                self._mark_seen(comment_id)
                 if self.account_id is not None:
                     meta = ev["params"].setdefault("metadata", {})
                     meta["account_id"] = self.account_id
                 emit(ev)
+                self._mark_seen(comment_id)
 
     def _producer_blocking(self, emit) -> None:
         """Verify credentials then poll forever in this worker thread.
@@ -711,7 +729,7 @@ class RedditAdapter(SidecarAdapter):
         )
         if status == 401:
             # Token expired mid-send: refresh once and retry.
-            self._cached_token = None
+            self._invalidate_token(token)
             token = self._get_token()
             headers["Authorization"] = f"Bearer {token}"
             status, resp, raw, resp_hdrs = self._http(
@@ -774,16 +792,14 @@ class RedditAdapter(SidecarAdapter):
         user = getattr(cmd, "user", None) or {}
         if isinstance(user, dict):
             candidate = user.get("librefang_user")
-            if (isinstance(candidate, str)
-                    and candidate.startswith(("t1_", "t3_", "t4_", "t5_"))
-                    and " " not in candidate
-                    and "/" not in candidate):
+            if _is_reddit_fullname(candidate):
                 parent_fullname = candidate
         if parent_fullname is None:
             thread_id = getattr(cmd, "thread_id", None)
             if thread_id is not None and not isinstance(thread_id, str):
                 thread_id = str(thread_id) if thread_id else None
-            parent_fullname = thread_id
+            if _is_reddit_fullname(thread_id):
+                parent_fullname = thread_id
 
         await asyncio.get_event_loop().run_in_executor(
             None, self._post_comment, parent_fullname or "", text,
