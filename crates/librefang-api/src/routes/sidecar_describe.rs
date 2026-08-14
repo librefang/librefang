@@ -82,7 +82,8 @@ pub async fn describe_sidecar(
             stderr.trim(),
         ));
     }
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = String::from_utf8(out.stdout)
+        .map_err(|e| format!("describe stdout was not valid UTF-8: {e}"))?;
     serde_json::from_str::<SidecarSchema>(stdout.trim())
         .map_err(|e| format!("invalid describe JSON: {e}; raw stdout: {stdout}"))
 }

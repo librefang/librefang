@@ -39,6 +39,29 @@ async fn describe_failing_command_returns_err() {
 }
 
 #[tokio::test]
+async fn describe_invalid_utf8_stdout_reports_encoding_failure() {
+    let home = tempfile::tempdir().unwrap();
+    let result = describe_sidecar(
+        "python3",
+        &[
+            "-c".into(),
+            "import sys; sys.stdout.buffer.write(bytes([255]))".into(),
+        ],
+        home.path(),
+    )
+    .await;
+    let err = result.expect_err("invalid UTF-8 stdout must fail");
+    assert!(
+        err.contains("describe stdout was not valid UTF-8"),
+        "expected an encoding diagnostic, got: {err}"
+    );
+    assert!(
+        !err.contains("invalid describe JSON"),
+        "invalid bytes must not be misclassified as JSON syntax: {err}"
+    );
+}
+
+#[tokio::test]
 async fn describe_missing_sdk_returns_actionable_install_hint() {
     // Simulate the exact failure operators hit when librefang-sdk
     // isn't installed in the interpreter the daemon picked. The raw
