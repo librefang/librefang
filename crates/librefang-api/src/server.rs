@@ -1110,6 +1110,12 @@ pub(crate) async fn change_password(
         return response.into_response();
     }
 
+    // Serialize credential verification together with the read-modify-write
+    // transaction. Otherwise two concurrent requests can both verify the old
+    // password before either acquires the write lock, allowing the later one
+    // to overwrite the first change with credentials that are already stale.
+    let _config_guard = state.config_write_lock.lock().await;
+
     let cfg = state.kernel.config_snapshot();
 
     let cfg_user = resolve_credential(
@@ -1219,10 +1225,6 @@ pub(crate) async fn change_password(
                 .into_response();
         }
     }
-
-    // Serialize the whole read-modify-write transaction with every other
-    // config writer so a concurrent update cannot be overwritten.
-    let _config_guard = state.config_write_lock.lock().await;
 
     // Load config.toml off the async worker. Invalid or unreadable existing
     // configuration must fail closed instead of being replaced with a new,
