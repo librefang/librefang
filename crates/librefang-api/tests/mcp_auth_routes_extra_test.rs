@@ -245,7 +245,7 @@ async fn auth_callback_stdio_transport_returns_no_http_sse_message() {
 }
 
 /// Callback whose `state` is well-formed (`flow.nonce`) but whose
-/// PKCE state is absent from the vault must fail with an explanatory
+/// PKCE state cannot be read from the vault must fail with an explanatory
 /// message. This is the dominant real-world failure mode when
 /// `LIBREFANG_VAULT_KEY` is missing — the user retries from the
 /// dashboard and the message tells them why.
@@ -263,11 +263,9 @@ async fn auth_callback_valid_format_but_no_pkce_state_in_vault_fails() {
         body.contains("Authorization Failed"),
         "expected failure text, got: {body}"
     );
-    // The current handler surfaces "No pending auth flow" with a
-    // LIBREFANG_VAULT_KEY hint.
     assert!(
-        body.contains("No pending auth flow") || body.to_lowercase().contains("pkce"),
-        "expected pkce/missing-flow detail, got: {body}"
+        body.contains("Failed to read OAuth state from the credential vault"),
+        "expected credential-vault detail, got: {body}"
     );
 }
 

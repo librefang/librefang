@@ -577,7 +577,8 @@ pub async fn auth_start(
         return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
     if let Err(e) = store("token_endpoint", &metadata.token_endpoint) {
-        tracing::warn!(error = %e, "Failed to store token_endpoint in vault");
+        tracing::error!(error = %e, "Failed to store token_endpoint in vault");
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
     // #3713: persist the original authorization-server host so the callback
     // can re-verify that the stored `token_endpoint` still resolves to the
@@ -589,13 +590,15 @@ pub async fn auth_start(
     // in the flow that the attacker cannot influence.
     if let Some(issuer_host) = url_host_lower(&server_url) {
         if let Err(e) = store("issuer_host", &issuer_host) {
-            tracing::warn!(error = %e, "Failed to store issuer_host in vault");
+            tracing::error!(error = %e, "Failed to store issuer_host in vault");
+            return ApiErrorResponse::internal_scrub(e).into_json_tuple();
         }
     } else {
         tracing::warn!(server_url = %server_url, "server_url has no host — cannot pin issuer for callback");
     }
     if let Err(e) = store("redirect_uri", &redirect_uri) {
-        tracing::warn!(error = %e, "Failed to store redirect_uri in vault");
+        tracing::error!(error = %e, "Failed to store redirect_uri in vault");
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
     if let Some(ref cid) = client_id {
         if let Err(e) = store("client_id", cid) {
@@ -779,27 +782,23 @@ pub async fn auth_callback(
         provider: &provider,
         prefix: flow_key_prefix.clone(),
     };
-    // #3750: collapse vault Result into Option for callers below — a vault
-    // storage failure during callback is logged and treated the same as
-    // "value missing", since the recovery path (retry from dashboard) is
-    // identical for both cases.
-    let load = |field: &str| -> Option<String> {
-        match provider.vault_get(&KernelOAuthProvider::vault_key(&flow_key_prefix, field)) {
-            Ok(opt) => opt,
-            Err(e) => {
-                tracing::warn!(
-                    field = %field,
-                    error = %e,
-                    "vault_get failed during OAuth callback"
-                );
-                None
-            }
+    let load = |field: &str| match provider
+        .vault_get(&KernelOAuthProvider::vault_key(&flow_key_prefix, field))
+    {
+        Ok(opt) => Ok(opt),
+        Err(e) => {
+            tracing::error!(
+                field = %field,
+                error = %e,
+                "vault_get failed during OAuth callback"
+            );
+            Err(e)
         }
     };
 
     let stored_state = match load("pkce_state") {
-        Some(s) => s,
-        None => {
+        Ok(Some(s)) => s,
+        Ok(None) => {
             tracing::error!(
                 server = %name,
                 server_url = %server_url,
@@ -812,6 +811,7 @@ pub async fn auth_callback(
                  Check that LIBREFANG_VAULT_KEY is set in your environment.",
             );
         }
+        Err(_) => return auth_failed("Failed to read OAuth state from the credential vault."),
     };
 
     // #3730: The stored state encodes the flow_id and a random nonce; the
@@ -860,17 +860,19 @@ pub async fn auth_callback(
     let code = code_param;
 
     let pkce_verifier = match load("pkce_verifier") {
-        Some(v) => v,
-        None => {
+        Ok(Some(v)) => v,
+        Ok(None) => {
             return auth_failed("PKCE verifier missing from vault.");
         }
+        Err(_) => return auth_failed("Failed to read OAuth state from the credential vault."),
     };
 
     let token_endpoint = match load("token_endpoint") {
-        Some(t) => t,
-        None => {
+        Ok(Some(t)) => t,
+        Ok(None) => {
             return auth_failed("Token endpoint missing from vault.");
         }
+        Err(_) => return auth_failed("Failed to read OAuth state from the credential vault."),
     };
     // SSRF guard (#3623): re-validate the stored token_endpoint before the
     // outbound code exchange.  The parser checks at discovery time, but the
@@ -891,8 +893,8 @@ pub async fn auth_callback(
     // match `token_endpoint.host()`, refuse the exchange — never POST the
     // code to an unverified host.
     let issuer_host = match load("issuer_host") {
-        Some(h) if !h.is_empty() => h,
-        _ => {
+        Ok(Some(h)) if !h.is_empty() => h,
+        Ok(_) => {
             tracing::error!(
                 server = %name,
                 token_endpoint = %token_endpoint,
@@ -902,6 +904,7 @@ pub async fn auth_callback(
                 "Authorization server host pin missing from vault — refusing to exchange the auth code. Please retry the sign-in from the dashboard.",
             );
         }
+        Err(_) => return auth_failed("Failed to read OAuth state from the credential vault."),
     };
     if !token_endpoint_host_matches(&token_endpoint, &issuer_host) {
         let token_host = url_host_lower(&token_endpoint).unwrap_or_default();
@@ -924,15 +927,19 @@ pub async fn auth_callback(
         );
     }
 
-    let client_id = load("client_id");
+    let client_id = match load("client_id") {
+        Ok(value) => value,
+        Err(_) => return auth_failed("Failed to read OAuth state from the credential vault."),
+    };
     let redirect_uri = match load("redirect_uri") {
-        Some(r) if !r.is_empty() => r,
-        _ => {
+        Ok(Some(r)) if !r.is_empty() => r,
+        Ok(_) => {
             return auth_failed(
                 "Redirect URI missing from vault — auth flow state was lost. \
                  Please retry from the dashboard.",
             );
         }
+        Err(_) => return auth_failed("Failed to read OAuth state from the credential vault."),
     };
 
     // Exchange authorization code for tokens.
@@ -949,11 +956,16 @@ pub async fn auth_callback(
         form_params.push(("client_id", cid.clone()));
     }
     // Persisted at auth_start when McpOAuthConfig::client_secret_env was set.
-    if let Some(secret) = provider.vault_get_or_warn(&KernelOAuthProvider::vault_key(
+    match provider.vault_get(&KernelOAuthProvider::vault_key(
         &server_url,
         "client_secret",
     )) {
-        form_params.push(("client_secret", secret));
+        Ok(Some(secret)) => form_params.push(("client_secret", secret)),
+        Ok(None) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to read OAuth client secret from vault");
+            return auth_failed("Failed to read OAuth credentials from the credential vault.");
+        }
     }
 
     // #3730: user-visible errors must NOT leak the token endpoint URL or the
@@ -1084,7 +1096,16 @@ pub async fn auth_callback(
     // Store tokens via the trait provider
     let trait_provider = state.kernel.oauth_provider_ref();
     if let Err(e) = trait_provider.store_tokens(&server_url, tokens).await {
-        tracing::warn!(error = %e, "Failed to store OAuth tokens");
+        tracing::error!(error = %e, "Failed to store OAuth tokens");
+        let message = "OAuth succeeded, but tokens could not be stored in the credential vault. Fix vault access and retry sign-in.";
+        let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
+        auth_states.insert(
+            name.clone(),
+            McpAuthState::Error {
+                message: message.to_string(),
+            },
+        );
+        return auth_failed(message);
     }
 
     // Promote `token_endpoint` (and `client_id` if registered via DCR) from
