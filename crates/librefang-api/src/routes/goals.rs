@@ -221,6 +221,13 @@ pub async fn start_goal_run(
         .and_then(|v| v.as_u64())
         .map(|n| n as u32);
 
+    let started = state
+        .kernel
+        .start_goal_run(goal_id, agent_id, max_iterations);
+    if !started {
+        return ApiErrorResponse::internal("Failed to start goal run").into_json_tuple();
+    }
+
     // Flip the goal to in_progress so the dashboard reflects the active run.
     //
     // The `Result` is deliberately not fatal — unlike the read above, this write is cosmetic.
@@ -255,9 +262,6 @@ pub async fn start_goal_run(
         );
     }
 
-    state
-        .kernel
-        .start_goal_run(goal_id, agent_id, max_iterations);
     let run = state.kernel.goal_run_state(goal_id);
     (
         StatusCode::OK,
