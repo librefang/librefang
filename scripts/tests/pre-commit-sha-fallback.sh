@@ -20,10 +20,12 @@ fi
 
 REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 HOOK="$REPO_ROOT/scripts/hooks/pre-commit"
-test -x "$HOOK" || chmod +x "$HOOK"
+test -x "$HOOK" || { echo "FAIL: hook is not executable: $HOOK" >&2; exit 1; }
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+SHIM_DIR="$(mktemp -d)"
+trap 'rm -rf "$WORK" "$SHIM_DIR"' EXIT
+LOG="$WORK/hook.log"
 
 cd "$WORK"
 git init -q
@@ -32,10 +34,6 @@ git config user.name test
 git config commit.gpgsign false
 
 mkdir -p xtask/baselines
-
-# The hook's secret scan runs `gitleaks protect --config .gitleaks.toml`, whose path is relative to the repo it is invoked in.
-# Without this copy the throwaway repo has no config, gitleaks exits non-zero on "unable to load gitleaks config", and the test fails on any machine where gitleaks is installed — i.e. it only passed where the hook was soft-warning past that step entirely.
-cp "$REPO_ROOT/.gitleaks.toml" .gitleaks.toml
 
 # Seed baseline with a wrong digest so the hook MUST rewrite it.
 echo "0000000000000000000000000000000000000000000000000000000000000000  openapi.json" \
@@ -52,16 +50,21 @@ printf '{"info":{"version":"0.0.1"}}' > openapi.json
 git add openapi.json
 
 EXPECTED=$(sha256sum openapi.json | awk '{print $1}')
+# Leave a different unstaged post-image on disk. The hook must hash the index
+# blob and must not auto-stage or otherwise consume this working-tree content.
+printf '{"info":{"version":"unstaged"}}' > openapi.json
 
 # Mask shasum out of PATH so the hook MUST use sha256sum via the shim.
-SHIM_DIR="$(mktemp -d)"
-trap 'rm -rf "$WORK" "$SHIM_DIR"' EXIT
 cat > "$SHIM_DIR/shasum" <<'EOF'
 #!/bin/sh
 echo "shasum: deliberately disabled by pre-commit-sha-fallback.sh" >&2
 exit 127
 EOF
-chmod +x "$SHIM_DIR/shasum"
+cat > "$SHIM_DIR/gitleaks" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$SHIM_DIR/shasum" "$SHIM_DIR/gitleaks"
 
 # Sanity: confirm masking works (PATH-prefix wins).
 PATH="$SHIM_DIR:$PATH"
@@ -71,14 +74,14 @@ if shasum -a 256 openapi.json >/dev/null 2>&1; then
 fi
 
 set +e
-"$HOOK" >/tmp/precommit-shafallback-out.log 2>&1
+"$HOOK" >"$LOG" 2>&1
 rc=$?
 set -e
 
 if [ "$rc" -ne 0 ]; then
     echo "FAIL: pre-commit errored under sha256sum-only PATH (rc=$rc)" >&2
     echo "----- hook output -----" >&2
-    cat /tmp/precommit-shafallback-out.log >&2
+    cat "$LOG" >&2
     exit 1
 fi
 
@@ -88,12 +91,17 @@ if [ "$RECORDED" != "$EXPECTED" ]; then
     echo "  expected: $EXPECTED" >&2
     echo "  recorded: $RECORDED" >&2
     echo "----- hook output -----" >&2
-    cat /tmp/precommit-shafallback-out.log >&2
+    cat "$LOG" >&2
     exit 1
 fi
 
 if ! git diff --cached --name-only | grep -qx "xtask/baselines/openapi.sha256"; then
     echo "FAIL: refreshed baseline was not auto-staged." >&2
+    exit 1
+fi
+
+if git diff --cached -- openapi.json | grep -q 'unstaged'; then
+    echo "FAIL: hook staged or hashed the unstaged openapi.json content." >&2
     exit 1
 fi
 

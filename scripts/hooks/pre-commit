@@ -18,6 +18,9 @@
 
 set -eu
 
+HOOK_TMP=$(mktemp -d "${TMPDIR:-/tmp}/librefang-pre-commit.XXXXXX")
+trap 'rm -rf "$HOOK_TMP"' EXIT HUP INT TERM
+
 # Portable sha256 shim. `shasum -a 256` ships on macOS by default
 # (perl-provided) but is absent on many Linux dev boxes (Debian /
 # Ubuntu / Alpine slim images) that only carry GNU coreutils'
@@ -46,11 +49,12 @@ sha256() {
 # metacharacters (`with space.rs`, `weird $name.rs`) are passed as
 # single argv entries to rustfmt instead of being word-split by the
 # shell. (#5664 sub-finding 1.)
-if git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' \
-    | grep -zq .; then
+STAGED_RUST="$HOOK_TMP/staged-rust"
+git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' >"$STAGED_RUST"
+if [ -s "$STAGED_RUST" ]; then
     if command -v rustfmt >/dev/null 2>&1; then
-        if ! git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' \
-            | xargs -0 -r rustfmt --check --edition 2021 >/dev/null 2>&1; then
+        if ! xargs -0 rustfmt --check --edition 2021 \
+            <"$STAGED_RUST" >/dev/null 2>&1; then
             echo "Error: staged Rust files are not rustfmt-clean."
             echo "Run: git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' \\"
             echo "       | xargs -0 rustfmt --edition 2021"
@@ -141,7 +145,12 @@ fi
 if git diff --cached --name-only | grep -qx "openapi.json"; then
     BASELINE_FILE="xtask/baselines/openapi.sha256"
     if [ -f openapi.json ] && [ -f "$BASELINE_FILE" ]; then
-        if EXPECTED_LINE=$(sha256 openapi.json 2>/dev/null); then
+        STAGED_OPENAPI="$HOOK_TMP/openapi.json"
+        if ! git show :openapi.json >"$STAGED_OPENAPI"; then
+            echo "Error: unable to read staged openapi.json from the index." >&2
+            exit 1
+        fi
+        if EXPECTED_LINE=$(sha256 "$STAGED_OPENAPI" 2>/dev/null); then
             EXPECTED=$(printf '%s' "$EXPECTED_LINE" | awk '{print $1}')
             RECORDED=$(awk '{print $1}' "$BASELINE_FILE")
             if [ "$EXPECTED" != "$RECORDED" ]; then
@@ -169,27 +178,32 @@ fi
 # ratchet, not a security boundary.
 ALLOWLIST="crates/librefang-channels/src/channels-allowlist.txt"
 if [ -f "$ALLOWLIST" ]; then
-    STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR -- \
-        'crates/librefang-channels/src/*.rs' \
-        'crates/librefang-channels/src/*/*.rs' 2>/dev/null || true)
-    VIOLATIONS=""
-    for f in $STAGED_FILES; do
+    STAGED_CHANNELS="$HOOK_TMP/staged-channels"
+    VIOLATIONS="$HOOK_TMP/channel-violations"
+    git diff --cached --name-only --diff-filter=ACMR -- \
+        crates/librefang-channels/src >"$STAGED_CHANNELS" 2>/dev/null || true
+    : >"$VIOLATIONS"
+    while IFS= read -r f; do
         case "$f" in
-            crates/librefang-channels/src/*/*.rs)
-                base=$(basename "$(dirname "$f")") ;;
             crates/librefang-channels/src/*.rs)
-                base=$(basename "$f" .rs) ;;
+                relative=${f#crates/librefang-channels/src/}
+                case "$relative" in
+                    */*) base=${relative%%/*} ;;
+                    *) base=${relative%.rs} ;;
+                esac
+                ;;
             *) continue ;;
         esac
-        if git show ":$f" 2>/dev/null | grep -q 'ChannelAdapter for'; then
+        if git show ":$f" 2>/dev/null \
+            | grep -Eq '^[[:space:]]*(unsafe[[:space:]]+)?impl([^[:alnum:]_]|$).*ChannelAdapter[[:space:]]+for[[:space:]]+'; then
             if ! grep -qx "$base" "$ALLOWLIST"; then
-                VIOLATIONS="$VIOLATIONS $f"
+                printf '%s\n' "$f" >>"$VIOLATIONS"
             fi
         fi
-    done
-    if [ -n "$VIOLATIONS" ]; then
+    done <"$STAGED_CHANNELS"
+    if [ -s "$VIOLATIONS" ]; then
         echo "Error: in-process channel adapter(s) not allowed:" >&2
-        for v in $VIOLATIONS; do echo "  - $v" >&2; done
+        while IFS= read -r v; do echo "  - $v" >&2; done <"$VIOLATIONS"
         echo "" >&2
         echo "LibreFang is sidecar-first. Ship a new channel as an" >&2
         echo "out-of-process sidecar adapter (Python or any language):" >&2
