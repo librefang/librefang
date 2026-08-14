@@ -4,6 +4,11 @@ name: Stale PR
 # New pushes remove the label immediately; other activity is reconciled daily.
 
 on:
+  pull_request:
+    paths:
+      - '.github/scripts/stale-pr.js'
+      - '.github/scripts/tests/stale-pr.test.js'
+      - '.github/workflows/stale-pr.yml'
   schedule:
     - cron: '23 3 * * *' # daily at 03:23 UTC
   pull_request_target:
@@ -12,18 +17,34 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
-
-concurrency:
-  group: stale-pr-${{ github.event.pull_request.number || 'reconcile' }}
-  cancel-in-progress: true
 
 jobs:
-  stale:
+  test:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Test stale PR API helpers
+        run: node .github/scripts/tests/stale-pr.test.js
+
+  stale:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    concurrency:
+      group: stale-pr-reconciliation
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
 
       - name: Manage stale-pr labels
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
