@@ -47,7 +47,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { truncateId } from "../lib/string";
-import { removeNodeAndCascadeEdges } from "../lib/canvas";
+import { removeEdgeById, removeNodeAndCascadeEdges } from "../lib/canvas";
 import { safeStorageGet, safeStorageSet } from "../lib/safeStorage";
 import {
   useCreateWorkflow,
@@ -2460,8 +2460,12 @@ function CanvasPageInner() {
               {contextMenu.edgeId ? (
                 <button role="menuitem" className="w-full px-3 py-1.5 text-xs text-left hover:bg-error/10 text-error flex items-center gap-2"
                   onClick={() => {
+                    const edgeId = contextMenu.edgeId;
+                    if (!edgeId) { setContextMenu(null); return; }
+                    const nextEdges = removeEdgeById(edgesRef.current, edgeId);
+                    if (nextEdges === edgesRef.current) { setContextMenu(null); return; }
                     pushHistory();
-                    setEdges(eds => eds.filter(ed => ed.id !== contextMenu.edgeId));
+                    setEdges(nextEdges);
                     setContextMenu(null);
                   }}>
                   <Trash2 className="w-3 h-3" /> {t("canvas.ctx_delete_connection")}

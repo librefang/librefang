@@ -18,15 +18,21 @@ import type { Edge, Node } from "@xyflow/react";
  * preserve both input references so callers can recognize a no-op.
  */
 export function removeNodeAndCascadeEdges<N extends Node, E extends Edge>(
-  nodes: readonly N[],
-  edges: readonly E[],
+  nodes: N[],
+  edges: E[],
   nodeId: string,
 ): { nodes: N[]; edges: E[] } {
   const nextNodes = nodes.filter((n) => n.id !== nodeId);
   const nextEdges = edges.filter((e) => e.source !== nodeId && e.target !== nodeId);
 
   return {
-    nodes: nextNodes.length === nodes.length ? (nodes as N[]) : nextNodes,
-    edges: nextEdges.length === edges.length ? (edges as E[]) : nextEdges,
+    nodes: nextNodes.length === nodes.length ? nodes : nextNodes,
+    edges: nextEdges.length === edges.length ? edges : nextEdges,
   };
+}
+
+/** Remove an edge while preserving the input reference when its id is stale. */
+export function removeEdgeById<E extends Edge>(edges: E[], edgeId: string): E[] {
+  const nextEdges = edges.filter((edge) => edge.id !== edgeId);
+  return nextEdges.length === edges.length ? edges : nextEdges;
 }
