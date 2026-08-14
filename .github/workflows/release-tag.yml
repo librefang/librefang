@@ -33,6 +33,7 @@ concurrency:
 jobs:
   tag:
     name: Create release tag
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: release-tag
     timeout-minutes: 10
@@ -40,6 +41,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          ref: main
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
       - name: Verify tag format
