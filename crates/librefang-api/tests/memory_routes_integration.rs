@@ -223,6 +223,19 @@ async fn get_memory_clamps_limit_to_100() {
     assert_eq!(body["offset"], serde_json::json!(42));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn get_memory_rejects_an_unknown_level_filter() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_get("/api/memory?level=unknown"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/memory/stats
 // ---------------------------------------------------------------------------

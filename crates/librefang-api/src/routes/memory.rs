@@ -120,9 +120,22 @@ fn default_limit() -> usize {
     10
 }
 
+fn parse_memory_level_filter(
+    level: Option<&str>,
+) -> Result<Option<librefang_types::memory::MemoryLevel>, String> {
+    match level {
+        None => Ok(None),
+        Some("user") => Ok(Some(librefang_types::memory::MemoryLevel::User)),
+        Some("session") => Ok(Some(librefang_types::memory::MemoryLevel::Session)),
+        Some("agent") => Ok(Some(librefang_types::memory::MemoryLevel::Agent)),
+        Some(_) => Err("Invalid memory level; expected user, session, or agent".to_string()),
+    }
+}
+
 #[derive(serde::Deserialize)]
 pub struct MemoryListQuery {
     pub category: Option<String>,
+    pub level: Option<String>,
     #[serde(default)]
     pub offset: usize,
     #[serde(default = "default_limit")]
@@ -508,6 +521,7 @@ pub async fn memory_search(
     tag = "proactive-memory",
     params(
         ("category" = Option<String>, Query, description = "Optional category filter"),
+        ("level" = Option<String>, Query, description = "Optional memory level filter"),
         ("offset" = Option<usize>, Query, description = "Pagination offset (default 0)"),
         ("limit" = Option<usize>, Query, description = "Page size (default 10, max 100)"),
     ),
@@ -535,6 +549,10 @@ pub async fn memory_list(
     let guard = guard_for_request(&state, request.extensions());
     let limit = params.limit.min(100);
     let offset = params.offset;
+    let level = match parse_memory_level_filter(params.level.as_deref()) {
+        Ok(level) => level,
+        Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
+    };
 
     // List across ALL agents so the dashboard shows all memories
     match store
@@ -542,6 +560,10 @@ pub async fn memory_list(
         .await
     {
         Ok(items) => {
+            let items: Vec<_> = items
+                .into_iter()
+                .filter(|item| level.is_none_or(|level| item.level == level))
+                .collect();
             let total = items.len();
             let page: Vec<_> = items.into_iter().skip(offset).take(limit).collect();
             (
@@ -979,6 +1001,7 @@ pub async fn memory_clear_level(
     params(
         ("id" = String, Path, description = "Agent ID"),
         ("category" = Option<String>, Query, description = "Optional category filter"),
+        ("level" = Option<String>, Query, description = "Optional memory level filter"),
         ("offset" = Option<usize>, Query, description = "Pagination offset (default 0)"),
         ("limit" = Option<usize>, Query, description = "Page size (default 10, max 100)"),
     ),
@@ -998,12 +1021,20 @@ pub async fn memory_list_agent(
     let guard = guard_for_request(&state, request.extensions());
     let limit = params.limit.min(100);
     let offset = params.offset;
+    let level = match parse_memory_level_filter(params.level.as_deref()) {
+        Ok(level) => level,
+        Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
+    };
 
     match store
         .list_with_guard(&agent_id, params.category.as_deref(), &guard)
         .await
     {
         Ok(items) => {
+            let items: Vec<_> = items
+                .into_iter()
+                .filter(|item| level.is_none_or(|level| item.level == level))
+                .collect();
             let total = items.len();
             let page: Vec<_> = items.into_iter().skip(offset).take(limit).collect();
             (

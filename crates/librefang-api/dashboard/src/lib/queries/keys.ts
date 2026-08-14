@@ -298,6 +298,7 @@ export const memoryKeys = {
   searchOrList: (params: {
     search: string;
     agentId?: string;
+    level?: string;
     offset: number;
     limit: number;
   }) => [...memoryKeys.lists(), "searchOrList", params] as const,

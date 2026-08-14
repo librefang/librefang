@@ -48,6 +48,7 @@ export const memoryQueries = {
 export interface MemorySearchOrListParams {
   search: string;
   agentId?: string;
+  level?: string;
   offset?: number;
   limit?: number;
 }
@@ -55,6 +56,7 @@ export interface MemorySearchOrListParams {
 export const memorySearchOrListQueryOptions = ({
   search,
   agentId,
+  level,
   offset = 0,
   limit = MEMORY_PAGE_SIZE,
 }: MemorySearchOrListParams) =>
@@ -63,7 +65,7 @@ export const memorySearchOrListQueryOptions = ({
     total: number;
     proactive_enabled?: boolean;
   }>({
-    queryKey: memoryKeys.searchOrList({ search, agentId, offset, limit }),
+    queryKey: memoryKeys.searchOrList({ search, agentId, level, offset, limit }),
     queryFn: async () => {
       if (search.trim()) {
         // Search has no offset/total contract. Keep the server's bounded result
@@ -73,9 +75,12 @@ export const memorySearchOrListQueryOptions = ({
           agentId,
           limit: MEMORY_SEARCH_LIMIT,
         });
-        return { memories: items, total: items.length };
+        const filtered = level
+          ? items.filter((item) => item.level === level)
+          : items;
+        return { memories: filtered, total: filtered.length };
       }
-      const res = await listMemories({ agentId, offset, limit });
+      const res = await listMemories({ agentId, level, offset, limit });
       return {
         memories: res.memories ?? [],
         total: res.total ?? 0,

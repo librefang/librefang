@@ -313,6 +313,7 @@ describe("MemoryPage (redesigned)", () => {
     expect(useMemorySearchOrListMock).toHaveBeenLastCalledWith({
       search: "",
       agentId: undefined,
+      level: undefined,
       offset: 0,
       limit: 50,
     });
@@ -320,7 +321,22 @@ describe("MemoryPage (redesigned)", () => {
     expect(useMemorySearchOrListMock).toHaveBeenLastCalledWith({
       search: "",
       agentId: undefined,
+      level: undefined,
       offset: 50,
+      limit: 50,
+    });
+  });
+
+  it("sends level filters through the paginated list query", () => {
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: "user" }));
+
+    expect(useMemorySearchOrListMock).toHaveBeenLastCalledWith({
+      search: "",
+      agentId: undefined,
+      level: "user",
+      offset: 0,
       limit: 50,
     });
   });

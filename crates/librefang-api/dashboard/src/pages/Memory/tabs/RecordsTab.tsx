@@ -40,6 +40,7 @@ export function RecordsTab({
   const memoryQuery = useMemorySearchOrList({
     search: deferredSearch,
     agentId: scopedAgentId,
+    level: levelFilter === "all" ? undefined : levelFilter,
     offset: page * MEMORY_PAGE_SIZE,
     limit: MEMORY_PAGE_SIZE,
   });
@@ -53,17 +54,8 @@ export function RecordsTab({
   );
   const totalCount = memoryQuery.data?.total ?? 0;
 
-  const scopedMemories = allMemories;
-
-  const filteredMemories = useMemo(() => {
-    if (levelFilter === "all") return scopedMemories;
-    return scopedMemories.filter((m) => m.level === levelFilter);
-  }, [scopedMemories, levelFilter]);
-
-  const levels = useMemo(
-    () => Array.from(new Set(scopedMemories.map((m) => m.level).filter(Boolean))),
-    [scopedMemories],
-  );
+  const filteredMemories = allMemories;
+  const levels = ["user", "session", "agent"];
 
   if (!proactiveEnabled) {
     return (
@@ -108,7 +100,10 @@ export function RecordsTab({
         </div>
         <div className="flex gap-1 p-1 bg-main/30 rounded-lg">
           <button
-            onClick={() => setLevelFilter("all")}
+            onClick={() => {
+              setLevelFilter("all");
+              setPage(0);
+            }}
             className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
               levelFilter === "all" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"
             }`}
@@ -118,7 +113,10 @@ export function RecordsTab({
           {levels.map((level) => (
             <button
               key={level}
-              onClick={() => setLevelFilter(level || "all")}
+              onClick={() => {
+                setLevelFilter(level);
+                setPage(0);
+              }}
               className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
                 levelFilter === level ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"
               }`}

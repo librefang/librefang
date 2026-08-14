@@ -3487,6 +3487,7 @@ export async function listMemories(params?: {
   offset?: number;
   limit?: number;
   category?: string;
+  level?: string;
 }): Promise<MemoryListResponse> {
   const offset = Number.isFinite(params?.offset) ? Math.max(0, Math.floor(params?.offset ?? 0)) : 0;
   const limit = Number.isFinite(params?.limit) ? Math.max(1, Math.floor(params?.limit ?? 20)) : 20;
@@ -3494,6 +3495,7 @@ export async function listMemories(params?: {
   query.set("offset", String(offset));
   query.set("limit", String(limit));
   if (params?.category) query.set("category", params.category);
+  if (params?.level) query.set("level", params.level);
 
   const path = params?.agentId
     ? `/api/memory/agents/${encodeURIComponent(params.agentId)}?${query.toString()}`
