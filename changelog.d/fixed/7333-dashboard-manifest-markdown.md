@@ -1,0 +1,1 @@
+- Make generated agent-manifest Markdown resilient to table delimiters, embedded code fences, backticks, non-decimal costs, and unknown schedule modes. (@xiaomo)

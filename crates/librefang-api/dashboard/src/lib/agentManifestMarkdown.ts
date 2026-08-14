@@ -9,6 +9,23 @@
 
 import type { ManifestExtras, ManifestFormState } from "./agentManifest";
 
+const escapeTableCell = (value: string): string =>
+  value.replace(/\|/g, "\\|").replace(/\r\n|\r|\n/g, " ");
+
+const markdownCodeSpan = (content: string): string => {
+  const longestRun = Math.max(0, ...(content.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(longestRun + 1);
+  const needsPadding = content.startsWith("`") || content.endsWith("`");
+  const padding = needsPadding ? " " : "";
+  return `${fence}${padding}${content}${padding}${fence}`;
+};
+
+const pushFencedBlock = (lines: string[], content: string, language = ""): void => {
+  const longestRun = Math.max(0, ...(content.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  lines.push(`${fence}${language}`, content, fence);
+};
+
 export const generateManifestMarkdown = (
   form: ManifestFormState,
   extras: ManifestExtras = {
@@ -52,9 +69,7 @@ export const generateManifestMarkdown = (
     lines.push("");
     lines.push("### System Prompt");
     lines.push("");
-    lines.push("```");
-    lines.push(form.model.system_prompt.trim());
-    lines.push("```");
+    pushFencedBlock(lines, form.model.system_prompt.trim());
   }
   lines.push("");
 
@@ -71,7 +86,7 @@ export const generateManifestMarkdown = (
     lines.push("| Limit | Value |");
     lines.push("|-------|-------|");
     for (const [k, v] of resourceRows) {
-      lines.push(`| ${k} | ${v} |`);
+      lines.push(`| ${escapeTableCell(k)} | ${escapeTableCell(v)} |`);
     }
     lines.push("");
   }
@@ -137,6 +152,8 @@ const pushAdvancedFormSections = (lines: string[], form: ManifestFormState): voi
       }
     } else if (form.schedule.mode === "continuous") {
       lines.push(`- **Check interval**: \`${form.schedule.check_interval_secs}s\``);
+    } else {
+      lines.push("- _Details for this schedule mode are not available._");
     }
     lines.push("");
   }
@@ -147,7 +164,7 @@ const pushAdvancedFormSections = (lines: string[], form: ManifestFormState): voi
     lines.push("| # | Provider | Model |");
     lines.push("|---|----------|-------|");
     form.fallback_models.forEach((fb, i) => {
-      lines.push(`| ${i + 1} | ${fb.provider || "_(empty)_"} | ${fb.model || "_(empty)_"} |`);
+      lines.push(`| ${i + 1} | ${escapeTableCell(fb.provider || "_(empty)_")} | ${escapeTableCell(fb.model || "_(empty)_")} |`);
     });
     lines.push("");
   }
@@ -191,9 +208,7 @@ const pushAdvancedFormSections = (lines: string[], form: ManifestFormState): voi
       lines.push(`**${i + 1}. ${ci.name || "(unnamed)"}** _(${ci.position})_`);
       if (ci.condition) lines.push(`- **Condition**: \`${ci.condition}\``);
       lines.push("");
-      lines.push("```");
-      lines.push(ci.content);
-      lines.push("```");
+      pushFencedBlock(lines, ci.content);
       lines.push("");
     });
   }
@@ -207,9 +222,7 @@ const pushAdvancedFormSections = (lines: string[], form: ManifestFormState): voi
       lines.push(`- **Strict**: ${form.response_format.strict ? "✓" : "✗"}`);
       if (form.response_format.schema.trim()) {
         lines.push("");
-        lines.push("```json");
-        lines.push(form.response_format.schema);
-        lines.push("```");
+        pushFencedBlock(lines, form.response_format.schema, "json");
       }
     }
     lines.push("");
@@ -273,6 +286,7 @@ const pushList = (lines: string[], heading: string, items: string[]): void => {
 const formatCost = (raw: string): string => {
   const trimmed = raw.trim();
   if (!trimmed) return "";
+  if (!/^\d+(?:\.\d+)?$/.test(trimmed)) return trimmed;
   const n = Number(trimmed);
   if (!Number.isFinite(n)) return trimmed;
   return `$${n.toFixed(2)}`;
@@ -329,12 +343,12 @@ const isArrayOfObjects = (v: unknown): boolean =>
 
 const stringifyExtraValue = (value: unknown): string => {
   if (value === null || value === undefined) return "_(empty)_";
-  if (typeof value === "string") return `\`"${value}"\``;
+  if (typeof value === "string") return markdownCodeSpan(`"${value}"`);
   if (typeof value === "boolean" || typeof value === "number" || typeof value === "bigint") {
-    return `\`${String(value)}\``;
+    return markdownCodeSpan(String(value));
   }
   try {
-    return `\`${JSON.stringify(value)}\``;
+    return markdownCodeSpan(JSON.stringify(value));
   } catch {
     return "_(unrenderable)_";
   }

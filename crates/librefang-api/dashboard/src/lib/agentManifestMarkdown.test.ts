@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   emptyManifestExtras,
   emptyManifestForm,
+  type ManifestFormState,
 } from "./agentManifest";
 import { generateManifestMarkdown } from "./agentManifestMarkdown";
 
@@ -207,5 +208,77 @@ describe("generateManifestMarkdown", () => {
     const form = emptyManifestForm();
     const md = generateManifestMarkdown(form);
     expect(md).toContain("# (unnamed agent)");
+  });
+
+  it("escapes table delimiters and normalizes cell newlines", () => {
+    const form = emptyManifestForm();
+    form.resources.max_tool_calls_per_minute = "30|40\n50";
+    form.fallback_models = [{
+      _uid: "fallback-1",
+      provider: "open|router",
+      model: "line-one\nline-two",
+      api_key_env: "",
+      base_url: "",
+      extras: {},
+    }];
+
+    const md = generateManifestMarkdown(form);
+
+    expect(md).toContain("| Tool calls / minute | 30\\|40 50 |");
+    expect(md).toContain("| 1 | open\\|router | line-one line-two |");
+  });
+
+  it("chooses code fences longer than embedded backtick runs", () => {
+    const form = emptyManifestForm();
+    form.model.system_prompt = "before\n```\nafter";
+    form.context_injection = [{
+      _uid: "context-1",
+      name: "code",
+      content: "inner ```` fence",
+      position: "before_user",
+      condition: "",
+    }];
+    form.response_format = {
+      mode: "json_schema",
+      name: "schema",
+      strict: true,
+      schema: '{"example":"```"}',
+    };
+
+    const md = generateManifestMarkdown(form);
+
+    expect(md).toContain("````\nbefore\n```\nafter\n````");
+    expect(md).toContain("`````\ninner ```` fence\n`````");
+    expect(md).toContain("````json\n{\"example\":\"```\"}\n````");
+  });
+
+  it("uses collision-resistant code spans for extras containing backticks", () => {
+    const form = emptyManifestForm();
+    const extras = emptyManifestExtras();
+    extras.topLevel.note = "before `code` after";
+
+    expect(generateManifestMarkdown(form, extras)).toContain(
+      '- `note` = ``"before `code` after"``',
+    );
+  });
+
+  it("formats decimal costs only", () => {
+    const form = emptyManifestForm();
+    form.resources.max_cost_per_hour_usd = "1e2";
+    form.resources.max_cost_per_day_usd = "0x10";
+
+    const md = generateManifestMarkdown(form);
+
+    expect(md).toContain("| Max cost / hour | 1e2 |");
+    expect(md).toContain("| Max cost / day | 0x10 |");
+  });
+
+  it("records that an unknown schedule mode has no known details", () => {
+    const form = emptyManifestForm();
+    form.schedule = { mode: "future" } as unknown as ManifestFormState["schedule"];
+
+    expect(generateManifestMarkdown(form)).toContain(
+      "Details for this schedule mode are not available.",
+    );
   });
 });
