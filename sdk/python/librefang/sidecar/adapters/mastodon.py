@@ -78,6 +78,7 @@ POLL_INTERVAL_SECS = 5
 SEND_TIMEOUT_SECS = 15
 DEFAULT_VISIBILITY = "unlisted"
 _ALLOWED_VISIBILITIES = {"public", "unlisted", "private", "direct"}
+_VISIBILITY_RANK = {"public": 0, "unlisted": 1, "private": 2, "direct": 3}
 
 def _strip_html_tags(value: str) -> str:
     """Strip HTML tags from a Mastodon status body and decode entities.
@@ -184,6 +185,22 @@ class MastodonAdapter(SidecarAdapter):
         if extra:
             h.update(extra)
         return h
+
+    def _reply_visibility(self, parent_visibility: str | None) -> str:
+        parent_rank = _VISIBILITY_RANK.get(parent_visibility or "", -1)
+        default_rank = _VISIBILITY_RANK[self.default_visibility]
+        return (
+            parent_visibility
+            if parent_rank > default_rank
+            else self.default_visibility
+        )
+
+    @staticmethod
+    def _reply_context(status_id: str, visibility: str) -> str:
+        return json.dumps(
+            {"status_id": status_id, "visibility": visibility},
+            separators=(",", ":"),
+        )
 
     @staticmethod
     def _response_headers(resp_or_err) -> dict:
@@ -311,12 +328,15 @@ class MastodonAdapter(SidecarAdapter):
             content=content,
             message_id=status_id,
             is_group=False,
-            librefang_user=status_id or None,
+            librefang_user=(
+                self._reply_context(status_id, visibility)
+                if status_id else None
+            ),
             thread_id=status_id or None,
             metadata=metadata,
         )
 
-    def _sse_loop(self, emit) -> None:
+    def _sse_loop(self, emit, advance_watermark=None) -> None:
         """One SSE subscribe pass; caller wraps in reconnect backoff.
         Returns normally on stream end → reconnect promptly. Raises on
         transport error → caller backs off."""
@@ -341,30 +361,46 @@ class MastodonAdapter(SidecarAdapter):
             log.info("mastodon SSE connected", instance=self.instance_url)
             event_type = ""
             data_buf: list[str] = []
-            for rawline in resp:
-                line = rawline.decode("utf-8", "replace").rstrip("\r\n")
-                if line.startswith(":"):
-                    # SSE comment / keepalive — skip.
-                    continue
-                if line == "":
-                    # End of an event; dispatch if we have one buffered.
-                    if event_type == "notification" and data_buf:
-                        data = "\n".join(data_buf)
-                        try:
-                            notif = json.loads(data)
-                        except (ValueError, TypeError):
-                            pass
-                        else:
-                            ev = self._parse_notification(notif)
-                            if ev is not None:
-                                emit(ev)
-                    event_type = ""
-                    data_buf.clear()
-                    continue
-                if line.startswith("event:"):
-                    event_type = line[len("event:"):].strip()
-                elif line.startswith("data:"):
-                    data_buf.append(line[len("data:"):].lstrip(" "))
+
+            def dispatch_buffered() -> None:
+                nonlocal event_type
+                if event_type != "notification" or not data_buf:
+                    return
+                data = "\n".join(data_buf)
+                event_type = ""
+                data_buf.clear()
+                try:
+                    notif = json.loads(data)
+                except (ValueError, TypeError):
+                    return
+                if not isinstance(notif, dict):
+                    return
+                notif_id = str(notif.get("id") or "")
+                if notif_id and advance_watermark is not None:
+                    advance_watermark(notif_id)
+                ev = self._parse_notification(notif)
+                if ev is not None:
+                    emit(ev)
+
+            try:
+                for rawline in resp:
+                    line = rawline.decode("utf-8", "replace").rstrip("\r\n")
+                    if line.startswith(":"):
+                        # SSE comment / keepalive — skip.
+                        continue
+                    if line == "":
+                        dispatch_buffered()
+                        event_type = ""
+                        data_buf.clear()
+                        continue
+                    if line.startswith("event:"):
+                        event_type = line[len("event:"):].strip()
+                    elif line.startswith("data:"):
+                        data_buf.append(line[len("data:"):].lstrip(" "))
+            finally:
+                # A peer may close immediately after a complete data line
+                # without the conventional terminating blank line.
+                dispatch_buffered()
 
     def _poll_once(self, emit, since_id: str | None) -> str | None:
         """One REST notification poll. Returns the new high-water-mark
@@ -440,99 +476,114 @@ class MastodonAdapter(SidecarAdapter):
 
         backoff = 1.0
         last_notif_id: str | None = None
-        use_streaming = True
-        while True:
-            if use_streaming:
-                try:
-                    self._sse_loop(emit)
-                    # Clean stream end — reconnect promptly.
-                    backoff = 1.0
-                    continue
-                except (urllib.error.HTTPError,
-                        urllib.error.URLError,
-                        RuntimeError) as e:
-                    log.warn(
-                        "mastodon SSE failed; falling back to polling",
-                        error=str(e),
-                    )
-                    use_streaming = False
-                except Exception as e:  # noqa: BLE001
-                    log.warn(
-                        "mastodon SSE unexpected error; backing off",
-                        error=str(e),
-                        delay=backoff,
-                    )
-                    time.sleep(backoff)
-                    backoff = min(backoff * 2, MAX_BACKOFF_SECS)
-                    continue
+
+        def advance_watermark(candidate: str) -> None:
+            nonlocal last_notif_id
+            if last_notif_id is None:
+                last_notif_id = candidate
+                return
             try:
-                last_notif_id = self._poll_once(emit, last_notif_id)
+                if int(candidate) > int(last_notif_id):
+                    last_notif_id = candidate
+            except ValueError:
+                # Mastodon IDs are decimal strings; retain forward
+                # compatibility with forks that use opaque ordered IDs by
+                # treating the most recently streamed ID as authoritative.
+                last_notif_id = candidate
+
+        while True:
+            try:
+                self._sse_loop(emit, advance_watermark)
+                # Clean stream end — reconnect promptly.
                 backoff = 1.0
-            except Exception as e:  # noqa: BLE001
+                continue
+            except Exception as e:  # noqa: BLE001 — transport varies
                 log.warn(
-                    "mastodon poll error; backing off",
-                    error=str(e),
-                    delay=backoff,
+                    "mastodon SSE failed; polling once before reconnect",
+                    error=str(e), delay=backoff,
                 )
                 time.sleep(backoff)
                 backoff = min(backoff * 2, MAX_BACKOFF_SECS)
+            try:
+                last_notif_id = self._poll_once(emit, last_notif_id)
+            except Exception as e:  # noqa: BLE001
+                log.warn(
+                    "mastodon fallback poll failed",
+                    error=str(e),
+                )
             time.sleep(POLL_INTERVAL_SECS)
 
     async def produce(self, emit) -> None:
         # Run the blocking inbound loop in a worker thread; CancelledError
         # propagates and tears it down at the await boundary.
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._producer_blocking, emit)
 
     # ---- outbound: POST /api/v1/statuses -----------------------------
 
-    def _post_status(self, text: str,
-                     in_reply_to_id: str | None) -> None:
+    def _post_status(
+        self, text: str, in_reply_to_id: str | None,
+        parent_visibility: str | None = None,
+    ) -> None:
         """Post a status, chunking at MAX_MESSAGE_LEN; chained chunks
         thread under the response id of the previous chunk so a long
         reply stays as a single conversational thread."""
         url = f"{self.instance_url}/api/v1/statuses"
         reply_id = in_reply_to_id
-        for chunk in _split_message(text, self.max_message_len):
-            params = {
-                "status": chunk,
-                "visibility": self.default_visibility,
-            }
-            if reply_id:
-                params["in_reply_to_id"] = reply_id
-            body = urllib.parse.urlencode(params).encode("utf-8")
-            req = urllib.request.Request(
-                url,
-                data=body,
-                headers=self._auth_headers({
-                    "Content-Type": "application/x-www-form-urlencoded",
-                }),
-                method="POST",
-            )
+        chunks = _split_message(text, self.max_message_len)
+        for chunk_index, chunk in enumerate(chunks):
             try:
-                with urllib.request.urlopen(  # noqa: S310 — configured URL
-                    req, timeout=SEND_TIMEOUT_SECS,
-                ) as resp:
-                    status = getattr(resp, "status", 200)
-                    if status >= 300:
-                        raise RuntimeError(f"post HTTP {status}")
-                    resp_body = json.loads(resp.read().decode("utf-8"))
-            except urllib.error.HTTPError as e:
-                if e.code == 429:
-                    # POST /statuses is rate-limited independently of
-                    # auth. Honour Retry-After and raise;
-                    # `suppress_error_responses=True` keeps the raise
-                    # from echoing as a public toot.
-                    self._sleep_on_429_then_raise(
-                        self._response_headers(e), "status POST",
+                reply_id = self._post_status_chunk(
+                    url, chunk, reply_id, parent_visibility,
+                )
+            except Exception as e:  # noqa: BLE001 — report partial delivery
+                if chunk_index > 0:
+                    log.warn(
+                        "mastodon reply partially delivered",
+                        posted_chunks=chunk_index,
+                        total_chunks=len(chunks),
+                        failed_chunk=chunk_index + 1,
+                        error=str(e),
                     )
-                err_body = e.read().decode("utf-8", "replace")
-                raise RuntimeError(
-                    f"mastodon post {e.code}: {err_body}"
-                ) from e
-            # Chain subsequent chunks to this status so the thread stays
-            # ordered in clients that group replies.
-            reply_id = str(resp_body.get("id") or "") or reply_id
+                raise
+
+    def _post_status_chunk(
+        self, url: str, chunk: str, reply_id: str | None,
+        parent_visibility: str | None,
+    ) -> str | None:
+        params = {
+            "status": chunk,
+            "visibility": self._reply_visibility(parent_visibility),
+        }
+        if reply_id:
+            params["in_reply_to_id"] = reply_id
+        body = urllib.parse.urlencode(params).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers=self._auth_headers({
+                "Content-Type": "application/x-www-form-urlencoded",
+            }),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(  # noqa: S310 — configured URL
+                req, timeout=SEND_TIMEOUT_SECS,
+            ) as resp:
+                status = getattr(resp, "status", 200)
+                if status >= 300:
+                    raise RuntimeError(f"post HTTP {status}")
+                resp_body = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                self._sleep_on_429_then_raise(
+                    self._response_headers(e), "status POST",
+                )
+            err_body = e.read().decode("utf-8", "replace")
+            raise RuntimeError(
+                f"mastodon post {e.code}: {err_body}"
+            ) from e
+        return str(resp_body.get("id") or "") or reply_id
 
     async def on_send(self, cmd) -> None:
         # Text only; structured content falls back to a placeholder so
@@ -551,9 +602,20 @@ class MastodonAdapter(SidecarAdapter):
         # threading=true path (would also require a future
         # `thread` capability declaration).
         in_reply_to: "Optional[str]" = None
+        parent_visibility: "Optional[str]" = None
         user = getattr(cmd, "user", None) or {}
         if isinstance(user, dict):
             candidate = user.get("librefang_user")
+            if isinstance(candidate, str) and candidate.startswith("{"):
+                try:
+                    reply_context = json.loads(candidate)
+                except (TypeError, ValueError):
+                    reply_context = None
+                if isinstance(reply_context, dict):
+                    candidate = reply_context.get("status_id")
+                    visibility = reply_context.get("visibility")
+                    if visibility in _ALLOWED_VISIBILITIES:
+                        parent_visibility = visibility
             # Guard: librefang_user is shared across channels (dingtalk
             # puts a sessionWebhook URL, telegram puts @username, …).
             # Mastodon status ids are typically pure-digit strings on
@@ -570,8 +632,8 @@ class MastodonAdapter(SidecarAdapter):
                 thread_id = str(thread_id) if thread_id else None
             in_reply_to = thread_id
 
-        await asyncio.get_event_loop().run_in_executor(
-            None, self._post_status, text, in_reply_to,
+        await asyncio.get_running_loop().run_in_executor(
+            None, self._post_status, text, in_reply_to, parent_visibility,
         )
 
 
