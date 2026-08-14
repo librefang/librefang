@@ -7,6 +7,10 @@ on:
 permissions:
   issues: write
 
+concurrency:
+  group: todo-to-issue-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -15,7 +19,7 @@ jobs:
       - uses: alstr/todo-to-issue-action@37bb7b56e58569ef273b60678048030a7f0c261a # v5
         with:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          LABEL: "good first issue,help wanted"
+          IDENTIFIERS: '[{"name":"TODO","labels":["good first issue","help wanted"]}]'
           AUTO_ASSIGN: false
           # Skip files that contain TODO markers inside string-literal code templates
           # (e.g. plugin / skill scaffolding) — those are placeholders for end users,
