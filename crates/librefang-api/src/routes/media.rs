@@ -33,6 +33,10 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 /// Keep in sync with `librefang_kernel::media::MEDIA_PROVIDER_ORDER`.
 const KNOWN_MEDIA_PROVIDERS: &[&str] = &["openai", "gemini", "elevenlabs", "minimax", "google_tts"];
 
+fn is_known_media_provider(provider: &str) -> bool {
+    KNOWN_MEDIA_PROVIDERS.contains(&provider)
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Convert a `MediaError` into an [`ApiErrorResponse`].
@@ -42,7 +46,10 @@ fn media_error_response(err: MediaError) -> ApiErrorResponse {
         MediaError::MissingKey(_) => (StatusCode::UNPROCESSABLE_ENTITY, "missing_key"),
         MediaError::Http(_) => (StatusCode::BAD_GATEWAY, "upstream_http_error"),
         MediaError::Api { status, .. } => {
-            let sc = StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY);
+            let sc = StatusCode::from_u16(*status)
+                .ok()
+                .filter(StatusCode::is_client_error)
+                .unwrap_or(StatusCode::BAD_GATEWAY);
             (sc, "upstream_api_error")
         }
         MediaError::RateLimit(_) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
@@ -64,6 +71,20 @@ fn media_error_response(err: MediaError) -> ApiErrorResponse {
         details: None,
         request_id: None,
         status,
+    }
+}
+
+fn image_content_type(data: &[u8]) -> Option<(&'static str, &'static str)> {
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(("image/png", "png"))
+    } else if data.starts_with(b"\xff\xd8\xff") {
+        Some(("image/jpeg", "jpg"))
+    } else if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        Some(("image/gif", "gif"))
+    } else if data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+        Some(("image/webp", "webp"))
+    } else {
+        None
     }
 }
 
@@ -169,8 +190,16 @@ pub async fn generate_image(
             }
         };
 
-        let filename = format!("image_{i}.png");
-        match save_upload(&state, &bytes, &filename, "image/png").await {
+        let Some((content_type, extension)) = image_content_type(&bytes) else {
+            tracing::warn!(index = i, "generated image has an unknown byte signature");
+            image_urls.push(serde_json::json!({
+                "data_base64": img.data_base64,
+                "url": img.url,
+            }));
+            continue;
+        };
+        let filename = format!("image_{i}.{extension}");
+        match save_upload(&state, &bytes, &filename, content_type).await {
             Ok(url) => {
                 image_urls.push(serde_json::json!({
                     "url": url,
@@ -299,6 +328,9 @@ pub async fn poll_video_task(
                 .into_response();
         }
     };
+    if !is_known_media_provider(&provider) {
+        return ApiErrorResponse::bad_request("Unknown media provider").into_response();
+    }
 
     let driver = match state.media_drivers.get_or_create(&provider, None) {
         Ok(d) => d,
@@ -449,6 +481,7 @@ pub async fn transcribe_audio(
     if let Err(e) = tokio::fs::write(&file_path, &body).await {
         return ApiErrorResponse::internal_scrub(e).into_response();
     }
+    let mut temp_file = TempUploadGuard(Some(file_path.clone()));
 
     let attachment = librefang_types::media::MediaAttachment {
         media_type: librefang_types::media::MediaType::Audio,
@@ -459,25 +492,32 @@ pub async fn transcribe_audio(
         size_bytes: body.len() as u64,
     };
 
-    match state
+    let response = match state
         .kernel
         .media()
         .transcribe_audio(&attachment, None, None)
         .await
     {
-        Ok(result) => {
-            // Clean up temp file
-            let _ = tokio::fs::remove_file(&file_path).await;
-            Json(serde_json::json!({
-                "text": result.description,
-                "provider": result.provider,
-                "model": result.model,
-            }))
-            .into_response()
-        }
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&file_path).await;
-            ApiErrorResponse::internal_scrub(e).into_response()
+        Ok(result) => Json(serde_json::json!({
+            "text": result.description,
+            "provider": result.provider,
+            "model": result.model,
+        }))
+        .into_response(),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_response(),
+    };
+    if tokio::fs::remove_file(&file_path).await.is_ok() {
+        temp_file.0 = None;
+    }
+    response
+}
+
+struct TempUploadGuard(Option<std::path::PathBuf>);
+
+impl Drop for TempUploadGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -512,6 +552,63 @@ pub async fn list_media_providers(State(state): State<Arc<AppState>>) -> impl In
     Json(serde_json::json!({
         "providers": providers,
     }))
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    #[test]
+    fn generated_image_signatures_select_the_real_mime_type() {
+        assert_eq!(
+            image_content_type(b"\x89PNG\r\n\x1a\nrest"),
+            Some(("image/png", "png"))
+        );
+        assert_eq!(
+            image_content_type(b"\xff\xd8\xffrest"),
+            Some(("image/jpeg", "jpg"))
+        );
+        assert_eq!(
+            image_content_type(b"GIF89arest"),
+            Some(("image/gif", "gif"))
+        );
+        assert_eq!(
+            image_content_type(b"RIFF1234WEBPrest"),
+            Some(("image/webp", "webp"))
+        );
+        assert_eq!(image_content_type(b"not an image"), None);
+    }
+
+    #[test]
+    fn upstream_statuses_only_preserve_client_errors() {
+        let client = media_error_response(MediaError::Api {
+            status: 422,
+            message: "invalid".to_string(),
+        });
+        let server = media_error_response(MediaError::Api {
+            status: 503,
+            message: "unavailable".to_string(),
+        });
+        assert_eq!(client.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(server.status, StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn temp_upload_guard_removes_an_abandoned_file() {
+        let path =
+            std::env::temp_dir().join(format!("librefang-media-guard-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"audio").unwrap();
+        {
+            let _guard = TempUploadGuard(Some(path.clone()));
+        }
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn video_polling_only_accepts_known_media_providers() {
+        assert!(is_known_media_provider("minimax"));
+        assert!(!is_known_media_provider("../../custom"));
+    }
 }
 
 #[cfg(test)]
