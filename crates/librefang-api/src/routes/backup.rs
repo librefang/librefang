@@ -520,6 +520,84 @@ const MAX_RESTORE_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_RESTORE_COMPRESSION_RATIO: u64 = 100;
 const MAX_RESTORE_MANIFEST_BYTES: u64 = 1024 * 1024;
 
+fn prepare_restore_target(
+    canonical_home: &std::path::Path,
+    entry_name: &std::path::Path,
+) -> Result<std::path::PathBuf, RestoreError> {
+    let mut parent = canonical_home.to_path_buf();
+    if let Some(relative_parent) = entry_name.parent() {
+        for component in relative_parent.components() {
+            let std::path::Component::Normal(component) = component else {
+                return Err(RestoreError::InvalidArchive(
+                    "unsafe restore path component".to_string(),
+                ));
+            };
+            parent.push(component);
+            match std::fs::symlink_metadata(&parent) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(RestoreError::InvalidArchive(
+                        "restore path contains a symbolic link".to_string(),
+                    ));
+                }
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => {
+                    return Err(RestoreError::InvalidArchive(
+                        "restore path contains a non-directory component".to_string(),
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::create_dir(&parent).map_err(|error| {
+                        RestoreError::InvalidArchive(format!(
+                            "failed to create restore directory: {error}"
+                        ))
+                    })?;
+                }
+                Err(error) => {
+                    return Err(RestoreError::InvalidArchive(format!(
+                        "failed to inspect restore directory: {error}"
+                    )));
+                }
+            }
+            let canonical_parent = std::fs::canonicalize(&parent).map_err(|error| {
+                RestoreError::InvalidArchive(format!(
+                    "failed to resolve restore directory: {error}"
+                ))
+            })?;
+            if !canonical_parent.starts_with(canonical_home) {
+                return Err(RestoreError::InvalidArchive(
+                    "restore path escapes the home directory".to_string(),
+                ));
+            }
+        }
+    }
+
+    let target = canonical_home.join(entry_name);
+    if let Ok(metadata) = std::fs::symlink_metadata(&target) {
+        if metadata.file_type().is_symlink() {
+            return Err(RestoreError::InvalidArchive(
+                "restore target is a symbolic link".to_string(),
+            ));
+        }
+        if metadata.is_dir() {
+            return Err(RestoreError::InvalidArchive(
+                "restore target is a directory".to_string(),
+            ));
+        }
+    }
+    Ok(target)
+}
+
+fn open_restore_target(target: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(target)
+}
+
 /// Result of a successful restore extraction.
 struct RestoreOutcome {
     restored: Vec<String>,
@@ -531,12 +609,13 @@ struct RestoreOutcome {
 /// validates the manifest, and extracts every entry into `home_dir`.
 /// Must be dispatched via `tokio::task::spawn_blocking` — the
 /// decompress-and-write loop otherwise stalls the axum/tokio worker for
-/// the full archive (each entry is buffered into a `Vec<u8>` then written),
-/// matching the `create_backup_blocking` contract above.
+/// the full archive, matching the `create_backup_blocking` contract above.
 fn restore_backup_blocking(
     backup_path: std::path::PathBuf,
     home_dir: std::path::PathBuf,
 ) -> Result<RestoreOutcome, RestoreError> {
+    let canonical_home = std::fs::canonicalize(&home_dir)
+        .map_err(|e| RestoreError::Open(format!("resolve restore directory: {e}")))?;
     let file = std::fs::File::open(&backup_path).map_err(|e| RestoreError::Open(e.to_string()))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| RestoreError::InvalidArchive(e.to_string()))?;
@@ -570,7 +649,10 @@ fn restore_backup_blocking(
                 name.display()
             )));
         }
-        if compressed_size > 0 && declared_size / compressed_size > MAX_RESTORE_COMPRESSION_RATIO {
+        if declared_size > 0
+            && (compressed_size == 0
+                || declared_size > compressed_size.saturating_mul(MAX_RESTORE_COMPRESSION_RATIO))
+        {
             return Err(RestoreError::ResourceLimit(format!(
                 "entry {} exceeds the compression-ratio limit",
                 name.display()
@@ -629,24 +711,14 @@ fn restore_backup_blocking(
             continue;
         }
 
-        let target = home_dir.join(&entry_name);
-
         if entry.is_dir() {
-            if let Err(e) = std::fs::create_dir_all(&target) {
-                errors.push(format!("mkdir {}: {e}", entry_name.display()));
-            }
+            prepare_restore_target(&canonical_home, &entry_name.join("placeholder"))?;
             continue;
         }
 
-        // Ensure parent directory exists
-        if let Some(parent) = target.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                errors.push(format!("mkdir parent for {}: {e}", entry_name.display()));
-                continue;
-            }
-        }
+        let target = prepare_restore_target(&canonical_home, &entry_name)?;
 
-        let mut output = match std::fs::File::create(&target) {
+        let mut output = match open_restore_target(&target) {
             Ok(file) => file,
             Err(e) => {
                 errors.push(format!("create {}: {e}", entry_name.display()));
@@ -879,5 +951,33 @@ mod tests {
             std::fs::read_to_string(restore_dir.join("config.toml")).unwrap(),
             "[kernel]\nname = \"test\"\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_rejects_parent_symlink_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("escape.zip");
+        let restore_dir = temp.path().join("restore");
+        let outside_dir = temp.path().join("outside");
+        std::fs::create_dir(&restore_dir).unwrap();
+        std::fs::create_dir(&outside_dir).unwrap();
+        std::os::unix::fs::symlink(&outside_dir, restore_dir.join("data")).unwrap();
+
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("manifest.json", options).unwrap();
+        zip.write_all(
+            br#"{"version":1,"created_at":"now","hostname":"host","librefang_version":"test","components":["data"]}"#,
+        )
+        .unwrap();
+        zip.start_file("data/escaped.txt", options).unwrap();
+        zip.write_all(b"escaped").unwrap();
+        zip.finish().unwrap();
+
+        let result = restore_backup_blocking(archive_path, restore_dir);
+        assert!(matches!(result, Err(RestoreError::InvalidArchive(_))));
+        assert!(!outside_dir.join("escaped.txt").exists());
     }
 }
