@@ -51,6 +51,7 @@ Configure via ``[[sidecar_channels]]``:
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import os
 import socket
@@ -283,7 +284,9 @@ def _render_inline_markdown(text: str) -> str:
             break
         pe = be + 2 + pe_rel
         link_text = result[bs + 1:be]
-        url = result[be + 2:pe]
+        # The source string was escaped before parsing. Restore the URL;
+        # the sanitizer performs the single canonical attribute escape.
+        url = html.unescape(result[be + 2:pe])
         result = (
             result[:bs] + f'<a href="{url}">{link_text}</a>' + result[pe + 1:]
         )
@@ -898,29 +901,42 @@ class TelegramAdapter(SidecarAdapter):
     # ---- outbound text (formatter + sanitize + chunk + HTML) ---------
 
     def _send_text(self, chat_id, text: str, thread_id=None) -> dict:
+        responses = self._send_text_chunks(chat_id, text, thread_id)
+        return responses[0] if responses else {}
+
+    def _send_text_chunks(self, chat_id, text: str, thread_id=None) -> list:
         sanitized = _format_and_sanitize(text)
-        last: dict = {}
+        responses = []
         for chunk in _split_to_utf16_chunks(sanitized, TELEGRAM_MSG_LIMIT):
-            payload = {
-                "chat_id": chat_id,
-                "text": chunk,
-                "parse_mode": PARSE_MODE_HTML,
-            }
+            responses.append(
+                self._send_formatted_chunk(chat_id, chunk, thread_id),
+            )
+        return responses
+
+    def _send_formatted_chunk(self, chat_id, chunk: str, thread_id=None) -> dict:
+        payload = {
+            "chat_id": chat_id,
+            "text": chunk,
+            "parse_mode": PARSE_MODE_HTML,
+        }
+        if thread_id:
+            payload["message_thread_id"] = thread_id
+        resp = self._call_retrying("sendMessage", payload)
+        if (resp.get("_http") == 400
+                and "can't parse entities" in str(resp.get("description", ""))):
+            plain = {"chat_id": chat_id, "text": chunk}
             if thread_id:
-                payload["message_thread_id"] = thread_id
-            resp = self._call_retrying("sendMessage", payload)
-            if (resp.get("_http") == 400
-                    and "can't parse entities" in str(resp.get("description",
-                                                               ""))):
-                plain = {"chat_id": chat_id, "text": chunk}
-                if thread_id:
-                    plain["message_thread_id"] = thread_id
-                resp = self._call("sendMessage", plain)
-            last = resp
-        return last
+                plain["message_thread_id"] = thread_id
+            resp = self._call("sendMessage", plain)
+        return resp
 
     def _edit_text(self, chat_id, message_id, text: str) -> None:
         sanitized = _format_and_sanitize(text)
+        self._edit_formatted_chunk(chat_id, message_id, sanitized, text)
+
+    def _edit_formatted_chunk(
+        self, chat_id, message_id, sanitized: str, plain_fallback: str,
+    ) -> None:
         resp = self._call("editMessageText", {
             "chat_id": chat_id,
             "message_id": message_id,
@@ -932,7 +948,7 @@ class TelegramAdapter(SidecarAdapter):
             if resp.get("_http") == 400 and "can't parse entities" in desc:
                 self._call("editMessageText", {
                     "chat_id": chat_id, "message_id": message_id,
-                    "text": text,
+                    "text": plain_fallback,
                 })
 
     def _send_media_request(self, endpoint: str, chat_id, body: dict,
@@ -1069,20 +1085,39 @@ class TelegramAdapter(SidecarAdapter):
                 f"{len(items)}")
         media = []
         for it in items:
+            if not isinstance(it, dict):
+                log.warn(
+                    "telegram media group skipping non-object item",
+                    item_type=type(it).__name__,
+                )
+                continue
             if "Photo" in it:
                 p = it["Photo"]
                 v = {"type": "photo", "media": p.get("url")}
                 if p.get("caption"):
                     v["caption"] = p["caption"]
                     v["parse_mode"] = PARSE_MODE_HTML
-            else:
+            elif "Video" in it:
                 p = it["Video"]
                 v = {"type": "video", "media": p.get("url"),
                      "duration": p.get("duration_seconds", 0)}
                 if p.get("caption"):
                     v["caption"] = p["caption"]
                     v["parse_mode"] = PARSE_MODE_HTML
+            else:
+                log.warn(
+                    "telegram media group skipping unsupported item",
+                    kinds=list(it) if isinstance(it, dict) else [],
+                )
+                continue
             media.append(v)
+        if len(media) < 2:
+            log.warn(
+                "telegram media group has fewer than two supported items; "
+                "not sending",
+                supported_items=len(media),
+            )
+            return {}
         body = {"chat_id": chat_id, "media": media}
         if thread_id:
             body["message_thread_id"] = thread_id
@@ -1125,7 +1160,7 @@ class TelegramAdapter(SidecarAdapter):
     def _send_interactive(self, chat_id, text, buttons, thread_id):
         body = {
             "chat_id": chat_id,
-            "text": sanitize_telegram_html(text),
+            "text": _format_and_sanitize(text),
             "parse_mode": PARSE_MODE_HTML,
             "reply_markup": self._inline_keyboard(buttons),
         }
@@ -1137,7 +1172,7 @@ class TelegramAdapter(SidecarAdapter):
         kb = self._inline_keyboard(buttons)
         resp = self._call("editMessageText", {
             "chat_id": chat_id, "message_id": int(message_id),
-            "text": sanitize_telegram_html(text),
+            "text": _format_and_sanitize(text),
             "parse_mode": PARSE_MODE_HTML,
             "reply_markup": kb,
         })
@@ -1625,21 +1660,46 @@ class TelegramAdapter(SidecarAdapter):
         if st is None:
             return
         st["text"] += chunk
-        if st["msg_id"] is None:
-            resp = self._send_text(st["chat_id"], st["text"], st["thread_id"])
-            st["msg_id"] = (resp.get("result") or {}).get("message_id")
+        if not st["initial_attempted"]:
+            st["initial_attempted"] = True
+            self._sync_stream_messages(st)
             st["last_edit"] = time.monotonic()
-        elif time.monotonic() - st["last_edit"] >= STREAM_EDIT_INTERVAL:
-            self._edit_text(st["chat_id"], st["msg_id"], st["text"])
+        elif (st["message_ids"]
+              and time.monotonic() - st["last_edit"] >= STREAM_EDIT_INTERVAL):
+            self._sync_stream_messages(st)
             st["last_edit"] = time.monotonic()
+
+    def _sync_stream_messages(self, st: dict) -> None:
+        sanitized = _format_and_sanitize(st["text"])
+        chunks = _split_to_utf16_chunks(sanitized, TELEGRAM_MSG_LIMIT)
+        for index, formatted_chunk in enumerate(chunks):
+            if index < len(st["message_ids"]):
+                self._edit_formatted_chunk(
+                    st["chat_id"], st["message_ids"][index],
+                    formatted_chunk, formatted_chunk,
+                )
+                continue
+            resp = self._send_formatted_chunk(
+                st["chat_id"], formatted_chunk, st["thread_id"],
+            )
+            message_id = (resp.get("result") or {}).get("message_id")
+            if message_id is None:
+                break
+            st["message_ids"].append(message_id)
+        if len(st["message_ids"]) > len(chunks):
+            for obsolete_id in st["message_ids"][len(chunks):]:
+                self._delete_message(st["chat_id"], obsolete_id)
+            del st["message_ids"][len(chunks):]
 
     def _stream_end(self, sid: str) -> None:
         st = self._streams.pop(sid, None)
         if st is None or not st["text"]:
             return
-        if st["msg_id"] is not None:
-            self._edit_text(st["chat_id"], st["msg_id"], st["text"])
+        if st["message_ids"]:
+            self._sync_stream_messages(st)
         else:
+            # Retry a failed initial send once at the terminal event, not on
+            # every accumulated delta.
             self._send_text(st["chat_id"], st["text"], st["thread_id"])
 
     # ---- command dispatch -------------------------------------------
@@ -1672,7 +1732,8 @@ class TelegramAdapter(SidecarAdapter):
             self._streams[cmd.stream_id] = {
                 "chat_id": cmd.channel_id,
                 "thread_id": getattr(cmd, "thread_id", None),
-                "text": "", "msg_id": None, "last_edit": 0.0,
+                "text": "", "message_ids": [], "initial_attempted": False,
+                "last_edit": 0.0,
             }
         elif isinstance(cmd, protocol.StreamDelta):
             await loop.run_in_executor(

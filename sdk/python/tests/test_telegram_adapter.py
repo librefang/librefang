@@ -59,6 +59,12 @@ def test_markdown_to_telegram_html_matches_rust_oracle():
     assert m("a < b & c > d") == "a &lt; b &amp; c &gt; d"
 
 
+def test_markdown_link_query_ampersand_is_escaped_once():
+    assert tg._format_and_sanitize(
+        "[results](https://example.com/search?a=1&b=2)",
+    ) == '<a href="https://example.com/search?a=1&amp;b=2">results</a>'
+
+
 # ---- sanitizer: vs telegram.rs sanitize_telegram_html tests --------
 
 
@@ -615,6 +621,53 @@ async def test_send_text_plain_fallback_on_parse_error(monkeypatch):
     assert "parse_mode" not in calls[1][1]
 
 
+def test_send_text_returns_first_chunk_response(monkeypatch):
+    monkeypatch.setattr(tg, "TELEGRAM_MSG_LIMIT", 4)
+    ids = iter((101, 102, 103))
+    monkeypatch.setattr(
+        tg.TelegramAdapter, "_call",
+        lambda self, method, payload: {
+            "ok": True, "result": {"message_id": next(ids)},
+        },
+    )
+    a = _adapter()
+
+    response = a._send_text("c1", "abcdefghij")
+
+    assert response["result"]["message_id"] == 101
+
+
+def test_interactive_send_and_edit_format_markdown(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tg.TelegramAdapter, "_call",
+        lambda self, method, payload: calls.append((method, payload)) or {},
+    )
+    a = _adapter()
+
+    a._send_interactive("c1", "**pick**", [], None)
+    a._edit_interactive("c1", 7, "`updated`", [])
+
+    assert calls[0][1]["text"] == "<b>pick</b>"
+    assert calls[1][1]["text"] == "<code>updated</code>"
+
+
+def test_media_group_skips_unknown_item_without_invalid_request(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tg.TelegramAdapter, "_call",
+        lambda self, method, payload: calls.append((method, payload)) or {},
+    )
+    a = _adapter()
+
+    result = a._send_media_group(
+        "c1", [{"Photo": {"url": "p"}}, {"Audio": {"url": "a"}}], None,
+    )
+
+    assert result == {}
+    assert calls == []
+
+
 @pytest.mark.asyncio
 async def test_streaming_initial_then_throttled_edit(monkeypatch):
     calls = []
@@ -635,6 +688,55 @@ async def test_streaming_initial_then_throttled_edit(monkeypatch):
     final = [p for m, p in calls if m == "editMessageText"][-1]
     assert final["message_id"] == 4242 and final["text"] == "Hello"
     assert "s1" not in a._streams
+
+
+@pytest.mark.asyncio
+async def test_streaming_tracks_and_edits_every_message_chunk(monkeypatch):
+    monkeypatch.setattr(tg, "TELEGRAM_MSG_LIMIT", 4)
+    monkeypatch.setattr(tg, "STREAM_EDIT_INTERVAL", 0.0)
+    calls = []
+    next_id = 100
+
+    def fake_call(self, method, payload):
+        nonlocal next_id
+        calls.append((method, payload))
+        if method == "sendMessage":
+            next_id += 1
+            return {"ok": True, "result": {"message_id": next_id}}
+        return {"ok": True}
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_call", fake_call)
+    a = _adapter()
+    await a.on_command(tg.protocol.StreamStart("c1", "multi"))
+    await a.on_command(tg.protocol.StreamDelta("multi", "abcdefghij"))
+    await a.on_command(tg.protocol.StreamDelta("multi", "kl"))
+    await a.on_command(tg.protocol.StreamEnd("multi"))
+
+    sends = [p for method, p in calls if method == "sendMessage"]
+    edits = [p for method, p in calls if method == "editMessageText"]
+    assert [p["message_id"] for p in edits[-3:]] == [101, 102, 103]
+    assert len(sends) == 3
+    assert all(tg._utf16_len(p["text"]) <= 4 for p in sends + edits)
+
+
+@pytest.mark.asyncio
+async def test_failed_initial_stream_send_is_not_retried_per_delta(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tg.TelegramAdapter, "_call",
+        lambda self, method, payload: calls.append((method, payload)) or {
+            "_http": 503,
+        },
+    )
+    a = _adapter()
+    await a.on_command(tg.protocol.StreamStart("c1", "failed"))
+    await a.on_command(tg.protocol.StreamDelta("failed", "a"))
+    await a.on_command(tg.protocol.StreamDelta("failed", "b"))
+    await a.on_command(tg.protocol.StreamDelta("failed", "c"))
+
+    assert [m for m, _ in calls] == ["sendMessage"]
+    await a.on_command(tg.protocol.StreamEnd("failed"))
+    assert [m for m, _ in calls] == ["sendMessage", "sendMessage"]
 
 
 @pytest.mark.asyncio
