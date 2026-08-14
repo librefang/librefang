@@ -1,0 +1,1 @@
+- Honor the user's reduced-motion preference across the dashboard and remove paint-heavy blur keyframes. (@xiaomo)
