@@ -12,7 +12,7 @@ librefang_api_key = "replace-with-a-random-64-character-hex-key"
 # region           = "us-central1"
 # zone             = "us-central1-a"
 # ssh_pub_key_path = "~/.ssh/id_rsa.pub"
-# librefang_version = "latest"
+# librefang_version = "v2026.7.31"
 
 # At least one LLM API key is required
 groq_api_key      = ""
