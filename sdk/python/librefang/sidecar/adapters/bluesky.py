@@ -188,6 +188,10 @@ class BlueskyAdapter(SidecarAdapter):
         self._refresh_jwt: str | None = None
         self._session_did: str | None = None
         self._session_created_at: float = 0.0
+        # Polling and outbound sends run on different executor threads.
+        # Keep each session check/refresh/update transaction indivisible;
+        # refreshSession rotates its refresh JWT.
+        self._session_lock = threading.Lock()
         # Discovered at startup via validate().
         self.own_did: str | None = None
         # Reply-thread cache: notification uri → {"root": {uri,cid},
@@ -295,6 +299,10 @@ class BlueskyAdapter(SidecarAdapter):
     def _create_session(self) -> str:
         """Mint a new session from identifier + app_password. Returns the
         DID of the authenticated account; stores session state on self."""
+        with self._session_lock:
+            return self._create_session_locked()
+
+    def _create_session_locked(self) -> str:
         url = f"{self.service_url}/xrpc/com.atproto.server.createSession"
         body = {"identifier": self.identifier, "password": self.app_password}
         status, resp, resp_hdrs = self._post_json(url, body)
@@ -332,8 +340,12 @@ class BlueskyAdapter(SidecarAdapter):
         """Refresh the access JWT. Falls back to createSession on failure
         — matches the Rust adapter's behaviour (transient refresh
         failures are recoverable by re-authing with the password)."""
+        with self._session_lock:
+            self._refresh_session_locked()
+
+    def _refresh_session_locked(self) -> None:
         if not self._refresh_jwt:
-            self._create_session()
+            self._create_session_locked()
             return
         url = f"{self.service_url}/xrpc/com.atproto.server.refreshSession"
         status, resp, resp_hdrs = self._post_json(
@@ -355,7 +367,7 @@ class BlueskyAdapter(SidecarAdapter):
                 "bluesky refreshSession failed; re-creating session",
                 status=status,
             )
-            self._create_session()
+            self._create_session_locked()
             return
         access = resp.get("accessJwt")
         new_refresh = resp.get("refreshJwt")
@@ -363,7 +375,7 @@ class BlueskyAdapter(SidecarAdapter):
         if not (isinstance(access, str) and access
                 and isinstance(new_refresh, str) and new_refresh
                 and isinstance(did, str) and did):
-            self._create_session()
+            self._create_session_locked()
             return
         self._access_jwt = access
         self._refresh_jwt = new_refresh
@@ -373,17 +385,29 @@ class BlueskyAdapter(SidecarAdapter):
     def _get_token(self) -> tuple[str, str]:
         """Return (access_jwt, did), refreshing if the session is close
         to expiry. Mirrors the Rust ``get_token`` logic."""
-        if (self._access_jwt is not None
-                and time.monotonic() - self._session_created_at
-                < (SESSION_LIFE_SECS - SESSION_REFRESH_BUFFER_SECS)):
-            assert self._session_did is not None
+        with self._session_lock:
+            if (self._access_jwt is not None
+                    and time.monotonic() - self._session_created_at
+                    < (SESSION_LIFE_SECS - SESSION_REFRESH_BUFFER_SECS)):
+                assert self._session_did is not None
+                return self._access_jwt, self._session_did
+            if self._access_jwt is not None:
+                self._refresh_session_locked()
+            else:
+                self._create_session_locked()
+            assert (self._access_jwt is not None
+                    and self._session_did is not None)
             return self._access_jwt, self._session_did
-        if self._access_jwt is not None:
-            self._refresh_session()
-        else:
-            self._create_session()
-        assert self._access_jwt is not None and self._session_did is not None
-        return self._access_jwt, self._session_did
+
+    def _invalidate_access_token(self, rejected_token: str) -> None:
+        """Invalidate only the token that actually received a 401.
+
+        A request can finish after another executor thread refreshed the
+        session.  Its late 401 must not discard that newer access token.
+        """
+        with self._session_lock:
+            if self._access_jwt == rejected_token:
+                self._access_jwt = None
 
     def _verify_credentials(self) -> str:
         """Validate at startup by creating a session and discovering the
@@ -498,7 +522,7 @@ class BlueskyAdapter(SidecarAdapter):
         status, body, resp_hdrs = self._get_json(url, bearer=token)
         if status == 401:
             # Mirror Rust: clear session so next poll re-auths.
-            self._access_jwt = None
+            self._invalidate_access_token(token)
             raise RuntimeError("bluesky 401 — session expired")
         if status == 429:
             # XRPC rate limit on listNotifications. Honour Retry-After
@@ -647,7 +671,7 @@ class BlueskyAdapter(SidecarAdapter):
                 "and retrying once",
                 uri=uri,
             )
-            self._access_jwt = None
+            self._invalidate_access_token(bearer)
             try:
                 bearer, _ = self._get_token()
             except Exception as e:  # noqa: BLE001
@@ -752,7 +776,7 @@ class BlueskyAdapter(SidecarAdapter):
             if status == 401:
                 # Token expired mid-batch: refresh once and retry this
                 # chunk. If it still fails we surface the error.
-                self._access_jwt = None
+                self._invalidate_access_token(token)
                 token, did = self._get_token()
                 body["repo"] = did
                 status, resp, resp_hdrs = self._post_json(
