@@ -35,6 +35,7 @@ jobs:
     name: Create release tag
     runs-on: ubuntu-latest
     environment: release-tag
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -58,7 +59,14 @@ jobs:
           # Same gate as release.yml `create_release` — the manifest
           # section must match the tag the maintainer is requesting.
           TAG="$VERSION"
-          WS_VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/{ s/^version *= *"\([^"]*\)".*/\1/p }' Cargo.toml | head -1)
+          if ! WS_VERSION=$(python3 -c 'import sys, tomllib; data = tomllib.load(sys.stdin.buffer); print(data["workspace"]["package"]["version"])' < Cargo.toml); then
+            echo "::error::could not parse [workspace.package].version from Cargo.toml"
+            exit 1
+          fi
+          if [ -z "$WS_VERSION" ]; then
+            echo "::error::[workspace.package].version is empty"
+            exit 1
+          fi
           if [ "${TAG#v}" != "$WS_VERSION" ]; then
             echo "::error::requested tag $TAG does not match [workspace.package].version $WS_VERSION"
             exit 1
