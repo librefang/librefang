@@ -86,6 +86,8 @@ REJECT_CORPUS=(
   $'fix(api): real change\n\nSigned-off-by: Claude <noreply+automation@anthropic.com>'
   $'fix(api): real change\n\nAuthored-By: Claude Code <human@example.com>'
   $'fix(api): real change\n\nHelped-by: Anthropic <human@example.com>'
+  $'fix(api): real change\n\nGenerated-by: Claude Code <human@example.com>'
+  $'fix(api): real change\n\nCo-Authored-By: Build Bot <claude+automation@anthropic.com>'
 )
 
 for bad in "${REJECT_CORPUS[@]}"; do
