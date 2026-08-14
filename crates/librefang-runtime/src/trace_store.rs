@@ -8,7 +8,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard};
+use tracing::warn;
 
 use crate::context_engine::HookTrace;
 
@@ -71,6 +72,14 @@ impl TraceStore {
         })
     }
 
+    fn lock_connection(&self) -> MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|poisoned| {
+            warn!("Trace store connection lock poisoned; recovering inner state");
+            self.conn.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+
     /// Insert a trace record asynchronously.
     ///
     /// SQLite work runs on a `tokio::task::spawn_blocking` thread so the tokio
@@ -91,7 +100,7 @@ impl TraceStore {
     /// call from any sync context (including tests); from a tokio task, call
     /// [`TraceStore::insert`] instead so the work is moved off the worker.
     pub fn insert_blocking(&self, plugin: &str, trace: &HookTrace) {
-        let Ok(conn) = self.conn.lock() else { return };
+        let conn = self.lock_connection();
 
         let input_preview = serde_json::to_string(&trace.input_preview).ok();
         let output_preview = trace
@@ -145,10 +154,7 @@ impl TraceStore {
         limit: usize,
         only_failures: bool,
     ) -> rusqlite::Result<Vec<serde_json::Value>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
+        let conn = self.lock_connection();
 
         // Build parameterized WHERE clause — never interpolate user values directly.
         let mut conditions: Vec<&str> = Vec::new();
@@ -202,12 +208,9 @@ impl TraceStore {
 
     /// Look up a single trace by its trace_id.
     ///
-    /// Returns `Ok(None)` if no trace matches; `Err` if the lookup itself fails (poisoned mutex, corrupt row, or other SQLite error).
+    /// Returns `Ok(None)` if no trace matches; `Err` if the lookup itself fails.
     pub fn query_by_trace_id(&self, trace_id: &str) -> rusqlite::Result<Option<serde_json::Value>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
+        let conn = self.lock_connection();
         conn.query_row(
             "SELECT trace_id, correlation_id, plugin, hook, started_at, elapsed_ms, success, error, \
              input_preview, output_preview FROM hook_traces WHERE trace_id = ?1",
@@ -232,10 +235,7 @@ impl TraceStore {
 
     /// Count traces, optionally filtered by plugin and/or failure status.
     pub fn count(&self, plugin: Option<&str>, only_failures: bool) -> rusqlite::Result<i64> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
+        let conn = self.lock_connection();
 
         // Build parameterized WHERE clause — never interpolate user values directly.
         let mut conditions: Vec<&str> = Vec::new();
@@ -272,10 +272,7 @@ impl TraceStore {
         failures: u32,
         opened_at: Option<&str>,
     ) -> rusqlite::Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
+        let conn = self.lock_connection();
         conn.execute(
             "INSERT INTO circuit_breaker_states (key, failures, opened_at)
              VALUES (?1, ?2, ?3)
@@ -291,10 +288,7 @@ impl TraceStore {
     ///
     /// Returns a map of `key → (failures, opened_at)`.
     pub fn load_circuit_states(&self) -> rusqlite::Result<HashMap<String, (u32, Option<String>)>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
+        let conn = self.lock_connection();
         let mut stmt =
             conn.prepare("SELECT key, failures, opened_at FROM circuit_breaker_states")?;
         let rows = stmt.query_map([], |row| {
@@ -315,10 +309,7 @@ impl TraceStore {
     /// Remove the persisted state for a key (e.g. when circuit resets to closed
     /// with zero failures).
     pub fn delete_circuit_state(&self, key: &str) -> rusqlite::Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
+        let conn = self.lock_connection();
         conn.execute(
             "DELETE FROM circuit_breaker_states WHERE key = ?1",
             rusqlite::params![key],
@@ -529,5 +520,43 @@ mod tests {
 
         assert!(store.query(None, None, 100, false).is_err());
         assert!(store.query_by_trace_id("test000000000000").is_err());
+    }
+
+    #[test]
+    fn store_recovers_all_connection_operations_after_lock_poison() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(TraceStore::open(&tmp.path().join("traces.db")).unwrap());
+        store.insert_blocking("before-panic", &make_trace("before", true));
+        store
+            .save_circuit_state("preserved", 2, Some("2026-08-14T00:00:00Z"))
+            .unwrap();
+
+        let poisoned_store = store.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poisoned_store.conn.lock().unwrap();
+            panic!("poison trace store connection lock");
+        });
+        assert!(store.conn.is_poisoned());
+
+        store.insert_blocking("after-panic", &make_trace("after", false));
+        assert!(!store.conn.is_poisoned());
+        assert_eq!(store.count(None, false).unwrap(), 2);
+        assert_eq!(store.count(None, true).unwrap(), 1);
+        assert_eq!(store.query(None, None, 10, false).unwrap().len(), 2);
+        assert!(store
+            .query_by_trace_id("test000000000000")
+            .unwrap()
+            .is_some());
+
+        let states = store.load_circuit_states().unwrap();
+        assert_eq!(states["preserved"].0, 2);
+        store.save_circuit_state("new", 3, None).unwrap();
+        assert_eq!(store.load_circuit_states().unwrap()["new"].0, 3);
+        store.delete_circuit_state("preserved").unwrap();
+        assert!(!store
+            .load_circuit_states()
+            .unwrap()
+            .contains_key("preserved"));
+        assert!(store.conn.lock().is_ok());
     }
 }
