@@ -41,12 +41,30 @@ module DevtoPublish
 
     tags = metadata["tags"]
     tags = tags.split(",") if tags.is_a?(String)
-    tags = Array(tags).map { |tag| tag.to_s.strip }.reject(&:empty?)
+    tags = [] if tags.nil?
+    raise Error, "#{path}: tags must be a string or array" unless tags.is_a?(Array)
+    unless tags.all? { |tag| tag.is_a?(String) }
+      raise Error, "#{path}: every tag must be a string"
+    end
+    tags = tags.map(&:strip).reject(&:empty?)
 
     devto_id = metadata["devto_id"]
     if devto_id && (!devto_id.is_a?(Integer) || devto_id < 1)
       raise Error, "#{path}: devto_id must be a positive integer"
     end
+
+    wrapped = start_index.positive? && lines[start_index - 1].strip.match?(/\A```(?:markdown|md)?\z/i)
+    body_end = lines.length
+    if wrapped
+      closing_index = (finish_index + 1...lines.length).reverse_each.find do |index|
+        lines[index].strip == "```"
+      end
+      raise Error, "#{path}: missing closing Markdown fence" unless closing_index
+
+      body_end = closing_index
+    end
+    body_markdown = lines[(finish_index + 1)...body_end].join.strip
+    raise Error, "#{path}: published article has no body" if published && body_markdown.empty?
 
     Article.new(
       path: path,
@@ -57,7 +75,7 @@ module DevtoPublish
       cover_image: metadata["cover_image"].to_s,
       canonical_url: metadata["canonical_url"].to_s,
       devto_id: devto_id,
-      body_markdown: lines[(finish_index + 1)..].join.strip
+      body_markdown: body_markdown
     )
   rescue Psych::Exception => e
     raise Error, "#{path}: invalid YAML front matter: #{e.message}"
@@ -78,13 +96,19 @@ module DevtoPublish
       articles = []
       page = 1
       loop do
-        batch = request_json(:get, "articles/me?page=#{page}&per_page=#{@page_size}")
+        batch = request_json(:get, "articles/me/all?page=#{page}&per_page=#{@page_size}")
         raise Error, "Dev.to articles response is not an array" unless batch.is_a?(Array)
+        unless batch.all? { |item| item.is_a?(Hash) && item["id"].is_a?(Integer) && item["id"].positive? }
+          raise Error, "Dev.to articles response contains an invalid article"
+        end
 
         articles.concat(batch)
         break if batch.length < @page_size
 
         page += 1
+      end
+      if articles.map { |item| item["id"] }.uniq.length != articles.length
+        raise Error, "Dev.to paginated inventory contains duplicate article ids"
       end
       articles
     end
@@ -108,7 +132,9 @@ module DevtoPublish
       method = id ? :put : :post
       path = id ? "articles/#{id}" : "articles"
       response = request_json(method, path, payload)
-      unless response.is_a?(Hash) && response["id"].is_a?(Integer) && !response["url"].to_s.empty?
+      valid_id = response.is_a?(Hash) && response["id"].is_a?(Integer) && response["id"].positive?
+      valid_id &&= response["id"] == id if id
+      unless valid_id && !response["url"].to_s.empty?
         raise Error, "Dev.to #{method.upcase} response omitted article id or URL"
       end
       response
@@ -161,32 +187,65 @@ module DevtoPublish
       published = articles.select(&:published)
       validate_unique_articles(published)
       existing = @client.all_articles
-      published.each do |article|
-        id = article.devto_id || match_existing(existing, article)&.fetch("id")
+      plans = published.map { |article| [article, resolve_existing_id(existing, article)] }
+      validate_unique_targets(plans)
+
+      plans.each do |article, id|
         @output.puts(id ? "Updating: #{article.title} (id=#{id})" : "Creating: #{article.title}")
         response = @client.publish(article, id: id)
         @output.puts(response.fetch("url"))
-        existing << response unless id
       end
     end
 
     private
 
     def validate_unique_articles(articles)
-      seen = {}
+      seen = Hash.new { |hash, key| hash[key] = {} }
       articles.each do |article|
-        key = if article.devto_id
-                ["devto_id", article.devto_id]
-              elsif !article.canonical_url.empty?
-                ["canonical_url", article.canonical_url]
-              else
-                ["title", article.title]
-              end
-        previous = seen[key]
-        if previous
-          raise Error, "#{article.path}: duplicate #{key.first} also used by #{previous}"
+        identifiers = [["title", article.title]]
+        identifiers << ["devto_id", article.devto_id] if article.devto_id
+        identifiers << ["canonical_url", article.canonical_url] unless article.canonical_url.empty?
+        identifiers.each do |kind, value|
+          previous = seen[kind][value]
+          if previous
+            raise Error, "#{article.path}: duplicate #{kind} also used by #{previous}"
+          end
+          seen[kind][value] = article.path
         end
-        seen[key] = article.path
+      end
+    end
+
+    def resolve_existing_id(existing, article)
+      if article.devto_id
+        matches = existing.select { |item| item["id"] == article.devto_id }
+        if matches.empty?
+          raise Error, "#{article.path}: devto_id #{article.devto_id} is not in the authenticated account"
+        end
+        if matches.length > 1
+          raise Error, "#{article.path}: devto_id #{article.devto_id} is duplicated in remote inventory"
+        end
+        remote = matches.first
+        same_title = remote["title"] == article.title
+        same_canonical = !article.canonical_url.empty? && remote["canonical_url"] == article.canonical_url
+        unless same_title || same_canonical
+          raise Error, "#{article.path}: devto_id #{article.devto_id} matches a different remote article"
+        end
+        return article.devto_id
+      end
+
+      match_existing(existing, article)&.fetch("id")
+    end
+
+    def validate_unique_targets(plans)
+      seen = {}
+      plans.each do |article, id|
+        next unless id
+
+        previous = seen[id]
+        if previous
+          raise Error, "#{article.path}: resolves to Dev.to id #{id}, already used by #{previous}"
+        end
+        seen[id] = article.path
       end
     end
 

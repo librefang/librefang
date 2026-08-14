@@ -19,6 +19,8 @@ class DevtoPublishTest < Minitest::Test
       article.devto_id ? ["devto_id", article.devto_id] : ["canonical_url", article.canonical_url]
     end
     assert_equal keys.uniq, keys
+    assert_equal articles.map(&:title).uniq, articles.map(&:title)
+    assert articles.all? { |article| !article.canonical_url.empty? }
   end
 
   def test_parses_real_yaml_forms_and_body_after_front_matter
@@ -37,6 +39,11 @@ class DevtoPublishTest < Minitest::Test
       ---
 
       Body text
+      ```ruby
+      puts "inside"
+      ```
+      ```
+      Trailing wrapper commentary
     ARTICLE
     file.close
 
@@ -44,7 +51,7 @@ class DevtoPublishTest < Minitest::Test
     assert_equal "Unquoted title", article.title
     assert_equal "Folded description", article.description
     assert_equal %w[rust ai], article.tags
-    assert_equal "Body text", article.body_markdown
+    assert_equal "Body text\n```ruby\nputs \"inside\"\n```", article.body_markdown
   ensure
     file&.close!
   end
@@ -52,14 +59,17 @@ class DevtoPublishTest < Minitest::Test
   def test_client_paginates_and_checks_http_and_json_errors
     calls = []
     transport = lambda do |method, uri, _payload|
-      calls << [method, uri.query]
+      calls << [method, uri.path, uri.query]
       page = URI.decode_www_form(uri.query).to_h.fetch("page")
       body = page == "1" ? JSON.generate([{id: 1}, {id: 2}]) : "[]"
       [200, body]
     end
     client = DevtoPublish::Client.new(api_key: "secret", page_size: 2, transport: transport)
     assert_equal 2, client.all_articles.length
-    assert_equal [[:get, "page=1&per_page=2"], [:get, "page=2&per_page=2"]], calls
+    assert_equal [
+      [:get, "/api/articles/me/all", "page=1&per_page=2"],
+      [:get, "/api/articles/me/all", "page=2&per_page=2"]
+    ], calls
 
     failing = DevtoPublish::Client.new(
       api_key: "secret", transport: ->(*) { [401, '{"error":"bad key"}'] }
@@ -68,6 +78,20 @@ class DevtoPublishTest < Minitest::Test
 
     malformed = DevtoPublish::Client.new(api_key: "secret", transport: ->(*) { [200, "not json"] })
     assert_raises(DevtoPublish::Error) { malformed.all_articles }
+
+    invalid_inventory = DevtoPublish::Client.new(
+      api_key: "secret", transport: ->(*) { [200, '[{"title":"missing id"}]'] }
+    )
+    assert_raises(DevtoPublish::Error) { invalid_inventory.all_articles }
+
+    duplicate_inventory = DevtoPublish::Client.new(
+      api_key: "secret", page_size: 2,
+      transport: lambda do |_, uri, _|
+        page = URI.decode_www_form(uri.query).to_h.fetch("page")
+        page == "1" ? [200, '[{"id":1},{"id":2}]'] : [200, '[{"id":2}]']
+      end
+    )
+    assert_raises(DevtoPublish::Error) { duplicate_inventory.all_articles }
   end
 
   def test_publisher_updates_by_canonical_url_and_creates_unknown_article
@@ -106,6 +130,12 @@ class DevtoPublishTest < Minitest::Test
     assert_equal [:post, "/api/articles"], calls[0][0, 2]
     assert_equal [:put, "/api/articles/7"], calls[1][0, 2]
     assert_equal "Article", calls[0][2].dig(:article, :title)
+
+    wrong_id = DevtoPublish::Client.new(
+      api_key: "secret",
+      transport: ->(*) { [200, JSON.generate({id: 8, url: "https://dev.to/wrong"})] }
+    )
+    assert_raises(DevtoPublish::Error) { wrong_id.publish(article, id: 7) }
   ensure
     file&.close!
   end
@@ -136,9 +166,64 @@ class DevtoPublishTest < Minitest::Test
     second&.close!
   end
 
+  def test_explicit_id_must_exist_in_authenticated_inventory
+    client = FakeClient.new([])
+    file = article_file("Known by id", "https://example.test/id", devto_id: 7)
+    publisher = DevtoPublish::Publisher.new(client: client, output: StringIO.new)
+
+    assert_raises(DevtoPublish::Error) { publisher.run([file.path]) }
+    assert_empty client.ids
+  ensure
+    file&.close!
+  end
+
+  def test_explicit_id_must_identify_the_expected_remote_article
+    client = FakeClient.new([
+      {"id" => 7, "title" => "Other", "canonical_url" => "https://example.test/other"}
+    ])
+    file = article_file("Expected", "https://example.test/expected", devto_id: 7)
+    publisher = DevtoPublish::Publisher.new(client: client, output: StringIO.new)
+
+    assert_raises(DevtoPublish::Error) { publisher.run([file.path]) }
+    assert_empty client.ids
+  ensure
+    file&.close!
+  end
+
+  def test_all_remote_matches_are_preflighted_before_writes
+    client = FakeClient.new([
+      {"id" => 1, "title" => "Ambiguous"},
+      {"id" => 2, "title" => "Ambiguous"}
+    ])
+    fresh = article_file("Fresh", "https://example.test/fresh")
+    ambiguous = article_file("Ambiguous", "")
+    publisher = DevtoPublish::Publisher.new(client: client, output: StringIO.new)
+
+    assert_raises(DevtoPublish::Error) { publisher.run([fresh.path, ambiguous.path]) }
+    assert_empty client.ids
+  ensure
+    fresh&.close!
+    ambiguous&.close!
+  end
+
+  def test_different_local_identifiers_cannot_target_same_remote_article
+    client = FakeClient.new([
+      {"id" => 7, "title" => "First", "canonical_url" => "https://example.test/shared"}
+    ])
+    by_id = article_file("First", "https://example.test/first", devto_id: 7)
+    by_url = article_file("Second", "https://example.test/shared")
+    publisher = DevtoPublish::Publisher.new(client: client, output: StringIO.new)
+
+    assert_raises(DevtoPublish::Error) { publisher.run([by_id.path, by_url.path]) }
+    assert_empty client.ids
+  ensure
+    by_id&.close!
+    by_url&.close!
+  end
+
   private
 
-  def article_file(title, canonical_url)
+  def article_file(title, canonical_url, devto_id: nil)
     file = Tempfile.new(["article", ".md"])
     file.write(<<~ARTICLE)
       ---
@@ -146,6 +231,7 @@ class DevtoPublishTest < Minitest::Test
       published: true
       tags: rust, ai
       canonical_url: #{canonical_url}
+      #{"devto_id: #{devto_id}" if devto_id}
       ---
       Body
     ARTICLE
