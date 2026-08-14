@@ -9,25 +9,34 @@ improvements documented in the module header (reply-context
 round-trip, msg.id dedupe, 429 Retry-After, explicit HTTP timeouts).
 """
 
-import io
 import json
 import os
 import time
-import urllib.error
 
 import pytest
 
+from librefang.sidecar.adapters import qq as qq_mod
 
-os.environ.setdefault("QQ_APP_ID", "test-app")
-os.environ.setdefault("QQ_APP_SECRET", "test-secret")
-os.environ.setdefault("QQ_API_BASE", "https://qq.test")
-os.environ.setdefault("QQ_TOKEN_URL", "https://qq-token.test/getAppAccessToken")
-from librefang.sidecar.adapters import qq as qq_mod  # noqa: E402
-
-from _sidecar_fakes import _FakeResp, _FakeUrlopen, _HdrShim
+from _sidecar_fakes import _FakeUrlopen
 
 
 # ---- _FakeUrlopen scaffolding ----------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolated_qq_env(monkeypatch):
+    defaults = {
+        "QQ_APP_ID": "test-app",
+        "QQ_APP_SECRET": "test-secret",
+        "QQ_ALLOWED_USERS": "",
+        "QQ_ACCOUNT_ID": "",
+        "QQ_INTENTS": "",
+        "QQ_API_BASE": "https://qq.test",
+        "QQ_TOKEN_URL": "https://qq-token.test/getAppAccessToken",
+        "QQ_WS_URL": "",
+    }
+    for key, value in defaults.items():
+        monkeypatch.setenv(key, value)
 
 
 def _adapter(**env):
@@ -95,21 +104,18 @@ def test_intents_garbage_falls_back_to_default():
     assert a.intents == qq_mod.DEFAULT_INTENTS
 
 
-def test_missing_app_id_exits_2():
-    os.environ["QQ_APP_ID"] = ""
-    os.environ["QQ_APP_SECRET"] = "x"
+def test_missing_app_id_exits_2(monkeypatch):
+    monkeypatch.setenv("QQ_APP_ID", "")
     with pytest.raises(SystemExit) as exc:
         qq_mod.QqAdapter()
     assert exc.value.code == 2
-    os.environ["QQ_APP_ID"] = "test-app"
 
 
-def test_missing_app_secret_exits_2():
-    os.environ["QQ_APP_SECRET"] = ""
+def test_missing_app_secret_exits_2(monkeypatch):
+    monkeypatch.setenv("QQ_APP_SECRET", "")
     with pytest.raises(SystemExit) as exc:
         qq_mod.QqAdapter()
     assert exc.value.code == 2
-    os.environ["QQ_APP_SECRET"] = "test-secret"
 
 
 def test_ws_url_override_picked_up():
@@ -905,7 +911,7 @@ class _FakeWS:
         self.sent.append(json.loads(s))
 
 
-def test_run_session_hello_then_identify(monkeypatch):
+def test_run_session_hello_then_identify():
     a = _adapter()
     fake = _FakeWS([
         # HELLO
@@ -927,7 +933,7 @@ def test_run_session_hello_then_identify(monkeypatch):
     assert emitted == []
 
 
-def test_run_session_dispatch_emits_message(monkeypatch):
+def test_run_session_dispatch_emits_message():
     a = _adapter()
     fake = _FakeWS([
         {"op": 10, "d": {"heartbeat_interval": 45000}},
@@ -976,7 +982,7 @@ def test_run_session_dedupes_repeated_msg_id():
     assert len(emitted) == 1
 
 
-def test_run_session_reconnect_op_returns(monkeypatch):
+def test_run_session_reconnect_op_returns():
     a = _adapter()
     fake = _FakeWS([
         {"op": 10, "d": {"heartbeat_interval": 45000}},
