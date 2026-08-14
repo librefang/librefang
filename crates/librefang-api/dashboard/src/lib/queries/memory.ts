@@ -12,8 +12,12 @@ import { healthDetailQueryOptions } from "./runtime";
 import { memoryKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
-const REFRESH_MS = 30_000;
-const STALE_MS = 30_000;
+// Records are the active workspace surface, so they refresh every 30 seconds.
+// Aggregate count cards tolerate a slower 60-second cadence. Both remain fresh
+// for 30 seconds so focus/remount does not duplicate an interval fetch.
+const RECORD_REFRESH_MS = 30_000;
+const STATS_REFRESH_MS = 60_000;
+const MEMORY_STALE_MS = 30_000;
 const CONFIG_STALE_MS = 300_000;
 const KV_STALE_MS = 30_000;
 export const MEMORY_PAGE_SIZE = 50;
@@ -25,8 +29,8 @@ export const memoryQueries = {
     queryOptions({
       queryKey: memoryKeys.stats(agentId),
       queryFn: () => getMemoryStats(agentId),
-      staleTime: STALE_MS,
-      refetchInterval: REFRESH_MS * 2,
+      staleTime: MEMORY_STALE_MS,
+      refetchInterval: STATS_REFRESH_MS,
       refetchIntervalInBackground: false, // #3393
     }),
   config: () =>
@@ -78,8 +82,8 @@ export const memorySearchOrListQueryOptions = ({
         proactive_enabled: res.proactive_enabled,
       };
     },
-    staleTime: STALE_MS,
-    refetchInterval: REFRESH_MS,
+    staleTime: MEMORY_STALE_MS,
+    refetchInterval: RECORD_REFRESH_MS,
     refetchIntervalInBackground: false, // #3393
   });
 
