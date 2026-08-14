@@ -40,6 +40,25 @@ fn abort_agent_watcher_slot(slot: &Mutex<AgentWatcherHandles>) {
     }
 }
 
+fn register_agent_watcher_slot(
+    slot: &Mutex<AgentWatcherHandles>,
+    handle: tokio::task::JoinHandle<()>,
+    agent_still_exists: impl FnOnce() -> bool,
+) {
+    let mut guard = lock_agent_watcher_slot(slot);
+    // Hold the slot lock while rechecking liveness. If kill_agent removed the
+    // map entry before registration reached this lock, this slot is detached
+    // and no later abort pass can find it. Conversely, if the agent disappears
+    // just after this check, kill_agent waits for this guard and then drains
+    // the newly inserted handle from the same slot.
+    if !agent_still_exists() {
+        handle.abort();
+        return;
+    }
+    guard.retain(|h| !h.is_finished());
+    guard.push(handle);
+}
+
 impl LibreFangKernel {
     /// Get session token usage and estimated cost for an agent.
     pub fn session_usage_cost(&self, agent_id: AgentId) -> KernelResult<(u64, u64, f64)> {
@@ -594,9 +613,9 @@ impl LibreFangKernel {
             .entry(agent_id)
             .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
             .clone();
-        let mut guard = lock_agent_watcher_slot(&slot);
-        guard.retain(|h| !h.is_finished());
-        guard.push(handle);
+        register_agent_watcher_slot(&slot, handle, || {
+            self.agents.registry.get(agent_id).is_some()
+        });
     }
 
     /// Abort and drop every tracked watcher task for `agent_id`.
@@ -776,7 +795,10 @@ impl LibreFangKernel {
 
 #[cfg(test)]
 mod tests {
-    use super::{abort_agent_watcher_slot, lock_agent_watcher_slot, AgentWatcherHandles};
+    use super::{
+        abort_agent_watcher_slot, lock_agent_watcher_slot, register_agent_watcher_slot,
+        AgentWatcherHandles,
+    };
     use std::sync::Mutex;
 
     struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
@@ -828,5 +850,20 @@ mod tests {
             .expect("later watcher was not aborted")
             .expect("later watcher dropped without signaling");
         assert!(slot.lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn agent_watcher_registration_aborts_after_agent_disappears() {
+        let slot = Mutex::new(AgentWatcherHandles::new());
+        let (handle, dropped) = tracked_task();
+        tokio::task::yield_now().await;
+
+        register_agent_watcher_slot(&slot, handle, || false);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped)
+            .await
+            .expect("watcher registered after agent removal was not aborted")
+            .expect("watcher dropped without signaling");
+        assert!(slot.lock().unwrap().is_empty());
     }
 }

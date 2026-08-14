@@ -1,1 +1,0 @@
-- Recover poisoned per-agent watcher slots so background tasks remain tracked and are aborted when agents stop. (@xiaomo)
