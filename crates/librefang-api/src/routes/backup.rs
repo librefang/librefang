@@ -506,11 +506,19 @@ pub async fn delete_backup(
 /// the original handler's distinct ApiErrorResponse branches so the
 /// translated client-facing message stays identical after the
 /// spawn_blocking refactor.
+#[derive(Debug)]
 enum RestoreError {
     Open(String),
     InvalidArchive(String),
     MissingManifest,
+    ResourceLimit(String),
 }
+
+const MAX_RESTORE_ENTRIES: usize = 10_000;
+const MAX_RESTORE_ENTRY_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_RESTORE_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_RESTORE_COMPRESSION_RATIO: u64 = 100;
+const MAX_RESTORE_MANIFEST_BYTES: u64 = 1024 * 1024;
 
 /// Result of a successful restore extraction.
 struct RestoreOutcome {
@@ -532,12 +540,58 @@ fn restore_backup_blocking(
     let file = std::fs::File::open(&backup_path).map_err(|e| RestoreError::Open(e.to_string()))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| RestoreError::InvalidArchive(e.to_string()))?;
+    if archive.len() > MAX_RESTORE_ENTRIES {
+        return Err(RestoreError::ResourceLimit(format!(
+            "archive contains {} entries; maximum is {MAX_RESTORE_ENTRIES}",
+            archive.len()
+        )));
+    }
+    let mut declared_total = 0_u64;
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| RestoreError::InvalidArchive(e.to_string()))?;
+        let name = entry
+            .enclosed_name()
+            .ok_or_else(|| RestoreError::InvalidArchive("unsafe entry name".to_string()))?;
+        let declared_size = entry.size();
+        let compressed_size = entry.compressed_size();
+        if name.to_string_lossy() == "manifest.json" {
+            if declared_size > MAX_RESTORE_MANIFEST_BYTES {
+                return Err(RestoreError::ResourceLimit(
+                    "manifest exceeds the restore limit".to_string(),
+                ));
+            }
+            continue;
+        }
+        if declared_size > MAX_RESTORE_ENTRY_BYTES {
+            return Err(RestoreError::ResourceLimit(format!(
+                "entry {} exceeds the per-entry decompression limit",
+                name.display()
+            )));
+        }
+        if compressed_size > 0 && declared_size / compressed_size > MAX_RESTORE_COMPRESSION_RATIO {
+            return Err(RestoreError::ResourceLimit(format!(
+                "entry {} exceeds the compression-ratio limit",
+                name.display()
+            )));
+        }
+        declared_total = declared_total.saturating_add(declared_size);
+        if declared_total > MAX_RESTORE_TOTAL_BYTES {
+            return Err(RestoreError::ResourceLimit(
+                "archive exceeds the total decompression limit".to_string(),
+            ));
+        }
+    }
 
     // Validate manifest before touching the filesystem.
     let manifest: Option<BackupManifest> = match archive.by_name("manifest.json") {
         Ok(mut entry) => {
             let mut buf = String::new();
-            if std::io::Read::read_to_string(&mut entry, &mut buf).is_ok() {
+            let mut limited = std::io::Read::take(&mut entry, MAX_RESTORE_MANIFEST_BYTES + 1);
+            if std::io::Read::read_to_string(&mut limited, &mut buf).is_ok()
+                && buf.len() as u64 <= MAX_RESTORE_MANIFEST_BYTES
+            {
                 serde_json::from_str(&buf).ok()
             } else {
                 None
@@ -551,6 +605,7 @@ fn restore_backup_blocking(
 
     let mut restored: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
+    let mut total_uncompressed = 0_u64;
 
     // Extract all files to home_dir, skipping manifest.json itself.
     for i in 0..archive.len() {
@@ -591,14 +646,35 @@ fn restore_backup_blocking(
             }
         }
 
-        let mut data = Vec::new();
-        if let Err(e) = std::io::Read::read_to_end(&mut entry, &mut data) {
-            errors.push(format!("read {}: {e}", entry_name.display()));
-            continue;
+        let mut output = match std::fs::File::create(&target) {
+            Ok(file) => file,
+            Err(e) => {
+                errors.push(format!("create {}: {e}", entry_name.display()));
+                continue;
+            }
+        };
+        let mut limited = std::io::Read::take(&mut entry, MAX_RESTORE_ENTRY_BYTES + 1);
+        let written = match std::io::copy(&mut limited, &mut output) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                let _ = std::fs::remove_file(&target);
+                errors.push(format!("extract {}: {e}", entry_name.display()));
+                continue;
+            }
+        };
+        if written > MAX_RESTORE_ENTRY_BYTES {
+            let _ = std::fs::remove_file(&target);
+            return Err(RestoreError::ResourceLimit(format!(
+                "entry {} exceeded the per-entry decompression limit",
+                entry_name.display()
+            )));
         }
-        if let Err(e) = std::fs::write(&target, &data) {
-            errors.push(format!("write {}: {e}", entry_name.display()));
-            continue;
+        total_uncompressed = total_uncompressed.saturating_add(written);
+        if total_uncompressed > MAX_RESTORE_TOTAL_BYTES {
+            let _ = std::fs::remove_file(&target);
+            return Err(RestoreError::ResourceLimit(
+                "archive exceeded the total decompression limit".to_string(),
+            ));
         }
         restored.push(entry_name.to_string_lossy().to_string());
     }
@@ -695,6 +771,11 @@ pub async fn restore_backup(
             return ApiErrorResponse::bad_request(t.t("api-error-backup-missing-manifest"))
                 .into_json_tuple();
         }
+        Ok(Err(RestoreError::ResourceLimit(msg))) => {
+            tracing::warn!(filename, %msg, "Backup restore rejected by resource limits");
+            return ApiErrorResponse::bad_request("Backup archive exceeds restore resource limits")
+                .into_json_tuple();
+        }
         Err(join_err) => {
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
             return ApiErrorResponse::internal(t.t_args(
@@ -742,4 +823,61 @@ fn read_backup_manifest(path: &std::path::Path) -> Option<BackupManifest> {
     let mut buf = String::new();
     std::io::Read::read_to_string(&mut entry, &mut buf).ok()?;
     serde_json::from_str(&buf).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn restore_rejects_high_compression_ratio_before_writing_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("bomb.zip");
+        let restore_dir = temp.path().join("restore");
+        std::fs::create_dir(&restore_dir).unwrap();
+
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("manifest.json", options).unwrap();
+        zip.write_all(br#"{"version":"test"}"#).unwrap();
+        zip.start_file("data/bomb.bin", options).unwrap();
+        zip.write_all(&vec![0_u8; 1024 * 1024]).unwrap();
+        zip.finish().unwrap();
+
+        let result = restore_backup_blocking(archive_path, restore_dir.clone());
+        assert!(matches!(result, Err(RestoreError::ResourceLimit(_))));
+        assert!(!restore_dir.join("data/bomb.bin").exists());
+    }
+
+    #[test]
+    fn restore_streams_normal_archive_within_limits() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("normal.zip");
+        let restore_dir = temp.path().join("restore");
+        std::fs::create_dir(&restore_dir).unwrap();
+
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("manifest.json", options).unwrap();
+        zip.write_all(
+            br#"{"version":1,"created_at":"now","hostname":"host","librefang_version":"test","components":["config"]}"#,
+        )
+        .unwrap();
+        zip.start_file("config.toml", options).unwrap();
+        zip.write_all(b"[kernel]\nname = \"test\"\n").unwrap();
+        zip.finish().unwrap();
+
+        let outcome = restore_backup_blocking(archive_path, restore_dir.clone()).unwrap();
+        assert_eq!(outcome.restored, vec!["config.toml"]);
+        assert!(outcome.errors.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(restore_dir.join("config.toml")).unwrap(),
+            "[kernel]\nname = \"test\"\n"
+        );
+    }
 }
