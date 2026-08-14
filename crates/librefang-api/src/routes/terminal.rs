@@ -33,6 +33,31 @@ pub const MAX_WS_MSG_SIZE: usize = 64 * 1024;
 const MAX_COLS: u16 = 1000;
 const MAX_ROWS: u16 = 500;
 
+fn lock_terminal_last_activity(
+    last_activity: &std::sync::Mutex<std::time::Instant>,
+) -> std::sync::MutexGuard<'_, std::time::Instant> {
+    last_activity.lock().unwrap_or_else(|poisoned| {
+        warn!("Terminal last-activity lock poisoned; recovering idle-timeout state");
+        last_activity.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
+fn mark_terminal_activity(last_activity: &std::sync::Mutex<std::time::Instant>) {
+    *lock_terminal_last_activity(last_activity) = std::time::Instant::now();
+}
+
+fn terminal_idle_duration(last_activity: &std::sync::Mutex<std::time::Instant>) -> Duration {
+    lock_terminal_last_activity(last_activity).elapsed()
+}
+
+fn terminal_idle_timeout_elapsed(
+    last_activity: &std::sync::Mutex<std::time::Instant>,
+    timeout: Duration,
+) -> bool {
+    terminal_idle_duration(last_activity) >= timeout
+}
+
 pub fn router() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/terminal/health", axum::routing::get(terminal_health))
@@ -965,9 +990,7 @@ async fn handle_terminal_ws(
             if send_json(&sender_clone, &output_msg).await.is_err() {
                 break;
             }
-            if let Ok(mut la) = la.lock() {
-                *la = std::time::Instant::now();
-            }
+            mark_terminal_activity(&la);
         }
     });
 
@@ -996,9 +1019,7 @@ async fn handle_terminal_ws(
                     Some(Ok(msg)) => {
                         match msg {
                             Message::Text(text) => {
-                                if let Ok(mut la) = last_activity_shared.lock() {
-                                    *la = std::time::Instant::now();
-                                }
+                                mark_terminal_activity(&last_activity_shared);
 
                                 if text.len() > MAX_WS_MSG_SIZE {
                                     let _ = send_json(
@@ -1155,9 +1176,7 @@ async fn handle_terminal_ws(
                                 break;
                             }
                             Message::Ping(data) => {
-                                if let Ok(mut la) = last_activity_shared.lock() {
-                                    *la = std::time::Instant::now();
-                                }
+                                mark_terminal_activity(&last_activity_shared);
                                 let mut s = sender.lock().await;
                                 let _ = s.send(Message::Pong(data)).await;
                             }
@@ -1175,14 +1194,19 @@ async fn handle_terminal_ws(
                     }
                 }
             }
-            _ = tokio::time::sleep(ws_idle_timeout.saturating_sub(last_activity_shared.lock().map(|la| la.elapsed()).unwrap_or(Duration::ZERO))) => {
-                exit_reason = ExitReason::Timeout;
-                break;
+            _ = tokio::time::sleep(ws_idle_timeout.saturating_sub(terminal_idle_duration(&last_activity_shared))) => {
+                // PTY output updates `last_activity` from a different task,
+                // but it cannot reset this already-created Sleep. Recheck the
+                // shared timestamp at the deadline so recent output does not
+                // get disconnected by a stale timer. A false result loops and
+                // creates a timer from the new remaining duration.
+                if terminal_idle_timeout_elapsed(&last_activity_shared, ws_idle_timeout) {
+                    exit_reason = ExitReason::Timeout;
+                    break;
+                }
             }
             _ = &mut pty_read_handle => {
-                if let Ok(mut la) = last_activity_shared.lock() {
-                    *la = std::time::Instant::now();
-                }
+                mark_terminal_activity(&last_activity_shared);
                 // PTY reader ended = child process exited; get real exit code below
                 exit_reason = ExitReason::ProcessExited;
                 break;
@@ -1221,9 +1245,43 @@ async fn handle_terminal_ws(
 #[cfg(test)]
 mod tests {
     use crate::routes::terminal::{
-        initial_terminal_dimension, router, ClientMessage, ServerMessage, MAX_COLS, MAX_ROWS,
+        initial_terminal_dimension, mark_terminal_activity, router, terminal_idle_duration,
+        terminal_idle_timeout_elapsed, ClientMessage, ServerMessage, MAX_COLS, MAX_ROWS,
     };
     use crate::terminal::shell_for_current_os;
+
+    #[test]
+    fn terminal_last_activity_recovers_after_held_lock_panic() {
+        let before = std::time::Instant::now() - std::time::Duration::from_secs(30);
+        let last_activity = std::sync::Mutex::new(before);
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = last_activity.lock().unwrap();
+            panic!("poison terminal last-activity lock");
+        });
+        assert!(last_activity.is_poisoned());
+
+        assert!(terminal_idle_duration(&last_activity) >= std::time::Duration::from_secs(30));
+        assert!(!last_activity.is_poisoned());
+
+        mark_terminal_activity(&last_activity);
+
+        assert!(terminal_idle_duration(&last_activity) < std::time::Duration::from_secs(1));
+        assert!(!last_activity.is_poisoned());
+        assert!(last_activity.lock().is_ok());
+    }
+
+    #[test]
+    fn stale_idle_timer_rechecks_recent_pty_activity() {
+        let timeout = std::time::Duration::from_secs(10);
+        let last_activity =
+            std::sync::Mutex::new(std::time::Instant::now() - std::time::Duration::from_secs(30));
+        assert!(terminal_idle_timeout_elapsed(&last_activity, timeout));
+
+        // Model PTY output arriving after the select loop created its Sleep
+        // but before that old deadline fired.
+        mark_terminal_activity(&last_activity);
+        assert!(!terminal_idle_timeout_elapsed(&last_activity, timeout));
+    }
 
     #[test]
     fn test_shell_selection_unix() {
