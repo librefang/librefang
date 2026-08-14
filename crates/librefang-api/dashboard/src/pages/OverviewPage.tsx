@@ -312,7 +312,7 @@ export function RelativeTime({ date }: { date: string | number | Date | undefine
     if (date == null) return;
     const timestamp = timestampFor(date);
     if (!Number.isFinite(timestamp)) return;
-    const ms = Date.now() - timestamp < 60_000 ? 1_000 : 30_000;
+    const ms = Math.abs(Date.now() - timestamp) < 60_000 ? 1_000 : 30_000;
     const id = window.setInterval(() => setTick((t) => t + 1), ms);
     return () => window.clearInterval(id);
   }, [date]);

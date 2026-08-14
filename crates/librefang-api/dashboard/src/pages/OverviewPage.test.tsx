@@ -360,4 +360,13 @@ describe("OverviewPage helper contracts", () => {
     rerender(<RelativeTime date={new Date("2026-01-01T00:00:00Z")} />);
     expect(screen.queryByText("-")).not.toBeInTheDocument();
   });
+
+  it("does not update a distant future timestamp every second", () => {
+    const setInterval = vi.spyOn(window, "setInterval");
+    const { unmount } = render(<RelativeTime date={Date.now() + 120_000} />);
+
+    expect(setInterval).toHaveBeenLastCalledWith(expect.any(Function), 30_000);
+    unmount();
+    setInterval.mockRestore();
+  });
 });
