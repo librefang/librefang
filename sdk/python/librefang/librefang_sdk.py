@@ -61,7 +61,10 @@ def read_input() -> Dict[str, Any]:
             "message": message,
             "context": {},
         }
-    return json.loads(line)
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError as e:
+        raise ValueError("Invalid JSON input from LibreFang kernel") from e
 
 
 def respond(text: str, metadata: Optional[Dict[str, Any]] = None) -> None:
@@ -122,25 +125,36 @@ class Agent:
 
         try:
             if self._setup:
-                self._setup()
+                try:
+                    self._setup()
+                except Exception as e:
+                    log(f"Agent setup error: {e}", "error")
+                    respond("An internal error occurred while processing your request.")
+                    sys.exit(1)
 
-            data = read_input()
+            try:
+                data = read_input()
+            except ValueError as e:
+                log(f"Invalid kernel input: {e}", "error")
+                respond("Invalid input received from the LibreFang kernel.")
+                sys.exit(1)
+
             message = data.get("message", "")
             context = data.get("context", {})
 
-            result = self._handler(message, context)
+            try:
+                result = self._handler(message, context)
 
-            if isinstance(result, str):
-                respond(result)
-            elif isinstance(result, dict):
-                respond(result.get("text", str(result)), result.get("metadata"))
-            else:
-                respond(str(result))
-
-        except Exception as e:
-            log(f"Agent error: {e}", "error")
-            respond(f"Error: {e}")
-            sys.exit(1)
+                if isinstance(result, str):
+                    respond(result)
+                elif isinstance(result, dict):
+                    respond(result.get("text", str(result)), result.get("metadata"))
+                else:
+                    respond(str(result))
+            except Exception as e:
+                log(f"Agent handler error: {e}", "error")
+                respond("An internal error occurred while processing your request.")
+                sys.exit(1)
         finally:
             if self._teardown:
                 try:
