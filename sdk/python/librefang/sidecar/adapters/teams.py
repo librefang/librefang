@@ -103,6 +103,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+from collections import OrderedDict
 import hashlib
 import hmac
 import http.server
@@ -146,6 +147,8 @@ DEFAULT_BIND_HOST = "0.0.0.0"
 SEND_TIMEOUT_SECS = 30.0
 SEEN_MESSAGES_MAX = 10_000
 SEEN_MESSAGES_EVICT = 5_000
+SERVICE_URLS_MAX = 10_000
+SERVICE_URLS_EVICT = 5_000
 
 
 # ---------------------------------------------------------------------------
@@ -396,11 +399,12 @@ class TeamsAdapter(SidecarAdapter):
         )
 
         self._token_lock = threading.Lock()
+        self._token_refresh_lock = threading.Lock()
         self._cached_token: Optional[tuple[str, float]] = None  # (token, expiry_monotonic)
 
         # Per-conversation serviceUrl cache (Improvement #1).
         self._service_url_lock = threading.Lock()
-        self._service_urls: dict[str, str] = {}
+        self._service_urls: OrderedDict[str, str] = OrderedDict()
 
         self._seen = _SeenSet(
             max_size=SEEN_MESSAGES_MAX, evict=SEEN_MESSAGES_EVICT,
@@ -419,43 +423,54 @@ class TeamsAdapter(SidecarAdapter):
                 token, expiry = self._cached_token
                 if time.monotonic() < expiry:
                     return token
-        body = urllib.parse.urlencode({
-            "grant_type": "client_credentials",
-            "client_id": self.app_id,
-            "client_secret": self.app_password,
-            "scope": "https://api.botframework.com/.default",
-        }).encode("ascii")
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "librefang-teams-sidecar/1 (https://librefang.org)",
-        }
-        status, resp, raw, _hdrs = _http_request(
-            self.oauth_token_url, method="POST", body=body, headers=headers,
-            timeout=SEND_TIMEOUT_SECS,
-        )
-        if status < 200 or status >= 300 or not isinstance(resp, dict):
-            snippet = raw[:200].decode("utf-8", "replace") if raw else ""
-            raise RuntimeError(
-                f"teams OAuth2 token error (status={status}): {snippet}",
+        # Serialize only refreshes. Ordinary cache hits never wait on the
+        # blocking OAuth request, while concurrent misses re-check after the
+        # first refresher publishes its token.
+        with self._token_refresh_lock:
+            with self._token_lock:
+                if self._cached_token is not None:
+                    token, expiry = self._cached_token
+                    if time.monotonic() < expiry:
+                        return token
+            body = urllib.parse.urlencode({
+                "grant_type": "client_credentials",
+                "client_id": self.app_id,
+                "client_secret": self.app_password,
+                "scope": "https://api.botframework.com/.default",
+            }).encode("ascii")
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": "librefang-teams-sidecar/1 (https://librefang.org)",
+            }
+            status, resp, raw, _hdrs = _http_request(
+                self.oauth_token_url, method="POST", body=body, headers=headers,
+                timeout=SEND_TIMEOUT_SECS,
             )
-        token = resp.get("access_token")
-        if not isinstance(token, str) or not token:
-            raise RuntimeError("teams OAuth2 response missing access_token")
-        try:
-            expires_in = int(resp.get("expires_in") or 3600)
-        except (TypeError, ValueError):
-            expires_in = 3600
-        # Refresh 5 minutes before actual expiry.
-        ttl = max(60, expires_in - int(TOKEN_REFRESH_BUFFER_SECS))
-        with self._token_lock:
-            self._cached_token = (token, time.monotonic() + ttl)
-        return token
+            if status < 200 or status >= 300 or not isinstance(resp, dict):
+                snippet = raw[:200].decode("utf-8", "replace") if raw else ""
+                raise RuntimeError(
+                    f"teams OAuth2 token error (status={status}): {snippet}",
+                )
+            token = resp.get("access_token")
+            if not isinstance(token, str) or not token:
+                raise RuntimeError("teams OAuth2 response missing access_token")
+            try:
+                expires_in = int(resp.get("expires_in") or 3600)
+            except (TypeError, ValueError):
+                expires_in = 3600
+            # Refresh 5 minutes before actual expiry.
+            ttl = max(60, expires_in - int(TOKEN_REFRESH_BUFFER_SECS))
+            with self._token_lock:
+                self._cached_token = (token, time.monotonic() + ttl)
+            return token
 
     # ---- service_url cache ------------------------------------------
 
     def _service_url_for(self, conversation_id: str) -> str:
         with self._service_url_lock:
             url = self._service_urls.get(conversation_id)
+            if url is not None:
+                self._service_urls.move_to_end(conversation_id)
         return url or self.default_service_url
 
     def _stash_service_url(self, conversation_id: str, url: str) -> None:
@@ -463,6 +478,12 @@ class TeamsAdapter(SidecarAdapter):
             return
         with self._service_url_lock:
             self._service_urls[conversation_id] = url
+            self._service_urls.move_to_end(conversation_id)
+            if len(self._service_urls) > SERVICE_URLS_MAX:
+                for _ in range(SERVICE_URLS_EVICT):
+                    if not self._service_urls:
+                        break
+                    self._service_urls.popitem(last=False)
 
     # ---- outbound REST ----------------------------------------------
 

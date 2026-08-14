@@ -9,6 +9,8 @@ import hashlib
 import hmac
 import json
 import os
+import threading
+import time
 
 import pytest
 
@@ -443,6 +445,19 @@ def test_webhook_body_unknown_conversation_falls_back_to_default():
     assert a._service_url_for("never-seen") == tm.DEFAULT_SERVICE_URL
 
 
+def test_service_url_cache_evicts_oldest_entries(monkeypatch):
+    monkeypatch.setattr(tm, "SERVICE_URLS_MAX", 3)
+    monkeypatch.setattr(tm, "SERVICE_URLS_EVICT", 1)
+    a = _adapter()
+    for i in range(3):
+        a._stash_service_url(f"conv-{i}", f"https://service-{i}.test")
+    # A read refreshes conv-0, so conv-1 is now the least recently used.
+    assert a._service_url_for("conv-0") == "https://service-0.test"
+    a._stash_service_url("conv-3", "https://service-3.test")
+    assert list(a._service_urls) == ["conv-2", "conv-0", "conv-3"]
+    assert a._service_url_for("conv-1") == tm.DEFAULT_SERVICE_URL
+
+
 # ---- _send_text via mocked http_request ----------------------------
 
 
@@ -561,6 +576,35 @@ def test_get_token_caches(monkeypatch):
     t2 = a._get_token()
     assert t1 == t2 == "fresh-tok"
     assert len(calls) == 1  # second call hit the cache
+
+
+def test_get_token_concurrent_misses_single_flight(monkeypatch):
+    calls: list[str] = []
+    barrier = threading.Barrier(8)
+
+    def _fake_http(url, **kw):
+        calls.append(url)
+        time.sleep(0.05)
+        return (200, {"access_token": "fresh-tok", "expires_in": 3600}, b"", {})
+
+    monkeypatch.setattr(tm, "_http_request", _fake_http)
+    a = _adapter()
+    a._cached_token = None
+    results: list[str] = []
+
+    def worker():
+        barrier.wait()
+        results.append(a._get_token())
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2.0)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert results == ["fresh-tok"] * 8
+    assert len(calls) == 1
 
 
 def test_get_token_raises_on_non_2xx(monkeypatch):
