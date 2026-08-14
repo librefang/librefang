@@ -51,6 +51,13 @@ fn terminal_idle_duration(last_activity: &std::sync::Mutex<std::time::Instant>) 
     lock_terminal_last_activity(last_activity).elapsed()
 }
 
+fn terminal_idle_timeout_elapsed(
+    last_activity: &std::sync::Mutex<std::time::Instant>,
+    timeout: Duration,
+) -> bool {
+    terminal_idle_duration(last_activity) >= timeout
+}
+
 pub fn router() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/terminal/health", axum::routing::get(terminal_health))
@@ -1188,8 +1195,15 @@ async fn handle_terminal_ws(
                 }
             }
             _ = tokio::time::sleep(ws_idle_timeout.saturating_sub(terminal_idle_duration(&last_activity_shared))) => {
-                exit_reason = ExitReason::Timeout;
-                break;
+                // PTY output updates `last_activity` from a different task,
+                // but it cannot reset this already-created Sleep. Recheck the
+                // shared timestamp at the deadline so recent output does not
+                // get disconnected by a stale timer. A false result loops and
+                // creates a timer from the new remaining duration.
+                if terminal_idle_timeout_elapsed(&last_activity_shared, ws_idle_timeout) {
+                    exit_reason = ExitReason::Timeout;
+                    break;
+                }
             }
             _ = &mut pty_read_handle => {
                 mark_terminal_activity(&last_activity_shared);
@@ -1232,7 +1246,7 @@ async fn handle_terminal_ws(
 mod tests {
     use crate::routes::terminal::{
         initial_terminal_dimension, mark_terminal_activity, router, terminal_idle_duration,
-        ClientMessage, ServerMessage, MAX_COLS, MAX_ROWS,
+        terminal_idle_timeout_elapsed, ClientMessage, ServerMessage, MAX_COLS, MAX_ROWS,
     };
     use crate::terminal::shell_for_current_os;
 
@@ -1254,6 +1268,19 @@ mod tests {
         assert!(terminal_idle_duration(&last_activity) < std::time::Duration::from_secs(1));
         assert!(!last_activity.is_poisoned());
         assert!(last_activity.lock().is_ok());
+    }
+
+    #[test]
+    fn stale_idle_timer_rechecks_recent_pty_activity() {
+        let timeout = std::time::Duration::from_secs(10);
+        let last_activity =
+            std::sync::Mutex::new(std::time::Instant::now() - std::time::Duration::from_secs(30));
+        assert!(terminal_idle_timeout_elapsed(&last_activity, timeout));
+
+        // Model PTY output arriving after the select loop created its Sleep
+        // but before that old deadline fired.
+        mark_terminal_activity(&last_activity);
+        assert!(!terminal_idle_timeout_elapsed(&last_activity, timeout));
     }
 
     #[test]
