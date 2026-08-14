@@ -5,7 +5,8 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/librefang/librefang"
+    "url": "https://github.com/librefang/librefang",
+    "directory": "packages/cli-npm"
   },
   "bin": {
     "librefang": "./bin/librefang.js"
@@ -15,6 +16,9 @@
   ],
   "engines": {
     "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
   },
   "optionalDependencies": {
     "@librefang/cli-linux-x64": "0.0.0",
