@@ -13,6 +13,14 @@ use librefang_types::error::{LibreFangError, LibreFangResult};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 
+const VALID_PHASES: &[&str] = &[
+    "running",
+    "finished",
+    "max_iterations_reached",
+    "rate_limited",
+    "stopped",
+];
+
 /// A flat row corresponding to the `goal_runs` SQLite table.
 ///
 /// All fields map directly to table columns. `goal_id` is the primary key —
@@ -56,7 +64,23 @@ impl GoalRunStore {
     /// implicit DELETE+INSERT that would reset ROWID. `created_at` is omitted
     /// from the INSERT column list so the schema default `datetime('now')`
     /// fires once on first insert and is preserved across later updates.
+    /// `started_at` is likewise insert-only so later state snapshots cannot
+    /// rewrite the run's true start time.
     pub fn save_run(&self, row: &GoalRunRow) -> LibreFangResult<()> {
+        self.upsert_run(row, false)
+    }
+
+    /// Atomically insert a newly started run or replace its durable predecessor.
+    ///
+    /// Unlike [`Self::save_run`], this updates `started_at` on conflict. This
+    /// lets a restarted goal establish a fresh lifetime without a separate
+    /// delete-and-insert window where a crash could lose both rows.
+    pub fn start_run(&self, row: &GoalRunRow) -> LibreFangResult<()> {
+        self.upsert_run(row, true)
+    }
+
+    fn upsert_run(&self, row: &GoalRunRow, replace_started_at: bool) -> LibreFangResult<()> {
+        validate_row(row)?;
         let c = self.pool.get().map_err(LibreFangError::memory)?;
         c.execute(
             "INSERT INTO goal_runs (
@@ -72,7 +96,7 @@ impl GoalRunStore {
                 max_iterations = excluded.max_iterations,
                 last_progress = excluded.last_progress,
                 last_error = excluded.last_error,
-                started_at = excluded.started_at,
+                started_at = CASE WHEN ?10 THEN excluded.started_at ELSE goal_runs.started_at END,
                 updated_at = excluded.updated_at",
             rusqlite::params![
                 row.goal_id,
@@ -84,6 +108,7 @@ impl GoalRunStore {
                 row.last_error,
                 row.started_at,
                 row.updated_at,
+                replace_started_at,
             ],
         )
         .map_err(|e| LibreFangError::memory_msg(format!("goal run save failed: {e}")))?;
@@ -116,15 +141,16 @@ impl GoalRunStore {
         }
     }
 
-    /// Load all goal runs, ordered by `started_at` (newest first) so the
-    /// boot-time recovery walk is deterministic across processes.
+    /// Load all goal runs, ordered by parsed `started_at` (newest first) and
+    /// then goal ID so the boot-time recovery walk is deterministic across
+    /// processes even when runs share a timestamp.
     pub fn load_all_runs(&self) -> LibreFangResult<Vec<GoalRunRow>> {
         let c = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = c
             .prepare(
                 "SELECT goal_id, agent_id, phase, iteration, max_iterations,
                         last_progress, last_error, started_at, updated_at
-                 FROM goal_runs ORDER BY started_at DESC",
+                 FROM goal_runs ORDER BY datetime(started_at) DESC, goal_id ASC",
             )
             .map_err(|e| {
                 LibreFangError::memory_msg(format!("goal run load_all prepare failed: {e}"))
@@ -164,10 +190,10 @@ impl GoalRunStore {
 
     /// Force a WAL checkpoint to flush writes to the main database file.
     ///
-    /// Called after persisting a terminal-phase run (the recovery sweep
-    /// demoting a stale run) so the transition is durable even if the daemon
-    /// crashes before the next automatic checkpoint. PASSIVE mode never blocks
-    /// concurrent readers.
+    /// The preceding transaction commit is the durability boundary. This
+    /// best-effort PASSIVE checkpoint asks SQLite to fold WAL frames into the
+    /// main database file without blocking concurrent readers, but may leave
+    /// frames in the WAL when another connection is active.
     pub fn wal_checkpoint(&self) -> LibreFangResult<()> {
         let c = self.pool.get().map_err(LibreFangError::memory)?;
         c.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")
@@ -176,6 +202,27 @@ impl GoalRunStore {
             })?;
         Ok(())
     }
+}
+
+fn validate_row(row: &GoalRunRow) -> LibreFangResult<()> {
+    if !VALID_PHASES.contains(&row.phase.as_str()) {
+        return Err(LibreFangError::memory_msg(format!(
+            "goal run save rejected invalid phase '{}'",
+            row.phase
+        )));
+    }
+    validate_timestamp("started_at", &row.started_at)?;
+    validate_timestamp("updated_at", &row.updated_at)?;
+    Ok(())
+}
+
+fn validate_timestamp(field: &str, value: &str) -> LibreFangResult<()> {
+    chrono::DateTime::parse_from_rfc3339(value).map_err(|e| {
+        LibreFangError::memory_msg(format!(
+            "goal run save rejected invalid {field} timestamp '{value}': {e}"
+        ))
+    })?;
+    Ok(())
 }
 
 /// Map a SQLite row to a `GoalRunRow`.
@@ -250,6 +297,38 @@ mod tests {
     }
 
     #[test]
+    fn save_preserves_original_started_at() {
+        let store = in_memory_store();
+        let mut row = sample_row("goal-1", "running");
+        store.save_run(&row).unwrap();
+
+        row.started_at = "2026-05-07T00:00:00Z".to_string();
+        row.updated_at = "2026-05-07T00:00:00Z".to_string();
+        store.save_run(&row).unwrap();
+
+        let loaded = store.get_run("goal-1").unwrap().unwrap();
+        assert_eq!(loaded.started_at, "2026-05-06T00:00:00Z");
+        assert_eq!(loaded.updated_at, "2026-05-07T00:00:00Z");
+    }
+
+    #[test]
+    fn start_atomically_replaces_predecessor_started_at() {
+        let store = in_memory_store();
+        let predecessor = sample_row("goal-1", "stopped");
+        store.save_run(&predecessor).unwrap();
+
+        let mut restarted = sample_row("goal-1", "running");
+        restarted.started_at = "2026-05-07T00:00:00Z".to_string();
+        restarted.updated_at = "2026-05-07T00:00:00Z".to_string();
+        store.start_run(&restarted).unwrap();
+
+        let loaded = store.get_run("goal-1").unwrap().unwrap();
+        assert_eq!(loaded.phase, "running");
+        assert_eq!(loaded.started_at, "2026-05-07T00:00:00Z");
+        assert_eq!(store.count_runs().unwrap(), 1);
+    }
+
+    #[test]
     fn get_nonexistent_returns_none() {
         let store = in_memory_store();
         assert!(store.get_run("no-such-goal").unwrap().is_none());
@@ -262,6 +341,29 @@ mod tests {
         store.save_run(&sample_row("g2", "finished")).unwrap();
         let all = store.load_all_runs().unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn load_all_runs_orders_parsed_timestamps_then_goal_id() {
+        let store = in_memory_store();
+        let mut newest = sample_row("g3", "running");
+        newest.started_at = "2026-05-06T01:00:00+01:00".to_string();
+        let tied_first = sample_row("g1", "running");
+        let mut oldest = sample_row("g0", "running");
+        oldest.started_at = "2026-05-05T23:59:59Z".to_string();
+        let tied_second = sample_row("g2", "running");
+        store.save_run(&oldest).unwrap();
+        store.save_run(&tied_second).unwrap();
+        store.save_run(&newest).unwrap();
+        store.save_run(&tied_first).unwrap();
+
+        let ids: Vec<_> = store
+            .load_all_runs()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.goal_id)
+            .collect();
+        assert_eq!(ids, vec!["g1", "g2", "g3", "g0"]);
     }
 
     #[test]
@@ -283,13 +385,27 @@ mod tests {
     }
 
     #[test]
-    fn invalid_phase_rejected_by_check_constraint() {
+    fn invalid_phase_rejected_before_persistence() {
         let store = in_memory_store();
         let row = sample_row("g1", "bogus_phase");
         assert!(
             store.save_run(&row).is_err(),
-            "CHECK constraint must reject an unknown phase"
+            "store validation must reject an unknown phase"
         );
+    }
+
+    #[test]
+    fn invalid_timestamps_are_rejected_before_persistence() {
+        let store = in_memory_store();
+        let mut row = sample_row("g1", "running");
+        row.started_at = "not-a-timestamp".to_string();
+        assert!(store.save_run(&row).is_err());
+        assert_eq!(store.count_runs().unwrap(), 0);
+
+        row.started_at = "2026-05-06T00:00:00Z".to_string();
+        row.updated_at = "also-invalid".to_string();
+        assert!(store.save_run(&row).is_err());
+        assert_eq!(store.count_runs().unwrap(), 0);
     }
 
     #[test]
