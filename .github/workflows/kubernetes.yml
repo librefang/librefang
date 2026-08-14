@@ -62,9 +62,17 @@ jobs:
         run: |
           set -euo pipefail
           changed=true
-          if [ "$EVENT_NAME" = pull_request ] \
-            && git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- Dockerfile deploy/docker-entrypoint.sh; then
-            changed=false
+          if [ "$EVENT_NAME" = pull_request ]; then
+            set +e
+            git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- \
+              Dockerfile deploy/docker-entrypoint.sh .github/workflows/kubernetes.yml
+            diff_rc=$?
+            set -e
+            case "$diff_rc" in
+              0) changed=false ;;
+              1) changed=true ;;
+              *) echo "::error::could not compare Kubernetes runtime inputs"; exit "$diff_rc" ;;
+            esac
           fi
           echo "image_runtime=$changed" >> "$GITHUB_OUTPUT"
 
@@ -149,8 +157,8 @@ jobs:
           file: Dockerfile
           load: true
           tags: ${{ env.IMAGE }}
-          cache-from: type=gha,scope=linux-amd64
-          cache-to: type=gha,mode=max,scope=linux-amd64
+          cache-from: type=gha,scope=docker-build
+          cache-to: type=gha,mode=max,scope=docker-build
 
       - name: Create cluster
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
@@ -273,6 +281,7 @@ jobs:
           # config.toml is written by first boot; capture its inode so we can
           # tell "the volume came back" from "init re-ran on a fresh volume".
           before="$(kubectl -n "$NS" exec statefulset/librefang -- stat -c '%i' /data/config.toml | tr -d '\r')"
+          before_uid="$(kubectl -n "$NS" get pod librefang-0 -o jsonpath='{.metadata.uid}')"
 
           rm -f /tmp/rollout-done /tmp/too-many
           kubectl -n "$NS" delete pod librefang-0 --wait=false
@@ -295,10 +304,24 @@ jobs:
           ) &
           watcher=$!
 
-          set +e
-          kubectl -n "$NS" rollout status statefulset/librefang --timeout=300s
-          rollout_rc=$?
-          set -e
+          replacement_seen=false
+          for _ in $(seq 1 600); do
+            current_uid="$(kubectl -n "$NS" get pod librefang-0 \
+              --ignore-not-found -o jsonpath='{.metadata.uid}')"
+            if [ -n "$current_uid" ] && [ "$current_uid" != "$before_uid" ]; then
+              replacement_seen=true
+              break
+            fi
+            sleep 0.5
+          done
+
+          rollout_rc=0
+          if [ "$replacement_seen" = true ]; then
+            set +e
+            kubectl -n "$NS" rollout status statefulset/librefang --timeout=300s
+            rollout_rc=$?
+            set -e
+          fi
           touch /tmp/rollout-done
           watcher_rc=0
           wait "$watcher" || watcher_rc=$?
@@ -308,6 +331,10 @@ jobs:
           fi
           [ "$watcher_rc" -eq 0 ] || {
             echo "::error::pod-overlap watcher failed (rc=$watcher_rc)"
+            exit 1
+          }
+          [ "$replacement_seen" = true ] || {
+            echo "::error::replacement pod did not appear within 300s"
             exit 1
           }
           [ "$rollout_rc" -eq 0 ] || {
