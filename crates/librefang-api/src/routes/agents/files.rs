@@ -159,6 +159,28 @@ mod identity_file_list_tests {
             "no staging file may survive a successful write; found {leftovers:?}"
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_file_helpers_reject_symlink_escape() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(workspace.path().join(".identity")).unwrap();
+        let outside_file = outside.path().join("secret");
+        std::fs::write(&outside_file, "secret").unwrap();
+        std::os::unix::fs::symlink(&outside_file, workspace.path().join(".identity/SOUL.md"))
+            .unwrap();
+
+        assert!(matches!(
+            read_identity_file(workspace.path(), "SOUL.md"),
+            Err(IdentityFileMutationError::Forbidden)
+        ));
+        assert!(matches!(
+            delete_identity_file(workspace.path(), "SOUL.md"),
+            Err(IdentityFileMutationError::Forbidden)
+        ));
+        assert_eq!(std::fs::read_to_string(outside_file).unwrap(), "secret");
+    }
 }
 
 /// GET /api/agents/{id}/files/{filename} — Read a workspace identity file.
@@ -227,54 +249,36 @@ pub async fn get_agent_file(
         }
     };
 
-    // Resolve canonical path: prefer .identity/ (current layout), fall back to workspace root
-    let ws_canonical = match workspace.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
+    let filename_for_read = filename.clone();
+    drop(t);
+    let read_result =
+        tokio::task::spawn_blocking(move || read_identity_file(&workspace, &filename_for_read))
+            .await;
+    let t = ErrorTranslator::new(resolved_lang);
+    let content = match read_result {
+        Ok(Ok(content)) => content,
+        Ok(Err(IdentityFileMutationError::Workspace)) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": t.t("api-error-file-workspace-error")})),
             );
         }
-    };
-
-    let identity_path = workspace.join(".identity").join(&filename);
-    let file_path = if identity_path.exists() {
-        identity_path
-    } else {
-        workspace.join(&filename)
-    };
-
-    let canonical = match file_path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
+        Ok(Err(IdentityFileMutationError::NotFound | IdentityFileMutationError::Io(_))) => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": t.t("api-error-file-not-found")})),
             );
         }
-    };
-
-    if !canonical.starts_with(&ws_canonical) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": t.t("api-error-file-path-traversal")})),
-        );
-    }
-
-    // Off-runtime read so this axum handler never parks a tokio worker
-    // thread on a slow disk (#3579). `ErrorTranslator` is `!Send`, so it
-    // must be dropped before the `.await` and re-created afterwards or
-    // axum's `Handler` bound fails to compile.
-    drop(t);
-    let read_result = tokio::fs::read_to_string(&canonical).await;
-    let t = ErrorTranslator::new(resolved_lang);
-    let content = match read_result {
-        Ok(c) => c,
-        Err(_) => {
+        Ok(Err(IdentityFileMutationError::Forbidden)) => {
             return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-file-not-found")})),
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": t.t("api-error-file-path-traversal")})),
+            );
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": scrub_500(&error, &t)})),
             );
         }
     };
@@ -303,6 +307,36 @@ enum IdentityFileMutationError {
     NotFound,
     Forbidden,
     Io(std::io::Error),
+}
+
+fn resolve_identity_file(
+    workspace: &std::path::Path,
+    filename: &str,
+) -> Result<std::path::PathBuf, IdentityFileMutationError> {
+    let ws_canonical = workspace
+        .canonicalize()
+        .map_err(|_| IdentityFileMutationError::Workspace)?;
+    let identity_candidate = ws_canonical.join(".identity").join(filename);
+    let file_path = if identity_candidate.exists() {
+        identity_candidate
+    } else {
+        ws_canonical.join(filename)
+    };
+    let canonical = file_path
+        .canonicalize()
+        .map_err(|_| IdentityFileMutationError::NotFound)?;
+    if !canonical.starts_with(&ws_canonical) {
+        return Err(IdentityFileMutationError::Forbidden);
+    }
+    Ok(canonical)
+}
+
+fn read_identity_file(
+    workspace: &std::path::Path,
+    filename: &str,
+) -> Result<String, IdentityFileMutationError> {
+    let path = resolve_identity_file(workspace, filename)?;
+    std::fs::read_to_string(path).map_err(IdentityFileMutationError::Io)
 }
 
 fn write_identity_file(
@@ -339,22 +373,8 @@ fn delete_identity_file(
     workspace: &std::path::Path,
     filename: &str,
 ) -> Result<(), IdentityFileMutationError> {
-    let ws_canonical = workspace
-        .canonicalize()
-        .map_err(|_| IdentityFileMutationError::Workspace)?;
-    let identity_candidate = workspace.join(".identity").join(filename);
-    let file_path = if identity_candidate.exists() {
-        identity_candidate
-    } else {
-        workspace.join(filename)
-    };
-    let canonical = file_path
-        .canonicalize()
-        .map_err(|_| IdentityFileMutationError::NotFound)?;
-    if !canonical.starts_with(&ws_canonical) {
-        return Err(IdentityFileMutationError::Forbidden);
-    }
-    std::fs::remove_file(canonical).map_err(IdentityFileMutationError::Io)
+    let path = resolve_identity_file(workspace, filename)?;
+    std::fs::remove_file(path).map_err(IdentityFileMutationError::Io)
 }
 
 /// PUT /api/agents/{id}/files/{filename} — Write a workspace identity file.
@@ -456,7 +476,10 @@ pub async fn set_agent_file(
             );
         }
         Ok(Err(IdentityFileMutationError::NotFound)) => {
-            unreachable!("write never returns NotFound")
+            return ApiErrorResponse::internal_scrub(
+                "identity-file write unexpectedly resolved as not found",
+            )
+            .into_json_tuple();
         }
         Err(error) => {
             return (
