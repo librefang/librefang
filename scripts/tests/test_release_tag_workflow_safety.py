@@ -183,8 +183,20 @@ def main() -> None:
         raise SystemExit("release-cli build_dashboard bypasses release tag validation")
 
     release_tag_job = documents["release-tag.yml"].get("jobs", {}).get("tag", {})
+    if release_tag_job.get("if") != "github.ref == 'refs/heads/main'":
+        raise SystemExit("release-tag job can run from a non-main ref")
     if release_tag_job.get("timeout-minutes") != 10:
         raise SystemExit("release-tag job does not have the expected timeout")
+    release_tag_checkout = next(
+        (
+            step
+            for step in release_tag_job.get("steps", [])
+            if step.get("uses", "").startswith("actions/checkout@")
+        ),
+        {},
+    )
+    if release_tag_checkout.get("with", {}).get("ref") != "main":
+        raise SystemExit("release-tag checkout is not pinned to main")
     workspace_step = next(
         (
             step
@@ -196,25 +208,47 @@ def main() -> None:
     workspace_script = workspace_step.get("run") if isinstance(workspace_step, dict) else None
     if not isinstance(workspace_script, str) or "tomllib.load" not in workspace_script:
         raise SystemExit("release-tag workflow does not parse workspace version as TOML")
-    manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+    manifest_text = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+    manifest = tomllib.loads(manifest_text)
     current_version = manifest["workspace"]["package"]["version"]
     workspace_environment = os.environ.copy()
     workspace_environment["PATH"] = (
         f"{Path(sys.executable).parent}{os.pathsep}{workspace_environment['PATH']}"
     )
-    workspace_result = subprocess.run(
-        ["bash", "-eu", "-o", "pipefail", "-c", workspace_script],
-        cwd=ROOT,
-        env={**workspace_environment, "VERSION": f"v{current_version}"},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+
+    def run_workspace_gate(candidate_manifest: str, version: str) -> subprocess.CompletedProcess:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "Cargo.toml").write_text(
+                candidate_manifest,
+                encoding="utf-8",
+            )
+            return subprocess.run(
+                ["bash", "-eu", "-o", "pipefail", "-c", workspace_script],
+                cwd=temp_dir,
+                env={**workspace_environment, "VERSION": version},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    workspace_result = run_workspace_gate(manifest_text, f"v{current_version}")
     if workspace_result.returncode != 0:
         raise SystemExit(
             "release-tag workspace-version gate rejected the current manifest: "
+            + workspace_result.stdout
             + workspace_result.stderr
         )
+    for candidate_manifest, version, expected_error in (
+        (manifest_text, "v0.0.0", "does not match"),
+        ("[workspace.package\n", "v1.0.0", "could not parse"),
+        ('[workspace.package]\nversion = ""\n', "v1.0.0", "is empty"),
+    ):
+        rejected = run_workspace_gate(candidate_manifest, version)
+        output = rejected.stdout + rejected.stderr
+        if rejected.returncode == 0 or expected_error not in output:
+            raise SystemExit(
+                f"release-tag workspace-version gate did not reject {expected_error!r} fixture"
+            )
 
     format_step = next(
         (
