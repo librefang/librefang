@@ -26,7 +26,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          snapshot=$(mktemp)
+          snapshot_path=crates/librefang-runtime/openrouter-models.snapshot.json
+          snapshot=$(mktemp "${snapshot_path}.XXXXXX")
           trap 'rm -f "$snapshot"' EXIT
 
           curl --fail --retry 3 --silent --show-error \
@@ -35,18 +36,20 @@ jobs:
             > "$snapshot"
 
           jq -e '
-            def nonempty_string: type == "string" and length > 0;
+            def nonblank_string: type == "string" and test("\\S");
+            def canonical_id:
+              nonblank_string and . == (sub("^\\s+"; "") | sub("\\s+$"; ""));
             .data as $models |
             ($models | type == "array" and length > 0) and
             ([$models[].id] | length == (unique | length)) and
             all($models[];
-              (.id | nonempty_string) and
-              (.name | nonempty_string) and
-              (.context_length | type == "number" and . > 0)
+              (.id | canonical_id) and
+              (.name | nonblank_string) and
+              (.context_length | type == "number" and . > 0 and floor == .)
             )
           ' "$snapshot" > /dev/null
 
-          mv "$snapshot" crates/librefang-runtime/openrouter-models.snapshot.json
+          mv -- "$snapshot" "$snapshot_path"
 
       - name: Create update PR
         id: cpr
