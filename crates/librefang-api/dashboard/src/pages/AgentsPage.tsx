@@ -188,7 +188,7 @@ export function SystemPromptSection({
   const bind = (version: PromptVersion) => {
     if (bindVersion.isPending) return;
     bindVersion.mutate(
-      { agentId, version },
+      { agentId, version, previousSystemPrompt: current },
       {
         onSuccess: () => {
           addToast(
