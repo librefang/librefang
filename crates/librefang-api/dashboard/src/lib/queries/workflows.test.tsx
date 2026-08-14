@@ -27,6 +27,15 @@ describe("useWorkflowRuns", () => {
     expect(httpClient.listWorkflowRuns).not.toHaveBeenCalled();
   });
 
+  it("cannot be force-enabled without a workflowId", () => {
+    const { result } = renderHook(() => useWorkflowRuns("", { enabled: true }), {
+      wrapper: createQueryClientWrapper().wrapper,
+    });
+
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(httpClient.listWorkflowRuns).not.toHaveBeenCalled();
+  });
+
   it("should fetch when workflowId is valid", async () => {
     const mockRuns = [{ id: "run-1", status: "completed" }];
     vi.mocked(httpClient.listWorkflowRuns).mockResolvedValue(mockRuns);
@@ -62,6 +71,15 @@ describe("useWorkflowRunDetail", () => {
 
     expect(result.current.data).toBeUndefined();
     expect(result.current.isLoading).toBe(false);
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(httpClient.getWorkflowRun).not.toHaveBeenCalled();
+  });
+
+  it("cannot be force-enabled without a runId", () => {
+    const { result } = renderHook(() => useWorkflowRunDetail("", { enabled: true }), {
+      wrapper: createQueryClientWrapper().wrapper,
+    });
+
     expect(result.current.fetchStatus).toBe("idle");
     expect(httpClient.getWorkflowRun).not.toHaveBeenCalled();
   });
