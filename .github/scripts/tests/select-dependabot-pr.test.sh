@@ -4,7 +4,10 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
 SCRIPT="$ROOT/.github/scripts/select-dependabot-pr.sh"
 TEST_ROOT=$(mktemp -d)
-trap 'rm -rf "$TEST_ROOT"' EXIT HUP INT TERM
+trap 'rm -rf "$TEST_ROOT"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 FAKE_BIN="$TEST_ROOT/bin"
 mkdir -p "$FAKE_BIN"
 
@@ -37,9 +40,12 @@ if [ "$1 $2" = 'pr view' ]; then
 {"state":"OPEN","createdAt":"2000-01-01T00:00:00Z","labels":[],"body":"","author":{"is_bot":false,"login":"attacker"},"title":"Bump x from 1.0.0 to 1.0.1","headRefName":"dependabot-lookalike/x","headRefOid":"bad"}
 JSON
   else
-    cat <<'JSON'
-{"state":"OPEN","createdAt":"2000-01-01T00:00:00Z","labels":[],"body":"","author":{"is_bot":true,"login":"app/dependabot"},"title":"Bump x from 1.0.0 to 1.0.1","headRefName":"dependabot/npm/x-1.0.1","headRefOid":"abc123"}
-JSON
+    head_oid=abc123
+    case "${EVENT_NAME:-}" in
+      schedule|workflow_dispatch) head_oid=old-green ;;
+    esac
+    [ "${GH_AUTHOR_MODE:-}" != race ] || head_oid=moved
+    printf '{"state":"OPEN","createdAt":"2000-01-01T00:00:00Z","author":{"is_bot":true,"login":"app/dependabot"},"title":"Bump x from 1.0.0 to 1.0.1","headRefName":"dependabot/npm/x-1.0.1","headRefOid":"%s"}\n' "$head_oid"
   fi
   exit 0
 fi
@@ -73,12 +79,18 @@ run_selector() {
   || { echo 'FAIL: workflow_run should select PR #42' >&2; exit 1; }
 [ "$(run_selector schedule dependabot)" = 41 ] \
   || { echo 'FAIL: schedule should select the aged green PR' >&2; exit 1; }
+[ "$(run_selector workflow_dispatch dependabot)" = 41 ] \
+  || { echo 'FAIL: manual reconciliation should select the aged green PR' >&2; exit 1; }
 [ -z "$(run_selector schedule young)" ] \
   || { echo 'FAIL: schedule must not select a PR inside the soak window' >&2; exit 1; }
 [ -z "$(run_selector schedule failed)" ] \
   || { echo 'FAIL: schedule must not select a PR without successful latest CI' >&2; exit 1; }
 if run_selector workflow_run impostor >/dev/null 2>&1; then
   echo 'FAIL: lookalike PR author must be rejected' >&2
+  exit 1
+fi
+if run_selector schedule race >/dev/null 2>&1; then
+  echo 'FAIL: schedule must reject a head changed after CI selection' >&2
   exit 1
 fi
 

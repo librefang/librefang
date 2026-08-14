@@ -26,23 +26,47 @@ on:
     types: [completed]
   schedule:
     - cron: '23 * * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/scripts/select-dependabot-pr.sh'
+      - '.github/scripts/tests/select-dependabot-pr.test.sh'
+      - '.github/workflows/auto-merge-dependabot.yml'
 
 # Tightened from `contents: write` — auto-merge only needs PR write access;
 # the squash itself is performed by GitHub on the PR's behalf.
 permissions:
-  actions: read
   contents: read
-  pull-requests: write
-
-concurrency:
-  group: dependabot-auto-merge
-  cancel-in-progress: false
 
 jobs:
+  test-selector:
+    name: Test Dependabot selector
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.workflow_run.event == 'pull_request' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.actor.login == 'dependabot[bot]'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Parse selector and tests
+        run: |
+          bash -n .github/scripts/select-dependabot-pr.sh
+          sh -n .github/scripts/tests/select-dependabot-pr.test.sh
+      - name: Run selector tests
+        run: .github/scripts/tests/select-dependabot-pr.test.sh
+
   auto-merge:
+    needs: test-selector
     # Run after Dependabot CI succeeds or during the hourly soak reconciliation.
     if: >-
       github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
       (
         github.event.workflow_run.event == 'pull_request' &&
         github.event.workflow_run.conclusion == 'success' &&
@@ -50,12 +74,19 @@ jobs:
       )
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+    concurrency:
+      group: dependabot-auto-merge
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      # Resolve the PR number from the workflow_run head SHA.  The commits
-      # → pulls endpoint returns every PR whose head matches; in practice
-      # dependabot opens one PR per branch, so .[0] is unambiguous.
+      # Resolve the PR number from the workflow_run head SHA. The commits
+      # → pulls endpoint may return multiple records, so the selector keeps
+      # only an open PR owned by Dependabot and revalidates its current head.
       - name: Find PR for head SHA
         id: pr
         env:
@@ -76,8 +107,8 @@ jobs:
       # Parse the bump's update-type from the PR title.  Dependabot's title
       # format is stable across cargo / github-actions / npm / pip:
       #   "Bump <dep> from <oldver> to <newver>"  (or "chore(deps): bump …")
-      # We compare the major components of the two versions to classify as
-      # major / minor / patch.  This intentionally replaces the
+      # We compare the numeric version components to classify the bump as
+      # major / minor / patch. This intentionally replaces the
       # `dependabot/fetch-metadata` action because that action requires a
       # `pull_request` event payload and we're in `workflow_run` context.
       #
@@ -187,8 +218,11 @@ jobs:
           UPDATE_TYPE: ${{ steps.meta.outputs.update_type }}
           DEP_NAME: ${{ steps.meta.outputs.dep_name }}
         run: |
+          set -euo pipefail
+          expected_head=$(jq -r .headRefOid /tmp/pr.json)
           echo "Auto-merging $DEP_NAME ($UPDATE_TYPE) — CI green, soak cleared."
-          gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash
+          gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash \
+            --match-head-commit "$expected_head"
 
       - name: Skip auto-merge for major / unparseable bumps
         if: |

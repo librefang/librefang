@@ -6,10 +6,13 @@ set -euo pipefail
 : "${PR_JSON_PATH:?PR_JSON_PATH is required}"
 
 pr_number=""
+selected_sha=""
 if [ "$EVENT_NAME" = "workflow_run" ]; then
   : "${HEAD_SHA:?HEAD_SHA is required for workflow_run}"
-  pr_number=$(gh api "/repos/${REPO}/commits/${HEAD_SHA}/pulls" --jq '.[0].number // empty')
-elif [ "$EVENT_NAME" = "schedule" ]; then
+  selected_sha="$HEAD_SHA"
+  pr_number=$(gh api "/repos/${REPO}/commits/${HEAD_SHA}/pulls" \
+    --jq '[.[] | select(.state == "open" and .user.login == "dependabot[bot]")][0].number // empty')
+elif [ "$EVENT_NAME" = "schedule" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
   now=$(date -u +%s)
   while IFS=$'\t' read -r candidate sha created_at; do
     [ -n "$candidate" ] || continue
@@ -21,14 +24,15 @@ elif [ "$EVENT_NAME" = "schedule" ]; then
       -f head_sha="$sha" \
       -f event='pull_request' \
       -f status='completed' \
-      -f per_page='10' \
+      -f per_page='1' \
       --jq '.workflow_runs | first | select(.conclusion == "success") | .id // empty')
     if [ -n "$successful_run" ]; then
       pr_number="$candidate"
+      selected_sha="$sha"
       break
     fi
   done < <(gh pr list --repo "$REPO" --state open --author 'app/dependabot' \
-    --limit 100 --json number,headRefOid,createdAt \
+    --limit 1000 --json number,headRefOid,createdAt \
     --jq '.[] | [.number, .headRefOid, .createdAt] | @tsv')
 else
   echo "Unsupported event: $EVENT_NAME" >&2
@@ -40,7 +44,7 @@ if [ -z "$pr_number" ]; then
 fi
 
 gh pr view "$pr_number" --repo "$REPO" \
-  --json createdAt,labels,body,author,title,headRefName,headRefOid,state \
+  --json createdAt,author,title,headRefName,headRefOid,state \
   > "$PR_JSON_PATH"
 
 if ! jq -e '
@@ -53,9 +57,8 @@ if ! jq -e '
   exit 1
 fi
 
-if [ "$EVENT_NAME" = "workflow_run" ] \
-  && [ "$(jq -r .headRefOid "$PR_JSON_PATH")" != "$HEAD_SHA" ]; then
-  echo "PR #${pr_number} head no longer matches the successful CI SHA; refusing" >&2
+if [ "$(jq -r .headRefOid "$PR_JSON_PATH")" != "$selected_sha" ]; then
+  echo "PR #${pr_number} head no longer matches the CI-tested SHA; refusing" >&2
   exit 1
 fi
 
