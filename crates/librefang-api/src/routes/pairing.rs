@@ -7,7 +7,7 @@
 
 use super::AppState;
 use crate::middleware::RequestLanguage;
-use crate::types::ApiErrorResponse;
+use crate::types::{api_error, ApiErrorResponse};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -172,8 +172,59 @@ fn default_unknown() -> String {
     "unknown".to_string()
 }
 
+const MAX_DEVICE_METADATA_BYTES: usize = 128;
+
+fn validate_device_metadata(field: &str, value: &str) -> Result<(), String> {
+    if value.len() > MAX_DEVICE_METADATA_BYTES {
+        return Err(format!(
+            "{field} must be at most {MAX_DEVICE_METADATA_BYTES} bytes"
+        ));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(format!("{field} must not contain control characters"));
+    }
+    Ok(())
+}
+
+fn pairing_completion_error(error: String) -> axum::response::Response {
+    if error == "Invalid or expired pairing token" || error == "Pairing token has expired" {
+        return api_error(StatusCode::GONE, "pairing_token_expired", error);
+    }
+    if error.starts_with("Maximum paired devices (") {
+        return ApiErrorResponse::conflict(error)
+            .with_code("pairing_capacity_reached")
+            .into_response();
+    }
+    ApiErrorResponse::internal_scrub(error).into_response()
+}
+
+type NotificationFailures = Vec<(String, String)>;
+
+fn summarize_notification_results(
+    results: Vec<(String, Result<(), String>)>,
+) -> (usize, NotificationFailures) {
+    let notified = results.iter().filter(|(_, result)| result.is_ok()).count();
+    let failures = results
+        .into_iter()
+        .filter_map(|(target, result)| result.err().map(|error| (target, error)))
+        .collect();
+    (notified, failures)
+}
+
 /// POST /api/pairing/complete — Complete pairing with token + device info.
-#[utoipa::path(post, path = "/api/pairing/complete", tag = "pairing", request_body = crate::types::JsonObject, responses((status = 200, description = "Pairing completed", body = crate::types::JsonObject)))]
+#[utoipa::path(
+    post,
+    path = "/api/pairing/complete",
+    tag = "pairing",
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 200, description = "Pairing completed", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid device metadata"),
+        (status = 409, description = "Pairing capacity reached"),
+        (status = 410, description = "Pairing token expired or already used"),
+        (status = 500, description = "Pairing completion failed")
+    )
+)]
 pub async fn pairing_complete(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -196,15 +247,19 @@ pub async fn pairing_complete(
     }
     let display_name = body.display_name.as_str();
     let platform = body.platform.as_str();
+    for (field, value) in [("display_name", display_name), ("platform", platform)] {
+        if let Err(error) = validate_device_metadata(field, value) {
+            return ApiErrorResponse::bad_request(error)
+                .into_json_tuple()
+                .into_response();
+        }
+    }
     let push_token = body.push_token.clone();
     // Mint a fresh per-device bearer token. The plaintext is returned
-    // to the mobile client exactly once below; only the Argon2 hash is
+    // to the mobile client exactly once below; only its one-way hash is
     // persisted, so this token cannot be reconstructed from a database
     // dump and cannot be re-used by anyone except the holder.
-    let plaintext_key = {
-        let bytes: [u8; 32] = rand::random();
-        hex::encode(bytes)
-    };
+    let plaintext_key = crate::password_hash::generate_bearer_token();
     // Device bearers are 256-bit CSPRNG outputs — high enough entropy that
     // the Argon2 KDF cost is dead weight on every mobile request. Use a
     // plain SHA-256 hash; `verify_password` recognises the `$sha256$`
@@ -222,6 +277,10 @@ pub async fn pairing_complete(
         api_key_hash: api_key_hash.clone(),
     };
 
+    // Acquire the live-auth guard before the synchronous state transition.
+    // Once pairing succeeds there is no cancellation point before bearer
+    // registration, so persisted and live authentication state cannot split.
+    let mut user_api_keys = state.user_api_keys.write().await;
     match state
         .kernel
         .pairing_ref()
@@ -240,7 +299,8 @@ pub async fn pairing_complete(
                 api_key_hash,
                 user_id: librefang_types::agent::UserId::from_name(&device_user_name),
             };
-            state.user_api_keys.write().await.push(auth);
+            user_api_keys.push(auth);
+            drop(user_api_keys);
 
             tracing::info!(
                 target: "pairing.audit",
@@ -264,15 +324,7 @@ pub async fn pairing_complete(
             }))
             .into_response()
         }
-        Err(e) => {
-            // Return 410 Gone for used/expired tokens to let the client
-            // distinguish "token consumed" from a generic 400 input error.
-            (
-                axum::http::StatusCode::GONE,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response()
-        }
+        Err(e) => pairing_completion_error(e),
     }
 }
 
@@ -350,7 +402,17 @@ pub async fn pairing_remove_device(
 }
 
 /// POST /api/pairing/notify — Push a notification to all paired devices.
-#[utoipa::path(post, path = "/api/pairing/notify", tag = "pairing", request_body = crate::types::JsonObject, responses((status = 200, description = "Notification sent", body = crate::types::JsonObject)))]
+#[utoipa::path(
+    post,
+    path = "/api/pairing/notify",
+    tag = "pairing",
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 200, description = "Notification delivery results", body = crate::types::JsonObject),
+        (status = 400, description = "Notification message missing"),
+        (status = 502, description = "All notification deliveries failed")
+    )
+)]
 pub async fn pairing_notify(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -378,13 +440,26 @@ pub async fn pairing_notify(
             .into_json_tuple()
             .into_response();
     }
-    state
+    let results = state
         .kernel
         .pairing_ref()
         .notify_devices(title, message)
         .await;
-    Json(serde_json::json!({"ok": true, "notified": state.kernel.pairing_ref().list_devices().len()}))
-        .into_response()
+    let (notified, failures) = summarize_notification_results(results);
+    if notified == 0 && !failures.is_empty() {
+        tracing::warn!(?failures, "all pairing notification deliveries failed");
+        let mut response = ApiErrorResponse::internal("Notification delivery failed")
+            .with_code("notification_delivery_failed")
+            .with_details(serde_json::json!({"notified": 0, "failed": failures.len()}));
+        response.status = StatusCode::BAD_GATEWAY;
+        return response.into_json_tuple().into_response();
+    }
+    Json(serde_json::json!({
+        "ok": failures.is_empty(),
+        "notified": notified,
+        "failed": failures,
+    }))
+    .into_response()
 }
 #[cfg(test)]
 mod pairing_tests {
@@ -517,5 +592,45 @@ mod pairing_tests {
         assert_eq!(parsed.display_name, "My iPhone");
         assert_eq!(parsed.platform, "ios");
         assert_eq!(parsed.push_token.as_deref(), Some("fcm-xyz"));
+    }
+
+    #[test]
+    fn device_metadata_rejects_oversized_and_control_characters() {
+        assert!(validate_device_metadata("display_name", &"x".repeat(129)).is_err());
+        assert!(validate_device_metadata("platform", "ios\nforged").is_err());
+        assert!(validate_device_metadata("display_name", &"x".repeat(128)).is_ok());
+    }
+
+    #[test]
+    fn pairing_completion_errors_have_distinct_statuses() {
+        assert_eq!(
+            pairing_completion_error("Invalid or expired pairing token".to_string()).status(),
+            StatusCode::GONE
+        );
+        assert_eq!(
+            pairing_completion_error(
+                "Maximum paired devices (5) reached. Remove a device first.".to_string()
+            )
+            .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            pairing_completion_error("unexpected storage failure".to_string()).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn notification_summary_counts_delivery_results() {
+        let (notified, failures) = summarize_notification_results(vec![
+            ("device-a".to_string(), Ok(())),
+            ("device-b".to_string(), Err("offline".to_string())),
+            ("device-c".to_string(), Ok(())),
+        ]);
+        assert_eq!(notified, 2);
+        assert_eq!(
+            failures,
+            vec![("device-b".to_string(), "offline".to_string())]
+        );
     }
 }
