@@ -1,0 +1,1 @@
+- Load WASM agent modules asynchronously so filesystem latency cannot block Tokio worker threads. (@xiaomo)

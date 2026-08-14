@@ -619,6 +619,47 @@ async fn skills_install_path_traversal_hand_rejected_400() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn skills_install_already_installed_returns_409() {
+    // Regression coverage for #6977: the destination-exists check moved
+    // from before the per-skill lock to inside
+    // `librefang_skills::evolution::install_local_skill`, and a hit now
+    // surfaces through `SkillError::AlreadyInstalled` instead of a
+    // pre-lock `dest.exists()` probe. Assert the HTTP-visible behavior
+    // (first install succeeds, second is a 409) still holds end-to-end.
+    let h = boot().await;
+    install_registry_skill(h.home(), "dup-skill", "A skill installed twice");
+
+    let (first_status, first_body) = json_request(
+        &h,
+        Method::POST,
+        "/api/skills/install",
+        Some(serde_json::json!({"name": "dup-skill"})),
+    )
+    .await;
+    assert_eq!(first_status, StatusCode::OK, "{first_body:?}");
+
+    let (second_status, second_body) = json_request(
+        &h,
+        Method::POST,
+        "/api/skills/install",
+        Some(serde_json::json!({"name": "dup-skill"})),
+    )
+    .await;
+    assert_eq!(second_status, StatusCode::CONFLICT, "{second_body:?}");
+    assert_eq!(
+        second_body["status"], "already_installed",
+        "{second_body:?}"
+    );
+    assert!(
+        second_body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("already installed"),
+        "error must mention already-installed: {second_body:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn skillhub_install_path_traversal_hand_rejected_400() {
     // Skillhub has its own install handler. Reject traversal before the
     // hand directory existence probe so an attacker cannot escape the

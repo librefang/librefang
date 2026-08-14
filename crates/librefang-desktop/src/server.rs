@@ -130,13 +130,15 @@ async fn run_embedded_server(
     // Desktop embeds the router directly, so it must start the same task here or live provider catalogs (notably OpenRouter) never refresh.
     kernel.clone().spawn_key_validation();
 
-    // Sync dashboard assets in background (downloads from release if outdated)
-    {
+    // Sync dashboard assets in background (downloads from release if outdated).
+    // Keep the handle so shutdown does not destroy the embedded runtime while
+    // the one-shot install is still updating the dashboard directory.
+    let dashboard_sync = {
         let home = kernel.home_dir().to_path_buf();
         tokio::spawn(async move {
             librefang_api::webchat::sync_dashboard(&home).await;
-        });
-    }
+        })
+    };
 
     // Convert std TcpListener → tokio TcpListener
     std_listener
@@ -158,6 +160,10 @@ async fn run_embedded_server(
 
     if let Err(e) = server.await {
         error!("Embedded server error: {e}");
+    }
+
+    if let Err(e) = dashboard_sync.await {
+        error!("Dashboard sync task failed: {e}");
     }
 
     // Clean up channel bridges. Swap out atomically then stop with owned access.

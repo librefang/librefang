@@ -314,6 +314,24 @@ async fn list_sessions_honours_pagination_query() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn list_sessions_returns_scrubbed_500_on_database_failure() {
+    let h = boot().await;
+    h.state
+        .kernel
+        .memory_substrate()
+        .pool()
+        .get()
+        .unwrap()
+        .execute_batch("DROP TABLE sessions;")
+        .unwrap();
+
+    let (status, body) = get_json(&h, "/api/sessions").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body:?}");
+    assert_eq!(body["error"]["message"], "Failed to list sessions");
+    assert!(!body.to_string().contains("no such table"), "{body:?}");
+}
+
 // ---------------------------------------------------------------------------
 // /api/sessions/search
 // ---------------------------------------------------------------------------
@@ -361,6 +379,24 @@ async fn search_sessions_returns_envelope_on_no_match() {
     // Legacy fields must be gone.
     assert!(body.get("results").is_none(), "{body:?}");
     assert!(body.get("next_offset").is_none(), "{body:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn search_sessions_returns_scrubbed_500_on_database_failure() {
+    let h = boot().await;
+    h.state
+        .kernel
+        .memory_substrate()
+        .pool()
+        .get()
+        .unwrap()
+        .execute_batch("DROP TABLE sessions_fts;")
+        .unwrap();
+
+    let (status, body) = get_json(&h, "/api/sessions/search?q=anything").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body:?}");
+    assert_eq!(body["error"]["message"], "Failed to search sessions");
+    assert!(!body.to_string().contains("no such table"), "{body:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

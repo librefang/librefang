@@ -1,0 +1,1 @@
+- Return an internal error when backup directory entries or metadata cannot be read instead of reporting a misleading empty or zero-sized backup list. (@xiaomo)

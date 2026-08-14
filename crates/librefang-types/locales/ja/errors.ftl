@@ -16,6 +16,7 @@ api-error-agent-execution-failed = エージェントの実行に失敗しまし
 api-error-agent-clone-spawn-failed = クローンの作成に失敗しました: { $error }
 api-error-agent-error = エージェントエラー: { $error }
 api-error-agent-not-found-with-id = エージェントが見つかりません: { $id }
+api-error-agent-invalid-sort = 無効なソートフィールド '{ $field }' です。有効なフィールド: { $valid }
 
 # メッセージエラー
 api-error-message-too-large = メッセージが大きすぎます（最大 64KB）
@@ -219,6 +220,10 @@ api-error-webhook-invalid-events = イベントタイプは文字列である必
 api-error-webhook-event-types-required = 少なくとも 1 つのイベントタイプが必要です
 api-error-webhook-url-unreachable = Webhook URL に到達できません: { $error }
 api-error-webhook-event-publish-failed = イベントの発行に失敗しました: { $error }
+api-error-webhook-invalid-url = Webhook URL の形式が無効です
+api-error-webhook-agent-exec-failed = Webhook エージェントの実行に失敗しました: { $error }
+api-error-webhook-reach-failed = Webhook URL への接続に失敗しました: { $error }
+api-error-webhook-unknown-event = 不明なイベントタイプ '{ $event }' です。有効なタイプ: { $valid }
 
 # バックアップエラー
 api-error-backup-not-found = バックアップが見つかりません

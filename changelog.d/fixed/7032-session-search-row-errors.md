@@ -1,0 +1,2 @@
+Session search (`SessionStore::search_sessions` / `search_sessions_paginated`) now propagates a row-decode failure from `sessions_fts` as an error instead of silently dropping the corrupt row and returning a partial result set.
+A single malformed row previously vanished from search results without a trace; the same failure is now surfaced to the caller so the underlying corruption gets noticed and investigated (#7032) (@houko)

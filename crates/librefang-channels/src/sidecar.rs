@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, MutexGuard as StdMutexGuard, OnceLock, RwLock};
+use std::sync::{
+    Arc, MutexGuard as StdMutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard,
+};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
@@ -30,6 +32,23 @@ fn lock_std_recover<'a, T>(
             lock = name,
             "sidecar state lock poisoned; recovering inner state"
         );
+        mutex.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
+fn read_caps_recover(caps: &RwLock<Caps>) -> RwLockReadGuard<'_, Caps> {
+    caps.read().unwrap_or_else(|poisoned| {
+        warn!("sidecar capability lock poisoned; recovering inner state");
+        caps.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
+fn write_caps_recover(caps: &RwLock<Caps>) -> RwLockWriteGuard<'_, Caps> {
+    caps.write().unwrap_or_else(|poisoned| {
+        warn!("sidecar capability lock poisoned; recovering inner state");
+        caps.clear_poison();
         poisoned.into_inner()
     })
 }
@@ -988,34 +1007,15 @@ async fn spawn_once(
                             match serde_json::from_str::<SidecarEvent>(&line) {
                                 Ok(SidecarEvent::Ready { params }) => {
                                     let cap_count = params.capabilities.len();
-                                    match caps.write() {
-                                        Ok(mut g) => {
-                                            g.set = params
-                                                .capabilities
-                                                .iter()
-                                                .cloned()
-                                                .collect();
-                                            g.suppress_errors =
-                                                params.suppress_error_responses;
-                                            g.notification_recipients =
-                                                params.notification_recipients.clone();
-                                            g.header_rules =
-                                                params.header_rules.clone();
-                                        }
-                                        Err(p) => {
-                                            let mut g = p.into_inner();
-                                            g.set = params
-                                                .capabilities
-                                                .iter()
-                                                .cloned()
-                                                .collect();
-                                            g.suppress_errors =
-                                                params.suppress_error_responses;
-                                            g.notification_recipients =
-                                                params.notification_recipients.clone();
-                                            g.header_rules =
-                                                params.header_rules.clone();
-                                        }
+                                    {
+                                        let mut caps_guard = write_caps_recover(&caps);
+                                        caps_guard.set =
+                                            params.capabilities.iter().cloned().collect();
+                                        caps_guard.suppress_errors =
+                                            params.suppress_error_responses;
+                                        caps_guard.notification_recipients =
+                                            params.notification_recipients.clone();
+                                        caps_guard.header_rules = params.header_rules.clone();
                                     }
                                     let _ = account_id_cell
                                         .set(params.account_id.clone());
@@ -1585,10 +1585,7 @@ impl SidecarAdapter {
 
     /// Whether the adapter declared capability `c` in its `ready` event.
     fn has_cap(&self, c: &str) -> bool {
-        self.caps
-            .read()
-            .map(|g| g.set.contains(c))
-            .unwrap_or_else(|p| p.into_inner().set.contains(c))
+        read_caps_recover(&self.caps).set.contains(c)
     }
 
     /// Write a command to the sidecar process stdin.
@@ -1900,7 +1897,7 @@ impl ChannelAdapter for SidecarAdapter {
             Some(h) => h,
             None => return Vec::new(),
         };
-        let guard = self.caps.read().unwrap_or_else(|p| p.into_inner());
+        let guard = read_caps_recover(&self.caps);
         // Only emit auth for an exact host the adapter declared — a
         // credential leak to a model-controlled host would let a forged
         // inbound message exfiltrate the token (see trait doc).
@@ -1971,10 +1968,7 @@ impl ChannelAdapter for SidecarAdapter {
     }
 
     fn suppress_error_responses(&self) -> bool {
-        self.caps
-            .read()
-            .map(|g| g.suppress_errors)
-            .unwrap_or_else(|p| p.into_inner().suppress_errors)
+        read_caps_recover(&self.caps).suppress_errors
     }
 
     fn typing_events(&self) -> Option<mpsc::Receiver<TypingEvent>> {
@@ -2070,10 +2064,9 @@ impl ChannelAdapter for SidecarAdapter {
     }
 
     fn notification_recipients(&self) -> Vec<ChannelUser> {
-        self.caps
-            .read()
-            .map(|g| g.notification_recipients.clone())
-            .unwrap_or_else(|p| p.into_inner().notification_recipients.clone())
+        read_caps_recover(&self.caps)
+            .notification_recipients
+            .clone()
     }
 
     fn account_id(&self) -> Option<&str> {
@@ -2138,11 +2131,33 @@ mod tests {
         .join()
         .is_err());
 
+        assert!(status.is_poisoned());
         let mut recovered = lock_std_recover(&status, "status");
         assert_eq!(recovered.messages_sent, 7);
         recovered.messages_sent += 1;
         drop(recovered);
+        assert!(!status.is_poisoned());
         assert_eq!(lock_std_recover(&status, "status").messages_sent, 8);
+    }
+
+    #[test]
+    fn sidecar_capability_lock_recovers_once_for_reads_and_writes() {
+        let caps = Arc::new(RwLock::new(Caps::default()));
+        let poisoner = Arc::clone(&caps);
+        assert!(std::thread::spawn(move || {
+            let mut guard = poisoner.write().unwrap();
+            guard.set.insert("typing".to_string());
+            panic!("poison sidecar capability lock");
+        })
+        .join()
+        .is_err());
+
+        assert!(caps.is_poisoned());
+        assert!(read_caps_recover(&caps).set.contains("typing"));
+        assert!(!caps.is_poisoned());
+
+        write_caps_recover(&caps).set.insert("reaction".to_string());
+        assert!(read_caps_recover(&caps).set.contains("reaction"));
     }
 
     #[test]

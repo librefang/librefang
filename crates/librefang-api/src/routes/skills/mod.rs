@@ -565,8 +565,14 @@ async fn activate_hand_inner(
         }
     };
 
-    match state.kernel.activate_hand(&hand_id, config) {
-        Ok(instance) => {
+    let kernel = Arc::clone(&state.kernel);
+    let activation_hand_id = hand_id.clone();
+    let activation =
+        hands::run_hand_lifecycle_job(move || kernel.activate_hand(&activation_hand_id, config))
+            .await;
+
+    match activation {
+        Ok(Ok(instance)) => {
             // If the hand agent has a non-reactive schedule (autonomous hands),
             // start its background loop so it begins running immediately.
             if let Some(agent_id) = instance.agent_id() {
@@ -593,10 +599,22 @@ async fn activate_hand_inner(
                 .unwrap_or_else(|_| b"{}".to_vec());
             (StatusCode::OK, body)
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             let payload = serde_json::json!({"error": format!("{e}"), "code": "activate_hand_failed", "type": "activate_hand_failed"});
             (
                 StatusCode::BAD_REQUEST,
+                serde_json::to_vec(&payload).unwrap_or_default(),
+            )
+        }
+        Err(e) => {
+            tracing::error!(hand = %hand_id, error = %e, "hand activation task failed");
+            let payload = serde_json::json!({
+                "error": "Hand activation task failed",
+                "code": "activate_hand_failed",
+                "type": "activate_hand_failed"
+            });
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
                 serde_json::to_vec(&payload).unwrap_or_default(),
             )
         }
@@ -1258,31 +1276,6 @@ fn status_str_for_catalog(
     }
 }
 
-/// Recursively copy a directory tree.
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        // `std::fs::copy` dereferences links, so a symlink planted in the registry checkout would write the target's real contents into the installed skill.
-        // Mirrors `librefang_skills::marketplace::copy_dir_recursive`.
-        if ty.is_symlink() {
-            tracing::warn!(
-                path = %entry.path().display(),
-                "skipping symlink while installing skill"
-            );
-            continue;
-        }
-        let dest_path = dst.join(entry.file_name());
-        if ty.is_dir() {
-            copy_dir_recursive(&entry.path(), &dest_path)?;
-        } else {
-            std::fs::copy(entry.path(), &dest_path)?;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1308,7 +1301,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside_dir, src.join("link_dir")).unwrap();
 
         let dest = tmp.path().join("dest");
-        copy_dir_recursive(&src, &dest).unwrap();
+        librefang_skills::evolution::install_local_skill(&src, &dest).unwrap();
 
         assert!(dest.join("SKILL.md").exists());
         assert!(dest.join("nested/file.txt").exists());

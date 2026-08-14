@@ -535,10 +535,14 @@ impl LibreFangKernel {
             let peer_agents: Vec<(String, String, String)> =
                 self.agents.registry.peer_agents_summary();
 
-            let ws_meta = manifest
-                .workspace
-                .as_ref()
-                .map(|w| self.cached_workspace_metadata(w, manifest.autonomous.is_some()));
+            let ws_meta = if let Some(workspace) = manifest.workspace.as_ref() {
+                Some(
+                    self.cached_workspace_metadata_async(workspace, manifest.autonomous.is_some())
+                        .await,
+                )
+            } else {
+                None
+            };
 
             let agent_id_str = agent_id.0.to_string();
             // One pass over `tools` produces both the name list (for the
@@ -2544,10 +2548,9 @@ impl LibreFangKernel {
                 self.agents.registry.peer_agents_summary();
 
             // Use cached workspace metadata (identity files + workspace context)
-            let ws_meta = manifest
-                .workspace
-                .as_ref()
-                .map(|w| self.cached_workspace_metadata(w, manifest.autonomous.is_some()));
+            let ws_meta = manifest.workspace.as_ref().map(|workspace| {
+                self.cached_workspace_metadata(workspace, manifest.autonomous.is_some())
+            });
 
             // Use cached skill metadata (summary + prompt context)
             let skill_meta = if manifest.skills_disabled {
@@ -2971,7 +2974,12 @@ impl LibreFangKernel {
             if needs_compact && !loop_opts.is_fork {
                 info!(agent_id = %agent_id, messages = session.messages.len(), "Auto-compacting session");
                 match kernel_clone
-                    .compact_agent_session_with_id(agent_id, Some(session.id), false)
+                    .compact_agent_session_in_lock_scope(
+                        agent_id,
+                        Some(session.id),
+                        false,
+                        agent_scoped,
+                    )
                     .await
                 {
                     Ok(msg) => {
@@ -3322,7 +3330,12 @@ impl LibreFangKernel {
                                 // Pass the session id explicitly (same
                                 // reason as the pre-loop path above).
                                 if let Err(e) = kc
-                                    .compact_agent_session_with_id(agent_id, Some(sid), false)
+                                    .compact_agent_session_in_lock_scope(
+                                        agent_id,
+                                        Some(sid),
+                                        false,
+                                        agent_scoped,
+                                    )
                                     .await
                                 {
                                     warn!(agent_id = %agent_id, "Post-loop compaction failed: {e}");

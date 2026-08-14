@@ -1,0 +1,2 @@
+The MCP migrator wrote synthesized `[[mcp_servers]]` configuration with a truncating write, so a crash or kill could leave `config.toml` empty or partial.
+The config is now staged, fsynced, and atomically published; existing Unix permissions are preserved, newly created config files use mode 0600, parent-directory sync failures after a successful publish are logged without misreporting the migration as skipped, and Windows publishes with write-through semantics. (#6975) (@houko)

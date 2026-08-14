@@ -23,7 +23,7 @@
 //! the same operator always maps to the same handle across registrations.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use webauthn_rs::prelude::*;
@@ -115,6 +115,24 @@ pub struct PasskeyEngine {
 }
 
 impl PasskeyEngine {
+    fn lock_registration_states(&self) -> MutexGuard<'_, HashMap<String, RegistrationCeremony>> {
+        self.reg_states.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("Passkey registration ceremony state lock poisoned; recovering state");
+            self.reg_states.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+
+    fn lock_authentication_states(
+        &self,
+    ) -> MutexGuard<'_, HashMap<String, AuthenticationCeremony>> {
+        self.auth_states.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("Passkey authentication ceremony state lock poisoned; recovering state");
+            self.auth_states.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+
     /// Build the engine from the configured RP-ID and origin.
     ///
     /// `rp_id` must be the effective registrable domain of `rp_origin`
@@ -166,7 +184,7 @@ impl PasskeyEngine {
             Some(exclude),
         )?;
         let ceremony_id = generate_session_token().token;
-        let mut states = self.reg_states.lock().expect("reg_states poisoned");
+        let mut states = self.lock_registration_states();
         prune_expired(&mut states, |c| c.expires_at);
         states.insert(
             ceremony_id.clone(),
@@ -189,7 +207,7 @@ impl PasskeyEngine {
         reg: &RegisterPublicKeyCredential,
     ) -> Result<Passkey, PasskeyError> {
         let ceremony = {
-            let mut states = self.reg_states.lock().expect("reg_states poisoned");
+            let mut states = self.lock_registration_states();
             states.remove(ceremony_id)
         }
         .filter(|c| c.expires_at > now_unix() && c.user_name == user_name)
@@ -209,7 +227,7 @@ impl PasskeyEngine {
     ) -> Result<(String, RequestChallengeResponse), PasskeyError> {
         let (rcr, state) = self.webauthn.start_passkey_authentication(passkeys)?;
         let ceremony_id = generate_session_token().token;
-        let mut states = self.auth_states.lock().expect("auth_states poisoned");
+        let mut states = self.lock_authentication_states();
         prune_expired(&mut states, |c| c.expires_at);
         states.insert(
             ceremony_id.clone(),
@@ -231,7 +249,7 @@ impl PasskeyEngine {
         cred: &PublicKeyCredential,
     ) -> Result<AuthenticationResult, PasskeyError> {
         let ceremony = {
-            let mut states = self.auth_states.lock().expect("auth_states poisoned");
+            let mut states = self.lock_authentication_states();
             states.remove(ceremony_id)
         }
         .filter(|c| c.expires_at > now_unix())
@@ -390,6 +408,41 @@ mod tests {
         assert_eq!(engine.reg_states.lock().unwrap().len(), 0);
     }
 
+    #[test]
+    fn ceremony_locks_recover_after_held_lock_panics() {
+        let engine = PasskeyEngine::new("localhost", "http://localhost", "admin").unwrap();
+        let (preserved_id, _) = engine.start_registration("admin", &[]).unwrap();
+
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = engine.reg_states.lock().unwrap();
+            panic!("poison registration ceremony state");
+        });
+        assert!(engine.reg_states.is_poisoned());
+
+        let (new_id, _) = engine.start_registration("admin", &[]).unwrap();
+        assert_ne!(preserved_id, new_id);
+        assert!(!engine.reg_states.is_poisoned());
+        let states = engine.reg_states.lock().unwrap();
+        assert!(states.contains_key(&preserved_id));
+        assert!(states.contains_key(&new_id));
+        drop(states);
+
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = engine.auth_states.lock().unwrap();
+            panic!("poison authentication ceremony state");
+        });
+        assert!(engine.auth_states.is_poisoned());
+
+        let credential: PublicKeyCredential =
+            serde_json::from_str(SAMPLE_AUTH).expect("sample authentication credential parses");
+        let err = engine
+            .finish_authentication("does-not-exist", &credential)
+            .unwrap_err();
+        assert!(matches!(err, PasskeyError::UnknownCeremony));
+        assert!(!engine.auth_states.is_poisoned());
+        assert!(engine.auth_states.lock().is_ok());
+    }
+
     // A syntactically valid (but cryptographically bogus) registration
     // payload — enough to exercise the ceremony-lookup branches without a
     // real authenticator. The crypto verification is never reached on these
@@ -400,6 +453,17 @@ mod tests {
         "response": {
             "attestationObject": "AAAA",
             "clientDataJSON": "AAAA"
+        },
+        "type": "public-key"
+    }"#;
+
+    const SAMPLE_AUTH: &str = r#"{
+        "id": "AAAA",
+        "rawId": "AAAA",
+        "response": {
+            "authenticatorData": "AAAA",
+            "clientDataJSON": "AAAA",
+            "signature": "AAAA"
         },
         "type": "public-key"
     }"#;

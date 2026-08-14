@@ -1,0 +1,3 @@
+Serialized local skill installs (`POST /api/skills/install`) behind the same per-skill file lock already used by evolve and uninstall.
+Previously the handler checked destination existence, then copied the skill directory outside any lock, so two concurrent installs of the same skill could both pass the existence check and race to write into the same directory, and a failed loser's cleanup (`remove_dir_all`) could delete a winner's just-installed files.
+The existence check now happens after the lock is acquired, and cleanup on a failed copy only ever removes the failed copier's own attempt (#6977) (@houko)

@@ -1,0 +1,2 @@
+Approval audit queries used to swallow SQLite failures and return an empty list or a zero count, which looked identical to "no audit history exists" on the dashboard and in the duplicate-resolution helper used by channel bridges.
+`query_audit` and `audit_count` on `ApprovalManager` now return a typed result, the `/api/approvals/audit` route surfaces a scrubbed HTTP 500 on failure instead of a fabricated empty page, and the channel-bridge duplicate check logs a warning and falls back to its prior no-match behaviour rather than pretending the query succeeded (#7035) (@houko)

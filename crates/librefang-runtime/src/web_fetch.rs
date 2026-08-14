@@ -581,12 +581,14 @@ pub(crate) fn is_cloud_metadata_ip(ip: &IpAddr) -> bool {
     }
 }
 
-/// Unwrap IPv4-mapped IPv6 (`::ffff:X.X.X.X`) and the NAT64 well-known
+/// Unwrap IPv4-mapped/compatible IPv6 (`::ffff:X.X.X.X` / `::X.X.X.X`)
+/// and the NAT64 well-known
 /// prefix (`64:ff9b::/96`, RFC 6052) to the IPv4 address the connection
 /// will actually reach. All other addresses are returned unchanged.
 ///
-/// IPv4-mapped is translated by the OS itself; NAT64 is translated by a
-/// network gateway when one is deployed. Both forms must be unwrapped
+/// IPv4-mapped and deprecated compatible forms can be translated to IPv4 by
+/// the network stack; NAT64 is translated by a network gateway when one is
+/// deployed. All forms must be unwrapped
 /// before SSRF checks so an attacker can't smuggle loopback / RFC1918 /
 /// cloud-metadata IPs through them.
 ///
@@ -595,7 +597,13 @@ pub(crate) fn is_cloud_metadata_ip(ip: &IpAddr) -> bool {
 pub(crate) fn canonical_ip(ip: &IpAddr) -> IpAddr {
     match ip {
         IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
+            // `to_ipv4()` also represents the native IPv6 special addresses
+            // `::` and `::1` as 0.0.0.0 and 0.0.0.1. Preserve them so the
+            // IPv6 unspecified/loopback checks still see their true class.
+            if v6.is_unspecified() || v6.is_loopback() {
+                return IpAddr::V6(*v6);
+            }
+            if let Some(v4) = v6.to_ipv4() {
                 return IpAddr::V4(v4);
             }
             if let Some(v4) = extract_nat64_well_known(v6) {
@@ -1268,6 +1276,12 @@ mod tests {
     }
 
     #[test]
+    fn test_ssrf_blocks_ipv4_compatible_ipv6_loopback() {
+        assert!(check_ssrf("http://[::127.0.0.1]/", &[]).is_err());
+        assert!(check_ssrf("http://[::7f00:1]/", &[]).is_err());
+    }
+
+    #[test]
     fn test_ssrf_blocks_ipv4_mapped_ipv6_metadata() {
         // 169.254.169.254 expressed as an IPv4-mapped IPv6 address reaches
         // the AWS EC2 instance metadata service on real hosts.
@@ -1293,6 +1307,17 @@ mod tests {
         // Real IPv6 is left alone.
         let real_v6: IpAddr = "2001:db8::1".parse().unwrap();
         assert_eq!(canonical_ip(&real_v6), real_v6);
+    }
+
+    #[test]
+    fn test_canonical_ip_unwraps_compatible() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let compatible: IpAddr = "::127.0.0.1".parse().unwrap();
+        assert_eq!(canonical_ip(&compatible), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let loopback: IpAddr = "::1".parse().unwrap();
+        assert_eq!(canonical_ip(&loopback), loopback);
+        let unspecified: IpAddr = "::".parse().unwrap();
+        assert_eq!(canonical_ip(&unspecified), unspecified);
     }
 
     #[test]

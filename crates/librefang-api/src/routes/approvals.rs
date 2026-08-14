@@ -451,7 +451,7 @@ pub async fn approve_request(
                                 .into_response();
                         }
                         Err(e) => {
-                            return ApiErrorResponse::internal(e)
+                            return ApiErrorResponse::internal_scrub(e)
                                 .into_json_tuple()
                                 .into_response();
                         }
@@ -1083,16 +1083,23 @@ pub async fn audit_log(
 ) -> impl IntoResponse {
     const MAX_AUDIT_LIMIT: usize = 500;
     let limit = params.limit.min(MAX_AUDIT_LIMIT);
-    let entries = state.kernel.approvals().query_audit(
+    let entries = match state.kernel.approvals().query_audit(
         limit,
         params.offset,
         params.agent_id.as_deref(),
         params.tool_name.as_deref(),
-    );
-    let total = state
+    ) {
+        Ok(entries) => entries,
+        Err(error) => return ApiErrorResponse::internal_scrub(error).into_response(),
+    };
+    let total = match state
         .kernel
         .approvals()
-        .audit_count(params.agent_id.as_deref(), params.tool_name.as_deref());
+        .audit_count(params.agent_id.as_deref(), params.tool_name.as_deref())
+    {
+        Ok(total) => total,
+        Err(error) => return ApiErrorResponse::internal_scrub(error).into_response(),
+    };
 
     Json(serde_json::json!({
         "items": entries,
@@ -1100,6 +1107,7 @@ pub async fn audit_log(
         "offset": params.offset,
         "limit": limit,
     }))
+    .into_response()
 }
 
 /// GET /api/approvals/count — Lightweight pending count for notification badges.
@@ -1165,7 +1173,7 @@ pub async fn totp_setup(
                     match state.kernel.vault_redeem_recovery_code(code) {
                         Ok(matched) => matched,
                         Err(e) => {
-                            return ApiErrorResponse::internal(e).into_json_tuple();
+                            return ApiErrorResponse::internal_scrub(e).into_json_tuple();
                         }
                     }
                 } else {
@@ -1253,7 +1261,7 @@ pub async fn totp_setup(
     {
         Ok(v) => v,
         Err(e) => {
-            return ApiErrorResponse::internal(e).into_json_tuple();
+            return ApiErrorResponse::internal_scrub(e).into_json_tuple();
         }
     };
     let qr_data_uri = format!("data:image/png;base64,{qr_base64}");
@@ -1264,16 +1272,16 @@ pub async fn totp_setup(
 
     // Store secret and recovery codes in vault (not yet active — totp_confirmed = false)
     if let Err(e) = state.kernel.vault_set("totp_secret", &secret_base32) {
-        return ApiErrorResponse::internal(e).into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
     if let Err(e) = state.kernel.vault_set("totp_confirmed", "false") {
-        return ApiErrorResponse::internal(e).into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
     if let Err(e) = state
         .kernel
         .vault_set("totp_recovery_codes", &recovery_json)
     {
-        return ApiErrorResponse::internal(e).into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     (
@@ -1332,7 +1340,7 @@ pub async fn totp_confirm(
                 Err(error) => return ApiErrorResponse::internal_scrub(error).into_json_tuple(),
             }
             if let Err(e) = state.kernel.vault_set("totp_confirmed", "true") {
-                return ApiErrorResponse::internal(e).into_json_tuple();
+                return ApiErrorResponse::internal_scrub(e).into_json_tuple();
             }
             (
                 StatusCode::OK,
@@ -1365,7 +1373,7 @@ pub async fn totp_confirm(
             )
             .into_json_tuple()
         }
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }
 
@@ -1440,7 +1448,7 @@ pub async fn totp_revoke(
         match state.kernel.vault_redeem_recovery_code(&body.code) {
             Ok(matched) => matched,
             Err(e) => {
-                return ApiErrorResponse::internal(e).into_json_tuple();
+                return ApiErrorResponse::internal_scrub(e).into_json_tuple();
             }
         }
     } else {
@@ -1529,10 +1537,13 @@ pub async fn totp_revoke(
         failures.push(format!("totp_confirmed: {e}"));
     }
     if !failures.is_empty() {
-        return ApiErrorResponse::internal(format!(
-            "TOTP revocation partially failed; the secret and recovery codes have been wiped first so 2FA is no longer verifiable, but vault state is inconsistent. Retry. Details: {}",
-            failures.join("; ")
-        ))
+        tracing::error!(
+            errors = %failures.join("; "),
+            "TOTP revocation left inconsistent vault state; retry required"
+        );
+        return ApiErrorResponse::internal(
+            "TOTP revocation partially failed; vault state may be inconsistent. Retry.",
+        )
         .into_json_tuple();
     }
 

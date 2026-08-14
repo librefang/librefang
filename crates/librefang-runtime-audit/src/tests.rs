@@ -1,6 +1,44 @@
 use super::*;
 
 #[test]
+fn test_audit_log_recovers_poisoned_chain_locks_with_integrity_intact() {
+    let log = AuditLog::new();
+    log.record("agent-1", AuditAction::ToolInvoke, "before poison", "ok");
+
+    let entries_poison = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let _guard = log.entries.lock().unwrap();
+                panic!("poison audit entries lock");
+            })
+            .join()
+    });
+    assert!(entries_poison.is_err());
+
+    let tip_poison = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let _guard = log.tip.lock().unwrap();
+                panic!("poison audit tip lock");
+            })
+            .join()
+    });
+    assert!(tip_poison.is_err());
+    assert!(log.entries.is_poisoned());
+    assert!(log.tip.is_poisoned());
+
+    log.record("agent-1", AuditAction::ShellExec, "after poison", "ok");
+    assert_eq!(log.len(), 2);
+    assert!(log.verify_integrity().is_ok());
+    assert_eq!(log.tip_hash(), log.recent(1)[0].hash);
+
+    // The first post-panic access must clear the poison flag via `clear_poison()`, not just unwrap around it with `into_inner()`.
+    // Otherwise every later call through `lock_audit_recover` for that same lock re-enters the poisoned branch and re-emits the `warn!` for the rest of the process instead of recovering once.
+    assert!(!log.entries.is_poisoned());
+    assert!(!log.tip.is_poisoned());
+}
+
+#[test]
 fn test_audit_chain_integrity() {
     let log = AuditLog::new();
     log.record(
@@ -183,12 +221,77 @@ fn malformed_persisted_row_fails_integrity_verification() {
         .unwrap();
     }
 
-    let log = AuditLog::with_db(pool);
+    let log = AuditLog::with_db(pool.clone());
 
     assert_eq!(log.len(), 0, "malformed rows must not enter the chain");
+    assert!(
+        log.db.is_none(),
+        "an incomplete reload must disable durable appends"
+    );
     let error = log.verify_integrity().unwrap_err();
     assert!(error.contains("only partially loaded"), "{error}");
     assert!(error.contains("ordered index 0"), "{error}");
+
+    log.record("agent-2", AuditAction::ShellExec, "after reload", "ok");
+    assert_eq!(log.len(), 1, "in-memory auditing should remain available");
+    let persisted: i64 = pool
+        .get()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM audit_entries", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(persisted, 1, "the damaged database must not be extended");
+}
+
+#[test]
+fn unknown_persisted_action_is_not_coerced_or_extended() {
+    let pool = Pool::builder()
+        .max_size(1)
+        .build(SqliteConnectionManager::memory())
+        .unwrap();
+    pool.get()
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            );
+            INSERT INTO audit_entries VALUES (
+                0, '2026-01-01T00:00:00Z', 'agent-1', 'FutureAction', 'detail', 'ok',
+                NULL, NULL,
+                '0000000000000000000000000000000000000000000000000000000000000000',
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+            );",
+        )
+        .unwrap();
+
+    let anchor_dir = tempfile::tempdir().unwrap();
+    let anchor_path = anchor_dir.path().join("audit.anchor");
+    let log = AuditLog::with_db_anchored(pool.clone(), anchor_path.clone());
+    assert_eq!(log.len(), 0, "unknown actions must not enter the chain");
+    assert!(log.db.is_none());
+    assert!(
+        !anchor_path.exists(),
+        "a partial reload must not seed an anchor from an incomplete chain"
+    );
+    let error = log.verify_integrity().unwrap_err();
+    assert!(error.contains("only partially loaded"), "{error}");
+    assert!(error.contains("unknown audit action"), "{error}");
+
+    log.record("agent-2", AuditAction::ToolInvoke, "after reload", "ok");
+    let persisted: i64 = pool
+        .get()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM audit_entries", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(persisted, 1, "the unknown-action row must remain untouched");
 }
 
 #[test]

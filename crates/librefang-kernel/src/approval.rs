@@ -7,6 +7,7 @@ use librefang_types::approval::{
     ApprovalResponse, RiskLevel, SecondFactor, TimeoutFallback,
 };
 use librefang_types::capability::glob_matches;
+use librefang_types::error::{LibreFangError, LibreFangResult};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use sha2::{Digest, Sha256};
@@ -1306,13 +1307,11 @@ impl ApprovalManager {
         offset: usize,
         agent_id: Option<&str>,
         tool_name: Option<&str>,
-    ) -> Vec<ApprovalAuditEntry> {
+    ) -> LibreFangResult<Vec<ApprovalAuditEntry>> {
         let Some(db) = &self.audit_db else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        let Ok(conn) = db.get() else {
-            return Vec::new();
-        };
+        let conn = db.get().map_err(LibreFangError::memory)?;
 
         let mut sql = String::from(
             "SELECT id, request_id, agent_id, tool_name, description, action_summary, risk_level, decision, decided_by, decided_at, requested_at, feedback, COALESCE(second_factor_used, 0) FROM approval_audit WHERE 1=1",
@@ -1334,9 +1333,7 @@ impl ApprovalManager {
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
 
-        let Ok(mut stmt) = conn.prepare(&sql) else {
-            return Vec::new();
-        };
+        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
         let rows = stmt.query_map(param_refs.as_slice(), |row| {
             Ok(ApprovalAuditEntry {
                 id: row.get(0)?,
@@ -1354,20 +1351,21 @@ impl ApprovalManager {
                 second_factor_used: row.get::<_, bool>(12).unwrap_or(false),
             })
         });
-        match rows {
-            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-            Err(_) => Vec::new(),
-        }
+        let rows = rows.map_err(LibreFangError::memory)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(LibreFangError::memory)
     }
 
     /// Count total audit entries (with optional filters).
-    pub fn audit_count(&self, agent_id: Option<&str>, tool_name: Option<&str>) -> usize {
+    pub fn audit_count(
+        &self,
+        agent_id: Option<&str>,
+        tool_name: Option<&str>,
+    ) -> LibreFangResult<usize> {
         let Some(db) = &self.audit_db else {
-            return 0;
+            return Ok(0);
         };
-        let Ok(conn) = db.get() else {
-            return 0;
-        };
+        let conn = db.get().map_err(LibreFangError::memory)?;
 
         let mut sql = String::from("SELECT COUNT(*) FROM approval_audit WHERE 1=1");
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -1384,8 +1382,12 @@ impl ApprovalManager {
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
 
-        conn.query_row(&sql, param_refs.as_slice(), |row| row.get::<_, i64>(0))
-            .unwrap_or(0) as usize
+        let count = conn
+            .query_row(&sql, param_refs.as_slice(), |row| row.get::<_, i64>(0))
+            .map_err(LibreFangError::memory)?;
+        usize::try_from(count).map_err(|_| {
+            LibreFangError::memory_msg(format!("invalid approval audit count: {count}"))
+        })
     }
 
     /// Hard-delete `approval_audit` rows whose `decided_at` is older than
@@ -3845,6 +3847,43 @@ mod tests {
         ApprovalManager::new_with_db(ApprovalPolicy::default(), pool)
     }
 
+    #[test]
+    fn approval_audit_queries_surface_storage_errors() {
+        let manager = make_manager_with_db();
+        manager
+            .audit_db
+            .as_ref()
+            .unwrap()
+            .get()
+            .unwrap()
+            .execute("DROP TABLE approval_audit", [])
+            .unwrap();
+
+        assert!(manager.query_audit(50, 0, None, None).is_err());
+        assert!(manager.audit_count(None, None).is_err());
+    }
+
+    #[test]
+    fn approval_audit_query_does_not_silently_drop_corrupt_rows() {
+        let manager = make_manager_with_db();
+        manager
+            .audit_db
+            .as_ref()
+            .unwrap()
+            .get()
+            .unwrap()
+            .execute(
+                "INSERT INTO approval_audit \
+                 (id, request_id, agent_id, tool_name, decision, decided_at, requested_at) \
+                 VALUES ('audit-corrupt', 'request-corrupt', X'00', 'shell_exec', \
+                         'approved', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+
+        assert!(manager.query_audit(50, 0, None, None).is_err());
+    }
+
     // -----------------------------------------------------------------------
     // #6492 Bug 1 — `auto_approve` shorthand is applied when a policy is installed (not just in a unit test that manually calls apply_shorthands)
     // -----------------------------------------------------------------------
@@ -4533,7 +4572,7 @@ mod tests {
         let request_id = mgr.submit_request(req, deferred).unwrap();
 
         // Audit row exists with `pending` decision before any resolve.
-        let audit = mgr.query_audit(50, 0, Some("agent-3611"), None);
+        let audit = mgr.query_audit(50, 0, Some("agent-3611"), None).unwrap();
         assert!(
             audit
                 .iter()

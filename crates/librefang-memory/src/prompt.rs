@@ -14,6 +14,13 @@ use rusqlite::{Connection, OptionalExtension, Row};
 use std::str::FromStr;
 use uuid::Uuid;
 
+fn conversion_error<E>(column: usize, error: E) -> rusqlite::Error
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Text, Box::new(error))
+}
+
 fn row_to_prompt_version(row: &Row) -> rusqlite::Result<PromptVersion> {
     let id: String = row.get(0)?;
     let agent_id: String = row.get(1)?;
@@ -23,16 +30,16 @@ fn row_to_prompt_version(row: &Row) -> rusqlite::Result<PromptVersion> {
     let is_active: i32 = row.get(9)?;
 
     Ok(PromptVersion {
-        id: Uuid::parse_str(&id).unwrap_or_default(),
-        agent_id: AgentId::from_str(&agent_id).unwrap_or_default(),
+        id: Uuid::parse_str(&id).map_err(|error| conversion_error(0, error))?,
+        agent_id: AgentId::from_str(&agent_id).map_err(|error| conversion_error(1, error))?,
         version: row.get::<_, i64>(2)? as u32,
         content_hash: row.get(3)?,
         system_prompt: row.get(4)?,
-        tools: serde_json::from_str(&tools).unwrap_or_default(),
-        variables: serde_json::from_str(&variables).unwrap_or_default(),
+        tools: serde_json::from_str(&tools).map_err(|error| conversion_error(5, error))?,
+        variables: serde_json::from_str(&variables).map_err(|error| conversion_error(6, error))?,
         created_at: DateTime::parse_from_rfc3339(&created_at)
             .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(|_| Utc::now()),
+            .map_err(|error| conversion_error(7, error))?,
         created_by: row.get(8)?,
         is_active: is_active != 0,
         description: row.get(10)?,
@@ -50,25 +57,31 @@ fn row_to_prompt_experiment(row: &Row) -> rusqlite::Result<PromptExperiment> {
     let created_at: String = row.get(8)?;
 
     Ok(PromptExperiment {
-        id: Uuid::parse_str(&id).unwrap_or_default(),
+        id: Uuid::parse_str(&id).map_err(|error| conversion_error(0, error))?,
         name: row.get(1)?,
-        agent_id: AgentId::from_str(&agent_id).unwrap_or_default(),
-        status: serde_json::from_str(&status).unwrap_or(ExperimentStatus::Draft),
-        traffic_split: serde_json::from_str(&traffic_split).unwrap_or_default(),
-        success_criteria: serde_json::from_str(&success_criteria).unwrap_or_default(),
-        started_at: started_at.and_then(|s| {
-            DateTime::parse_from_rfc3339(&s)
-                .map(|dt| dt.with_timezone(&Utc))
-                .ok()
-        }),
-        ended_at: ended_at.and_then(|s| {
-            DateTime::parse_from_rfc3339(&s)
-                .map(|dt| dt.with_timezone(&Utc))
-                .ok()
-        }),
+        agent_id: AgentId::from_str(&agent_id).map_err(|error| conversion_error(2, error))?,
+        status: serde_json::from_str(&status).map_err(|error| conversion_error(3, error))?,
+        traffic_split: serde_json::from_str(&traffic_split)
+            .map_err(|error| conversion_error(4, error))?,
+        success_criteria: serde_json::from_str(&success_criteria)
+            .map_err(|error| conversion_error(5, error))?,
+        started_at: started_at
+            .map(|value| {
+                DateTime::parse_from_rfc3339(&value)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .map_err(|error| conversion_error(6, error))
+            })
+            .transpose()?,
+        ended_at: ended_at
+            .map(|value| {
+                DateTime::parse_from_rfc3339(&value)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .map_err(|error| conversion_error(7, error))
+            })
+            .transpose()?,
         created_at: DateTime::parse_from_rfc3339(&created_at)
             .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(|_| Utc::now()),
+            .map_err(|error| conversion_error(8, error))?,
         variants: vec![],
     })
 }
@@ -85,9 +98,10 @@ fn load_variants_for_experiment(
         let id: String = row.get(0)?;
         let prompt_version_id: String = row.get(2)?;
         Ok(ExperimentVariant {
-            id: Uuid::parse_str(&id).unwrap_or_default(),
+            id: Uuid::parse_str(&id).map_err(|error| conversion_error(0, error))?,
             name: row.get(1)?,
-            prompt_version_id: Uuid::parse_str(&prompt_version_id).unwrap_or_default(),
+            prompt_version_id: Uuid::parse_str(&prompt_version_id)
+                .map_err(|error| conversion_error(2, error))?,
             description: row.get(3)?,
         })
     })?;
@@ -174,11 +188,8 @@ impl PromptStore {
             .query_map([agent_id.to_string()], row_to_prompt_version)
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
-        let mut versions = Vec::new();
-        for row in rows.flatten() {
-            versions.push(row);
-        }
-        Ok(versions)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))
     }
 
     pub fn get_version(&self, id: Uuid) -> LibreFangResult<Option<PromptVersion>> {
@@ -411,9 +422,10 @@ impl PromptStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let mut experiments = Vec::new();
-        for mut exp in rows.flatten() {
-            exp.variants =
-                load_variants_for_experiment(&conn, &exp.id.to_string()).unwrap_or_default();
+        for row in rows {
+            let mut exp = row.map_err(|e| LibreFangError::Internal(e.to_string()))?;
+            exp.variants = load_variants_for_experiment(&conn, &exp.id.to_string())
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
             experiments.push(exp);
         }
         Ok(experiments)
@@ -431,11 +443,13 @@ impl PromptStore {
             .optional()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
-        Ok(result.map(|mut exp| {
-            exp.variants =
-                load_variants_for_experiment(&conn, &exp.id.to_string()).unwrap_or_default();
-            exp
-        }))
+        result
+            .map(|mut exp| {
+                exp.variants = load_variants_for_experiment(&conn, &exp.id.to_string())?;
+                Ok(exp)
+            })
+            .transpose()
+            .map_err(|e: rusqlite::Error| LibreFangError::Internal(e.to_string()))
     }
 
     pub fn update_experiment_status(
@@ -491,11 +505,13 @@ impl PromptStore {
             .optional()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
-        Ok(result.map(|mut exp| {
-            exp.variants =
-                load_variants_for_experiment(&conn, &exp.id.to_string()).unwrap_or_default();
-            exp
-        }))
+        result
+            .map(|mut exp| {
+                exp.variants = load_variants_for_experiment(&conn, &exp.id.to_string())?;
+                Ok(exp)
+            })
+            .transpose()
+            .map_err(|e: rusqlite::Error| LibreFangError::Internal(e.to_string()))
     }
 
     pub fn record_request(
@@ -572,7 +588,8 @@ impl PromptStore {
                 };
 
                 Ok(ExperimentVariantMetrics {
-                    variant_id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_default(),
+                    variant_id: Uuid::parse_str(&row.get::<_, String>(0)?)
+                        .map_err(|error| conversion_error(0, error))?,
                     variant_name: row.get(1)?,
                     total_requests: total_requests as u64,
                     successful_requests: successful_requests as u64,
@@ -629,7 +646,8 @@ impl PromptStore {
                 };
 
                 Ok(ExperimentVariantMetrics {
-                    variant_id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_default(),
+                    variant_id: Uuid::parse_str(&row.get::<_, String>(0)?)
+                        .map_err(|error| conversion_error(0, error))?,
                     variant_name: row.get(1)?,
                     total_requests: total_requests as u64,
                     successful_requests: successful_requests as u64,
@@ -733,6 +751,24 @@ mod tests {
         assert_eq!(versions.len(), 1);
         assert_eq!(versions[0].version, 1);
         assert_eq!(versions[0].system_prompt, "You are a helpful assistant.");
+    }
+
+    #[test]
+    fn list_versions_propagates_malformed_row() {
+        let store = create_test_store();
+        let agent_id = AgentId::new();
+        store
+            .pool
+            .get()
+            .unwrap()
+            .execute(
+                "INSERT INTO prompt_versions (id, agent_id, version, content_hash, system_prompt, tools, variables, created_at, created_by, is_active, description)
+                 VALUES ('not-a-uuid', ?1, 1, 'hash', 'prompt', '[]', '[]', ?2, 'test', 0, NULL)",
+                rusqlite::params![agent_id.to_string(), Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+
+        assert!(store.list_versions(agent_id).is_err());
     }
 
     #[test]
@@ -856,6 +892,37 @@ mod tests {
         let experiments = store.list_experiments(agent_id).unwrap();
         assert_eq!(experiments.len(), 1);
         assert_eq!(experiments[0].name, "Test Experiment");
+    }
+
+    #[test]
+    fn list_experiments_propagates_malformed_variant() {
+        let store = create_test_store();
+        let agent_id = AgentId::new();
+        let experiment = PromptExperiment {
+            id: Uuid::new_v4(),
+            name: "Malformed Variant".to_string(),
+            agent_id,
+            status: ExperimentStatus::Draft,
+            traffic_split: vec![100],
+            success_criteria: SuccessCriteria::default(),
+            started_at: None,
+            ended_at: None,
+            created_at: Utc::now(),
+            variants: vec![],
+        };
+        store.create_experiment(experiment.clone()).unwrap();
+        store
+            .pool
+            .get()
+            .unwrap()
+            .execute(
+                "INSERT INTO experiment_variants (id, experiment_id, name, prompt_version_id, description)
+                 VALUES ('not-a-uuid', ?1, 'broken', ?2, NULL)",
+                rusqlite::params![experiment.id.to_string(), Uuid::new_v4().to_string()],
+            )
+            .unwrap();
+
+        assert!(store.list_experiments(agent_id).is_err());
     }
 
     #[test]

@@ -689,14 +689,12 @@ fn is_url_safe_for_ssrf(raw_url: &str, allowed_hosts: &[String]) -> Result<(), S
     Ok(())
 }
 
-/// Unwrap IPv4-mapped IPv6 (`::ffff:X.X.X.X`) to its IPv4 form. All other
+/// Unwrap IPv4-mapped or IPv4-compatible IPv6 to its IPv4 form. All other
 /// addresses are returned unchanged.
 fn canonical_ip(ip: &IpAddr) -> IpAddr {
     match ip {
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => IpAddr::V4(v4),
-            None => IpAddr::V6(*v6),
-        },
+        IpAddr::V6(v6) if v6.is_unspecified() || v6.is_loopback() => IpAddr::V6(*v6),
+        IpAddr::V6(v6) => v6.to_ipv4().map_or(IpAddr::V6(*v6), IpAddr::V4),
         IpAddr::V4(_) => *ip,
     }
 }
@@ -2353,6 +2351,16 @@ mod tests {
         // Real IPv6 is left alone.
         let real_v6: IpAddr = "2001:db8::1".parse().unwrap();
         assert_eq!(canonical_ip(&real_v6), real_v6);
+    }
+
+    #[test]
+    fn canonical_ip_unwraps_ipv4_compatible_v6() {
+        let compatible: IpAddr = "::127.0.0.1".parse().unwrap();
+        assert_eq!(canonical_ip(&compatible), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let loopback: IpAddr = "::1".parse().unwrap();
+        assert_eq!(canonical_ip(&loopback), loopback);
+        let unspecified: IpAddr = "::".parse().unwrap();
+        assert_eq!(canonical_ip(&unspecified), unspecified);
     }
 
     #[test]

@@ -1,0 +1,5 @@
+`max_content_chars` now bounds the link table's opening line along with its entries, so the extraction stays inside the ceiling an operator set rather than overshooting it by that line's length.
+The budget summed the entries and stopped there, but the rendered block also opens with a line naming the marker form and the base origin, and that line reaches the model with the entries — 50,093 characters against a 50,000 cap on the Rust Wikipedia article, the 93 being that line for a 24-character origin.
+The test could not have caught it: it re-derived the table's cost in its own port and asserted against that same derivation, so the budget and the assertion agreed by construction whatever the renderer did.
+Every ported test in this module now asserts that the template still contains the rule it models, since a port is only evidence about the script while the two agree — and nothing else would have noticed the script and its port drifting apart.
+It now asserts against what `render_page_body` actually produces, which is the string that reaches the model (#6624, #6973) (@nevgenov)
