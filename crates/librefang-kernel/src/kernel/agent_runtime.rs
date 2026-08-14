@@ -10,7 +10,7 @@
 //! `LibreFangKernel`'s private fields and inherent methods without any
 //! visibility surgery.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use librefang_types::agent::{AgentId, RunningSessionSnapshot, RunningSessionState, SessionId};
 use librefang_types::error::LibreFangError;
@@ -21,6 +21,43 @@ use crate::metering::MeteringEngine;
 
 use super::cron_script::atomic_write_toml;
 use super::LibreFangKernel;
+
+type AgentWatcherHandles = Vec<tokio::task::JoinHandle<()>>;
+
+fn lock_agent_watcher_slot(
+    slot: &Mutex<AgentWatcherHandles>,
+) -> MutexGuard<'_, AgentWatcherHandles> {
+    slot.lock().unwrap_or_else(|poisoned| {
+        warn!("Agent watcher slot mutex poisoned; recovering tracked tasks");
+        slot.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
+fn abort_agent_watcher_slot(slot: &Mutex<AgentWatcherHandles>) {
+    for handle in lock_agent_watcher_slot(slot).drain(..) {
+        handle.abort();
+    }
+}
+
+fn register_agent_watcher_slot(
+    slot: &Mutex<AgentWatcherHandles>,
+    handle: tokio::task::JoinHandle<()>,
+    agent_still_exists: impl FnOnce() -> bool,
+) {
+    let mut guard = lock_agent_watcher_slot(slot);
+    // Hold the slot lock while rechecking liveness. If kill_agent removed the
+    // map entry before registration reached this lock, this slot is detached
+    // and no later abort pass can find it. Conversely, if the agent disappears
+    // just after this check, kill_agent waits for this guard and then drains
+    // the newly inserted handle from the same slot.
+    if !agent_still_exists() {
+        handle.abort();
+        return;
+    }
+    guard.retain(|h| !h.is_finished());
+    guard.push(handle);
+}
 
 impl LibreFangKernel {
     /// Get session token usage and estimated cost for an agent.
@@ -290,7 +327,7 @@ impl LibreFangKernel {
         agent_id: AgentId,
         force: bool,
     ) -> KernelResult<String> {
-        self.compact_agent_session_with_id(agent_id, None, force)
+        self.compact_agent_session_in_lock_scope(agent_id, None, force, true)
             .await
     }
 
@@ -310,10 +347,80 @@ impl LibreFangKernel {
         session_id_override: Option<SessionId>,
         force: bool,
     ) -> KernelResult<String> {
+        // Public callers do not carry the dispatch lock-domain bit.
+        // Serialize with the agent-scoped writers used by channel dispatch first, then let the scoped helper also cover an explicit-session writer.
+        let _agent_guard = if librefang_runtime::held_agent_locks::is_held(agent_id) {
+            None
+        } else {
+            let lock = self
+                .agents
+                .agent_msg_locks
+                .entry(agent_id)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            Some(lock.lock_owned().await)
+        };
+        self.compact_agent_session_in_lock_scope(agent_id, session_id_override, force, false)
+            .await
+    }
+
+    /// Compact a session using the same lock domain selected by the caller's message turn.
+    /// An explicit session id does not by itself identify the lock domain: agent-scoped turns also pass their resolved session id so compaction operates on the exact in-turn session.
+    pub(crate) async fn compact_agent_session_in_lock_scope(
+        &self,
+        agent_id: AgentId,
+        session_id_override: Option<SessionId>,
+        force: bool,
+        agent_scoped: bool,
+    ) -> KernelResult<String> {
         let cfg = self.config.load_full();
         use librefang_runtime::compactor::{
             compact_session, estimate_token_count, needs_compaction, needs_compaction_by_tokens,
             CompactionConfig,
+        };
+
+        // Hold the same serialization lock that a message turn writing this session uses.
+        // Compaction awaits an LLM response between loading the session and replacing its messages; without this lock, a concurrent turn can save new messages during that window and the final compaction UPSERT silently overwrites them with its stale snapshot.
+        //
+        // Automatic compaction runs inside an already-locked agent turn.
+        // The task-local held-lock registry lets that path avoid re-acquiring the same non-reentrant mutex while external API/channel callers wait for the active writer before taking their snapshot.
+        let _compaction_guard: Option<tokio::sync::OwnedMutexGuard<()>> = if agent_scoped {
+            if librefang_runtime::held_agent_locks::is_held(agent_id) {
+                None
+            } else {
+                let lock = self
+                    .agents
+                    .agent_msg_locks
+                    .entry(agent_id)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone();
+                Some(lock.lock_owned().await)
+            }
+        } else if let Some(session_id) = session_id_override {
+            if librefang_runtime::held_agent_locks::is_session_held(session_id) {
+                None
+            } else {
+                let lock = self
+                    .agents
+                    .session_msg_locks
+                    .entry(session_id)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone();
+                Some(lock.lock_owned().await)
+            }
+        } else {
+            // The public default-session entry point always sets `agent_scoped = true`; keep this defensive fallback aligned.
+            if librefang_runtime::held_agent_locks::is_held(agent_id) {
+                None
+            } else {
+                let lock = self
+                    .agents
+                    .agent_msg_locks
+                    .entry(agent_id)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone();
+                Some(lock.lock_owned().await)
+            }
         };
 
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
@@ -576,25 +683,15 @@ impl LibreFangKernel {
             .entry(agent_id)
             .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
             .clone();
-        // The trailing `;` matters: without it the if-let is the function's
-        // tail expression, which keeps the LockResult's temporaries borrowing
-        // `slot` until function exit — and `slot` itself drops at the same
-        // point, tripping E0597. The semicolon ends the statement so the
-        // temporaries (and the guard) drop before `slot` does.
-        if let Ok(mut guard) = slot.lock() {
-            guard.retain(|h| !h.is_finished());
-            guard.push(handle);
-        };
+        register_agent_watcher_slot(&slot, handle, || {
+            self.agents.registry.get(agent_id).is_some()
+        });
     }
 
     /// Abort and drop every tracked watcher task for `agent_id`.
     fn abort_agent_watchers(&self, agent_id: AgentId) {
         if let Some((_, slot)) = self.agents.agent_watchers.remove(&agent_id) {
-            if let Ok(mut guard) = slot.lock() {
-                for h in guard.drain(..) {
-                    h.abort();
-                }
-            }
+            abort_agent_watcher_slot(&slot);
         }
     }
 
@@ -764,4 +861,79 @@ impl LibreFangKernel {
     // Hand lifecycle (`activate_hand`, `deactivate_hand`, `pause_hand`,
     // `resume_hand`, `update_hand_agent_runtime_override`, …) lives in
     // `kernel::hands_lifecycle` since #4713 phase 3c.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        abort_agent_watcher_slot, lock_agent_watcher_slot, register_agent_watcher_slot,
+        AgentWatcherHandles,
+    };
+    use std::sync::Mutex;
+
+    struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    fn tracked_task() -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _signal = DropSignal(Some(sender));
+            std::future::pending::<()>().await;
+        });
+        (handle, receiver)
+    }
+
+    #[tokio::test]
+    async fn agent_watcher_slot_recovers_tasks_after_poison_and_aborts_them() {
+        let slot = Mutex::new(AgentWatcherHandles::new());
+        let (first, first_dropped) = tracked_task();
+        let (second, second_dropped) = tracked_task();
+        tokio::task::yield_now().await;
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut guard = slot.lock().unwrap();
+            guard.push(first);
+            panic!("poison agent watcher slot");
+        }));
+        assert!(slot.is_poisoned());
+
+        lock_agent_watcher_slot(&slot).push(second);
+        assert!(!slot.is_poisoned());
+        abort_agent_watcher_slot(&slot);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), first_dropped)
+            .await
+            .expect("first recovered watcher was not aborted")
+            .expect("first watcher dropped without signaling");
+        tokio::time::timeout(std::time::Duration::from_secs(1), second_dropped)
+            .await
+            .expect("later watcher was not aborted")
+            .expect("later watcher dropped without signaling");
+        assert!(slot.lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn agent_watcher_registration_aborts_after_agent_disappears() {
+        let slot = Mutex::new(AgentWatcherHandles::new());
+        let (handle, dropped) = tracked_task();
+        tokio::task::yield_now().await;
+
+        register_agent_watcher_slot(&slot, handle, || false);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped)
+            .await
+            .expect("watcher registered after agent removal was not aborted")
+            .expect("watcher dropped without signaling");
+        assert!(slot.lock().unwrap().is_empty());
+    }
 }

@@ -58,7 +58,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::types::ApiErrorResponse;
 
@@ -612,6 +612,34 @@ fn schema_error_cache() -> &'static RwLock<HashMap<&'static str, String>> {
     SIDECAR_SCHEMA_ERROR_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
+fn read_cache_recover<'a, T>(
+    cache: &'a RwLock<T>,
+    cache_name: &'static str,
+) -> RwLockReadGuard<'a, T> {
+    cache.read().unwrap_or_else(|poisoned| {
+        tracing::warn!(
+            cache = cache_name,
+            "Channel schema cache lock poisoned; recovering state"
+        );
+        cache.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
+fn write_cache_recover<'a, T>(
+    cache: &'a RwLock<T>,
+    cache_name: &'static str,
+) -> RwLockWriteGuard<'a, T> {
+    cache.write().unwrap_or_else(|poisoned| {
+        tracing::warn!(
+            cache = cache_name,
+            "Channel schema cache lock poisoned; recovering state"
+        );
+        cache.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
 /// Spawn `<command> <args> --describe` for every catalog entry and cache
 /// the resulting schemas. Called once at daemon boot from
 /// `server::build_router`. `describe_sidecar` injects the binary-embedded
@@ -634,7 +662,7 @@ pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
                     fields = schema.fields.len(),
                     "sidecar schema cached"
                 );
-                schema_cache().write().unwrap().insert(entry.name, schema);
+                write_cache_recover(schema_cache(), "schema").insert(entry.name, schema);
             }
             Err(e) => {
                 if let Some(static_fields) = entry.static_fields {
@@ -663,7 +691,7 @@ pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
                         fields = fallback.fields.len(),
                         "sidecar --describe failed; using compile-time fallback schema"
                     );
-                    schema_cache().write().unwrap().insert(entry.name, fallback);
+                    write_cache_recover(schema_cache(), "schema").insert(entry.name, fallback);
                 } else {
                     tracing::warn!(
                         adapter = entry.name,
@@ -671,7 +699,7 @@ pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
                         "sidecar --describe failed; discovery card will have no form fields"
                     );
                     // Stash the failure reason so the discovery row can tell the operator *why* the form is empty (typically: Python sidecar SDK not installed).
-                    schema_error_cache().write().unwrap().insert(entry.name, e);
+                    write_cache_recover(schema_error_cache(), "schema error").insert(entry.name, e);
                 }
             }
         }
@@ -686,7 +714,7 @@ pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
 /// [`populate_sidecar_schema_cache`] at boot.
 #[doc(hidden)]
 pub fn __test_seed_sidecar_schema_cache(entries: &[(&'static str, SidecarSchema)]) {
-    let mut guard = schema_cache().write().unwrap();
+    let mut guard = write_cache_recover(schema_cache(), "schema");
     guard.clear();
     for (k, v) in entries {
         guard.insert(*k, v.clone());
@@ -698,7 +726,7 @@ pub fn __test_seed_sidecar_schema_cache(entries: &[(&'static str, SidecarSchema)
 /// `#[doc(hidden)]` for the same reason.
 #[doc(hidden)]
 pub fn __test_seed_sidecar_schema_error_cache(entries: &[(&'static str, String)]) {
-    let mut guard = schema_error_cache().write().unwrap();
+    let mut guard = write_cache_recover(schema_error_cache(), "schema error");
     guard.clear();
     for (k, v) in entries {
         guard.insert(*k, v.clone());
@@ -727,8 +755,8 @@ fn sidecar_discovery_rows(
         covered.insert(sc.name.as_str());
     }
 
-    let cache_guard = schema_cache().read().unwrap();
-    let err_guard = schema_error_cache().read().unwrap();
+    let cache_guard = read_cache_recover(schema_cache(), "schema");
+    let err_guard = read_cache_recover(schema_error_cache(), "schema error");
     let mut rows = Vec::new();
     for entry in SIDECAR_CATALOG {
         if covered.contains(entry.name) {
@@ -819,6 +847,7 @@ pub struct ConfigureSidecarBody {
 /// of include paths that contain at least one `[[sidecar_channels]]`
 /// header. A missing root config has no includes; every other read or parse
 /// failure is returned so the write-side safety check fails closed.
+#[cfg(test)]
 async fn included_files_with_sidecars(
     config_path: &std::path::Path,
 ) -> Result<Vec<std::path::PathBuf>, String> {
@@ -870,6 +899,143 @@ async fn included_files_with_sidecars(
     Ok(hits)
 }
 
+/// Blocking counterpart used only inside the configure handler's `spawn_blocking` transaction.
+/// Keeping the include reads in that transaction prevents the include list from changing between validation and the configuration write.
+fn included_files_with_sidecars_blocking(
+    config_path: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(format!(
+                "failed to read root config {}: {error}",
+                config_path.display()
+            ));
+        }
+    };
+    let document: toml_edit::DocumentMut = content.parse().map_err(|error| {
+        format!(
+            "failed to parse root config {}: {error}",
+            config_path.display()
+        )
+    })?;
+    let Some(include_array) = document.get("include").and_then(|item| item.as_array()) else {
+        return Ok(Vec::new());
+    };
+    let parent = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut hits = Vec::new();
+    for raw in include_array.iter().filter_map(|entry| entry.as_str()) {
+        let raw_path = std::path::Path::new(raw);
+        let path = if raw_path.is_absolute() {
+            raw_path.to_path_buf()
+        } else {
+            parent.join(raw_path)
+        };
+        let body = std::fs::read_to_string(&path).map_err(|error| {
+            format!("failed to read included config {}: {error}", path.display())
+        })?;
+        if body.contains("[[sidecar_channels]]") {
+            hits.push(path);
+        }
+    }
+    Ok(hits)
+}
+
+#[derive(Debug)]
+enum ConfigureSidecarWriteError {
+    IncludedSidecars(Vec<std::path::PathBuf>),
+    Write(String),
+}
+
+fn write_sidecar_configuration(
+    config_path: &std::path::Path,
+    secrets_path: &std::path::Path,
+    entry: &SidecarCatalogEntry,
+    schema: &SidecarSchema,
+    values: &HashMap<String, String>,
+) -> Result<Vec<String>, ConfigureSidecarWriteError> {
+    let shadowing = included_files_with_sidecars_blocking(config_path)
+        .map_err(ConfigureSidecarWriteError::Write)?;
+    if !shadowing.is_empty() {
+        return Err(ConfigureSidecarWriteError::IncludedSidecars(shadowing));
+    }
+
+    // This is key-only extraction for membership tests.
+    // It mirrors `librefang_channels::sidecar::parse_secrets_env` without parsing values because dotenv quotes cannot occur in keys; if this code later compares values, use the channels helper so quote handling stays aligned with sidecar spawning.
+    let secrets_env_keys: std::collections::HashSet<String> = std::fs::read_to_string(secrets_path)
+        .ok()
+        .map(|s| {
+            s.lines()
+                .filter_map(|line| {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        return None;
+                    }
+                    let eq = line.find('=')?;
+                    let key = line[..eq].trim();
+                    if key.is_empty() {
+                        None
+                    } else {
+                        Some(key.to_string())
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut shadowed_secrets: Vec<String> = schema
+        .fields
+        .iter()
+        .filter(|field| field.field_type == "secret")
+        .filter(|field| {
+            values
+                .get(&field.key)
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+        .filter(|field| std::env::var(&field.key).is_ok() && !secrets_env_keys.contains(&field.key))
+        .map(|field| field.key.clone())
+        .collect();
+    shadowed_secrets.sort();
+
+    let mut nonsecret_env = std::collections::BTreeMap::new();
+    for field in &schema.fields {
+        let Some(raw) = values.get(&field.key) else {
+            continue;
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if field.field_type == "secret" {
+            super::secrets_env::upsert_secret(secrets_path, &field.key, trimmed)
+                .map_err(ConfigureSidecarWriteError::Write)?;
+        } else {
+            nonsecret_env.insert(field.key.clone(), trimmed.to_string());
+        }
+    }
+
+    let managed_env_keys: Vec<&str> = schema
+        .fields
+        .iter()
+        .filter(|field| field.field_type != "secret")
+        .map(|field| field.key.as_str())
+        .collect();
+    super::sidecar_toml::upsert_sidecar_block(
+        config_path,
+        entry.name,
+        entry.name,
+        entry.command,
+        entry.args,
+        &nonsecret_env,
+        &managed_env_keys,
+    )
+    .map_err(ConfigureSidecarWriteError::Write)?;
+
+    Ok(shadowed_secrets)
+}
+
 /// `POST /api/channels/sidecar/{name}/configure` — save schema-driven
 /// sidecar form values, splitting the payload across `secrets.env` and
 /// `config.toml`, then trigger a hot-reload so the kernel picks up the
@@ -913,9 +1079,7 @@ pub async fn configure_sidecar_channel(
 
     // 2. Pull the cached `--describe` schema. Without it we can't
     //    validate required fields or split secret-vs-nonsecret.
-    let schema = schema_cache()
-        .read()
-        .unwrap()
+    let schema = read_cache_recover(schema_cache(), "schema")
         .get(entry.name)
         .cloned()
         .ok_or_else(|| {
@@ -952,161 +1116,41 @@ pub async fn configure_sidecar_channel(
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
 
-    // 3c. Refuse to save when an `include`d file already owns the
-    //     `[[sidecar_channels]]` array. Writing a root-level entry on
-    //     top of that would silently shadow the included one after the
-    //     kernel merges them — the operator's intent (edit *that*
-    //     entry) and our behaviour (append a fresh root entry) would
-    //     diverge without warning. The dashboard / docs steer the
-    //     operator to the file that owns the existing block.
-    let shadowing = included_files_with_sidecars(&config_path)
-        .await
-        .map_err(|e| ApiErrorResponse::internal_scrub(e).into_json_tuple())?;
-    if !shadowing.is_empty() {
-        let files = shadowing
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(ApiErrorResponse::conflict(format!(
-            "config.toml uses `include` directive and existing `[[sidecar_channels]]` entries live in {files}. Edit that file directly to avoid silently shadowing the included sidecars."
-        ))
-        .into_json_tuple());
-    }
-
-    // 4. Split payload: secrets go to secrets.env, everything else
-    //    accumulates into the [sidecar_channels.env] table.
+    // 4. Split payload: secrets go to secrets.env, everything else goes into the [sidecar_channels.env] table.
     //
-    //    Both the secrets.env upserts and the config.toml upsert below
-    //    run inside `state.config_write_lock`. That mutex also gates
-    //    `POST /api/config/set` and the legacy `configure_channel`
-    //    handler (issue #3183), so two concurrent
-    //    `POST /api/channels/sidecar/{a,b}/configure` calls — or one of
-    //    those interleaved with `config_set` — cannot lost-update on
-    //    `~/.librefang/config.toml` or on `~/.librefang/secrets.env`.
-    //    The guard is dropped before `reload_config().await` so the
-    //    hot-reload step does not gate other config-writing handlers.
+    //    Both the secrets.env upserts and the config.toml upsert below run inside `state.config_write_lock`.
+    //    That mutex also gates `POST /api/config/set` and the legacy `configure_channel` handler (issue #3183), so two concurrent `POST /api/channels/sidecar/{a,b}/configure` calls — or one of those interleaved with `config_set` — cannot lost-update on `~/.librefang/config.toml` or on `~/.librefang/secrets.env`.
+    //    The guard is dropped before `reload_config().await` so the hot-reload step does not gate other config-writing handlers.
     //
-    //    The `secrets.env` membership read (for shell-shadow detection)
-    //    also lives inside the guard so two concurrent saves on
-    //    different keys cannot each see the pre-write file state and
-    //    falsely report shadows on keys the other handler is about to
-    //    write — a cosmetic-only TOCTOU but trivially closed by reading
-    //    under the same lock that gates the write.
-    let mut nonsecret_env: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
-    let shadowed_secrets: Vec<String>;
-    {
+    //    Include-file detection, the `secrets.env` membership read, and all durable writes run as one serialized blocking task.
+    //    Keeping include detection under the lock also prevents another config writer from changing the include list between the check and write.
+    let shadowed_secrets = {
         let _config_guard = state.config_write_lock.lock().await;
-
-        // 4a. Detect shell-environment shadowing of `secret` fields,
-        //     under the lock. The dotenv loader's priority is system env
-        //     > vault > .env > secrets.env (see
-        //     `librefang_extensions::dotenv`). If the operator exported
-        //     `TELEGRAM_BOT_TOKEN` before launching the daemon,
-        //     `std::env::var` returns that exported value and the
-        //     sidecar child inherits it — not whatever we write to
-        //     `secrets.env`. The save still succeeds mechanically, but
-        //     the new value never takes effect. Warn before the operator
-        //     chases this for an hour.
-        //
-        //     `std::env::var` also returns true for keys we loaded from
-        //     `secrets.env` into the process env at boot, so subtract
-        //     those out by reading the on-disk `secrets.env` once: a
-        //     key already in `secrets.env` means the env presence is
-        //     our own boot-time write, not a shell shadow.
-        // KEY-only extraction: this set is used purely for membership
-        // checks against the schema's secret field names (i.e. "is
-        // TELEGRAM_BOT_TOKEN listed in secrets.env?"). Quotes never
-        // appear inside dotenv KEYS, so the parser here intentionally
-        // mirrors `librefang_channels::sidecar::parse_secrets_env`'s
-        // key-extraction path but skips the value-side quote-stripping
-        // that `parse_secrets_env` performs. If a future change starts
-        // comparing VALUES here, switch to invoking the channels-crate
-        // helper directly so quote/whitespace handling stays consistent
-        // with how the sidecar actually inherits env vars at spawn time
-        // (codex review fix #9).
-        let secrets_env_keys: std::collections::HashSet<String> =
-            std::fs::read_to_string(&secrets_path)
-                .ok()
-                .map(|s| {
-                    s.lines()
-                        .filter_map(|line| {
-                            let line = line.trim();
-                            if line.is_empty() || line.starts_with('#') {
-                                return None;
-                            }
-                            let eq = line.find('=')?;
-                            let k = line[..eq].trim();
-                            if k.is_empty() {
-                                None
-                            } else {
-                                Some(k.to_string())
-                            }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-        let mut shadowed: Vec<String> = schema
-            .fields
-            .iter()
-            .filter(|f| f.field_type == "secret")
-            .filter(|f| {
-                body.values
-                    .get(&f.key)
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false)
-            })
-            .filter(|f| std::env::var(&f.key).is_ok() && !secrets_env_keys.contains(&f.key))
-            .map(|f| f.key.clone())
-            .collect();
-        shadowed.sort();
-        shadowed_secrets = shadowed;
-
-        for f in &schema.fields {
-            let Some(raw) = body.values.get(&f.key) else {
-                continue;
-            };
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                continue;
+        tokio::task::spawn_blocking(move || {
+            write_sidecar_configuration(&config_path, &secrets_path, entry, &schema, &body.values)
+        })
+        .await
+        .map_err(|e| {
+            ApiErrorResponse::internal_scrub(format!("sidecar configure task failed: {e}"))
+                .into_json_tuple()
+        })?
+        .map_err(|error| match error {
+            ConfigureSidecarWriteError::IncludedSidecars(paths) => {
+                let files = paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                ApiErrorResponse::conflict(format!(
+                    "config.toml uses `include` directive and existing `[[sidecar_channels]]` entries live in {files}. Edit that file directly to avoid silently shadowing the included sidecars."
+                ))
+                .into_json_tuple()
             }
-            if f.field_type == "secret" {
-                super::secrets_env::upsert_secret(&secrets_path, &f.key, trimmed)
-                    .map_err(|e| ApiErrorResponse::internal_scrub(e).into_json_tuple())?;
-            } else {
-                nonsecret_env.insert(f.key.clone(), trimmed.to_string());
+            ConfigureSidecarWriteError::Write(error) => {
+                ApiErrorResponse::internal_scrub(error).into_json_tuple()
             }
-        }
-
-        // 5. Upsert the [[sidecar_channels]] block keyed by adapter name.
-        //    Idempotent: a second POST with the same name replaces the
-        //    block in-place, preserving formatting of every other section.
-        //    `managed_env_keys` is the form's set of NON-SECRET schema
-        //    fields — i.e. the keys the configure form is the source of
-        //    truth for. Every OTHER env key already in the block (operator
-        //    hand-edits such as `PYTHONPATH`, `HTTP_PROXY`, locale vars,
-        //    or even a hand-edited `TELEGRAM_BOT_TOKEN` inline) is
-        //    preserved untouched. Secret schema fields never appear in
-        //    config.toml at all — they live in `secrets.env` — so they
-        //    are intentionally excluded from this set.
-        let managed_env_keys: Vec<&str> = schema
-            .fields
-            .iter()
-            .filter(|f| f.field_type != "secret")
-            .map(|f| f.key.as_str())
-            .collect();
-        super::sidecar_toml::upsert_sidecar_block(
-            &config_path,
-            entry.name,
-            entry.name, // channel_type defaults to the catalog name
-            entry.command,
-            entry.args,
-            &nonsecret_env,
-            &managed_env_keys,
-        )
-        .map_err(|e| ApiErrorResponse::internal_scrub(e).into_json_tuple())?;
-    }
+        })?
+    };
 
     // 6. Trigger hot-reload. The kernel diffs the on-disk config
     //    against the live snapshot and returns the resulting plan;
@@ -1681,5 +1725,144 @@ mod schema_error_discovery_tests {
         // Reset shared caches so we don't leak state into other tests.
         __test_seed_sidecar_schema_cache(&[]);
         __test_seed_sidecar_schema_error_cache(&[]);
+    }
+}
+
+#[cfg(test)]
+mod schema_cache_poison_tests {
+    use super::{read_cache_recover, write_cache_recover};
+    use std::collections::HashMap;
+    use std::sync::RwLock;
+
+    #[test]
+    fn cache_helpers_recover_reads_and_writes_after_held_lock_panics() {
+        let read_recovery = RwLock::new(HashMap::from([("telegram", "schema")]));
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = read_recovery.write().unwrap();
+            panic!("poison cache before recovered read");
+        });
+        assert!(read_recovery.is_poisoned());
+
+        let guard = read_cache_recover(&read_recovery, "test read cache");
+        assert_eq!(guard.get("telegram"), Some(&"schema"));
+        drop(guard);
+        assert!(!read_recovery.is_poisoned());
+        assert!(read_recovery.read().is_ok());
+
+        let write_recovery = RwLock::new(HashMap::from([("wechat", "error")]));
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = write_recovery.write().unwrap();
+            panic!("poison cache before recovered write");
+        });
+        assert!(write_recovery.is_poisoned());
+
+        write_cache_recover(&write_recovery, "test write cache").insert("feishu", "fallback");
+        assert!(!write_recovery.is_poisoned());
+        let guard = write_recovery.read().unwrap();
+        assert_eq!(guard.get("wechat"), Some(&"error"));
+        assert_eq!(guard.get("feishu"), Some(&"fallback"));
+    }
+}
+
+#[cfg(test)]
+mod sidecar_configuration_write_tests {
+    use super::{
+        write_sidecar_configuration, ConfigureSidecarWriteError, SidecarCatalogEntry,
+        SidecarSchema, SidecarSchemaField,
+    };
+    use std::collections::HashMap;
+
+    static TEST_ENTRY: SidecarCatalogEntry = SidecarCatalogEntry {
+        name: "test-sidecar",
+        display_name: "Test Sidecar",
+        description: "test",
+        command: "test-command",
+        args: &["--serve"],
+        static_fields: None,
+    };
+
+    fn schema() -> SidecarSchema {
+        SidecarSchema {
+            name: TEST_ENTRY.name.to_string(),
+            display_name: TEST_ENTRY.display_name.to_string(),
+            description: TEST_ENTRY.description.to_string(),
+            fields: vec![
+                SidecarSchemaField {
+                    key: "TEST_TOKEN".to_string(),
+                    label: "Token".to_string(),
+                    field_type: "secret".to_string(),
+                    required: true,
+                    placeholder: String::new(),
+                    advanced: false,
+                    options: None,
+                },
+                SidecarSchemaField {
+                    key: "ROOM".to_string(),
+                    label: "Room".to_string(),
+                    field_type: "text".to_string(),
+                    required: false,
+                    placeholder: String::new(),
+                    advanced: false,
+                    options: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn writes_secret_and_nonsecret_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let secrets_path = dir.path().join("secrets.env");
+        let values = HashMap::from([
+            ("TEST_TOKEN".to_string(), "secret-value".to_string()),
+            ("ROOM".to_string(), "alerts".to_string()),
+        ]);
+
+        write_sidecar_configuration(&config_path, &secrets_path, &TEST_ENTRY, &schema(), &values)
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&secrets_path).unwrap(),
+            "TEST_TOKEN=secret-value\n"
+        );
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        assert!(config.contains("name = \"test-sidecar\""));
+        assert!(config.contains("ROOM = \"alerts\""));
+        assert!(!config.contains("TEST_TOKEN"));
+    }
+
+    #[test]
+    fn included_sidecar_conflict_prevents_all_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let included_path = dir.path().join("channels.toml");
+        let secrets_path = dir.path().join("secrets.env");
+        std::fs::write(&config_path, "include = [\"channels.toml\"]\n").unwrap();
+        std::fs::write(
+            &included_path,
+            "[[sidecar_channels]]\nname = \"existing\"\n",
+        )
+        .unwrap();
+        let values = HashMap::from([("TEST_TOKEN".to_string(), "secret-value".to_string())]);
+
+        let result = write_sidecar_configuration(
+            &config_path,
+            &secrets_path,
+            &TEST_ENTRY,
+            &schema(),
+            &values,
+        );
+
+        assert!(matches!(
+            result,
+            Err(ConfigureSidecarWriteError::IncludedSidecars(paths))
+                if paths == vec![included_path]
+        ));
+        assert!(!secrets_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(config_path).unwrap(),
+            "include = [\"channels.toml\"]\n"
+        );
     }
 }
