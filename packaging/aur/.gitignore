@@ -1,6 +1,5 @@
-*/LICENSE
-*/src/
-*/pkg/
-*/*.pkg.tar.*
-*/*.tar.gz
-*/*.deb
+LICENSE
+src/
+pkg/
+*.pkg.tar.*
+*.tar.*

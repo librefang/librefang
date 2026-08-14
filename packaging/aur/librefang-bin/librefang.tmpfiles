@@ -1,2 +1,3 @@
 d /var/lib/librefang 0750 librefang librefang -
 d /etc/librefang 0755 root root -
+z /etc/librefang/env 0640 root librefang -

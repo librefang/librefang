@@ -2,7 +2,7 @@ pkgname=librefang-bin
 _pkgname=librefang
 pkgver=2026.6.24_beta.23
 _upstream_ver=${pkgver/_/-}
-pkgrel=1
+pkgrel=2
 pkgdesc="Community-maintained Agent Operating System written in Rust"
 arch=('x86_64')
 url="https://librefang.ai"
@@ -30,8 +30,8 @@ sha256sums=(
   'd4330a3004bd990da1830124b1ccccb51129ebb8b5a70a0b79d5626b7c1226a0'
   '8256e3089819a4e4a865c5454876fdf3192945c9569b85d6854a31c3b3ee911f'
   '9d72d1f4de5e5aef909778d7ccb9de3c29072ed1dc371a252b551b828e5a74d9'
-  'd5551061bab4c176c95ea77d4c787c3f766f64a78fe0937b9a857f07073bd59e'
-  'e6c162276a58e632cd7464629c39a24671d8bacf953cb4b0261bad6efb145d24'
+  '36448e610108a9173bac1bb672fea9447183481cfd29137eabb4d3c6864c96b7'
+  '5aa619d539ddf8f5cfd126e62e2ecb52b7c2a9c747f714c841f06b9661047cd9'
 )
 
 package() {
@@ -45,5 +45,5 @@ package() {
   install -Dm644 "$srcdir/librefang.service" "$pkgdir/usr/lib/systemd/system/librefang.service"
   install -Dm644 "$srcdir/librefang.sysusers" "$pkgdir/usr/lib/sysusers.d/librefang.conf"
   install -Dm644 "$srcdir/librefang.tmpfiles" "$pkgdir/usr/lib/tmpfiles.d/librefang.conf"
-  install -Dm644 "$srcdir/librefang.env" "$pkgdir/etc/librefang/env"
+  install -Dm640 "$srcdir/librefang.env" "$pkgdir/etc/librefang/env"
 }
