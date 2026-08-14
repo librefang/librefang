@@ -49,6 +49,28 @@ describe("pickLatestSessionId", () => {
     ];
     expect(pickLatestSessionId(list)).toBe("dated");
   });
+
+  it("prefers a valid timestamp when an invalid date appears first", () => {
+    const list: SessionListItem[] = [
+      { session_id: "invalid", agent_id: "a1", created_at: "not-a-date" },
+      { session_id: "dated", agent_id: "a1", created_at: "2020-01-01T00:00:00Z" },
+    ];
+    expect(pickLatestSessionId(list)).toBe("dated");
+  });
+
+  it("prefers epoch and pre-epoch timestamps over an invalid first row", () => {
+    const epoch: SessionListItem[] = [
+      { session_id: "invalid", agent_id: "a1", created_at: "not-a-date" },
+      { session_id: "epoch", agent_id: "a1", created_at: "1970-01-01T00:00:00Z" },
+    ];
+    const preEpoch: SessionListItem[] = [
+      { session_id: "invalid", agent_id: "a1", created_at: "not-a-date" },
+      { session_id: "historical", agent_id: "a1", created_at: "1960-01-01T00:00:00Z" },
+    ];
+
+    expect(pickLatestSessionId(epoch)).toBe("epoch");
+    expect(pickLatestSessionId(preEpoch)).toBe("historical");
+  });
 });
 
 describe("deriveDropdownActiveSessionId", () => {
