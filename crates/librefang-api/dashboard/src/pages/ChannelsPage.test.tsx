@@ -3,6 +3,7 @@ import { render, screen, fireEvent, within, waitFor } from "@testing-library/rea
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ChannelsPage } from "./ChannelsPage";
 import { useDrawerStore } from "../lib/drawerStore";
+import { useUIStore } from "../lib/store";
 import { useChannels, useChannelQr } from "../lib/queries/channels";
 import { useReloadChannels, useSaveSidecarConfig, useRemoveSidecarConfig } from "../lib/mutations/channels";
 import type { ChannelItem, QrState } from "../api";
@@ -140,11 +141,11 @@ function setMutationDefaults(): {
   return { reload, save, remove };
 }
 
-function renderPage(): void {
+function renderPage() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: 0 } },
   });
-  render(
+  return render(
     <QueryClientProvider client={queryClient}>
       <ChannelsPage />
       <DrawerSlot />
@@ -168,6 +169,7 @@ describe("ChannelsPage", () => {
     vi.clearAllMocks();
     setMutationDefaults();
     useDrawerStore.setState({ isOpen: false, content: null });
+    useUIStore.setState({ toasts: [] });
     // Default: no QR session. Individual tests override.
     useChannelQrMock.mockReturnValue(
       makeQuery<QrState | null>(null, { isLoading: false }),
@@ -227,6 +229,35 @@ describe("ChannelsPage", () => {
     fireEvent.change(search, { target: { value: "tele" } });
     expect(screen.queryByText("Slack")).not.toBeInTheDocument();
     expect(screen.getByText("Telegram")).toBeInTheDocument();
+  });
+
+  it("prunes selections when a channel disappears after reload", async () => {
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({ name: "slack", display_name: "Slack" }),
+        makeChannel({ name: "telegram", display_name: "Telegram" }),
+      ]),
+    );
+    const view = renderPage();
+    fireEvent.click(screen.getAllByRole("button", { name: "common.select" })[0]);
+    expect(screen.getByRole("button", { name: "common.deselect" })).toBeInTheDocument();
+
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({ name: "telegram", display_name: "Telegram" }),
+      ]),
+    );
+    view.rerender(
+      <QueryClientProvider client={new QueryClient()}>
+        <ChannelsPage />
+        <DrawerSlot />
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "common.deselect" })).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "channels.select_all" }));
+    expect(screen.getByRole("button", { name: "common.deselect" })).toBeInTheDocument();
   });
 
   it("opens the picker drawer with unconfigured channels", () => {
@@ -342,6 +373,33 @@ describe("ChannelsPage", () => {
       name: "telegram",
       values: { TELEGRAM_BOT_TOKEN: "abc-123" },
     });
+  });
+
+  it("emits one informational toast when saved secrets are shadowed", () => {
+    const { save } = setMutationDefaults();
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({ name: "slack" }),
+        makeChannel({
+          name: "telegram",
+          display_name: "Telegram",
+          configured: false,
+          fields: [{ key: "TOKEN", label: "Token", type: "secret" }],
+        }),
+      ]),
+    );
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /channels\.add/ }));
+    let drawer = screen.getByTestId("drawer-slot");
+    fireEvent.click(within(drawer).getByText("Telegram"));
+    drawer = screen.getByTestId("drawer-slot");
+    fireEvent.change(within(drawer).getByDisplayValue(""), { target: { value: "secret" } });
+    fireEvent.click(within(drawer).getByRole("button", { name: /common\.save/ }));
+    const options = save.mutate.mock.calls[0][1];
+    options.onSuccess({ restart_required: true, shadowed_secrets: ["TOKEN"] });
+
+    expect(useUIStore.getState().toasts).toHaveLength(1);
+    expect(useUIStore.getState().toasts[0]).toMatchObject({ type: "info" });
   });
 
   it("triggers useReloadChannels when the Reload header button is clicked", () => {
@@ -544,15 +602,25 @@ describe("ChannelsPage", () => {
     expect(screen.getByText("common.retry")).toBeInTheDocument();
   });
 
-  it("hides the section entirely when the daemon returns 204 / null", () => {
+  it("hides the section and disables polling when the daemon returns 204 / null", async () => {
     openDetailsForWechat(null);
     // Section heading absent → component returned null.
     expect(screen.queryByText("channels.qr_login")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(useChannelQrMock).toHaveBeenLastCalledWith(
+        "wechat",
+        expect.objectContaining({ enabled: false }),
+      ));
   });
 
-  it("hides the section when the QR endpoint errors (e.g. 404 sidecar not running)", () => {
+  it("hides the section and disables polling when the QR endpoint errors", async () => {
     openDetailsForWechat(null, { isError: true });
     expect(screen.queryByText("channels.qr_login")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(useChannelQrMock).toHaveBeenLastCalledWith(
+        "wechat",
+        expect.objectContaining({ enabled: false }),
+      ));
   });
 
   it("does NOT expose `bot_token` in the QrState type surface", () => {
