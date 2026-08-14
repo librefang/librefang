@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/librefang/librefang/sdk/go"
 )
@@ -11,12 +12,21 @@ import (
 func main() {
 	client := librefang.New("http://localhost:4545")
 
-	skills, _ := client.Skills.ListSkills()
-	fmt.Printf("Skills: %d\n", len(librefang.ToSlice(skills)))
+	if skills, err := client.Skills.ListSkills(); err != nil {
+		log.Printf("ListSkills failed: %v", err)
+	} else {
+		fmt.Printf("Skills: %d\n", len(librefang.ToSlice(skills)))
+	}
 
-	models, _ := client.Models.ListAllModels()
-	fmt.Printf("Models: %d\n", len(librefang.ToSlice(models)))
+	if models, err := client.Models.ListAllModels(); err != nil {
+		log.Printf("ListAllModels failed: %v", err)
+	} else {
+		fmt.Printf("Models: %d\n", len(librefang.ToSlice(models)))
+	}
 
-	providers, _ := client.Providers.ListProviders()
-	fmt.Printf("Providers: %d\n", len(librefang.ToSlice(providers)))
+	if providers, err := client.Models.ListProviders(); err != nil {
+		log.Printf("ListProviders failed: %v", err)
+	} else {
+		fmt.Printf("Providers: %d\n", len(librefang.ToSlice(providers)))
+	}
 }
