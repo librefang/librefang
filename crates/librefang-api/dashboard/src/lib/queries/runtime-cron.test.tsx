@@ -14,26 +14,24 @@ beforeEach(() => {
 });
 
 describe("useCronJobs", () => {
-  it("should be disabled when agentId is undefined", () => {
+  it("fetches all jobs when agentId is undefined", async () => {
+    vi.mocked(api.listCronJobs).mockResolvedValue([]);
     const { result } = renderHook(() => useCronJobs(), {
       wrapper: createQueryClientWrapper().wrapper,
     });
 
-    expect(result.current.data).toBeUndefined();
-    expect(result.current.isLoading).toBe(false);
-    expect(result.current.fetchStatus).toBe("idle");
-    expect(api.listCronJobs).not.toHaveBeenCalled();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(api.listCronJobs).toHaveBeenCalledWith(undefined);
   });
 
-  it("should be disabled when agentId is empty string", () => {
+  it("treats an empty agentId as the API's unfiltered form", async () => {
+    vi.mocked(api.listCronJobs).mockResolvedValue([]);
     const { result } = renderHook(() => useCronJobs(""), {
       wrapper: createQueryClientWrapper().wrapper,
     });
 
-    expect(result.current.data).toBeUndefined();
-    expect(result.current.isLoading).toBe(false);
-    expect(result.current.fetchStatus).toBe("idle");
-    expect(api.listCronJobs).not.toHaveBeenCalled();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(api.listCronJobs).toHaveBeenCalledWith("");
   });
 
   it("should be enabled when agentId is valid string, fetches data", async () => {
