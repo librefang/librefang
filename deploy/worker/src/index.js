@@ -55,92 +55,110 @@ async function handleDeploy(request, fetchImpl) {
       return json({ error: `Failed to create app: ${err}` }, 500);
     }
 
-    // 3. Allocate shared IPv4 + IPv6 (needed for public HTTPS)
-    const flyGraphQL = 'https://api.fly.io/graphql';
-    const gqlHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    try {
+      // 3. Allocate shared IPv4 + IPv6 (needed for public HTTPS)
+      await allocateIpAddress(fetchImpl, token, appName, 'shared_v4');
+      await allocateIpAddress(fetchImpl, token, appName, 'v6');
 
-    await fetchImpl(flyGraphQL, {
-      method: 'POST',
-      headers: gqlHeaders,
-      body: JSON.stringify({
-        query: `mutation { allocateIPAddress(input: { appId: "${appName}", type: shared_v4 }) { ipAddress { address type } } }`,
-      }),
-    });
-    await fetchImpl(flyGraphQL, {
-      method: 'POST',
-      headers: gqlHeaders,
-      body: JSON.stringify({
-        query: `mutation { allocateIPAddress(input: { appId: "${appName}", type: v6 }) { ipAddress { address type } } }`,
-      }),
-    });
+      // 4. Create volume
+      const volRes = await fetchImpl(`${FLY_API}/apps/${appName}/volumes`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ name: 'librefang_data', region: REGION, size_gb: 1 }),
+      });
+      if (!volRes.ok) {
+        throw new Error('Failed to create volume. Check your Fly configuration and try again.');
+      }
 
-    // 4. Create volume
-    const volRes = await fetchImpl(`${FLY_API}/apps/${appName}/volumes`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ name: 'librefang_data', region: REGION, size_gb: 1 }),
-    });
-    if (!volRes.ok) {
-      const err = await volRes.text();
-      return json({ error: `Failed to create volume: ${err}` }, 500);
-    }
+      // 5. Build env exclusively from credentials supplied by this deployer.
+      // Never copy a Worker-level provider key into user-owned infrastructure.
+      const env_vars = {
+        LIBREFANG_HOME: '/data',
+        OPENROUTER_API_KEY: openrouterApiKey.trim(),
+      };
 
-    // 5. Build env exclusively from credentials supplied by this deployer.
-    // Never copy a Worker-level provider key into user-owned infrastructure.
-    const env_vars = {
-      LIBREFANG_HOME: '/data',
-      OPENROUTER_API_KEY: openrouterApiKey.trim(),
-    };
+      // 6. Create machine
+      const machineRes = await fetchImpl(`${FLY_API}/apps/${appName}/machines`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          region: REGION,
+          config: {
+            image: DOCKER_IMAGE,
+            env: env_vars,
+            guest: { cpu_kind: 'shared', cpus: 1, memory_mb: 256 },
+            services: [
+              {
+                ports: [
+                  { port: 443, handlers: ['tls', 'http'] },
+                  { port: 80, handlers: ['http'] },
+                ],
+                protocol: 'tcp',
+                internal_port: 4545,
+                force_instance_key: null,
+              },
+            ],
+            mounts: [{ volume: 'librefang_data', path: '/data' }],
+            auto_destroy: false,
+          },
+        }),
+      });
 
-    // 6. Create machine
-    const machineRes = await fetchImpl(`${FLY_API}/apps/${appName}/machines`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
+      if (!machineRes.ok) {
+        // This request contains the caller's provider key.
+        // Never reflect Fly's raw validation body because it may echo the submitted machine config.
+        throw new Error('Failed to create machine. Check your Fly configuration and try again.');
+      }
+
+      const machine = await machineRes.json();
+      const appUrl = `https://${appName}.fly.dev`;
+
+      return json({
+        success: true,
+        appName,
+        url: appUrl,
+        dashboardUrl: `https://fly.io/apps/${appName}`,
+        machineId: machine.id,
         region: REGION,
-        config: {
-          image: DOCKER_IMAGE,
-          env: env_vars,
-          guest: { cpu_kind: 'shared', cpus: 1, memory_mb: 256 },
-          services: [
-            {
-              ports: [
-                { port: 443, handlers: ['tls', 'http'] },
-                { port: 80, handlers: ['http'] },
-              ],
-              protocol: 'tcp',
-              internal_port: 4545,
-              force_instance_key: null,
-            },
-          ],
-          mounts: [{ volume: 'librefang_data', path: '/data' }],
-          auto_destroy: false,
-        },
-      }),
-    });
-
-    if (!machineRes.ok) {
-      // This request contains the caller's provider key.
-      // Never reflect Fly's raw validation body because it may echo the submitted machine config.
-      return json(
-        { error: 'Failed to create machine. Check your Fly configuration and try again.' },
-        500,
-      );
+      });
+    } catch (err) {
+      await deleteApp(fetchImpl, headers, appName);
+      return json({ error: err.message || 'Deployment failed' }, 500);
     }
-
-    const machine = await machineRes.json();
-    const appUrl = `https://${appName}.fly.dev`;
-
-    return json({
-      success: true,
-      appName,
-      url: appUrl,
-      dashboardUrl: `https://fly.io/apps/${appName}`,
-      machineId: machine.id,
-      region: REGION,
-    });
   } catch (err) {
     return json({ error: err.message || 'Unexpected error' }, 500);
+  }
+}
+
+async function allocateIpAddress(fetchImpl, token, appName, type) {
+  const response = await fetchImpl('https://api.fly.io/graphql', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      query: `mutation { allocateIPAddress(input: { appId: "${appName}", type: ${type} }) { ipAddress { address type } } }`,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to allocate ${type} address.`);
+  }
+
+  let result;
+  try {
+    result = await response.json();
+  } catch {
+    throw new Error(`Failed to allocate ${type} address.`);
+  }
+  if (result.errors?.length || !result.data?.allocateIPAddress?.ipAddress?.address) {
+    throw new Error(`Failed to allocate ${type} address.`);
+  }
+}
+
+async function deleteApp(fetchImpl, headers, appName) {
+  try {
+    await fetchImpl(`${FLY_API}/apps/${appName}`, { method: 'DELETE', headers });
+  } catch {
+    // Cleanup is best effort. Preserve the original deployment error.
   }
 }
 
