@@ -4,10 +4,12 @@ Deterministic, no network — urllib monkeypatched via _http_request.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import os
+import threading
 
 import pytest
 
@@ -118,6 +120,38 @@ def test_dm_policy_lowercased():
 def test_group_policy_lowercased():
     a = _cloud_adapter(WHATSAPP_GROUP_POLICY="Mention_Only")
     assert a.group_policy == "mention_only"
+
+
+@pytest.mark.asyncio
+async def test_produce_marshals_webhook_emit_to_event_loop(monkeypatch):
+    a = _cloud_adapter(WHATSAPP_APP_SECRET="appsecret")
+    event = {"method": "inbound", "params": {"text": "hello"}}
+    seen = asyncio.Event()
+    emit_threads: list[int] = []
+    loop_thread = threading.get_ident()
+
+    class _Server:
+        def shutdown(self):
+            pass
+
+    def _serve(emit, ready):
+        a._httpd = _Server()
+        emit(event)
+        ready.set()
+
+    def _emit(received):
+        emit_threads.append(threading.get_ident())
+        assert received is event
+        seen.set()
+
+    monkeypatch.setattr(a, "_serve_forever", _serve)
+    task = asyncio.create_task(a.produce(_emit))
+    await asyncio.wait_for(seen.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert emit_threads == [loop_thread]
 
 
 # ---- X-Hub-Signature-256 verification ------------------------------
@@ -466,15 +500,13 @@ def test_get_verify_empty_self_token_rejects(monkeypatch):
     assert status == 403
 
 
-def test_post_webhook_signature_disabled_accepts_any():
-    """When WHATSAPP_APP_SECRET is empty, signature is skipped —
-    operator was warned at startup."""
+def test_post_webhook_without_app_secret_fails_closed():
     a = _cloud_adapter()  # app_secret = ""
     body = json.dumps(_wh_payload()).encode("utf-8")
     emitted: list = []
     status = a._handle_post_webhook(body, None, lambda ev: emitted.append(ev))
-    assert status == 200
-    assert len(emitted) == 1
+    assert status == 500
+    assert emitted == []
 
 
 def test_post_webhook_valid_signature_emits():
@@ -485,6 +517,14 @@ def test_post_webhook_valid_signature_emits():
     status = a._handle_post_webhook(body, sig, lambda ev: emitted.append(ev))
     assert status == 200
     assert len(emitted) == 1
+
+
+def test_verify_token_non_ascii_input_returns_403():
+    a = _cloud_adapter(WHATSAPP_VERIFY_TOKEN="expected")
+    status, _body = a._handle_get_verify(
+        "hub.mode=subscribe&hub.verify_token=%C3%A9&hub.challenge=ECHO",
+    )
+    assert status == 403
 
 
 def test_post_webhook_missing_signature_returns_400():
@@ -524,31 +564,37 @@ def test_post_webhook_invalid_signature_rejected():
 
 
 def test_post_webhook_malformed_json_400():
-    a = _cloud_adapter()
-    status = a._handle_post_webhook(b"{not json", None, lambda _: None)
+    a = _cloud_adapter(WHATSAPP_APP_SECRET="appsecret")
+    body = b"{not json"
+    status = a._handle_post_webhook(
+        body, _xhub(b"appsecret", body), lambda _: None,
+    )
     assert status == 400
 
 
 def test_post_webhook_dedupes_message_id():
     """Meta retries on non-200 — sidecar's SeenSet keeps the second
     delivery from double-emitting."""
-    a = _cloud_adapter()
+    a = _cloud_adapter(WHATSAPP_APP_SECRET="appsecret")
     body = json.dumps(_wh_payload(msg_id="dup-1")).encode("utf-8")
+    sig = _xhub(b"appsecret", body)
     emitted: list = []
-    s1 = a._handle_post_webhook(body, None, lambda ev: emitted.append(ev))
-    s2 = a._handle_post_webhook(body, None, lambda ev: emitted.append(ev))
+    s1 = a._handle_post_webhook(body, sig, lambda ev: emitted.append(ev))
+    s2 = a._handle_post_webhook(body, sig, lambda ev: emitted.append(ev))
     assert s1 == 200 and s2 == 200
     assert len(emitted) == 1
 
 
 def test_post_webhook_applies_dm_policy():
     a = _cloud_adapter(
+        WHATSAPP_APP_SECRET="appsecret",
         WHATSAPP_DM_POLICY="allowed_only",
         WHATSAPP_ALLOWED_USERS="+19990",
     )
     body = json.dumps(_wh_payload(from_phone="15551234567")).encode("utf-8")
+    sig = _xhub(b"appsecret", body)
     emitted: list = []
-    status = a._handle_post_webhook(body, None, lambda ev: emitted.append(ev))
+    status = a._handle_post_webhook(body, sig, lambda ev: emitted.append(ev))
     assert status == 200
     assert emitted == []
 
@@ -604,6 +650,18 @@ def test_cloud_send_text_429_retries_once(monkeypatch):
     monkeypatch.setattr(wa, "_parse_retry_after", lambda h, **kw: 0.0)
     a = _cloud_adapter()
     a._cloud_send_text("+1", "hi")
+
+
+def test_cloud_send_429_shutdown_raises_cancelled(monkeypatch):
+    monkeypatch.setattr(
+        wa, "_http_request",
+        lambda url, **kw: (429, None, b"slow", {"retry-after": "30"}),
+    )
+    a = _cloud_adapter()
+    a._shutdown.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        a._cloud_send_text("+1", "hi")
 
 
 def test_cloud_send_text_non_2xx_raises(monkeypatch):
@@ -860,6 +918,23 @@ async def test_on_send_cloud_mode_location(monkeypatch):
     }))
     assert sent[0]["type"] == "location"
     assert sent[0]["location"]["latitude"] == 37.5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("location", [{"lat": 37.5}, {"lon": -122.0}, {}])
+async def test_on_send_cloud_mode_rejects_incomplete_location(
+    monkeypatch, location,
+):
+    sent: list = []
+    monkeypatch.setattr(
+        wa, "_http_request",
+        lambda url, **kw: (sent.append(kw), (200, {}, b"", {}))[1],
+    )
+    a = _cloud_adapter()
+
+    await a.on_send(_send_cmd(content={"Location": location}))
+
+    assert sent == []
 
 
 @pytest.mark.asyncio

@@ -458,10 +458,9 @@ class WhatsAppAdapter(SidecarAdapter):
                 )
                 raise SystemExit(2)
             if not self.app_secret:
-                log.warn(
-                    "whatsapp WHATSAPP_APP_SECRET unset — X-Hub-Signature-256 "
-                    "verification on inbound webhook is DISABLED. Production "
-                    "deployments should always set this.",
+                log.error(
+                    "whatsapp WHATSAPP_APP_SECRET unset — inbound webhook "
+                    "requests will be rejected",
                 )
             if not self.verify_token:
                 # Without this, _handle_get_verify short-circuits on
@@ -560,7 +559,7 @@ class WhatsAppAdapter(SidecarAdapter):
                 retry_after=wait,
             )
             if self._shutdown.wait(wait):
-                return status, resp, raw, hdrs
+                raise asyncio.CancelledError()
             status, resp, raw, hdrs = _http_request(
                 url, method="POST", body=body,
                 headers=self._cloud_headers(),
@@ -703,7 +702,9 @@ class WhatsAppAdapter(SidecarAdapter):
         if (
             mode == "subscribe"
             and self.verify_token
-            and hmac.compare_digest(token, self.verify_token)
+            and hmac.compare_digest(
+                token.encode("utf-8"), self.verify_token.encode("utf-8"),
+            )
         ):
             return 200, challenge.encode("utf-8")
         return 403, b""
@@ -714,20 +715,25 @@ class WhatsAppAdapter(SidecarAdapter):
         signature: Optional[str],
         emit: Callable[[dict], None],
     ) -> int:
-        """Verify X-Hub-Signature-256 (if app_secret configured) +
+        """Verify X-Hub-Signature-256 +
         parse Cloud API webhook body + emit text events."""
-        if self.app_secret:
-            if not signature:
-                # Missing header (Meta omits it, or the upstream
-                # proxy stripped it) — 400 not 401, since 401
-                # implies credentials were presented and rejected.
-                log.warn("whatsapp: missing X-Hub-Signature-256 header")
-                return 400
-            if not verify_xhub_signature(
-                self.app_secret.encode("utf-8"), body, signature,
-            ):
-                log.warn("whatsapp: invalid X-Hub-Signature-256")
-                return 401
+        if not self.app_secret:
+            log.error(
+                "whatsapp: refusing webhook because WHATSAPP_APP_SECRET "
+                "is unset",
+            )
+            return 500
+        if not signature:
+            # Missing header (Meta omits it, or the upstream
+            # proxy stripped it) — 400 not 401, since 401
+            # implies credentials were presented and rejected.
+            log.warn("whatsapp: missing X-Hub-Signature-256 header")
+            return 400
+        if not verify_xhub_signature(
+            self.app_secret.encode("utf-8"), body, signature,
+        ):
+            log.warn("whatsapp: invalid X-Hub-Signature-256")
+            return 401
         try:
             payload = json.loads(body.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
@@ -872,10 +878,15 @@ class WhatsAppAdapter(SidecarAdapter):
             return
 
         # Cloud API mode: spin up our own webhook server.
+        loop = asyncio.get_running_loop()
+
+        def emit_on_loop(event: dict) -> None:
+            loop.call_soon_threadsafe(emit, event)
+
         ready = threading.Event()
         t = threading.Thread(
             target=self._serve_forever,
-            args=(emit, ready),
+            args=(emit_on_loop, ready),
             name="whatsapp-webhook",
             daemon=True,
         )
@@ -1019,9 +1030,13 @@ class WhatsAppAdapter(SidecarAdapter):
                 loc = content.get("Location") or {}
                 lat = loc.get("lat") if isinstance(loc, dict) else None
                 lon = loc.get("lon") if isinstance(loc, dict) else None
+                if lat is None or lon is None:
+                    log.warn("whatsapp location: missing lat/lon",
+                             lat=lat, lon=lon)
+                    return
                 try:
-                    lat_f = float(lat) if lat is not None else 0.0
-                    lon_f = float(lon) if lon is not None else 0.0
+                    lat_f = float(lat)
+                    lon_f = float(lon)
                 except (TypeError, ValueError):
                     log.warn("whatsapp location: invalid lat/lon",
                              lat=lat, lon=lon)
