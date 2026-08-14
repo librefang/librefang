@@ -24,12 +24,37 @@ fn lock_watchers_recover(
     })
 }
 
+fn track_watcher(
+    watchers: &std::sync::Mutex<Vec<JoinHandle<()>>>,
+    stopped: &AtomicBool,
+    watcher: JoinHandle<()>,
+) {
+    let mut guards = lock_watchers_recover(watchers);
+    guards.retain(|handle| !handle.is_finished());
+    if stopped.load(Ordering::Acquire) {
+        watcher.abort();
+    } else {
+        guards.push(watcher);
+    }
+}
+
+struct AbortTaskOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortTaskOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Outer loop handle + any inner watcher handles spawned by that loop.
 struct AgentTaskEntry {
     outer: JoinHandle<()>,
     /// Inner watcher tasks spawned by this agent's loop. These hold LLM permits
     /// and must be aborted when the agent stops so permits are released promptly.
     watchers: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
+    /// Set before watcher cleanup begins. Registration checks it while holding
+    /// the watcher lock, preventing a late watcher from escaping `stop_agent`.
+    stopped: Arc<AtomicBool>,
 }
 
 /// Maximum number of concurrent background LLM calls across all agents.
@@ -242,6 +267,8 @@ impl BackgroundExecutor {
                 let watcher_handles: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>> =
                     Arc::new(std::sync::Mutex::new(Vec::new()));
                 let watcher_handles_loop = watcher_handles.clone();
+                let stopped = Arc::new(AtomicBool::new(false));
+                let stopped_loop = stopped.clone();
                 // Self-cleanup: when this outer loop exits (cap, shutdown, or
                 // any other break path), drop the DashMap entry so a stale
                 // `AgentTaskEntry` does not keep `active_count()` inflated and
@@ -325,9 +352,11 @@ impl BackgroundExecutor {
                         let watcher_name = name.clone();
                         let streak_clone = rate_limit_streak.clone();
                         let jh = (send_message)(agent_id, prompt);
+                        let abort_jh_on_drop = AbortTaskOnDrop(jh.abort_handle());
                         // Spawn a watcher with RAII guard — busy flag clears even on panic.
                         // Track the handle so stop_agent can abort it and release the permit.
                         let watcher_jh = tokio::spawn(async move {
+                            let _abort_jh_on_drop = abort_jh_on_drop;
                             let _guard = BusyGuard { flag: busy_clone };
                             let _permit = permit; // drop permit when watcher exits
                             match jh.await {
@@ -359,9 +388,7 @@ impl BackgroundExecutor {
                                 }
                             }
                         });
-                        let mut guards = lock_watchers_recover(&watcher_handles_loop);
-                        guards.retain(|h| !h.is_finished());
-                        guards.push(watcher_jh);
+                        track_watcher(&watcher_handles_loop, &stopped_loop, watcher_jh);
                     }
 
                     // Self-cleanup on any break path (cap, shutdown, semaphore
@@ -379,6 +406,7 @@ impl BackgroundExecutor {
                     AgentTaskEntry {
                         outer: handle,
                         watchers: watcher_handles,
+                        stopped,
                     },
                 );
             }
@@ -412,6 +440,8 @@ impl BackgroundExecutor {
                 let watcher_handles: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>> =
                     Arc::new(std::sync::Mutex::new(Vec::new()));
                 let watcher_handles_loop = watcher_handles.clone();
+                let stopped = Arc::new(AtomicBool::new(false));
+                let stopped_loop = stopped.clone();
                 // Self-cleanup on outer-task exit — see the continuous loop
                 // for the rationale (issue #5174 review).
                 let tasks_for_cleanup = self.tasks.clone();
@@ -482,9 +512,11 @@ impl BackgroundExecutor {
                         let watcher_name = name.clone();
                         let streak_clone = rate_limit_streak.clone();
                         let jh = (send_message)(agent_id, prompt);
+                        let abort_jh_on_drop = AbortTaskOnDrop(jh.abort_handle());
                         // Spawn a watcher with RAII guard — busy flag clears even on panic.
                         // Track the handle so stop_agent can abort it and release the permit.
                         let watcher_jh = tokio::spawn(async move {
+                            let _abort_jh_on_drop = abort_jh_on_drop;
                             let _guard = BusyGuard { flag: busy_clone };
                             let _permit = permit; // drop permit when watcher exits
                             match jh.await {
@@ -512,9 +544,7 @@ impl BackgroundExecutor {
                                 }
                             }
                         });
-                        let mut guards = lock_watchers_recover(&watcher_handles_loop);
-                        guards.retain(|h| !h.is_finished());
-                        guards.push(watcher_jh);
+                        track_watcher(&watcher_handles_loop, &stopped_loop, watcher_jh);
                     }
 
                     // Self-cleanup on any break path (cap, shutdown, semaphore
@@ -531,6 +561,7 @@ impl BackgroundExecutor {
                     AgentTaskEntry {
                         outer: handle,
                         watchers: watcher_handles,
+                        stopped,
                     },
                 );
             }
@@ -549,6 +580,7 @@ impl BackgroundExecutor {
     pub fn stop_agent(&self, agent_id: AgentId) {
         self.pause_flags.remove(&agent_id);
         if let Some((_, entry)) = self.tasks.remove(&agent_id) {
+            entry.stopped.store(true, Ordering::Release);
             entry.outer.abort();
             // Abort all tracked inner watcher tasks so they release LLM permits.
             let mut guards = lock_watchers_recover(&entry.watchers);
@@ -891,6 +923,7 @@ mod tests {
             AgentTaskEntry {
                 outer: tokio::spawn(std::future::pending()),
                 watchers: watchers.clone(),
+                stopped: Arc::new(AtomicBool::new(false)),
             },
         );
 
@@ -899,6 +932,42 @@ mod tests {
 
         assert!(!watchers.is_poisoned());
         assert_eq!(executor.llm_semaphore.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn late_watcher_registration_is_aborted_after_stop() {
+        let watchers = std::sync::Mutex::new(Vec::new());
+        let stopped = AtomicBool::new(true);
+        let watcher = tokio::spawn(std::future::pending::<()>());
+        let abort_handle = watcher.abort_handle();
+
+        track_watcher(&watchers, &stopped, watcher);
+        tokio::task::yield_now().await;
+
+        assert!(lock_watchers_recover(&watchers).is_empty());
+        assert!(abort_handle.is_finished());
+    }
+
+    #[tokio::test]
+    async fn aborting_watcher_also_aborts_tick_task() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let tick = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            std::future::pending::<TickOutcome>().await
+        });
+        let tick_abort_handle = tick.abort_handle();
+        let abort_tick_on_drop = AbortTaskOnDrop(tick_abort_handle.clone());
+        let watcher = tokio::spawn(async move {
+            let _abort_tick_on_drop = abort_tick_on_drop;
+            let _ = tick.await;
+        });
+
+        started_rx.await.unwrap();
+        watcher.abort();
+        let _ = watcher.await;
+        tokio::task::yield_now().await;
+
+        assert!(tick_abort_handle.is_finished());
     }
 
     #[test]

@@ -1,1 +1,0 @@
-- Recover poisoned background watcher state so stopping an agent still aborts its in-flight tick and promptly releases the shared LLM concurrency permit. (@xiaomo)
