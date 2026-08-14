@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# scripts/commit.sh — wrap `cargo fmt → git add → git commit` (#3306).
+# scripts/commit.sh — format staged Rust blobs, then commit (#3306).
 #
 # Why: the in-repo pre-commit hook (scripts/hooks/pre-commit) only *checks*
 # rustfmt and rejects the commit when staged Rust files are dirty, leaving
-# the contributor to retry by hand. This wrapper formats first, re-stages
-# the same files, and only then invokes git commit — saving a manual round
-# trip.
+# the contributor to retry by hand. This wrapper formats temporary copies of
+# the index blobs, updates the index atomically, and only then invokes git
+# commit. Unstaged working-tree edits are never formatted or staged.
 #
 # It also holds a soft lock against parallel commits in the same worktree
 # (the user often has several `librefang-trees/<feature>` checkouts open at
@@ -17,13 +17,14 @@
 #   scripts/commit.sh -F path/to/msg.txt
 #   scripts/commit.sh -m "fix: ..." --signoff
 #
-# All arguments are forwarded verbatim to `git commit` after fmt + re-stage.
+# All arguments are forwarded verbatim to `git commit` after staged formatting.
 #
 # Exit codes:
 #   0   commit succeeded
-#   2   another commit is in progress (index.lock held)
-#   3   cargo fmt failed (rustfmt errors); staged set is unchanged
+#   2   another wrapper commit is in progress
+#   3   rustfmt failed; staged set is unchanged
 #   4   git commit itself failed (hooks, empty diff, signing, …)
+#   5   staged blob extraction or atomic index update failed
 
 set -euo pipefail
 
@@ -45,41 +46,79 @@ esac
 # ---------------------------------------------------------------------------
 # 1. Concurrent-commit guard.
 #
-# `.git/index.lock` is git's own atomicity primitive — it always exists for
-# the duration of any index-mutating operation. If we see it, another commit
-# (CLI session, IDE, parallel agent) is already running and our `git add`
-# would either block or race. Bail out loud rather than silently waiting.
+# Use a wrapper-specific directory lock acquired atomically. Git's own
+# index.lock protects each individual index operation; checking for its
+# existence before later work would be a check-then-act race.
 # ---------------------------------------------------------------------------
-if [ -e "$GIT_DIR/index.lock" ]; then
+WRAPPER_LOCK="$GIT_DIR/librefang-commit.lock"
+if ! mkdir "$WRAPPER_LOCK" 2>/dev/null; then
     echo "scripts/commit.sh: another git operation is in progress" >&2
-    echo "  ($GIT_DIR/index.lock exists)" >&2
+    echo "  ($WRAPPER_LOCK exists)" >&2
     echo "  Wait for it to finish, or remove the lock manually if stale." >&2
     exit 2
 fi
+WORK_TMP=$(mktemp -d "${TMPDIR:-/tmp}/librefang-commit.XXXXXX")
+cleanup() {
+    rmdir "$WRAPPER_LOCK" 2>/dev/null || true
+    rm -rf "$WORK_TMP"
+}
+trap cleanup EXIT HUP INT TERM
 
 # ---------------------------------------------------------------------------
-# 2. cargo fmt on staged Rust files (only if cargo is on PATH).
+# 2. rustfmt on staged Rust blobs (only if rustfmt is on PATH).
 #
-# We do not run a full-workspace fmt — that would touch unstaged files and
-# blow the contributor's working tree open. We mirror the pre-commit hook
-# scope: ACMR-staged *.rs files only. If cargo is missing (e.g. running
-# inside a CI container without rust), warn once and skip.
+# Extract index blobs to a private tree, format those copies, then update the
+# index in one `git update-index --index-info` transaction. This preserves any
+# unstaged edits and leaves the index unchanged if rustfmt fails.
 # ---------------------------------------------------------------------------
-STAGED_RS=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs' || true)
+FILES=()
+STAGED_PATHS="$WORK_TMP/staged-rust"
+if ! git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' >"$STAGED_PATHS"; then
+    echo "scripts/commit.sh: failed to enumerate staged Rust files" >&2
+    exit 5
+fi
+while IFS= read -r -d '' file; do
+    FILES+=("$file")
+done <"$STAGED_PATHS"
 
-if [ -n "$STAGED_RS" ]; then
-    if command -v cargo >/dev/null 2>&1; then
-        # Read the staged files list into an array for safe quoting.
-        # shellcheck disable=SC2206 # word-splitting on \n is intentional
-        FILES=($STAGED_RS)
-        if ! cargo fmt -- "${FILES[@]}"; then
-            echo "scripts/commit.sh: cargo fmt failed; staged set unchanged" >&2
+if [ "${#FILES[@]}" -gt 0 ]; then
+    if command -v rustfmt >/dev/null 2>&1; then
+        FORMATTED=()
+        INDEX_INFO="$WORK_TMP/index-info"
+        : >"$INDEX_INFO"
+        for file in "${FILES[@]}"; do
+            staged_copy="$WORK_TMP/tree/$file"
+            mkdir -p "$(dirname "$staged_copy")"
+            if ! git show ":$file" >"$staged_copy"; then
+                echo "scripts/commit.sh: failed to read staged blob: $file" >&2
+                exit 5
+            fi
+            FORMATTED+=("$staged_copy")
+        done
+        if ! rustfmt --edition 2021 "${FORMATTED[@]}"; then
+            echo "scripts/commit.sh: rustfmt failed; staged set unchanged" >&2
             exit 3
         fi
-        # Re-add the same files so any reformatting lands in the commit.
-        git add -- "${FILES[@]}"
+        for index in "${!FILES[@]}"; do
+            file=${FILES[$index]}
+            staged_copy=${FORMATTED[$index]}
+            if ! entry=$(git ls-files -s -- "$file") || [ -z "$entry" ]; then
+                echo "scripts/commit.sh: failed to read index metadata: $file" >&2
+                exit 5
+            fi
+            mode=${entry%% *}
+            if ! blob=$(git hash-object -w "$staged_copy"); then
+                echo "scripts/commit.sh: failed to write formatted blob: $file" >&2
+                exit 5
+            fi
+            printf '%s %s\t%s\0' "$mode" "$blob" "$file" >>"$INDEX_INFO"
+        done
+        if ! git update-index -z --index-info <"$INDEX_INFO"; then
+            echo "scripts/commit.sh: failed to update the staged Rust blobs" >&2
+            exit 5
+        fi
     else
-        echo "scripts/commit.sh: cargo not found, skipping rustfmt" >&2
+        echo "scripts/commit.sh: rustfmt not found, skipping staged formatting" >&2
         echo "  (the pre-commit hook will still gate on rustfmt)" >&2
     fi
 fi
