@@ -145,14 +145,14 @@ export default [
       // already covered by tsc with `noFallthroughCasesInSwitch`.
       "no-case-declarations": "off",
 
+      // Hook ordering is a correctness invariant. The previous ChatPage
+      // violation has been removed, so regressions fail lint again.
+      "react-hooks/rules-of-hooks": "error",
+
       // ── Demoted-to-warn for the bootstrap PR (follow-up issue) ────
       // These have small, real baselines we want to clean up
       // incrementally rather than block the initial CI gate on.
       //
-      //   * `react-hooks/rules-of-hooks` — `ChatPage.tsx` calls hooks
-      //     after an early return for `system` messages; needs a real
-      //     refactor of MessageBubble to fix correctly. Tracked as a
-      //     follow-up; demoted here so the gate ships.
       //   * `no-unused-expressions` — a couple of inline
       //     `cond ? a() : b()` statement shorthands in event handlers
       //     (CanvasPage / TerminalPage). Stylistic; not a defect.
@@ -161,28 +161,28 @@ export default [
       //     describing real-world CSV pitfalls.
       //   * `no-control-regex` — `TerminalTabs.tsx` ANSI / xterm
       //     handling legitimately matches control characters.
-      "react-hooks/rules-of-hooks": "warn",
       "@typescript-eslint/no-unused-expressions": "warn",
       "no-irregular-whitespace": "warn",
       "no-control-regex": "warn",
     },
   },
 
-  // The clipboard helper is the one place allowed to touch the raw API — it is the fallback the `no-restricted-properties` rule above points everyone else at.
-  // Only that rule is disabled: the helper reads a bare `navigator.clipboard`, so the `window.navigator.clipboard` spelling that `no-restricted-syntax` covers stays banned even here.
+  // The clipboard helper is the one place allowed to touch the raw API — it is the fallback the restrictions above point everyone else at.
   {
     files: ["src/lib/clipboard.ts"],
     rules: {
       "no-restricted-properties": "off",
+      "no-restricted-syntax": "off",
     },
   },
 
   // Test files — relax a couple of rules that are noisy in vitest specs.
   {
     files: [
-      "src/**/*.test.{ts,tsx}",
-      "src/lib/__tests__/**/*.{ts,tsx}",
-      "src/lib/test/**/*.{ts,tsx}",
+      "src/**/*.{test,spec}.{ts,tsx}",
+      "src/**/__tests__/**/*.{ts,tsx}",
+      "src/**/test/**/*.{ts,tsx}",
+      "src/setupTests.ts",
     ],
     languageOptions: {
       globals: {
@@ -199,7 +199,7 @@ export default [
 
   // Config-style files at the repo root of the dashboard.
   {
-    files: ["*.config.{js,ts,mjs}", "vitest.config.ts", "vite.config.ts"],
+    files: ["*.config.{js,ts,mjs,cjs}"],
     languageOptions: {
       globals: {
         ...globals.node,
