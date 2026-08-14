@@ -17,6 +17,13 @@ class NotifyError(RuntimeError):
     pass
 
 
+def public_origin(url):
+    parsed = urllib.parse.urlsplit(url)
+    scheme = parsed.scheme or "https"
+    host = parsed.hostname or "unknown-host"
+    return f"{scheme}://{host}"
+
+
 class HttpClient:
     def request(self, method, url, *, headers=None, payload=None):
         body = None if payload is None else json.dumps(payload).encode()
@@ -29,8 +36,11 @@ class HttpClient:
                 return response.status, response.read().decode()
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read().decode(errors="replace")
-        except urllib.error.URLError as exc:
-            raise NotifyError(f"request to {url} failed: {exc.reason}") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            reason = getattr(exc, "reason", str(exc))
+            raise NotifyError(
+                f"request to {public_origin(url)} failed: {reason}"
+            ) from exc
 
 
 class GitHub:
@@ -74,15 +84,25 @@ class GitHub:
                 return jobs
             page += 1
 
-    def marker_done(self, sha, channel):
+    def marker_done(self, sha, channel, page_size=100):
         context = f"release-notify/{channel}"
-        statuses = self._json(
-            "GET", f"repos/{self.repository}/commits/{sha}/statuses?per_page=100"
-        )
-        return any(
-            status.get("context") == context and status.get("state") == "success"
-            for status in statuses
-        )
+        page = 1
+        while True:
+            statuses = self._json(
+                "GET",
+                f"repos/{self.repository}/commits/{sha}/statuses"
+                f"?per_page={page_size}&page={page}",
+            )
+            if not isinstance(statuses, list):
+                raise NotifyError("GitHub statuses response was not an array")
+            if any(
+                status.get("context") == context and status.get("state") == "success"
+                for status in statuses
+            ):
+                return True
+            if len(statuses) < page_size:
+                return False
+            page += 1
 
     def mark_done(self, sha, channel, description):
         self._json(
@@ -97,6 +117,8 @@ class GitHub:
 
     def graphql(self, query, variables):
         data = self._json("POST", "graphql", {"query": query, "variables": variables})
+        if not isinstance(data, dict):
+            raise NotifyError("GitHub GraphQL returned a non-object response")
         if data.get("errors"):
             raise NotifyError(f"GitHub GraphQL failed: {json.dumps(data['errors'])[:500]}")
         return data.get("data", {})
@@ -192,21 +214,35 @@ def aggregate_jobs(jobs):
             result[label] = "cancelled"
         elif any(value in {"queued", "in_progress", "waiting", "pending", None} for value in conclusions):
             result[label] = "running"
-        elif all(value in {"skipped", "neutral"} for value in conclusions):
-            # Optional publish/deploy jobs deliberately skip when their
-            # destination credential is not configured.
+        elif all(value in {"success", "skipped", "neutral"} for value in conclusions):
+            if label != "Deploy" and "success" not in conclusions:
+                raise NotifyError(
+                    f"Release run skipped every job in required {label} group"
+                )
+            # Deploy jobs are optional when their destination credentials are
+            # absent. Every other group must contain at least one real success.
             result[label] = "success"
         else:
-            result[label] = "success"
+            unknown = sorted({str(value) for value in conclusions} - {
+                "success", "skipped", "neutral",
+            })
+            raise NotifyError(
+                f"Release run returned unknown {label} conclusions: {unknown}"
+            )
     return result
 
 
-def changelog_changes(path, full_version):
-    text = Path(path).read_text(encoding="utf-8")
+def release_versions(full_version):
     candidates = [full_version]
     stable = full_version.split("-", 1)[0]
     if stable != full_version:
         candidates.append(stable)
+    return candidates
+
+
+def changelog_changes(path, full_version):
+    text = Path(path).read_text(encoding="utf-8")
+    candidates = release_versions(full_version)
     for version in candidates:
         match = re.search(
             rf"^## \[{re.escape(version)}\].*?\n(.*?)(?=^## \[|\Z)", text, re.MULTILINE | re.DOTALL
@@ -237,6 +273,22 @@ def emoji(status):
     return "✅" if status == "success" else "❌"
 
 
+def utf16_units(text):
+    return len(text.encode("utf-16-le")) // 2
+
+
+def truncate_utf16(text, limit):
+    result = []
+    used = 0
+    for character in text:
+        width = 2 if ord(character) > 0xFFFF else 1
+        if used + width > limit:
+            break
+        result.append(character)
+        used += width
+    return "".join(result)
+
+
 def discord_content(tag, changes, statuses, run_conclusion, repository):
     succeeded = sum(value == "success" for value in statuses.values())
     all_green = succeeded == len(statuses) and run_conclusion == "success"
@@ -256,16 +308,16 @@ def discord_content(tag, changes, statuses, run_conclusion, repository):
     fixed = f"{header}\n\n{{changes}}\n\n**Build Status:**\n" + "\n".join(status_lines) + f"\n\n{footer}"
     fallback = f"See [CHANGELOG](https://github.com/{repository}/blob/main/CHANGELOG.md) for details."
     changes = changes or fallback
-    budget = 2000 - len(fixed.format(changes=""))
-    if len(changes) > budget:
+    budget = 2000 - utf16_units(fixed.format(changes=""))
+    if utf16_units(changes) > budget:
         suffix = f"\n\n_…truncated — see the [CHANGELOG](https://github.com/{repository}/blob/main/CHANGELOG.md)._"
-        prefix = changes[: max(0, budget - len(suffix))]
+        prefix = truncate_utf16(changes, max(0, budget - utf16_units(suffix)))
         if "\n" in prefix:
             prefix = prefix.rsplit("\n", 1)[0]
         changes = prefix + suffix
     content = fixed.format(changes=changes)
-    if len(content) > 2000:
-        raise NotifyError("Discord content still exceeds 2000 characters")
+    if utf16_units(content) > 2000:
+        raise NotifyError("Discord content still exceeds 2000 UTF-16 units")
     return content
 
 
@@ -298,7 +350,7 @@ class Notifier:
             return
         full_version = self.tag[1:]
         source_root = Path(self.env.get("SOURCE_ROOT", "."))
-        changes, matched_version = changelog_changes(source_root / "CHANGELOG.md", full_version)
+        changes, _ = changelog_changes(source_root / "CHANGELOG.md", full_version)
         jobs = self.github.run_jobs(self.env["WORKFLOW_RUN_ID"])
         statuses = aggregate_jobs(jobs)
         if any(value == "running" for value in statuses.values()):
@@ -306,10 +358,7 @@ class Notifier:
 
         self.notify_discord(changes, statuses)
         self.notify_bluesky(changes)
-        versions = [full_version]
-        if matched_version not in versions:
-            versions.append(matched_version)
-        self.notify_discussion(versions)
+        self.notify_discussion(release_versions(full_version))
 
     def once(self, channel, callback):
         marker = f"{channel}/{self.tag}"

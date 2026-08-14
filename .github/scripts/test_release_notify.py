@@ -4,6 +4,8 @@ import importlib.util
 import json
 import tempfile
 import unittest
+import urllib.error
+from unittest import mock
 from pathlib import Path
 
 
@@ -58,6 +60,27 @@ class ReleaseNotifyTests(unittest.TestCase):
         self.assertEqual("success", statuses["Deploy"])
         self.assertEqual("success", statuses["SDK"])
 
+    def test_aggregate_rejects_unknown_and_fully_skipped_required_groups(self):
+        jobs = self.representative_jobs()
+        for job in jobs:
+            if job["name"].startswith("SDK /"):
+                job["conclusion"] = "skipped"
+        with self.assertRaisesRegex(release_notify.NotifyError, "required SDK"):
+            release_notify.aggregate_jobs(jobs)
+
+        jobs = self.representative_jobs()
+        next(job for job in jobs if job["name"].startswith("CLI /"))[
+            "conclusion"
+        ] = "startup_failure"
+        with self.assertRaisesRegex(release_notify.NotifyError, "unknown CLI"):
+            release_notify.aggregate_jobs(jobs)
+
+        jobs = self.representative_jobs()
+        for job in jobs:
+            if job["name"].startswith("Deploy to "):
+                job["conclusion"] = "skipped"
+        self.assertEqual("success", release_notify.aggregate_jobs(jobs)["Deploy"])
+
     def test_missing_expected_group_fails_loudly(self):
         jobs = [job for job in self.representative_jobs() if not job["name"].startswith("SDK /")]
         with self.assertRaises(release_notify.NotifyError):
@@ -77,6 +100,27 @@ class ReleaseNotifyTests(unittest.TestCase):
         )
         with self.assertRaises(release_notify.NotifyError):
             failing.run_jobs("42")
+
+    def test_status_marker_inventory_paginates_and_validates_shape(self):
+        first_page = [
+            {"context": "unrelated", "state": "success"},
+            {"context": "release-notify/discord/v1", "state": "failure"},
+        ]
+        second_page = [
+            {"context": "release-notify/discord/v1", "state": "success"}
+        ]
+        http = self.FakeHttp(
+            [(200, json.dumps(first_page)), (200, json.dumps(second_page))]
+        )
+        github = release_notify.GitHub("owner/repo", "token", http)
+        self.assertTrue(github.marker_done("abc", "discord/v1", page_size=2))
+        self.assertIn("page=2", http.calls[1][1])
+
+        malformed = release_notify.GitHub(
+            "owner/repo", "token", self.FakeHttp([(200, '{"statuses":[]}')])
+        )
+        with self.assertRaisesRegex(release_notify.NotifyError, "not an array"):
+            malformed.marker_done("abc", "discord/v1")
 
     def test_discussion_target_resolves_runtime_ids_and_paginates(self):
         def page(nodes, has_next, cursor):
@@ -121,6 +165,11 @@ class ReleaseNotifyTests(unittest.TestCase):
             self.assertEqual("- stable detail", changes)
             self.assertEqual("1.2.3", version)
 
+        self.assertEqual(
+            ["1.2.3-beta.1", "1.2.3"],
+            release_notify.release_versions("1.2.3-beta.1"),
+        )
+
     def test_article_body_uses_prerelease_file_and_strips_outer_fence(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "release-1.2.3-beta.1.md"
@@ -142,6 +191,25 @@ class ReleaseNotifyTests(unittest.TestCase):
         self.assertIn("Unified Release workflow", content)
         self.assertIn("❌ Desktop", content)
         self.assertIn("truncated", content)
+
+        emoji_content = release_notify.discord_content(
+            "v1.2.3", "🚀" * 2000, statuses, "failure", "owner/repo"
+        )
+        self.assertLessEqual(release_notify.utf16_units(emoji_content), 2000)
+        self.assertIn("truncated", emoji_content)
+
+    def test_network_errors_redact_webhook_credentials(self):
+        webhook = "https://discord.com/api/webhooks/123/super-secret-token"
+        with mock.patch(
+            "urllib.request.urlopen",
+            side_effect=urllib.error.URLError("connection reset"),
+        ):
+            with self.assertRaises(release_notify.NotifyError) as raised:
+                release_notify.HttpClient().request("POST", webhook, payload={})
+        message = str(raised.exception)
+        self.assertIn("https://discord.com", message)
+        self.assertNotIn("123", message)
+        self.assertNotIn("super-secret-token", message)
 
     def test_bluesky_truncation_preserves_url_and_utf8_facet(self):
         url = "https://github.com/owner/repo/releases/tag/v1.2.3-beta.1"
