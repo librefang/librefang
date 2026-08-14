@@ -73,7 +73,7 @@ def _service_account_blob(*, with_jwt: bool = True, with_token: bool = False):
 
 def _set_env(*, sa_blob: str, spaces: str = "", port: str = "8090",
              account_id: str = "", api_base: str = "", bind_host: str = "",
-             verification_token: str = ""):
+             verification_token: str | None = "test-verification-token"):
     os.environ["GOOGLE_CHAT_SERVICE_ACCOUNT_JSON"] = sa_blob
     os.environ["GOOGLE_CHAT_SPACE_IDS"] = spaces
     os.environ["GOOGLE_CHAT_WEBHOOK_PORT"] = port
@@ -86,7 +86,7 @@ def _set_env(*, sa_blob: str, spaces: str = "", port: str = "8090",
         os.environ["GOOGLE_CHAT_BIND_HOST"] = bind_host
     else:
         os.environ.pop("GOOGLE_CHAT_BIND_HOST", None)
-    if verification_token:
+    if verification_token is not None:
         os.environ["GOOGLE_CHAT_VERIFICATION_TOKEN"] = verification_token
     else:
         os.environ.pop("GOOGLE_CHAT_VERIFICATION_TOKEN", None)
@@ -598,13 +598,12 @@ def test_bind_host_empty_string_falls_back_to_default():
     assert a._bind_host == gc.DEFAULT_BIND_HOST
 
 
-@pytest.mark.parametrize(
-    "host", ["0.0.0.0", "::", "192.0.2.10", "localhost"],
-)
-def test_non_loopback_bind_requires_verification_token(host):
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "0.0.0.0", "::"])
+def test_every_listener_requires_verification_token(host):
     _set_env(
         sa_blob=_service_account_blob(with_jwt=False, with_token=True),
         bind_host=host,
+        verification_token=None,
     )
     with pytest.raises(RuntimeError, match="VERIFICATION_TOKEN.*required"):
         gc.GoogleChatAdapter()
@@ -638,6 +637,7 @@ def test_verification_token_field_is_secret_and_advanced():
     )
     assert field["type"] == "secret"
     assert field["advanced"] is True
+    assert field["required"] is True
 
 
 # ---- shutdown lifecycle ------------------------------------------------
@@ -860,6 +860,7 @@ def test_webhook_handler_dedupes_redelivered_event():
     emitted: list[dict] = []
 
     payload = _msg_event(text="hi")
+    payload["token"] = a._verification_token
     # First delivery: emit fires + 200 OK returned to Google.
     status, _ = _post_to_webhook(a, payload, emit_target=emitted)
     assert status == 200
@@ -875,6 +876,7 @@ def test_webhook_handler_dedupes_redelivered_event():
 
     # A distinct message in the same space still emits.
     payload2 = _msg_event(text="round 2")
+    payload2["token"] = a._verification_token
     payload2["message"]["name"] = "spaces/AAAA/messages/M2"
     status, _ = _post_to_webhook(a, payload2, emit_target=emitted)
     assert status == 200
@@ -932,6 +934,7 @@ def test_webhook_handler_does_not_consume_dedupe_slot_for_filtered_events():
 
     # Event for a disallowed space → filtered out by `_parse_webhook_event`.
     blocked = _msg_event(text="hi", space_name="spaces/BBBB")
+    blocked["token"] = a._verification_token
     status, _ = _post_to_webhook(a, blocked, emit_target=emitted)
     assert status == 200
     assert emitted == []
@@ -940,7 +943,8 @@ def test_webhook_handler_does_not_consume_dedupe_slot_for_filtered_events():
 
     # Non-MESSAGE event → also filtered, also no _seen consumption.
     non_msg = {"type": "ADDED_TO_SPACE",
-               "space": {"name": "spaces/AAAA", "type": "ROOM"}}
+               "space": {"name": "spaces/AAAA", "type": "ROOM"},
+               "token": a._verification_token}
     status, _ = _post_to_webhook(a, non_msg, emit_target=emitted)
     assert status == 200
     assert emitted == []

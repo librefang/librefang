@@ -59,7 +59,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-import ipaddress
 import json
 import os
 import socketserver
@@ -106,16 +105,10 @@ WEBHOOK_MAX_BODY_BYTES = 1 * 1024 * 1024
 
 HTTP_TIMEOUT_SECS = 30
 
-# Default to a local reverse-proxy boundary. A non-loopback listener is
-# permitted only when every event carries a configured verification token.
+# Default to a local reverse-proxy boundary as defense in depth. Requests are
+# authenticated independently because a public reverse proxy still reaches
+# this listener through a loopback connection.
 DEFAULT_BIND_HOST = "127.0.0.1"
-
-
-def _is_loopback_host(host: str) -> bool:
-    try:
-        return ipaddress.ip_address(host.strip()).is_loopback
-    except ValueError:
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +430,7 @@ SCHEMA = Schema(
             "GOOGLE_CHAT_VERIFICATION_TOKEN",
             "Inbound event verification token",
             "secret",
+            required=True,
             advanced=True,
         ),
         Field(
@@ -489,13 +483,10 @@ class GoogleChatAdapter(SidecarAdapter):
         self._verification_token = os.environ.get(
             "GOOGLE_CHAT_VERIFICATION_TOKEN", "",
         ).strip()
-        if (
-            not _is_loopback_host(self._bind_host)
-            and not self._verification_token
-        ):
+        if not self._verification_token:
             raise RuntimeError(
-                "GOOGLE_CHAT_VERIFICATION_TOKEN is required when "
-                "GOOGLE_CHAT_BIND_HOST is not loopback"
+                "GOOGLE_CHAT_VERIFICATION_TOKEN is required for inbound "
+                "webhook authentication"
             )
         self.account_id = os.environ.get("GOOGLE_CHAT_ACCOUNT_ID") or None
 
