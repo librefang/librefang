@@ -9,12 +9,10 @@ import hmac
 import json
 import os
 import socket
-import time
 
 import pytest
 
-os.environ.setdefault("WEBHOOK_SECRET", "test-secret")
-from librefang.sidecar.adapters import webhook as wh  # noqa: E402
+from librefang.sidecar.adapters import webhook as wh
 
 
 @pytest.fixture(autouse=True)
@@ -31,6 +29,22 @@ def _public_example_dns(monkeypatch):
         return real_getaddrinfo(host, port, *args, **kwargs)
 
     monkeypatch.setattr(wh.socket, "getaddrinfo", _getaddrinfo)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_webhook_env(monkeypatch):
+    defaults = {
+        "WEBHOOK_SECRET": "test-secret",
+        "WEBHOOK_LISTEN_PORT": "",
+        "WEBHOOK_LISTEN_PATH": "",
+        "WEBHOOK_BIND_HOST": "",
+        "WEBHOOK_CALLBACK_URL": "",
+        "WEBHOOK_DELIVER_ONLY": "",
+        "WEBHOOK_DELIVER": "",
+        "WEBHOOK_ACCOUNT_ID": "",
+    }
+    for key, value in defaults.items():
+        monkeypatch.setenv(key, value)
 
 
 def _adapter(**env):
@@ -63,8 +77,8 @@ def test_default_env_construction():
     assert a.account_id is None
 
 
-def test_missing_secret_raises():
-    os.environ["WEBHOOK_SECRET"] = ""
+def test_missing_secret_raises(monkeypatch):
+    monkeypatch.setenv("WEBHOOK_SECRET", "")
     with pytest.raises(SystemExit):
         wh.WebhookAdapter()
 
@@ -619,15 +633,22 @@ def test_handle_webhook_body_empty_message_returns_200():
 
 def test_handle_webhook_body_replay_attack_with_old_timestamp():
     """A valid signature on a 10-minute-old request still rejects."""
+    now_secs = 1_000_000
     a = _adapter()
     body = json.dumps({"message": "old"}).encode("utf-8")
     sig = _sig(b"test-secret", body)
     # Simulate the request from 10 minutes ago — we send the
     # signature, but the timestamp header places it outside the
     # skew window.
-    old_ts_ms = (int(time.time()) - 600) * 1000
+    old_ts_ms = (now_secs - 600) * 1000
     emitted: list = []
-    status = a._handle_webhook_body(body, sig, str(old_ts_ms), lambda ev: emitted.append(ev))
+    status = a._handle_webhook_body(
+        body,
+        sig,
+        str(old_ts_ms),
+        emitted.append,
+        now_secs=now_secs,
+    )
     assert status == 403
     assert emitted == []
 
@@ -855,17 +876,21 @@ def test_send_text_429_retries_once(monkeypatch):
         (429, None, b"slow down", {"retry-after": "0"}),
         (200, {}, b"", {}),
     ]
-    calls: list = []
+    statuses: list = []
 
     def _fake_http(url, **kw):
-        calls.append(url)
-        return responses.pop(0)
+        del url, kw
+        if len(statuses) >= len(responses):
+            raise AssertionError("unexpected callback request after retry")
+        response = responses[len(statuses)]
+        statuses.append(response[0])
+        return response
 
     monkeypatch.setattr(wh, "_http_request", _fake_http)
     monkeypatch.setattr(wh, "_parse_retry_after", lambda h, **kw: 0.0)
     a = _adapter(WEBHOOK_CALLBACK_URL="https://example.com/in")
     a._send_text("u", "n", "hi")
-    assert len(calls) == 2
+    assert statuses == [429, 200]
 
 
 def test_send_text_non_2xx_raises(monkeypatch):
