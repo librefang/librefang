@@ -291,23 +291,35 @@ fn command_is_python_interpreter(command: &str) -> bool {
 fn has_real_sdk_installed(command: &str) -> bool {
     static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(guard) = cache.lock() {
-        if let Some(&v) = guard.get(command) {
-            return v;
-        }
+    probe_sdk_cached(cache, command, || {
+        Command::new(command)
+            .args(["-c", "import librefang.sidecar"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
+}
+
+fn probe_sdk_cached(
+    cache: &Mutex<HashMap<String, bool>>,
+    command: &str,
+    probe: impl FnOnce() -> bool,
+) -> bool {
+    let mut guard = cache.lock().unwrap_or_else(|poisoned| {
+        warn!("embedded SDK probe cache lock poisoned; recovering inner state");
+        cache.clear_poison();
+        poisoned.into_inner()
+    });
+    if let Some(&installed) = guard.get(command) {
+        return installed;
     }
-    let probed = Command::new(command)
-        .args(["-c", "import librefang.sidecar"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if let Ok(mut guard) = cache.lock() {
-        guard.insert(command.to_string(), probed);
-    }
-    probed
+
+    let installed = probe();
+    guard.insert(command.to_string(), installed);
+    installed
 }
 
 /// Single platform-correct PATH separator for `PYTHONPATH` composition.
@@ -373,6 +385,8 @@ pub fn pythonpath_with_embedded(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
 
     #[test]
@@ -615,5 +629,62 @@ mod tests {
             !tmp.path().join("sidecar-python").exists(),
             "non-python command must not trigger extraction"
         );
+    }
+
+    #[test]
+    fn sdk_probe_cache_coalesces_concurrent_misses() {
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let probes = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(8));
+        let mut threads = Vec::new();
+
+        for _ in 0..8 {
+            let cache = cache.clone();
+            let probes = probes.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                probe_sdk_cached(&cache, "/test/python3", || {
+                    probes.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    true
+                })
+            }));
+        }
+
+        for thread in threads {
+            assert!(thread.join().unwrap());
+        }
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sdk_probe_cache_recovers_poison_and_preserves_entries() {
+        let cache = Arc::new(Mutex::new(HashMap::from([(
+            "/cached/python3".to_string(),
+            true,
+        )])));
+        let poisoned_cache = cache.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poisoned_cache.lock().unwrap();
+            panic!("poison SDK probe cache");
+        });
+        assert!(cache.is_poisoned());
+
+        let probes = AtomicUsize::new(0);
+        assert!(probe_sdk_cached(&cache, "/cached/python3", || {
+            probes.fetch_add(1, Ordering::SeqCst);
+            false
+        }));
+        assert_eq!(probes.load(Ordering::SeqCst), 0);
+        assert!(!cache.is_poisoned());
+
+        assert!(!probe_sdk_cached(&cache, "/new/python3", || {
+            probes.fetch_add(1, Ordering::SeqCst);
+            false
+        }));
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.lock().unwrap().len(), 2);
     }
 }
