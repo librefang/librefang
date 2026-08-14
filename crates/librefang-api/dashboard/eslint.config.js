@@ -145,6 +145,10 @@ export default [
       // already covered by tsc with `noFallthroughCasesInSwitch`.
       "no-case-declarations": "off",
 
+      // Hook ordering is a correctness invariant. The previous ChatPage
+      // violation has been removed, so regressions fail lint again.
+      "react-hooks/rules-of-hooks": "error",
+
       // ── Demoted-to-warn for the bootstrap PR (follow-up issue) ────
       // These have small, real baselines we want to clean up
       // incrementally rather than block the initial CI gate on.
@@ -157,7 +161,6 @@ export default [
       //     describing real-world CSV pitfalls.
       //   * `no-control-regex` — `TerminalTabs.tsx` ANSI / xterm
       //     handling legitimately matches control characters.
-      "react-hooks/rules-of-hooks": "error",
       "@typescript-eslint/no-unused-expressions": "warn",
       "no-irregular-whitespace": "warn",
       "no-control-regex": "warn",
