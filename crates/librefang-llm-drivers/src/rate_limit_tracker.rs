@@ -450,7 +450,7 @@ fn split_sec_and_tz(s: &str) -> (&str, &str) {
 /// signed offset in seconds.  Returns `None` for unrecognised formats.
 fn parse_tz_offset(s: &str) -> Option<f64> {
     let s = s.trim();
-    if s.is_empty() || s.eq_ignore_ascii_case("z") {
+    if s.eq_ignore_ascii_case("z") {
         return Some(0.0);
     }
     if s.is_ascii()
@@ -953,6 +953,7 @@ mod tests {
             "2026-01-22T12:34:56+24:00",
             "2026-01-22T12:34:56+00:60",
             "2026-01-22T12:34:56+00:00junk",
+            "2026-01-22T12:34:56",
             "2026-02-29T12:34:56Z",
             "2026-04-31T12:34:56Z",
         ] {
