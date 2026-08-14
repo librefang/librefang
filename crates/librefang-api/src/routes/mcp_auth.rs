@@ -602,7 +602,8 @@ pub async fn auth_start(
     }
     if let Some(ref cid) = client_id {
         if let Err(e) = store("client_id", cid) {
-            tracing::warn!(error = %e, "Failed to store client_id in vault");
+            tracing::error!(error = %e, "Failed to store client_id in vault");
+            return ApiErrorResponse::internal_scrub(e).into_json_tuple();
         }
     }
 
