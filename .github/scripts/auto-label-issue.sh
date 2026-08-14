@@ -51,7 +51,7 @@ case "$title_lower" in
     labels="$labels,enhancement"; matched=1 ;;
   fix:*|'fix('*|fix!:*)
     labels="$labels,bug"; matched=1 ;;
-  perf:*|'perf('*)
+  perf:*|'perf('*|perf!:*)
     labels="$labels,enhancement"; matched=1 ;;
   docs:*|doc:*|'docs('*)
     labels="$labels,area/docs"; matched=1 ;;
@@ -98,22 +98,31 @@ add_label_if_match 'translat|i18n|chinese|japanese|korean' 'no-rust-required'
 # too short, flag it so maintainers can ask for details.
 is_bug=0
 case "$title_lower" in
-  fix:*|'fix('*|*bug*|*broken*|*crash*|*error*|*fail*|*wrong*)
+  fix:*|'fix('*)
     is_bug=1 ;;
 esac
+if ! printf '%s' "$title_lower" \
+  | grep -qE '^(add|improve|enhance|feature|support|document|refactor)([^[:alnum:]_]|$)'; then
+  if printf '%s' "$title_lower" \
+    | grep -qE '(^|[^[:alnum:]_])(bug|broken|crash|error|fail|wrong)([^[:alnum:]_]|$)'; then
+    is_bug=1
+  fi
+fi
 
 if [ "$is_bug" -eq 1 ] && [ -n "${3:-}" ] && [ -f "${3}" ]; then
   body_len=$(wc -c < "$3" | tr -d ' ')
-  has_version=$(grep -ciE 'version|v[0-9]+\.[0-9]+|beta[0-9]' "$3" 2>/dev/null || true)
-  has_steps=$(grep -ciE 'steps|reproduce|repro|how to|expected|actual' "$3" 2>/dev/null || true)
-  if [ "$body_len" -lt 50 ] || { [ "${has_version:-0}" -eq 0 ] && [ "${has_steps:-0}" -eq 0 ]; }; then
+  # Use a small language-neutral floor. Keyword scoring made complete reports
+  # written outside English look empty and hid real grep failures behind
+  # `|| true`. Fifty bytes catches blank/thin submissions without assuming a
+  # language or issue-template vocabulary.
+  if [ "$body_len" -lt 50 ]; then
     labels="$labels,needs-info"
   fi
 fi
 
 # ── Fallback ────────────────────────────────────────────────────────
 if [ "$matched" -eq 0 ]; then
-  labels="needs-triage"
+  labels="$labels,needs-triage"
 fi
 
 # ── Strip leading comma + dedupe + drop empties ─────────────────────
