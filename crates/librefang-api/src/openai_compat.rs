@@ -16,7 +16,9 @@ use base64::Engine as _;
 use librefang_kernel::kernel_handle::prelude::*;
 use librefang_kernel::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
-use librefang_types::message::{ContentBlock, Message, MessageContent, Role, StopReason};
+use librefang_types::message::{
+    validate_image, ContentBlock, Message, MessageContent, Role, StopReason,
+};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -193,7 +195,7 @@ fn parse_image_data_uri(url: &str) -> Option<ContentBlock> {
     let rest = url.strip_prefix("data:")?;
     let (metadata, data) = rest.split_once(',')?;
     let media_type = metadata.strip_suffix(";base64")?;
-    if !media_type.starts_with("image/") || media_type.len() == "image/".len() || data.is_empty() {
+    if data.is_empty() || validate_image(media_type, data).is_err() {
         return None;
     }
     base64::engine::general_purpose::STANDARD
@@ -821,6 +823,8 @@ mod tests {
 
         assert!(parse_image_data_uri("data:image/png,raw-bytes").is_none());
         assert!(parse_image_data_uri("data:image/png;base64,not!base64").is_none());
+        assert!(parse_image_data_uri("data:image/svg+xml;base64,PHN2Zz4=").is_none());
+        assert!(parse_image_data_uri("data:image/png;charset=utf-8;base64,AA==").is_none());
         assert!(parse_image_data_uri("data:text/plain;base64,dGV4dA==").is_none());
         assert!(parse_image_data_uri("https://example.com/image.png").is_none());
     }
