@@ -15,6 +15,11 @@ name: Main Build Alert
 # The success branch below therefore requires that at least one Rust test lane actually ran and passed on the commit before it closes anything.
 
 on:
+  pull_request:
+    paths:
+      - '.github/scripts/main-build-alert.js'
+      - '.github/scripts/tests/main-build-alert.test.js'
+      - '.github/workflows/main-build-alert.yml'
   workflow_run:
     workflows: ["CI"]
     types: [completed]
@@ -22,21 +27,36 @@ on:
 
 permissions:
   contents: read
-  issues: write
-
-concurrency:
-  group: main-build-alert
-  cancel-in-progress: false
 
 jobs:
+  test:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Test main build alert rendering
+        run: node .github/scripts/tests/main-build-alert.test.js
+
   notify:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: main-build-alert
+      cancel-in-progress: false
     # Only act on main pushes; ignore PR check completions (those still
     # arrive via the same workflow_run event).
-    if: ${{ github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' }}
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
 
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         env:

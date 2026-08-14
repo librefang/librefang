@@ -19,5 +19,13 @@ assert.equal(escaped.includes('@maintainers'), false);
 assert.equal(escaped.includes('[fake]'), false);
 assert.equal(escaped.includes('`code`'), false);
 assert.equal(escapeInlineCode('run `danger` for @team'), "run 'danger' for @\u200bteam");
+assert.equal(
+  escapeMarkdownText('job\n- [forged](https://example.test)\r@team'),
+  'job \\- \\[forged\\]\\(https://example\\.test\\) @\u200bteam',
+);
+assert.equal(
+  escapeInlineCode('step\n```\r@team'),
+  "step ''' @\u200bteam",
+);
 
 console.log('main-build-alert tests passed');
