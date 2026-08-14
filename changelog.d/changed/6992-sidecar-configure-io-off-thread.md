@@ -1,0 +1,4 @@
+`POST /api/channels/sidecar/{name}/configure` ran the `include`-shadow check, the `secrets.env` membership read, secret/config writes, and the `config.toml` upsert synchronously on the async worker thread handling the request.
+  All of that now runs as a single `spawn_blocking` task on Tokio's blocking pool, still serialized under the same `config_write_lock` that gates `POST /api/config/set` and the legacy `configure_channel` handler.
+  Moving the `include`-shadow check inside that lock (previously it ran before the lock was taken) closes a check/write race where a concurrent writer could add a conflicting `include` between the check and the write.
+  Conflict and internal-error responses are unchanged; a join failure on the blocking task is now caught and returned as a scrubbed internal error instead of propagating as an unhandled panic (#6992) (@houko)
