@@ -70,10 +70,11 @@ search_routes() {
   local pattern=$1 status
   set +e
   if command -v rg >/dev/null 2>&1; then
-    rg --no-heading --line-number "$pattern" "$ROUTES_DIR"
+    rg --no-heading --line-number --no-ignore --hidden --text \
+      "$pattern" "$ROUTES_DIR"
     status=$?
   else
-    grep -RHnE "$pattern" "$ROUTES_DIR"
+    grep -rHnaE "$pattern" "$ROUTES_DIR"
     status=$?
   fi
   set -e
