@@ -12,8 +12,8 @@ import type { SessionListItem } from "../api";
  * cap and returns the full agent-scoped history. See issue #4294.
  *
  * Returns `undefined` for an empty list. Sessions without a valid `created_at`
- * sort as epoch 0 — a single such session is still returned, but any session
- * with a real timestamp wins over it.
+ * sort before every valid timestamp — a single such session is still returned,
+ * but any session with a real timestamp wins over it.
  */
 export function pickLatestSessionId(
   sessions: ReadonlyArray<SessionListItem> | undefined,
@@ -21,8 +21,8 @@ export function pickLatestSessionId(
   if (!sessions || sessions.length === 0) return undefined;
   let best: { session_id: string; ts: number } | undefined;
   for (const s of sessions) {
-    const parsed = s.created_at ? Date.parse(s.created_at) : 0;
-    const ts = Number.isNaN(parsed) ? 0 : parsed;
+    const parsed = s.created_at ? Date.parse(s.created_at) : Number.NaN;
+    const ts = Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
     if (!best || ts > best.ts) best = { session_id: s.session_id, ts };
   }
   return best?.session_id;
