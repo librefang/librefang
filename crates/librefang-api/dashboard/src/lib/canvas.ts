@@ -14,16 +14,19 @@ import type { Edge, Node } from "@xyflow/react";
  * context-menu delete must do the same thing — otherwise orphaned edges
  * remain in graph state pointing at a node that no longer exists.
  *
- * Returns the new node/edge arrays; callers are responsible for any
- * surrounding `pushHistory()` so undo works.
+ * Returns new node/edge arrays when anything is removed. Unknown node ids
+ * preserve both input references so callers can recognize a no-op.
  */
 export function removeNodeAndCascadeEdges<N extends Node, E extends Edge>(
   nodes: readonly N[],
   edges: readonly E[],
   nodeId: string,
 ): { nodes: N[]; edges: E[] } {
+  const nextNodes = nodes.filter((n) => n.id !== nodeId);
+  const nextEdges = edges.filter((e) => e.source !== nodeId && e.target !== nodeId);
+
   return {
-    nodes: nodes.filter((n) => n.id !== nodeId),
-    edges: edges.filter((e) => e.source !== nodeId && e.target !== nodeId),
+    nodes: nextNodes.length === nodes.length ? (nodes as N[]) : nextNodes,
+    edges: nextEdges.length === edges.length ? (edges as E[]) : nextEdges,
   };
 }

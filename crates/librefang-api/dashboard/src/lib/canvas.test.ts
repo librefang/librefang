@@ -71,6 +71,8 @@ describe("removeNodeAndCascadeEdges", () => {
     const next = removeNodeAndCascadeEdges(nodes, edges, "missing");
     expect(next.nodes.map((n) => n.id)).toEqual(["a", "b"]);
     expect(next.edges.map((e) => e.id)).toEqual(["e1"]);
+    expect(next.nodes).toBe(nodes);
+    expect(next.edges).toBe(edges);
   });
 
   it("returns new arrays without mutating the inputs (so a prior snapshot survives for undo)", () => {

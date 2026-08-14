@@ -1,0 +1,1 @@
+- Avoid recording canvas undo history or reallocating graph state when a stale context-menu target is deleted. (@xiaomo)
