@@ -1,0 +1,1 @@
+- Recover and serialize the embedded SDK probe cache so concurrent sidecar starts issue at most one interpreter probe per command, including after a prior lock panic. (@xiaomo)
