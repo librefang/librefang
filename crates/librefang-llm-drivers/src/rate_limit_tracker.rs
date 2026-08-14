@@ -323,33 +323,13 @@ impl RateLimitSnapshot {
 ///   as an ISO 8601 datetime.
 fn parse_reset_value(s: &str) -> Option<f64> {
     // Plain numeric seconds
-    if let Ok(v) = s.parse::<f64>() {
+    if let Some(v) = parse_nonnegative_decimal(s) {
         return Some(v);
     }
 
     // ISO 8601 duration — minimal subset: PT[Nh][Nm][Ns] (no date part)
-    if let Some(rest) = s.strip_prefix("PT").or_else(|| s.strip_prefix("pt")) {
-        let mut secs = 0.0f64;
-        let mut current = String::new();
-        for ch in rest.chars() {
-            match ch {
-                '0'..='9' | '.' => current.push(ch),
-                'H' | 'h' => {
-                    secs += current.parse::<f64>().unwrap_or(0.0) * 3600.0;
-                    current.clear();
-                }
-                'M' | 'm' => {
-                    secs += current.parse::<f64>().unwrap_or(0.0) * 60.0;
-                    current.clear();
-                }
-                'S' | 's' => {
-                    secs += current.parse::<f64>().unwrap_or(0.0);
-                    current.clear();
-                }
-                _ => {}
-            }
-        }
-        return Some(secs);
+    if s.starts_with("PT") || s.starts_with("pt") {
+        return parse_iso8601_duration(s);
     }
 
     // ISO 8601 datetime or RFC 7231 HTTP-date: try to parse as a point in time
@@ -359,6 +339,81 @@ fn parse_reset_value(s: &str) -> Option<f64> {
     }
 
     None
+}
+
+fn parse_nonnegative_decimal(s: &str) -> Option<f64> {
+    if s.is_empty() || s.starts_with('.') || s.ends_with('.') {
+        return None;
+    }
+    let mut dots = 0;
+    for byte in s.bytes() {
+        match byte {
+            b'0'..=b'9' => {}
+            b'.' if dots == 0 => dots += 1,
+            _ => return None,
+        }
+    }
+    let value: f64 = s.parse().ok()?;
+    value.is_finite().then_some(value)
+}
+
+fn parse_iso8601_duration(s: &str) -> Option<f64> {
+    let rest = s.strip_prefix("PT").or_else(|| s.strip_prefix("pt"))?;
+    if rest.is_empty() {
+        return None;
+    }
+
+    let mut total = 0.0;
+    let mut current = String::new();
+    let mut last_rank = 0;
+    let mut components = 0;
+    let mut fractional_component_seen = false;
+
+    for ch in rest.chars() {
+        match ch {
+            '0'..='9' => {
+                if fractional_component_seen {
+                    return None;
+                }
+                current.push(ch);
+            }
+            '.' => {
+                if fractional_component_seen || current.is_empty() || current.contains('.') {
+                    return None;
+                }
+                current.push(ch);
+            }
+            'H' | 'h' | 'M' | 'm' | 'S' | 's' => {
+                let rank = match ch.to_ascii_uppercase() {
+                    'H' => 1,
+                    'M' => 2,
+                    'S' => 3,
+                    _ => unreachable!(),
+                };
+                if rank <= last_rank {
+                    return None;
+                }
+                let value = parse_nonnegative_decimal(&current)?;
+                let multiplier = match rank {
+                    1 => 3600.0,
+                    2 => 60.0,
+                    3 => 1.0,
+                    _ => unreachable!(),
+                };
+                total += value * multiplier;
+                if !total.is_finite() {
+                    return None;
+                }
+                fractional_component_seen = current.contains('.');
+                current.clear();
+                last_rank = rank;
+                components += 1;
+            }
+            _ => return None,
+        }
+    }
+
+    (components > 0 && current.is_empty()).then_some(total)
 }
 
 /// Attempt to parse `s` as an absolute datetime (ISO 8601 or RFC 7231) and
@@ -503,38 +558,44 @@ fn days_since_epoch(year: i64, month: i64, day: i64) -> Option<i64> {
 }
 
 /// Parse an RFC 7231 HTTP-date to a Unix timestamp.
-/// Format: "Thu, 01 Jan 2026 12:00:00 GMT"
-/// Returns `None` if the string doesn't look like an HTTP-date.
+/// Format: "Thu, 01 Jan 2026 12:00:00 GMT".
+/// Returns `None` unless the value is a complete IMF-fixdate.
 fn parse_http_date_to_unix(s: &str) -> Option<f64> {
-    // Expected format after optional weekday+comma: "DD Mon YYYY HH:MM:SS GMT"
-    // Strip optional "DDD, " prefix
-    let s = if let Some(pos) = s.find(',') {
-        s[pos + 1..].trim()
-    } else {
-        s.trim()
-    };
-
-    // Now expect: "DD Mon YYYY HH:MM:SS GMT"
-    let parts: Vec<&str> = s.splitn(5, ' ').collect();
-    if parts.len() < 4 {
+    if s.len() != 29 || !s.is_ascii() {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    if !matches!(
+        &s[0..3],
+        "Mon" | "Tue" | "Wed" | "Thu" | "Fri" | "Sat" | "Sun"
+    ) || bytes[3] != b','
+        || bytes[4] != b' '
+        || bytes[7] != b' '
+        || bytes[11] != b' '
+        || bytes[16] != b' '
+        || bytes[19] != b':'
+        || bytes[22] != b':'
+        || bytes[25] != b' '
+        || &s[26..29] != "GMT"
+        || [5, 6, 12, 13, 14, 15, 17, 18, 20, 21, 23, 24]
+            .into_iter()
+            .any(|index| !bytes[index].is_ascii_digit())
+    {
         return None;
     }
 
-    let day: i64 = parts[0].parse().ok()?;
-    let month = month_name_to_num(parts[1])?;
-    let year: i64 = parts[2].parse().ok()?;
-
-    // Time part: "HH:MM:SS"
-    let time_parts: Vec<&str> = parts[3].splitn(3, ':').collect();
-    if time_parts.len() < 3 {
+    let day: i64 = s[5..7].parse().ok()?;
+    let month = month_name_to_num(&s[8..11])?;
+    let year: i64 = s[12..16].parse().ok()?;
+    let hour: i64 = s[17..19].parse().ok()?;
+    let minute: i64 = s[20..22].parse().ok()?;
+    let second: i64 = s[23..25].parse().ok()?;
+    if hour > 23 || minute > 59 || second > 59 {
         return None;
     }
-    let hour: f64 = time_parts[0].parse().ok()?;
-    let minute: f64 = time_parts[1].parse().ok()?;
-    let sec: f64 = time_parts[2].trim_end_matches(" GMT").parse().ok()?;
 
     let days = days_since_epoch(year, month, day)?;
-    Some(days as f64 * 86400.0 + hour * 3600.0 + minute * 60.0 + sec)
+    Some((days * 86400 + hour * 3600 + minute * 60 + second) as f64)
 }
 
 /// Convert a 3-letter English month abbreviation to its 1-based month number.
@@ -936,8 +997,38 @@ mod tests {
 
     #[test]
     fn test_parse_reset_value_unrecognised_returns_none() {
-        assert!(parse_reset_value("not-a-date").is_none());
-        assert!(parse_reset_value("").is_none());
+        for value in [
+            "not-a-date",
+            "",
+            "NaN",
+            "inf",
+            "-1",
+            "1e3",
+            "PT",
+            "PTgarbage",
+            "PT1Hgarbage",
+            "PT1.2.3S",
+            "PT1H2",
+            "PT1.5H2M",
+        ] {
+            assert!(parse_reset_value(value).is_none(), "{value}");
+        }
+    }
+
+    #[test]
+    fn test_http_date_parser_rejects_partial_and_out_of_range_values() {
+        for value in [
+            "01 Jan 2099 00:00:00 GMT",
+            "Anything, 01 Jan 2099 00:00:00 GMT",
+            "Thu, 01 Jan 2099 00:00:00",
+            "Thu, 01 Jan 2099 00:00:00 UTC",
+            "Thu, 01 Jan 2099 24:00:00 GMT",
+            "Thu, 01 Jan 2099 00:60:00 GMT",
+            "Thu, 01 Jan 2099 00:00:60 GMT",
+            "Thu, 29 Feb 2099 00:00:00 GMT",
+        ] {
+            assert!(parse_http_date_to_unix(value).is_none(), "{value}");
+        }
     }
 
     #[test]
