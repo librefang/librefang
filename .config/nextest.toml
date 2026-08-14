@@ -1,3 +1,7 @@
 [profile.default]
 # Show immediately which tests fail
 failure-output = "immediate"
+
+[profile.ci]
+# Aggregate concurrent failures at the end so CI logs remain readable.
+failure-output = "final"
