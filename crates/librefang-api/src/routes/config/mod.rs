@@ -110,7 +110,6 @@ async fn current_process_rss_mb() -> Option<u64> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         tokio::process::Command::new("tasklist")
             .args([
