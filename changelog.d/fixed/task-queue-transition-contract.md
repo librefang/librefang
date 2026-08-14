@@ -1,1 +1,1 @@
-Prevent active tasks from being reset to pending, report task-list totals before result limits, distinguish missing tasks from retry conflicts, bind HTTP provenance to authenticated callers, and warn on unknown task statuses. (#7163) (@xiaomo)
+Enforce task transition and provenance contracts, prevent late completion from reviving cancelled work, and make dashboard queue actions consistent, accessible, and failure-visible. (#7163) (@xiaomo)

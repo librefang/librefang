@@ -1177,11 +1177,11 @@ impl MemorySubstrate {
             let db = conn.get().map_err(LibreFangError::memory)?;
             // `finished_at` is the unix-epoch column the retention sweep reads (#3466).
             let rows = db.execute(
-                "UPDATE task_queue SET status = 'completed', result = ?2, completed_at = ?3, finished_at = ?4, claimed_at = NULL WHERE id = ?1",
+                "UPDATE task_queue SET status = 'completed', result = ?2, completed_at = ?3, finished_at = ?4, claimed_at = NULL WHERE id = ?1 AND status = 'in_progress'",
                 rusqlite::params![task_id, result, now, now_unix],
             ).map_err(LibreFangError::memory)?;
             if rows == 0 {
-                return Err(LibreFangError::Internal(format!("Task not found: {task_id}")));
+                return Err(LibreFangError::Internal(format!("Task not active: {task_id}")));
             }
             Ok(())
         })
@@ -2391,6 +2391,31 @@ mod tests {
             finished_at.is_some(),
             "task_complete must stamp finished_at"
         );
+    }
+
+    #[tokio::test]
+    async fn test_task_complete_cannot_revive_cancelled_claim() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let task_id = substrate
+            .task_post("t", "d", Some("worker"), None)
+            .await
+            .unwrap();
+        substrate
+            .task_claim("worker", Some("worker"))
+            .await
+            .unwrap();
+        substrate
+            .task_update_status(&task_id, "cancelled")
+            .await
+            .unwrap();
+
+        assert!(substrate
+            .task_complete(&task_id, "late result")
+            .await
+            .is_err());
+        let task = substrate.task_get(&task_id).await.unwrap().unwrap();
+        assert_eq!(task["status"], "cancelled");
+        assert_ne!(task["result"], "late result");
     }
 
     #[tokio::test]
