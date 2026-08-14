@@ -980,4 +980,32 @@ mod tests {
         assert!(matches!(result, Err(RestoreError::InvalidArchive(_))));
         assert!(!outside_dir.join("escaped.txt").exists());
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_rejects_leaf_symlink_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("leaf-escape.zip");
+        let restore_dir = temp.path().join("restore");
+        let outside_file = temp.path().join("outside.txt");
+        std::fs::create_dir(&restore_dir).unwrap();
+        std::fs::write(&outside_file, b"keep me").unwrap();
+        std::os::unix::fs::symlink(&outside_file, restore_dir.join("config.toml")).unwrap();
+
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("manifest.json", options).unwrap();
+        zip.write_all(
+            br#"{"version":1,"created_at":"now","hostname":"host","librefang_version":"test","components":["config"]}"#,
+        )
+        .unwrap();
+        zip.start_file("config.toml", options).unwrap();
+        zip.write_all(b"replaced").unwrap();
+        zip.finish().unwrap();
+
+        let result = restore_backup_blocking(archive_path, restore_dir);
+        assert!(matches!(result, Err(RestoreError::InvalidArchive(_))));
+        assert_eq!(std::fs::read(&outside_file).unwrap(), b"keep me");
+    }
 }
