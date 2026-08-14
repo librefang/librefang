@@ -1,1 +1,1 @@
-Keep browser connection credentials in memory, propagate keyring failures consistently, and distinguish QR scan outcomes. (#7311) (@xiaomo)
+Keep browser connection credentials in memory, propagate keyring failures consistently, distinguish QR scan outcomes, and reject malformed pairing expiries without interrupting user edits or leaking navigation timers. (#7311) (@xiaomo)
