@@ -1,0 +1,1 @@
+Prevent the resolved-issue reconciler from treating negated closing keywords as fixes, validate its lookback, serialize runs, and make live retries idempotent without blocking promotion from dry-run. (#7274) (@houko)
