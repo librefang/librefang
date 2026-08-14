@@ -118,8 +118,16 @@ def test_missing_auth_paths_raises():
 def test_pre_supplied_token_path_constructs():
     _set_env(sa_blob=_service_account_blob(with_jwt=False, with_token=True))
     a = gc.GoogleChatAdapter()
-    # Pre-supplied path seeds the cache so _get_access_token doesn't
-    # need to sign anything.
+    # Pre-supplied tokens bypass the expiring JWT cache.
+    assert a._get_access_token() == "pre-supplied-token"
+    assert a._token_cache.get() is None
+
+
+def test_pre_supplied_token_does_not_expire_with_jwt_lifetime(monkeypatch):
+    _set_env(sa_blob=_service_account_blob(with_jwt=False, with_token=True))
+    a = gc.GoogleChatAdapter()
+    monkeypatch.setattr(gc.time, "time", lambda: 10**12)
+    a._token_cache.clear()
     assert a._get_access_token() == "pre-supplied-token"
 
 
@@ -377,12 +385,13 @@ def test_send_text_chunks_oversize_payload(monkeypatch):
     assert sum(len(p["text"]) for p in payloads) == len(text)
 
 
-def test_send_text_401_clears_token_cache(monkeypatch):
+def test_send_text_401_clears_jwt_cache_but_keeps_static_token(monkeypatch):
     _set_env(
         sa_blob=_service_account_blob(with_jwt=False, with_token=True),
     )
     a = gc.GoogleChatAdapter()
-    assert a._token_cache.get() == "pre-supplied-token"
+    a._token_cache.set("stale-jwt-token", 3600)
+    assert a._token_cache.get() == "stale-jwt-token"
 
     def fake_urlopen(req, timeout=None):
         import urllib.error
@@ -395,8 +404,9 @@ def test_send_text_401_clears_token_cache(monkeypatch):
     monkeypatch.setattr(gc.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(RuntimeError, match="Google Chat API error 401"):
         a._send_text("spaces/AAAA", "hi")
-    # 401 should have cleared the cache so the next send re-runs auth.
+    # Static tokens bypass the JWT cache and remain operator-managed.
     assert a._token_cache.get() is None
+    assert a._get_access_token() == "pre-supplied-token"
 
 
 # ---- JWT signing end-to-end against the test PEM ----------------------

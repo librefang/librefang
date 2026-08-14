@@ -493,12 +493,6 @@ class GoogleChatAdapter(SidecarAdapter):
             )
 
         self._token_cache = _TokenCache()
-        # Seed the cache with the pre-supplied access_token if that's
-        # the only auth source — keeps the JWT-less path simple.
-        if self._sa.access_token and self._rsa_key is None:
-            self._token_cache.set(
-                self._sa.access_token, DEFAULT_TOKEN_LIFETIME_SECS
-            )
 
         # Server handle for clean shutdown.
         self._httpd: Optional[socketserver.ThreadingTCPServer] = None
@@ -515,17 +509,16 @@ class GoogleChatAdapter(SidecarAdapter):
     # ---- Token resolution ------------------------------------------
 
     def _get_access_token(self) -> str:
+        # Operator-supplied tokens have no expiry metadata or refresh
+        # credentials. Trust the configured value until the operator rotates
+        # it instead of inventing the JWT token lifetime for this path.
+        if self._rsa_key is None and self._sa.access_token:
+            return self._sa.access_token
         cached = self._token_cache.get()
         if cached:
             return cached
         if self._rsa_key is None:
-            # No JWT auth configured AND the pre-supplied token expired
-            # (only happens after DEFAULT_TOKEN_LIFETIME_SECS). The
-            # pre-supplied path doesn't refresh — surface clearly.
-            raise RuntimeError(
-                "pre-supplied access_token expired and no JWT auth "
-                "configured to refresh it"
-            )
+            raise RuntimeError("Google Chat has no usable authentication")
         n, d = self._rsa_key
         now = int(time.time())
         claims = {
@@ -589,8 +582,8 @@ class GoogleChatAdapter(SidecarAdapter):
                 self._send_chunk(url, token, chunk, retry_429=False)
                 return
             text_body = (e.read() or b"").decode("utf-8", errors="replace")
-            # 401 likely means the cached token went stale early —
-            # clear and let the next send retry from JWT auth.
+            # A JWT token may have gone stale early. Static tokens bypass the
+            # cache and remain operator-managed, so this is harmless there.
             if e.code == 401:
                 self._token_cache.clear()
             raise RuntimeError(
