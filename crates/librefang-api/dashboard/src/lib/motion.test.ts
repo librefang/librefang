@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { fadeInScale, fadeInUp, staggerItem } from "./motion";
+import { fadeInScale, fadeInUp, slideInRight, staggerItem } from "./motion";
 
 describe("dashboard motion variants", () => {
-  it.each([fadeInScale, fadeInUp, staggerItem])(
+  it.each([fadeInScale, fadeInUp, slideInRight, staggerItem])(
     "avoids paint-heavy filter animation",
     (variant) => {
       for (const state of Object.values(variant)) {
