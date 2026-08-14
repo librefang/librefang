@@ -132,7 +132,7 @@ export interface MediaVideoResult {
 }
 
 export interface MediaVideoStatus {
-  status: string;
+  status: "submitted" | "pending" | "queued" | "processing" | "completed" | "failed";
   task_id?: string;
   result?: MediaVideoResult;
   error?: string;
