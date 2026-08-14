@@ -22,7 +22,7 @@
 //! * PTY support.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use tracing::{debug, warn};
@@ -190,6 +190,14 @@ impl ProcessRegistry {
         }
     }
 
+    fn lock_inner(&self) -> MutexGuard<'_, RegistryInner> {
+        self.inner.lock().unwrap_or_else(|poisoned| {
+            warn!("process_registry lock poisoned; recovering inner state");
+            self.inner.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+
     // ------------------------------------------------------------------
     // Write side
     // ------------------------------------------------------------------
@@ -200,14 +208,14 @@ impl ProcessRegistry {
     /// the old entry is silently overwritten.
     pub fn register(&self, pid: u32, command: String, session_id: Option<String>) {
         let entry = ProcessEntry::new(pid, command.clone(), session_id);
-        let mut inner = self.inner.lock().expect("process_registry lock poisoned");
+        let mut inner = self.lock_inner();
         inner.entries.insert(pid, entry);
         debug!(pid, command = %command, "process_registry: registered");
     }
 
     /// Append output bytes for `pid`.  Silently ignored if the pid is unknown.
     pub fn append_output(&self, pid: u32, chunk: &str) {
-        let mut inner = self.inner.lock().expect("process_registry lock poisoned");
+        let mut inner = self.lock_inner();
         if let Some(entry) = inner.entries.get_mut(&pid) {
             entry.append_output(chunk);
         }
@@ -215,7 +223,7 @@ impl ProcessRegistry {
 
     /// Mark `pid` as finished with `exit_code`.  Silently ignored if unknown.
     pub fn mark_finished(&self, pid: u32, exit_code: i32) {
-        let mut inner = self.inner.lock().expect("process_registry lock poisoned");
+        let mut inner = self.lock_inner();
         if let Some(entry) = inner.entries.get_mut(&pid) {
             entry.status = ProcessStatus::Finished(exit_code);
             entry.finished_at = Some(Instant::now());
@@ -237,7 +245,7 @@ impl ProcessRegistry {
     ///
     /// Returns `None` if the pid is not tracked.
     pub fn get_output(&self, pid: u32) -> Option<String> {
-        let inner = self.inner.lock().expect("process_registry lock poisoned");
+        let inner = self.lock_inner();
         inner.entries.get(&pid).map(|e| e.output().to_owned())
     }
 
@@ -245,13 +253,13 @@ impl ProcessRegistry {
     ///
     /// Returns `None` if the pid is not tracked.
     pub fn get_status(&self, pid: u32) -> Option<ProcessStatus> {
-        let inner = self.inner.lock().expect("process_registry lock poisoned");
+        let inner = self.lock_inner();
         inner.entries.get(&pid).map(|e| e.status.clone())
     }
 
     /// List PIDs of processes currently in `Running` state.
     pub fn list_running(&self) -> Vec<u32> {
-        let inner = self.inner.lock().expect("process_registry lock poisoned");
+        let inner = self.lock_inner();
         inner
             .entries
             .values()
@@ -262,14 +270,14 @@ impl ProcessRegistry {
 
     /// List PIDs of all tracked processes (running and finished).
     pub fn list_all(&self) -> Vec<u32> {
-        let inner = self.inner.lock().expect("process_registry lock poisoned");
+        let inner = self.lock_inner();
         inner.entries.keys().copied().collect()
     }
 
     /// Snapshot of all entries as simple display structs (for diagnostics /
     /// future API endpoints).
     pub fn snapshot(&self) -> Vec<ProcessSnapshot> {
-        let inner = self.inner.lock().expect("process_registry lock poisoned");
+        let inner = self.lock_inner();
         inner
             .entries
             .values()
@@ -291,7 +299,7 @@ impl ProcessRegistry {
     /// this method simply removes all `Finished` entries.  It is safe to
     /// call at any frequency since it only touches finished processes.
     pub fn cleanup_finished(&self) {
-        let mut inner = self.inner.lock().expect("process_registry lock poisoned");
+        let mut inner = self.lock_inner();
         inner
             .entries
             .retain(|_, e| e.status == ProcessStatus::Running);
@@ -299,13 +307,13 @@ impl ProcessRegistry {
 
     /// Total number of tracked entries (running + finished).
     pub fn len(&self) -> usize {
-        let inner = self.inner.lock().expect("process_registry lock poisoned");
+        let inner = self.lock_inner();
         inner.entries.len()
     }
 
     /// Returns `true` when no processes are tracked.
     pub fn is_empty(&self) -> bool {
-        let inner = self.inner.lock().expect("process_registry lock poisoned");
+        let inner = self.lock_inner();
         inner.entries.is_empty()
     }
 }
@@ -476,5 +484,42 @@ mod tests {
         // After finishing, finished_secs_ago must be Some.
         let snap = reg.snapshot();
         assert!(snap[0].finished_secs_ago.is_some());
+    }
+
+    #[test]
+    fn registry_recovers_preserved_state_after_lock_poison() {
+        let reg = ProcessRegistry::new();
+        reg.register(41, "long-running".into(), Some("session-a".into()));
+        reg.append_output(41, "before panic\n");
+
+        let poisoned_registry = reg.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poisoned_registry.inner.lock().unwrap();
+            panic!("poison process registry lock");
+        });
+        assert!(reg.inner.is_poisoned());
+
+        reg.append_output(41, "after panic\n");
+        assert!(!reg.inner.is_poisoned());
+        assert_eq!(
+            reg.get_output(41).as_deref(),
+            Some("before panic\nafter panic\n")
+        );
+        assert_eq!(reg.list_running(), vec![41]);
+        assert_eq!(reg.list_all(), vec![41]);
+
+        reg.mark_finished(41, 7);
+        assert_eq!(reg.get_status(41), Some(ProcessStatus::Finished(7)));
+        let snapshot = reg.snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].pid, 41);
+        assert_eq!(snapshot[0].output_bytes, 25);
+        assert_eq!(snapshot[0].session_id.as_deref(), Some("session-a"));
+        assert_eq!(reg.len(), 1);
+        assert!(!reg.is_empty());
+
+        reg.cleanup_finished();
+        assert!(reg.is_empty());
+        assert!(reg.inner.lock().is_ok());
     }
 }

@@ -12516,6 +12516,142 @@ fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198
 // Regression test for #5201: when a session is over the token threshold but
 // under threshold_messages, the inner gate in compact_agent_session_with_id
 // must NOT return "No compaction needed" — it must proceed to the compactor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compact_session_serializes_with_message_writers_without_self_deadlock() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let kernel = Arc::new(
+        LibreFangKernel::boot_with_config(KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        })
+        .expect("kernel should boot"),
+    );
+
+    let manifest = AgentManifest {
+        name: "compact-session-lock-test".to_string(),
+        description: "test".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let session_id = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry")
+        .session_id;
+
+    // The default-session entry point must wait behind an agent-scoped turn.
+    let agent_lock = kernel
+        .agents
+        .agent_msg_locks
+        .entry(agent_id)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let agent_guard = agent_lock.lock_owned().await;
+    let default_task = {
+        let kernel = Arc::clone(&kernel);
+        tokio::spawn(async move { kernel.compact_agent_session(agent_id, false).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !default_task.is_finished(),
+        "default-session compaction must wait for the agent message lock"
+    );
+    drop(agent_guard);
+    let default_result = tokio::time::timeout(std::time::Duration::from_secs(2), default_task)
+        .await
+        .expect("default compaction should finish after lock release")
+        .expect("compaction task should not panic")
+        .expect("empty-session compaction should succeed");
+    assert!(default_result.starts_with("No compaction needed"));
+
+    // A public explicit-session entry point lacks the caller's dispatch lock-domain bit.
+    // It must wait behind both agent-scoped channel writers and explicit-session writers.
+    let agent_guard = kernel
+        .agents
+        .agent_msg_locks
+        .get(&agent_id)
+        .expect("agent lock")
+        .clone()
+        .lock_owned()
+        .await;
+    let explicit_agent_task = {
+        let kernel = Arc::clone(&kernel);
+        tokio::spawn(async move {
+            kernel
+                .compact_agent_session_with_id(agent_id, Some(session_id), false)
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !explicit_agent_task.is_finished(),
+        "explicit-session compaction must wait for an agent-scoped channel writer"
+    );
+    drop(agent_guard);
+    tokio::time::timeout(std::time::Duration::from_secs(2), explicit_agent_task)
+        .await
+        .expect("explicit compaction should finish after agent lock release")
+        .expect("compaction task should not panic")
+        .expect("empty-session compaction should succeed");
+
+    let session_lock = kernel
+        .agents
+        .session_msg_locks
+        .entry(session_id)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let session_guard = session_lock.lock_owned().await;
+    let explicit_task = {
+        let kernel = Arc::clone(&kernel);
+        tokio::spawn(async move {
+            kernel
+                .compact_agent_session_with_id(agent_id, Some(session_id), false)
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !explicit_task.is_finished(),
+        "explicit-session compaction must also wait for the session message lock"
+    );
+    drop(session_guard);
+    tokio::time::timeout(std::time::Duration::from_secs(2), explicit_task)
+        .await
+        .expect("explicit compaction should finish after lock release")
+        .expect("compaction task should not panic")
+        .expect("empty-session compaction should succeed");
+
+    // Automatic compaction is called inside the turn that already owns the lock.
+    // Its task-local registration must make the compactor skip a second acquisition of the same non-reentrant mutex.
+    let kernel_for_scope = Arc::clone(&kernel);
+    librefang_runtime::held_agent_locks::scope(async move {
+        let lock = kernel_for_scope
+            .agents
+            .agent_msg_locks
+            .get(&agent_id)
+            .expect("agent lock")
+            .clone();
+        let _lock_guard = lock.lock_owned().await;
+        let _held_guard = librefang_runtime::held_agent_locks::HeldLockGuard::register(agent_id);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            kernel_for_scope.compact_agent_session(agent_id, false),
+        )
+        .await
+        .expect("re-entrant automatic compaction must not self-deadlock")
+        .expect("empty-session compaction should succeed");
+    })
+    .await;
+
+    kernel.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_compact_gate_passes_when_tokens_above_threshold_but_messages_below() {
     use librefang_memory::session::Session as MemSession;
