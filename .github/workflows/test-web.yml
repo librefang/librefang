@@ -69,4 +69,5 @@ jobs:
         with:
           name: playwright-trace
           path: web/test-results/
+          if-no-files-found: error
           retention-days: 7
