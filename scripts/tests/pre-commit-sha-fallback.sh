@@ -50,9 +50,9 @@ printf '{"info":{"version":"0.0.1"}}' > openapi.json
 git add openapi.json
 
 EXPECTED=$(sha256sum openapi.json | awk '{print $1}')
-# Leave a different unstaged post-image on disk. The hook must hash the index
-# blob and must not auto-stage or otherwise consume this working-tree content.
-printf '{"info":{"version":"unstaged"}}' > openapi.json
+# Remove the working-tree post-image. The hook must hash the index blob and
+# must not skip the check merely because the staged file is absent on disk.
+rm openapi.json
 
 # Mask shasum out of PATH so the hook MUST use sha256sum via the shim.
 cat > "$SHIM_DIR/shasum" <<'EOF'
@@ -100,9 +100,50 @@ if ! git diff --cached --name-only | grep -qx "xtask/baselines/openapi.sha256"; 
     exit 1
 fi
 
-if git diff --cached -- openapi.json | grep -q 'unstaged'; then
-    echo "FAIL: hook staged or hashed the unstaged openapi.json content." >&2
+if [ "$(git show :openapi.json)" != '{"info":{"version":"0.0.1"}}' ]; then
+    echo "FAIL: hook changed the staged openapi.json blob." >&2
     exit 1
 fi
 
-echo "PASS: pre-commit auto-synced openapi.sha256 via sha256sum fallback"
+if [ -e openapi.json ]; then
+    echo "FAIL: hook recreated the deliberately absent working-tree post-image." >&2
+    exit 1
+fi
+
+cat >"$SHIM_DIR/python3" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$SHIM_DIR/python3"
+printf '%s\n' '## [Unreleased]' >CHANGELOG.md
+git add CHANGELOG.md
+printf '%s\n' '## [Unreleased]' '' '## [Unreleased]' >CHANGELOG.md
+if ! "$HOOK" >"$WORK/changelog.log" 2>&1; then
+    echo "FAIL: hook inspected the unstaged CHANGELOG.md post-image." >&2
+    cat "$WORK/changelog.log" >&2
+    exit 1
+fi
+
+git commit -q -m sync
+git restore openapi.json xtask/baselines/openapi.sha256
+printf '{"info":{"version":"0.0.2"}}' >openapi.json
+git add openapi.json
+printf '%s\n' 'preserve this unstaged baseline edit' \
+    >xtask/baselines/openapi.sha256
+if "$HOOK" >"$WORK/baseline-dirty.log" 2>&1; then
+    echo "FAIL: hook overwrote an unstaged OpenAPI baseline edit." >&2
+    exit 1
+fi
+if ! grep -Fq 'has unstaged changes; refusing to overwrite' \
+    "$WORK/baseline-dirty.log"; then
+    echo "FAIL: hook rejected dirty baseline for the wrong reason." >&2
+    cat "$WORK/baseline-dirty.log" >&2
+    exit 1
+fi
+if ! grep -Fxq 'preserve this unstaged baseline edit' \
+    xtask/baselines/openapi.sha256; then
+    echo "FAIL: hook changed the unstaged OpenAPI baseline edit." >&2
+    exit 1
+fi
+
+echo "PASS: pre-commit consumed staged OpenAPI and CHANGELOG content safely"

@@ -19,12 +19,16 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 LOG="$WORK/hook.log"
 RUSTFMT_ARGS="$WORK/rustfmt.args"
+RUSTFMT_INPUT="$WORK/rustfmt.input"
 
 cd "$WORK"
 git init -q
 git config user.email test@librefang.local
 git config user.name test
 git config commit.gpgsign false
+printf '%s\n' 'edition = "2021"' >rustfmt.toml
+git add rustfmt.toml
+git commit -q -m config
 
 # A fake rustfmt makes the test independent of the host toolchain and records
 # exact argv so rejection cannot be confused with another hook stage.
@@ -32,6 +36,8 @@ mkdir -p "$WORK/bin"
 cat >"$WORK/bin/rustfmt" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$@" >"${RUSTFMT_ARGS:?}"
+for arg; do input=$arg; done
+cat "$input" >"${RUSTFMT_INPUT:?}"
 exit 1
 EOF
 chmod +x "$WORK/bin/rustfmt"
@@ -42,12 +48,16 @@ fn main(   ) {println!("hi"  );}
 EOF
 
 git add -- "$FILE"
+cat > "$FILE" <<'EOF'
+fn main() { println!("unstaged"); }
+EOF
 
 # Run the hook from inside the throwaway repo. We do NOT chdir into the
 # real repo because the hook only inspects `git diff --cached`, which is
 # bound to whichever index we're currently in.
 set +e
-PATH="$WORK/bin:$PATH" RUSTFMT_ARGS="$RUSTFMT_ARGS" "$HOOK" >"$LOG" 2>&1
+PATH="$WORK/bin:$PATH" RUSTFMT_ARGS="$RUSTFMT_ARGS" \
+    RUSTFMT_INPUT="$RUSTFMT_INPUT" "$HOOK" >"$LOG" 2>&1
 rc=$?
 set -e
 
@@ -58,11 +68,22 @@ if [ "$rc" -eq 0 ]; then
     exit 1
 fi
 
-if ! grep -Fxq "$FILE" "$RUSTFMT_ARGS"; then
+RUSTFMT_PATH=$(tail -n 1 "$RUSTFMT_ARGS")
+case "$RUSTFMT_PATH" in
+    */"$FILE") ;;
+    *)
     echo "FAIL: rustfmt did not receive the staged path as one exact argument." >&2
     printf 'recorded argv:\n' >&2
     cat "$RUSTFMT_ARGS" >&2
     exit 1
+    ;;
+esac
+
+if ! grep -Fq 'fn main(   )' "$RUSTFMT_INPUT" \
+    || grep -Fq 'unstaged' "$RUSTFMT_INPUT"; then
+    echo "FAIL: rustfmt did not receive the exact staged Rust blob." >&2
+    cat "$RUSTFMT_INPUT" >&2
+    exit 1
 fi
 
-echo "PASS: pre-commit preserved the staged metacharacter path"
+echo "PASS: pre-commit preserved the staged metacharacter path and blob"
