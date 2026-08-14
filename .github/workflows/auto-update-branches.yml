@@ -4,19 +4,41 @@ on:
   schedule:
     - cron: '0 */6 * * *'  # every 6 hours — primary trigger; catches failing PRs
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/scripts/auto-update-branches.js'
+      - '.github/scripts/tests/auto-update-branches.test.js'
+      - '.github/workflows/auto-update-branches.yml'
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
-  group: auto-update-pr-branches
-  cancel-in-progress: false
+  group: auto-update-pr-branches-${{ github.event_name == 'pull_request' && github.ref || 'reconcile' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  test-helper:
+    name: Test branch reconciliation helper
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Parse helper and tests
+        run: |
+          node --check .github/scripts/auto-update-branches.js
+          node --check .github/scripts/tests/auto-update-branches.test.js
+      - name: Run helper tests
+        run: node .github/scripts/tests/auto-update-branches.test.js
+
   update-branches:
+    needs: test-helper
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -83,6 +105,7 @@ jobs:
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   pull_number: pr.number,
+                  expected_head_sha: ref,
                 });
                 console.log(`Updated PR #${pr.number} (CI was failing)`);
               } catch (e) {

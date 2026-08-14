@@ -30,12 +30,25 @@ const github = {
     { conclusion: 'failure' },
   ]);
   assert.equal(calls[0].endpoint, pullsEndpoint);
-  assert.equal(calls[0].params.per_page, 100);
+  assert.deepEqual(calls[0].params, {
+    owner: 'o',
+    repo: 'r',
+    state: 'open',
+    per_page: 100,
+  });
   assert.equal(calls[1].endpoint, checksEndpoint);
-  assert.equal(calls[1].params.ref, 'abc');
+  assert.deepEqual(calls[1].params, {
+    owner: 'o',
+    repo: 'r',
+    ref: 'abc',
+    filter: 'latest',
+    per_page: 100,
+  });
   assert.equal(hasFailingStatus([{ conclusion: 'timed_out' }], 'success'), true);
+  assert.equal(hasFailingStatus([{ conclusion: 'stale' }], 'success'), true);
   assert.equal(hasFailingStatus([{ conclusion: 'success' }], 'failure'), true);
   assert.equal(hasFailingStatus([], 'error'), true);
+  assert.equal(hasFailingStatus([{ conclusion: 'neutral' }], 'success'), false);
   assert.equal(hasFailingStatus([{ conclusion: null }], 'pending'), false);
   console.log('auto-update-branches tests passed');
 })().catch((error) => {

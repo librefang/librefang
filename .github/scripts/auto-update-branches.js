@@ -6,6 +6,7 @@ const FAIL_CONCLUSIONS = new Set([
   'action_required',
   'startup_failure',
   'cancelled',
+  'stale',
 ]);
 
 async function listOpenPulls(github, repo) {
@@ -22,6 +23,7 @@ async function listCheckRuns(github, repo, ref) {
     owner: repo.owner,
     repo: repo.repo,
     ref,
+    filter: 'latest',
     per_page: 100,
   });
 }
