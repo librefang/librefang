@@ -83,10 +83,10 @@ export function deriveDropdownActiveSessionId(
  *      override an explicit `?sessionId=` even if (1) and (2) somehow
  *      hold; the server already mirrors this on its side by omitting
  *      `session_id` from the response body when the request supplied one.
- *   4. `resolvedSessionId` is a non-empty string — defensive guard for
- *      malformed server responses; the wire contract is "string or
- *      absent", but a regression that emits `""` should not pin to an
- *      empty id.
+ *   4. `resolvedSessionId` is a string — defensive guard for malformed
+ *      server responses; the wire contract is "string or absent".
+ *   5. `resolvedSessionId` is non-empty — a regression that emits `""`
+ *      should not pin to an empty id.
  *
  * Pure function so both transport paths can call it identically and the
  * contract is unit-testable in isolation.
@@ -115,8 +115,7 @@ export function shouldAutoPinResolvedSession(args: {
  * "Unpinned" hint string — keeping i18n at the call site rather than baking
  * English into the selector. When the active session id is present but no
  * matching row is found in `sessions`, falls back to the short 8-char prefix
- * of the id; if even that is empty, returns `null` so the caller can render
- * its own generic placeholder. Issue #5199-C.
+ * of the id. Issue #5199-C.
  */
 export function pickSessionDropdownLabel(
   activeSessionId: string | undefined,
@@ -125,6 +124,5 @@ export function pickSessionDropdownLabel(
   if (!activeSessionId) return null;
   const active = sessions?.find((s) => s.session_id === activeSessionId);
   if (active?.label) return active.label;
-  const short = activeSessionId.slice(0, 8);
-  return short.length > 0 ? short : null;
+  return activeSessionId.slice(0, 8);
 }
