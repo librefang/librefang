@@ -20,6 +20,7 @@ acknowledged improvements:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 import threading
@@ -27,13 +28,24 @@ import time
 
 import pytest
 
-# Required env must be present at import time because the adapter
-# raises SystemExit(2) on construction otherwise.
-os.environ.setdefault("TWITCH_OAUTH_TOKEN", "oauth:test-token")
-os.environ.setdefault("TWITCH_NICK", "librefang-bot")
-os.environ.setdefault("TWITCH_CHANNELS", "librefang")
-os.environ.setdefault("TWITCH_PLAINTEXT", "1")
-from librefang.sidecar.adapters import twitch as ta  # noqa: E402
+from librefang.sidecar.adapters import twitch as ta
+
+
+@pytest.fixture(autouse=True)
+def _isolated_twitch_env(monkeypatch):
+    defaults = {
+        "TWITCH_OAUTH_TOKEN": "oauth:test-token",
+        "TWITCH_NICK": "librefang-bot",
+        "TWITCH_CHANNELS": "librefang",
+        "TWITCH_ACCOUNT_ID": "",
+        "TWITCH_HOST": "",
+        "TWITCH_PORT": "",
+        "TWITCH_PLAINTEXT": "1",
+        "TWITCH_RATE_LIMIT_MSGS": "",
+        "TWITCH_RATE_LIMIT_SECS": "",
+    }
+    for key, value in defaults.items():
+        monkeypatch.setenv(key, value)
 
 
 def _adapter(**env):
@@ -180,27 +192,45 @@ def test_rate_limit_invalid_exits():
 # ---- token bucket -----------------------------------------------
 
 
-def test_token_bucket_starts_full_and_drains():
+class _Clock:
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _install_clock(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(ta.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(ta.time, "sleep", clock.sleep)
+    return clock
+
+
+def test_token_bucket_starts_full_and_drains(monkeypatch):
     """Bucket initialised at capacity. First N acquires don't block."""
+    clock = _install_clock(monkeypatch)
     b = ta._TokenBucket(capacity=5, window_secs=10)
-    start = time.monotonic()
     for _ in range(5):
         b.acquire()
-    # All 5 took negligible time (no blocking).
-    assert time.monotonic() - start < 0.5
+    assert clock.sleeps == []
+    assert b.tokens == 0
 
 
-def test_token_bucket_blocks_when_empty():
+def test_token_bucket_blocks_when_empty(monkeypatch):
     """The 6th token in a 5-token bucket must wait for regen."""
+    clock = _install_clock(monkeypatch)
     b = ta._TokenBucket(capacity=5, window_secs=1.0)
     for _ in range(5):
         b.acquire()
-    start = time.monotonic()
     b.acquire()
-    elapsed = time.monotonic() - start
-    # Regen rate: 5 / 1.0 = 5 tokens/sec → 0.2 s for the next token.
-    # Allow generous lower bound (timer resolution) and upper bound.
-    assert 0.1 < elapsed < 0.5, elapsed
+    assert clock.sleeps == pytest.approx([0.2])
+    assert clock.now == pytest.approx(0.2)
 
 
 def test_token_bucket_capacity_floor():
@@ -573,19 +603,17 @@ def test_send_privmsg_blocking_raises_when_disconnected():
         a._send_privmsg_blocking("#librefang", "lost", None)
 
 
-def test_send_passes_through_token_bucket():
+def test_send_passes_through_token_bucket(monkeypatch):
     """A non-default tight bucket forces a measurable delay between
     chunks — confirms _send_privmsg_blocking calls bucket.acquire()
     on every frame, not just the first."""
     a = _adapter(TWITCH_RATE_LIMIT_MSGS="2", TWITCH_RATE_LIMIT_SECS="1")
+    clock = _install_clock(monkeypatch)
+    a._bucket = ta._TokenBucket(capacity=2, window_secs=1)
     fake = _install_fake_sock(a)
     body = "y" * (ta.MAX_MESSAGE_LEN * 3)  # 3 chunks
-    start = time.monotonic()
     a._send_privmsg_blocking("#librefang", body, None)
-    elapsed = time.monotonic() - start
-    # First 2 chunks are free (bucket starts full); the 3rd waits
-    # for ~0.5 s regen (capacity=2, window=1 → 2 tokens/sec).
-    assert 0.3 < elapsed < 1.5, elapsed
+    assert clock.sleeps == pytest.approx([0.5])
     assert len(fake.sent) == 3
 
 
@@ -643,11 +671,13 @@ def _capture_listener():
     server.listen(1)
     host, port = server.getsockname()
     received: dict = {"buf": b"", "conn": None}
+    received_lock = threading.Lock()
     accepted = threading.Event()
 
     def _serve():
         conn, _addr = server.accept()
-        received["conn"] = conn
+        with received_lock:
+            received["conn"] = conn
         accepted.set()
         try:
             while True:
@@ -657,7 +687,8 @@ def _capture_listener():
                     break
                 if not chunk:
                     break
-                received["buf"] += chunk
+                with received_lock:
+                    received["buf"] += chunk
         finally:
             try:
                 conn.close()
@@ -669,17 +700,20 @@ def _capture_listener():
     t.start()
 
     def get_received():
-        return received["buf"]
+        with received_lock:
+            return received["buf"]
 
     def send_to_client(data: bytes):
         accepted.wait(timeout=2.0)
-        conn = received["conn"]
+        with received_lock:
+            conn = received["conn"]
         if conn is None:
             raise RuntimeError("client has not connected yet")
         conn.sendall(data)
 
     def close():
-        conn = received["conn"]
+        with received_lock:
+            conn = received["conn"]
         if conn is not None:
             try:
                 conn.shutdown(socket.SHUT_RDWR)
@@ -750,23 +784,29 @@ def test_reader_loop_emits_privmsg_received_from_server():
         a._sock = sock
         accepted.wait(timeout=2.0)
         emitted: list = []
-        # Send one PRIVMSG, then close.
+        message_emitted = threading.Event()
+
+        def emit(event):
+            emitted.append(event)
+            message_emitted.set()
+
+        reader = threading.Thread(
+            target=a._reader_loop_blocking,
+            args=(sock, emit),
+            daemon=True,
+        )
+        reader.start()
         send_to_client(
             b"@id=server-1;display-name=Alice "
             b":alice!a@host PRIVMSG #librefang :hello\r\n"
         )
-        # Run the reader briefly. We can't easily run _reader_loop_blocking
-        # to completion without a separate stop-thread, so just shovel
-        # data through _handle_line directly for the assertion.
-        a._handle_line(
-            "@id=server-1;display-name=Alice "
-            ":alice!a@host PRIVMSG #librefang :hello",
-            emitted.append,
-        )
+        assert message_emitted.wait(timeout=2.0)
         assert len(emitted) == 1
         assert emitted[0]["params"]["content"] == {"Text": "hello"}
         assert emitted[0]["params"]["thread_id"] == "server-1"
-        sock.close()
+        close()
+        reader.join(timeout=2.0)
+        assert not reader.is_alive()
     finally:
         close()
 
@@ -816,7 +856,6 @@ def test_on_send_uses_channel_id_and_thread_id():
     opt-in would deliver thread_id directly. In production today, the
     bridge strips cmd.thread_id to None for cap-less sidecars — see
     the regression-guard test below."""
-    import asyncio
     a = _adapter()
     fake = _install_fake_sock(a)
     cmd = _make_send(channel_id="#librefang", thread_id="src-7", text="ack")
@@ -830,7 +869,6 @@ def test_on_send_recovers_reply_parent_from_user_librefang_user():
     cmd.thread_id=None so the @reply-parent-msg-id tag was never
     attached and chat UI lost the inline reply preview. librefang_user
     is the always-round-tripped carrier."""
-    import asyncio
     a = _adapter()
     fake = _install_fake_sock(a)
     cmd = _make_send(
@@ -848,7 +886,6 @@ def test_on_send_falls_back_to_user_platform_id():
     """Pre-#5219 daemons / older bridge code didn't carry channel_id;
     fall back to user.platform_id so the message still ships (matches
     the Rust adapter, which used user.platform_id as the target)."""
-    import asyncio
     a = _adapter()
     fake = _install_fake_sock(a)
     cmd = _make_send(
@@ -864,7 +901,6 @@ def test_on_send_falls_back_to_user_platform_id():
 def test_on_send_raises_when_no_channel():
     """Both channel_id and user.platform_id empty → on_send raises so
     the daemon surfaces the routing bug instead of silently dropping."""
-    import asyncio
     a = _adapter()
     _install_fake_sock(a)
     cmd = _make_send(channel_id="", user={})
@@ -876,7 +912,6 @@ def test_on_send_unsupported_content_emits_placeholder():
     """Non-Text content (Image / Voice / etc.) is converted to a
     placeholder string so the operator sees something rather than a
     silent drop — matches the Rust adapter's fallback."""
-    import asyncio
     a = _adapter()
     fake = _install_fake_sock(a)
     cmd = _make_send(
@@ -894,7 +929,6 @@ def test_on_send_unsupported_content_emits_placeholder():
 def test_on_shutdown_sets_stop_and_closes():
     """on_shutdown signals _stop (so the producer loop exits at the
     next backoff tick) and closes the active socket if any."""
-    import asyncio
     a = _adapter()
     fake = _install_fake_sock(a)
     assert not a._stop.is_set()
@@ -911,7 +945,6 @@ def test_on_shutdown_idempotent_when_disconnected():
     """on_shutdown called twice / before any connect is a no-op
     (no exception), so the daemon can fire it freely on supervisor
     restart races."""
-    import asyncio
     a = _adapter()
     asyncio.run(a.on_shutdown())
     asyncio.run(a.on_shutdown())
