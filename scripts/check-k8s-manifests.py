@@ -77,11 +77,6 @@ def load_documents(source: str) -> list[dict[str, Any]]:
     return [doc for doc in yaml.safe_load_all(source) if isinstance(doc, dict)]
 
 
-def find_one(docs: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
-    matches = [d for d in docs if d.get("kind") == kind]
-    return matches[0] if len(matches) == 1 else None
-
-
 def check_statefulset(sts: dict[str, Any], failures: Failures) -> None:
     spec = sts.get("spec", {})
 
@@ -305,8 +300,8 @@ def check_probes(container: dict[str, Any], failures: Failures) -> None:
         )
 
     startup = container.get("startupProbe", {})
-    period = startup.get("periodSeconds") or 10
-    threshold = startup.get("failureThreshold") or 3
+    period = startup.get("periodSeconds", 10)
+    threshold = startup.get("failureThreshold", 3)
     failures.check(
         period * threshold >= 60,
         f"startupProbe budget is only {period * threshold}s "
@@ -316,15 +311,18 @@ def check_probes(container: dict[str, Any], failures: Failures) -> None:
     )
 
 
-def check_services(docs: list[dict[str, Any]], failures: Failures) -> None:
+def check_services(
+    docs: list[dict[str, Any]],
+    statefulset: dict[str, Any] | None,
+    failures: Failures,
+) -> None:
     services = [d for d in docs if d.get("kind") == "Service"]
     if not failures.check(
         len(services) >= 1, "expected at least one Service exposing the daemon."
     ):
         return
 
-    sts = find_one(docs, "StatefulSet")
-    governing = (sts or {}).get("spec", {}).get("serviceName")
+    governing = (statefulset or {}).get("spec", {}).get("serviceName")
     by_name = {s.get("metadata", {}).get("name"): s for s in services}
 
     failures.check(
@@ -376,9 +374,14 @@ def check_no_inline_secrets(docs: list[dict[str, Any]], failures: Failures) -> N
 
 def main(argv: list[str]) -> int:
     if len(argv) > 2:
-        return int(bool(sys.stderr.write(f"usage: {argv[0]} [rendered.yaml]\n")) or 2)
+        sys.stderr.write(f"usage: {argv[0]} [rendered.yaml]\n")
+        return 2
 
-    source = Path(argv[1]).read_text() if len(argv) == 2 else sys.stdin.read()
+    try:
+        source = Path(argv[1]).read_text() if len(argv) == 2 else sys.stdin.read()
+    except OSError as error:
+        sys.stderr.write(f"error: cannot read manifest input {argv[1]!r}: {error}\n")
+        return 2
     if not source.strip():
         sys.stderr.write("error: no manifest input (stdin was empty)\n")
         return 2
@@ -386,14 +389,18 @@ def main(argv: list[str]) -> int:
     docs = load_documents(source)
     failures = Failures()
 
-    sts = find_one(docs, "StatefulSet")
-    if sts is None:
+    statefulsets = [doc for doc in docs if doc.get("kind") == "StatefulSet"]
+    sts = statefulsets[0] if len(statefulsets) == 1 else None
+    if len(statefulsets) != 1:
         kinds = sorted({d.get("kind") for d in docs})
-        failures.fail(f"expected exactly one StatefulSet; rendered kinds: {kinds!r}")
+        failures.fail(
+            f"expected exactly one StatefulSet, found {len(statefulsets)}; "
+            f"rendered kinds: {kinds!r}"
+        )
     else:
         check_statefulset(sts, failures)
 
-    check_services(docs, failures)
+    check_services(docs, sts, failures)
     check_no_inline_secrets(docs, failures)
 
     if failures.items:
