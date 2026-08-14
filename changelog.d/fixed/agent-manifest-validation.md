@@ -1,0 +1,1 @@
+- Validate continuous agent schedule intervals and keep parsed manifest list identities stable across reloads. (@xiaomo)
