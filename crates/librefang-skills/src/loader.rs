@@ -294,6 +294,17 @@ fn validate_input_against_schema(
                 if let Some(type_node) = prop_schema.get("type") {
                     check_type(val, type_node).map_err(|e| format!("property '{key}': {e}"))?;
                 }
+                if let (Some(value), Some(max_length)) = (
+                    val.as_str(),
+                    prop_schema.get("maxLength").and_then(|v| v.as_u64()),
+                ) {
+                    let actual = value.chars().count() as u64;
+                    if actual > max_length {
+                        return Err(format!(
+                            "property '{key}': length {actual} exceeds maxLength {max_length}"
+                        ));
+                    }
+                }
             }
         }
         // `additionalProperties: false` — Draft-07 default is `true` (extras
@@ -1924,6 +1935,34 @@ echo '{"greeting": "hello from shell"}'
         assert!(
             validate_input_against_schema(&serde_json::json!({"url": "http://x"}), &schema).is_ok()
         );
+    }
+
+    #[test]
+    fn test_validate_input_string_max_length_counts_characters() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "text": { "type": "string", "maxLength": 3 } },
+        });
+        assert!(
+            validate_input_against_schema(&serde_json::json!({"text": "三文字"}), &schema).is_ok()
+        );
+        let err = validate_input_against_schema(&serde_json::json!({"text": "four"}), &schema)
+            .expect_err("oversized strings must be rejected");
+        assert!(err.contains("maxLength 3"), "got: {err}");
+    }
+
+    #[test]
+    fn custom_skill_examples_declare_bounded_provided_tools() {
+        for source in [
+            include_str!("../../../examples/custom-skill-python/skill.toml"),
+            include_str!("../../../examples/custom-skill-wasm/skill.toml"),
+        ] {
+            let manifest: SkillManifest = toml::from_str(source).unwrap();
+            assert_eq!(manifest.tools.provided.len(), 1);
+            let schema = &manifest.tools.provided[0].input_schema;
+            assert_eq!(schema["properties"]["text"]["maxLength"], 1_048_576);
+            assert_eq!(schema["additionalProperties"], false);
+        }
     }
 
     // ---- #3453 / #3454 end-to-end via execute_skill_tool ----

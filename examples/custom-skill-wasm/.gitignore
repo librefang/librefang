@@ -1,4 +1,3 @@
 /target
-Cargo.lock
 # The compiled artifact is the build output, not source — rebuild via README.
 skill.wasm

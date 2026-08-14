@@ -23,9 +23,9 @@ type = "wasm"
 entry = "skill.wasm"
 
 [[tools.provided]]
-name = "count_words"
+name = "count_text_stats"
 description = "Count words, sentences, and characters in text."
-input_schema = { type = "object", properties = { text = { type = "string" } }, required = ["text"] }
+input_schema = { type = "object", properties = { text = { type = "string", maxLength = 1048576 } }, required = ["text"], additionalProperties = false }
 
 [requirements]
 capabilities = []

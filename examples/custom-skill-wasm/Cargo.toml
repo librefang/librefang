@@ -1,4 +1,5 @@
 [workspace]
+resolver = "2"
 # Own workspace root so this example is not pulled into the kernel workspace
 # (it targets wasm32-unknown-unknown) and builds standalone.
 
@@ -6,6 +7,11 @@
 name = "word-counter-wasm"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.94.1"
+description = "Standalone LibreFang WASM skill example"
+license = "MIT"
+repository = "https://github.com/librefang/librefang"
+publish = false
 
 [lib]
 # Fixed name so the artifact is always `skill.wasm`.
