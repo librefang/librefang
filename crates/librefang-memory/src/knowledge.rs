@@ -354,8 +354,19 @@ fn parse_entity(
     created: &str,
     updated: &str,
 ) -> LibreFangResult<Entity> {
-    let entity_type: EntityType =
-        serde_json::from_str(etype).unwrap_or(EntityType::Custom("unknown".to_string()));
+    let entity_type: EntityType = match serde_json::from_str(etype) {
+        Ok(value) => value,
+        Err(e) => {
+            error!(
+                row_id = %id,
+                table = "entities",
+                column = "entity_type",
+                error = %e,
+                "corrupt JSON in TEXT column"
+            );
+            return Err(LibreFangError::serialization(e));
+        }
+    };
     // Refuse to silently substitute `HashMap::default()` for a corrupt
     // `properties` blob — that disguises corruption as "this entity has
     // no properties", which the operator cannot tell apart from a row
@@ -373,12 +384,8 @@ fn parse_entity(
             return Err(LibreFangError::serialization(e));
         }
     };
-    let created_at = chrono::DateTime::parse_from_rfc3339(created)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now());
-    let updated_at = chrono::DateTime::parse_from_rfc3339(updated)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now());
+    let created_at = parse_timestamp(created, "entities", "created_at", id)?;
+    let updated_at = parse_timestamp(updated, "entities", "updated_at", id)?;
     Ok(Entity {
         id: id.to_string(),
         entity_type,
@@ -397,7 +404,20 @@ fn parse_relation(
     confidence: f64,
     created: &str,
 ) -> LibreFangResult<Relation> {
-    let relation: RelationType = serde_json::from_str(rtype).unwrap_or(RelationType::RelatedTo);
+    let relation: RelationType = match serde_json::from_str(rtype) {
+        Ok(value) => value,
+        Err(e) => {
+            error!(
+                source = %source,
+                target = %target,
+                table = "relations",
+                column = "relation_type",
+                error = %e,
+                "corrupt JSON in TEXT column"
+            );
+            return Err(LibreFangError::serialization(e));
+        }
+    };
     // Same rationale as `parse_entity`: a corrupt `properties` blob must
     // surface as an error, not as a silent empty map (audit:
     // json-text-silent-parse-fallback).
@@ -415,9 +435,12 @@ fn parse_relation(
             return Err(LibreFangError::serialization(e));
         }
     };
-    let created_at = chrono::DateTime::parse_from_rfc3339(created)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now());
+    let created_at = parse_timestamp(
+        created,
+        "relations",
+        "created_at",
+        &format!("{source}->{target}"),
+    )?;
     Ok(Relation {
         source: source.to_string(),
         relation,
@@ -426,6 +449,26 @@ fn parse_relation(
         confidence: confidence as f32,
         created_at,
     })
+}
+
+fn parse_timestamp(
+    value: &str,
+    table: &str,
+    column: &str,
+    row_id: &str,
+) -> LibreFangResult<chrono::DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|e| {
+            error!(
+                row_id = %row_id,
+                table = %table,
+                column = %column,
+                error = %e,
+                "corrupt RFC3339 timestamp in TEXT column"
+            );
+            LibreFangError::serialization(e)
+        })
 }
 
 #[cfg(test)]
@@ -730,6 +773,49 @@ mod tests {
             matches!(res, Err(LibreFangError::Serialization { .. })),
             "corrupt relation properties must surface as Serialization, not be silently defaulted; \
              got: {res:?}"
+        );
+    }
+
+    #[test]
+    fn parsers_surface_corrupt_types_instead_of_defaulting() {
+        let now = Utc::now().to_rfc3339();
+        let entity = parse_entity("entity-1", "not-json", "Entity", "{}", &now, &now);
+        assert!(
+            matches!(entity, Err(LibreFangError::Serialization { .. })),
+            "corrupt entity_type must surface as Serialization; got: {entity:?}"
+        );
+
+        let relation = parse_relation("source", "not-json", "target", "{}", 1.0, &now);
+        assert!(
+            matches!(relation, Err(LibreFangError::Serialization { .. })),
+            "corrupt relation_type must surface as Serialization; got: {relation:?}"
+        );
+    }
+
+    #[test]
+    fn parsers_surface_corrupt_timestamps_instead_of_using_now() {
+        let now = Utc::now().to_rfc3339();
+        let entity_type = serde_json::to_string(&EntityType::Person).unwrap();
+        for (created, updated) in [("not-a-timestamp", now.as_str()), (now.as_str(), "bad")] {
+            let entity = parse_entity("entity-1", &entity_type, "Entity", "{}", created, updated);
+            assert!(
+                matches!(entity, Err(LibreFangError::Serialization { .. })),
+                "corrupt entity timestamp must surface as Serialization; got: {entity:?}"
+            );
+        }
+
+        let relation_type = serde_json::to_string(&RelationType::RelatedTo).unwrap();
+        let relation = parse_relation(
+            "source",
+            &relation_type,
+            "target",
+            "{}",
+            1.0,
+            "not-a-timestamp",
+        );
+        assert!(
+            matches!(relation, Err(LibreFangError::Serialization { .. })),
+            "corrupt relation timestamp must surface as Serialization; got: {relation:?}"
         );
     }
 
