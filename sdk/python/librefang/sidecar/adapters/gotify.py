@@ -45,6 +45,7 @@ import os
 import socket
 import ssl
 import struct
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -71,6 +72,8 @@ MAX_MESSAGE_LEN = 65535
 MAX_FRAME_PAYLOAD = 1 << 20  # 1 MiB
 SEND_TIMEOUT_SECS = 10
 HANDSHAKE_TIMEOUT_SECS = 15.0
+# A silent TCP path must eventually reconnect instead of blocking forever.
+STREAM_READ_TIMEOUT_SECS = 90.0
 # RFC 6455 magic GUID used to derive Sec-WebSocket-Accept.
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 # WebSocket opcodes.
@@ -120,9 +123,15 @@ class _WebSocketReader:
         host, port, path, is_tls = self._parse_url(self.url)
         sock = socket.create_connection((host, port),
                                          timeout=self._handshake_timeout)
+        self._sock = sock
         if is_tls:
             ctx = ssl.create_default_context()
-            sock = ctx.wrap_socket(sock, server_hostname=host)
+            try:
+                sock = ctx.wrap_socket(sock, server_hostname=host)
+            except BaseException:
+                self.close()
+                raise
+            self._sock = sock
         key = base64.b64encode(os.urandom(16)).decode("ascii")
         lines = [
             f"GET {path} HTTP/1.1",
@@ -168,19 +177,27 @@ class _WebSocketReader:
         if got != expected:
             sock.close()
             raise RuntimeError("handshake Sec-WebSocket-Accept mismatch")
-        # No read deadline in steady state — this is a long-lived stream.
-        sock.settimeout(None)
+        sock.settimeout(STREAM_READ_TIMEOUT_SECS)
         self._sock = sock
         self._leftover = leftover
         return self
 
     def __exit__(self, *_exc) -> None:
-        if self._sock is not None:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-            self._sock = None
+        self.close()
+
+    def close(self) -> None:
+        sock = self._sock
+        self._sock = None
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
 
     def _recv_exact(self, n: int) -> bytes:
         if n <= 0:
@@ -192,15 +209,19 @@ class _WebSocketReader:
                 buf.extend(self._leftover[:take])
                 self._leftover = self._leftover[take:]
                 continue
-            assert self._sock is not None
-            chunk = self._sock.recv(n - len(buf))
+            sock = self._sock
+            if sock is None:
+                raise RuntimeError("websocket not connected")
+            chunk = sock.recv(n - len(buf))
             if not chunk:
                 raise EOFError("websocket closed mid-frame")
             buf.extend(chunk)
         return bytes(buf)
 
     def _send_frame(self, opcode: int, payload: bytes) -> None:
-        assert self._sock is not None
+        sock = self._sock
+        if sock is None:
+            raise RuntimeError("websocket not connected")
         header = bytearray([0x80 | (opcode & 0x0F)])
         ln = len(payload)
         if ln < 126:
@@ -214,7 +235,7 @@ class _WebSocketReader:
         mask = os.urandom(4)
         header.extend(mask)
         masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
-        self._sock.sendall(bytes(header) + masked)
+        sock.sendall(bytes(header) + masked)
 
     def __iter__(self):
         message_buf = bytearray()
@@ -229,6 +250,8 @@ class _WebSocketReader:
                 ln = struct.unpack(">H", self._recv_exact(2))[0]
             elif ln == 127:
                 ln = struct.unpack(">Q", self._recv_exact(8))[0]
+            if opcode >= _OP_CLOSE and (not fin or ln > 125):
+                raise RuntimeError("invalid fragmented/oversized control frame")
             if ln > MAX_FRAME_PAYLOAD:
                 raise RuntimeError(
                     f"websocket frame payload {ln} exceeds cap "
@@ -257,6 +280,11 @@ class _WebSocketReader:
                 message_op = opcode
                 message_buf = bytearray(payload)
             elif opcode == _OP_CONT:
+                if len(message_buf) + len(payload) > MAX_FRAME_PAYLOAD:
+                    raise RuntimeError(
+                        "websocket reassembled message exceeds cap "
+                        f"{MAX_FRAME_PAYLOAD}; failing the stream"
+                    )
                 message_buf.extend(payload)
             else:
                 # Unknown / reserved opcode — drop to avoid breaking the stream.
@@ -321,6 +349,9 @@ class GotifyAdapter(SidecarAdapter):
         # on reconnect — without dedupe an unstable network produces
         # duplicate agent triggers.
         self._seen = _SeenSet()
+        self._active_reader_lock = threading.Lock()
+        self._active_reader: _WebSocketReader | None = None
+        self._shutdown = threading.Event()
 
     # ---- inbound: WebSocket subscription -----------------------------
 
@@ -351,15 +382,14 @@ class GotifyAdapter(SidecarAdapter):
         priority = val.get("priority") or 0
         app_id = val.get("appid") or 0
         try:
-            return (
-                int(mid),
-                msg,
-                str(title),
-                int(priority),
-                int(app_id),
-            )
+            priority = int(priority)
         except (TypeError, ValueError):
-            return None
+            priority = 0
+        try:
+            app_id = int(app_id)
+        except (TypeError, ValueError):
+            app_id = 0
+        return int(mid), msg, str(title), priority, app_id
 
     def _to_event(self, mid: int, message: str, title: str,
                   priority: int, app_id: int) -> dict:
@@ -385,35 +415,56 @@ class GotifyAdapter(SidecarAdapter):
 
     def _ws_loop(self, emit) -> None:
         """One subscribe pass; caller wraps in reconnect backoff."""
-        with _WebSocketReader(self._build_ws_url()) as ws:
-            log.info("gotify WS connected", server=self.server_url)
-            for text in ws:
-                parsed = self._parse_frame(text)
-                if parsed is None:
-                    continue
-                mid = parsed[0]
-                if not self._seen.mark(f"gotify-{mid}"):
-                    continue
-                emit(self._to_event(*parsed))
+        ws = _WebSocketReader(self._build_ws_url())
+        with self._active_reader_lock:
+            self._active_reader = ws
+        try:
+            if self._shutdown.is_set():
+                return
+            with ws:
+                if self._shutdown.is_set():
+                    return
+                log.info("gotify WS connected", server=self.server_url)
+                for text in ws:
+                    parsed = self._parse_frame(text)
+                    if parsed is None:
+                        continue
+                    mid = parsed[0]
+                    if not self._seen.mark(f"gotify-{mid}"):
+                        continue
+                    emit(self._to_event(*parsed))
+        finally:
+            with self._active_reader_lock:
+                if self._active_reader is ws:
+                    self._active_reader = None
+
+    def _close_active_reader(self) -> None:
+        with self._active_reader_lock:
+            reader = self._active_reader
+        if reader is not None:
+            reader.close()
 
     async def produce(self, emit) -> None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         backoff = 1.0
-        while True:
-            try:
-                await loop.run_in_executor(None, self._ws_loop, emit)
-                # Clean stream end → reconnect promptly.
-                backoff = 1.0
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001 — transport errors vary
-                log.warn(
-                    "gotify WS error; backing off",
-                    error=str(e),
-                    delay=backoff,
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60.0)
+        try:
+            while True:
+                try:
+                    await loop.run_in_executor(None, self._ws_loop, emit)
+                    # Clean stream end → reconnect promptly.
+                    backoff = 1.0
+                except Exception as e:  # noqa: BLE001 — transport errors vary
+                    log.warn(
+                        "gotify WS error; backing off",
+                        error=str(e),
+                        delay=backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 60.0)
+        except asyncio.CancelledError:
+            self._shutdown.set()
+            self._close_active_reader()
+            raise
 
     # ---- outbound: REST publish --------------------------------------
 
