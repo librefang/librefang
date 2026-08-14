@@ -1,6 +1,7 @@
 """End-to-end test: `python -m <adapter> --describe` writes JSON to stdout."""
 import io
 import json
+import subprocess
 import sys
 from contextlib import redirect_stdout
 
@@ -43,7 +44,6 @@ def test_run_stdio_main_describes_class_without_instantiation():
     """run_stdio_main accepts a class and runs --describe without ever
     calling __init__ — so adapters whose __init__ requires env vars
     can still be described."""
-    import subprocess, sys, json
     # NoSchema__init__-raises is a class whose __init__ would crash, so if
     # run_stdio_main correctly avoids instantiation it must still describe
     # successfully when SCHEMA is class-level.
@@ -56,6 +56,12 @@ def test_run_stdio_main_describes_class_without_instantiation():
         "import sys; sys.argv = ['x', '--describe']\n"
         "run_stdio_main(Crashy)\n"
     )
-    out = subprocess.check_output([sys.executable, "-c", script])
-    payload = json.loads(out)
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    payload = json.loads(proc.stdout)
     assert payload["name"] == "crashy"
