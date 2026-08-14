@@ -58,8 +58,8 @@ def split_message(text: str, limit: int) -> list[str]:
       newline; if found, split there (so messages break on a
       semantic boundary). If no newline is in the window, hard-cut
       at ``limit``.
-    * The leftover after a newline-cut has its leading ``\\n``
-      stripped so the next chunk doesn't start with a blank line.
+    * The newline chosen as the delimiter is consumed. Adjacent newlines
+      remain so intentional blank lines survive chunking.
     """
     if len(text) <= limit:
         return [text]
@@ -71,7 +71,7 @@ def split_message(text: str, limit: int) -> list[str]:
         if cut <= 0:
             cut = limit
         chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n") if cut < limit else rest[cut:]
+        rest = rest[cut + 1:] if cut < limit else rest[cut:]
     if rest:
         chunks.append(rest)
     return chunks
@@ -198,10 +198,12 @@ class SeenSet:
             return True
 
     def __contains__(self, id_: Any) -> bool:
-        return id_ in self.ids
+        with self._lock:
+            return id_ in self.ids
 
     def __len__(self) -> int:
-        return len(self.ids)
+        with self._lock:
+            return len(self.ids)
 
 
 # ---- HTTP request wrapper ------------------------------------------
@@ -250,7 +252,7 @@ def http_request(
         status = e.code
         try:
             raw = e.read()
-        except Exception:  # noqa: BLE001
+        except OSError:
             raw = b""
         if e.headers is not None:
             resp_headers = {k.lower(): v for k, v in e.headers.items()}
