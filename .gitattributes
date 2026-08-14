@@ -1,9 +1,8 @@
-# Force LF line endings on golden fixtures and other generated/compared
-# text artifacts so Windows git checkouts don't drift from CI on other OSes.
-# Without this, a Windows checkout would materialize CRLF and fixture-diff
-# tests would fail cross-platform. (Rust source + JSON are fine as-is; the
-# explicit `eol=lf` here is a safety rail for tests that byte-compare.)
-crates/librefang-api/tests/fixtures/*.json text eol=lf
+# Force LF line endings on golden fixtures and embedded comparison data so
+# Windows checkouts preserve the bytes used by tests. The API JSON test also
+# normalizes CRLF, but the attribute remains defense in depth for new fixtures.
+crates/librefang-api/tests/fixtures/**/*.json text eol=lf
+crates/librefang-rl-export/tests/fixtures/kernel_redaction_patterns.txt text eol=lf
 
 # login_page.html is embedded verbatim via include_str! and its inline <script> is pinned by an exact SHA-256 in the CSP (middleware.rs).
 # A Windows checkout with core.autocrlf=true rewrites it to CRLF, which shifts the hash and fails dashboard_login_page_script_is_allowed_by_csp_hash on Windows only.
