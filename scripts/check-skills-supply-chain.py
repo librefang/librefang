@@ -513,7 +513,10 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--exclude", action="append", default=[],
-        help="Substring excluded from scan (repeatable). Defaults always apply.",
+        help=(
+            "Exact path-component sequence excluded from scan (repeatable). "
+            "Defaults always apply."
+        ),
     )
     parser.add_argument(
         "--include-fixtures", action="store_true",
