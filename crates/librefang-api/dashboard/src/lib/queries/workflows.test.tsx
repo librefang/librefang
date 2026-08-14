@@ -1,18 +1,45 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { WorkflowRunDetail } from "../../api";
-import { useWorkflowRuns, useWorkflowRunDetail } from "./workflows";
+import {
+  useWorkflowDetail,
+  useWorkflowOperatorPause,
+  useWorkflowRuns,
+  useWorkflowRunDetail,
+} from "./workflows";
 import * as httpClient from "../http/client";
 import { workflowKeys } from "./keys";
 import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", () => ({
+  getWorkflow: vi.fn(),
+  inspectOperatorPause: vi.fn(),
   listWorkflowRuns: vi.fn(),
   getWorkflowRun: vi.fn(),
 }));
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe("required workflow query IDs", () => {
+  it("cannot force-enable workflow detail without a workflowId", () => {
+    const { result } = renderHook(() => useWorkflowDetail("", { enabled: true }), {
+      wrapper: createQueryClientWrapper().wrapper,
+    });
+
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(httpClient.getWorkflow).not.toHaveBeenCalled();
+  });
+
+  it("cannot force-enable operator pause without a runId", () => {
+    const { result } = renderHook(() => useWorkflowOperatorPause("", { enabled: true }), {
+      wrapper: createQueryClientWrapper().wrapper,
+    });
+
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(httpClient.inspectOperatorPause).not.toHaveBeenCalled();
+  });
 });
 
 describe("useWorkflowRuns", () => {
