@@ -9081,6 +9081,18 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid device metadata"
+          },
+          "409": {
+            "description": "Pairing capacity reached"
+          },
+          "410": {
+            "description": "Pairing token expired or already used"
+          },
+          "500": {
+            "description": "Pairing completion failed"
           }
         }
       }
@@ -9151,7 +9163,7 @@
         },
         "responses": {
           "200": {
-            "description": "Notification sent",
+            "description": "Notification delivery results",
             "content": {
               "application/json": {
                 "schema": {
@@ -9159,6 +9171,12 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Notification message missing"
+          },
+          "502": {
+            "description": "All notification deliveries failed"
           }
         }
       }
