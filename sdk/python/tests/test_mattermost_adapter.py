@@ -8,7 +8,6 @@ improvements documented in the module header (thread_id round-trip,
 429 Retry-After, post.id dedupe, explicit HTTP timeouts).
 """
 
-import io
 import json
 import os
 import urllib.error
@@ -16,14 +15,25 @@ import urllib.error
 import pytest
 
 
-os.environ.setdefault("MATTERMOST_SERVER_URL", "https://mm.test")
-os.environ.setdefault("MATTERMOST_TOKEN", "test-token")
-from librefang.sidecar.adapters import mattermost as mm  # noqa: E402
+from librefang.sidecar.adapters import mattermost as mm
 
-from _sidecar_fakes import _FakeResp, _FakeUrlopen, _HdrShim
+from _sidecar_fakes import _FakeUrlopen
 
 
 # ---- _FakeUrlopen scaffolding ----------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolated_mattermost_env(monkeypatch):
+    defaults = {
+        "MATTERMOST_SERVER_URL": "https://mm.test",
+        "MATTERMOST_TOKEN": "test-token",
+        "MATTERMOST_ALLOWED_CHANNELS": "",
+        "MATTERMOST_ACCOUNT_ID": "",
+        "MATTERMOST_WS_URL": "",
+    }
+    for key, value in defaults.items():
+        monkeypatch.setenv(key, value)
 
 
 def _adapter(**env):
@@ -62,30 +72,25 @@ def test_server_url_http_becomes_ws():
     assert a.ws_url == "ws://localhost:8065/api/v4/websocket"
 
 
-def test_missing_server_url_exits_2():
-    os.environ["MATTERMOST_SERVER_URL"] = ""
-    os.environ["MATTERMOST_TOKEN"] = "tok"
+def test_missing_server_url_exits_2(monkeypatch):
+    monkeypatch.setenv("MATTERMOST_SERVER_URL", "")
     with pytest.raises(SystemExit) as exc:
         mm.MattermostAdapter()
     assert exc.value.code == 2
-    os.environ["MATTERMOST_SERVER_URL"] = "https://mm.test"
 
 
-def test_missing_token_exits_2():
-    os.environ["MATTERMOST_SERVER_URL"] = "https://mm.test"
-    os.environ["MATTERMOST_TOKEN"] = ""
+def test_missing_token_exits_2(monkeypatch):
+    monkeypatch.setenv("MATTERMOST_TOKEN", "")
     with pytest.raises(SystemExit) as exc:
         mm.MattermostAdapter()
     assert exc.value.code == 2
-    os.environ["MATTERMOST_TOKEN"] = "test-token"
 
 
-def test_invalid_scheme_exits_2():
-    os.environ["MATTERMOST_SERVER_URL"] = "ftp://nope"
+def test_invalid_scheme_exits_2(monkeypatch):
+    monkeypatch.setenv("MATTERMOST_SERVER_URL", "ftp://nope")
     with pytest.raises(SystemExit) as exc:
         mm.MattermostAdapter()
     assert exc.value.code == 2
-    os.environ["MATTERMOST_SERVER_URL"] = "https://mm.test"
 
 
 def test_allowed_channels_split_on_comma():
@@ -666,10 +671,9 @@ def test_handle_envelope_dedupes_repeated_post_id():
     assert len(emitted) == 1
 
 
-def test_handle_envelope_self_skip_does_not_consume_dedupe_slot():
-    """A bot self-message should not poison the dedupe set, otherwise
-    a real later message from the same id (race / replay) would be
-    dropped."""
+def test_handle_envelope_self_skip_still_consumes_dedupe_slot():
+    """Self-message IDs are claimed before author filtering, matching
+    reconnect dedupe for Mattermost's immutable post IDs."""
     a = _adapter()
     a.bot_user_id = "bot-123"
     emitted = []
