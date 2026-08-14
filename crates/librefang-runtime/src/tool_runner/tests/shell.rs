@@ -1540,6 +1540,26 @@ async fn test_shell_exec_full_mode_skips_approval_by_default() {
     assert_eq!(approvals, 0);
 }
 
+/// Full mode still runs the dangerous-command gate before spawning the shell, including its shell-expansion normalization.
+#[tokio::test]
+async fn test_shell_exec_full_mode_blocks_ifs_hidden_recursive_delete() {
+    let policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Full,
+        ..Default::default()
+    };
+
+    let (result, approvals) =
+        run_full_mode_approval_case(&policy, "rm${IFS}-rf${IFS}/", None, Some(false)).await;
+
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("dangerous command detected"),
+        "expanded destructive command must be blocked before execution: {}",
+        result.content
+    );
+    assert_eq!(approvals, 0);
+}
+
 /// #6594: with the flag off, `Full` no longer speaks for `[approval]` — a `shell_exec` named in the global `require_approval` list routes through the approval queue while still running unrestricted commands.
 #[tokio::test]
 async fn test_shell_exec_full_mode_honours_require_approval_when_flag_disabled() {

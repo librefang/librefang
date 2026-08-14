@@ -493,6 +493,30 @@ mod tests {
         assert_eq!(pm.count(), 0);
     }
 
+    #[tokio::test]
+    async fn process_start_blocks_ifs_hidden_command_in_full_mode() {
+        use librefang_types::config::{ExecPolicy, ExecSecurityMode};
+        let pm = crate::process_manager::ProcessManager::new(5);
+        let policy = ExecPolicy {
+            mode: ExecSecurityMode::Full,
+            ..Default::default()
+        };
+        let res = tool_process_start(
+            &json!({ "command": "sh", "args": ["-c", "rm${IFS}-rf${IFS}/"] }),
+            Some(&pm),
+            Some("agent1"),
+            Some(&policy),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(res, Err(ToolError::PermissionDenied(_))));
+        assert_eq!(pm.count(), 0);
+    }
+
     /// The gate must NOT over-block: a safe_bin under the default Allowlist
     /// posture still spawns. Unix-only because it relies on `/bin/sleep`
     /// existing as a standalone binary (`sleep` is not a Windows executable).
