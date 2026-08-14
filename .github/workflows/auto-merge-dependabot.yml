@@ -6,41 +6,53 @@ name: Auto Merge Dependabot
 #      protection, which is a single toggle away from disappearing.  Listening
 #      on `workflow_run: CI completed` makes the green-CI gate explicit in
 #      this file so it survives a branch-protection misconfig.
-#   2. The PR has aged at least 24 hours.  Dependabot routinely opens patch
+#   2. The PR has aged at least 24 hours. Dependabot routinely opens patch
 #      bumps that get yanked upstream within a few hours; the soak window
-#      gives us time to react before a yanked release hits main.  Security
-#      advisories (CVE-/GHSA- in the body) bypass the soak — we want those
-#      to land fast.
-#   3. The bump still classifies as patch or minor (preserved from the prior
-#      #3938 hardening — major bumps stay manual).  Update-type is parsed
-#      from the PR title (`bump <dep> from X.Y.Z to A.B.C`) which dependabot
-#      generates in a stable format across all ecosystems we use.
+#      gives us time to react before a yanked release hits main. An hourly
+#      reconciliation run retries green PRs after the window elapses.
+#   3. A single-dependency bump still classifies as patch or minor (preserved
+#      from the prior #3938 hardening — major and grouped bumps stay manual).
+#      Update-type is parsed from the title (`bump <dep> from X to Y`).
 #
 # `workflow_run` triggers fire in the context of the default branch and
 # don't carry pull_request context, so we resolve the PR number from the
-# head SHA via the REST commits→pulls endpoint.  This also means
+# head SHA via the REST commits→pulls endpoint. The hourly trigger selects an
+# aged open Dependabot PR whose latest completed CI run passed. This also means
 # `dependabot/fetch-metadata` (which requires `pull_request` event payload)
 # isn't usable here — we parse the version range from the PR title instead.
 on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
+  schedule:
+    - cron: '23 * * * *'
 
 # Tightened from `contents: write` — auto-merge only needs PR write access;
 # the squash itself is performed by GitHub on the PR's behalf.
 permissions:
+  actions: read
   contents: read
   pull-requests: write
 
+concurrency:
+  group: dependabot-auto-merge
+  cancel-in-progress: false
+
 jobs:
   auto-merge:
-    # Only run when CI succeeded on a dependabot-authored pull_request run.
+    # Run after Dependabot CI succeeds or during the hourly soak reconciliation.
     if: >-
-      github.event.workflow_run.event == 'pull_request'
-      && github.event.workflow_run.conclusion == 'success'
-      && github.event.workflow_run.actor.login == 'dependabot[bot]'
+      github.event_name == 'schedule' ||
+      (
+        github.event.workflow_run.event == 'pull_request' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.actor.login == 'dependabot[bot]'
+      )
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
       # Resolve the PR number from the workflow_run head SHA.  The commits
       # → pulls endpoint returns every PR whose head matches; in practice
       # dependabot opens one PR per branch, so .[0] is unambiguous.
@@ -50,18 +62,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_JSON_PATH: /tmp/pr.json
         run: |
           set -euo pipefail
-          pr_number=$(gh api "/repos/${REPO}/commits/${HEAD_SHA}/pulls" --jq '.[0].number // empty')
+          pr_number=$(bash .github/scripts/select-dependabot-pr.sh)
           if [ -z "$pr_number" ]; then
-            echo "No open PR found for ${HEAD_SHA} — skipping."
+            echo "No eligible Dependabot PR found — skipping."
             exit 0
           fi
           echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
-          # Capture metadata once so later steps don't re-hit the API.
-          gh pr view "$pr_number" --repo "$REPO" \
-            --json createdAt,labels,body,author,title,headRefName \
-            > /tmp/pr.json
 
       # Parse the bump's update-type from the PR title.  Dependabot's title
       # format is stable across cargo / github-actions / npm / pip:
@@ -83,24 +93,14 @@ jobs:
           title=$(jq -r .title /tmp/pr.json)
           echo "PR title: ${title}"
 
-          # Grouped PRs: dependabot.yml configures groups suffixed
-          # `-minor-patch` that ONLY include `update-types: [minor, patch]`,
-          # so a group PR with that suffix is by-construction safe to
-          # auto-merge — we don't have to parse individual versions out of
-          # the title (which lists N updates).  Any other group name is
-          # treated as `unknown` and falls through to manual review.
+          # Group titles do not prove the current dependabot.yml constraints
+          # or the update type of every member. Keep all grouped changes on
+          # the manual-review path.
           if [[ "$title" =~ [Bb]ump[[:space:]]+the[[:space:]]+([a-zA-Z0-9_-]+)[[:space:]]+group ]]; then
             group_name="${BASH_REMATCH[1]}"
-            echo "Grouped update: ${group_name}"
-            if [[ "$group_name" == *-minor-patch ]]; then
-              echo "Group is restricted to minor+patch in dependabot.yml — classifying as minor."
-              echo "update_type=version-update:semver-minor" >> "$GITHUB_OUTPUT"
-              echo "dep_name=$group_name" >> "$GITHUB_OUTPUT"
-            else
-              echo "Unrecognized group — refusing to auto-merge."
-              echo "update_type=unknown" >> "$GITHUB_OUTPUT"
-              echo "dep_name=$group_name" >> "$GITHUB_OUTPUT"
-            fi
+            echo "Grouped update ${group_name} — refusing to auto-merge."
+            echo "update_type=unknown" >> "$GITHUB_OUTPUT"
+            echo "dep_name=$group_name" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -154,33 +154,18 @@ jobs:
       # 24-hour soak gate.  Yanked-upstream releases (npm/pypi/cargo) usually
       # surface within a few hours; the soak gives time for the upstream
       # advisory or yank to propagate before we squash the bump into main.
-      # Security advisories (CVE-####-/GHSA-) bypass the soak — for those,
-      # delay = exposure window.
-      - name: Check PR age (24h soak, security advisories bypass)
+      - name: Check PR age (24h soak)
         id: age
         if: steps.pr.outputs.pr_number != ''
         run: |
           set -euo pipefail
           created_at=$(jq -r .createdAt /tmp/pr.json)
-          body=$(jq -r '.body // ""' /tmp/pr.json)
-
-          # Security advisory fast-path.  Dependabot annotates security PRs
-          # with CVE / GHSA identifiers in the body, and labels them
-          # `security` — match either signal.
-          has_security_label=$(jq -r '[.labels[].name] | map(ascii_downcase) | any(. == "security")' /tmp/pr.json)
-          if [ "$has_security_label" = "true" ] || \
-             echo "$body" | grep -qiE 'security advisory|cve-[0-9]{4}-|GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}'; then
-            echo "Security advisory detected — bypassing 24h soak."
-            echo "merge_now=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
           # ubuntu-latest runners are GNU coreutils, so `date -d` is fine.
           age_seconds=$(( $(date -u +%s) - $(date -u -d "$created_at" +%s) ))
           if [ "$age_seconds" -lt 86400 ]; then
             hours=$(( age_seconds / 3600 ))
             echo "PR is only ${hours}h old (< 24h soak window) — skipping merge for now."
-            echo "Next CI completion after the soak window will retry."
+            echo "The hourly reconciliation run will retry after the soak window."
             exit 0
           fi
           echo "PR aged ${age_seconds}s — soak window cleared."
