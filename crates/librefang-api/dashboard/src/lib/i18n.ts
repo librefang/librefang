@@ -46,6 +46,7 @@ export const i18nReady = i18n
   })
   .catch((error: unknown) => {
     console.error("[i18n] initialization failed", error);
+    throw error;
   });
 
 export default i18n;
