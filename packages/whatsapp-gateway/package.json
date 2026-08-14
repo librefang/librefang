@@ -6,6 +6,12 @@
     "librefang-whatsapp-gateway": "./index.js"
   },
   "main": "index.js",
+  "files": [
+    "index.js",
+    "lib/",
+    "scripts/",
+    "ecosystem.config.cjs"
+  ],
   "scripts": {
     "start": "node index.js",
     "postinstall": "node scripts/postinstall.js"
