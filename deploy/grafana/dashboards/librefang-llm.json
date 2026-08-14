@@ -53,12 +53,12 @@
       "keepTime": true
     },
     {
-      "title": "Jaeger UI",
+      "title": "Search Traces (Jaeger)",
       "type": "link",
       "icon": "external link",
-      "tooltip": "Open standalone Jaeger UI for waterfall / span-diff / service-deps views",
-      "url": "http://localhost:16686/search?service=librefang",
-      "targetBlank": true,
+      "tooltip": "Open Grafana Explore on the proxied Jaeger datasource",
+      "url": "/explore?left=[\"now-1h\",\"now\",\"librefang-jaeger\",{}]",
+      "targetBlank": false,
       "tags": [],
       "asDropdown": false,
       "includeVars": false,
