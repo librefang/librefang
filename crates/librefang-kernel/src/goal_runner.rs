@@ -344,6 +344,14 @@ impl GoalRunner {
         // Replace any prior run for this goal. `stop_locked` (not `stop`)
         // because we already hold `start_lock`, which is non-reentrant.
         self.stop_locked(goal_id);
+        // A terminal row can survive a second daemon restart without being
+        // reconstructed into `runs` (recovery only loads stale `running`
+        // rows). Remove any such durable predecessor before inserting the
+        // new run; otherwise the store's update path correctly preserves the
+        // predecessor's `started_at` and makes this run appear older than it
+        // is. The extra delete is harmless when `stop_locked` already removed
+        // a live or recovered in-memory entry.
+        delete_persisted_run(&self.store, goal_id);
 
         let now = Utc::now();
         let initial = GoalRunState {
@@ -1115,6 +1123,52 @@ mod tests {
             store.get_run(&goal.id.to_string()).unwrap().is_none(),
             "a completed run must be removed from the durable store"
         );
+    }
+
+    #[tokio::test]
+    async fn start_replaces_terminal_row_with_a_fresh_started_at() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let store = store_from(&substrate);
+        let goal_id = GoalId::new();
+        let agent_id = AgentId::new();
+        let stale_started = Utc::now() - chrono::Duration::days(1);
+        store
+            .save_run(&GoalRunRow {
+                goal_id: goal_id.to_string(),
+                agent_id: agent_id.to_string(),
+                phase: GoalRunPhase::Stopped.to_string(),
+                iteration: 5,
+                max_iterations: 25,
+                last_progress: 50,
+                last_error: Some("Interrupted by daemon restart".to_string()),
+                started_at: stale_started.to_rfc3339(),
+                updated_at: stale_started.to_rfc3339(),
+            })
+            .unwrap();
+
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store.clone());
+        runner.start(
+            goal_id,
+            agent_id,
+            25,
+            substrate,
+            |_agent_id, _message| async move {
+                std::future::pending::<Result<String, String>>().await
+            },
+        );
+
+        let row = store.get_run(&goal_id.to_string()).unwrap().unwrap();
+        let started_at = chrono::DateTime::parse_from_rfc3339(&row.started_at)
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(row.phase, GoalRunPhase::Running.to_string());
+        assert!(
+            started_at > stale_started,
+            "a new run must not inherit the predecessor's started_at"
+        );
+
+        assert!(runner.stop(goal_id));
     }
 
     #[test]
