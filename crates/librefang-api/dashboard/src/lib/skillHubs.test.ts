@@ -28,8 +28,8 @@ describe("skill hub configuration", () => {
     const hub = getSkillHub("skillhub");
 
     expect(hub?.domain).toBe("deployment configured");
-    expect(hub?.cli("private/tool")).toContain(
-      'CLAWHUB_REGISTRY="$SKILLHUB_REGISTRY_URL"',
+    expect(hub?.cli("private/tool")).toBe(
+      `CLAWHUB_REGISTRY="$SKILLHUB_REGISTRY_URL" clawhub install 'private/tool'`,
     );
   });
 
@@ -39,14 +39,47 @@ describe("skill hub configuration", () => {
     const hub = getSkillHub("skillhub");
 
     expect(hub?.domain).toBe("skills.example.com");
-    expect(hub?.cli("private/tool")).toContain(
-      'CLAWHUB_REGISTRY="https://skills.example.com/registry"',
+    expect(hub?.cli("private/tool")).toBe(
+      `CLAWHUB_REGISTRY='https://skills.example.com/registry' clawhub install 'private/tool'`,
     );
   });
 
-  it("rejects non-HTTP registry configuration", async () => {
-    vi.stubEnv("VITE_SKILLHUB_REGISTRY_URL", "javascript:alert(1)");
+  it.each([
+    "javascript:alert(1)",
+    "https://user:secret@skills.example.com/registry",
+    "https://skills.example.com/registry?token=public",
+    "https://skills.example.com/registry#fragment",
+  ])("rejects unsafe registry configuration %s", async (registryUrl) => {
+    vi.stubEnv("VITE_SKILLHUB_REGISTRY_URL", registryUrl);
     const { getSkillHub } = await import("./skillHubs");
+
     expect(getSkillHub("skillhub")?.domain).toBe("deployment configured");
+  });
+
+  it("normalizes every trailing registry slash", async () => {
+    vi.stubEnv(
+      "VITE_SKILLHUB_REGISTRY_URL",
+      "https://skills.example.com/registry///",
+    );
+    const { getSkillHub } = await import("./skillHubs");
+
+    expect(getSkillHub("skillhub")?.cli("private/tool")).toBe(
+      `CLAWHUB_REGISTRY='https://skills.example.com/registry' clawhub install 'private/tool'`,
+    );
+  });
+
+  it("shell-quotes registry URLs and remote slugs", async () => {
+    vi.stubEnv(
+      "VITE_SKILLHUB_REGISTRY_URL",
+      "https://skills.example.com/$HOME",
+    );
+    const { getSkillHub } = await import("./skillHubs");
+
+    expect(getSkillHub("skillhub")?.cli("tool'; touch /tmp/pwn; echo '")).toBe(
+      `CLAWHUB_REGISTRY='https://skills.example.com/$HOME' clawhub install 'tool'"'"'; touch /tmp/pwn; echo '"'"''`,
+    );
+    expect(getSkillHub("fanghub")?.cli("$(touch /tmp/pwn)")).toBe(
+      `librefang skill install '$(touch /tmp/pwn)'`,
+    );
   });
 });

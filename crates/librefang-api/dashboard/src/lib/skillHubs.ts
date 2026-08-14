@@ -39,11 +39,15 @@ const normalizeRegistryUrl = (raw: string | undefined): string | undefined => {
   try {
     const url = new URL(raw.trim());
     if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
-    return url.href.replace(/\/$/, "");
+    if (url.username || url.password || url.search || url.hash) return undefined;
+    return url.href.replace(/\/+$/, "");
   } catch {
     return undefined;
   }
 };
+
+const shellQuote = (value: string): string =>
+  `'${value.replace(/'/g, `'"'"'`)}'`;
 
 const skillHubRegistryUrl = normalizeRegistryUrl(
   import.meta.env.VITE_SKILLHUB_REGISTRY_URL,
@@ -51,7 +55,9 @@ const skillHubRegistryUrl = normalizeRegistryUrl(
 const skillHubDomain = skillHubRegistryUrl
   ? new URL(skillHubRegistryUrl).host
   : "deployment configured";
-const skillHubCliRegistry = skillHubRegistryUrl ?? "$SKILLHUB_REGISTRY_URL";
+const skillHubCliRegistry = skillHubRegistryUrl
+  ? shellQuote(skillHubRegistryUrl)
+  : '"$SKILLHUB_REGISTRY_URL"';
 
 type SkillHubIndex = {
   readonly [K in SkillHubId]: SkillHub & { readonly id: K };
@@ -66,7 +72,7 @@ const HUB_INDEX = {
     domain: "fanghub.librefang.ai",
     desc:
       "Official LibreFang registry — curated hands, agents, MCP, providers, plugins.",
-    cli: (slug) => `librefang skill install ${slug}`,
+    cli: (slug) => `librefang skill install ${shellQuote(slug)}`,
   },
   skillhub: {
     id: "skillhub",
@@ -77,7 +83,7 @@ const HUB_INDEX = {
     desc:
       "Self-hosted enterprise skill registry — private namespaces behind your firewall.",
     cli: (slug) =>
-      `CLAWHUB_REGISTRY="${skillHubCliRegistry}" clawhub install ${slug}`,
+      `CLAWHUB_REGISTRY=${skillHubCliRegistry} clawhub install ${shellQuote(slug)}`,
   },
   clawhub: {
     id: "clawhub",
@@ -87,7 +93,7 @@ const HUB_INDEX = {
     domain: "clawhub.ai",
     desc:
       "OpenClaw public registry — thousands of community skills, vector search.",
-    cli: (slug) => `clawhub install ${slug}`,
+    cli: (slug) => `clawhub install ${shellQuote(slug)}`,
   },
   "clawhub-cn": {
     id: "clawhub-cn",
@@ -98,7 +104,7 @@ const HUB_INDEX = {
     desc:
       "ClawHub China mirror — accelerated access, CN-native skills.",
     cli: (slug) =>
-      `CLAWHUB_REGISTRY=https://clawhub.cn clawhub install ${slug}`,
+      `CLAWHUB_REGISTRY=https://clawhub.cn clawhub install ${shellQuote(slug)}`,
   },
 } as const satisfies SkillHubIndex;
 
