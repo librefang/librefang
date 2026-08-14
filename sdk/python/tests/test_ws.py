@@ -210,6 +210,35 @@ def test_recv_any_frame_reassembles_fragmented_binary_with_ping():
     assert sock.sent[0][0] & 0x0F == OP_PONG
 
 
+def test_recv_frame_drains_ignored_fragmented_binary_before_next_message():
+    incoming = b"".join([
+        _server_frame(OP_BIN, b"\x01", fin=False),
+        _server_frame(OP_PING, b"beat"),
+        _server_frame(OP_CONT, b"\x02"),
+        _server_frame(OP_TEXT, b"next"),
+    ])
+    sock = _FakeSocket(incoming)
+    ws = WebSocketClient("ws://example.test")
+    ws._sock = sock
+
+    assert ws.recv_frame() == (None, None)
+    assert ws.recv_frame() == ("next", None)
+    assert sock.sent[0][0] & 0x0F == OP_PONG
+
+
+def test_recv_frame_caps_ignored_fragmented_binary(monkeypatch):
+    monkeypatch.setattr(ws_mod, "MAX_FRAME_PAYLOAD", 5)
+    incoming = b"".join([
+        _server_frame(OP_BIN, b"abc", fin=False),
+        _server_frame(OP_CONT, b"def"),
+    ])
+    ws = WebSocketClient("ws://example.test")
+    ws._sock = _FakeSocket(incoming)
+
+    with pytest.raises(RuntimeError, match="reassembled message exceeds cap"):
+        ws.recv_frame()
+
+
 @pytest.mark.parametrize("any_frame", [False, True])
 def test_close_between_fragments_surfaces_close(any_frame):
     incoming = b"".join([

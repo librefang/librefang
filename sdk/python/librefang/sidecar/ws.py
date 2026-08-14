@@ -352,6 +352,15 @@ class WebSocketClient:
                 if close is not None:
                     return None, close
             return buf.decode("utf-8", "replace"), None
+        if opcode == OP_BIN:
+            # This API intentionally ignores binary messages, but it still
+            # has to consume every continuation so the next call starts on a
+            # new message boundary and the aggregate size cap is enforced.
+            buf = bytearray(payload)
+            if not fin:
+                close = self._continue_message(buf)
+                if close is not None:
+                    return None, close
         # Binary / unknown — ignore.
         return None, None
 
