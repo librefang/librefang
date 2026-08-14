@@ -330,6 +330,12 @@ def resolve_diff_range(args: argparse.Namespace) -> tuple[str, str]:
     """
     base = args.base or os.environ.get("BASE_SHA")
     head = args.head or os.environ.get("HEAD_SHA")
+    if bool(base) != bool(head):
+        sys.stderr.write(
+            "Diff range is incomplete. Pass both --base and --head, set both "
+            "BASE_SHA and HEAD_SHA, or leave both unset for auto-detection.\n"
+        )
+        sys.exit(2)
     if base and head:
         return (base, head)
     # Fallback: derive from local refs.
@@ -410,6 +416,9 @@ def added_lines_in_unreleased(base: str, head: str, root: Path) -> list[Violatio
             cur_new_lineno += 1
         elif raw.startswith("-"):
             # Removal: post-image line counter stays put.
+            continue
+        elif raw.startswith("\\ No newline at end of file"):
+            # Diff metadata, not a post-image content line.
             continue
         else:
             # Context line under --unified=0 should not appear, but be safe.
@@ -511,6 +520,8 @@ def scan_staged_added_lines(root: Path) -> list[Violation]:
                 ):
                     added.append(Violation(CHANGELOG, lineno, content))
             cur_new_lineno += 1
+        elif raw.startswith("\\ No newline at end of file"):
+            continue
 
     return added
 
