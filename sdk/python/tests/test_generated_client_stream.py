@@ -36,6 +36,28 @@ def test_stream_closes_response_when_done_marker_returns(monkeypatch):
     assert response.closed
 
 
+def test_stream_joins_multiline_data_fields_at_event_boundary(monkeypatch):
+    response = FakeStreamResponse([
+        b'data: {"content":\ndata:"hello"}\n\ndata: {"next":true}\n\n',
+        b"",
+    ])
+    monkeypatch.setattr(client_module, "urlopen", lambda _request, **_kwargs: response)
+
+    events = list(LibreFang("http://example.test")._stream("GET", "/events"))
+
+    assert events == [{"content": "hello"}, {"next": True}]
+    assert response.closed
+
+
+def test_stream_preserves_newlines_in_non_json_multiline_data(monkeypatch):
+    response = FakeStreamResponse([b"data: first\ndata: second\n\n", b""])
+    monkeypatch.setattr(client_module, "urlopen", lambda _request, **_kwargs: response)
+
+    events = list(LibreFang("http://example.test")._stream("GET", "/events"))
+
+    assert events == [{"raw": "first\nsecond"}]
+
+
 def test_stream_closes_response_when_consumer_stops_early(monkeypatch):
     response = FakeStreamResponse([
         b'data: {"content":"first"}\n\ndata: {"content":"second"}\n\n',
