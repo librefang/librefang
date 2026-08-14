@@ -48,6 +48,12 @@ MAX_MESSAGE_LEN = 4096
 DEFAULT_SERVER_URL = "https://ntfy.sh"
 # Reconnect/post backoff ceilings, kept separate so the publish-side
 # raise can be capped distinctly from the SSE reconnect curve.
+
+
+class _RateLimited(RuntimeError):
+    """The server-requested delay was already observed synchronously."""
+
+
 class NtfyAdapter(SidecarAdapter):
     # ntfy has no typing/reaction/interactive/thread/streaming concept
     # — declare nothing, so LibreFang routes plain text only.
@@ -134,7 +140,7 @@ class NtfyAdapter(SidecarAdapter):
             str(mid),
             str(msg),
             str(val.get("topic", "")),
-            val.get("title"),
+            str(val.get("title")) if val.get("title") is not None else None,
         )
 
     def _to_event(self, mid, message, topic, title) -> dict:
@@ -171,7 +177,7 @@ class NtfyAdapter(SidecarAdapter):
                     topic=self.topic, retry_after_secs=wait,
                 )
                 time.sleep(wait)
-                raise RuntimeError("ntfy 429 — rate-limited") from e
+                raise _RateLimited("ntfy 429 — rate-limited") from e
             raise
         with resp_cm as resp:
             if getattr(resp, "status", 200) != 200:
@@ -197,6 +203,14 @@ class NtfyAdapter(SidecarAdapter):
                 backoff = 1.0  # clean stream end → reconnect promptly
             except asyncio.CancelledError:
                 raise
+            except _RateLimited as e:
+                # `_sse_loop` already honored Retry-After. Reconnect without
+                # stacking the generic transport backoff on top.
+                log.warn(
+                    "ntfy SSE rate limit wait completed; reconnecting",
+                    error=str(e),
+                )
+                backoff = 1.0
             except Exception as e:  # noqa: BLE001 - transport errors vary
                 log.warn(
                     "ntfy SSE error; backing off",
@@ -204,7 +218,7 @@ class NtfyAdapter(SidecarAdapter):
                     delay=backoff,
                 )
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 120.0)
+                backoff = min(backoff * 2, MAX_BACKOFF_SECS)
 
     # ---- outbound: publish -------------------------------------------
 
