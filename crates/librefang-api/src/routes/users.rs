@@ -203,6 +203,9 @@ fn validate_name(name: &str) -> Result<(), String> {
     if trimmed.len() > 128 {
         return Err("name too long (max 128 chars)".to_string());
     }
+    if trimmed.chars().any(char::is_control) {
+        return Err("name must not contain control characters".to_string());
+    }
     Ok(())
 }
 
@@ -486,7 +489,7 @@ pub async fn update_user(
     tag = "users",
     params(("name" = String, Path, description = "User name (case-sensitive)")),
     responses(
-        (status = 200, description = "User deleted"),
+        (status = 204, description = "User deleted"),
         (status = 404, description = "Not found"),
     )
 )]
@@ -584,7 +587,7 @@ pub async fn import_users(
     if req.dry_run {
         // Compute the would-be counts without writing.
         let cfg = state.kernel.config_ref();
-        let existing_names: std::collections::HashSet<&str> =
+        let mut existing_names: std::collections::HashSet<&str> =
             cfg.users.iter().map(|u| u.name.as_str()).collect();
         // `prepared.len() == req.rows.len()` (every row is pushed once
         // above, success or fail), so this allocation is bounded by the
@@ -601,6 +604,7 @@ pub async fn import_users(
                         "updated"
                     } else {
                         created += 1;
+                        existing_names.insert(u.name.as_str());
                         "created"
                     };
                     rows_out.push(BulkImportRow {
@@ -631,22 +635,11 @@ pub async fn import_users(
         .into_response();
     }
 
-    // Commit phase. Snapshot existing names BEFORE persisting so we can
-    // classify each applied row as created vs updated. Failed rows already
-    // have entries in `rows_out`; valid rows are appended after persist
-    // succeeds (so the order in `rows_out` matches the input).
+    // Commit phase. Failed rows already have entries in `rows_out`; valid rows are appended after persist succeeds so the output can retain input order.
     let mut rows_out: Vec<BulkImportRow> = Vec::new();
     let mut created = 0usize;
     let mut updated = 0usize;
     let mut failed = 0usize;
-
-    let pre_existing: std::collections::HashSet<String> = state
-        .kernel
-        .config_ref()
-        .users
-        .iter()
-        .map(|u| u.name.clone())
-        .collect();
 
     let mut to_apply: Vec<(usize, UserConfig)> = Vec::new();
     for (i, prepared_row) in prepared.into_iter() {
@@ -667,8 +660,10 @@ pub async fn import_users(
     let payload: Vec<UserConfig> = to_apply.iter().map(|(_, u)| u.clone()).collect();
     let caller_uid = caller.as_ref().map(|c| c.0.user_id);
     let result = persist_users(&state, caller_uid, move |users| {
+        let mut existed_before_row = Vec::with_capacity(payload.len());
         for new_u in &payload {
             if let Some(idx) = users.iter().position(|u| u.name == new_u.name) {
+                existed_before_row.push(true);
                 // RBAC M3 (#3205) + M5 (#3203): preserve existing per-
                 // user policy and budget when a CSV row updates an
                 // existing user — same reasoning as `update_user`.
@@ -682,17 +677,18 @@ pub async fn import_users(
                     ..new_u.clone()
                 };
             } else {
+                existed_before_row.push(false);
                 users.push(new_u.clone());
             }
         }
-        Ok(())
+        Ok(existed_before_row)
     })
     .await;
 
     match result {
-        Ok(()) => {
-            for (i, u) in to_apply {
-                let status = if pre_existing.contains(&u.name) {
+        Ok(existed_before_row) => {
+            for ((i, u), existed) in to_apply.into_iter().zip(existed_before_row) {
+                let status = if existed {
                     updated += 1;
                     "updated"
                 } else {
@@ -1132,15 +1128,10 @@ fn api_key_hash_fingerprint(api_key_hash: &str) -> String {
     s
 }
 
-/// Rebuild the `ApiUserAuth` records from the kernel's current `[[users]]`
-/// table. Mirrors `server.rs::configured_user_api_keys`, kept private to
-/// `users.rs` so the persistence path can call it without exposing
-/// `server.rs` internals across the route boundary.
-fn rebuild_api_user_records(state: &AppState) -> Vec<ApiUserAuth> {
-    state
-        .kernel
-        .config_ref()
-        .users
+/// Build the `ApiUserAuth` records that middleware reads from a validated `[[users]]` table.
+/// This deliberately accepts the just-persisted table instead of reading kernel config, because a reload failure leaves kernel config stale even though the file and revocation have moved forward.
+fn build_api_user_records(users: &[UserConfig]) -> Vec<ApiUserAuth> {
+    users
         .iter()
         .filter_map(|user| {
             let api_key_hash = user.api_key_hash.as_deref()?.trim();
@@ -1237,6 +1228,7 @@ where
     } else {
         let mut aot = toml_edit::ArrayOfTables::new();
         for u in &users {
+            // Replacing the whole users array intentionally discards comments and custom key ordering inside individual user tables; unrelated config sections retain their formatting.
             // Serialize the whole UserConfig via serde so RBAC M3 (#3205)
             // fields (`tool_policy` / `tool_categories` / `memory_access`
             // / `channel_tool_rules`) survive the round-trip. Earlier
@@ -1279,23 +1271,7 @@ where
         }
     }
 
-    // Acquire the auth-snapshot write lock BEFORE the disk write so the
-    // middleware can never observe an intermediate state where the new
-    // hash is already on disk (and reachable through `kernel.config_ref()`)
-    // but the `state.user_api_keys` Vec the middleware actually verifies
-    // against still holds the OLD record. Earlier ordering was
-    // `write file → reload → acquire lock → swap`, which left a small
-    // race window: any request landing between the file write and the
-    // snapshot swap would hit the stale `Vec<ApiUserAuth>` and pass auth
-    // with the just-rotated plaintext — bounded by `reload_config`
-    // latency (a few ms under load) but exploitable. Holding the lock
-    // across persist + reload + swap means every concurrent auth check
-    // either sees the pre-rotation snapshot OR blocks on this writer
-    // until the swap completes; never an in-between read where the
-    // on-disk hash and the live `Vec` disagree. Auth blocking during
-    // rotation is the correct behavior (the operator just rotated;
-    // concurrent requests with the old key SHOULD fail).
-    let mut user_keys_guard = state.user_api_keys.write().await;
+    let new_user_records = build_api_user_records(&users);
 
     let write_path = config_path.clone();
     let write_bytes = new_toml.into_bytes();
@@ -1304,27 +1280,15 @@ where
         .map_err(|error| PersistError::Internal(format!("write task failed: {error}")))?
         .map_err(|error| PersistError::Internal(format!("write failed: {error}")))?;
 
-    if let Err(e) = state.kernel.reload_config().await {
-        // The file is on disk; surface a soft error so the dashboard can
-        // show the reason without rolling back. The next manual reload (or
-        // restart) will pick it up. Drop the guard so subsequent reads
-        // aren't blocked on a failed-write path — the on-disk state has
-        // moved forward, and a stale `Vec<ApiUserAuth>` is no worse than
-        // pre-fix behaviour for this failure mode.
-        drop(user_keys_guard);
+    // Authentication consults only this snapshot, not config.toml or the kernel config.
+    // Keep the lock to the brief atomic replacement, and publish immediately after the durable write so reload failure or request cancellation while awaiting reload can never preserve a credential that the file has revoked.
+    *state.user_api_keys.write().await = new_user_records;
+
+    let reload_error = state.kernel.reload_config().await.err();
+    if let Some(e) = reload_error {
         tracing::warn!(error = %e, "user config reload failed after write");
         return Err(PersistError::Internal(format!("reload failed: {e}")));
     }
-
-    // Refresh the in-memory `ApiUserAuth` snapshot the auth middleware
-    // reads from. Without this swap, mutations to `users[].api_key_hash`
-    // (rotate-key, update_user, import_users) only become effective after
-    // a daemon restart — the bug rotate-key exists to fix. Done in the
-    // shared helper so every user-mutation path benefits, not only the
-    // rotation endpoint. Still holding `user_keys_guard` here so the swap
-    // is atomic with the persist + reload above.
-    *user_keys_guard = rebuild_api_user_records(state.as_ref());
-    drop(user_keys_guard);
 
     // Attribute the mutation to the caller that reached the user-management
     // endpoint (RBAC #3054). `None` for loopback / no-auth deployments.
