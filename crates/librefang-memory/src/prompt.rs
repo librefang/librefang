@@ -10,7 +10,7 @@ use librefang_types::agent::{
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{Connection, OptionalExtension, Row};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior};
 use std::str::FromStr;
 use uuid::Uuid;
 
@@ -113,6 +113,28 @@ pub struct PromptStore {
     pool: Pool<SqliteConnectionManager>,
 }
 
+fn insert_version(conn: &Connection, version: &PromptVersion) -> LibreFangResult<()> {
+    conn.execute(
+        "INSERT INTO prompt_versions (id, agent_id, version, content_hash, system_prompt, tools, variables, created_at, created_by, is_active, description)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        rusqlite::params![
+            version.id.to_string(),
+            version.agent_id.to_string(),
+            version.version as i64,
+            version.content_hash,
+            version.system_prompt,
+            serde_json::to_string(&version.tools).unwrap_or_default(),
+            serde_json::to_string(&version.variables).unwrap_or_default(),
+            version.created_at.to_rfc3339(),
+            version.created_by,
+            version.is_active as i32,
+            version.description,
+        ],
+    )
+    .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+    Ok(())
+}
+
 impl PromptStore {
     pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
         Self { pool }
@@ -156,25 +178,36 @@ impl PromptStore {
 
     pub fn create_version(&self, version: PromptVersion) -> LibreFangResult<()> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        conn.execute(
-            "INSERT INTO prompt_versions (id, agent_id, version, content_hash, system_prompt, tools, variables, created_at, created_by, is_active, description)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            rusqlite::params![
-                version.id.to_string(),
-                version.agent_id.to_string(),
-                version.version as i64,
-                version.content_hash,
-                version.system_prompt,
-                serde_json::to_string(&version.tools).unwrap_or_default(),
-                serde_json::to_string(&version.variables).unwrap_or_default(),
-                version.created_at.to_rfc3339(),
-                version.created_by,
-                version.is_active as i32,
-                version.description,
-            ],
-        )
-        .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        insert_version(&conn, &version)?;
         Ok(())
+    }
+
+    /// Assign the next per-agent version number and insert the row atomically.
+    pub fn create_next_version(
+        &self,
+        mut version: PromptVersion,
+    ) -> LibreFangResult<PromptVersion> {
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let latest: i64 = tx
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM prompt_versions WHERE agent_id = ?1",
+                [version.agent_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        version.version = u32::try_from(latest)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| {
+                LibreFangError::Internal("prompt version number overflow".to_string())
+            })?;
+        insert_version(&tx, &version)?;
+        tx.commit()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        Ok(version)
     }
 
     pub fn list_versions(&self, agent_id: AgentId) -> LibreFangResult<Vec<PromptVersion>> {
@@ -690,7 +723,8 @@ mod tests {
                 created_at TEXT NOT NULL,
                 created_by TEXT,
                 is_active INTEGER NOT NULL DEFAULT 0,
-                description TEXT
+                description TEXT,
+                UNIQUE(agent_id, version)
             );
             CREATE TABLE IF NOT EXISTS prompt_experiments (
                 id TEXT PRIMARY KEY,
@@ -751,6 +785,68 @@ mod tests {
         assert_eq!(versions.len(), 1);
         assert_eq!(versions[0].version, 1);
         assert_eq!(versions[0].system_prompt, "You are a helpful assistant.");
+    }
+
+    #[test]
+    fn concurrent_next_versions_are_unique_and_monotonic() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = PromptStore::new_with_path(temp.path().join("prompts.db"), 8).unwrap();
+        store
+            .pool
+            .get()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE prompt_versions (
+                    id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    system_prompt TEXT NOT NULL,
+                    tools TEXT NOT NULL,
+                    variables TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 0,
+                    description TEXT,
+                    UNIQUE(agent_id, version)
+                );",
+            )
+            .unwrap();
+        let agent_id = AgentId::new();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|index| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store
+                        .create_next_version(PromptVersion {
+                            id: Uuid::new_v4(),
+                            agent_id,
+                            version: 999,
+                            content_hash: format!("hash-{index}"),
+                            system_prompt: format!("prompt {index}"),
+                            tools: vec![],
+                            variables: vec![],
+                            created_at: Utc::now(),
+                            created_by: "test".to_string(),
+                            is_active: false,
+                            description: None,
+                        })
+                        .unwrap()
+                        .version
+                })
+            })
+            .collect();
+
+        let mut assigned: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assigned.sort_unstable();
+        assert_eq!(assigned, (1..=8).collect::<Vec<_>>());
+        assert_eq!(store.list_versions(agent_id).unwrap().len(), 8);
     }
 
     #[test]

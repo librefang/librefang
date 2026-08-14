@@ -186,23 +186,17 @@ async fn create_prompt_version(
     // version active is `POST /prompts/versions/{id}/activate`, which
     // additionally invariant-checks against the existing active version.
     version.is_active = false;
-    // Audit: ignore client-supplied `version`. Versions are monotonic
-    // per agent and the server is the single source of truth — a client
-    // picking `version = 999` would break monotonicity assumptions
-    // downstream (active-version selection, list ordering, audit log).
-    // Compute `prev_max + 1` from the existing rows for this agent.
-    let next_version = match state.kernel.list_prompt_versions(agent_id) {
-        Ok(existing) => existing.iter().map(|v| v.version).max().unwrap_or(0) + 1,
-        Err(e) => return ApiErrorResponse::from(e).into_response(),
-    };
-    version.version = next_version;
+    // The store replaces this client-controlled placeholder while holding an
+    // immediate SQLite write transaction, so concurrent creates cannot select
+    // the same per-agent version number.
+    version.version = 0;
     // Compute content hash from system_prompt
     let mut hasher = Sha256::new();
     hasher.update(version.system_prompt.as_bytes());
     version.content_hash = format!("{:x}", hasher.finalize());
-    let body = match state.kernel.create_prompt_version(&version) {
+    let body = match state.kernel.create_next_prompt_version(&version) {
         // Issue #3832: POST /versions creates a new resource — 201 Created.
-        Ok(_) => (StatusCode::CREATED, Json(version)).into_response(),
+        Ok(created) => (StatusCode::CREATED, Json(created)).into_response(),
         // #3541: PromptStore returns typed `KernelOpError`; route through
         // the central status-code map so a `NotFound { kind: "prompt_version" }`
         // surfaces as 404 instead of being flattened to 500.

@@ -53,6 +53,14 @@ pub trait PromptStore: Send + Sync {
         Err(KernelOpError::unavailable("Prompt store"))
     }
 
+    /// Atomically assign the next per-agent number and create a prompt version.
+    fn create_next_prompt_version(
+        &self,
+        _version: &librefang_types::agent::PromptVersion,
+    ) -> Result<librefang_types::agent::PromptVersion, KernelOpError> {
+        Err(KernelOpError::unavailable("Prompt store"))
+    }
+
     /// Delete a prompt version. Default: error.
     fn delete_prompt_version(&self, _version_id: &str) -> Result<(), KernelOpError> {
         Err(KernelOpError::unavailable("Prompt store"))
