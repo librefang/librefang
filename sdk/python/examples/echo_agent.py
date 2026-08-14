@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """Example LibreFang agent: echoes back messages with a friendly greeting."""
 
-import sys
 import os
 
-# Add parent directory to path for librefang_sdk import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from librefang_sdk import Agent
+from librefang import Agent
 
 agent = Agent()
 
@@ -17,4 +14,5 @@ def handle(message: str, context: dict) -> str:
     return f"Hello from Python agent {agent_id}! You said: {message}"
 
 
-agent.run()
+if __name__ == "__main__":
+    agent.run()

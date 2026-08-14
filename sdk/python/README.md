@@ -5,14 +5,14 @@ Official Python client and SDK for the LibreFang Agent OS.
 ## Installation
 
 ```bash
-pip install librefang
+pip install librefang-sdk
 ```
 
-## Two Packages
+## Public APIs
 
 This package provides two different interfaces:
 
-### 1. REST API Client (`librefang.client`)
+### 1. REST API Client
 
 Control LibreFang remotely via its REST API.
 
@@ -22,20 +22,21 @@ from librefang import Client
 client = Client("http://localhost:4545")
 
 # Create an agent
-agent = client.agents.create(template="assistant")
-print(f"Agent created: {agent['id']}")
+agent = client.agents.spawn_agent(template="assistant")
+agent_id = agent["agent_id"]
+print(f"Agent created: {agent_id}")
 
 # Send a message
-reply = client.agents.message(agent["id"], "Hello!")
+reply = client.agents.send_message(agent_id, message="Hello!")
 print(reply)
 
 # Stream a response
-for event in client.agents.stream(agent["id"], "Tell me a story"):
-    if event.get("type") == "text_delta":
-        print(event["delta"], end="", flush=True)
+for event in client.agents.send_message_stream(agent_id, message="Tell me a story"):
+    if event.get("content"):
+        print(event["content"], end="", flush=True)
 ```
 
-### 2. Agent SDK (`librefang.sdk`)
+### 2. Agent SDK
 
 Write Python agents that run inside LibreFang.
 
@@ -74,7 +75,7 @@ See the `examples/` directory for more examples:
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.10+
 
 ## License
 
