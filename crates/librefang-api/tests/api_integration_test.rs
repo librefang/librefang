@@ -3239,6 +3239,15 @@ async fn test_attach_session_stream_accepts_websocket_upgrade() {
     assert_eq!(envelope["type"], "chunk");
     assert_eq!(envelope["content"], "hello-websocket-attach");
     assert_eq!(envelope["done"], false);
+
+    socket.close(None).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while sender.receiver_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("client close should release the session stream subscription");
 }
 
 // ---------------------------------------------------------------------------

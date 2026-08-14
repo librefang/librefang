@@ -796,38 +796,53 @@ async fn session_stream_websocket(
 
     let mut dedup = StreamDedup::new();
     loop {
-        let event = match receiver.recv().await {
-            Ok(event) => event,
-            Err(RecvError::Lagged(skipped)) => {
-                tracing::debug!(skipped, "session attach WebSocket lagged, skipping");
-                continue;
+        tokio::select! {
+            received = receiver.recv() => {
+                let event = match received {
+                    Ok(event) => event,
+                    Err(RecvError::Lagged(skipped)) => {
+                        tracing::debug!(skipped, "session attach WebSocket lagged, skipping");
+                        continue;
+                    }
+                    Err(RecvError::Closed) => break,
+                };
+                let done = matches!(event, StreamEvent::ContentComplete { .. });
+                let Some((event_type, payload)) = session_stream_payload(event, &mut dedup) else {
+                    continue;
+                };
+                let mut envelope = match payload {
+                    serde_json::Value::Object(map) => map,
+                    _ => serde_json::Map::new(),
+                };
+                envelope.insert(
+                    "type".to_string(),
+                    serde_json::Value::String(event_type.to_string()),
+                );
+                if socket
+                    .send(Message::Text(
+                        serde_json::Value::Object(envelope).to_string().into(),
+                    ))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                if done {
+                    let _ = socket.close().await;
+                    break;
+                }
             }
-            Err(RecvError::Closed) => break,
-        };
-        let done = matches!(event, StreamEvent::ContentComplete { .. });
-        let Some((event_type, payload)) = session_stream_payload(event, &mut dedup) else {
-            continue;
-        };
-        let mut envelope = match payload {
-            serde_json::Value::Object(map) => map,
-            _ => serde_json::Map::new(),
-        };
-        envelope.insert(
-            "type".to_string(),
-            serde_json::Value::String(event_type.to_string()),
-        );
-        if socket
-            .send(Message::Text(
-                serde_json::Value::Object(envelope).to_string().into(),
-            ))
-            .await
-            .is_err()
-        {
-            break;
-        }
-        if done {
-            let _ = socket.close().await;
-            break;
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Ping(data))) => {
+                        if socket.send(Message::Pong(data)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    Some(Ok(_)) => {}
+                }
+            }
         }
     }
 }
