@@ -38,10 +38,14 @@ concurrency:
   group: dashboard-build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Dashboard Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # ESLint guards security-sensitive JSX (jsx-no-target-blank,
     # no-danger-with-children) and acts as a fast pre-build gate so the
     # heavier typecheck + build jobs don't waste a runner on a PR that
@@ -63,6 +67,7 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     permissions:
       contents: write
     steps:
@@ -103,21 +108,14 @@ jobs:
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag || '' }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          case "${{ github.event_name }}" in
-            release)
-              TAG="${{ github.event.release.tag_name }}"
-              ;;
-            workflow_dispatch)
-              TAG="${{ github.event.inputs.tag }}"
-              ;;
-            *)
-              # push to main — upload to the most recent release
-              TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
-              ;;
-          esac
+          set -euo pipefail
+          TAG=$(sh .github/scripts/dashboard-release-tag.sh)
           if [ -z "$TAG" ]; then
-            echo "No release found, skipping upload"
+            echo "No stable release found, skipping upload"
             exit 0
           fi
           echo "Uploading dashboard-dist.tar.gz to $TAG"
