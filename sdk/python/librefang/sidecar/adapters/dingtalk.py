@@ -408,6 +408,10 @@ class DingTalkAdapter(SidecarAdapter):
                 and expires_at > 0
                 and expires_at <= now_ms
             ):
+                # An expired replacement for an existing message ID must
+                # invalidate the previously cached reply URL as well.
+                self._session_webhooks.pop(msg_id, None)
+                self._session_webhook_expiries.pop(msg_id, None)
                 return
             self._session_webhooks[msg_id] = session_webhook
             self._session_webhooks.move_to_end(msg_id)

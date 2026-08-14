@@ -425,6 +425,21 @@ def test_session_webhook_cache_drops_expired_urls(monkeypatch):
     assert "live" not in a._session_webhook_expiries
 
 
+def test_expired_session_webhook_update_invalidates_existing_url():
+    now_ms = time.time_ns() // 1_000_000
+    a = _adapter()
+    a._cache_session_webhook(
+        "same-message", "https://example.test/live", now_ms + 60_000,
+    )
+
+    a._cache_session_webhook(
+        "same-message", "https://example.test/expired", now_ms - 1,
+    )
+
+    assert a._pop_session_webhook("same-message") is None
+    assert "same-message" not in a._session_webhook_expiries
+
+
 # ─── on_send routing ─────────────────────────────────────────────────
 
 
