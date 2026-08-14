@@ -79,10 +79,12 @@ export function deriveDropdownActiveSessionId(
  *      close() takes effect; the HTTP path has the same window via the
  *      awaited mutation. Overwriting the user's deliberate pin would be
  *      a worse regression than the unpinned-URL bug.
- *   3. `urlSessionId == null` — the request itself was unpinned. We never
- *      override an explicit `?sessionId=` even if (1) and (2) somehow
- *      hold; the server already mirrors this on its side by omitting
- *      `session_id` from the response body when the request supplied one.
+ *   3. `urlSessionId` has no non-empty value — the request itself was
+ *      unpinned. ChatPage normalizes an empty `?sessionId=` to `null`, so
+ *      it is intentionally treated like an absent parameter. We never
+ *      override a non-empty explicit pin even if (1) and (2) somehow hold;
+ *      the server already mirrors this on its side by omitting `session_id`
+ *      from the response body when the request supplied one.
  *   4. `resolvedSessionId` is a string — defensive guard for malformed
  *      server responses; the wire contract is "string or absent".
  *   5. `resolvedSessionId` is non-empty — a regression that emits `""`
