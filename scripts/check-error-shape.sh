@@ -64,35 +64,40 @@ LEGACY_FILES=(
   "crates/librefang-api/src/routes/config/system.rs"
 )
 
-# Build an extended-regex alternation of legacy paths for grep filtering.
-LEGACY_RE=""
-for f in "${LEGACY_FILES[@]}"; do
-  if [ -z "$LEGACY_RE" ]; then
-    LEGACY_RE="^${f}:"
+# Prefer ripgrep (fast). Fall back to portable extended grep. Both are
+# deliberately line-oriented and consume the same ERE-compatible patterns.
+search_routes() {
+  local pattern=$1 status
+  set +e
+  if command -v rg >/dev/null 2>&1; then
+    rg --no-heading --line-number "$pattern" "$ROUTES_DIR"
+    status=$?
   else
-    LEGACY_RE="${LEGACY_RE}|^${f}:"
+    grep -RHnE "$pattern" "$ROUTES_DIR"
+    status=$?
   fi
-done
+  set -e
+  case "$status" in
+    0|1) return 0 ;;
+    *) echo "::error::error-shape search engine failed (exit $status)." >&2; return 2 ;;
+  esac
+}
 
-# Prefer ripgrep (fast). Fall back to grep -RHn so the script still
-# works in stripped-down CI containers that don't bundle ripgrep.
-if command -v rg >/dev/null 2>&1; then
-  search_multi() { rg --no-heading --line-number -U "$@"; }
-  search_line()  { rg --no-heading --line-number "$@"; }
-else
-  search_multi() { grep -RHnP "$@"; }
-  search_line()  { grep -RHnE "$@"; }
-fi
-
-# Filter out hits in the legacy allowlist. Using `grep -Ev` keeps the
-# script readable; the alternation regex is anchored on `^path:` so a
-# substring match in a comment cannot mask hits in other files.
+# Filter out hits in the legacy allowlist by exact path, never by regex.
 filter_legacy() {
-  if [ -z "$LEGACY_RE" ]; then
-    cat
-  else
-    grep -Ev "$LEGACY_RE" || true
-  fi
+  local line path legacy skip
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    path=${line%%:*}
+    skip=0
+    for legacy in "${LEGACY_FILES[@]}"; do
+      if [ "$path" = "$legacy" ]; then
+        skip=1
+        break
+      fi
+    done
+    [ "$skip" = 1 ] || printf '%s\n' "$line"
+  done
 }
 
 violations=0
@@ -104,8 +109,15 @@ violations=0
 # with `"detail"` as the first key. The cheapest reliable heuristic:
 # require the literal `json!({"detail":` so the AuditEntry row case
 # (`json!({ "seq": …, "detail": …, … })`) is naturally excluded.
-detail_hits=$(search_multi 'json!\(\{\s*"detail"\s*:' "$ROUTES_DIR" 2>/dev/null || true)
-detail_hits_filtered=$(printf '%s\n' "$detail_hits" | filter_legacy | grep -Ev ':[[:space:]]*///' | sed '/^$/d' || true)
+if ! detail_hits=$(search_routes 'json!\(\{[[:space:]]*"detail"[[:space:]]*:'); then
+  exit 2
+fi
+detail_hits_filtered=""
+if [ -n "$detail_hits" ]; then
+  detail_hits_filtered=$(printf '%s\n' "$detail_hits" \
+    | filter_legacy \
+    | grep -Ev ':[0-9]+:[[:space:]]*///' || true)
+fi
 if [ -n "$detail_hits_filtered" ]; then
   echo "::error::Found forbidden '{\"detail\": …}' error shape (issue #3505):"
   echo "$detail_hits_filtered"
@@ -119,8 +131,15 @@ fi
 # Pattern 2: `{"status": "error", …}` shape. Strip out `///` doc-comment
 # lines so a doc string explaining why the shape is gone doesn't trip
 # the lint.
-status_hits=$(search_line '"status"[[:space:]]*:[[:space:]]*"error"' "$ROUTES_DIR" 2>/dev/null || true)
-status_hits_filtered=$(printf '%s\n' "$status_hits" | filter_legacy | grep -Ev ':[[:space:]]*///' | sed '/^$/d' || true)
+if ! status_hits=$(search_routes 'json!\(\{[[:space:]]*"status"[[:space:]]*:[[:space:]]*"error"'); then
+  exit 2
+fi
+status_hits_filtered=""
+if [ -n "$status_hits" ]; then
+  status_hits_filtered=$(printf '%s\n' "$status_hits" \
+    | filter_legacy \
+    | grep -Ev ':[0-9]+:[[:space:]]*///' || true)
+fi
 if [ -n "$status_hits_filtered" ]; then
   echo "::error::Found forbidden '{\"status\": \"error\", …}' shape (issue #3505):"
   echo "$status_hits_filtered"
