@@ -2,9 +2,9 @@
 //!
 //! All audit endpoints are deliberately gated to `UserRole::Admin+` with an actual credential because audit access leaks sensitive identity / action data — the role check happens in-handler (the global auth middleware only enforces "is this a recognised token", not "may this caller see audit").
 //!
-//! Filtering is done at the SQLite layer with parameterised queries —
-//! all filter values come straight from the URL and are bound through
-//! `rusqlite::params!` to keep the SQL injection surface zero.
+//! Filtering is done against a complete snapshot of the retained in-memory
+//! chain.
+//! Filter values are compared as Rust strings and never enter SQL.
 
 use super::AppState;
 use crate::middleware::{AuthenticatedApiUser, TrustedNoAuthCaller, UserRole};
@@ -156,10 +156,15 @@ fn require_admin(
 /// SQL injection surface is zero because we never build SQL from user
 /// input here. `rusqlite::params!` is used in `librefang-memory` for
 /// the DB-backed paths.
-fn apply_filter(entry: &AuditEntry, f: &AuditFilter, bounds: TimeBounds) -> bool {
+fn apply_filter(
+    entry: &AuditEntry,
+    f: &AuditFilter,
+    bounds: TimeBounds,
+    derived_user_id: Option<&str>,
+) -> bool {
     if let Some(ref u) = f.user {
         let uid_str = entry.user_id.map(|u| u.to_string()).unwrap_or_default();
-        if uid_str != *u && !user_matches_loose(u, &uid_str) {
+        if uid_str != *u && derived_user_id != Some(uid_str.as_str()) {
             return false;
         }
     }
@@ -203,13 +208,22 @@ fn apply_filter(entry: &AuditEntry, f: &AuditFilter, bounds: TimeBounds) -> bool
     true
 }
 
-/// Allow `?user=Alice` to match either the stringified UUID or the raw
-/// name (re-derived via `UserId::from_name`). Saves the operator from
-/// having to round-trip through the user-list endpoint just to get a
-/// uuid for filtering.
-fn user_matches_loose(query: &str, recorded_uuid: &str) -> bool {
-    let derived = UserId::from_name(query).to_string();
-    derived == recorded_uuid
+/// Resolve a name filter once per request so each audit row only performs
+/// string comparisons.
+fn derived_user_id(filter: &AuditFilter) -> Option<String> {
+    filter
+        .user
+        .as_deref()
+        .map(UserId::from_name)
+        .map(|id| id.to_string())
+}
+
+fn anchor_error_status(anchor_enabled: bool) -> &'static str {
+    if anchor_enabled {
+        "error"
+    } else {
+        "none"
+    }
 }
 
 /// GET /api/audit/query — admin-only filtered audit log.
@@ -248,17 +262,15 @@ pub async fn audit_query(
         .limit
         .unwrap_or(DEFAULT_AUDIT_QUERY_LIMIT)
         .clamp(1, MAX_AUDIT_QUERY_LIMIT);
+    let derived_user_id = derived_user_id(&filter);
 
-    // Pull the full in-memory window and filter, then truncate.
-    // `MAX_AUDIT_QUERY_LIMIT * 4` gives the filter some headroom when
-    // the operator narrows by user / channel without losing the recency
-    // ordering that callers expect (newest first).
-    let pool_size = (MAX_AUDIT_QUERY_LIMIT as usize).saturating_mul(4);
-    let pool = state.kernel.audit().recent(pool_size);
+    // Snapshot the complete retained log before filtering.
+    // A fixed pre-filter window can silently omit older rare matches.
+    let pool = state.kernel.audit().recent(usize::MAX);
 
     let mut filtered: Vec<&AuditEntry> = pool
         .iter()
-        .filter(|e| apply_filter(e, &filter, bounds))
+        .filter(|e| apply_filter(e, &filter, bounds, derived_user_id.as_deref()))
         .collect();
     // `recent` returns oldest-first within the slice; reverse for newest-first.
     filtered.reverse();
@@ -341,11 +353,12 @@ pub async fn audit_export(
     const EXPORT_DEFAULT: u32 = 5_000;
     const EXPORT_MAX: u32 = 50_000;
     let limit = filter.limit.unwrap_or(EXPORT_DEFAULT).clamp(1, EXPORT_MAX);
+    let derived_user_id = derived_user_id(&filter);
 
-    let pool = state.kernel.audit().recent(EXPORT_MAX as usize * 2);
+    let pool = state.kernel.audit().recent(usize::MAX);
     let mut filtered: Vec<AuditEntry> = pool
         .into_iter()
-        .filter(|e| apply_filter(e, &filter, bounds))
+        .filter(|e| apply_filter(e, &filter, bounds, derived_user_id.as_deref()))
         .collect();
     filtered.reverse();
     filtered.truncate(limit as usize);
@@ -542,7 +555,7 @@ pub async fn audit_recent(
                 "seq": e.seq,
                 "timestamp": e.timestamp,
                 "agent_id": e.agent_id,
-                "action": format!("{:?}", e.action),
+                "action": e.action.to_string(),
                 "detail": e.detail,
                 "outcome": e.outcome,
                 "hash": e.hash,
@@ -606,11 +619,9 @@ pub async fn audit_verify(
             Json(body).into_response()
         }
         Err(msg) => {
-            // verify_integrity() returns Err when the chain is broken
-            // OR when the anchor file diverges from the in-DB tip.
-            // Surface "diverged" so the UI can distinguish anchor
-            // failure from chain failure even though both are fatal.
-            let anchor_status = if anchor_enabled { "diverged" } else { "none" };
+            // Integrity verification does not distinguish a broken chain
+            // from an anchor mismatch.
+            let anchor_status = anchor_error_status(anchor_enabled);
             Json(serde_json::json!({
                 "valid": false,
                 "error": msg,
@@ -655,6 +666,17 @@ mod tests {
         (None, None)
     }
 
+    fn filter_matches(entry: &AuditEntry, filter: &AuditFilter, bounds: TimeBounds) -> bool {
+        let user_id = derived_user_id(filter);
+        apply_filter(entry, filter, bounds, user_id.as_deref())
+    }
+
+    #[test]
+    fn ambiguous_integrity_failure_does_not_blame_anchor() {
+        assert_eq!(anchor_error_status(true), "error");
+        assert_eq!(anchor_error_status(false), "none");
+    }
+
     #[test]
     fn test_filter_by_user_uuid_and_name() {
         let alice = UserId::from_name("Alice");
@@ -672,21 +694,21 @@ mod tests {
             user: Some(alice.to_string()),
             ..Default::default()
         };
-        assert!(apply_filter(&e, &f, no_bounds()));
+        assert!(filter_matches(&e, &f, no_bounds()));
 
         // Name match (re-derived via UserId::from_name)
         let f = AuditFilter {
             user: Some("Alice".to_string()),
             ..Default::default()
         };
-        assert!(apply_filter(&e, &f, no_bounds()));
+        assert!(filter_matches(&e, &f, no_bounds()));
 
         // Different name must NOT match
         let f = AuditFilter {
             user: Some("Bob".to_string()),
             ..Default::default()
         };
-        assert!(!apply_filter(&e, &f, no_bounds()));
+        assert!(!filter_matches(&e, &f, no_bounds()));
     }
 
     #[test]
@@ -696,12 +718,12 @@ mod tests {
             action: Some("permissiondenied".to_string()),
             ..Default::default()
         };
-        assert!(apply_filter(&e, &f, no_bounds()));
+        assert!(filter_matches(&e, &f, no_bounds()));
         let f = AuditFilter {
             action: Some("ToolInvoke".to_string()),
             ..Default::default()
         };
-        assert!(!apply_filter(&e, &f, no_bounds()));
+        assert!(!filter_matches(&e, &f, no_bounds()));
     }
 
     #[test]
@@ -721,14 +743,14 @@ mod tests {
             channel: Some("telegram".to_string()),
             ..Default::default()
         };
-        assert!(apply_filter(&e, &f, no_bounds()));
+        assert!(filter_matches(&e, &f, no_bounds()));
 
         // Agent mismatch
         let f = AuditFilter {
             agent: Some("agent-9".to_string()),
             ..Default::default()
         };
-        assert!(!apply_filter(&e, &f, no_bounds()));
+        assert!(!filter_matches(&e, &f, no_bounds()));
 
         // Time range — `from` is inclusive, compared as parsed instants.
         let f = AuditFilter {
@@ -737,13 +759,13 @@ mod tests {
             ..Default::default()
         };
         let bounds = parse_time_bounds(&f).expect("valid RFC-3339");
-        assert!(apply_filter(&e, &f, bounds));
+        assert!(filter_matches(&e, &f, bounds));
         let f = AuditFilter {
             from: Some("2027-01-01T00:00:00+00:00".to_string()),
             ..Default::default()
         };
         let bounds = parse_time_bounds(&f).expect("valid RFC-3339");
-        assert!(!apply_filter(&e, &f, bounds));
+        assert!(!filter_matches(&e, &f, bounds));
     }
 
     #[test]
@@ -769,7 +791,7 @@ mod tests {
         };
         let bounds = parse_time_bounds(&f).expect("Z-suffixed RFC-3339 must parse");
         assert!(
-            apply_filter(&e, &f, bounds),
+            filter_matches(&e, &f, bounds),
             "Z-suffixed bound equal to entry instant must include the entry"
         );
     }
@@ -928,6 +950,6 @@ mod tests {
             agent: Some("' OR 1=1 --".to_string()),
             ..Default::default()
         };
-        assert!(!apply_filter(&e, &f, no_bounds()));
+        assert!(!filter_matches(&e, &f, no_bounds()));
     }
 }

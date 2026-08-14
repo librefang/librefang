@@ -1,0 +1,1 @@
+Prevent filtered audit queries and exports from silently omitting older retained matches, precompute name filters once per request, and report ambiguous integrity failures without blaming the external anchor. (@xiaomo)
