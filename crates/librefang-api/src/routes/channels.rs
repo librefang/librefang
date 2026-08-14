@@ -58,7 +58,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::types::ApiErrorResponse;
 
@@ -612,6 +612,34 @@ fn schema_error_cache() -> &'static RwLock<HashMap<&'static str, String>> {
     SIDECAR_SCHEMA_ERROR_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
+fn read_cache_recover<'a, T>(
+    cache: &'a RwLock<T>,
+    cache_name: &'static str,
+) -> RwLockReadGuard<'a, T> {
+    cache.read().unwrap_or_else(|poisoned| {
+        tracing::warn!(
+            cache = cache_name,
+            "Channel schema cache lock poisoned; recovering state"
+        );
+        cache.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
+fn write_cache_recover<'a, T>(
+    cache: &'a RwLock<T>,
+    cache_name: &'static str,
+) -> RwLockWriteGuard<'a, T> {
+    cache.write().unwrap_or_else(|poisoned| {
+        tracing::warn!(
+            cache = cache_name,
+            "Channel schema cache lock poisoned; recovering state"
+        );
+        cache.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
 /// Spawn `<command> <args> --describe` for every catalog entry and cache
 /// the resulting schemas. Called once at daemon boot from
 /// `server::build_router`. `describe_sidecar` injects the binary-embedded
@@ -634,7 +662,7 @@ pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
                     fields = schema.fields.len(),
                     "sidecar schema cached"
                 );
-                schema_cache().write().unwrap().insert(entry.name, schema);
+                write_cache_recover(schema_cache(), "schema").insert(entry.name, schema);
             }
             Err(e) => {
                 if let Some(static_fields) = entry.static_fields {
@@ -663,7 +691,7 @@ pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
                         fields = fallback.fields.len(),
                         "sidecar --describe failed; using compile-time fallback schema"
                     );
-                    schema_cache().write().unwrap().insert(entry.name, fallback);
+                    write_cache_recover(schema_cache(), "schema").insert(entry.name, fallback);
                 } else {
                     tracing::warn!(
                         adapter = entry.name,
@@ -671,7 +699,7 @@ pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
                         "sidecar --describe failed; discovery card will have no form fields"
                     );
                     // Stash the failure reason so the discovery row can tell the operator *why* the form is empty (typically: Python sidecar SDK not installed).
-                    schema_error_cache().write().unwrap().insert(entry.name, e);
+                    write_cache_recover(schema_error_cache(), "schema error").insert(entry.name, e);
                 }
             }
         }
@@ -686,7 +714,7 @@ pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
 /// [`populate_sidecar_schema_cache`] at boot.
 #[doc(hidden)]
 pub fn __test_seed_sidecar_schema_cache(entries: &[(&'static str, SidecarSchema)]) {
-    let mut guard = schema_cache().write().unwrap();
+    let mut guard = write_cache_recover(schema_cache(), "schema");
     guard.clear();
     for (k, v) in entries {
         guard.insert(*k, v.clone());
@@ -698,7 +726,7 @@ pub fn __test_seed_sidecar_schema_cache(entries: &[(&'static str, SidecarSchema)
 /// `#[doc(hidden)]` for the same reason.
 #[doc(hidden)]
 pub fn __test_seed_sidecar_schema_error_cache(entries: &[(&'static str, String)]) {
-    let mut guard = schema_error_cache().write().unwrap();
+    let mut guard = write_cache_recover(schema_error_cache(), "schema error");
     guard.clear();
     for (k, v) in entries {
         guard.insert(*k, v.clone());
@@ -727,8 +755,8 @@ fn sidecar_discovery_rows(
         covered.insert(sc.name.as_str());
     }
 
-    let cache_guard = schema_cache().read().unwrap();
-    let err_guard = schema_error_cache().read().unwrap();
+    let cache_guard = read_cache_recover(schema_cache(), "schema");
+    let err_guard = read_cache_recover(schema_error_cache(), "schema error");
     let mut rows = Vec::new();
     for entry in SIDECAR_CATALOG {
         if covered.contains(entry.name) {
@@ -913,9 +941,7 @@ pub async fn configure_sidecar_channel(
 
     // 2. Pull the cached `--describe` schema. Without it we can't
     //    validate required fields or split secret-vs-nonsecret.
-    let schema = schema_cache()
-        .read()
-        .unwrap()
+    let schema = read_cache_recover(schema_cache(), "schema")
         .get(entry.name)
         .cloned()
         .ok_or_else(|| {
@@ -1681,5 +1707,41 @@ mod schema_error_discovery_tests {
         // Reset shared caches so we don't leak state into other tests.
         __test_seed_sidecar_schema_cache(&[]);
         __test_seed_sidecar_schema_error_cache(&[]);
+    }
+}
+
+#[cfg(test)]
+mod schema_cache_poison_tests {
+    use super::{read_cache_recover, write_cache_recover};
+    use std::collections::HashMap;
+    use std::sync::RwLock;
+
+    #[test]
+    fn cache_helpers_recover_reads_and_writes_after_held_lock_panics() {
+        let read_recovery = RwLock::new(HashMap::from([("telegram", "schema")]));
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = read_recovery.write().unwrap();
+            panic!("poison cache before recovered read");
+        });
+        assert!(read_recovery.is_poisoned());
+
+        let guard = read_cache_recover(&read_recovery, "test read cache");
+        assert_eq!(guard.get("telegram"), Some(&"schema"));
+        drop(guard);
+        assert!(!read_recovery.is_poisoned());
+        assert!(read_recovery.read().is_ok());
+
+        let write_recovery = RwLock::new(HashMap::from([("wechat", "error")]));
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = write_recovery.write().unwrap();
+            panic!("poison cache before recovered write");
+        });
+        assert!(write_recovery.is_poisoned());
+
+        write_cache_recover(&write_recovery, "test write cache").insert("feishu", "fallback");
+        assert!(!write_recovery.is_poisoned());
+        let guard = write_recovery.read().unwrap();
+        assert_eq!(guard.get("wechat"), Some(&"error"));
+        assert_eq!(guard.get("feishu"), Some(&"fallback"));
     }
 }
