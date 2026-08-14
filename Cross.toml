@@ -1,8 +1,12 @@
 [target.aarch64-unknown-linux-gnu]
+# The glibc target enables the keyring crate's Secret Service backend, which
+# requires the target-architecture D-Bus development library. Keep libssl for
+# the remaining native TLS consumers in the cross sysroot.
 pre-build = [
-  "dpkg --add-architecture $CROSS_DEB_ARCH",
-  "apt-get update && apt-get install --assume-yes libssl-dev:$CROSS_DEB_ARCH libdbus-1-dev:$CROSS_DEB_ARCH"
+  "dpkg --add-architecture $CROSS_DEB_ARCH && apt-get update && apt-get install --assume-yes libssl-dev:$CROSS_DEB_ARCH libdbus-1-dev:$CROSS_DEB_ARCH"
 ]
 
 [target.aarch64-linux-android]
-image = "ghcr.io/cross-rs/aarch64-linux-android:main"
+# cross-rs main snapshot resolved on 2026-08-14. Bump deliberately after an
+# Android release build verifies the replacement image.
+image = "ghcr.io/cross-rs/aarch64-linux-android@sha256:a6aa29659aec359b512717f89c71e885012fd3e07423e74da0a9945b2cd623dc"
