@@ -1,10 +1,10 @@
 # LibreFang i18n — English (en)
 #
-# This file provides a TOML key-value reference for all translatable
-# error messages. The runtime uses Fluent (.ftl) files under
-# crates/librefang-types/locales/ for actual translation lookup.
-# This TOML file serves as a human-readable catalog and can be used
-# by external tooling or future TOML-based i18n backends.
+# This file provides a curated TOML key-value reference for common error
+# messages. It is not an exhaustive catalog. The runtime Fluent (.ftl) files
+# under crates/librefang-types/locales/ are the authoritative catalogs.
+# TOML placeholders use `{name}`; a consumer must map them to its own
+# interpolation syntax (Fluent uses `{ $name }`).
 
 [agent]
 not-found        = "Agent not found"
