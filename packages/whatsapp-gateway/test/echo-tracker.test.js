@@ -54,6 +54,31 @@ describe('EchoTracker.track / isEcho', () => {
     assert.equal(t.isEcho('never-sent'), false);
   });
 
+  it('scopes identical text to its destination chat', () => {
+    const t = new EchoTracker();
+    t.track('ok', 'alice@s.whatsapp.net');
+    assert.equal(t.isEcho('OK!', 'alice@s.whatsapp.net'), true);
+    assert.equal(t.isEcho('ok', 'bob@s.whatsapp.net'), false);
+  });
+
+  it('expires tracked text after the TTL', () => {
+    let clock = 1_000;
+    const t = new EchoTracker(100, { ttlMs: 50, now: () => clock });
+    t.track('hello', 'alice@s.whatsapp.net');
+    clock += 50;
+    assert.equal(t.isEcho('hello', 'alice@s.whatsapp.net'), true);
+    clock += 1;
+    assert.equal(t.isEcho('hello', 'alice@s.whatsapp.net'), false);
+    assert.equal(t.size(), 0);
+  });
+
+  it('uses one clock reading when tracking', () => {
+    let clock = 0;
+    const t = new EchoTracker(100, { now: () => ++clock });
+    t.track('hello');
+    assert.equal(t.lastSentAt, 1);
+  });
+
   it('track(null), track(""), track(undefined) are no-ops', () => {
     const t = new EchoTracker();
     t.track(null);
