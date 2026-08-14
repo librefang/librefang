@@ -28,6 +28,8 @@ export const versionInfoQueryOptions = () =>
     // but allow a focus/remount refresh once it is five minutes old.
     staleTime: VERSION_STALE_MS,
     gcTime: Infinity,
+    // The dashboard QueryClient disables focus refetching globally.
+    refetchOnWindowFocus: true,
   });
 
 export function useDashboardSnapshot(options: QueryOverrides = {}) {

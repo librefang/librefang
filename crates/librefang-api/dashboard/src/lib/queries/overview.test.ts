@@ -19,5 +19,6 @@ describe("overview query policy", () => {
     expect(options.staleTime).toBe(5 * 60_000);
     expect(options.gcTime).toBe(Infinity);
     expect(options.refetchInterval).toBeUndefined();
+    expect(options.refetchOnWindowFocus).toBe(true);
   });
 });
