@@ -79,8 +79,7 @@ import {
   useCloneAgent,
   useDeleteAgent,
   usePatchAgent,
-  usePatchAgentConfig,
-  usePatchHandAgentRuntimeConfig,
+  usePatchAgentRuntimeConfig,
   useResetAgentSession,
   useResumeAgent,
   useSpawnAgent,
@@ -388,8 +387,7 @@ export function AgentsPage() {
   const spawnMutation = useSpawnAgent();
   const suspendMutation = useSuspendAgent();
   const resumeMutation = useResumeAgent();
-  const patchAgentConfigMutation = usePatchAgentConfig();
-  const patchHandAgentRuntimeConfigMutation = usePatchHandAgentRuntimeConfig();
+  const patchAgentRuntimeConfigMutation = usePatchAgentRuntimeConfig();
   const patchAgentMutation = usePatchAgent();
   const cloneMutation = useCloneAgent();
   const resetSessionMutation = useResetAgentSession();
@@ -581,14 +579,8 @@ export function AgentsPage() {
       return;
     }
 
-    // Caller picks the mutation based on cached agent-detail knowledge: hand
-    // agents go through the hand-runtime-config endpoint (also invalidates
-    // handKeys.details()), everyone else hits the standalone /config route.
-    const mutation = detailAgent.is_hand
-      ? patchHandAgentRuntimeConfigMutation
-      : patchAgentConfigMutation;
-    mutation.mutate(
-      { agentId: detailAgent.id, config: patch },
+    patchAgentRuntimeConfigMutation.mutate(
+      { agentId: detailAgent.id, isHand: detailAgent.is_hand === true, config: patch },
       {
         onSuccess: async () => {
           setEditingModel(false);
@@ -930,9 +922,7 @@ export function AgentsPage() {
   const isDetailDrawerCrashed = drawerDetailState === "crashed";
   const drawerStatusColor = isDetailDrawerSuspended ? "bg-warning" : isDetailDrawerCrashed ? "bg-error" : "bg-success";
   const lockRename = !!detailAgent?.is_hand;
-  const activeConfigMutation = detailAgent?.is_hand
-    ? patchHandAgentRuntimeConfigMutation
-    : patchAgentConfigMutation;
+  const activeConfigMutation = patchAgentRuntimeConfigMutation;
   // Save enables when the draft is both valid AND differs from the persisted
   // model in any field — Provider, Model, Max tokens, or Temperature. Earlier
   // this gate checked validity only; combined with the provider-switch model
@@ -2691,14 +2681,12 @@ export function AgentsPage() {
                       value={detailAgent.web_search_augmentation || "off"}
                       onChange={e => {
                         const mode = e.target.value as "off" | "auto" | "always";
-                        // Branch in the caller, not the hook — only the
-                        // caller knows from the cached detail whether this
-                        // agent is a hand role.
-                        const mutation = detailAgent.is_hand
-                          ? patchHandAgentRuntimeConfigMutation
-                          : patchAgentConfigMutation;
-                        mutation.mutate(
-                          { agentId: detailAgent.id, config: { web_search_augmentation: mode } },
+                        patchAgentRuntimeConfigMutation.mutate(
+                          {
+                            agentId: detailAgent.id,
+                            isHand: detailAgent.is_hand === true,
+                            config: { web_search_augmentation: mode },
+                          },
                           {
                             onSuccess: async () => {
                               await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);

@@ -36,7 +36,7 @@ vi.mock("../http/client", async () => {
 });
 
 describe("useCompleteExperiment", () => {
-  it("invalidates experiments and experimentMetrics keys", async () => {
+  it("patches experiments and invalidates only experiment metrics", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -48,9 +48,9 @@ describe("useCompleteExperiment", () => {
     await result.current.mutateAsync(variables);
 
     await waitFor(() => {
-      expect(invalidateSpy).toHaveBeenCalledTimes(2);
+      expect(invalidateSpy).toHaveBeenCalledTimes(1);
     });
-    expect(invalidateSpy).toHaveBeenCalledWith({
+    expect(invalidateSpy).not.toHaveBeenCalledWith({
       queryKey: agentKeys.experiments("agent-1"),
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
