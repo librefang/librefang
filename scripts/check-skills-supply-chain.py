@@ -386,9 +386,11 @@ def check_prompt_file(path: Path) -> Iterator[Finding]:
 def scan_paths(
     roots: Iterable[Path],
     excludes: tuple[str, ...],
-) -> list[Finding]:
+) -> tuple[list[Finding], int]:
     findings: list[Finding] = []
+    scanned = 0
     for path in iter_files(roots, excludes):
+        scanned += 1
         # Always-fail rules first — file extension is irrelevant.
         findings.extend(check_pth_files(path))
 
@@ -399,7 +401,7 @@ def scan_paths(
             findings.extend(check_js_file(path))
         if suffix in PROMPT_FILE_SUFFIXES:
             findings.extend(check_prompt_file(path))
-    return findings
+    return findings, scanned
 
 
 # --- Self-test --------------------------------------------------------------
@@ -475,9 +477,14 @@ def run_self_test() -> int:
         excluded.write_text("exec(payload)\n", encoding="utf-8")
         included.write_text("exec(payload)\n", encoding="utf-8")
 
-        findings = scan_paths([root], excludes=())
+        findings, scanned = scan_paths([root], excludes=())
 
         failures: list[str] = []
+        expected_scanned = len(_SELF_TEST_CASES) + 2
+        if scanned != expected_scanned:
+            failures.append(
+                f"scan count expected {expected_scanned} files, got {scanned}"
+            )
         discovered = set(iter_files([root], excludes=("target",)))
         if excluded in discovered:
             failures.append("exact excluded component target was scanned")
@@ -559,7 +566,7 @@ def main(argv: list[str]) -> int:
     )
     excludes = base_excludes + tuple(args.exclude)
 
-    findings = scan_paths(roots, excludes)
+    findings, scanned = scan_paths(roots, excludes)
 
     for f in findings:
         print(f.to_jsonl())
@@ -569,8 +576,7 @@ def main(argv: list[str]) -> int:
     for f in findings:
         by_rule[f.rule] = by_rule.get(f.rule, 0) + 1
     print(
-        f"supply-chain-audit: scanned {sum(1 for _ in iter_files(roots, excludes))} "
-        f"files, {len(findings)} findings",
+        f"supply-chain-audit: scanned {scanned} files, {len(findings)} findings",
         file=sys.stderr,
     )
     for rule, count in sorted(by_rule.items()):
