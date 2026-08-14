@@ -1156,6 +1156,17 @@ impl AuditLog {
         lock_audit_recover(&self.entries, "entries").len()
     }
 
+    /// Returns the number of rows retained in persistent storage.
+    ///
+    /// This can exceed [`Self::len`] after the in-memory soft cap evicts an
+    /// old prefix without deleting its SQLite rows. Callers that can only
+    /// inspect the in-memory window use this value to disclose that their
+    /// result is incomplete rather than presenting a partial audit history
+    /// as exhaustive.
+    pub fn persisted_len(&self) -> usize {
+        self.persisted_rows.load(Ordering::Relaxed)
+    }
+
     /// Returns the configured external tip-anchor path, if any.
     ///
     /// When `Some`, every audit append mirrors the new tip hash to this
