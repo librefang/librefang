@@ -119,11 +119,8 @@ import asyncio
 import base64
 import json
 import os
-import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from typing import Any, Optional
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
@@ -131,7 +128,6 @@ from librefang.sidecar import logging as log
 from librefang.sidecar.common import (
     http_request as _http_request,
     MAX_BACKOFF_SECS,
-    parse_retry_after as _parse_retry_after_impl,
     RETRY_AFTER_DEFAULT_SECS,
     SeenSet as _SeenSet,
     split_csv as _split_csv,
@@ -640,7 +636,6 @@ class ZulipAdapter(SidecarAdapter):
                 last_event_id, signal = self._poll_once(
                     emit, queue_id, last_event_id,
                 )
-                backoff = INITIAL_BACKOFF_SECS
                 if signal == "reregister":
                     # Re-register inline so the next poll uses the new
                     # queue id. If re-register itself fails the outer
@@ -651,6 +646,7 @@ class ZulipAdapter(SidecarAdapter):
                         queue_id=queue_id,
                         last_event_id=last_event_id,
                     )
+                backoff = INITIAL_BACKOFF_SECS
             except Exception as e:  # noqa: BLE001
                 log.warn(
                     "zulip poll error; backing off",
