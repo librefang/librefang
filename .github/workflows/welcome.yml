@@ -15,18 +15,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Welcome first-time contributors
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          AUTHOR: ${{ github.event.sender.login }}
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || '' }}
+          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
         run: |
-          REPO="${{ github.repository }}"
-          AUTHOR="${{ github.event.sender.login }}"
+          set -euo pipefail
 
-          if [ "${{ github.event_name }}" = "issues" ]; then
-            NUMBER="${{ github.event.issue.number }}"
+          if [ "$EVENT_NAME" = "issues" ]; then
+            NUMBER="$ISSUE_NUMBER"
             # Check if this is the author's first issue (use listing API, not search — search has secondary rate limits and indexing delays)
             COUNT=$(gh issue list --repo "$REPO" --author "$AUTHOR" --state all --limit 2 --json number --jq 'length')
             if [ "$COUNT" -lt 2 ]; then
-              gh issue comment "$NUMBER" --repo "$REPO" --body "$(cat <<'MSG'
+              BODY_FILE=$(mktemp)
+              trap 'rm -f "$BODY_FILE"' EXIT
+              cat > "$BODY_FILE" <<'MSG'
           Thanks for opening your first issue! 🎉
 
           A maintainer will take a look soon. In the meantime:
@@ -35,15 +42,19 @@ jobs:
 
           We aim to respond within 7 days.
           MSG
-              )"
+              gh issue comment "$NUMBER" --repo "$REPO" --body-file "$BODY_FILE"
+              rm -f "$BODY_FILE"
+              trap - EXIT
             fi
 
-          elif [ "${{ github.event_name }}" = "pull_request_target" ]; then
-            NUMBER="${{ github.event.pull_request.number }}"
+          elif [ "$EVENT_NAME" = "pull_request_target" ]; then
+            NUMBER="$PR_NUMBER"
             # Check if this is the author's first PR (use listing API, not search — search has secondary rate limits and indexing delays)
             COUNT=$(gh pr list --repo "$REPO" --author "$AUTHOR" --state all --limit 2 --json number --jq 'length')
             if [ "$COUNT" -lt 2 ]; then
-              gh pr comment "$NUMBER" --repo "$REPO" --body "$(cat <<'MSG'
+              BODY_FILE=$(mktemp)
+              trap 'rm -f "$BODY_FILE"' EXIT
+              cat > "$BODY_FILE" <<'MSG'
           Thanks for your first pull request! 🎉
 
           A maintainer will review it soon. While you wait, please make sure:
@@ -53,6 +64,8 @@ jobs:
 
           We aim to provide initial feedback within 7 days. See [CONTRIBUTING.md](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md) for details.
           MSG
-              )"
+              gh pr comment "$NUMBER" --repo "$REPO" --body-file "$BODY_FILE"
+              rm -f "$BODY_FILE"
+              trap - EXIT
             fi
           fi
