@@ -1,0 +1,1 @@
+- Let dashboard section-label callers reliably override layout classes and centralize compact-label typography tokens. (@xiaomo)
