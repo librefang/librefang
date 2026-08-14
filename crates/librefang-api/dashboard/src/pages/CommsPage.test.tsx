@@ -208,6 +208,49 @@ describe("CommsPage degraded data", () => {
     });
   });
 
+  it("enables and refreshes only the active tab queries", () => {
+    const channels = makeQuery([]);
+    const snapshot = makeQuery({ status: { uptime_seconds: 1 } });
+    const topology = makeQuery(null);
+    const events = makeQuery([]);
+    useChannelsMock.mockReturnValue(channels);
+    useDashboardSnapshotMock.mockReturnValue(snapshot);
+    useCommsTopologyMock.mockReturnValue(topology);
+    useCommsEventsMock.mockReturnValue(events);
+    render(<CommsPage />);
+
+    expect(useChannelsMock).toHaveBeenLastCalledWith({ enabled: true });
+    expect(useDashboardSnapshotMock).toHaveBeenLastCalledWith({ enabled: true });
+    fireEvent.click(screen.getByRole("tab", { name: "comms.topology" }));
+    expect(useChannelsMock).toHaveBeenLastCalledWith({ enabled: false });
+    expect(useDashboardSnapshotMock).toHaveBeenLastCalledWith({ enabled: false });
+    expect(useCommsTopologyMock).toHaveBeenLastCalledWith({ enabled: true });
+    fireEvent.click(screen.getByRole("button", { name: "common.refresh" }));
+    expect(topology.refetch).toHaveBeenCalledOnce();
+    expect(snapshot.refetch).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("tab", { name: "comms.active_channels" }));
+    fireEvent.click(screen.getByRole("button", { name: "common.refresh" }));
+    expect(channels.refetch).toHaveBeenCalledOnce();
+    expect(snapshot.refetch).toHaveBeenCalledOnce();
+    expect(events.refetch).toHaveBeenCalledOnce();
+  });
+
+  it("counts only live configured channels as connected", () => {
+    useChannelsMock.mockReturnValue(
+      makeQuery([
+        makeChannel({ name: "connected", connected: true }),
+        makeChannel({ name: "disconnected", connected: false }),
+      ]),
+    );
+    render(<CommsPage />);
+
+    const label = screen.getByText("comms.connected");
+    expect(
+      within(label.parentElement?.parentElement as HTMLElement).getByText("1"),
+    ).toBeInTheDocument();
+  });
+
   it("distinguishes channel query failures from empty results", () => {
     useChannelsMock.mockReturnValue(
       makeQuery([], { isError: true, error: new Error("channels unavailable") }),
@@ -215,7 +258,21 @@ describe("CommsPage degraded data", () => {
 
     render(<CommsPage />);
 
-    expect(screen.getByText("common.error")).toBeInTheDocument();
-    expect(screen.getByText("Error: channels unavailable")).toBeInTheDocument();
+    expect(screen.getAllByText("common.error")).toHaveLength(2);
+    expect(screen.getByText("channels unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("common.online")).not.toBeInTheDocument();
+  });
+
+  it("does not report the events stream as online after a query failure", () => {
+    useCommsEventsMock.mockReturnValue(
+      makeQuery([], { isError: true, error: new Error("events unavailable") }),
+    );
+    render(<CommsPage />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "comms.events" }));
+
+    expect(screen.getAllByText("common.error")).toHaveLength(3);
+    expect(screen.getByText("events unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("common.online")).not.toBeInTheDocument();
   });
 });

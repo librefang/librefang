@@ -1,1 +1,1 @@
-- Keep the dashboard Comms page resilient to partial snapshots and query failures, and align event polling and counts with the active tab. (@xiaomo)
+Keep the dashboard Comms page resilient to partial snapshots and query failures, and align polling, refreshes, and counts with the active tab. (#7323) (@houko)

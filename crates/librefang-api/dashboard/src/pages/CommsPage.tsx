@@ -21,6 +21,7 @@ import {
   ArrowsUpFromLine, Users
 } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
+import { toastErr } from "../lib/errors";
 
 // Channel icons
 const channelIcons: Record<string, React.ReactNode> = {
@@ -159,9 +160,11 @@ export function CommsPage() {
   const [activeTab, setActiveTab] = useState<"channels" | "topology" | "events">("channels");
   const [search, setSearch] = useState("");
 
-  const channelsQuery = useChannels();
+  // The cached channel list still supplies the header while another tab is active; only the Channels tab needs live polling.
+  const channelsQuery = useChannels({ enabled: activeTab === "channels" });
 
-  const snapshotQuery = useDashboardSnapshot();
+  // Snapshot health and uptime are rendered only on Channels.
+  const snapshotQuery = useDashboardSnapshot({ enabled: activeTab === "channels" });
 
   const topologyQuery = useCommsTopology({ enabled: activeTab === "topology" });
 
@@ -180,8 +183,17 @@ export function CommsPage() {
   } else if (activeTab === "topology") {
     isFetching = topologyQuery.isFetching;
   }
+  const activeError = activeTab === "channels"
+    ? channelsQuery.error ?? snapshotQuery.error ?? eventsQuery.error
+    : activeTab === "topology"
+      ? topologyQuery.error
+      : eventsQuery.error;
 
   const configuredCount = useMemo(() => channels.filter(c => c.configured).length, [channels]);
+  const connectedCount = useMemo(
+    () => channels.filter(c => c.configured && c.connected === true).length,
+    [channels],
+  );
 
   const filteredChannels = useMemo(
     () => channels
@@ -211,17 +223,35 @@ export function CommsPage() {
         subtitle={t("comms.subtitle")}
         isFetching={isFetching}
         onRefresh={() => {
-          if (activeTab === "channels") { void channelsQuery.refetch(); void snapshotQuery.refetch(); }
-          if (activeTab === "topology") { void topologyQuery.refetch(); void snapshotQuery.refetch(); }
-          if (activeTab === "events") { void eventsQuery.refetch(); }
+          if (activeTab === "channels") {
+            void channelsQuery.refetch();
+            void snapshotQuery.refetch();
+            void eventsQuery.refetch();
+          }
+          if (activeTab === "topology") {
+            void topologyQuery.refetch();
+          }
+          if (activeTab === "events") {
+            void eventsQuery.refetch();
+          }
         }}
         icon={<Radio className="h-4 w-4" />}
         helpText={t("comms.help")}
         actions={
           <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-success/10 border border-success/20">
-              <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
-              <span className="text-[10px] font-bold text-success uppercase">{t("common.online")}</span>
+            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border ${
+              activeError
+                ? "bg-error/10 border-error/20"
+                : "bg-success/10 border-success/20"
+            }`}>
+              <span className={`w-2 h-2 rounded-full ${
+                activeError ? "bg-error" : "bg-success animate-pulse"
+              }`} />
+              <span className={`text-[10px] font-bold uppercase ${
+                activeError ? "text-error" : "text-success"
+              }`}>
+                {activeError ? t("common.error") : t("common.online")}
+              </span>
             </div>
             <div className="text-xs text-text-dim">
               {configuredCount} / {channels.length} {t("channels.configured")}
@@ -297,7 +327,7 @@ export function CommsPage() {
           <StaggerList className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4">
             {[
               { icon: Radio, label: t("comms.total_channels"), value: channels.length, color: "text-brand", bg: "bg-brand/10" },
-              { icon: CheckCircle2, label: t("comms.connected"), value: configuredCount, color: "text-success", bg: "bg-success/10" },
+              { icon: CheckCircle2, label: t("comms.connected"), value: connectedCount, color: "text-success", bg: "bg-success/10" },
               { icon: Activity, label: t("comms.recent_events"), value: events.length, color: "text-warning", bg: "bg-warning/10" },
               { icon: Clock, label: t("comms.uptime"), value: formatUptime(snapshot?.status?.uptime_seconds ?? 0), color: "text-accent", bg: "bg-accent/10" },
             ].map((kpi, i) => (
@@ -330,7 +360,9 @@ export function CommsPage() {
               ))}
               {(!snapshot?.health?.checks || snapshot.health.checks.length === 0) && (
                 <div className="flex items-center gap-2 py-4 col-span-full justify-center">
-                  <div className="w-2 h-2 rounded-full bg-success" />
+                  <div className={`w-2 h-2 rounded-full ${
+                    snapshot?.health?.status === "ok" ? "bg-success" : "bg-text-dim/30"
+                  }`} />
                   <p className="text-xs text-text-dim">{snapshot?.health?.status === "ok" ? t("common.daemon_online") : t("common.no_data")}</p>
                 </div>
               )}
@@ -341,7 +373,7 @@ export function CommsPage() {
           {channelsQuery.isError || snapshotQuery.isError || eventsQuery.isError ? (
             <EmptyState
               title={t("common.error")}
-              description={String(channelsQuery.error ?? snapshotQuery.error ?? eventsQuery.error)}
+              description={toastErr(activeError, t("common.error"))}
               icon={<Radio className="h-6 w-6" />}
             />
           ) : channelsQuery.isLoading || snapshotQuery.isLoading || eventsQuery.isLoading ? (
@@ -370,7 +402,7 @@ export function CommsPage() {
           {topologyQuery.isError ? (
             <EmptyState
               title={t("common.error")}
-              description={String(topologyQuery.error)}
+              description={toastErr(topologyQuery.error, t("common.error"))}
               icon={<Zap className="h-6 w-6" />}
             />
           ) : topologyQuery.isLoading ? (
@@ -428,15 +460,27 @@ export function CommsPage() {
               <p className="text-xs text-text-dim">{t("comms.events_desc")}</p>
             </div>
             <div className="flex items-center gap-2">
-              <span className={`w-2 h-2 rounded-full ${eventsQuery.isFetching ? "bg-warning animate-pulse" : "bg-success"}`} />
-              <span className="text-xs text-text-dim">{eventsQuery.isFetching ? t("common.loading") : t("common.online")}</span>
+              <span className={`w-2 h-2 rounded-full ${
+                eventsQuery.isError
+                  ? "bg-error"
+                  : eventsQuery.isFetching
+                    ? "bg-warning animate-pulse"
+                    : "bg-success"
+              }`} />
+              <span className={`text-xs ${eventsQuery.isError ? "text-error" : "text-text-dim"}`}>
+                {eventsQuery.isError
+                  ? t("common.error")
+                  : eventsQuery.isFetching
+                    ? t("common.loading")
+                    : t("common.online")}
+              </span>
             </div>
           </div>
 
           {eventsQuery.isError ? (
             <EmptyState
               title={t("common.error")}
-              description={String(eventsQuery.error)}
+              description={toastErr(eventsQuery.error, t("common.error"))}
               icon={<Activity className="h-6 w-6" />}
             />
           ) : eventsQuery.isLoading ? (
