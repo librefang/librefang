@@ -805,7 +805,7 @@ params = { region = "us" }
     if (!reparsed.ok) return;
 
     // The form state and extras should match exactly after a full round-trip.
-    // _uid is an ephemeral React key, regenerated on each parse, so strip it.
+    // _uid is an ephemeral React key rather than manifest data, so strip it.
     const stripUids = <
       T extends Record<string, unknown> & { _uid?: string },
     >(items: T[]): Omit<T, "_uid">[] =>
