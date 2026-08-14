@@ -3174,6 +3174,73 @@ async fn test_attach_session_stream_fans_out_to_multiple_clients() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_attach_session_stream_accepts_websocket_upgrade() {
+    use futures::StreamExt as _;
+    use librefang_kernel::llm_driver::StreamEvent;
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({ "manifest_toml": TEST_MANIFEST }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let body: serde_json::Value = response.json().await.unwrap();
+    let agent_id_text = body["agent_id"].as_str().unwrap();
+    let agent_id = agent_id_text.parse().unwrap();
+    let session_id = server
+        .state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .unwrap()
+        .session_id;
+    let url = format!(
+        "{}/api/agents/{agent_id_text}/sessions/{session_id}/stream",
+        server.base_url.replacen("http://", "ws://", 1)
+    );
+
+    let mut request = url.into_client_request().unwrap();
+    request.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        "bearer.test-token".parse().unwrap(),
+    );
+    let (mut socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::SWITCHING_PROTOCOLS);
+    assert_eq!(
+        response
+            .headers()
+            .get("Sec-WebSocket-Protocol")
+            .and_then(|value| value.to_str().ok()),
+        Some("bearer.test-token")
+    );
+
+    let sender = server.state.kernel.session_stream_hub().sender(session_id);
+    sender
+        .send(StreamEvent::TextDelta {
+            text: "hello-websocket-attach".to_string(),
+        })
+        .expect("WebSocket subscriber should be attached");
+
+    let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .expect("WebSocket event should arrive")
+        .expect("WebSocket should remain open")
+        .expect("WebSocket frame should be valid");
+    let Message::Text(text) = message else {
+        panic!("expected a text frame, got {message:?}");
+    };
+    let envelope: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(envelope["type"], "chunk");
+    assert_eq!(envelope["content"], "hello-websocket-attach");
+    assert_eq!(envelope["done"], false);
+}
+
 // ---------------------------------------------------------------------------
 // Memory endpoint regression tests for issue #3070:
 // When `[proactive_memory] enabled = false`, GET /api/memory and
