@@ -111,9 +111,14 @@ describe('phoneToJid', () => {
   it('known LID and hosted LID shapes passthrough', () => {
     assert.equal(phoneToJid('123@lid'), '123@lid');
     assert.equal(phoneToJid('123@hosted.lid'), '123@hosted.lid');
+    assert.equal(phoneToJid('123:45@lid'), '123:45@lid');
+  });
+  it('legacy and modern group JID shapes passthrough', () => {
+    assert.equal(phoneToJid('123-456@g.us'), '123-456@g.us');
+    assert.equal(phoneToJid('120363000000000000@g.us'), '120363000000000000@g.us');
   });
   it('rejects unknown or malformed JIDs and non-numeric phones', () => {
-    for (const value of ['x@evil.com', '@bad', '<script>@x', 'abc', '+', '123@g.us']) {
+    for (const value of ['x@evil.com', '@bad', '<script>@x', 'abc', '+', '123-@g.us']) {
       assert.equal(phoneToJid(value), '', value);
     }
   });

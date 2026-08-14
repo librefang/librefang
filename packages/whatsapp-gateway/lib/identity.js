@@ -12,14 +12,14 @@
 //   - '<digits>:<device>@s.whatsapp.net'   — device-scoped multi-device JID
 //   - '<digits>@lid'                       — WhatsApp anonymous LID (opaque)
 //   - '<digits>@hosted.lid'                — hosted LID (Baileys docs; guard)
-//   - '<digits>-<digits>@g.us'             — group JID
+//   - '<digits>[-<digits>]@g.us'            — group JID
 // ---------------------------------------------------------------------------
 
 const LID_SUFFIX_RE = /@(lid|hosted\.lid)$/;
 const GROUP_SUFFIX_RE = /@g\.us$/;
 const DEVICE_SUFFIX_RE = /:(\d+)@s\.whatsapp\.net$/;
 const E164_JID_RE = /^(\d+)@s\.whatsapp\.net$/;
-const SENDABLE_JID_RE = /^(?:\d+(?::\d+)?@s\.whatsapp\.net|\d+-\d+@g\.us|\d+@(?:lid|hosted\.lid))$/;
+const SENDABLE_JID_RE = /^(?:\d+(?::\d+)?@(?:s\.whatsapp\.net|lid|hosted\.lid)|\d+(?:-\d+)?@g\.us)$/;
 const PHONE_NUMBER_RE = /^\+?\d+$/;
 
 function isLidJid(jid) {
