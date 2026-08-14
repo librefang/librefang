@@ -251,7 +251,8 @@ async fn test_files_concurrent_writes_leave_one_payload_intact() {
         .collect();
 
     let mut tasks = Vec::with_capacity(WRITERS);
-    for payload in payloads.iter().cloned() {
+    for payload in &payloads {
+        let payload = payload.clone();
         let app = h.app.clone();
         let barrier = Arc::clone(&barrier);
         tasks.push(tokio::spawn(async move {
