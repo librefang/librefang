@@ -41,6 +41,7 @@ export function parseCsvText(input: string): CsvParseResult {
   let cur = "";
   let row: string[] = [];
   let quoted = false;
+  let closedQuote = false;
   let sawAnyChar = false;
 
   for (let i = 0; i < raw.length; i++) {
@@ -52,6 +53,7 @@ export function parseCsvText(input: string): CsvParseResult {
           i++;
         } else {
           quoted = false;
+          closedQuote = true;
         }
       } else {
         // Inside quotes, newlines and commas are literal.
@@ -67,6 +69,7 @@ export function parseCsvText(input: string): CsvParseResult {
           `Record ${records.length + 1}: unexpected quote in an unquoted field; treating it literally.`,
         );
         cur += c;
+        closedQuote = false;
       } else {
         quoted = true;
       }
@@ -74,6 +77,7 @@ export function parseCsvText(input: string): CsvParseResult {
     } else if (c === ",") {
       row.push(cur);
       cur = "";
+      closedQuote = false;
       sawAnyChar = true;
     } else if (c === "\r" || c === "\n") {
       // End of record. Consume CRLF as a single delimiter.
@@ -81,11 +85,18 @@ export function parseCsvText(input: string): CsvParseResult {
       records.push(row);
       row = [];
       cur = "";
+      closedQuote = false;
       sawAnyChar = false;
       if (c === "\r" && raw[i + 1] === "\n") {
         i++;
       }
     } else {
+      if (closedQuote) {
+        errors.push(
+          `Record ${records.length + 1}: unexpected character after a closing quote; treating it literally.`,
+        );
+        closedQuote = false;
+      }
       cur += c;
       sawAnyChar = true;
     }

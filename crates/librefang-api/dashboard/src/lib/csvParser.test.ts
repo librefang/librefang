@@ -82,6 +82,14 @@ describe("parseCsvText", () => {
     ]);
     expect(out.records[1]).toEqual(["alice", 'foo"bar', "baz"]);
   });
+
+  it("reports and preserves text after a closing quote", () => {
+    const out = parseCsvText('name,note\nalice,"quoted"suffix\n');
+    expect(out.errors).toEqual([
+      "Record 2: unexpected character after a closing quote; treating it literally.",
+    ]);
+    expect(out.records[1]).toEqual(["alice", "quotedsuffix"]);
+  });
 });
 
 describe("parseUsersCsv", () => {
