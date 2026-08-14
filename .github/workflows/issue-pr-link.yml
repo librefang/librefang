@@ -5,30 +5,51 @@ name: Issue-PR Link Labels
 # close, reopen, and body edits all use the same source-of-truth scan.
 
 on:
+  pull_request:
+    paths:
+      - '.github/scripts/issue-pr-links.js'
+      - '.github/scripts/tests/issue-pr-links.test.js'
+      - '.github/workflows/issue-pr-link.yml'
   pull_request_target:
     types: [opened, edited, closed, reopened]
 
 permissions:
   contents: read
-  issues: write
-  pull-requests: read
-
-concurrency:
-  group: issue-pr-link-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
 
 jobs:
-  link:
+  test:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Test issue link parser and API error handling
+        run: node .github/scripts/tests/issue-pr-links.test.js
+
+  link:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    concurrency:
+      group: issue-pr-link-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
 
       - name: Sync has-pr label on linked issues
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
-            const { extractIssueNumbers } = require(
+            const { extractIssueNumbers, getIssueOrNull } = require(
               `${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-pr-links.js`,
             );
             const LABEL = 'has-pr';
@@ -56,46 +77,38 @@ jobs:
             });
 
             for (const num of issueNumbers) {
-              try {
-                const { data: issue } = await github.rest.issues.get({
+              const issue = await getIssueOrNull(github, context.repo, num);
+              if (!issue) {
+                core.info(`Issue #${num}: not found, skipping`);
+                continue;
+              }
+              if (issue.pull_request) {
+                core.info(`#${num}: linked target is a PR, skipping`);
+                continue;
+              }
+              const labels = issue.labels.map(l => l.name);
+              const hasLabel = labels.includes(LABEL);
+              const linkedByCurrent = pr.state === 'open' && currentNumbers.has(num);
+              const linkedBySnapshot = openPrs.some(
+                candidate => extractIssueNumbers(candidate.body, context.repo).has(num),
+              );
+              const shouldHaveLabel = issue.state === 'open' && (linkedByCurrent || linkedBySnapshot);
+
+              if (shouldHaveLabel && !hasLabel) {
+                await github.rest.issues.addLabels({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   issue_number: num,
+                  labels: [LABEL],
                 });
-                if (issue.pull_request) {
-                  core.info(`#${num}: linked target is a PR, skipping`);
-                  continue;
-                }
-                const labels = issue.labels.map(l => l.name);
-                const hasLabel = labels.includes(LABEL);
-                const linkedByCurrent = pr.state === 'open' && currentNumbers.has(num);
-                const linkedBySnapshot = openPrs.some(
-                  candidate => extractIssueNumbers(candidate.body, context.repo).has(num),
-                );
-                const shouldHaveLabel = issue.state === 'open' && (linkedByCurrent || linkedBySnapshot);
-
-                if (shouldHaveLabel && !hasLabel) {
-                  await github.rest.issues.addLabels({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    issue_number: num,
-                    labels: [LABEL],
-                  });
-                  core.info(`Issue #${num}: added "${LABEL}"`);
-                } else if (!shouldHaveLabel && hasLabel) {
-                  await github.rest.issues.removeLabel({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    issue_number: num,
-                    name: LABEL,
-                  });
-                  core.info(`Issue #${num}: removed "${LABEL}" (no open linked PR)`);
-                }
-              } catch (e) {
-                if (e.status === 404) {
-                  core.info(`Issue #${num}: not found, skipping`);
-                  continue;
-                }
-                throw e;
+                core.info(`Issue #${num}: added "${LABEL}"`);
+              } else if (!shouldHaveLabel && hasLabel) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: num,
+                  name: LABEL,
+                });
+                core.info(`Issue #${num}: removed "${LABEL}" (no open linked PR)`);
               }
             }

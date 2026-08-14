@@ -1,0 +1,1 @@
+Reconcile issue `has-pr` labels across every open PR on merge, close, reopen, and body edits, with serialized updates and one boundary-safe parser for shorthand and same-repository URL links. (#7291) (@houko)

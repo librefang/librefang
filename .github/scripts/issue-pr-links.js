@@ -18,9 +18,28 @@ function extractIssueNumbers(body, repo) {
   const numbers = new Set();
   for (const match of String(body || '').matchAll(pattern)) {
     const raw = match[1] || match[2] || match[3];
-    numbers.add(Number.parseInt(raw, 10));
+    const number = Number.parseInt(raw, 10);
+    if (Number.isSafeInteger(number) && number > 0) {
+      numbers.add(number);
+    }
   }
   return numbers;
 }
 
-module.exports = { extractIssueNumbers };
+async function getIssueOrNull(github, repo, number) {
+  try {
+    const response = await github.rest.issues.get({
+      owner: repo.owner,
+      repo: repo.repo,
+      issue_number: number,
+    });
+    return response.data;
+  } catch (error) {
+    if (error.status === 404) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+module.exports = { extractIssueNumbers, getIssueOrNull };
