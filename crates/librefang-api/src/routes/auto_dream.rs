@@ -20,6 +20,7 @@ use serde::Deserialize;
 
 use super::AppState;
 use crate::extractors::AgentIdPath;
+use librefang_types::error::LibreFangError;
 
 pub fn router() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
@@ -96,6 +97,13 @@ pub struct SetEnabledRequest {
     pub enabled: bool,
 }
 
+fn set_enabled_error_response(error: &LibreFangError) -> (StatusCode, &'static str) {
+    match error {
+        LibreFangError::AgentNotFound(_) => (StatusCode::NOT_FOUND, "agent not found"),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    }
+}
+
 #[utoipa::path(
     put,
     path = "/api/auto-dream/agents/{id}/enabled",
@@ -118,12 +126,37 @@ pub async fn auto_dream_set_enabled(
             "enabled": req.enabled,
         }))
         .into_response(),
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(error) => {
+            let (status, message) = set_enabled_error_response(&error);
+            if status.is_server_error() {
+                tracing::error!(%agent_id, %error, "failed to update auto-dream opt-in");
+            }
+            (status, Json(serde_json::json!({"error": message}))).into_response()
+        }
     };
     // #3511: tag response with agent_id for the access-log middleware.
     crate::extensions::with_agent_id(agent_id, body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_enabled_error_response_distinguishes_missing_agent() {
+        let missing = LibreFangError::AgentNotFound("agent-id".to_string());
+        assert_eq!(
+            set_enabled_error_response(&missing),
+            (StatusCode::NOT_FOUND, "agent not found")
+        );
+    }
+
+    #[test]
+    fn set_enabled_error_response_scrubs_internal_errors() {
+        let internal = LibreFangError::Internal("sensitive backend detail".to_string());
+        assert_eq!(
+            set_enabled_error_response(&internal),
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        );
+    }
 }
