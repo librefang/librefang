@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { CommsPage } from "./CommsPage";
 import { useChannels, useCommsTopology, useCommsEvents } from "../lib/queries/channels";
 import { useDashboardSnapshot } from "../lib/queries/overview";
@@ -46,13 +46,15 @@ const useDashboardSnapshotMock = useDashboardSnapshot as unknown as ReturnType<
   typeof vi.fn
 >;
 
-function makeQuery<T>(data: T) {
+function makeQuery<T>(data: T, overrides: Record<string, unknown> = {}) {
   return {
     data,
     isLoading: false,
     isFetching: false,
     isError: false,
     refetch: vi.fn(),
+    error: null,
+    ...overrides,
   };
 }
 
@@ -167,5 +169,53 @@ describe("CommsPage channel tiles", () => {
     expect(
       within(container).getByText("Out-of-process sidecar"),
     ).toBeInTheDocument();
+  });
+});
+
+describe("CommsPage degraded data", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useChannelsMock.mockReturnValue(makeQuery([]));
+    useCommsTopologyMock.mockReturnValue(makeQuery(null));
+    useCommsEventsMock.mockReturnValue(makeQuery([]));
+    useDashboardSnapshotMock.mockReturnValue(makeQuery({ status: { uptime_seconds: 1 } }));
+  });
+
+  it("renders a partial snapshot without health data", () => {
+    render(<CommsPage />);
+
+    expect(screen.getAllByText("common.no_data")).not.toHaveLength(0);
+  });
+
+  it("fetches recent events once on channels and polls only on the events tab", () => {
+    render(<CommsPage />);
+
+    expect(useCommsEventsMock).toHaveBeenLastCalledWith(50, {
+      enabled: true,
+      refetchInterval: false,
+    });
+
+    fireEvent.click(screen.getByRole("tab", { name: "comms.events" }));
+    expect(useCommsEventsMock).toHaveBeenLastCalledWith(50, {
+      enabled: true,
+      refetchInterval: 5_000,
+    });
+
+    fireEvent.click(screen.getByRole("tab", { name: "comms.topology" }));
+    expect(useCommsEventsMock).toHaveBeenLastCalledWith(50, {
+      enabled: false,
+      refetchInterval: false,
+    });
+  });
+
+  it("distinguishes channel query failures from empty results", () => {
+    useChannelsMock.mockReturnValue(
+      makeQuery([], { isError: true, error: new Error("channels unavailable") }),
+    );
+
+    render(<CommsPage />);
+
+    expect(screen.getByText("common.error")).toBeInTheDocument();
+    expect(screen.getByText("Error: channels unavailable")).toBeInTheDocument();
   });
 });

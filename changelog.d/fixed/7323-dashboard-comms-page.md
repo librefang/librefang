@@ -1,0 +1,1 @@
+- Keep the dashboard Comms page resilient to partial snapshots and query failures, and align event polling and counts with the active tab. (@xiaomo)

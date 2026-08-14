@@ -166,14 +166,20 @@ export function CommsPage() {
   const topologyQuery = useCommsTopology({ enabled: activeTab === "topology" });
 
   const eventsQuery = useCommsEvents(EVENT_PAGE_SIZE, {
-    refetchInterval: 5_000,
+    enabled: activeTab !== "topology",
+    refetchInterval: activeTab === "events" ? 5_000 : false,
   });
 
   const channels = useMemo(() => channelsQuery.data ?? [], [channelsQuery.data]);
   const snapshot = snapshotQuery.data ?? null;
   const topology = topologyQuery.data ?? null;
   const events = useMemo(() => eventsQuery.data ?? [], [eventsQuery.data]);
-  const isLoading = channelsQuery.isLoading || snapshotQuery.isLoading;
+  let isFetching = eventsQuery.isFetching;
+  if (activeTab === "channels") {
+    isFetching = channelsQuery.isFetching || snapshotQuery.isFetching || eventsQuery.isFetching;
+  } else if (activeTab === "topology") {
+    isFetching = topologyQuery.isFetching;
+  }
 
   const configuredCount = useMemo(() => channels.filter(c => c.configured).length, [channels]);
 
@@ -203,7 +209,7 @@ export function CommsPage() {
         badge={t("comms.bus")}
         title={t("nav.comms")}
         subtitle={t("comms.subtitle")}
-        isFetching={isLoading}
+        isFetching={isFetching}
         onRefresh={() => {
           if (activeTab === "channels") { void channelsQuery.refetch(); void snapshotQuery.refetch(); }
           if (activeTab === "topology") { void topologyQuery.refetch(); void snapshotQuery.refetch(); }
@@ -292,7 +298,7 @@ export function CommsPage() {
             {[
               { icon: Radio, label: t("comms.total_channels"), value: channels.length, color: "text-brand", bg: "bg-brand/10" },
               { icon: CheckCircle2, label: t("comms.connected"), value: configuredCount, color: "text-success", bg: "bg-success/10" },
-              { icon: Activity, label: t("comms.events_today"), value: events.length, color: "text-warning", bg: "bg-warning/10" },
+              { icon: Activity, label: t("comms.recent_events"), value: events.length, color: "text-warning", bg: "bg-warning/10" },
               { icon: Clock, label: t("comms.uptime"), value: formatUptime(snapshot?.status?.uptime_seconds ?? 0), color: "text-accent", bg: "bg-accent/10" },
             ].map((kpi, i) => (
               <Card key={i} hover padding="md">
@@ -311,7 +317,7 @@ export function CommsPage() {
             <p className="mb-6 text-xs text-text-dim font-medium">{t("comms.health_description")}</p>
 
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {snapshot?.health.checks?.map((check, i) => (
+              {snapshot?.health?.checks?.map((check, i) => (
                 <div key={i} className="flex items-center justify-between p-4 rounded-xl bg-main/40 border border-border-subtle/50">
                   <div className="flex items-center gap-3">
                     <div className={`w-2 h-2 rounded-full ${check.status === 'ok' ? 'bg-success' : 'bg-error'}`} />
@@ -332,7 +338,13 @@ export function CommsPage() {
           </Card>
 
           {/* Channels Grid */}
-          {isLoading ? (
+          {channelsQuery.isError || snapshotQuery.isError || eventsQuery.isError ? (
+            <EmptyState
+              title={t("common.error")}
+              description={String(channelsQuery.error ?? snapshotQuery.error ?? eventsQuery.error)}
+              icon={<Radio className="h-6 w-6" />}
+            />
+          ) : channelsQuery.isLoading || snapshotQuery.isLoading || eventsQuery.isLoading ? (
             <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6">
               {[1, 2, 3, 4, 5, 6].map(i => <CardSkeleton key={i} />)}
             </div>
@@ -355,7 +367,13 @@ export function CommsPage() {
           <h2 className="text-lg font-black tracking-tight mb-1">{t("comms.topology")}</h2>
           <p className="mb-6 text-xs text-text-dim font-medium">{t("comms.topology_description")}</p>
 
-          {topologyQuery.isLoading ? (
+          {topologyQuery.isError ? (
+            <EmptyState
+              title={t("common.error")}
+              description={String(topologyQuery.error)}
+              icon={<Zap className="h-6 w-6" />}
+            />
+          ) : topologyQuery.isLoading ? (
             <div className="py-12 text-center">
               <div className="w-8 h-8 border-2 border-brand border-t-transparent rounded-full animate-spin mx-auto" />
             </div>
@@ -415,7 +433,13 @@ export function CommsPage() {
             </div>
           </div>
 
-          {eventsQuery.isLoading ? (
+          {eventsQuery.isError ? (
+            <EmptyState
+              title={t("common.error")}
+              description={String(eventsQuery.error)}
+              icon={<Activity className="h-6 w-6" />}
+            />
+          ) : eventsQuery.isLoading ? (
             <ListSkeleton rows={5} />
           ) : filteredEvents.length === 0 ? (
             <EmptyState title={t("common.no_data")} icon={<Activity className="h-6 w-6" />} />
