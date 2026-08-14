@@ -290,7 +290,7 @@ impl LibreFangKernel {
         agent_id: AgentId,
         force: bool,
     ) -> KernelResult<String> {
-        self.compact_agent_session_with_id(agent_id, None, force)
+        self.compact_agent_session_in_lock_scope(agent_id, None, force, true)
             .await
     }
 
@@ -310,10 +310,80 @@ impl LibreFangKernel {
         session_id_override: Option<SessionId>,
         force: bool,
     ) -> KernelResult<String> {
+        // Public callers do not carry the dispatch lock-domain bit.
+        // Serialize with the agent-scoped writers used by channel dispatch first, then let the scoped helper also cover an explicit-session writer.
+        let _agent_guard = if librefang_runtime::held_agent_locks::is_held(agent_id) {
+            None
+        } else {
+            let lock = self
+                .agents
+                .agent_msg_locks
+                .entry(agent_id)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            Some(lock.lock_owned().await)
+        };
+        self.compact_agent_session_in_lock_scope(agent_id, session_id_override, force, false)
+            .await
+    }
+
+    /// Compact a session using the same lock domain selected by the caller's message turn.
+    /// An explicit session id does not by itself identify the lock domain: agent-scoped turns also pass their resolved session id so compaction operates on the exact in-turn session.
+    pub(crate) async fn compact_agent_session_in_lock_scope(
+        &self,
+        agent_id: AgentId,
+        session_id_override: Option<SessionId>,
+        force: bool,
+        agent_scoped: bool,
+    ) -> KernelResult<String> {
         let cfg = self.config.load_full();
         use librefang_runtime::compactor::{
             compact_session, estimate_token_count, needs_compaction, needs_compaction_by_tokens,
             CompactionConfig,
+        };
+
+        // Hold the same serialization lock that a message turn writing this session uses.
+        // Compaction awaits an LLM response between loading the session and replacing its messages; without this lock, a concurrent turn can save new messages during that window and the final compaction UPSERT silently overwrites them with its stale snapshot.
+        //
+        // Automatic compaction runs inside an already-locked agent turn.
+        // The task-local held-lock registry lets that path avoid re-acquiring the same non-reentrant mutex while external API/channel callers wait for the active writer before taking their snapshot.
+        let _compaction_guard: Option<tokio::sync::OwnedMutexGuard<()>> = if agent_scoped {
+            if librefang_runtime::held_agent_locks::is_held(agent_id) {
+                None
+            } else {
+                let lock = self
+                    .agents
+                    .agent_msg_locks
+                    .entry(agent_id)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone();
+                Some(lock.lock_owned().await)
+            }
+        } else if let Some(session_id) = session_id_override {
+            if librefang_runtime::held_agent_locks::is_session_held(session_id) {
+                None
+            } else {
+                let lock = self
+                    .agents
+                    .session_msg_locks
+                    .entry(session_id)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone();
+                Some(lock.lock_owned().await)
+            }
+        } else {
+            // The public default-session entry point always sets `agent_scoped = true`; keep this defensive fallback aligned.
+            if librefang_runtime::held_agent_locks::is_held(agent_id) {
+                None
+            } else {
+                let lock = self
+                    .agents
+                    .agent_msg_locks
+                    .entry(agent_id)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone();
+                Some(lock.lock_owned().await)
+            }
         };
 
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
