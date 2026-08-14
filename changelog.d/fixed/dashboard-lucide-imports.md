@@ -1,1 +1,0 @@
-- Pin the dashboard Lucide version used by curated deep imports and smoke-test every icon mapping. (@xiaomo)
