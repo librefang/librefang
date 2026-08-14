@@ -26,6 +26,9 @@
 #   5. Otherwise restart via PM2 once and re-check.
 #   6. After RECOVERY_GIVE_UP_FAILURES failures, write the flag file so the
 #      agent surfaces it to the operator on the next heartbeat.
+#
+# Stdout is a LibreFang pre-check gate: the last non-empty line is always
+# `{"wakeAgent": false}` for a skip or `{"wakeAgent": true}` for escalation.
 
 set -euo pipefail
 
@@ -89,10 +92,14 @@ clear_failure_state() {
 }
 
 check_health() {
-  local response http_code body
-  response=$(curl -s --max-time "$HEALTH_TIMEOUT" -o - -w '%{http_code}' "$HEALTH_URL" 2>/dev/null) || return 1
-  http_code="${response: -3}"
-  body="${response%???}"
+  local tmp_body http_code body
+  tmp_body=$(mktemp "${GATEWAY_DIR}/.health-body.XXXXXX") || return 1
+  if ! http_code=$(curl -s --max-time "$HEALTH_TIMEOUT" -o "$tmp_body" -w '%{http_code}' "$HEALTH_URL" 2>/dev/null); then
+    rm -f "$tmp_body"
+    return 1
+  fi
+  body=$(< "$tmp_body")
+  rm -f "$tmp_body"
 
   if [[ "$http_code" != "200" ]]; then
     log "[health] HTTP $http_code (expected 200)"
@@ -111,13 +118,17 @@ dns_ok() {
   # Returns 0 if web.whatsapp.com resolves. We try getent first (no extra deps),
   # then nslookup as a fallback. If neither is present we assume DNS is fine
   # rather than mis-diagnose.
+  local attempted=0
   if command -v getent >/dev/null 2>&1; then
-    getent hosts web.whatsapp.com >/dev/null 2>&1 && return 0 || return 1
+    attempted=1
+    if getent hosts web.whatsapp.com >/dev/null 2>&1; then return 0; fi
   fi
   if command -v nslookup >/dev/null 2>&1; then
-    nslookup -timeout=3 web.whatsapp.com >/dev/null 2>&1 && return 0 || return 1
+    attempted=1
+    if nslookup -timeout=3 web.whatsapp.com >/dev/null 2>&1; then return 0; fi
   fi
-  return 0
+  if (( attempted == 0 )); then return 0; fi
+  return 1
 }
 
 pm2_restart() {
@@ -130,15 +141,16 @@ pm2_restart() {
   # signal callers may eventually want is then a lie. With `pipefail`
   # already set at the top of the script, capture pm2's status via
   # PIPESTATUS so the function returns a faithful success/failure.
-  pm2 restart whatsapp-gateway 2>&1 | while read -r line; do log "[pm2] $line"; done
-  return "${PIPESTATUS[0]}"
+  local status=0
+  pm2 restart whatsapp-gateway 2>&1 | while read -r line; do log "[pm2] $line"; done || status=${PIPESTATUS[0]}
+  return "$status"
 }
 
 write_flag() {
   local kind=$1
   local pm2_status=""
   if command -v pm2 >/dev/null 2>&1; then
-    pm2_status=$(pm2 describe whatsapp-gateway 2>&1 | head -40 || true)
+    pm2_status=$(timeout 10s pm2 describe whatsapp-gateway 2>&1 | head -40 || true)
   fi
   cat > "$FLAG_FILE" <<EOF
 timestamp=$(date -Iseconds)
@@ -151,15 +163,26 @@ $pm2_status
 EOF
 }
 
+# Emit the LibreFang cron pre_check_script gate. Default to "skip the agent
+# turn" — flag paths explicitly emit the wake form.
+emit_skip() { echo '{"wakeAgent": false}'; }
+emit_wake() { echo '{"wakeAgent": true}'; }
+
+if [[ "${HEALTH_CHECK_LIB_ONLY:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 # --- Main ---
+
+exec 9>"${GATEWAY_DIR}/health-check.lock"
+if ! flock -n 9; then
+  log "[health] Another health-check instance is running; skipping overlap"
+  emit_skip
+  exit 0
+fi
 
 date -Iseconds > "$HEARTBEAT_FILE"
 rotate_pm2_logs
-
-# Emit the LibreFang cron pre_check_script gate. Default to "skip the agent
-# turn" — we only wake the agent if a flag file gets written below, in which
-# case we print an empty (or different) line and let the agent fire.
-emit_skip() { echo '{"wakeAgent": false}'; }
 
 if check_health; then
   if [[ -f "$COUNTER_FILE" ]] || [[ -f "$FLAG_FILE" ]]; then
@@ -170,7 +193,8 @@ if check_health; then
   exit 0
 fi
 
-failures=$(($(read_counter) + 1))
+previous_failures=$(read_counter)
+failures=$((previous_failures + 1))
 write_counter "$failures"
 log "[health] Health check failed (consecutive=$failures)"
 
@@ -188,7 +212,7 @@ if ! dns_ok; then
   if (( failures >= RECOVERY_GIVE_UP_FAILURES )); then
     write_flag dns-blackout
     log "[health] Wrote flag file (kind=dns-blackout)"
-    # Wake the agent so the operator hears about it.
+    emit_wake
     exit 1
   fi
   emit_skip
@@ -209,7 +233,7 @@ fi
 if (( failures >= RECOVERY_GIVE_UP_FAILURES )); then
   write_flag restart-failed
   log "[health] Wrote flag file (kind=restart-failed)"
-  # Wake the agent.
+  emit_wake
   exit 1
 fi
 
