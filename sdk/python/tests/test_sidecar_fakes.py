@@ -41,6 +41,18 @@ def test_fakeresp_is_context_manager():
     with fr as resp:
         assert resp.status == 200
         assert resp.read() == b"hello"
+        assert resp.read() == b""
+    assert fr.closed
+    with pytest.raises(ValueError, match="closed response"):
+        fr.read()
+
+
+def test_fakeresp_bounded_reads_advance_cursor():
+    fr = FakeResp(200, b"abcdef")
+    assert fr.read(2) == b"ab"
+    assert fr.read(3) == b"cde"
+    assert fr.read(3) == b"f"
+    assert fr.read(1) == b""
 
 
 def test_fakeresp_default_headers_empty():
@@ -115,6 +127,14 @@ def test_fakeurlopen_3_tuple_with_headers():
     assert exc.value.headers.items() == [("Retry-After", "5")]
 
 
+def test_fakeurlopen_success_response_preserves_headers():
+    fake = FakeUrlopen([(200, b"ok", {"Link": "</next>; rel=next"})])
+
+    resp = fake(_make_req())
+
+    assert resp.headers.items() == [("Link", "</next>; rel=next")]
+
+
 def test_fakeurlopen_4xx_raises_httperror():
     fake = FakeUrlopen([(404, {"err": "not found"})])
     with pytest.raises(urllib.error.HTTPError) as exc:
@@ -148,6 +168,34 @@ def test_fakeurlopen_bytes_body_passthrough():
     fake = FakeUrlopen([(200, b"plain text response")])
     resp = fake(_make_req())
     assert resp.read() == b"plain text response"
+
+
+def test_fakeurlopen_distinguishes_empty_body_from_no_body():
+    fake = FakeUrlopen([(200, {}), (200, {})])
+
+    fake(_make_req(method="POST", body=b""))
+    fake(_make_req(method="POST", body=None))
+
+    assert fake.calls[0]["body_raw"] == ""
+    assert fake.calls[1]["body_raw"] is None
+
+
+def test_fakeurlopen_invalid_body_degrades_parse_fields():
+    fake = FakeUrlopen([(200, {})])
+
+    fake(_make_req(method="POST", body=b"\xff"))
+
+    assert fake.calls[0]["body_raw"] is None
+    assert fake.calls[0]["body"] is None
+    assert fake.calls[0]["params"] == {}
+
+
+@pytest.mark.parametrize("entry", [(200,), (200, {}, {}, "extra")])
+def test_fakeurlopen_rejects_invalid_script_tuple_length(entry):
+    fake = FakeUrlopen([entry])
+
+    with pytest.raises(AssertionError, match="script entries must be"):
+        fake(_make_req())
 
 
 def test_fakeurlopen_backcompat_underscore_aliases():

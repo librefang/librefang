@@ -87,17 +87,30 @@ class FakeResp:
     ) -> None:
         self.status = status
         self._body = body
+        self._pos = 0
+        self.closed = False
         self.headers = headers if headers is not None else HdrShim({})
 
     def read(self, size: Optional[int] = None) -> bytes:
+        if self.closed:
+            raise ValueError("read of closed response")
         if size is None or size < 0:
-            return self._body
-        return self._body[:size]
+            chunk = self._body[self._pos:]
+            self._pos = len(self._body)
+            return chunk
+        end = min(self._pos + size, len(self._body))
+        chunk = self._body[self._pos:end]
+        self._pos = end
+        return chunk
+
+    def close(self) -> None:
+        self.closed = True
 
     def __enter__(self) -> "FakeResp":
         return self
 
     def __exit__(self, *_exc) -> bool:
+        self.close()
         return False
 
 
@@ -125,7 +138,7 @@ class FakeUrlopen:
         # str-decoded body (most common shape)
         try:
             body_raw: Optional[str] = (
-                body_bytes.decode("utf-8") if body_bytes else None
+                body_bytes.decode("utf-8") if body_bytes is not None else None
             )
         except Exception:  # noqa: BLE001
             body_raw = None
@@ -161,9 +174,14 @@ class FakeUrlopen:
         entry = self.script.pop(0)
         if len(entry) == 3:
             status, body, resp_hdrs = entry
-        else:
+        elif len(entry) == 2:
             status, body = entry
             resp_hdrs = {}
+        else:
+            raise AssertionError(
+                "urlopen script entries must be (status, body) or "
+                f"(status, body, headers), got {len(entry)} values"
+            )
         if status >= 400:
             raise urllib.error.HTTPError(
                 req.full_url, status, "Error", HdrShim(resp_hdrs),
