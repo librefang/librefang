@@ -405,7 +405,10 @@ fn parse_iso8601_to_unix(s: &str) -> Option<f64> {
         && bytes[7] == b'-'
         && (bytes[10] == b'T' || bytes[10] == b't')
         && bytes[13] == b':'
-        && bytes[16] == b':')
+        && bytes[16] == b':'
+        && [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18]
+            .into_iter()
+            .all(|index| bytes[index].is_ascii_digit()))
     {
         return None;
     }
@@ -421,6 +424,9 @@ fn parse_iso8601_to_unix(s: &str) -> Option<f64> {
     // seconds may include fractional part
     let sec_str = &s[17..];
     let (sec_frac, tz_str) = split_sec_and_tz(sec_str);
+    if sec_frac.ends_with('.') {
+        return None;
+    }
     let sec: f64 = sec_frac.parse().ok()?;
     if !(0.0..60.0).contains(&sec) {
         return None;
@@ -449,7 +455,6 @@ fn split_sec_and_tz(s: &str) -> (&str, &str) {
 /// Parse a timezone suffix such as `"Z"`, `"+05:30"`, `"-07:00"` into a
 /// signed offset in seconds.  Returns `None` for unrecognised formats.
 fn parse_tz_offset(s: &str) -> Option<f64> {
-    let s = s.trim();
     if s.eq_ignore_ascii_case("z") {
         return Some(0.0);
     }
@@ -459,12 +464,12 @@ fn parse_tz_offset(s: &str) -> Option<f64> {
         && s.as_bytes()[3] == b':'
     {
         let sign: f64 = if s.starts_with('-') { -1.0 } else { 1.0 };
-        let h: f64 = s[1..3].parse().ok()?;
-        let m: f64 = s[4..6].parse().ok()?;
-        if h > 23.0 || m > 59.0 {
+        let h: u32 = s[1..3].parse().ok()?;
+        let m: u32 = s[4..6].parse().ok()?;
+        if h > 23 || m > 59 {
             return None;
         }
-        return Some(sign * (h * 3600.0 + m * 60.0));
+        return Some(sign * f64::from(h * 3600 + m * 60));
     }
     None
 }
@@ -954,6 +959,14 @@ mod tests {
             "2026-01-22T12:34:56+00:60",
             "2026-01-22T12:34:56+00:00junk",
             "2026-01-22T12:34:56",
+            "+026-01-22T12:34:56Z",
+            "2026-+1-22T12:34:56Z",
+            "2026-01-22T+1:34:56Z",
+            "2026-01-22T12:+1:56Z",
+            "2026-01-22T12:34:56.Z",
+            "2026-01-22T12:34:56 Z",
+            "2026-01-22T12:34:56+.5:30",
+            "2026-01-22T12:34:56+05:.5",
             "2026-02-29T12:34:56Z",
             "2026-04-31T12:34:56Z",
         ] {
