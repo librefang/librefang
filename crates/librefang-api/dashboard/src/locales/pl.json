@@ -3476,7 +3476,8 @@
     "copied": "Skopiowano do schowka",
     "copy_failed": "Kopiowanie nie powiodło się",
     "download": "Pobierz",
-    "loading": "Ładowanie…"
+    "loading": "Ładowanie…",
+    "source_changed": "Plik TOML zmienił się poza tym edytorem. Anuluj i ponownie otwórz edycję przed zapisaniem."
   },
   "audit": {
     "title": "Ścieżka audytu",
