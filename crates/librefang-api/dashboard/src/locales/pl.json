@@ -3121,7 +3121,8 @@
     "status_submitted": "zgłoszone",
     "status_completed": "ukończone",
     "status_failed": "nieudane",
-    "image_too_large": "Obraz jest zbyt duży, aby go wyświetlić"
+    "image_too_large": "Obraz jest zbyt duży, aby go wyświetlić",
+    "image_unavailable": "Obraz jest niedostępny"
   },
   "auth": {
     "title": "Wymagany klucz API",

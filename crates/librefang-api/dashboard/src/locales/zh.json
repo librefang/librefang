@@ -3085,7 +3085,8 @@
     "status_submitted": "已提交",
     "status_completed": "已完成",
     "status_failed": "失败",
-    "image_too_large": "图片过大，无法显示"
+    "image_too_large": "图片过大，无法显示",
+    "image_unavailable": "图片不可用"
   },
   "auth": {
     "title": "需要 API Key",

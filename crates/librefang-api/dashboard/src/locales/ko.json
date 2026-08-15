@@ -3119,7 +3119,8 @@
     "status_submitted": "제출됨",
     "status_completed": "완료됨",
     "status_failed": "실패",
-    "image_too_large": "이미지가 너무 커서 표시할 수 없습니다."
+    "image_too_large": "이미지가 너무 커서 표시할 수 없습니다.",
+    "image_unavailable": "이미지를 사용할 수 없습니다."
   },
   "auth": {
     "title": "API 키 필요",
