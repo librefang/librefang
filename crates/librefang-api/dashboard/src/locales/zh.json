@@ -1688,7 +1688,10 @@
       "submit_action": "提交 {{action}}",
       "pending_review_one": "1 个工作流运行正在等待操作员审查",
       "pending_review_other": "{{count}} 个工作流运行正在等待操作员审查",
-      "empty_artifact": "（空产物）"
+      "empty_artifact": "（空产物）",
+      "load_failed": "无法加载待处理的操作员审查。",
+      "review_run": "审查 {{workflow}} — {{step}}",
+      "more_pending": "另有 {{count}} 项待处理"
     }
   },
   "scheduler": {
