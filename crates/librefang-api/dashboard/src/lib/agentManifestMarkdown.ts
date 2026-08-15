@@ -38,6 +38,15 @@ const pushFencedBlock = (lines: string[], content: string, language = ""): void 
   lines.push(`${fence}${language}`, content, fence);
 };
 
+const compactBlankLineElements = (lines: string[]): string[] => {
+  const compacted: string[] = [];
+  for (const line of lines) {
+    if (line === "" && compacted.at(-1) === "") continue;
+    compacted.push(line);
+  }
+  return compacted;
+};
+
 export const generateManifestMarkdown = (
   form: ManifestFormState,
   extras: ManifestExtras = {
@@ -144,7 +153,7 @@ export const generateManifestMarkdown = (
     lines.push("");
   }
 
-  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+  return compactBlankLineElements(lines).join("\n").trimEnd() + "\n";
 };
 
 // Render the advanced first-class form fields when populated. Keeping

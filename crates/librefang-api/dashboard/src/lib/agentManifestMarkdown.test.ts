@@ -252,6 +252,23 @@ describe("generateManifestMarkdown", () => {
     expect(md).toContain("````json\n{\"example\":\"```\"}\n````");
   });
 
+  it("preserves repeated blank lines inside fenced content", () => {
+    const form = emptyManifestForm();
+    form.model.system_prompt = "before\n\n\nafter";
+    form.context_injection = [{
+      _uid: "context-1",
+      name: "spacing",
+      content: "first\n\n\n\nsecond",
+      position: "before_user",
+      condition: "",
+    }];
+
+    const md = generateManifestMarkdown(form);
+
+    expect(md).toContain("```\nbefore\n\n\nafter\n```");
+    expect(md).toContain("```\nfirst\n\n\n\nsecond\n```");
+  });
+
   it("uses collision-resistant code spans for extras containing backticks", () => {
     const form = emptyManifestForm();
     const extras = emptyManifestExtras();
