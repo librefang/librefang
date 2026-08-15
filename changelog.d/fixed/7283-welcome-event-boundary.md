@@ -1,1 +1,1 @@
-Pass privileged welcome-workflow event metadata through environment variables, render welcome bodies from temporary files, and enforce the shell boundary in CI. (#7283) (@houko)
+Pass privileged welcome metadata through environment variables, exclude current items from first-time checks, render bodies from temporary files, and recommend scoped tests. (#7283) (@houko)

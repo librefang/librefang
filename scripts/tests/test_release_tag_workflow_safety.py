@@ -156,6 +156,15 @@ def check_repository_automation() -> None:
     welcome_script = welcome_step.get("run", "")
     if not isinstance(welcome_script, str) or "${{" in welcome_script:
         raise SystemExit("welcome shell source interpolates GitHub event expressions")
+    if (
+        welcome_script.count('select(.number != $current)') != 2
+        or welcome_script.count('--argjson current "$NUMBER"') != 2
+    ):
+        raise SystemExit("welcome workflow does not exclude the event item from history")
+    if "cargo test --workspace" in welcome_script or (
+        "cargo test -p <affected-crate>" not in welcome_script
+    ):
+        raise SystemExit("welcome workflow recommends a forbidden workspace-wide test")
     expected_event_env = {
         "REPO": "${{ github.repository }}",
         "AUTHOR": "${{ github.event.sender.login }}",
