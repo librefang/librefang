@@ -303,6 +303,12 @@ jobs:
             done
           ) &
           watcher=$!
+          cleanup_watcher() {
+            touch /tmp/rollout-done
+            kill "$watcher" 2>/dev/null || true
+            wait "$watcher" 2>/dev/null || true
+          }
+          trap cleanup_watcher EXIT
 
           replacement_seen=false
           for _ in $(seq 1 600); do
@@ -325,6 +331,7 @@ jobs:
           touch /tmp/rollout-done
           watcher_rc=0
           wait "$watcher" || watcher_rc=$?
+          trap - EXIT
           if [ -f /tmp/too-many ]; then
             echo "::error::$(cat /tmp/too-many) daemons Running simultaneously against one RWO volume"
             exit 1
