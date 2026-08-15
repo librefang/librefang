@@ -10,7 +10,7 @@
 //! resolve through the glob re-export in `routes/mod.rs`.
 
 use super::AppState;
-use crate::middleware::RequestLanguage;
+use crate::middleware::{AuthenticatedApiUser, RequestLanguage};
 use crate::types::ApiErrorResponse;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -444,10 +444,11 @@ fn delete_backup_blocking(backups_dir: &std::path::Path, filename: &str) -> std:
 }
 
 /// DELETE /api/backups/{filename} — Delete a specific backup.
-#[utoipa::path(delete, path = "/api/backups/{filename}", tag = "system", params(("filename" = String, Path, description = "Backup filename")), responses((status = 200, description = "Backup deleted")))]
+#[utoipa::path(delete, path = "/api/backups/{filename}", tag = "system", params(("filename" = String, Path, description = "Backup filename")), responses((status = 204, description = "Backup deleted")))]
 pub async fn delete_backup(
     State(state): State<Arc<AppState>>,
     Path(filename): Path<String>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     // Sanitize filename to prevent path traversal
@@ -499,6 +500,15 @@ pub async fn delete_backup(
     }
 
     tracing::info!("Backup deleted: {filename}");
+    let user_id = api_user.as_ref().map(|user| user.0.user_id);
+    state.kernel.audit().record_with_context(
+        "system",
+        librefang_kernel::audit::AuditAction::ConfigChange,
+        format!("Backup deleted: {filename}"),
+        "completed",
+        user_id,
+        Some("api".to_string()),
+    );
     (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
 }
 
@@ -508,6 +518,7 @@ pub async fn delete_backup(
 /// spawn_blocking refactor.
 #[derive(Debug)]
 enum RestoreError {
+    NotFound,
     Open(String),
     InvalidArchive(String),
     MissingManifest,
@@ -603,6 +614,14 @@ struct RestoreOutcome {
     restored: Vec<String>,
     errors: Vec<String>,
     manifest: Option<BackupManifest>,
+}
+
+fn restore_completion(errors: &[String]) -> (StatusCode, &'static str) {
+    if errors.is_empty() {
+        (StatusCode::OK, "completed")
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, "failed")
+    }
 }
 
 /// Sync, blocking implementation of `restore_backup`: opens the zip,
@@ -793,23 +812,7 @@ pub async fn restore_backup(
 
     let home_dir = state.kernel.home_dir().to_path_buf();
     let backups_dir = home_dir.join("backups");
-    let backup_path = match find_backup_path(&backups_dir, &filename) {
-        Ok(Some(path)) => path,
-        Ok(None) => {
-            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
-                .into_json_tuple();
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
-                .into_json_tuple();
-        }
-        Err(e) => {
-            return ApiErrorResponse::internal(
-                t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())]),
-            )
-            .into_json_tuple();
-        }
-    };
+    let filename_for_task = filename.clone();
 
     // Drop the `!Send` ErrorTranslator before the spawn_blocking `.await`
     // (the axum Handler bound rejects a non-Send future). Each error branch
@@ -819,11 +822,26 @@ pub async fn restore_backup(
     // Dispatch the blocking open + decompress + write loop onto a blocking
     // thread so it does not stall the axum/tokio worker (refs
     // blocking-fs-on-executor).
-    let result =
-        tokio::task::spawn_blocking(move || restore_backup_blocking(backup_path, home_dir)).await;
+    let result = tokio::task::spawn_blocking(move || {
+        let backup_path = match find_backup_path(&backups_dir, &filename_for_task) {
+            Ok(Some(path)) => path,
+            Ok(None) => return Err(RestoreError::NotFound),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(RestoreError::NotFound);
+            }
+            Err(error) => return Err(RestoreError::Open(error.to_string())),
+        };
+        restore_backup_blocking(backup_path, home_dir)
+    })
+    .await;
 
     let outcome = match result {
         Ok(Ok(o)) => o,
+        Ok(Err(RestoreError::NotFound)) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
+                .into_json_tuple();
+        }
         Ok(Err(RestoreError::Open(msg))) => {
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
             return ApiErrorResponse::internal(
@@ -862,22 +880,44 @@ pub async fn restore_backup(
     let manifest = outcome.manifest;
 
     let total_restored = restored.len();
-    tracing::info!(
-        "Restore from {filename}: {total_restored} files restored, {} errors",
-        errors.len()
-    );
+    let error_count = errors.len();
+    let (response_status, audit_status) = restore_completion(&errors);
+    if errors.is_empty() {
+        tracing::info!("Restore from {filename}: {total_restored} files restored");
+    } else {
+        tracing::error!(
+            filename,
+            total_restored,
+            error_count,
+            errors = ?errors,
+            "Backup restore completed with partial filesystem failures"
+        );
+    }
     let user_id = api_user.as_ref().map(|u| u.0.user_id);
     state.kernel.audit().record_with_context(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
-        format!("Backup restored: {filename} ({total_restored} files)"),
-        "completed",
+        format!(
+            "Backup restore {audit_status}: {filename} ({total_restored} files, {error_count} errors)"
+        ),
+        audit_status,
         user_id,
         Some("api".to_string()),
     );
 
+    if response_status.is_server_error() {
+        return (
+            response_status,
+            Json(serde_json::json!({
+                "error": "Backup restore incomplete",
+                "restored_files": total_restored,
+                "error_count": error_count,
+            })),
+        );
+    }
+
     (
-        StatusCode::OK,
+        response_status,
         Json(serde_json::json!({
             "restored_files": total_restored,
             "errors": errors,
@@ -901,6 +941,15 @@ fn read_backup_manifest(path: &std::path::Path) -> Option<BackupManifest> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn partial_restore_is_a_failed_server_response() {
+        assert_eq!(restore_completion(&[]), (StatusCode::OK, "completed"));
+        assert_eq!(
+            restore_completion(&["disk full".to_string()]),
+            (StatusCode::INTERNAL_SERVER_ERROR, "failed")
+        );
+    }
 
     #[test]
     fn restore_rejects_high_compression_ratio_before_writing_files() {
