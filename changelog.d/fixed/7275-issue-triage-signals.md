@@ -1,1 +1,1 @@
-Preserve `needs-info` when issue labeling falls back to triage, recognize breaking performance titles, avoid substring bug matches, and make thin-report detection language-neutral. (#7275) (@houko)
+Preserve `needs-info` during triage fallback, recognize breaking performance and inflected bug titles, keep meta-only prefixes as successful empty output, and make thin-report detection language-neutral. (#7275) (@houko)

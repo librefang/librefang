@@ -32,5 +32,9 @@ assert_labels 'needs-triage' 'debugger improvements' "$TEST_ROOT/short.txt"
 assert_labels 'needs-triage' 'improve error handling' "$TEST_ROOT/short.txt"
 assert_labels 'needs-triage' 'feature: retry on fail' "$TEST_ROOT/short.txt"
 assert_labels 'needs-triage' 'error: 无法启动' "$TEST_ROOT/non-english.txt"
+assert_labels 'needs-info,needs-triage' 'service crashes on startup' "$TEST_ROOT/short.txt"
+assert_labels 'needs-info,needs-triage' 'request failed after retry' "$TEST_ROOT/short.txt"
+assert_labels '' 'chore: refresh generated metadata' "$TEST_ROOT/short.txt"
+assert_labels '' 'refactor: rename internal helper' "$TEST_ROOT/short.txt"
 
 echo 'auto-label-issue tests passed'
