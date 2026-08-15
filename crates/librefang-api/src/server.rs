@@ -2515,13 +2515,25 @@ pub async fn run_daemon(
                 st.gcra_limiter.retain_recent();
                 let gcra_removed = gcra_before.saturating_sub(st.gcra_limiter.len());
 
+                // Bound route-owned caches that receive attacker-controlled keys.
+                // Manual provider results expire with their existing ten-minute
+                // read TTL. Unapproved A2A discoveries get a 24-hour lease that a
+                // repeat discovery refreshes, so abandoned entries cannot occupy
+                // the fixed pending registry forever.
+                let route_cache_removed = crate::routes::prune_route_caches(
+                    &st.provider_test_cache,
+                    &st.pending_a2a_agents,
+                );
+
                 let claw_removed = before_claw - st.clawhub_cache.len();
                 let skill_removed = before_skill - st.skillhub_cache.len();
                 let total = claw_removed
                     + skill_removed
                     + expired_sessions
                     + auth_rl_removed
-                    + gcra_removed;
+                    + gcra_removed
+                    + route_cache_removed.provider_tests
+                    + route_cache_removed.pending_a2a_agents;
                 if total > 0 {
                     tracing::info!(
                         clawhub = claw_removed,
@@ -2529,6 +2541,8 @@ pub async fn run_daemon(
                         sessions = expired_sessions,
                         auth_rate_limit_entries = auth_rl_removed,
                         gcra_ips = gcra_removed,
+                        provider_tests = route_cache_removed.provider_tests,
+                        pending_a2a_agents = route_cache_removed.pending_a2a_agents,
                         "API cache GC sweep completed"
                     );
                 }
