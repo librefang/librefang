@@ -12,7 +12,6 @@ import {
   addEdge,
   useNodesState,
   useEdgesState,
-  type Node,
   type NodeChange,
   type EdgeChange,
   type NodeProps,
@@ -47,7 +46,15 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { truncateId } from "../lib/string";
-import { removeEdgeById, removeNodeAndCascadeEdges } from "../lib/canvas";
+import {
+  parseCanvasImport,
+  removeEdgeById,
+  removeNodeAndCascadeEdges,
+  resolveDependencyIds,
+  resolveDependencyNames,
+  type CanvasNode,
+  type CanvasNodeData,
+} from "../lib/canvas";
 import { safeStorageGet, safeStorageSet } from "../lib/safeStorage";
 import {
   useCreateWorkflow,
@@ -62,62 +69,6 @@ import { useCreateSchedule } from "../lib/mutations/schedules";
 import { useWorkflows, useWorkflowTemplates, workflowQueries } from "../lib/queries/workflows";
 import { useAgents } from "../lib/queries/agents";
 import { useQueryClient } from "@tanstack/react-query";
-
-/**
- * Shape we attach to every ReactFlow node — both regular workflow steps
- * (custom node) and group-folder nodes. Open-ended (`unknown` index)
- * because spreads like `{ ...n.data, _runState: undefined }` need to
- * tolerate extra runtime fields without forcing every callsite to widen.
- */
-type CanvasNodeData = {
-  // Visual / identity
-  nodeType?: string;
-  label?: string;
-  name?: string;
-  description?: string;
-  // Workflow step config
-  agentId?: string;
-  agentName?: string;
-  prompt?: string;
-  timeoutSecs?: number;
-  maxRetries?: number;
-  errorMode?: string;
-  outputVar?: string;
-  stepMode?: string;
-  condition?: string;
-  maxIterations?: number;
-  until?: string;
-  dependsOn?: string[];
-  // Runtime / UI overlays
-  _runState?: string;
-  // Group folder fields
-  _expanded?: boolean;
-  _childCount?: number;
-  _childIds?: string[];
-  // Restored on group expand. Stored as CSS width/height so it round-trips
-  // straight through `n.style` without a narrowing dance.
-  _origWidth?: number | string;
-  _origHeight?: number | string;
-  _groupId?: string;
-  _onToggle?: (id: string) => void;
-  _onUngroup?: (id: string) => void;
-  _onDeleteGroup?: (id: string) => void;
-  // Imported from backend (group inner content)
-  nodes?: CanvasNode[];
-  edges?: Edge[];
-  // Edge data overlays for collapse/expand redirection
-  _origSource?: string;
-  _origTarget?: string;
-  [key: string]: unknown;
-};
-
-/**
- * Concrete React Flow node type for this page. Parameterizing on
- * `CanvasNodeData` makes `n.data._childIds` etc. typed access — replaces
- * the previous `(n.data as CanvasNodeData)` cast riddled across this file
- * (and the `as any` escapes that preceded those casts, see #3390).
- */
-type CanvasNode = Node<CanvasNodeData>;
 
 /** Shape of a node entry persisted into sessionStorage by the templates flow. */
 type StoredCanvasNode = {
@@ -707,7 +658,9 @@ function NodeConfigPanel({
   const [until, setUntil] = useState(d.until || "");
   // Retry fields
   const [maxRetries, setMaxRetries] = useState<number>(d.maxRetries || 3);
-  const [dependsOn, setDependsOn] = useState<string[]>(d.dependsOn || []);
+  const [dependsOn, setDependsOn] = useState<string[]>(() =>
+    resolveDependencyIds(d.dependsOn || [], siblingNodes || []),
+  );
 
   // pointer capture keeps the drag alive past the thin handle boundary
   const [dragWidth, setDragWidth] = useState<number | null>(null);
@@ -912,10 +865,10 @@ function NodeConfigPanel({
                       <label key={s.id} className="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-brand/5 cursor-pointer">
                         <input
                           type="checkbox"
-                          checked={dependsOn.includes(s.label)}
+                          checked={dependsOn.includes(s.id)}
                           onChange={e => {
-                            if (e.target.checked) setDependsOn([...dependsOn, s.label]);
-                            else setDependsOn(dependsOn.filter(n => n !== s.label));
+                            if (e.target.checked) setDependsOn([...dependsOn, s.id]);
+                            else setDependsOn(dependsOn.filter(id => id !== s.id));
                           }}
                           className="rounded border-border-subtle"
                         />
@@ -1260,11 +1213,12 @@ function CanvasPageInner() {
       const reader = new FileReader();
       reader.onload = () => {
         try {
-          const data = JSON.parse(reader.result as string);
-          if (data.nodes) { pushHistory(); setNodes(data.nodes); }
-          if (data.edges) setEdges(data.edges);
-          if (data.name) setWorkflowName(data.name);
-          if (data.description) setWorkflowDescription(data.description);
+          const data = parseCanvasImport(JSON.parse(typeof reader.result === "string" ? reader.result : ""));
+          pushHistory();
+          setNodes(data.nodes);
+          setEdges(data.edges);
+          setWorkflowName(data.name ?? "");
+          setWorkflowDescription(data.description ?? "");
           showToast(t("canvas.imported"));
         } catch { showError(t("canvas.import_error")); }
       };
@@ -1844,11 +1798,12 @@ function CanvasPageInner() {
 
   // Build backend steps from nodes: only nodes bound to a real agent are steps
   const buildSteps = useCallback((nodeList: CanvasNode[]) => {
-    return nodeList
-      .filter(n => {
-        const d = n.data;
-        return d.agentId || d.agentName;
-      })
+    const stepNodes = nodeList.filter(n => n.data.agentId || n.data.agentName);
+    const dependencyOptions = stepNodes.map((node, idx) => ({
+      id: node.id,
+      label: node.data.label || `Step ${idx + 1}`,
+    }));
+    return stepNodes
       .map((n, idx) => {
         const d = n.data;
         const step: WorkflowStepBuild = {
@@ -1877,7 +1832,10 @@ function CanvasPageInner() {
         // Output variable
         if (d.outputVar) step.output_var = d.outputVar;
         // DAG dependencies
-        if (d.dependsOn && d.dependsOn.length > 0) step.depends_on = d.dependsOn;
+        if (d.dependsOn && d.dependsOn.length > 0) {
+          const dependencies = resolveDependencyNames(d.dependsOn, dependencyOptions);
+          if (dependencies.length > 0) step.depends_on = dependencies;
+        }
         return step;
       });
   }, []);
