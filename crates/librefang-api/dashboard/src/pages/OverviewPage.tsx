@@ -30,8 +30,72 @@ import { useBudgetStatus, useUsageDaily, useUsageByAgent, useUsageByModel, useMo
 import { formatCompact, formatCost } from "../lib/format";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
+import { cn } from "../lib/cn";
 
 type Range = "7d" | "30d" | "90d";
+type OverviewRoute =
+  | "/agents"
+  | "/analytics"
+  | "/approvals"
+  | "/audit"
+  | "/mcp-servers"
+  | "/memory"
+  | "/network"
+  | "/runtime"
+  | "/scheduler"
+  | "/sessions";
+
+const RANGE_OPTIONS: Range[] = ["7d", "30d", "90d"];
+
+export function RangeSelector({
+  range,
+  onChange,
+  variant,
+}: {
+  range: Range;
+  onChange: (range: Range) => void;
+  variant: "desktop" | "mobile" | "chart";
+}) {
+  return (
+    <div className={cn("flex shrink-0", variant === "chart" ? "gap-1 lg:gap-1.5" : "gap-1")}>
+      {RANGE_OPTIONS.map((option) => (
+        <button
+          key={option}
+          type="button"
+          onClick={() => onChange(option)}
+          className={cn(
+            "rounded-md border font-mono text-[11px] cursor-pointer transition-colors",
+            variant === "desktop" && "h-8 px-2.5",
+            variant === "mobile" && "h-9 px-2.5",
+            variant === "chart" && "px-2 lg:px-2.5 py-0.5",
+            option === range
+              ? "bg-brand/10 border-brand/30 text-brand"
+              : "bg-transparent border-border-subtle text-text-dim hover:border-brand/20",
+          )}
+        >
+          {option}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function signFor(value: number): string {
+  if (value > 0) return "+";
+  if (value < 0) return "−";
+  return "";
+}
+
+function timestampFor(value: string | number | Date): number {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === "string") return Date.parse(value);
+  return value;
+}
+
+function trendFor(delta: number, hasPrior: boolean): "up" | "down" | "flat" {
+  if (!hasPrior || delta === 0) return "flat";
+  return delta > 0 ? "up" : "down";
+}
 
 function computeRangeData(
   days: { date?: string; cost_usd?: number }[] | undefined,
@@ -219,7 +283,7 @@ interface AlertItem {
   kind: AlertKind;
   title: string;
   sub: string;
-  page?: string;
+  page?: OverviewRoute;
   /** ISO timestamp the alert was triggered at, when the source has one.
    *  Rendered as a relative time on the right edge of the row; omitted
    *  for sources where no event timestamp exists (mcp degraded,
@@ -242,15 +306,17 @@ const ALERT_KIND_TINT: Record<AlertKind, { color: string; bg: string }> = {
   pending: { color: "#fbbf24", bg: "rgba(251,191,36,0.10)" },
 };
 
-function RelativeTime({ date }: { date: number | undefined }) {
+export function RelativeTime({ date }: { date: string | number | Date | undefined | null }) {
   const [, setTick] = useState(0);
   useEffect(() => {
-    if (!date) return;
-    const ms = Date.now() - date < 60_000 ? 1_000 : 30_000;
+    if (date == null) return;
+    const timestamp = timestampFor(date);
+    if (!Number.isFinite(timestamp)) return;
+    const ms = Math.abs(Date.now() - timestamp) < 60_000 ? 1_000 : 30_000;
     const id = window.setInterval(() => setTick((t) => t + 1), ms);
     return () => window.clearInterval(id);
   }, [date]);
-  if (!date) return <>-</>;
+  if (date == null) return <>-</>;
   return <>{formatRelativeTime(date)}</>;
 }
 
@@ -305,7 +371,10 @@ export function OverviewPage() {
   const peersCount       = peersQuery.data?.length ?? 0;
   const schedulesCount   = schedulesQuery.data?.length ?? 0;
   const pendingApprovals = approvalCountQuery.data ?? 0;
-  const budgetUsage = budgetUsageRatio(budgetStatusQuery.data as Record<string, unknown> | undefined);
+  const budgetUsage = useMemo(
+    () => budgetUsageRatio(budgetStatusQuery.data as Record<string, unknown> | undefined),
+    [budgetStatusQuery.data],
+  );
 
   // 24h session count — derived from the sessions list (sorted DESC by
   // created_at, default page size 100). `snapshot.status.session_count` is
@@ -329,12 +398,12 @@ export function OverviewPage() {
   const costDelta = rangeData.cost - rangeData.prior;
   const hasPriorCost = rangeData.prior > 0;
   const costDeltaPct = hasPriorCost ? Math.abs((costDelta / rangeData.prior) * 100) : undefined;
-  const costTrendDir: "up" | "down" | "flat" = !hasPriorCost || costDelta === 0 ? "flat" : costDelta > 0 ? "up" : "down";
+  const costTrendDir = trendFor(costDelta, hasPriorCost);
   const costDeltaLabel = costDeltaPct == null
     ? t("overview.kpi.no_prior", { defaultValue: "no prior spend" })
-    : `${costDelta > 0 ? "+" : "−"}${costDeltaPct.toFixed(0)}%`;
+    : `${signFor(costDelta)}${costDeltaPct.toFixed(0)}%`;
   const costDeltaAmountLabel = hasPriorCost
-    ? `${costDelta > 0 ? "+" : costDelta < 0 ? "−" : ""}$${Math.abs(costDelta).toFixed(0)} ${t("overview.cost.vs_prior", { defaultValue: "vs prior" })}`
+    ? `${signFor(costDelta)}$${Math.abs(costDelta).toFixed(0)} ${t("overview.cost.vs_prior", { defaultValue: "vs prior" })}`
     : t("overview.cost.no_prior", { defaultValue: "no prior spend" });
 
   const dailyTokens = useMemo(
@@ -476,7 +545,7 @@ export function OverviewPage() {
           count: mcpDegradedCount,
         }),
         sub: `${mcpConnectedCount}/${mcpConfiguredCount} ${t("overview.alerts.connected", { defaultValue: "connected" })}`,
-        page: "/mcp",
+        page: "/mcp-servers",
       });
     }
     for (const c of snapshot?.health?.checks ?? []) {
@@ -522,7 +591,7 @@ export function OverviewPage() {
       label: t("overview.system.mcp", { defaultValue: "MCP" }),
       value: `${mcpConfiguredCount} ${t("overview.system.servers", { defaultValue: "servers" })}${mcpDegradedCount > 0 ? ` · ${mcpDegradedCount} ${t("overview.system.degraded", { defaultValue: "deg" })}` : ""}`,
       dot: mcpDegradedCount > 0 ? "warn" : "ok",
-      page: "/mcp",
+      page: "/mcp-servers",
     },
     {
       label: t("overview.system.network", { defaultValue: "Network" }),
@@ -605,22 +674,7 @@ export function OverviewPage() {
           >
             {snapshotQuery.isFetching ? t("overview.refreshing", { defaultValue: "Refreshing…" }) : t("overview.refresh", { defaultValue: "Refresh" })}
           </Button>
-          <div className="flex gap-1 shrink-0">
-            {(["7d", "30d", "90d"] as const).map((p) => (
-              <button
-                key={p}
-                type="button"
-                onClick={() => setRange(p)}
-                className={`h-8 px-2.5 rounded-md text-[11px] font-mono cursor-pointer transition-colors ${
-                  p === range
-                    ? "bg-brand/10 border border-brand/30 text-brand"
-                    : "bg-transparent border border-border-subtle text-text-dim hover:border-brand/20"
-                }`}
-              >
-                {p}
-              </button>
-            ))}
-          </div>
+          <RangeSelector range={range} onChange={setRange} variant="desktop" />
           <Button variant="primary" size="sm" leftIcon={<Plus className="w-3.5 h-3.5" />} onClick={() => navigate({ to: "/agents" })}>
             {t("overview.new_agent", { defaultValue: "New agent" })}
           </Button>
@@ -635,22 +689,7 @@ export function OverviewPage() {
           >
             <RefreshCw className={`w-4 h-4 ${snapshotQuery.isFetching ? "animate-spin" : ""}`} />
           </button>
-          <div className="flex gap-1 shrink-0">
-            {(["7d", "30d", "90d"] as const).map((p) => (
-              <button
-                key={p}
-                type="button"
-                onClick={() => setRange(p)}
-                className={`h-9 px-2.5 rounded-md text-[11px] font-mono cursor-pointer transition-colors ${
-                  p === range
-                    ? "bg-brand/10 border border-brand/30 text-brand"
-                    : "bg-transparent border border-border-subtle text-text-dim hover:border-brand/20"
-                }`}
-              >
-                {p}
-              </button>
-            ))}
-          </div>
+          <RangeSelector range={range} onChange={setRange} variant="mobile" />
           <button
             type="button"
             onClick={() => navigate({ to: "/agents" })}
@@ -735,7 +774,7 @@ export function OverviewPage() {
         <Card padding="none" className="surface-lit lg:col-span-2 overflow-hidden">
           <div className="px-3 lg:px-4 pt-3 lg:pt-3.5 pb-2 flex items-start justify-between gap-2">
             <div className="min-w-0">
-              <SectionLabel className="!mb-0.5">
+              <SectionLabel className="mb-0.5">
                 {t("overview.cost.title", { defaultValue: "Cost" })} · {t(rangeData.labelKey, { defaultValue: range })}
               </SectionLabel>
               <div className="flex items-baseline gap-2 flex-wrap">
@@ -745,25 +784,7 @@ export function OverviewPage() {
                 </span>
               </div>
             </div>
-            <div className="flex gap-1 lg:gap-1.5 shrink-0">
-              {(["7d", "30d", "90d"] as const).map((p) => {
-                const active = p === range;
-                return (
-                  <button
-                    key={p}
-                    type="button"
-                    onClick={() => setRange(p)}
-                    className={`px-2 lg:px-2.5 py-0.5 text-[11px] rounded-md font-mono cursor-pointer transition-colors ${
-                      active
-                        ? "bg-brand/10 border border-brand/30 text-brand"
-                        : "bg-transparent border border-border-subtle text-text-dim hover:border-brand/20"
-                    }`}
-                  >
-                    {p}
-                  </button>
-                );
-              })}
-            </div>
+            <RangeSelector range={range} onChange={setRange} variant="chart" />
           </div>
           <div className="px-2 pb-2">
             <CostChart data={rangeData.trend} height={170} />
@@ -847,7 +868,7 @@ export function OverviewPage() {
                 <button
                   key={alert.id}
                   onClick={() => {
-                    if (alert.page) navigate({ to: alert.page as never });
+                    if (alert.page) navigate({ to: alert.page });
                     dismissAlert(alert.id);
                   }}
                   className="px-3 lg:px-4 py-2.5 flex items-start gap-2.5 border-t border-border-subtle bg-transparent text-left cursor-pointer hover:bg-main/30 transition-colors"
@@ -884,7 +905,7 @@ export function OverviewPage() {
           (e.g. fresh install) so the row never goes empty. */}
       <Card padding="none" className="surface-lit">
         <div className="px-3 lg:px-4 pt-3 lg:pt-3.5 pb-2 flex items-center justify-between gap-2">
-          <SectionLabel className="!mb-0">
+          <SectionLabel className="mb-0">
             {recentSessions.length > 0
               ? t("overview.recent_sessions", { defaultValue: "Recent sessions" })
               : t("overview.recent_agents", { defaultValue: "Recent agents" })}
@@ -896,7 +917,7 @@ export function OverviewPage() {
             <button
               onClick={() => navigate({
                 to: recentSessions.length > 0 ? "/sessions" : "/agents",
-              } as never)}
+              })}
               className="bg-transparent border-0 text-brand text-[11px] cursor-pointer hover:underline"
             >
               {t("overview.view_all", { defaultValue: "View all" })}
@@ -916,7 +937,7 @@ export function OverviewPage() {
               return (
                 <li key={session.session_id}>
                   <button
-                    onClick={() => navigate({ to: "/sessions" } as never)}
+                    onClick={() => navigate({ to: "/sessions" })}
                     className="w-full text-left px-3 py-2.5 border-t border-border-subtle hover:bg-main/30 transition-colors flex items-start gap-2.5"
                   >
                     <Pill kind={pillKindForSessionStatus(status)} dot size="sm">
@@ -1005,7 +1026,7 @@ export function OverviewPage() {
                   return (
                     <tr
                       key={session.session_id}
-                      onClick={() => navigate({ to: "/sessions" } as never)}
+                      onClick={() => navigate({ to: "/sessions" })}
                       className="border-t border-border-subtle cursor-pointer hover:bg-main/30 transition-colors"
                     >
                       <td className="px-4 py-2">
@@ -1136,7 +1157,7 @@ export function OverviewPage() {
             {systemTiles.map((tile) => (
               <button
                 key={tile.label}
-                onClick={() => navigate({ to: tile.page as never })}
+                onClick={() => navigate({ to: tile.page })}
                 className="px-2.5 py-2 rounded-md bg-main/60 border border-border-subtle flex items-center justify-between gap-2 cursor-pointer text-left text-text-main hover:border-brand/40 transition-colors"
               >
                 <div className="min-w-0">

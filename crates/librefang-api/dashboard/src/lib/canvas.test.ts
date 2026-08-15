@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Edge, Node } from "@xyflow/react";
-import { removeNodeAndCascadeEdges } from "./canvas";
+import { removeEdgeById, removeNodeAndCascadeEdges } from "./canvas";
 
 type N = Node<{ label: string }>;
 type E = Edge;
@@ -71,6 +71,8 @@ describe("removeNodeAndCascadeEdges", () => {
     const next = removeNodeAndCascadeEdges(nodes, edges, "missing");
     expect(next.nodes.map((n) => n.id)).toEqual(["a", "b"]);
     expect(next.edges.map((e) => e.id)).toEqual(["e1"]);
+    expect(next.nodes).toBe(nodes);
+    expect(next.edges).toBe(edges);
   });
 
   it("returns new arrays without mutating the inputs (so a prior snapshot survives for undo)", () => {
@@ -92,5 +94,22 @@ describe("removeNodeAndCascadeEdges", () => {
     expect(edges).toEqual(snapshotEdges);
     expect(snapshotNodes.map((n) => n.id)).toEqual(["a", "b"]);
     expect(snapshotEdges.map((e) => e.id)).toEqual(["e1"]);
+  });
+});
+
+describe("removeEdgeById", () => {
+  it("returns a new array when the edge exists", () => {
+    const edges = [mkEdge("e1", "a", "b"), mkEdge("e2", "b", "c")];
+
+    const next = removeEdgeById(edges, "e1");
+
+    expect(next.map((edge) => edge.id)).toEqual(["e2"]);
+    expect(next).not.toBe(edges);
+  });
+
+  it("preserves the input reference when the edge id is stale", () => {
+    const edges = [mkEdge("e1", "a", "b")];
+
+    expect(removeEdgeById(edges, "missing")).toBe(edges);
   });
 });

@@ -17,6 +17,10 @@
   --color-border-subtle: var(--border-color);
   --color-text-dim: var(--text-muted);
 
+  /* Shared compact-label typography. */
+  --text-label: 10.5px;
+  --tracking-label: 0.08em;
+
   /* Override Tailwind v4's `lg` breakpoint from 1024px → 1000px (refs #4873).
      iPad Pro 13" portrait is 1024px CSS-wide — exactly on the default `lg`
      boundary. iOS Safari can report the visual viewport a fraction below
@@ -243,4 +247,3 @@ input[type="number"] {
   -moz-appearance: textfield;
   appearance: textfield;
 }
-
