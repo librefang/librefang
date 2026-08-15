@@ -13,7 +13,7 @@ import { RouterProvider } from "@tanstack/react-router";
 import { router } from "./router";
 import { ToastContainer } from "./components/ui/Toast";
 import "./index.css";
-import i18n from "./lib/i18n";
+import i18n, { i18nReady } from "./lib/i18n";
 import { channelKeys, handKeys, mcpKeys, pluginKeys } from "./lib/queries/keys";
 import { createDashboardQueryClient } from "./lib/queryClient";
 
@@ -96,13 +96,20 @@ if (!rootEl) {
   throw new Error("Root element #root not found — cannot mount dashboard.");
 }
 
-createRoot(rootEl).render(
-  <React.StrictMode>
-    <RootErrorBoundary>
-      <QueryClientProvider client={queryClient}>
-        <RouterProvider router={router} />
-        <ToastContainer />
-      </QueryClientProvider>
-    </RootErrorBoundary>
-  </React.StrictMode>
-);
+const mountDashboard = async (): Promise<void> => {
+  await i18nReady;
+  createRoot(rootEl).render(
+    <React.StrictMode>
+      <RootErrorBoundary>
+        <QueryClientProvider client={queryClient}>
+          <RouterProvider router={router} />
+          <ToastContainer />
+        </QueryClientProvider>
+      </RootErrorBoundary>
+    </React.StrictMode>,
+  );
+};
+
+void mountDashboard().catch((error: unknown) => {
+  console.error("[dashboard] failed to mount", error);
+});

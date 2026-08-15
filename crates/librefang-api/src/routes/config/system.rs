@@ -1,4 +1,21 @@
 use super::*;
+use librefang_types::config::DefaultModelConfig;
+use std::sync::RwLock;
+
+fn status_default_model_snapshot(
+    model_override: &RwLock<Option<DefaultModelConfig>>,
+    configured: &DefaultModelConfig,
+) -> (String, String) {
+    let guard = model_override.read().unwrap_or_else(|poisoned| {
+        tracing::warn!(
+            "System status default-model override lock poisoned; recovering response state"
+        );
+        model_override.clear_poison();
+        poisoned.into_inner()
+    });
+    let effective = guard.as_ref().unwrap_or(configured);
+    (effective.provider.clone(), effective.model.clone())
+}
 
 #[utoipa::path(
     get,
@@ -52,6 +69,10 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .unwrap_or(0);
 
     let cfg = state.kernel.config_snapshot();
+    let (default_provider, default_model) = status_default_model_snapshot(
+        state.kernel.default_model_override_ref(),
+        &cfg.default_model,
+    );
     Json(serde_json::json!({
         "status": "running",
         "version": env!("CARGO_PKG_VERSION"),
@@ -59,8 +80,8 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "active_agent_count": active_agent_count,
         "session_count": session_count,
         "memory_used_mb": memory_used_mb,
-        "default_provider": state.kernel.default_model_override_ref().read().ok().and_then(|g| g.as_ref().map(|dm| dm.provider.clone())).unwrap_or_else(|| cfg.default_model.provider.clone()),
-        "default_model": state.kernel.default_model_override_ref().read().ok().and_then(|g| g.as_ref().map(|dm| dm.model.clone())).unwrap_or_else(|| cfg.default_model.model.clone()),
+        "default_provider": default_provider,
+        "default_model": default_model,
         "uptime_seconds": uptime,
         "api_listen": cfg.api_listen,
         "home_dir": state.kernel.home_dir().display().to_string(),
@@ -215,7 +236,58 @@ fn write_quick_init_config(home: &std::path::Path, contents: &[u8]) -> std::io::
 
 #[cfg(test)]
 mod tests {
-    use super::write_quick_init_config;
+    use super::{status_default_model_snapshot, write_quick_init_config};
+    use librefang_types::config::DefaultModelConfig;
+    use std::sync::RwLock;
+
+    #[test]
+    fn status_model_snapshot_recovers_consistent_override_after_poison() {
+        let configured = DefaultModelConfig {
+            provider: "configured-provider".to_string(),
+            model: "configured-model".to_string(),
+            ..DefaultModelConfig::default()
+        };
+        let model_override = RwLock::new(Some(DefaultModelConfig {
+            provider: "override-provider".to_string(),
+            model: "override-model".to_string(),
+            ..DefaultModelConfig::default()
+        }));
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = model_override.write().unwrap();
+            panic!("poison status default-model override");
+        });
+        assert!(model_override.is_poisoned());
+
+        assert_eq!(
+            status_default_model_snapshot(&model_override, &configured),
+            (
+                "override-provider".to_string(),
+                "override-model".to_string()
+            )
+        );
+
+        assert!(!model_override.is_poisoned());
+        assert!(model_override.read().is_ok());
+        assert!(model_override.write().is_ok());
+    }
+
+    #[test]
+    fn status_model_snapshot_uses_configured_pair_without_override() {
+        let configured = DefaultModelConfig {
+            provider: "configured-provider".to_string(),
+            model: "configured-model".to_string(),
+            ..DefaultModelConfig::default()
+        };
+        let model_override = RwLock::new(None);
+
+        assert_eq!(
+            status_default_model_snapshot(&model_override, &configured),
+            (
+                "configured-provider".to_string(),
+                "configured-model".to_string()
+            )
+        );
+    }
 
     #[test]
     fn quick_init_write_is_create_once_and_preserves_existing_config() {

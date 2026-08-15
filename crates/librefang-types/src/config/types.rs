@@ -7122,9 +7122,9 @@ fn expand_tilde(path: &std::path::Path) -> PathBuf {
 pub struct MemoryDecayConfig {
     /// Whether time-based decay is enabled.
     pub enabled: bool,
-    /// SESSION-scope memories expire after this many days of no access.
+    /// SESSION-scope memories expire after this many days of no access. Zero disables expiry.
     pub session_ttl_days: u32,
-    /// AGENT-scope memories expire after this many days of no access.
+    /// AGENT-scope memories expire after this many days of no access. Zero disables expiry.
     pub agent_ttl_days: u32,
     /// How often to run the decay sweep (hours).
     pub decay_interval_hours: u32,
