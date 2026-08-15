@@ -270,6 +270,34 @@ describe("TerminalPage", () => {
     }
   });
 
+  it("does not leak an intentional disconnect into a replacement socket", async () => {
+    vi.useFakeTimers();
+    try {
+      renderPage();
+
+      const firstSocket = MockWebSocket.instances[0];
+      act(() => {
+        firstSocket.emitOpen();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "terminal.disconnect" }));
+      fireEvent.click(screen.getByRole("button", { name: "terminal.connect" }));
+
+      const secondSocket = MockWebSocket.instances[1];
+      act(() => {
+        secondSocket.emitOpen();
+        secondSocket.readyState = MockWebSocket.CLOSED;
+        secondSocket.onclose?.({ code: 1006, reason: "" } as unknown as CloseEvent);
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(MockWebSocket.instances).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("stops auto-reconnect after consecutive fast-failed launches (#4675)", async () => {
     // Two back-to-back connections that get `started` and then `exit` with
     // a non-zero code inside the FAST_EXIT_WINDOW_MS slot must trip the

@@ -177,6 +177,7 @@ export function TerminalPage() {
   const connect = useCallback(() => {
     if (terminalEnabled !== true) return;
 
+    intentionalDisconnectRef.current = false;
     const gen = ++wsGenerationRef.current;
 
     if (wsRef.current) {
@@ -383,6 +384,7 @@ export function TerminalPage() {
       setReconnectAttempt(attemptRef.current);
       setIsConnecting(true);
       reconnectTimeoutRef.current = setTimeout(() => {
+        reconnectTimeoutRef.current = null;
         if (wsRef.current === null || wsRef.current.readyState === WebSocket.CLOSED) {
           connectRef.current();
         }
