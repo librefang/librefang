@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { WorkflowStepImageGallery } from "./WorkflowStepImageGallery";
 import { extractImageRefs } from "../lib/workflowOutputImages";
@@ -43,6 +43,29 @@ describe("WorkflowStepImageGallery", () => {
     );
     render(<WorkflowStepImageGallery refs={refs} />);
     expect(screen.getByAltText("a watercolor sunset")).toBeInTheDocument();
+  });
+
+  it("does not link data URI images to a blocked top-level navigation", () => {
+    const refs = extractImageRefs(
+      JSON.stringify({ url: "data:image/png;base64,aGVsbG8=" }),
+    );
+    render(<WorkflowStepImageGallery refs={refs} />);
+
+    expect(screen.getByRole("img").closest("a")).toBeNull();
+  });
+
+  it("renders duplicate image refs without duplicate React keys", () => {
+    const onError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ref = {
+      kind: "url" as const,
+      src: "/api/uploads/duplicate",
+    };
+
+    render(<WorkflowStepImageGallery refs={[ref, ref]} />);
+
+    expect(screen.getAllByRole("img")).toHaveLength(2);
+    expect(onError).not.toHaveBeenCalled();
+    onError.mockRestore();
   });
 
   it("does NOT render anything for plain text (falls back to caller)", () => {
