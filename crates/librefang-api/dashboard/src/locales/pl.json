@@ -4003,6 +4003,9 @@
   },
   "errors": {
     "something_went_wrong": "Coś poszło nie tak",
+    "page_assets_updated": "Zasoby strony zostały zaktualizowane",
+    "react_state_reset": "Stan React został zresetowany — ponowne ładowanie",
+    "new_version_available": "Dostępna jest nowa wersja. Przeładuj stronę, aby ją pobrać.",
     "unexpected": "Wystąpił nieoczekiwany błąd.",
     "force_reload_title": "Czyści czas oczekiwania na automatyczne przeładowanie i wymusza świeże ładowanie",
     "force_reload": "Wymuś przeładowanie",

@@ -1,7 +1,7 @@
-import { lazy, Suspense, useEffect, useState, type ComponentType } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState, type ComponentType } from "react";
 import { Link, Navigate, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
+import { useTranslation } from "react-i18next";
 import { App } from "./App";
-import i18n from "./lib/i18n";
 
 // Matches chunk load failures across browsers:
 // Chrome:  "Failed to fetch dynamically imported module: ..."
@@ -15,11 +15,52 @@ const CHUNK_ERROR_RE = /dynamically imported module|importing a module script|Lo
 // Matches the transient React 19 + Vite HMR failure mode where the dispatcher
 // is null at hook-read time. A full reload reliably clears the stale module
 // graph; we auto-reload once per session so users don't have to click Reload.
-const REACT_DISPATCHER_RE = /reading ['"]useContext['"]|reading ['"]useState['"]|reading ['"]useRef['"]|reading ['"]useMemo['"]|reading ['"]useEffect['"]|reading ['"]useReducer['"]|reading ['"]useCallback['"]|reading ['"]useLayoutEffect['"]|reading ['"]useSyncExternalStore['"]/;
+const REACT_DISPATCHER_RE = /^Cannot read properties of null \(reading ['"](?:useContext|useState|useRef|useMemo|useEffect|useReducer|useCallback|useLayoutEffect|useSyncExternalStore)['"]\)$/;
 
-function shouldAutoReload(err: unknown): boolean {
+type RouteErrorKind = "chunk" | "dispatcher" | "other";
+
+export function classifyRouteError(err: unknown): RouteErrorKind {
   const msg = err instanceof Error ? err.message : String(err);
-  return CHUNK_ERROR_RE.test(msg) || REACT_DISPATCHER_RE.test(msg);
+  if (CHUNK_ERROR_RE.test(msg)) return "chunk";
+  if (import.meta.env.DEV && REACT_DISPATCHER_RE.test(msg)) return "dispatcher";
+  return "other";
+}
+
+export function parseCanvasSearch(search: Record<string, unknown>): { t?: number; wf?: string } {
+  const out: { t?: number; wf?: string } = {};
+  let timestamp = Number.NaN;
+  if (typeof search.t === "number") {
+    timestamp = search.t;
+  } else if (typeof search.t === "string" && search.t.trim() !== "") {
+    timestamp = Number(search.t);
+  }
+  if (Number.isFinite(timestamp)) out.t = timestamp;
+  if (typeof search.wf === "string") out.wf = search.wf;
+  return out;
+}
+
+export function readReloadTimestamp(storage?: Pick<Storage, "getItem">): number {
+  try {
+    return Number((storage ?? window.sessionStorage).getItem(CHUNK_RELOAD_KEY) || "0");
+  } catch {
+    return 0;
+  }
+}
+
+export function writeReloadTimestamp(timestamp: number, storage?: Pick<Storage, "setItem">): void {
+  try {
+    (storage ?? window.sessionStorage).setItem(CHUNK_RELOAD_KEY, String(timestamp));
+  } catch {
+    // Reload recovery must still proceed when browser storage is unavailable.
+  }
+}
+
+function clearReloadTimestamp(): void {
+  try {
+    window.sessionStorage.removeItem(CHUNK_RELOAD_KEY);
+  } catch {
+    // A manual reload remains useful even when browser storage is unavailable.
+  }
 }
 
 // Auto-reload on stale chunk — when the dashboard is rebuilt (dev HMR, sync,
@@ -27,11 +68,11 @@ function shouldAutoReload(err: unknown): boolean {
 // Detect the chunk error and reload once so the browser picks up the new
 // index.html with correct chunk hashes. A sessionStorage guard prevents
 // infinite reload loops.
-function tryAutoReload(err: unknown): boolean {
-  if (!shouldAutoReload(err)) return false;
-  const last = Number(sessionStorage.getItem(CHUNK_RELOAD_KEY) || "0");
+function tryAutoReload(kind: RouteErrorKind): boolean {
+  if (kind === "other") return false;
+  const last = readReloadTimestamp();
   if (Date.now() - last <= 10_000) return false;
-  sessionStorage.setItem(CHUNK_RELOAD_KEY, String(Date.now()));
+  writeReloadTimestamp(Date.now());
   window.location.reload();
   return true;
 }
@@ -46,7 +87,7 @@ function lazyWithReload<T extends ComponentType<any>>(
 ): React.LazyExoticComponent<T> {
   return lazy(() =>
     factory().catch((err: unknown) => {
-      if (tryAutoReload(err)) {
+      if (tryAutoReload(classifyRouteError(err))) {
         // Return a never-resolving promise so React doesn't render the
         // error boundary before the reload takes effect.
         return new Promise<never>(() => {});
@@ -135,10 +176,7 @@ const overviewRoute = createRoute({
 const canvasRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/canvas",
-  validateSearch: (search: Record<string, unknown>) => ({
-    t: search.t as number | undefined,
-    wf: search.wf as string | undefined,
-  }),
+  validateSearch: parseCanvasSearch,
   component: () => <LazyRouteBoundary><CanvasPage /></LazyRouteBoundary>
 });
 
@@ -457,26 +495,25 @@ const routeTree = rootRoute.addChildren([
 ]);
 
 function ChunkErrorBoundary({ error }: { error: Error }) {
-  const isChunkError = CHUNK_ERROR_RE.test(error.message);
-  const isDispatcherError = REACT_DISPATCHER_RE.test(error.message);
+  const { t } = useTranslation();
+  const errorKind = useMemo(() => classifyRouteError(error), [error]);
   const [showStack, setShowStack] = useState(false);
 
   // Auto-reload once per session for known-transient failures (chunk misses,
   // React dispatcher-null after HMR). If the reload fires we never render
   // past this effect; otherwise we show the diagnostic UI below.
   useEffect(() => {
-    if (isChunkError || isDispatcherError) {
-      tryAutoReload(error);
-    }
-  }, [error, isChunkError, isDispatcherError]);
+    tryAutoReload(errorKind);
+  }, [errorKind]);
 
-  const title = isChunkError
-    ? "Page assets have been updated"
-    : isDispatcherError
-    ? "React state reset — reloading"
-    : "Something went wrong";
-  const detail = isChunkError
-    ? "A new version is available. Reload to get the latest."
+  let title = t("errors.something_went_wrong", "Something went wrong");
+  if (errorKind === "chunk") {
+    title = t("errors.page_assets_updated", "Page assets have been updated");
+  } else if (errorKind === "dispatcher") {
+    title = t("errors.react_state_reset", "React state reset — reloading");
+  }
+  const detail = errorKind === "chunk"
+    ? t("errors.new_version_available", "A new version is available. Reload to get the latest.")
     : error.message;
 
   return (
@@ -489,24 +526,24 @@ function ChunkErrorBoundary({ error }: { error: Error }) {
             onClick={() => window.location.reload()}
             className="rounded-xl bg-sky-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-sky-600 transition-colors"
           >
-            {i18n.t("common.reload", "Reload")}
+            {t("common.reload", "Reload")}
           </button>
           <button
             onClick={() => {
-              sessionStorage.removeItem(CHUNK_RELOAD_KEY);
+              clearReloadTimestamp();
               window.location.reload();
             }}
             className="rounded-xl bg-red-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-red-600 transition-colors"
-            title={i18n.t("errors.force_reload_title", "Clears the auto-reload cooldown and forces a fresh load")}
+            title={t("errors.force_reload_title", "Clears the auto-reload cooldown and forces a fresh load")}
           >
-            {i18n.t("errors.force_reload", "Force reload")}
+            {t("errors.force_reload", "Force reload")}
           </button>
           {error.stack && (
             <button
               onClick={() => setShowStack(v => !v)}
               className="rounded-xl border border-gray-300 px-6 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
             >
-              {showStack ? i18n.t("common.hide", "Hide") : i18n.t("common.show", "Show")} {i18n.t("errors.stack", "stack")}
+              {showStack ? t("common.hide", "Hide") : t("common.show", "Show")} {t("errors.stack", "stack")}
             </button>
           )}
         </div>
@@ -521,15 +558,16 @@ function ChunkErrorBoundary({ error }: { error: Error }) {
 }
 
 function NotFound() {
+  const { t } = useTranslation();
   return (
     <div className="flex h-[60vh] items-center justify-center">
       <div className="max-w-xl text-center space-y-4 px-4">
-        <p className="text-lg font-semibold">{i18n.t("errors.page_not_found", "Page not found")}</p>
+        <p className="text-lg font-semibold">{t("errors.page_not_found", "Page not found")}</p>
         <Link
           to="/overview"
           className="inline-block rounded-xl bg-sky-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-sky-600 transition-colors"
         >
-          {i18n.t("errors.go_to_overview", "Go to Overview")}
+          {t("errors.go_to_overview", "Go to Overview")}
         </Link>
       </div>
     </div>

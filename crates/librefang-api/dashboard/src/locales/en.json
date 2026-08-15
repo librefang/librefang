@@ -3995,6 +3995,9 @@
   },
   "errors": {
     "something_went_wrong": "Something went wrong",
+    "page_assets_updated": "Page assets have been updated",
+    "react_state_reset": "React state reset — reloading",
+    "new_version_available": "A new version is available. Reload to get the latest.",
     "unexpected": "An unexpected error occurred.",
     "force_reload_title": "Clears the auto-reload cooldown and forces a fresh load",
     "force_reload": "Force reload",
