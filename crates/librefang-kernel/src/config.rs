@@ -25,9 +25,17 @@ fn atomic_write_config(path: &Path, content: &str) -> std::io::Result<()> {
         Ok(metadata) if metadata.file_type().is_symlink() => std::fs::canonicalize(path)?,
         _ => path.to_path_buf(),
     };
-    let original_permissions = std::fs::metadata(&target)
-        .ok()
-        .map(|metadata| metadata.permissions());
+    let original_permissions = match std::fs::metadata(&target) {
+        Ok(metadata) => {
+            // Atomic rename is governed by directory permissions and could
+            // otherwise replace an operator-owned read-only config that the
+            // previous direct-write path correctly refused to modify.
+            std::fs::OpenOptions::new().write(true).open(&target)?;
+            Some(metadata.permissions())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
     let file_name = target
         .file_name()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing filename"))?;
@@ -794,6 +802,22 @@ mod tests {
             std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_config_write_refuses_a_read_only_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "old = true\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+        let error = atomic_write_config(&path, "new = true\n").unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "old = true\n");
     }
 
     #[test]
