@@ -1438,7 +1438,7 @@
     "topology_description": "High-performance event bus coordination.",
     "total_channels": "Total Channels",
     "connected": "Connected",
-    "events_today": "Events Today",
+    "recent_events": "Recent Events (max 50)",
     "uptime": "Uptime",
     "events": "Events",
     "events_desc": "Real-time message events.",

@@ -1438,7 +1438,7 @@
     "topology_description": "고성능 이벤트 버스 조정.",
     "total_channels": "총 채널",
     "connected": "연결됨",
-    "events_today": "오늘의 이벤트",
+    "recent_events": "최근 이벤트(최대 50개)",
     "uptime": "가동 시간",
     "events": "이벤트",
     "events_desc": "실시간 메시지 이벤트.",
