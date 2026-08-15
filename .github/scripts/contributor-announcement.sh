@@ -28,6 +28,7 @@ prior_count=$(jq -er --argjson current "$PR_NUMBER" '
   if .incomplete_results != false or
      (.total_count | type) != "number" or .total_count < 0 or (.total_count | floor) != .total_count or
      (.items | type) != "array" or .total_count < (.items | length) or
+     (.total_count > 0 and (.items | length) == 0) or
      any(.items[]; (.number | type) != "number" or .number < 1 or (.number | floor) != .number)
   then
     error("GitHub returned an incomplete contributor search")

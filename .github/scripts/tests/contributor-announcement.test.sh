@@ -18,6 +18,7 @@ case "${ANNOUNCE_MODE:-first}" in
   returning) printf '{"total_count":2,"incomplete_results":false,"items":[{"number":42},{"number":7}]}\n' ;;
   returning_unindexed) printf '{"total_count":1,"incomplete_results":false,"items":[{"number":7}]}\n' ;;
   incomplete) printf '{"total_count":0,"incomplete_results":true,"items":[]}\n' ;;
+  empty_page) printf '{"total_count":1,"incomplete_results":false,"items":[]}\n' ;;
   malformed) printf '{"total_count":1,"incomplete_results":false,"items":[{"number":"42"}]}\n' ;;
   github_fail) exit 1 ;;
   *) exit 2 ;;
@@ -67,7 +68,7 @@ jq -e '.content | startswith("✅ **PR Merged:**")' "$TEST_ROOT/returning.json" 
 run_announcement returning_unindexed
 jq -e '.content | startswith("✅ **PR Merged:**")' "$TEST_ROOT/returning_unindexed.json" >/dev/null
 
-for mode in incomplete malformed github_fail discord_fail; do
+for mode in incomplete empty_page malformed github_fail discord_fail; do
   if run_announcement "$mode" >/dev/null 2>&1; then
     echo "FAIL: $mode should fail" >&2
     exit 1
