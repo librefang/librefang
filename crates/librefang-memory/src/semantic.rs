@@ -1078,8 +1078,15 @@ impl SemanticStore {
             .query_row(
                 "SELECT COUNT(*) FROM memories
                  WHERE deleted = 0
+                   AND CASE
+                         WHEN json_valid(metadata) THEN json_type(metadata) = 'object'
+                         ELSE 0
+                       END
                    AND (?1 IS NULL OR agent_id = ?1)
-                   AND (?2 IS NULL OR json_extract(metadata, '$.category') = ?2)
+                   AND (?2 IS NULL OR json_extract(
+                         CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                         '$.category'
+                       ) = ?2)
                    AND (?3 IS NULL OR scope = ?3)",
                 rusqlite::params![agent_id.as_deref(), category, scope],
                 |row| row.get(0),
@@ -1094,8 +1101,15 @@ impl SemanticStore {
                             image_embedding, modality
                      FROM memories
                      WHERE deleted = 0
+                       AND CASE
+                             WHEN json_valid(metadata) THEN json_type(metadata) = 'object'
+                             ELSE 0
+                           END
                        AND (?1 IS NULL OR agent_id = ?1)
-                       AND (?2 IS NULL OR json_extract(metadata, '$.category') = ?2)
+                       AND (?2 IS NULL OR json_extract(
+                             CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                             '$.category'
+                           ) = ?2)
                        AND (?3 IS NULL OR scope = ?3)
                      ORDER BY created_at DESC, id DESC
                      LIMIT ?4 OFFSET ?5",
@@ -2549,6 +2563,55 @@ mod tests {
                 Some("keep")
             );
         }
+    }
+
+    #[test]
+    fn test_list_page_skips_corrupt_metadata_without_inflating_total() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        store
+            .remember(
+                agent_id,
+                "healthy memory",
+                MemorySource::Conversation,
+                "user_memory",
+                HashMap::from([(
+                    "category".to_string(),
+                    serde_json::Value::String("keep".to_string()),
+                )]),
+            )
+            .unwrap();
+        let corrupt_id = store
+            .remember(
+                agent_id,
+                "corrupt memory",
+                MemorySource::Conversation,
+                "user_memory",
+                HashMap::new(),
+            )
+            .unwrap();
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute(
+                "UPDATE memories SET metadata = ?1 WHERE id = ?2",
+                rusqlite::params!["not-json", corrupt_id.0.to_string()],
+            )
+            .unwrap();
+        }
+
+        let (unfiltered, total) = store
+            .list_page(Some(agent_id), None, Some("user_memory"), 0, 10)
+            .unwrap();
+        let (filtered, filtered_total) = store
+            .list_page(Some(agent_id), Some("keep"), Some("user_memory"), 0, 10)
+            .unwrap();
+
+        assert_eq!(total, 1);
+        assert_eq!(filtered_total, 1);
+        assert_eq!(unfiltered.len(), 1);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(unfiltered[0].content, "healthy memory");
+        assert_eq!(filtered[0].content, "healthy memory");
     }
 
     /// Regression for the audit item `json-text-silent-parse-fallback`.
