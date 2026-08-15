@@ -3994,8 +3994,6 @@
     "create_error": "버전을 생성하지 못했습니다."
   },
   "errors": {
-    "something_went_wrong": "문제가 발생했습니다.",
-    "unexpected": "예상치 못한 오류가 발생했습니다.",
     "force_reload_title": "자동 새로고침 쿨타임을 지우고 새로 불러옵니다.",
     "force_reload": "강제 새로고침",
     "stack": "스택",
