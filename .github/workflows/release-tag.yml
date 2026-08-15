@@ -92,6 +92,15 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
         run: |
+          # Environment approval and validation can take long enough for main to advance.
+          # Fail instead of tagging a stale checkout whose version was validated against an older manifest.
+          git fetch --no-tags origin refs/heads/main
+          CHECKED_OUT_SHA=$(git rev-parse HEAD)
+          CURRENT_MAIN_SHA=$(git rev-parse FETCH_HEAD)
+          if [ "$CHECKED_OUT_SHA" != "$CURRENT_MAIN_SHA" ]; then
+            echo "::error::main advanced from $CHECKED_OUT_SHA to $CURRENT_MAIN_SHA; rerun the workflow"
+            exit 1
+          fi
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           git tag -- "$VERSION"
