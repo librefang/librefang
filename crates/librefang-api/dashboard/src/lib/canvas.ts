@@ -101,14 +101,48 @@ function isCanvasNode(value: unknown, depth = 0): value is CanvasNode {
     || typeof value.position.x !== "number" || !Number.isFinite(value.position.x)
     || typeof value.position.y !== "number" || !Number.isFinite(value.position.y)) return false;
   if (!isCanvasNodeData(value.data, depth)) return false;
-  return value.type === undefined || typeof value.type === "string";
+  if (value.type !== undefined && typeof value.type !== "string") return false;
+  for (const field of ["hidden", "selected", "draggable", "selectable", "connectable", "deletable", "focusable", "expandParent"]) {
+    if (value[field] !== undefined && typeof value[field] !== "boolean") return false;
+  }
+  for (const field of ["width", "height", "initialWidth", "initialHeight", "zIndex"]) {
+    if (value[field] !== undefined
+      && (typeof value[field] !== "number" || !Number.isFinite(value[field]))) return false;
+  }
+  for (const field of ["parentId", "dragHandle", "ariaLabel", "className"]) {
+    if (value[field] !== undefined && typeof value[field] !== "string") return false;
+  }
+  if (value.style !== undefined && !isRecord(value.style)) return false;
+  if (value.measured !== undefined && (!isRecord(value.measured)
+    || [value.measured.width, value.measured.height].some((size) =>
+      size !== undefined && (typeof size !== "number" || !Number.isFinite(size))))) return false;
+  return true;
 }
 
 function isCanvasEdge(value: unknown): value is Edge {
-  return isRecord(value)
-    && typeof value.id === "string" && value.id.trim() !== ""
-    && typeof value.source === "string" && value.source.trim() !== ""
-    && typeof value.target === "string" && value.target.trim() !== "";
+  if (!isRecord(value)
+    || typeof value.id !== "string" || value.id.trim() === ""
+    || typeof value.source !== "string" || value.source.trim() === ""
+    || typeof value.target !== "string" || value.target.trim() === "") return false;
+  for (const field of ["animated", "hidden", "selected", "selectable", "deletable", "focusable", "reconnectable"]) {
+    if (value[field] !== undefined && typeof value[field] !== "boolean") return false;
+  }
+  for (const field of ["zIndex", "interactionWidth"]) {
+    if (value[field] !== undefined
+      && (typeof value[field] !== "number" || !Number.isFinite(value[field]))) return false;
+  }
+  for (const field of ["type", "sourceHandle", "targetHandle", "className", "ariaLabel"]) {
+    if (value[field] !== undefined && value[field] !== null && typeof value[field] !== "string") return false;
+  }
+  for (const field of ["style", "labelStyle", "data"]) {
+    if (value[field] !== undefined && !isRecord(value[field])) return false;
+  }
+  if (isRecord(value.data)) {
+    for (const field of ["_origSource", "_origTarget"]) {
+      if (value.data[field] !== undefined && typeof value.data[field] !== "string") return false;
+    }
+  }
+  return true;
 }
 
 /** Validate an exported workflow before allowing it into React Flow state. */
@@ -133,6 +167,30 @@ export function parseCanvasImport(value: unknown): CanvasImport {
   }
   if (value.edges.some((edge) => !nodeIds.has(edge.source) || !nodeIds.has(edge.target))) {
     throw new Error("Canvas import contains an edge with an unknown endpoint");
+  }
+  if (value.edges.some((edge) => edge.source === edge.target)) {
+    throw new Error("Canvas import contains a self-referencing edge");
+  }
+
+  const labelToId = new Map<string, string | null>();
+  for (const node of value.nodes) {
+    const label = node.data.label;
+    if (!label) continue;
+    labelToId.set(label, labelToId.has(label) ? null : node.id);
+  }
+  for (const node of value.nodes) {
+    if (node.data._groupId && !nodeIds.has(node.data._groupId)) {
+      throw new Error("Canvas import contains an unknown group reference");
+    }
+    if (node.data._childIds?.some((id) => id === node.id || !nodeIds.has(id))) {
+      throw new Error("Canvas import contains an invalid group child reference");
+    }
+    if (node.data.dependsOn?.some((dependency) => {
+      const targetId = nodeIds.has(dependency) ? dependency : labelToId.get(dependency);
+      return !targetId || targetId === node.id;
+    })) {
+      throw new Error("Canvas import contains an invalid dependency reference");
+    }
   }
 
   return {

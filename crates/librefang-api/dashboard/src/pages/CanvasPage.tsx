@@ -954,6 +954,7 @@ function CanvasPageInner() {
   const [hasClipboard, setHasClipboard] = useState(false);
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
+  const loadedRouteKeyRef = useRef<string | null>(null);
 
   useEffect(() => { nodesRef.current = nodes; }, [nodes]);
   useEffect(() => { edgesRef.current = edges; }, [edges]);
@@ -1219,13 +1220,20 @@ function CanvasPageInner() {
           setEdges(data.edges);
           setWorkflowName(data.name ?? "");
           setWorkflowDescription(data.description ?? "");
+          setSelectedWorkflow(null);
+          setEditingNode(null);
+          // Detach the imported canvas from a previously selected workflow.
+          // Mark the blank route as already handled so the route effect does
+          // not restore an older draft over the freshly imported state.
+          loadedRouteKeyRef.current = "|";
+          navigate({ to: "/canvas", search: { t: undefined, wf: undefined }, replace: true });
           showToast(t("canvas.imported"));
         } catch { showError(t("canvas.import_error")); }
       };
       reader.readAsText(file);
     };
     input.click();
-  }, [pushHistory, setNodes, setEdges, showToast, showError, t]);
+  }, [pushHistory, setNodes, setEdges, navigate, showToast, showError, t]);
 
   // Connection validation: prevent source->source or target->target
   const isValidConnection = useCallback((connection: Edge | Connection) => {
@@ -1570,8 +1578,6 @@ function CanvasPageInner() {
 
   // Track which (timestamp, workflowId) tuple has already been loaded so
   // even unrelated dep changes can't re-trigger the load.
-  const loadedRouteKeyRef = useRef<string | null>(null);
-
   // Load template or workflow from URL once agent/workflow data is available
   useEffect(() => {
     if (agentsQuery.isLoading || workflowsQuery.isLoading) return;

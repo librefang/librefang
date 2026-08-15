@@ -157,6 +157,40 @@ describe("parseCanvasImport", () => {
       edges: [mkEdge("e1", "a", "missing")],
     })).toThrow();
   });
+
+  it("rejects malformed React Flow state and self-references", () => {
+    expect(() => parseCanvasImport({
+      nodes: [{ ...mkNode("a"), hidden: "yes" }],
+      edges: [],
+    })).toThrow();
+    expect(() => parseCanvasImport({
+      nodes: [mkNode("a"), mkNode("b")],
+      edges: [{ ...mkEdge("e1", "a", "b"), data: { _origSource: 42 } }],
+    })).toThrow();
+    expect(() => parseCanvasImport({
+      nodes: [mkNode("a")],
+      edges: [mkEdge("e1", "a", "a")],
+    })).toThrow();
+  });
+
+  it("rejects unknown, ambiguous, and self dependency references", () => {
+    expect(() => parseCanvasImport({
+      nodes: [{ ...mkNode("a"), data: { label: "A", dependsOn: ["missing"] } }],
+      edges: [],
+    })).toThrow();
+    expect(() => parseCanvasImport({
+      nodes: [
+        { ...mkNode("a"), data: { label: "Duplicate" } },
+        { ...mkNode("b"), data: { label: "Duplicate" } },
+        { ...mkNode("c"), data: { label: "C", dependsOn: ["Duplicate"] } },
+      ],
+      edges: [],
+    })).toThrow();
+    expect(() => parseCanvasImport({
+      nodes: [{ ...mkNode("a"), data: { label: "A", dependsOn: ["a"] } }],
+      edges: [],
+    })).toThrow();
+  });
 });
 
 describe("canvas dependency references", () => {
