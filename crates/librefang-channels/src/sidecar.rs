@@ -638,6 +638,15 @@ fn parse_secrets_env(path: &Path) -> Vec<(String, String)> {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
+    parse_secrets_env_contents(&content)
+}
+
+/// Parse the lightweight dotenv syntax accepted by sidecar `secrets.env` files.
+///
+/// This content-level entry point lets callers that already hold a consistent
+/// file snapshot reuse the sidecar runtime's exact key and value semantics
+/// without reading the path again.
+pub fn parse_secrets_env_contents(content: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
