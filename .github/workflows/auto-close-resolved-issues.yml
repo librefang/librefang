@@ -52,6 +52,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
 
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         env:
@@ -60,13 +62,14 @@ jobs:
           LIVE_VAR: ${{ vars.AUTO_CLOSE_LIVE || '' }}
         with:
           script: |
-            const { execSync } = require('child_process');
+            const { execFileSync } = require('child_process');
             const {
               CLOSE_MARKER,
               FLAG_MARKER,
               collectRefs,
               commentDisposition,
               parseLookback,
+              sanitizeInlineCode,
             } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/auto-close-resolved-issues.js`);
             const lookback = parseLookback(process.env.LOOKBACK_DAYS);
             const live =
@@ -84,8 +87,9 @@ jobs:
             core.info(`Lookback: ${lookback} days (since ${since})`);
 
             // 1. Collect issue refs from commit messages on main
-            const log = execSync(
-              `git log origin/main --since="${since}" --pretty=format:"%H%n%B%n---COMMIT-END---"`,
+            const log = execFileSync(
+              'git',
+              ['log', 'origin/main', `--since=${since}`, '-z', '--format=%H%x00%s%x00%B'],
               { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }
             );
 
@@ -173,6 +177,7 @@ jobs:
               }
 
               if (live) {
+                const safeSubject = sanitizeInlineCode(info.subject);
                 if (commentState.addComment) {
                   await github.rest.issues.createComment({
                     owner: context.repo.owner,
@@ -181,7 +186,7 @@ jobs:
                     body:
                       `${CLOSE_MARKER}\n` +
                       `Auto-closing: commit \`${info.sha}\` on \`main\` references this issue ` +
-                      `with a closing keyword (\`${info.subject}\`), but GitHub's auto-close ` +
+                      `with a closing keyword (\`${safeSubject}\`), but GitHub's auto-close ` +
                       `did not fire. Reopen if this is in error.`,
                   });
                 }
@@ -194,13 +199,14 @@ jobs:
                 });
                 closed.push(`#${num} (by ${info.sha})`);
               } else {
+                const safeSubject = sanitizeInlineCode(info.subject);
                 await github.rest.issues.createComment({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   issue_number: num,
                   body:
                     `${FLAG_MARKER}\n` +
-                    `🤖 Looks resolved by commit \`${info.sha}\` on \`main\` (\`${info.subject}\`).\n\n` +
+                    `🤖 Looks resolved by commit \`${info.sha}\` on \`main\` (\`${safeSubject}\`).\n\n` +
                     `Dry-run flag from the auto-close reconciliation workflow. ` +
                     `Close manually if correct. The bot keys off the hidden marker in this ` +
                     `comment to avoid re-flagging — delete this comment if you want the bot ` +

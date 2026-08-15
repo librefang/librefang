@@ -1,1 +1,1 @@
-Prevent the resolved-issue reconciler from treating negated closing keywords as fixes, validate its lookback, serialize runs, and make live retries idempotent without blocking promotion from dry-run. (#7274) (@houko)
+Parse trusted NUL-delimited commit data, neutralize commit metadata in comments, reject negated or invalid references, validate lookback, serialize runs, and preserve idempotent live retries. (#7274) (@houko)

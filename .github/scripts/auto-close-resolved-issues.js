@@ -18,20 +18,31 @@ const REF_REGEX =
 
 function collectRefs(log) {
   const refs = new Map();
-  for (const block of log.split('---COMMIT-END---')) {
-    const trimmed = block.trim();
-    if (!trimmed) continue;
-    const lines = trimmed.split('\n');
-    const sha = lines[0];
-    const subject = lines[1] || '';
-    for (const match of trimmed.matchAll(REF_REGEX)) {
+  const fields = log.split('\0');
+  if (fields.at(-1) === '') fields.pop();
+  if (fields.length % 3 !== 0) {
+    throw new Error('git log output did not contain SHA/subject/body triples');
+  }
+  for (let index = 0; index < fields.length; index += 3) {
+    const [sha, subject, body] = fields.slice(index, index + 3);
+    if (!/^[0-9a-f]{40,64}$/i.test(sha)) {
+      throw new Error(`git log returned an invalid commit id: ${JSON.stringify(sha)}`);
+    }
+    for (const match of body.matchAll(REF_REGEX)) {
       const issueNumber = Number.parseInt(match[2], 10);
-      if (!refs.has(issueNumber)) {
+      if (Number.isSafeInteger(issueNumber) && issueNumber > 0 && !refs.has(issueNumber)) {
         refs.set(issueNumber, { sha: sha.slice(0, 7), subject });
       }
     }
   }
   return refs;
+}
+
+function sanitizeInlineCode(value) {
+  return String(value)
+    .replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ')
+    .replaceAll('`', "'")
+    .replaceAll('@', '@\u200b');
 }
 
 function commentDisposition(live, bodies) {
@@ -51,4 +62,5 @@ module.exports = {
   collectRefs,
   commentDisposition,
   parseLookback,
+  sanitizeInlineCode,
 };

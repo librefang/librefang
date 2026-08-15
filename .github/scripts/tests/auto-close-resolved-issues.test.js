@@ -5,6 +5,7 @@ const {
   collectRefs,
   commentDisposition,
   parseLookback,
+  sanitizeInlineCode,
 } = require('../auto-close-resolved-issues.js');
 
 assert.equal(parseLookback('14'), 14);
@@ -31,8 +32,18 @@ const negations = [
   'never close #16',
   'not resolved #17',
 ];
-const log = `0123456789abcdef\n${negations.join('\n')}\nFixes #21\nCloses #22\n---COMMIT-END---`;
+const sha = '0123456789abcdef0123456789abcdef01234567';
+const log = `${sha}\0subject with ---COMMIT-END---\0${negations.join('\n')}\nFixes #21\nCloses #22\n\0`;
 assert.deepEqual([...collectRefs(log).keys()], [21, 22]);
+assert.deepEqual(
+  collectRefs(`${sha}\0subject\0Fixes #999999999999999999999999\0`).size,
+  0,
+);
+assert.throws(() => collectRefs(`${sha}\0subject only\0`), /triples/);
+assert.equal(
+  sanitizeInlineCode('unsafe `code`\n@maintainers'),
+  "unsafe 'code' @\u200bmaintainers",
+);
 
 assert.deepEqual(commentDisposition(false, []), { skipIssue: false, addComment: true });
 assert.deepEqual(commentDisposition(false, ['<!-- auto-close-reconciler:flagged -->']), {
