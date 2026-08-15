@@ -433,18 +433,6 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         ),
         kernel_handle::KernelOpError,
     > {
-        // Resolving removes the pending request and records its terminal
-        // decision. Acquire the handle needed to resume deferred work first,
-        // so a malformed kernel cannot terminalize an approval and then lose
-        // the approved tool with no retry path.
-        let kernel = self
-            .self_handle
-            .get()
-            .and_then(|weak| weak.upgrade())
-            .ok_or_else(|| {
-                kernel_handle::KernelOpError::Internal("Kernel self-handle unavailable".to_string())
-            })?;
-
         // #3541 follow-up: classify the missing-id case as
         // `KernelOpError::AgentNotFound` / `Internal` so the API
         // boundary surfaces 404 via the typed mapping. The underlying
@@ -452,10 +440,22 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         // is left to a separate ApprovalManager refactor); the substring
         // check is scoped to the manager's exact "not found or expired"
         // wording. All other error wordings flow through `Internal`.
-        let (response, deferred) = self
+        let (response, deferred_with_kernel) = self
             .governance
             .approval_manager
-            .resolve(request_id, decision, decided_by, totp_verified, user_id)
+            .resolve_with_deferred_preflight(
+                request_id,
+                decision,
+                decided_by,
+                totp_verified,
+                user_id,
+                || {
+                    self.self_handle
+                        .get()
+                        .and_then(|weak| weak.upgrade())
+                        .ok_or_else(|| "Kernel self-handle unavailable".to_string())
+                },
+            )
             .map_err(|msg| {
                 if msg.starts_with("Already ") {
                     // Double-resolve of an already-terminal approval ("Already {decision} by {who}") is a state conflict, not a malformed request: map to `Conflict` (409) so a client can tell "someone already handled this" apart from a bad request (400) or a never-existed id (404).
@@ -474,7 +474,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
 
         // Deferred approval execution resumes in the background so API callers do
         // not block on slow tools.
-        if let Some(ref def) = deferred {
+        let deferred = deferred_with_kernel.map(|(def, kernel)| {
             let decision_clone = response.decision.clone();
             let deferred_clone = def.clone();
             spawn_logged("approval_resolution", async move {
@@ -482,7 +482,8 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
                     .handle_approval_resolution(request_id, decision_clone, deferred_clone)
                     .await;
             });
-        }
+            def
+        });
 
         Ok((response, deferred))
     }
@@ -595,6 +596,64 @@ mod tests {
                 .is_some(),
             "failed preflight must leave approval retryable"
         );
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn missing_self_handle_does_not_block_manual_approval() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = KernelConfig {
+            home_dir: tmp.path().to_path_buf(),
+            data_dir: tmp.path().join("data"),
+            ..KernelConfig::default()
+        };
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
+        assert!(kernel.self_handle.get().is_none());
+
+        let request_id = uuid::Uuid::new_v4();
+        let request = ApprovalRequest {
+            id: request_id,
+            agent_id: AgentId::new().to_string(),
+            tool_name: "shell_exec".to_string(),
+            description: "run command".to_string(),
+            action_summary: "run command".to_string(),
+            risk_level: RiskLevel::High,
+            requested_at: chrono::Utc::now(),
+            timeout_secs: 60,
+            sender_id: None,
+            channel: None,
+            chat_id: None,
+            route_to: Vec::new(),
+            escalation_count: 0,
+            session_id: None,
+            tool_use_id: None,
+        };
+        kernel
+            .governance
+            .approval_manager
+            .submit_manual_request(request)
+            .expect("submit approval");
+
+        let (response, deferred) = kernel_handle::ApprovalGate::resolve_tool_approval(
+            &kernel,
+            request_id,
+            ApprovalDecision::Denied,
+            Some("test".to_string()),
+            false,
+            None,
+        )
+        .await
+        .expect("manual approval does not need deferred resume state");
+
+        assert_eq!(response.decision, ApprovalDecision::Denied);
+        assert!(deferred.is_none());
+        assert!(kernel
+            .governance
+            .approval_manager
+            .get_pending(request_id)
+            .is_none());
 
         kernel.shutdown();
     }
