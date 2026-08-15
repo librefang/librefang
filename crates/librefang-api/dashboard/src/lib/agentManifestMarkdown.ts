@@ -27,7 +27,11 @@ const longestBacktickRun = (content: string): number => {
 const markdownCodeSpan = (content: string): string => {
   const longestRun = longestBacktickRun(content);
   const fence = "`".repeat(longestRun + 1);
-  const needsPadding = content.startsWith("`") || content.endsWith("`");
+  const hasBoundarySpaces = content.startsWith(" ") && content.endsWith(" ");
+  const needsPadding =
+    content.startsWith("`") ||
+    content.endsWith("`") ||
+    (hasBoundarySpaces && content.trim() !== "");
   const padding = needsPadding ? " " : "";
   return `${fence}${padding}${content}${padding}${fence}`;
 };
@@ -41,7 +45,7 @@ const pushFencedBlock = (lines: string[], content: string, language = ""): void 
 const compactBlankLineElements = (lines: string[]): string[] => {
   const compacted: string[] = [];
   for (const line of lines) {
-    if (line === "" && compacted.at(-1) === "") continue;
+    if (line === "" && compacted[compacted.length - 1] === "") continue;
     compacted.push(line);
   }
   return compacted;

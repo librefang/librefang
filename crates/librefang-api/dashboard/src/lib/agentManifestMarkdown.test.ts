@@ -293,6 +293,18 @@ describe("generateManifestMarkdown", () => {
     expect(md).toContain("- ``tick`rate`` = `5`");
   });
 
+  it("pads code spans so CommonMark preserves boundary spaces", () => {
+    const form = emptyManifestForm();
+    const extras = emptyManifestExtras();
+    form.tags = [" padded "];
+    extras.topLevel[" spaced "] = true;
+
+    const md = generateManifestMarkdown(form, extras);
+
+    expect(md).toContain("**Tags**: `  padded  `");
+    expect(md).toContain("- `  spaced  ` = `true`");
+  });
+
   it("handles many separate backtick runs without expanding them as function arguments", () => {
     const form = emptyManifestForm();
     form.model.system_prompt = "x`".repeat(150_000);
