@@ -66,8 +66,7 @@ impl LibreFangKernel {
 
         self.workflows
             .goal_runner
-            .start(goal_id, agent_id, max, substrate, send);
-        true
+            .start(goal_id, agent_id, max, substrate, send)
     }
 
     /// Stop an active goal run. Returns whether a run was stopped.
