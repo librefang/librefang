@@ -21,15 +21,34 @@ export function Card({
   hover = false,
   glow = false,
   children,
+  onClick,
+  onKeyDown,
+  role,
+  tabIndex,
   ...props
 }: CardProps) {
   // `hover` controls the visual hover effect (border tint + shadow lift).
   // The pointer cursor is gated on actual clickability so we don't
   // mislead users into clicking cards that have nothing wired up
   // (e.g. FangHub skill cards in browse view, plain stat cards).
-  const isClickable = typeof props.onClick === "function";
+  const isClickable = typeof onClick === "function";
   return (
     <div
+      role={role ?? (isClickable ? "button" : undefined)}
+      tabIndex={tabIndex ?? (isClickable ? 0 : undefined)}
+      onClick={onClick}
+      onKeyDown={
+        isClickable
+          ? (event) => {
+              onKeyDown?.(event);
+              if (event.defaultPrevented) return;
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                event.currentTarget.click();
+              }
+            }
+          : onKeyDown
+      }
       className={`
         rounded-xl sm:rounded-2xl border border-border-subtle bg-surface shadow-sm
         ${paddingStyles[padding]}

@@ -503,7 +503,7 @@ const ProviderCard = memo(function ProviderCard({ provider: p, isSelected, isDef
 
   if (viewMode === "list") {
     return (
-      <Card hover padding="sm" onClick={() => onViewDetails(p)} className={`flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4 group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
+      <Card aria-label={p.display_name || p.id} hover padding="sm" onClick={() => onViewDetails(p)} className={`flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4 group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
         <div className="flex items-center gap-3 w-full sm:w-auto">
           <button
             onClick={(e) => { e.stopPropagation(); onSelect(p.id, !isSelected); }}
@@ -606,7 +606,7 @@ const ProviderCard = memo(function ProviderCard({ provider: p, isSelected, isDef
 
   // Grid view
   return (
-    <Card hover padding="none" onClick={() => onViewDetails(p)} className={`relative flex flex-col overflow-hidden group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
+    <Card aria-label={p.display_name || p.id} hover padding="none" onClick={() => onViewDetails(p)} className={`relative flex flex-col overflow-hidden group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
       {isCli && (
         <div className="absolute top-1.5 left-0 z-10 overflow-hidden w-20 h-20 pointer-events-none">
           <div className="absolute top-[12px] left-[-18px] w-[90px] text-center text-[9px] font-black uppercase tracking-wider text-text-dim bg-surface/80 border-y border-border-subtle rotate-[-45deg] py-px">
