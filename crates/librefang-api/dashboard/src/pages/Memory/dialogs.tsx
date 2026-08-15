@@ -191,6 +191,7 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
   const chatModels = modelsQuery.data?.models ?? [];
 
   const [form, setForm] = useState<MemoryConfigForm | null>(null);
+  const [embeddingCustomSelected, setEmbeddingCustomSelected] = useState(false);
 
   // Suggestion list for the Embedding Model dropdown. When the provider is
   // pinned and known, surface only that provider's catalog. When the provider
@@ -205,7 +206,8 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
     : Array.from(new Set(Object.values(KNOWN_EMBEDDING_MODELS).flat()));
   const embeddingKnownSet = new Set<string>(embeddingProviderSuggestions);
   const embeddingIsCustom =
-    !!form?.embedding_model && !embeddingKnownSet.has(form.embedding_model);
+    embeddingCustomSelected ||
+    (!!form?.embedding_model && !embeddingKnownSet.has(form.embedding_model));
   const chatModelIdSet = new Set(chatModels.map((m) => m.id));
   // Guard on isSuccess so the stored value doesn't flicker through Custom
   // during the initial useModels() fetch (chatModels is [] while loading).
@@ -311,7 +313,22 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                   </span>
                   <select
                     value={form.embedding_provider ?? ""}
-                    onChange={(e) => setForm({ ...form, embedding_provider: e.target.value })}
+                    onChange={(e) => {
+                      const nextProvider = e.target.value;
+                      const nextSuggestions: readonly string[] =
+                        isKnownEmbeddingProvider(nextProvider)
+                          ? KNOWN_EMBEDDING_MODELS[nextProvider]
+                          : Array.from(new Set(Object.values(KNOWN_EMBEDDING_MODELS).flat()));
+                      setEmbeddingCustomSelected(false);
+                      setForm({
+                        ...form,
+                        embedding_provider: nextProvider,
+                        embedding_model:
+                          !form.embedding_model || nextSuggestions.includes(form.embedding_model)
+                            ? form.embedding_model
+                            : "",
+                      });
+                    }}
                     className={inputCls}
                   >
                     <option value="">
@@ -333,8 +350,10 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                     onChange={(e) => {
                       const v = e.target.value;
                       if (v === CUSTOM_OPTION) {
+                        setEmbeddingCustomSelected(true);
                         if (!embeddingIsCustom) setForm({ ...form, embedding_model: "" });
                       } else {
+                        setEmbeddingCustomSelected(false);
                         setForm({ ...form, embedding_model: v });
                       }
                     }}

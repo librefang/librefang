@@ -32,6 +32,7 @@ import {
   useSetAutoDreamEnabled,
   useSetAutoDreamGlobalEnabled,
 } from "../../lib/mutations/autoDream";
+import { CUSTOM_OPTION } from "./constants";
 
 vi.mock("../../lib/queries/memory", () => ({
   useMemoryStats: vi.fn(),
@@ -330,6 +331,40 @@ describe("MemoryPage (redesigned)", () => {
     // i18n mock returns the defaultValue, so the drawer title renders as
     // "Memory Configuration".
     expect(screen.getByText("Memory Configuration")).toBeInTheDocument();
+  });
+
+  it("keeps the custom embedding-model input open while a new value is entered", async () => {
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /Settings/i }));
+
+    const embeddingModelSelect = screen.getAllByRole("combobox")[1];
+    fireEvent.change(embeddingModelSelect, { target: { value: CUSTOM_OPTION } });
+
+    const customModelInput = screen.getByPlaceholderText("text-embedding-3-small");
+    fireEvent.change(customModelInput, { target: { value: "custom/embed-v1" } });
+    expect(embeddingModelSelect).toHaveValue(CUSTOM_OPTION);
+    expect(customModelInput).toHaveValue("custom/embed-v1");
+
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+    await waitFor(() => expect(configMutateAsync).toHaveBeenCalledTimes(1));
+    expect(configMutateAsync.mock.calls[0][0].embedding_model).toBe("custom/embed-v1");
+  });
+
+  it("clears a model that is invalid for the newly selected embedding provider", async () => {
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /Settings/i }));
+
+    const [providerSelect, embeddingModelSelect] = screen.getAllByRole("combobox");
+    expect(embeddingModelSelect).toHaveValue("text-embedding-3-small");
+    fireEvent.change(providerSelect, { target: { value: "cohere" } });
+    expect(embeddingModelSelect).toHaveValue("");
+
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+    await waitFor(() => expect(configMutateAsync).toHaveBeenCalledTimes(1));
+    expect(configMutateAsync.mock.calls[0][0]).toMatchObject({
+      embedding_provider: "cohere",
+      embedding_model: undefined,
+    });
   });
 
   it("shows the proactive-disabled notice on the Records tab when proactive memory is off", () => {
