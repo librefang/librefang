@@ -13,7 +13,8 @@
 //! 5. When the channel closes (or cancel fires), resolve the
 //!    [`librefang_types::message::StopReason`] last seen on
 //!    [`StreamEvent::ContentComplete`] and return a `PromptResponse`
-//!    to the editor.
+//!    to the editor. A channel that closes without that completion
+//!    event is reported as an internal error.
 
 use std::sync::Arc;
 
@@ -123,8 +124,13 @@ pub(crate) async fn handle<K: AcpKernel>(
 
     let stop = if cancel.is_cancelled() {
         StopReason::Cancelled
+    } else if let Some(reason) = last_stop_reason {
+        map_stop_reason(reason)
     } else {
-        map_stop_reason(last_stop_reason.unwrap_or(LfStopReason::EndTurn))
+        return responder.respond_with_error(
+            crate::AcpError::internal("prompt event channel closed before ContentComplete")
+                .into_acp_error(),
+        );
     };
 
     responder.respond(PromptResponse::new(stop))

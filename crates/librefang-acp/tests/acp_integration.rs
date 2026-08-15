@@ -299,6 +299,66 @@ async fn initialize_and_prompt_emits_text_chunks_and_end_turn() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn prompt_channel_close_without_completion_returns_internal_error() {
+    use tokio::task::LocalSet;
+
+    let local = LocalSet::new();
+    local
+        .run_until(async {
+            let kernel = MockKernel::new(vec![]);
+            let (server_reader, server_writer, client_reader, client_writer) = duplex_pair();
+            let server_transport =
+                agent_client_protocol::ByteStreams::new(server_writer, server_reader);
+            let client_transport =
+                agent_client_protocol::ByteStreams::new(client_writer, client_reader);
+
+            tokio::task::spawn_local(async move {
+                let _ = librefang_acp::run_with_transport(
+                    kernel,
+                    AgentId(Uuid::nil()),
+                    server_transport,
+                )
+                .await;
+            });
+
+            let client = agent_client_protocol::Client.builder();
+            let result = client
+                .connect_with(client_transport, async |cx: ConnectionTo<agent_client_protocol::Agent>| -> Result<(), agent_client_protocol::Error> {
+                    let _: InitializeResponse =
+                        recv(cx.send_request(InitializeRequest::new(ProtocolVersion::LATEST)))
+                            .await?;
+                    let new_resp: NewSessionResponse =
+                        recv(cx.send_request(NewSessionRequest::new(PathBuf::from("/tmp/proj"))))
+                            .await?;
+
+                    let prompt_result = recv(cx.send_request(PromptRequest::new(
+                        new_resp.session_id,
+                        vec![ContentBlock::Text(TextContent::new("hi"))],
+                    )))
+                    .await;
+                    let error = prompt_result.expect_err(
+                        "an incomplete event stream must not be reported as a clean end turn",
+                    );
+                    assert_eq!(
+                        error.code,
+                        agent_client_protocol::ErrorCode::InternalError
+                    );
+                    assert_eq!(
+                        error.data,
+                        Some(serde_json::json!(
+                            "internal acp error: prompt event channel closed before ContentComplete"
+                        ))
+                    );
+                    Ok(())
+                })
+                .await;
+
+            assert!(result.is_ok(), "client driver failed: {result:?}");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn permission_round_trip_resolves_kernel_approval() {
     use tokio::task::LocalSet;
 
