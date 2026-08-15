@@ -36,11 +36,11 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: write
-      pull-requests: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
 
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
@@ -65,12 +65,9 @@ jobs:
             // burnt CI minutes on every open PR after every merge.
             //
             // Trade-off: a PR that is currently green will not pick up
-            // newer main commits until either its own CI later turns red
-            // or the 6h cron fires. Acceptable because (a) green PRs are
-            // by definition still building against a viable base, and
-            // (b) the merge queue / final pre-merge "Update branch" click
-            // still re-validates against fresh main before the actual
-            // merge.
+            // newer main commits until its own CI later turns red.
+            // A green PR is still building against a viable base.
+            // The merge queue or final pre-merge update still re-validates against fresh main.
             const prs = await listOpenPulls(github, context.repo);
 
             for (const pr of prs) {
