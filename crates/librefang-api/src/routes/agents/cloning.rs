@@ -20,6 +20,19 @@ fn default_clone_true() -> bool {
     true
 }
 
+fn clone_success_body(
+    new_id: AgentId,
+    name: String,
+    warnings: Vec<&'static str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "agent_id": new_id.to_string(),
+        "name": name,
+        "partial": !warnings.is_empty(),
+        "warnings": warnings,
+    })
+}
+
 /// POST /api/agents/{id}/clone — Clone an agent with its workspace files.
 #[utoipa::path(
     post,
@@ -28,7 +41,7 @@ fn default_clone_true() -> bool {
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = CloneAgentRequest, description = "New name for the cloned agent"),
     responses(
-        (status = 200, description = "Clone an agent with its workspace files", body = crate::types::JsonObject)
+        (status = 201, description = "Agent created; response reports any partial identity-copy failures", body = crate::types::JsonObject)
     )
 )]
 #[allow(private_interfaces)]
@@ -123,11 +136,25 @@ pub async fn clone_agent(
         destination.and_then(|entry| entry.manifest.workspace.clone())
     };
     drop(t);
-    if let (Some(src_ws), Some(dst_ws)) = (source_workspace, destination_workspace) {
-        if let Err(error) =
-            tokio::task::spawn_blocking(move || copy_clone_identity_files(&src_ws, &dst_ws)).await
-        {
-            tracing::error!(%error, "cloned agent identity copy task failed");
+    let mut warnings = Vec::new();
+    if let Some(src_ws) = source_workspace {
+        if let Some(dst_ws) = destination_workspace {
+            match tokio::task::spawn_blocking(move || copy_clone_identity_files(&src_ws, &dst_ws))
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::error!(%error, %new_id, "failed to copy cloned agent identity files");
+                    warnings.push("identity_files_copy_failed");
+                }
+                Err(error) => {
+                    tracing::error!(%error, %new_id, "cloned agent identity copy task failed");
+                    warnings.push("identity_files_copy_failed");
+                }
+            }
+        } else {
+            tracing::error!(%new_id, "cloned agent has no destination workspace");
+            warnings.push("destination_workspace_missing");
         }
     }
 
@@ -137,28 +164,26 @@ pub async fn clone_agent(
         .agent_registry()
         .update_identity(new_id, source_identity)
     {
-        tracing::warn!("Failed to copy agent identity: {e}");
+        tracing::error!(error = %e, %new_id, "failed to copy cloned agent registry identity");
+        warnings.push("registry_identity_copy_failed");
     }
 
     (
         StatusCode::CREATED,
-        Json(serde_json::json!({
-            "agent_id": new_id.to_string(),
-            "name": req.new_name,
-        })),
+        Json(clone_success_body(new_id, req.new_name, warnings)),
     )
 }
 
-fn copy_clone_identity_files(src_ws: &std::path::Path, dst_ws: &std::path::Path) {
+fn copy_clone_identity_files(
+    src_ws: &std::path::Path,
+    dst_ws: &std::path::Path,
+) -> std::io::Result<()> {
     // Security: canonicalize both paths before constructing identity paths.
-    let (Ok(src_can), Ok(dst_can)) = (src_ws.canonicalize(), dst_ws.canonicalize()) else {
-        return;
-    };
+    let src_can = src_ws.canonicalize()?;
+    let dst_can = dst_ws.canonicalize()?;
     let src_identity = src_can.join(".identity");
     let dst_identity = dst_can.join(".identity");
-    if let Err(error) = std::fs::create_dir_all(&dst_identity) {
-        tracing::warn!(%error, "failed to create identity directory for cloned agent");
-    }
+    std::fs::create_dir_all(&dst_identity)?;
     for &filename in KNOWN_IDENTITY_FILES {
         // Source: prefer .identity/ (post-migration), fall back to workspace root.
         let migrated_source = src_identity.join(filename);
@@ -169,11 +194,10 @@ fn copy_clone_identity_files(src_ws: &std::path::Path, dst_ws: &std::path::Path)
         };
         if source.exists() {
             let destination = dst_identity.join(filename);
-            if let Err(error) = std::fs::copy(&source, destination) {
-                tracing::warn!(%error, %filename, "failed to copy cloned agent identity file");
-            }
+            std::fs::copy(&source, destination)?;
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -192,7 +216,7 @@ mod tests {
         std::fs::write(source.join(".identity/SOUL.md"), "migrated soul").expect("migrated soul");
         std::fs::write(source.join("IDENTITY.md"), "legacy identity").expect("legacy identity");
 
-        copy_clone_identity_files(&source, &destination);
+        copy_clone_identity_files(&source, &destination).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(destination.join(".identity/SOUL.md")).unwrap(),
@@ -201,6 +225,36 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(destination.join(".identity/IDENTITY.md")).unwrap(),
             "legacy identity"
+        );
+    }
+
+    #[test]
+    fn clone_identity_files_report_missing_workspace() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&source).expect("source workspace");
+
+        let error = copy_clone_identity_files(&source, &temp.path().join("missing"))
+            .expect_err("missing destination must be reported");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn clone_response_distinguishes_complete_and_partial_creation() {
+        let id = AgentId::new();
+        let complete = clone_success_body(id, "complete".to_string(), Vec::new());
+        assert_eq!(complete["partial"], false);
+        assert_eq!(complete["warnings"], serde_json::json!([]));
+
+        let partial = clone_success_body(
+            id,
+            "partial".to_string(),
+            vec!["identity_files_copy_failed"],
+        );
+        assert_eq!(partial["partial"], true);
+        assert_eq!(
+            partial["warnings"],
+            serde_json::json!(["identity_files_copy_failed"])
         );
     }
 }
