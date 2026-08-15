@@ -62,6 +62,7 @@ export function HubBadge({
   size?: "sm" | "lg";
 }) {
   const h = getSkillHub(hub);
+  if (!h) return null;
   const px = size === "lg" ? "text-[11px] px-2 py-[3px]" : "text-[10px] px-1.5 py-[2px]";
   return (
     <span
@@ -170,6 +171,7 @@ export function SkillHubBar({
 /** Headline tile shown when a specific hub is selected — domain, desc, latency. */
 export function SkillHubHeadline({ hub }: { hub: SkillHubId }) {
   const h = getSkillHub(hub);
+  if (!h) return null;
   return (
     <div
       className="flex items-center gap-3 rounded-lg p-3 mb-3 flex-wrap"
@@ -212,7 +214,9 @@ export function SkillInstallCommand({
   onCopied?: () => void;
 }) {
   const { t } = useTranslation();
-  const cmd = getSkillHub(hub).cli(slug);
+  const h = getSkillHub(hub);
+  if (!h) return null;
+  const cmd = h.cli(slug);
   return (
     <div
       className="font-mono text-[11.5px] rounded-md flex items-center gap-2 px-2.5 py-2 overflow-hidden"
