@@ -3299,6 +3299,7 @@
       "create_failed": "Nie udało się utworzyć okna",
       "delete_failed": "Nie udało się zamknąć okna",
       "rename_failed": "Nie udało się zmienić nazwy okna",
+      "switch_unavailable": "Nie można przełączać okien, gdy terminal jest rozłączony.",
       "rename_hint": "Kliknij dwukrotnie, aby zmienić nazwę",
       "name_label": "Nazwa okna",
       "name_invalid": "Nazwa musi mieć od 1 do 64 znaków i nie może zawierać znaku | ani znaków kontrolnych.",
