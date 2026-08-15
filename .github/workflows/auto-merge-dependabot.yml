@@ -30,7 +30,9 @@ on:
   pull_request:
     paths:
       - '.github/scripts/select-dependabot-pr.sh'
+      - '.github/scripts/classify-dependabot-title.sh'
       - '.github/scripts/tests/select-dependabot-pr.test.sh'
+      - '.github/scripts/tests/classify-dependabot-title.test.sh'
       - '.github/workflows/auto-merge-dependabot.yml'
 
 # Tightened from `contents: write` — auto-merge only needs PR write access;
@@ -57,9 +59,13 @@ jobs:
       - name: Parse selector and tests
         run: |
           bash -n .github/scripts/select-dependabot-pr.sh
+          bash -n .github/scripts/classify-dependabot-title.sh
           sh -n .github/scripts/tests/select-dependabot-pr.test.sh
+          sh -n .github/scripts/tests/classify-dependabot-title.test.sh
       - name: Run selector tests
-        run: .github/scripts/tests/select-dependabot-pr.test.sh
+        run: |
+          .github/scripts/tests/select-dependabot-pr.test.sh
+          .github/scripts/tests/classify-dependabot-title.test.sh
 
   auto-merge:
     needs: test-selector
@@ -83,6 +89,9 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
 
       # Resolve the PR number from the workflow_run head SHA. The commits
       # → pulls endpoint may return multiple records, so the selector keeps
@@ -124,60 +133,8 @@ jobs:
           title=$(jq -r .title /tmp/pr.json)
           echo "PR title: ${title}"
 
-          # Group titles do not prove the current dependabot.yml constraints
-          # or the update type of every member. Keep all grouped changes on
-          # the manual-review path.
-          if [[ "$title" =~ [Bb]ump[[:space:]]+the[[:space:]]+([a-zA-Z0-9_-]+)[[:space:]]+group ]]; then
-            group_name="${BASH_REMATCH[1]}"
-            echo "Grouped update ${group_name} — refusing to auto-merge."
-            echo "update_type=unknown" >> "$GITHUB_OUTPUT"
-            echo "dep_name=$group_name" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Single-dep PR: match "bump <dep> from X to Y" anywhere in the
-          # title (case-insensitive).  Captures: dep name, old, new version.
-          if [[ ! "$title" =~ [Bb]ump[[:space:]]+([^[:space:]]+)[[:space:]]+from[[:space:]]+([^[:space:]]+)[[:space:]]+to[[:space:]]+([^[:space:]]+) ]]; then
-            echo "Could not parse dependabot update from title — refusing to auto-merge."
-            echo "update_type=unknown" >> "$GITHUB_OUTPUT"
-            echo "dep_name=unknown" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          dep_name="${BASH_REMATCH[1]}"
-          old_ver="${BASH_REMATCH[2]}"
-          new_ver="${BASH_REMATCH[3]}"
-          echo "Parsed: ${dep_name} ${old_ver} -> ${new_ver}"
-
-          # Strip leading 'v' (github-actions tags are e.g. v3.1.0).
-          old_ver="${old_ver#v}"
-          new_ver="${new_ver#v}"
-
-          # Split on '.', take the first three numeric components; default
-          # missing parts to 0 so "1" -> 1.0.0 still classifies sensibly.
-          IFS='.' read -r o_maj o_min o_pat _ <<< "$old_ver"
-          IFS='.' read -r n_maj n_min n_pat _ <<< "$new_ver"
-          o_maj="${o_maj:-0}"; o_min="${o_min:-0}"; o_pat="${o_pat:-0}"
-          n_maj="${n_maj:-0}"; n_min="${n_min:-0}"; n_pat="${n_pat:-0}"
-
-          # Numeric-only check; if anything's non-numeric (e.g., commit SHA
-          # bumps from a `replace` directive) refuse and let a human review.
-          for v in "$o_maj" "$o_min" "$o_pat" "$n_maj" "$n_min" "$n_pat"; do
-            if ! [[ "$v" =~ ^[0-9]+$ ]]; then
-              echo "Non-numeric version component (${v}) — refusing to auto-merge."
-              echo "update_type=unknown" >> "$GITHUB_OUTPUT"
-              echo "dep_name=$dep_name" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          done
-
-          if [ "$n_maj" -gt "$o_maj" ]; then
-            update_type="version-update:semver-major"
-          elif [ "$n_min" -gt "$o_min" ]; then
-            update_type="version-update:semver-minor"
-          else
-            # Includes patch bumps and same-version (no-op, shouldn't happen).
-            update_type="version-update:semver-patch"
-          fi
+          result=$(TITLE="$title" bash .github/scripts/classify-dependabot-title.sh)
+          IFS=$'\t' read -r update_type dep_name <<< "$result"
           echo "Update type: ${update_type}"
           echo "update_type=$update_type" >> "$GITHUB_OUTPUT"
           echo "dep_name=$dep_name" >> "$GITHUB_OUTPUT"
