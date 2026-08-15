@@ -70,9 +70,25 @@ use librefang_kernel::kernel_handle::prelude::*;
 use librefang_kernel::tool_runner::builtin_tool_definitions;
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use crate::types::ApiErrorResponse;
+
+const MAX_COMMS_EVENT_STREAMS: usize = 64;
+static COMMS_EVENT_STREAM_PERMITS: LazyLock<Arc<tokio::sync::Semaphore>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_COMMS_EVENT_STREAMS)));
+
+fn try_acquire_comms_stream_permit(
+    permits: Arc<tokio::sync::Semaphore>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::TryAcquireError> {
+    permits.try_acquire_owned()
+}
+
+fn authenticated_a2a_caller(
+    api_user: Option<&crate::middleware::AuthenticatedApiUser>,
+) -> Option<String> {
+    api_user.map(|user| format!("user:{}", user.user_id))
+}
 // ---------------------------------------------------------------------------
 // Peer endpoints
 // ---------------------------------------------------------------------------
@@ -376,7 +392,7 @@ pub async fn a2a_list_agents(State(state): State<Arc<AppState>>) -> impl IntoRes
 )]
 pub async fn a2a_send_task(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(request): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     // Extract message text from A2A format
@@ -393,11 +409,10 @@ pub async fn a2a_send_task(
         })
         .unwrap_or_else(|| "No message provided".to_string());
 
-    // Extract caller identity from A2A header (for audit / ACL).
-    let caller_a2a_agent_id = headers
-        .get("x-a2a-agent-id")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
+    // Record only identity established by authentication middleware. A bare
+    // x-a2a-agent-id header is client-controlled and must never become audit
+    // or ACL identity.
+    let caller_a2a_agent_id = authenticated_a2a_caller(api_user.as_ref().map(|user| &user.0));
 
     // Require an explicit target agent — refuse to silently dispatch to agents[0].
     let target_agent_id_str = request["params"]["agentId"]
@@ -733,7 +748,7 @@ fn is_host_allowed(hostname: &str, ip: &IpAddr, allowed_hosts: &[String]) -> boo
             if suffix.is_empty() {
                 continue; // reject bare "*" — too broad
             }
-            if hostname.ends_with(suffix) {
+            if hostname_matches_glob_suffix(hostname, suffix) {
                 return true;
             }
             continue;
@@ -749,6 +764,21 @@ fn is_host_allowed(hostname: &str, ip: &IpAddr, allowed_hosts: &[String]) -> boo
         }
     }
     false
+}
+
+fn hostname_matches_glob_suffix(hostname: &str, suffix: &str) -> bool {
+    let hostname = hostname.trim_end_matches('.').to_ascii_lowercase();
+    let suffix = suffix.trim_end_matches('.').to_ascii_lowercase();
+    if suffix.is_empty() {
+        return false;
+    }
+    if suffix.starts_with('.') {
+        return hostname.ends_with(&suffix);
+    }
+    hostname == suffix
+        || hostname
+            .strip_suffix(&suffix)
+            .is_some_and(|prefix| prefix.ends_with('.'))
 }
 
 /// Check if `ip` falls within the CIDR range `cidr` (e.g. `"10.0.0.0/8"`).
@@ -806,16 +836,17 @@ fn is_private_ip(ip: &IpAddr) -> bool {
     }
 }
 
-/// GET /api/a2a/agents/{id} — Get a specific external A2A agent by index, URL, or name.
+/// GET /api/a2a/agents/{id} — Get a specific external A2A agent by URL or name.
 #[utoipa::path(
     get,
     path = "/api/a2a/agents/{id}",
     tag = "a2a",
     params(
-        ("id" = String, Path, description = "Id"),
+        ("id" = String, Path, description = "Canonical URL or agent name"),
     ),
     responses(
-        (status = 200, description = "Get a specific external A2A agent", body = crate::types::JsonObject)
+        (status = 200, description = "Get a specific external A2A agent", body = crate::types::JsonObject),
+        (status = 404, description = "No external A2A agent found for the given identity")
     )
 )]
 pub async fn a2a_get_external_agent(
@@ -838,24 +869,21 @@ pub async fn a2a_get_external_agent(
         })
     };
 
-    // Try by index first
-    if let Ok(idx) = id.parse::<usize>() {
-        if let Some(entry) = agents.get(idx) {
-            return (StatusCode::OK, Json(make_response(entry)));
-        }
-    }
-
-    // Try by URL match
-    if let Some(entry) = agents.iter().find(|(_, c)| c.url == id) {
-        return (StatusCode::OK, Json(make_response(entry)));
-    }
-
-    // Try by agent name
-    if let Some(entry) = agents.iter().find(|(_, c)| c.name == id) {
+    if let Some(entry) = find_external_agent_by_identity(&agents, &id) {
         return (StatusCode::OK, Json(make_response(entry)));
     }
 
     ApiErrorResponse::not_found(format!("A2A agent '{}' not found", id)).into_json_tuple()
+}
+
+fn find_external_agent_by_identity<'a>(
+    agents: &'a [(String, librefang_kernel::a2a::AgentCard)],
+    id: &str,
+) -> Option<&'a (String, librefang_kernel::a2a::AgentCard)> {
+    agents
+        .iter()
+        .find(|(_, card)| card.url == id)
+        .or_else(|| agents.iter().find(|(_, card)| card.name == id))
 }
 
 /// POST /api/a2a/discover — Discover a new external A2A agent by URL.
@@ -1263,6 +1291,7 @@ pub async fn a2a_external_task_status(
     ),
     responses(
         (status = 200, description = "Agent approved and promoted to trusted list", body = crate::types::JsonObject),
+        (status = 400, description = "The pending-agent identity is not a valid HTTP(S) URL"),
         (status = 404, description = "No pending agent found for the given URL")
     )
 )]
@@ -1276,7 +1305,13 @@ pub async fn a2a_approve_external(
     // handler used as the storage key. Without this, an operator who
     // approves `https://x.com/` after discover stored `https://x.com`
     // (or vice versa) would 404.
-    let url = librefang_kernel::a2a::canonicalize_a2a_url(&decoded).unwrap_or(decoded);
+    let url = match librefang_kernel::a2a::canonicalize_a2a_url(&decoded) {
+        Some(url) => url,
+        None => {
+            return ApiErrorResponse::bad_request("URL is not a valid http(s) URL with a host")
+                .into_json_tuple();
+        }
+    };
 
     match state.pending_a2a_agents.remove(&url) {
         Some((_, card)) => {
@@ -1366,6 +1401,7 @@ pub async fn a2a_approve_external(
 )]
 pub async fn mcp_http(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     headers: HeaderMap,
     Json(request): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -1399,9 +1435,9 @@ pub async fn mcp_http(
     // cron/schedule tool fails with "workspace sandbox not configured"
     // or "Agent ID required" — issue #2699.
     //
-    // Unauthenticated external MCP clients do not set this header and
-    // continue to run with `None` context: the fallback behaviour is
-    // unchanged.
+    // Header-less external MCP clients continue to run with `None` context.
+    // A supplied header is accepted only when authentication middleware
+    // established a principal that may access the requested agent.
     //
     // We resolve this up-front (rather than only inside the `tools/call`
     // branch) because non-`tools/call` methods — chiefly `tools/list`
@@ -1411,23 +1447,46 @@ pub async fn mcp_http(
     // server (e.g. Smithery `googlesuper`, 223 tools) gets the full
     // kernel catalogue injected into the CLI's system prompt and the
     // CLI silently exits with code 1 (#5101).
-    let caller_entry = headers
-        .get("x-librefang-agent-id")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<librefang_types::agent::AgentId>().ok())
-        .and_then(|id| state.kernel.agent_registry().get(id));
+    let caller_entry = match headers.get("x-librefang-agent-id") {
+        None => None,
+        Some(raw_id) => {
+            let requested_id = raw_id
+                .to_str()
+                .ok()
+                .and_then(|value| value.parse::<librefang_types::agent::AgentId>().ok());
+            let Some(requested_id) = requested_id else {
+                return mcp_identity_error(&request, "Invalid X-LibreFang-Agent-Id header");
+            };
+            let Some(ref authenticated_user) = api_user else {
+                return mcp_identity_error(
+                    &request,
+                    "Authenticated identity required for agent-scoped MCP context",
+                );
+            };
+            if !super::can_access_agent(&state, requested_id, Some(authenticated_user)) {
+                return mcp_identity_error(
+                    &request,
+                    "Caller may not use the requested agent-scoped MCP context",
+                );
+            }
+            state.kernel.agent_registry().get(requested_id)
+        }
+    };
 
     // #6117: inbound peer scope of the turn that spawned the subprocess driver,
     // forwarded by `claude-code`'s `write_mcp_config` on the bridge connection.
     // Rehydrated into `ToolExecContext` below so `channel_send` rejects a
-    // cross-chat recipient mismatch on the same channel. External MCP clients
-    // that omit these headers run unguarded (the guard no-ops on `None`).
+    // cross-chat recipient mismatch on the same channel. These headers are
+    // honored only alongside an authorized agent context; otherwise they are
+    // ignored and cannot manufacture channel identity on their own.
     let header_str = |name: &str| -> Option<String> {
-        headers
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string)
-            .filter(|s| !s.is_empty())
+        caller_entry.as_ref().and_then(|_| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+                .filter(|s| !s.is_empty())
+        })
     };
     let current_peer_jid = header_str("x-librefang-current-peer-jid");
     let current_channel = header_str("x-librefang-current-channel");
@@ -1580,6 +1639,14 @@ pub async fn mcp_http(
     };
     let response = librefang_kernel::mcp_server::handle_mcp_request(&request, &tools_view).await;
     Json(response)
+}
+
+fn mcp_identity_error(request: &serde_json::Value, message: &str) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request.get("id").cloned(),
+        "error": {"code": -32001, "message": message},
+    }))
 }
 
 // ── Multi-Session Endpoints ─────────────────────────────────────────────
@@ -1941,11 +2008,26 @@ pub async fn comms_events(
     path = "/api/comms/events/stream",
     tag = "network",
     responses(
-        (status = 200, description = "SSE stream of inter-agent events", body = crate::types::JsonObject)
+        (status = 200, description = "SSE stream of inter-agent events", body = crate::types::JsonObject),
+        (status = 429, description = "The process-wide communication stream limit is exhausted", body = crate::types::JsonObject)
     )
 )]
 pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::response::Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
+
+    let stream_permit = match try_acquire_comms_stream_permit(COMMS_EVENT_STREAM_PERMITS.clone()) {
+        Ok(permit) => permit,
+        Err(_) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "error": "Too many active communication event streams",
+                    "code": "comms_stream_limit",
+                })),
+            )
+                .into_response();
+        }
+    };
 
     let (tx, rx) = tokio::sync::mpsc::channel::<
         Result<axum::response::sse::Event, std::convert::Infallible>,
@@ -1957,6 +2039,7 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
     let mut shutdown_rx = state.kernel.supervisor_ref().subscribe();
 
     tokio::spawn(async move {
+        let _stream_permit = stream_permit;
         let mut last_seq: u64 = {
             let entries = state.kernel.audit().recent(1);
             entries.last().map(|e| e.seq).unwrap_or(0)
@@ -1965,6 +2048,9 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+                _ = tx.closed() => {
+                    return; // Client disconnected while the event log was quiet.
+                }
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
                         return; // Kernel shutting down — drop Arc<AppState>.
@@ -2048,13 +2134,10 @@ pub async fn comms_send(
         let allowed = match api_user.as_ref().map(|u| &u.0) {
             Some(u) if u.role >= UserRole::Admin => true,
             Some(u) => u.name.eq_ignore_ascii_case(&from_entry.manifest.author),
-            // No auth context (unauthenticated request — only
-            // possible on loopback in `require_auth = false` mode):
-            // we have no caller identity to compare against, so
-            // refuse the impersonation surface entirely. The legacy
-            // loopback path can keep using its own agents but not
-            // mint messages from named human-owned ones.
-            None => from_entry.manifest.author.is_empty(),
+            // No authenticated identity means there is no ownership claim to
+            // compare. Production no-auth mode injects a synthetic Owner, so
+            // None only occurs when middleware was bypassed and must fail closed.
+            None => false,
         };
         if !allowed {
             tracing::warn!(
@@ -2221,10 +2304,15 @@ pub(crate) fn remove_toml_section(content: &str, section: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_ip, is_cloud_metadata_ip, is_private_ip};
+    use super::{
+        authenticated_a2a_caller, canonical_ip, find_external_agent_by_identity,
+        hostname_matches_glob_suffix, is_cloud_metadata_ip, is_private_ip,
+        try_acquire_comms_stream_permit,
+    };
     use librefang_kernel::MemorySubsystemApi;
     use librefang_kernel::MeshSubsystemApi;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
 
     // -----------------------------------------------------------------
     // Regression test for #3644: /api/peers must reflect the live kernel
@@ -2387,5 +2475,92 @@ mod tests {
         assert!(is_cloud_metadata_ip(
             &"::ffff:100.100.100.200".parse().unwrap()
         ));
+    }
+
+    #[test]
+    fn glob_suffix_requires_a_hostname_label_boundary() {
+        assert!(hostname_matches_glob_suffix("example.com", "example.com"));
+        assert!(hostname_matches_glob_suffix(
+            "api.example.com",
+            "example.com"
+        ));
+        assert!(hostname_matches_glob_suffix(
+            "API.EXAMPLE.COM",
+            ".example.com"
+        ));
+        assert!(!hostname_matches_glob_suffix(
+            "attackerexample.com",
+            "example.com"
+        ));
+        assert!(!hostname_matches_glob_suffix("example.com", ".example.com"));
+        assert!(hostname_matches_glob_suffix(
+            "api.example.com.",
+            ".example.com"
+        ));
+        assert!(!hostname_matches_glob_suffix("attacker.example.", "."));
+    }
+
+    #[test]
+    fn a2a_caller_identity_comes_from_authenticated_principal() {
+        let user = crate::middleware::AuthenticatedApiUser {
+            name: "alice".to_string(),
+            role: crate::middleware::UserRole::User,
+            user_id: librefang_types::agent::UserId::from_name("alice"),
+        };
+
+        assert_eq!(
+            authenticated_a2a_caller(Some(&user)),
+            Some(format!("user:{}", user.user_id))
+        );
+        assert_eq!(authenticated_a2a_caller(None), None);
+    }
+
+    #[test]
+    fn comms_stream_permit_caps_and_releases_connections() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = try_acquire_comms_stream_permit(permits.clone()).expect("first stream");
+        assert!(try_acquire_comms_stream_permit(permits.clone()).is_err());
+
+        drop(permit);
+
+        assert!(try_acquire_comms_stream_permit(permits).is_ok());
+    }
+
+    #[tokio::test]
+    async fn comms_stream_sender_detects_quiet_client_disconnect() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+        drop(rx);
+
+        tokio::time::timeout(std::time::Duration::from_millis(100), tx.closed())
+            .await
+            .expect("sender should observe dropped stream receiver");
+    }
+
+    #[test]
+    fn numeric_agent_name_is_identity_not_position() {
+        let card = |name: &str, url: &str| librefang_kernel::a2a::AgentCard {
+            name: name.to_string(),
+            description: String::new(),
+            url: url.to_string(),
+            version: "1".to_string(),
+            capabilities: Default::default(),
+            skills: Vec::new(),
+            default_input_modes: Vec::new(),
+            default_output_modes: Vec::new(),
+        };
+        let agents = vec![
+            (
+                "https://first.example/a2a".to_string(),
+                card("first", "https://first.example/a2a"),
+            ),
+            (
+                "https://zero.example/a2a".to_string(),
+                card("0", "https://zero.example/a2a"),
+            ),
+        ];
+
+        let found = find_external_agent_by_identity(&agents, "0").expect("numeric name");
+
+        assert_eq!(found.1.name, "0");
     }
 }
