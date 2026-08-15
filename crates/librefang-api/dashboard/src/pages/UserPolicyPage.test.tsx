@@ -330,11 +330,12 @@ describe("UserPolicyPage", () => {
 
     policy = {
       ...HAPPY_POLICY,
-      tool_policy: { allowed_tools: ["server_refresh"], denied_tools: ["delete_*"] },
+      tool_policy: { allowed_tools: ["server_refresh"], denied_tools: ["server_denied"] },
     };
     page.rerenderPage();
 
     expect(allowed.value).toBe("read_*\nlist_*");
+    expect(screen.getByDisplayValue("server_denied")).toBeInTheDocument();
   });
 
   it("refreshes a clean form when the server policy changes", async () => {

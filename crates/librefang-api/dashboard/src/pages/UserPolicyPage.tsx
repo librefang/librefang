@@ -239,6 +239,47 @@ function deepEqual(a: unknown, b: unknown): boolean {
   return true;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// Reapply only the leaves the operator changed onto a newer server form.
+// This preserves unsaved edits without turning untouched, concurrently
+// updated server fields back into stale values on the next full PUT.
+function rebaseFormEdits(
+  previous: FormState,
+  current: FormState,
+  next: FormState,
+): FormState {
+  const rebaseValue = (base: unknown, local: unknown, remote: unknown): unknown => {
+    if (deepEqual(local, base)) return remote;
+    if (!isRecord(base) || !isRecord(local) || !isRecord(remote)) return local;
+
+    const result: Record<string, unknown> = {};
+    const keys = new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(remote)]);
+    for (const key of keys) {
+      const baseHas = Object.prototype.hasOwnProperty.call(base, key);
+      const localHas = Object.prototype.hasOwnProperty.call(local, key);
+      const remoteHas = Object.prototype.hasOwnProperty.call(remote, key);
+
+      if (!baseHas) {
+        if (localHas) result[key] = local[key];
+        else if (remoteHas) result[key] = remote[key];
+        continue;
+      }
+      if (!localHas) continue;
+      if (!remoteHas) {
+        if (!deepEqual(local[key], base[key])) result[key] = local[key];
+        continue;
+      }
+      result[key] = rebaseValue(base[key], local[key], remote[key]);
+    }
+    return result;
+  };
+
+  return rebaseValue(previous, current, next) as FormState;
+}
+
 export function UserPolicyPage() {
   const { t } = useTranslation();
   const { name } = useParams({ from: "/users/$name/policy" });
@@ -275,16 +316,22 @@ export function UserPolicyPage() {
     if (!baselineForm) return false;
     return !deepEqual(form, baselineForm);
   }, [baselineForm, form]);
-  const isDirtyRef = useRef(isDirty);
+  const baselineFormRef = useRef<FormState | null>(null);
   const seededNameRef = useRef<string | null>(null);
-  isDirtyRef.current = isDirty;
 
   // Seed on initial load or route changes. Background refetches may refresh
-  // a clean form, but must not discard edits made after the previous payload.
+  // a clean form. Dirty forms rebase only their local leaf edits onto the
+  // latest server payload so unrelated concurrent changes are not lost.
   useEffect(() => {
     if (!policyQuery.data) return;
     const nextBaseline = policyToForm(policyQuery.data);
-    if (seededNameRef.current !== name || !isDirtyRef.current) setForm(nextBaseline);
+    const previousBaseline = baselineFormRef.current;
+    setForm(current =>
+      seededNameRef.current !== name || !previousBaseline
+        ? nextBaseline
+        : rebaseFormEdits(previousBaseline, current, nextBaseline),
+    );
+    baselineFormRef.current = nextBaseline;
     setBaselineForm(nextBaseline);
     seededNameRef.current = name;
   }, [name, policyQuery.data]);
