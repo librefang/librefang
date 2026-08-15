@@ -525,13 +525,21 @@ pub async fn memory_search(
         ("offset" = Option<usize>, Query, description = "Pagination offset (default 0)"),
         ("limit" = Option<usize>, Query, description = "Page size (default 10, max 100)"),
     ),
-    responses((status = 200, description = "Paginated memory list", body = crate::types::JsonObject))
+    responses(
+        (status = 200, description = "Paginated memory list", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid memory level filter")
+    )
 )]
 pub async fn memory_list(
     State(state): State<Arc<AppState>>,
     Query(params): Query<MemoryListQuery>,
     request: axum::extract::Request,
 ) -> impl IntoResponse {
+    let level = match parse_memory_level_filter(params.level.as_deref()) {
+        Ok(level) => level,
+        Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
+    };
+
     // Graceful degradation: proactive memory disabled → empty list, not 500.
     let Some(store) = state.kernel.proactive_memory_store().cloned() else {
         return (
@@ -549,10 +557,6 @@ pub async fn memory_list(
     let guard = guard_for_request(&state, request.extensions());
     let limit = params.limit.min(100);
     let offset = params.offset;
-    let level = match parse_memory_level_filter(params.level.as_deref()) {
-        Ok(level) => level,
-        Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
-    };
 
     // List across ALL agents so the dashboard shows all memories
     match store
@@ -888,10 +892,15 @@ pub async fn memory_stats(State(state): State<Arc<AppState>>) -> impl IntoRespon
         Ok(stats) => {
             let mut value = serde_json::json!(stats);
             if let Some(obj) = value.as_object_mut() {
+                let counts = match store.count_by_agent() {
+                    Ok(counts) => counts,
+                    Err(error) => return internal_error(error),
+                };
                 obj.insert(
                     "proactive_enabled".to_string(),
                     serde_json::Value::Bool(true),
                 );
+                obj.insert("by_agent".to_string(), serde_json::json!(counts));
             }
             (StatusCode::OK, Json(value))
         }
@@ -1005,7 +1014,10 @@ pub async fn memory_clear_level(
         ("offset" = Option<usize>, Query, description = "Pagination offset (default 0)"),
         ("limit" = Option<usize>, Query, description = "Page size (default 10, max 100)"),
     ),
-    responses((status = 200, description = "Paginated agent memory list", body = crate::types::JsonObject))
+    responses(
+        (status = 200, description = "Paginated agent memory list", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid memory level filter")
+    )
 )]
 pub async fn memory_list_agent(
     State(state): State<Arc<AppState>>,
@@ -1013,6 +1025,11 @@ pub async fn memory_list_agent(
     Query(params): Query<MemoryListQuery>,
     request: axum::extract::Request,
 ) -> impl IntoResponse {
+    let level = match parse_memory_level_filter(params.level.as_deref()) {
+        Ok(level) => level,
+        Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
+    };
+
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -1021,10 +1038,6 @@ pub async fn memory_list_agent(
     let guard = guard_for_request(&state, request.extensions());
     let limit = params.limit.min(100);
     let offset = params.offset;
-    let level = match parse_memory_level_filter(params.level.as_deref()) {
-        Ok(level) => level,
-        Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
-    };
 
     match store
         .list_with_guard(&agent_id, params.category.as_deref(), &guard)

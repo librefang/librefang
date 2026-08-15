@@ -1054,6 +1054,31 @@ impl SemanticStore {
         Ok(count as u64)
     }
 
+    /// Count non-deleted memories grouped by agent ID.
+    pub fn count_by_agent(&self) -> LibreFangResult<HashMap<String, usize>> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT agent_id, COUNT(*) FROM memories \
+                 WHERE deleted = 0 GROUP BY agent_id",
+            )
+            .map_err(LibreFangError::memory)?;
+        let rows = stmt
+            .query_map([], |row| {
+                let agent_id: String = row.get(0)?;
+                let count: i64 = row.get(1)?;
+                Ok((agent_id, count as usize))
+            })
+            .map_err(LibreFangError::memory)?;
+
+        let mut counts = HashMap::new();
+        for row in rows {
+            let (agent_id, count) = row.map_err(LibreFangError::memory)?;
+            counts.insert(agent_id, count);
+        }
+        Ok(counts)
+    }
+
     /// Count non-deleted memories grouped by category (from JSON metadata).
     ///
     /// For a specific agent, pass `Some(agent_id)`. For global stats, pass `None`.
@@ -2370,6 +2395,43 @@ mod tests {
         assert_eq!(store.count(agent_id, Some("session_memory")).unwrap(), 1);
         assert_eq!(store.count(agent_id, Some("user_memory")).unwrap(), 1);
         assert_eq!(store.count(agent_id, Some("agent_memory")).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_count_by_agent_uses_one_grouped_snapshot() {
+        let store = setup();
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+
+        for content in ["A1", "A2"] {
+            store
+                .remember(
+                    agent_a,
+                    content,
+                    MemorySource::Conversation,
+                    "session_memory",
+                    HashMap::new(),
+                )
+                .unwrap();
+        }
+        store
+            .remember(
+                agent_b,
+                "B1",
+                MemorySource::Conversation,
+                "user_memory",
+                HashMap::new(),
+            )
+            .unwrap();
+
+        let counts = store.count_by_agent().unwrap();
+        assert_eq!(counts.get(&agent_a.to_string()), Some(&2));
+        assert_eq!(counts.get(&agent_b.to_string()), Some(&1));
+
+        store.forget_by_agent(agent_a).unwrap();
+        let counts = store.count_by_agent().unwrap();
+        assert!(!counts.contains_key(&agent_a.to_string()));
+        assert_eq!(counts.get(&agent_b.to_string()), Some(&1));
     }
 
     /// Regression for the audit item `json-text-silent-parse-fallback`.

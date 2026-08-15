@@ -54,6 +54,12 @@ export function RecordsTab({
   );
   const totalCount = memoryQuery.data?.total ?? 0;
 
+  useEffect(() => {
+    if (searching || !memoryQuery.data) return;
+    const lastPage = Math.max(0, Math.ceil(totalCount / MEMORY_PAGE_SIZE) - 1);
+    if (page > lastPage) setPage(lastPage);
+  }, [memoryQuery.data, page, searching, totalCount]);
+
   const filteredMemories = allMemories;
   const levels = ["user", "session", "agent"];
 
@@ -158,7 +164,7 @@ export function RecordsTab({
 
       <div className="text-xs text-text-dim">
         {t("memory.showing", { count: filteredMemories.length, total: totalCount })}
-        {searching && totalCount === MEMORY_PAGE_SIZE && (
+        {searching && (
           <span className="ml-2 text-text-dim/60">
             ({t("memory.search_result_cap", { defaultValue: "first 50 matches" })})
           </span>

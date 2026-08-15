@@ -1337,6 +1337,11 @@ impl ProactiveMemoryStore {
         })
     }
 
+    /// Count memories for every agent in one grouped SQL query.
+    pub fn count_by_agent(&self) -> LibreFangResult<HashMap<String, usize>> {
+        self.semantic.count_by_agent()
+    }
+
     /// List memories across ALL agents, optionally filtered by category.
     ///
     /// Used by the dashboard to show all memories without agent scoping.

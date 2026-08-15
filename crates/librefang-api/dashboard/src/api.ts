@@ -909,6 +909,7 @@ export interface MemoryListResponse {
 
 export interface MemoryStatsResponse {
   total?: number;
+  by_agent?: Record<string, number>;
   user_count?: number;
   session_count?: number;
   agent_count?: number;

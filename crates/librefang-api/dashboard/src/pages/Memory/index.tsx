@@ -11,7 +11,6 @@ import {
   useMemoryConfig,
   useMemoryStats,
   agentKvMemoryQueryOptions,
-  memoryQueries,
 } from "../../lib/queries/memory";
 import { useAgents } from "../../lib/queries/agents";
 import { useAutoDreamStatus } from "../../lib/queries/autoDream";
@@ -73,22 +72,11 @@ export function MemoryPage() {
     memoryConfigQuery.data?.proactive_memory?.enabled ??
     true;
 
-  // Stats use SQL COUNT queries. This keeps rail totals exact without loading
-  // and rendering the entire memory corpus in the browser.
-  const agentStatsQueries = useQueries({
-    queries: agents.map((agent) => ({
-      ...memoryQueries.stats(agent.id),
-      enabled: proactiveEnabled,
-    })),
-  });
+  // Global stats include one SQL-grouped count map for the rail. This keeps
+  // totals exact without issuing one continuously polling request per agent.
   const recordsByAgentId = useMemo(() => {
-    const m = new Map<string, number>();
-    agents.forEach((agent, index) => {
-      const total = agentStatsQueries[index]?.data?.total;
-      if (total !== undefined) m.set(agent.id, total);
-    });
-    return m;
-  }, [agents, agentStatsQueries]);
+    return new Map(Object.entries(globalStatsQuery.data?.by_agent ?? {}));
+  }, [globalStatsQuery.data?.by_agent]);
   const totalRecords = globalStatsQuery.data?.total ?? 0;
 
   // Per-agent KV: one `useQueries` observer set, owned at the page level so
@@ -124,11 +112,11 @@ export function MemoryPage() {
   const scopedAgent = selectedAgentId
     ? agents.find((a) => a.id === selectedAgentId)
     : undefined;
-  const scopedAgentIndex = selectedAgentId
-    ? agents.findIndex((agent) => agent.id === selectedAgentId)
-    : -1;
+  const scopedStatsQuery = useMemoryStats(selectedAgentId, {
+    enabled: proactiveEnabled && !!selectedAgentId,
+  });
   const scopedStats = selectedAgentId
-    ? agentStatsQueries[scopedAgentIndex]?.data
+    ? scopedStatsQuery.data
     : globalStatsQuery.data;
   const dreamForAgent = selectedAgentId
     ? autoDreamQuery.data?.agents.find((a) => a.agent_id === selectedAgentId)
@@ -179,6 +167,7 @@ export function MemoryPage() {
         isFetching={globalStatsQuery.isFetching || agentsQuery.isFetching}
         onRefresh={() => {
           void globalStatsQuery.refetch();
+          if (selectedAgentId) void scopedStatsQuery.refetch();
           void agentsQuery.refetch();
           void autoDreamQuery.refetch();
         }}

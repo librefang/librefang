@@ -263,6 +263,11 @@ async fn get_memory_stats_returns_200_with_proactive_enabled_flag() {
         serde_json::Value::Bool(true),
         "expected proactive_enabled merged into stats, got: {body}"
     );
+    assert_eq!(
+        body["by_agent"],
+        serde_json::json!({}),
+        "empty fixtures should expose an empty grouped count map"
+    );
 }
 
 // ---------------------------------------------------------------------------

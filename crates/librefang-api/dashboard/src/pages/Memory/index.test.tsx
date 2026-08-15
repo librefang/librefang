@@ -35,12 +35,6 @@ import {
 
 vi.mock("../../lib/queries/memory", () => ({
   MEMORY_PAGE_SIZE: 50,
-  memoryQueries: {
-    stats: (agentId?: string) => ({
-      queryKey: ["memory", "stats", agentId],
-      queryFn: async () => ({ total: 0 }),
-    }),
-  },
   useMemoryStats: vi.fn(),
   useMemoryConfig: vi.fn(),
   useMemoryHealth: vi.fn(),
@@ -182,7 +176,7 @@ const useAbortAutoDreamMock = useAbortAutoDream as unknown as ReturnType<typeof 
 const useSetAutoDreamEnabledMock = useSetAutoDreamEnabled as unknown as ReturnType<typeof vi.fn>;
 const useSetAutoDreamGlobalEnabledMock = useSetAutoDreamGlobalEnabled as unknown as ReturnType<typeof vi.fn>;
 
-const STATS = { total: 7, user_count: 2, session_count: 3, agent_count: 2 };
+const STATS = { total: 7, by_agent: {}, user_count: 2, session_count: 3, agent_count: 2 };
 const CONFIG = {
   embedding_provider: "openai",
   embedding_model: "text-embedding-3-small",
@@ -325,6 +319,30 @@ describe("MemoryPage (redesigned)", () => {
       offset: 50,
       limit: 50,
     });
+  });
+
+  it("returns to the last valid page when a refreshed total shrinks", async () => {
+    useMemorySearchOrListMock.mockImplementation((params: { offset: number }) => ({
+      data:
+        params.offset === 0
+          ? { memories: MEMORIES, total: 120, proactive_enabled: true }
+          : { memories: [], total: 50, proactive_enabled: true },
+      isLoading: false,
+      isError: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    }));
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: "common.next" }));
+    expect(useMemorySearchOrListMock).toHaveBeenCalledWith(
+      expect.objectContaining({ offset: 50 }),
+    );
+    await waitFor(() =>
+      expect(useMemorySearchOrListMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ offset: 0 }),
+      ),
+    );
   });
 
   it("sends level filters through the paginated list query", () => {
