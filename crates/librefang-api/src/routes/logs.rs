@@ -32,7 +32,10 @@ pub async fn logs_stream(
 ) -> axum::response::Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
 
-    let level_filter = params.get("level").cloned().unwrap_or_default();
+    let level_filter = params
+        .get("level")
+        .map(|level| level.to_ascii_lowercase())
+        .unwrap_or_default();
     let text_filter = params
         .get("filter")
         .cloned()
@@ -87,10 +90,19 @@ pub async fn logs_stream(
 
             for entry in &entries {
                 let action_str = format!("{:?}", entry.action);
+                let action_lower = if level_filter.is_empty() && text_filter.is_empty() {
+                    None
+                } else {
+                    Some(action_str.to_ascii_lowercase())
+                };
 
                 // Apply level filter
                 if !level_filter.is_empty() {
-                    let classified = classify_audit_level(&action_str);
+                    let classified = classify_lowercase_audit_level(
+                        action_lower
+                            .as_deref()
+                            .expect("filter requires lowercase action"),
+                    );
                     if classified != level_filter {
                         continue;
                     }
@@ -98,9 +110,17 @@ pub async fn logs_stream(
 
                 // Apply text filter
                 if !text_filter.is_empty() {
-                    let haystack = format!("{} {} {}", action_str, entry.detail, entry.agent_id)
-                        .to_lowercase();
-                    if !haystack.contains(&text_filter) {
+                    let action_matches = action_lower
+                        .as_deref()
+                        .expect("filter requires lowercase action")
+                        .contains(&text_filter);
+                    let detail_matches = contains_lowercase_filter(&entry.detail, &text_filter);
+                    let agent_matches = if action_matches || detail_matches {
+                        false
+                    } else {
+                        contains_lowercase_filter(&entry.agent_id.to_string(), &text_filter)
+                    };
+                    if !action_matches && !detail_matches && !agent_matches {
                         continue;
                     }
                 }
@@ -140,11 +160,18 @@ pub async fn logs_stream(
     // and log on panic (#5137). The watchdog ends naturally when the
     // forwarder returns (client disconnect) — no leak.
     tokio::spawn(async move {
-        if let Err(e) = forwarder.await {
-            if e.is_panic() {
+        match forwarder.await {
+            Ok(()) => {}
+            Err(error) if error.is_panic() => {
                 tracing::error!(
-                    error = %e,
+                    error = %error,
                     "SSE log forwarder task panicked; EventSource stalled"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "SSE log forwarder task was cancelled"
                 );
             }
         }
@@ -160,15 +187,33 @@ pub async fn logs_stream(
         .into_response()
 }
 
-/// Classify an audit action string into a level (info, warn, error).
-fn classify_audit_level(action: &str) -> &'static str {
-    let a = action.to_lowercase();
-    if a.contains("error") || a.contains("fail") || a.contains("crash") || a.contains("denied") {
+/// Classify an already-lowercase audit action into a level (info, warn, error).
+fn classify_lowercase_audit_level(action: &str) -> &'static str {
+    if action.contains("error")
+        || action.contains("fail")
+        || action.contains("crash")
+        || action.contains("denied")
+    {
         "error"
-    } else if a.contains("warn") || a.contains("block") || a.contains("kill") {
+    } else if action.contains("warn") || action.contains("block") || action.contains("kill") {
         "warn"
     } else {
         "info"
+    }
+}
+
+/// Test a pre-lowercased filter without allocating for the common ASCII case.
+fn contains_lowercase_filter(haystack: &str, lowercase_filter: &str) -> bool {
+    if lowercase_filter.is_empty() {
+        return true;
+    }
+    if lowercase_filter.is_ascii() {
+        haystack
+            .as_bytes()
+            .windows(lowercase_filter.len())
+            .any(|window| window.eq_ignore_ascii_case(lowercase_filter.as_bytes()))
+    } else {
+        haystack.to_lowercase().contains(lowercase_filter)
     }
 }
 
@@ -213,5 +258,19 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_millis(100), tx.closed())
             .await
             .expect("sender should observe a dropped SSE receiver");
+    }
+
+    #[test]
+    fn audit_level_uses_the_reused_lowercase_action() {
+        assert_eq!(classify_lowercase_audit_level("permissiondenied"), "error");
+        assert_eq!(classify_lowercase_audit_level("processkilled"), "warn");
+        assert_eq!(classify_lowercase_audit_level("configchange"), "info");
+    }
+
+    #[test]
+    fn text_filter_avoids_allocation_for_ascii_and_supports_unicode() {
+        assert!(contains_lowercase_filter("Agent FAILED safely", "fail"));
+        assert!(!contains_lowercase_filter("Agent completed", "fail"));
+        assert!(contains_lowercase_filter("Überprüfung", "über"));
     }
 }
