@@ -3878,6 +3878,7 @@
     "error_disabled_body": "<a>구성 → 보안</a>에서 페어링을 활성화합니다(<code>pairing.enabled = true</code>).",
     "error_generic_title": "페어링 코드를 생성하지 못했습니다.",
     "qr_aria_label": "모바일 장치와 페어링하기 위한 QR 코드",
+    "qr_render_failed": "페어링 QR 코드를 표시할 수 없습니다. 새로고침하여 다시 시도하세요.",
     "btn_try_again": "다시 시도"
   },
   "shortcuts_help": {

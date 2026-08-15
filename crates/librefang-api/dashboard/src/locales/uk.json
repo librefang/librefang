@@ -3884,6 +3884,7 @@
     "error_disabled_body": "Увімкніть пейринг у <a>Конфігурації → Безпека</a> (<code>pairing.enabled = true</code>).",
     "error_generic_title": "Не вдалося згенерувати код пейрингу",
     "qr_aria_label": "QR-код для пейрингу з мобільним пристроєм",
+    "qr_render_failed": "Не вдалося відобразити QR-код пейрингу. Оновіть сторінку, щоб повторити спробу.",
     "btn_try_again": "Спробувати знову"
   },
   "shortcuts_help": {

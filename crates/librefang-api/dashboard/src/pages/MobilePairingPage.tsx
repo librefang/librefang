@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import QRCode from "qrcode";
 import { Smartphone, RefreshCw, CheckCircle, Clock, Trash2, AlertCircle } from "lucide-react";
 import { usePairingRequest, usePairedDevices, useRemovePairedDevice } from "../lib/queries/pairing";
@@ -10,34 +11,65 @@ import { pairingKeys } from "../lib/queries/keys";
 function QRCanvas({ uri }: { uri: string }) {
   const { t } = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [renderFailed, setRenderFailed] = useState(false);
   useEffect(() => {
-    if (canvasRef.current) {
-      QRCode.toCanvas(canvasRef.current, uri, {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    let active = true;
+    setRenderFailed(false);
+    void QRCode.toCanvas(canvas, uri, {
         width: 240,
         margin: 2,
         color: { dark: "#0f172a", light: "#ffffff" },
+      }).catch(() => {
+        if (active) setRenderFailed(true);
       });
-    }
+    return () => { active = false; };
   }, [uri]);
   return (
-    <canvas
-      ref={canvasRef}
-      role="img"
-      aria-label={t("mobile_pairing.qr_aria_label")}
-      className="rounded-xl"
-    />
+    <>
+      <canvas
+        ref={canvasRef}
+        role="img"
+        aria-label={t("mobile_pairing.qr_aria_label")}
+        className={renderFailed ? "hidden" : "rounded-xl"}
+      />
+      {renderFailed && (
+      <div role="alert" className="flex h-60 w-60 items-center justify-center rounded-xl bg-error/5 p-4 text-center text-sm text-error">
+        {t("mobile_pairing.qr_render_failed")}
+      </div>
+      )}
+    </>
   );
 }
 
-function CountdownBadge({ expiresAt }: { expiresAt: string }) {
-  const { t } = useTranslation();
-  const [secs, setSecs] = useState(() =>
-    Math.max(0, Math.round((new Date(expiresAt).getTime() - Date.now()) / 1000)),
-  );
+function secondsUntil(expiresAt: string): number {
+  return Math.max(0, Math.ceil((new Date(expiresAt).getTime() - Date.now()) / 1000));
+}
+
+function useRemainingSeconds(expiresAt: string | undefined): number {
+  const [secs, setSecs] = useState(() => expiresAt ? secondsUntil(expiresAt) : 0);
   useEffect(() => {
-    const id = setInterval(() => setSecs((s) => Math.max(0, s - 1)), 1000);
+    if (!expiresAt) {
+      setSecs(0);
+      return;
+    }
+    const update = () => {
+      const remaining = secondsUntil(expiresAt);
+      setSecs(remaining);
+      return remaining;
+    };
+    if (update() === 0) return;
+    const id = setInterval(() => {
+      if (update() === 0) clearInterval(id);
+    }, 1000);
     return () => clearInterval(id);
   }, [expiresAt]);
+  return secs;
+}
+
+function CountdownBadge({ secs }: { secs: number }) {
+  const { t } = useTranslation();
   const mins = Math.floor(secs / 60);
   const s = secs % 60;
   const expired = secs === 0;
@@ -57,8 +89,8 @@ export function MobilePairingPage() {
   const { data: req, error, isLoading, refetch } = usePairingRequest(true);
   const { data: devices = [] } = usePairedDevices();
   const removeDevice = useRemovePairedDevice();
-
-  const expired = req ? new Date(req.expires_at).getTime() < Date.now() : false;
+  const remainingSecs = useRemainingSeconds(req?.expires_at);
+  const expired = !!req && remainingSecs === 0;
 
   const refresh = () => {
     qc.removeQueries({ queryKey: pairingKeys.request() });
@@ -79,7 +111,7 @@ export function MobilePairingPage() {
           <p className="text-sm text-text-dim">
             {/*
               Translator strings may contain only the tags listed in
-              `components`. i18next maps <link>…</link> → <a>, <code>…</code>
+              `components`. i18next maps <a>…</a> → the typed Link, <code>…</code>
               → <code>; any other tag in a translation is rendered as text,
               so a malicious translator cannot inject <script> or new
               attributes.
@@ -87,7 +119,7 @@ export function MobilePairingPage() {
             <Trans
               i18nKey="mobile_pairing.error_disabled_body"
               components={{
-                a: <a href="/dashboard/config/security" className="text-brand underline" />,
+                a: <Link to="/config/security" className="text-brand underline" />,
                 code: <code />,
               }}
             />
@@ -132,7 +164,7 @@ export function MobilePairingPage() {
               <QRCanvas uri={req.qr_uri} />
             </div>
             <div className="flex items-center gap-4">
-              <CountdownBadge expiresAt={req.expires_at} />
+              <CountdownBadge secs={remainingSecs} />
               <button
                 onClick={refresh}
                 className="flex items-center gap-1.5 text-sm text-brand hover:underline"
@@ -187,7 +219,7 @@ export function MobilePairingPage() {
                 </div>
                 <button
                   onClick={() => removeDevice.mutate(d.device_id)}
-                  disabled={removeDevice.isPending}
+                  disabled={removeDevice.isPending && removeDevice.variables === d.device_id}
                   className="rounded-lg p-1.5 text-text-dim hover:text-error transition-colors"
                   title={t("mobile_pairing.remove_title")}
                 >

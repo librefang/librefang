@@ -3878,6 +3878,7 @@
     "error_disabled_body": "Enable pairing in <a>Config → Security</a> (<code>pairing.enabled = true</code>).",
     "error_generic_title": "Failed to generate pairing code",
     "qr_aria_label": "QR code for pairing with a mobile device",
+    "qr_render_failed": "The pairing QR code could not be rendered. Refresh to try again.",
     "btn_try_again": "Try again"
   },
   "shortcuts_help": {
