@@ -16,10 +16,10 @@ use agent_client_protocol::schema::v1::{
     InitializeResponse, LoadSessionRequest, NewSessionRequest, NewSessionResponse,
     PermissionOptionId, PromptRequest, PromptResponse, ReadTextFileRequest, ReadTextFileResponse,
     ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionNotification, SessionUpdate, StopReason, TerminalExitStatus, TerminalId,
-    TerminalOutputRequest, TerminalOutputResponse, TextContent, WaitForTerminalExitRequest,
-    WaitForTerminalExitResponse,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    ResumeSessionResponse, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
+    StopReason, TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse,
+    TextContent, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
 // `ProtocolVersion` is re-exported at the `schema` root (not under `v1`) in agent-client-protocol 1.x.
 use agent_client_protocol::schema::ProtocolVersion;
@@ -754,6 +754,85 @@ async fn session_load_replays_history_to_client() {
                             },
                             other => panic!("expected AgentMessageChunk second, got {other:?}"),
                         }
+                        Ok(())
+                    },
+                )
+                .await;
+            assert!(result.is_ok(), "client driver failed: {result:?}");
+        })
+        .await;
+}
+
+/// `session/resume` reconnects a client that already has its transcript.
+/// Persisted history must not be emitted again as `session/update` notifications.
+#[tokio::test(flavor = "current_thread")]
+async fn session_resume_does_not_replay_history_to_client() {
+    use tokio::task::LocalSet;
+
+    let local = LocalSet::new();
+    local
+        .run_until(async {
+            let kernel = MockKernel::new(vec![]);
+            kernel
+                .set_history(vec![
+                    (
+                        librefang_types::message::Role::User,
+                        "already visible question".to_string(),
+                    ),
+                    (
+                        librefang_types::message::Role::Assistant,
+                        "already visible answer".to_string(),
+                    ),
+                ])
+                .await;
+
+            let (server_reader, server_writer, client_reader, client_writer) = duplex_pair();
+            let server_transport =
+                agent_client_protocol::ByteStreams::new(server_writer, server_reader);
+            let client_transport =
+                agent_client_protocol::ByteStreams::new(client_writer, client_reader);
+
+            let kernel_for_server = kernel.clone();
+            tokio::task::spawn_local(async move {
+                let _ = librefang_acp::run_with_transport(
+                    kernel_for_server,
+                    AgentId(Uuid::nil()),
+                    server_transport,
+                )
+                .await;
+            });
+
+            let updates: Arc<AsyncMutex<Vec<SessionNotification>>> =
+                Arc::new(AsyncMutex::new(Vec::new()));
+            let updates_capture = updates.clone();
+            let client = agent_client_protocol::Client.builder().on_receive_notification(
+                async move |notif: SessionNotification, _cx| {
+                    updates_capture.lock().await.push(notif);
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_notification!(),
+            );
+
+            let result = client
+                .connect_with(
+                    client_transport,
+                    async move |cx: ConnectionTo<agent_client_protocol::Agent>| -> Result<(), agent_client_protocol::Error> {
+                        let _: InitializeResponse =
+                            recv(cx.send_request(InitializeRequest::new(ProtocolVersion::LATEST)))
+                                .await?;
+
+                        let session_id =
+                            agent_client_protocol::schema::v1::SessionId::new("resuming-session");
+                        let _: ResumeSessionResponse = recv(cx.send_request(
+                            ResumeSessionRequest::new(session_id, PathBuf::from("/tmp/proj")),
+                        ))
+                        .await?;
+
+                        let captured = updates.lock().await.clone();
+                        assert!(
+                            captured.is_empty(),
+                            "resume replayed persisted history: {captured:?}"
+                        );
                         Ok(())
                     },
                 )
