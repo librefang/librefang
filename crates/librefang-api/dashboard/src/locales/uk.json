@@ -3670,7 +3670,6 @@
       "not_set": "Не встановлено"
     },
     "errors": {
-      "empty_entry": "{{field}} містить порожній запис",
       "duplicate_entry": "{{field}} містить дублікат запису '{{item}}'",
       "writable_not_subset": "memory_access.writable_namespaces['{{ns}}'] не входить до readable_namespaces (запис має бути підмножиною читання)"
     },

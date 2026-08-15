@@ -6,7 +6,7 @@
 // `useUpdateUserPolicy`. Validation mirrors the daemon's checks so the
 // user sees errors inline before a round-trip.
 
-import { useCallback, useEffect, useMemo, useId, useState } from "react";
+import { useCallback, useEffect, useMemo, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams, Link } from "@tanstack/react-router";
 import {
@@ -93,7 +93,7 @@ function policyToForm(policy: PermissionPolicy | undefined): FormState {
         out[ch] = { allowed: "", denied: "" };
       }
       for (const [ch, rule] of Object.entries(policy?.channel_tool_rules ?? {})) {
-        out[ch] = {
+        out[normalizeChannelKey(ch)] = {
           allowed: formatList(rule.allowed_tools),
           denied: formatList(rule.denied_tools),
         };
@@ -112,13 +112,6 @@ function validateForm(form: FormState, t: ValidatorT): string | null {
   const checkList = (label: string, items: string[]): string | null => {
     const seen = new Set<string>();
     for (const item of items) {
-      if (item.length === 0) {
-        return t(
-          "userPolicy.errors.empty_entry",
-          "{{field}} contains an empty entry",
-          { field: label },
-        );
-      }
       if (seen.has(item)) {
         return t(
           "userPolicy.errors.duplicate_entry",
@@ -254,6 +247,7 @@ export function UserPolicyPage() {
   const updateMutation = useUpdateUserPolicy();
 
   const [form, setForm] = useState<FormState>(() => policyToForm(undefined));
+  const [baselineForm, setBaselineForm] = useState<FormState | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitOk, setSubmitOk] = useState(false);
   // Inline add-channel state. Kept local to the page (not in the form)
@@ -275,30 +269,35 @@ export function UserPolicyPage() {
     [submitOk],
   );
 
-  // Re-hydrate the form whenever the underlying query resolves a new value
-  // (e.g. on initial load or after invalidation).
-  useEffect(() => {
-    if (policyQuery.data) {
-      setForm(policyToForm(policyQuery.data));
-    }
-  }, [policyQuery.data]);
-
   // Track whether the form differs from the last loaded server state so
   // we can enable / disable Discard and surface "Unsaved changes" hint.
   const isDirty = useMemo(() => {
-    if (!policyQuery.data) return false;
-    return !deepEqual(form, policyToForm(policyQuery.data));
-  }, [form, policyQuery.data]);
+    if (!baselineForm) return false;
+    return !deepEqual(form, baselineForm);
+  }, [baselineForm, form]);
+  const isDirtyRef = useRef(isDirty);
+  const seededNameRef = useRef<string | null>(null);
+  isDirtyRef.current = isDirty;
+
+  // Seed on initial load or route changes. Background refetches may refresh
+  // a clean form, but must not discard edits made after the previous payload.
+  useEffect(() => {
+    if (!policyQuery.data) return;
+    const nextBaseline = policyToForm(policyQuery.data);
+    if (seededNameRef.current !== name || !isDirtyRef.current) setForm(nextBaseline);
+    setBaselineForm(nextBaseline);
+    seededNameRef.current = name;
+  }, [name, policyQuery.data]);
 
   // Discard: re-seed straight from the last query payload. We keep
   // submitError / submitOk untouched so the user still sees the
   // outcome of their last submit attempt.
   const handleDiscard = useCallback(() => {
-    if (!policyQuery.data) return;
-    setForm(policyToForm(policyQuery.data));
+    if (!baselineForm) return;
+    setForm(baselineForm);
     setNewChannel("");
     setNewChannelError(null);
-  }, [policyQuery.data]);
+  }, [baselineForm]);
 
   const validationError = useMemo(
     () =>
@@ -413,7 +412,7 @@ export function UserPolicyPage() {
               type="submit"
               variant="primary"
               size="sm"
-              disabled={updateMutation.isPending || !!validationError}
+              disabled={updateMutation.isPending || !!validationError || !isDirty}
             >
               <Save className="h-3.5 w-3.5" />
               {t("user_policy.save", "Save")}
@@ -883,4 +882,3 @@ function CheckboxLabel({ label, checked, onChange }: CheckboxLabelProps) {
     </label>
   );
 }
-

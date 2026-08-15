@@ -3670,7 +3670,6 @@
       "not_set": "Nie ustawiono"
     },
     "errors": {
-      "empty_entry": "{{field}} zawiera pusty wpis",
       "duplicate_entry": "{{field}} zawiera zduplikowany wpis '{{item}}'",
       "writable_not_subset": "memory_access.writable_namespaces['{{ns}}'] nie znajduje się w readable_namespaces (zapisywalne muszą być podzbiorem odczytywalnych)"
     },

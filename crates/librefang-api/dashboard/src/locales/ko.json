@@ -3664,7 +3664,6 @@
       "not_set": "설정되지 않음"
     },
     "errors": {
-      "empty_entry": "{{field}}에 빈 항목이 포함되어 있습니다.",
       "duplicate_entry": "{{field}}에 '{{item}}' 중복 항목이 포함되어 있습니다.",
       "writable_not_subset": "memory_access.writable_namespaces['{{ns}}']는 readable_namespaces에 없습니다(쓰기 가능은 읽기 가능의 하위 집합이어야 함)."
     },

@@ -3664,7 +3664,6 @@
       "not_set": "未设置"
     },
     "errors": {
-      "empty_entry": "{{field}} 中存在空白条目",
       "duplicate_entry": "{{field}} 中存在重复条目 '{{item}}'",
       "writable_not_subset": "memory_access.writable_namespaces['{{ns}}'] 不在 readable_namespaces 中（可写必须是可读的子集）"
     },

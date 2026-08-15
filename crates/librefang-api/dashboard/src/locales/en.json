@@ -3664,7 +3664,6 @@
       "not_set": "Not set"
     },
     "errors": {
-      "empty_entry": "{{field}} contains an empty entry",
       "duplicate_entry": "{{field}} contains duplicate entry '{{item}}'",
       "writable_not_subset": "memory_access.writable_namespaces['{{ns}}'] is not in readable_namespaces (writable must be a subset of readable)"
     },
