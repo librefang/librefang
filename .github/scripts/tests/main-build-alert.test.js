@@ -5,14 +5,31 @@ const {
   escapeInlineCode,
   escapeMarkdownText,
   isRedConclusion,
+  selectOpenAlertIssues,
 } = require('../main-build-alert.js');
 
-for (const conclusion of ['failure', 'timed_out', 'cancelled', 'startup_failure']) {
+for (const conclusion of [
+  'failure',
+  'timed_out',
+  'cancelled',
+  'startup_failure',
+  'action_required',
+  'stale',
+]) {
   assert.equal(isRedConclusion(conclusion), true, conclusion);
 }
-for (const conclusion of ['success', 'neutral', 'skipped', 'action_required']) {
+for (const conclusion of ['success', 'neutral', 'skipped']) {
   assert.equal(isRedConclusion(conclusion), false, conclusion);
 }
+
+assert.deepEqual(
+  selectOpenAlertIssues([
+    { number: 1 },
+    { number: 2, pull_request: { url: 'https://api.github.test/pulls/2' } },
+    { number: 3 },
+  ]).map(issue => issue.number),
+  [1, 3],
+);
 
 const escaped = escapeMarkdownText('@maintainers [fake](https://example.test) `code` *bold*');
 assert.equal(escaped.includes('@maintainers'), false);

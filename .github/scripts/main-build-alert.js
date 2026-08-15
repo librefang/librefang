@@ -5,6 +5,8 @@ const RED_CONCLUSIONS = new Set([
   'timed_out',
   'cancelled',
   'startup_failure',
+  'action_required',
+  'stale',
 ]);
 
 function isRedConclusion(conclusion) {
@@ -25,4 +27,13 @@ function escapeInlineCode(value) {
   return singleLine(value).replaceAll('`', "'").replaceAll('@', '@\u200b');
 }
 
-module.exports = { escapeInlineCode, escapeMarkdownText, isRedConclusion };
+function selectOpenAlertIssues(items) {
+  return items.filter(item => !item.pull_request);
+}
+
+module.exports = {
+  escapeInlineCode,
+  escapeMarkdownText,
+  isRedConclusion,
+  selectOpenAlertIssues,
+};

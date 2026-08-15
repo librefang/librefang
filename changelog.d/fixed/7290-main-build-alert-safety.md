@@ -1,1 +1,1 @@
-Alert on main-CI startup failures, serialize issue reconciliation, render untrusted job metadata as inert single-line Markdown, and bound notification runtime. (#7290) (@houko)
+Alert on every actionable main-CI failure, ignore stale completions, exclude PRs from alert reconciliation, render untrusted job metadata as inert single-line Markdown, and bound runtime. (#7290) (@houko)
