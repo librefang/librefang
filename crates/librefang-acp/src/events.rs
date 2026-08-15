@@ -73,10 +73,9 @@ impl EventTranslator {
                 ))]
             }
 
-            // Owner notices are private side-channel messages for the
-            // agent owner's DM. ACP has no owner-authenticated update
-            // channel, so forwarding one as ordinary agent speech would
-            // disclose it to the editor session participant.
+            // Owner notices are private side-channel messages for the agent owner's DM.
+            // ACP has no owner-authenticated update channel.
+            // Forwarding one as ordinary agent speech would disclose it to the editor session participant.
             StreamEvent::OwnerNotice { .. } => Vec::new(),
 
             StreamEvent::ToolUseStart { id, name } => {
