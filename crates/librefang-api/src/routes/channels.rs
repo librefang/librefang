@@ -1992,6 +1992,18 @@ mod sidecar_configuration_write_tests {
             std::fs::read_to_string(secrets_path).unwrap(),
             original_secrets
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(dir.path().join("secrets.env"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]
