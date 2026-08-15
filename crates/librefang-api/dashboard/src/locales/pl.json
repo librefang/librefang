@@ -1438,7 +1438,7 @@
     "topology_description": "Koordynacja wysokowydajnej magistrali zdarzeń.",
     "total_channels": "Łączna liczba kanałów",
     "connected": "Połączone",
-    "events_today": "Dzisiejsze zdarzenia",
+    "recent_events": "Ostatnie zdarzenia (maks. 50)",
     "uptime": "Czas działania",
     "events": "Zdarzenia",
     "events_desc": "Zdarzenia komunikatów w czasie rzeczywistym.",
