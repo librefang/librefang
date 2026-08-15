@@ -204,6 +204,7 @@ def check_repository_automation() -> None:
     for contract_fragment in (
         "hasOpenPeerLink",
         "context.payload.changes?.body?.from",
+        "await github.rest.pulls.get",
         "github.paginate(github.rest.pulls.list",
     ):
         if contract_fragment not in github_script:

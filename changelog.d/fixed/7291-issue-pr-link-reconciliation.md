@@ -1,1 +1,1 @@
-Reconcile issue `has-pr` labels across every open peer PR on merge, close, reopen, and body edits, excluding stale snapshots of the event PR and using one boundary-safe parser for shorthand and same-repository URL links. (#7291) (@houko)
+Reconcile issue `has-pr` labels across every open peer PR on merge, close, reopen, and body edits, refreshing the event PR before writes, excluding stale list snapshots, and using one boundary-safe link parser. (#7291) (@houko)
