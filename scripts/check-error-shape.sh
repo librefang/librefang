@@ -64,24 +64,47 @@ LEGACY_FILES=(
   "crates/librefang-api/src/routes/config/system.rs"
 )
 
-# Prefer ripgrep (fast). Fall back to portable extended grep. Both are
-# deliberately line-oriented and consume the same ERE-compatible patterns.
+# Scan complete Rust source files so rustfmt line wrapping cannot hide a
+# forbidden first JSON key. Python is already required by the repository's CI
+# and gives every platform the same multiline-regex semantics.
 search_routes() {
-  local pattern=$1 status
-  set +e
-  if command -v rg >/dev/null 2>&1; then
-    rg --no-heading --line-number --no-ignore --hidden --text \
-      "$pattern" "$ROUTES_DIR"
-    status=$?
-  else
-    grep -rHnaE "$pattern" "$ROUTES_DIR"
-    status=$?
+  local shape=$1
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "::error::python3 is required for multiline error-shape scanning." >&2
+    return 2
   fi
-  set -e
-  case "$status" in
-    0|1) return 0 ;;
-    *) echo "::error::error-shape search engine failed (exit $status)." >&2; return 2 ;;
-  esac
+  python3 - "$ROUTES_DIR" "$shape" <<'PY'
+import os
+import re
+import sys
+
+root, shape = sys.argv[1:]
+patterns = {
+    "detail": re.compile(r'json!\(\{\s*"detail"\s*:', re.DOTALL),
+    "status_error": re.compile(
+        r'json!\(\{\s*"status"\s*:\s*"error"', re.DOTALL
+    ),
+}
+pattern = patterns[shape]
+try:
+    for directory, _, filenames in os.walk(root, followlinks=False):
+        for filename in sorted(filenames):
+            if not filename.endswith(".rs"):
+                continue
+            path = os.path.join(directory, filename)
+            if os.path.islink(path):
+                continue
+            with open(path, encoding="utf-8", errors="replace") as source:
+                text = source.read()
+            lines = text.splitlines()
+            for match in pattern.finditer(text):
+                line_number = text.count("\n", 0, match.start()) + 1
+                excerpt = lines[line_number - 1].strip() if lines else ""
+                print(f"{path}:{line_number}:{excerpt}")
+except (OSError, KeyError) as error:
+    print(f"::error::error-shape search failed: {error}", file=sys.stderr)
+    raise SystemExit(2)
+PY
 }
 
 # Filter out hits in the legacy allowlist by exact path, never by regex.
@@ -110,7 +133,7 @@ violations=0
 # with `"detail"` as the first key. The cheapest reliable heuristic:
 # require the literal `json!({"detail":` so the AuditEntry row case
 # (`json!({ "seq": …, "detail": …, … })`) is naturally excluded.
-if ! detail_hits=$(search_routes 'json!\(\{[[:space:]]*"detail"[[:space:]]*:'); then
+if ! detail_hits=$(search_routes detail); then
   exit 2
 fi
 detail_hits_filtered=""
@@ -132,7 +155,7 @@ fi
 # Pattern 2: `{"status": "error", …}` shape. Strip out `///` doc-comment
 # lines so a doc string explaining why the shape is gone doesn't trip
 # the lint.
-if ! status_hits=$(search_routes 'json!\(\{[[:space:]]*"status"[[:space:]]*:[[:space:]]*"error"'); then
+if ! status_hits=$(search_routes status_error); then
   exit 2
 fi
 status_hits_filtered=""

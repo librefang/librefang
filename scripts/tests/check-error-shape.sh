@@ -9,10 +9,11 @@ trap 'rm -rf "$WORK"' EXIT
 git -C "$WORK" init -q
 mkdir -p "$WORK/crates/librefang-api/src/routes"
 
-# Guarantee one run uses grep even on runners that install rg in /usr/bin.
+# Run once with the normal toolchain and once without rg to prove the scanner
+# does not depend on platform-specific multiline grep behavior.
 NO_RG_BIN="$WORK/no-rg-bin"
 mkdir -p "$NO_RG_BIN"
-for utility in git grep; do
+for utility in git grep python3; do
   ln -s "$(command -v "$utility")" "$NO_RG_BIN/$utility"
 done
 
@@ -33,24 +34,14 @@ grep -Fq 'OK: no new forbidden error shapes' <<<"$default_output"
 fallback_output=$(run_check "$NO_RG_BIN")
 grep -Fq 'OK: no new forbidden error shapes' <<<"$fallback_output"
 
-mkdir -p "$WORK/bin"
-cat >"$WORK/bin/rg" <<'SH'
-#!/bin/sh
-exit 2
-SH
-chmod +x "$WORK/bin/rg"
-set +e
-engine_failure=$(run_check "$WORK/bin:/usr/bin:/bin" 2>&1)
-engine_status=$?
-set -e
-if [[ "$engine_status" != 2 || "$engine_failure" != *'search engine failed'* ]]; then
-  echo "FAIL: search engine failure was silently treated as no matches" >&2
-  exit 1
-fi
-
 cat >"$WORK/crates/librefang-api/src/routes/new.rs" <<'RS'
-let response = json!({ "detail": reason });
-let other = json!({ "status": "error", "message": reason });
+let response = json!({
+    "detail": reason,
+});
+let other = json!({
+    "status": "error",
+    "message": reason,
+});
 RS
 mkdir -p "$WORK/crates/librefang-api/src/routes/.hidden" \
   "$WORK/crates/librefang-api/src/routes/ignored" "$WORK/outside"
@@ -74,7 +65,7 @@ if [[ "$default_status" != 1 || "$fallback_status" != 1 ]]; then
 fi
 for output in "$default_failure" "$fallback_failure"; do
   grep -Fq 'new.rs:1:' <<<"$output"
-  grep -Fq 'new.rs:2:' <<<"$output"
+  grep -Fq 'new.rs:4:' <<<"$output"
   grep -Fq '.hidden/hidden.rs:1:' <<<"$output"
   grep -Fq 'ignored/ignored.rs:1:' <<<"$output"
   if grep -Fq 'symlink-target.rs' <<<"$output"; then
@@ -83,14 +74,15 @@ for output in "$default_failure" "$fallback_failure"; do
   fi
 done
 
-# A legacy filename lookalike must not inherit providers.rs exemption.
+# A same-named Rust file outside the exact legacy path must not inherit the
+# providers.rs exemption.
 rm -f "$WORK/crates/librefang-api/src/routes/.hidden/hidden.rs" \
   "$WORK/crates/librefang-api/src/routes/ignored/ignored.rs" \
   "$WORK/crates/librefang-api/src/routes/outside-link"
 mv "$WORK/crates/librefang-api/src/routes/new.rs" \
-  "$WORK/crates/librefang-api/src/routes/providersXrs"
+  "$WORK/crates/librefang-api/src/routes/.hidden/providers.rs"
 if run_check "$PATH" >/dev/null 2>&1; then
-  echo "FAIL: regex-like legacy path lookalike was exempted" >&2
+  echo "FAIL: same-named non-legacy path was exempted" >&2
   exit 1
 fi
 
