@@ -764,8 +764,7 @@ async fn session_load_replays_history_to_client() {
 }
 
 /// `session/resume` reconnects a client that already has its transcript.
-/// Persisted history must not be emitted again as `session/update`
-/// notifications.
+/// Persisted history must not be emitted again as `session/update` notifications.
 #[tokio::test(flavor = "current_thread")]
 async fn session_resume_does_not_replay_history_to_client() {
     use tokio::task::LocalSet;
