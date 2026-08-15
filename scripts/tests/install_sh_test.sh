@@ -124,6 +124,17 @@ FIRST_PATH_ENTRY=$(printf "%s" "$PATH" | cut -d: -f1)
 if session_needs_path_refresh "$FIRST_PATH_ENTRY"; then
     fail "an existing PATH entry should not require a refresh"
 fi
+
+# INSTALL_DIR is configurable and may contain shell glob characters. The
+# comparison must treat them literally rather than as a case pattern.
+ORIGINAL_PATH=$PATH
+PATH='/tmp/exact:/tmp/literal-star'
+session_needs_path_refresh '/tmp/*' \
+    || fail "a wildcard-like install dir absent from PATH should require a refresh"
+if session_needs_path_refresh '/tmp/literal-star'; then
+    fail "a literal install dir present in PATH should not require a refresh"
+fi
+PATH=$ORIGINAL_PATH
 pass "SESSION_NEEDS_PATH_REFRESH detection"
 
 # Exercise the production restart-shell choice.

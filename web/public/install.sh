@@ -413,12 +413,28 @@ detect_user_shell() {
 }
 
 # Return 0 when the current process still needs INSTALL_DIR added to PATH.
-session_needs_path_refresh() {
-    case ":${PATH:-}:" in
-        *":$1:"*) return 1 ;;
-        *) return 0 ;;
-    esac
-}
+# Run in a subshell so the parser variables cannot leak into install().
+session_needs_path_refresh() (
+    _snpr_target=$1
+    _snpr_remaining=${PATH:-}
+
+    while :; do
+        case "$_snpr_remaining" in
+            *:*)
+                _snpr_entry=${_snpr_remaining%%:*}
+                _snpr_remaining=${_snpr_remaining#*:}
+                _snpr_last=0
+                ;;
+            *)
+                _snpr_entry=$_snpr_remaining
+                _snpr_last=1
+                ;;
+        esac
+
+        [ "$_snpr_entry" != "$_snpr_target" ] || return 1
+        [ "$_snpr_last" -eq 0 ] || return 0
+    done
+)
 
 # Prefer the configured login shell, falling back to the detected parent shell.
 restart_shell_for() {
