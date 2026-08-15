@@ -14,6 +14,8 @@ import { useModels } from "../../lib/queries/models";
 import {
   KNOWN_EMBEDDING_MODELS,
   EMBEDDING_PROVIDER_LABELS,
+  EMBEDDING_PROVIDERS,
+  isKnownEmbeddingProvider,
   CUSTOM_OPTION,
 } from "./constants";
 
@@ -197,11 +199,11 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
   // `text-embedding-3-small` would be flagged Custom whenever the user hasn't
   // explicitly pinned `openai`, which is wrong and surprising.
   const embeddingProvider = form?.embedding_provider ?? "";
-  const embeddingProviderKnown = embeddingProvider in KNOWN_EMBEDDING_MODELS;
+  const embeddingProviderKnown = isKnownEmbeddingProvider(embeddingProvider);
   const embeddingProviderSuggestions = embeddingProviderKnown
     ? KNOWN_EMBEDDING_MODELS[embeddingProvider]
     : Array.from(new Set(Object.values(KNOWN_EMBEDDING_MODELS).flat()));
-  const embeddingKnownSet = new Set(embeddingProviderSuggestions);
+  const embeddingKnownSet = new Set<string>(embeddingProviderSuggestions);
   const embeddingIsCustom =
     !!form?.embedding_model && !embeddingKnownSet.has(form.embedding_model);
   const chatModelIdSet = new Set(chatModels.map((m) => m.id));
@@ -315,24 +317,11 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                     <option value="">
                       {t("memory.auto_detect", { defaultValue: "Auto-detect" })}
                     </option>
-                    <option value="openai">
-                      {t("memory.provider_openai", { defaultValue: "OpenAI" })}
-                    </option>
-                    <option value="ollama">
-                      {t("memory.provider_ollama", { defaultValue: "Ollama" })}
-                    </option>
-                    <option value="vllm">
-                      {t("memory.provider_vllm", { defaultValue: "vLLM" })}
-                    </option>
-                    <option value="lmstudio">
-                      {t("memory.provider_lmstudio", { defaultValue: "LM Studio" })}
-                    </option>
-                    <option value="gemini">
-                      {t("memory.provider_gemini", { defaultValue: "Gemini" })}
-                    </option>
-                    <option value="minimax">
-                      {t("memory.provider_minimax", { defaultValue: "MiniMax" })}
-                    </option>
+                    {EMBEDDING_PROVIDERS.map((provider) => (
+                      <option key={provider} value={provider}>
+                        {EMBEDDING_PROVIDER_LABELS[provider]}
+                      </option>
+                    ))}
                   </select>
                 </div>
                 <div>
@@ -363,12 +352,12 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                         </option>
                       ))
                     ) : (
-                      Object.entries(KNOWN_EMBEDDING_MODELS).map(([prov, names]) => (
+                      EMBEDDING_PROVIDERS.map((prov) => (
                         <optgroup
                           key={prov}
-                          label={EMBEDDING_PROVIDER_LABELS[prov] ?? prov}
+                          label={EMBEDDING_PROVIDER_LABELS[prov]}
                         >
-                          {names.map((name) => (
+                          {KNOWN_EMBEDDING_MODELS[prov].map((name) => (
                             <option key={`${prov}:${name}`} value={name}>
                               {name}
                             </option>
