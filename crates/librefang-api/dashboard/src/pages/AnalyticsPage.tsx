@@ -39,6 +39,26 @@ interface BudgetForm {
   alert?: string;
 }
 
+function providerCapTone(pct: number, alertThreshold: number): string {
+  if (pct >= alertThreshold) return "bg-error shadow-[0_0_6px_rgba(239,68,68,0.45)]";
+  if (pct >= alertThreshold * 0.6) return "bg-warning";
+  return "bg-brand";
+}
+
+function parseNonNegative(raw: string, integer = false): number | null {
+  if (raw.trim() === "") return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0 || (integer && !Number.isInteger(value))) return null;
+  return value;
+}
+
+export function escapeCsvField(value: unknown): string {
+  if (value == null) return "";
+  const raw = String(value);
+  const safe = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+  return /[",\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+}
+
 // Render a single percent / progress-bar pair with green/yellow/red coloring
 // driven by the global `alert_threshold` echoed on `/api/budget/providers`.
 // 0-cap means "unlimited" — the bar collapses to a single em-dash so the
@@ -57,11 +77,7 @@ function ProviderCapBar({
   }
   const pct = Math.min(1, spend / cap);
   const breached = pct >= alertThreshold;
-  const tone = breached
-    ? "bg-error shadow-[0_0_6px_rgba(239,68,68,0.45)]"
-    : pct >= alertThreshold * 0.6
-    ? "bg-warning"
-    : "bg-brand";
+  const tone = providerCapTone(pct, alertThreshold);
   return (
     <div className="flex items-center gap-1.5 min-w-[80px]">
       <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-main/60">
@@ -119,23 +135,24 @@ function ProviderBudgetsCard({
   };
 
   const submitEdit = (providerId: string) => {
-    const payload = {
-      max_cost_per_hour_usd: parseFloat(editForm.max_cost_per_hour_usd) || 0,
-      max_cost_per_day_usd: parseFloat(editForm.max_cost_per_day_usd) || 0,
-      max_cost_per_month_usd: parseFloat(editForm.max_cost_per_month_usd) || 0,
-      max_tokens_per_hour: parseInt(editForm.max_tokens_per_hour, 10) || 0,
+    const parsed = {
+      max_cost_per_hour_usd: parseNonNegative(editForm.max_cost_per_hour_usd),
+      max_cost_per_day_usd: parseNonNegative(editForm.max_cost_per_day_usd),
+      max_cost_per_month_usd: parseNonNegative(editForm.max_cost_per_month_usd),
+      max_tokens_per_hour: parseNonNegative(editForm.max_tokens_per_hour, true),
     };
-    for (const [k, v] of Object.entries(payload)) {
-      if (!Number.isFinite(v) || v < 0) {
+    for (const [field, value] of Object.entries(parsed)) {
+      if (value === null) {
         addToast(
           t("analytics.provider_budgets.bad_input", "{{field}} must be a non-negative number", {
-            field: k,
+            field,
           }),
           "error",
         );
         return;
       }
     }
+    const payload = parsed as Record<keyof typeof parsed, number>;
     mutation.mutate(
       { providerId, payload },
       {
@@ -372,19 +389,14 @@ export function AnalyticsPage() {
   // Download combined per-agent + per-model usage as a CSV so operators
   // can hand it to their finance/FinOps pipeline without screenshotting.
   const handleExportCsv = () => {
-    const escape = (v: unknown) => {
-      if (v == null) return "";
-      const s = String(v);
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
     const lines: string[] = [];
     lines.push("scope,name,identifier,total_cost_usd,total_tokens,calls");
     for (const a of usageByAgent) {
       lines.push(
         [
           "agent",
-          escape(a.name ?? ""),
-          escape(a.agent_id ?? ""),
+          escapeCsvField(a.name ?? ""),
+          escapeCsvField(a.agent_id ?? ""),
           (a.cost ?? a.total_cost_usd ?? 0).toString(),
           (a.total_tokens ?? 0).toString(),
           (a.call_count ?? a.calls ?? 0).toString(),
@@ -395,8 +407,8 @@ export function AnalyticsPage() {
       lines.push(
         [
           "model",
-          escape(m.model ?? ""),
-          escape(m.provider ?? ""),
+          escapeCsvField(m.model ?? ""),
+          escapeCsvField(m.provider ?? ""),
           (m.total_cost_usd ?? 0).toString(),
           (m.total_tokens ?? 0).toString(),
           (m.call_count ?? 0).toString(),
@@ -455,12 +467,13 @@ export function AnalyticsPage() {
       dailyQuery.refetch(),
       modelPerformanceQuery.refetch(),
       budgetQuery.refetch(),
+      providerBudgetsQuery.refetch(),
     ]).catch((e) => {
       // Match NetworkPage's pattern (#4718 review L1) — surface refresh
       // failures as a toast rather than silently swallowing them.
       addToast(toastErr(e, t("common.error")), "error");
     });
-  }, [usageQuery, usageByAgentQuery, usageByModelQuery, dailyQuery, modelPerformanceQuery, budgetQuery, addToast, t]);
+  }, [usageQuery, usageByAgentQuery, usageByModelQuery, dailyQuery, modelPerformanceQuery, budgetQuery, providerBudgetsQuery, addToast, t]);
 
   return (
     <div className="flex flex-col gap-4 sm:gap-6 transition-colors duration-300">
@@ -702,6 +715,13 @@ export function AnalyticsPage() {
                   if (budgetForm.alert) {
                     const parsed = parseFloat(budgetForm.alert);
                     if (!isNaN(parsed) && parsed >= 0) payload.alert_threshold = parsed;
+                  }
+                  if (Object.keys(payload).length === 0) {
+                    addToast(
+                      t("analytics.budget_no_changes", "Enter at least one valid budget value before saving."),
+                      "info",
+                    );
+                    return;
                   }
                   budgetMutation.mutate(payload, {
                     onSuccess: () => {

@@ -1263,6 +1263,7 @@
     "token_limit": "Token/小时",
     "alert_threshold": "告警阈值",
     "budget_saved": "预算限额已更新。",
+    "budget_no_changes": "保存前请至少输入一个有效的预算值。",
     "total_cost": "总消耗",
     "avg_latency": "平均延迟",
     "usage_by_agent": "智能体消耗",

@@ -1263,6 +1263,7 @@
     "token_limit": "Tokeny/godzinę",
     "alert_threshold": "Próg ostrzegawczy",
     "budget_saved": "Zaktualizowano limity budżetu.",
+    "budget_no_changes": "Przed zapisaniem wprowadź co najmniej jedną prawidłową wartość budżetu.",
     "total_cost": "Łączny koszt",
     "avg_latency": "Średnie opóźnienie",
     "usage_by_agent": "Zużycie według agenta",
