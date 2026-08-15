@@ -225,4 +225,57 @@ describe("groupedPicker", () => {
     expect(roles).toEqual(["linter", "main"]); // alphabetical
     expect(flags).toEqual([false, false]); // no coordinator marked
   });
+
+  it("drops hands with null, blank, or malformed identity metadata", () => {
+    const agents = [agent("a1", "main", { is_hand: true })];
+    const hands = [
+      hand("inst-1", null as unknown as string, "Null ID", { main: "a1" }, "main"),
+      hand("inst-2", "blank-name", "   ", { main: "a1" }, "main"),
+    ];
+
+    expect(groupedPicker(agents, hands, true).handGroups).toEqual([]);
+  });
+
+  it("preserves every role and hand membership for a duplicate agent id", () => {
+    const agents = [agent("shared", "shared", { is_hand: true })];
+    const hands = [
+      hand("inst-1", "alpha", "Alpha", { coordinator: "shared", reviewer: "shared" }, "coordinator"),
+      hand("inst-2", "beta", "Beta", { researcher: "shared" }, "researcher"),
+    ];
+
+    const result = groupedPicker(agents, hands, true);
+
+    expect(result.handGroups.map((group) => ({
+      hand: group.hand_id,
+      roles: group.agents.map((member) => member.role),
+    }))).toEqual([
+      { hand: "alpha", roles: ["coordinator", "reviewer"] },
+      { hand: "beta", roles: ["researcher"] },
+    ]);
+  });
+
+  it("keeps identical recovered memberships keyed by instance", () => {
+    const agents = [agent("shared", "shared", { is_hand: true })];
+    const hands = [
+      hand("inst-1", "alpha", "Alpha", { main: "shared" }, "main"),
+      hand("inst-2", "alpha", "Alpha", { main: "shared" }, "main"),
+    ];
+
+    const members = groupedPicker(agents, hands, true).handGroups[0].agents;
+
+    expect(members).toHaveLength(2);
+    expect(new Set(members.map((member) => member.membershipKey)).size).toBe(2);
+  });
+
+  it("normalizes valid membership fields and rejects blank roles", () => {
+    const agents = [agent("a1", "main", { is_hand: true })];
+    const hands = [
+      hand("inst-1", "alpha", "Alpha", { "  main  ": "  a1  ", "   ": "a1" }, " main "),
+    ];
+
+    const members = groupedPicker(agents, hands, true).handGroups[0].agents;
+
+    expect(members).toHaveLength(1);
+    expect(members[0]).toMatchObject({ id: "a1", role: "main", isCoordinator: true });
+  });
 });
