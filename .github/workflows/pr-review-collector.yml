@@ -20,10 +20,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: pr-review-collector-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   collect:
     name: Capture review event
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     # Only the two states the applier acts on need a full collection
     # run; commented/dismissed/pending events are dropped here so we
     # don't churn artifacts.
