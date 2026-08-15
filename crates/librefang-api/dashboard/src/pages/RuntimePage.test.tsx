@@ -420,6 +420,31 @@ describe("RuntimePage", () => {
     expect(shutdownReset).toHaveBeenCalledTimes(1);
     vi.useRealTimers();
   });
+
+  it("does not postpone an older mutation reset when another action settles", () => {
+    vi.useFakeTimers();
+    const backupReset = vi.fn();
+    const restoreReset = vi.fn();
+    let restoreSettled = false;
+    useCreateBackupMock.mockReturnValue(
+      makeMutation({ isError: true, reset: backupReset }),
+    );
+    useRestoreBackupMock.mockImplementation(() =>
+      makeMutation({ isError: restoreSettled, reset: restoreReset }),
+    );
+    renderPage();
+
+    act(() => vi.advanceTimersByTime(4000));
+    restoreSettled = true;
+    fireEvent.click(screen.getByRole("button", { name: "runtime.shutdown" }));
+    act(() => vi.advanceTimersByTime(1000));
+    expect(backupReset).toHaveBeenCalledTimes(1);
+    expect(restoreReset).not.toHaveBeenCalled();
+
+    act(() => vi.advanceTimersByTime(4000));
+    expect(restoreReset).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
 });
 
 describe("RuntimePage presentation helpers", () => {

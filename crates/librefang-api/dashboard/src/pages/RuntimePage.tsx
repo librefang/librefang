@@ -65,6 +65,14 @@ export function anchorStatusVariant(status: string) {
   return "warning";
 }
 
+function useSettledMutationReset(settled: boolean, reset: () => void) {
+  useEffect(() => {
+    if (!settled) return;
+    const timeout = setTimeout(reset, 5000);
+    return () => clearTimeout(timeout);
+  }, [reset, settled]);
+}
+
 function formatUptime(seconds?: number): string {
   if (seconds === undefined || seconds <= 0) return "-";
   const d = Math.floor(seconds / 86400);
@@ -167,32 +175,11 @@ export function RuntimePage() {
   const resetCleanup = cleanupMutation.reset;
   const resetShutdown = shutdownMutation.reset;
 
-  useEffect(() => {
-    const resetters = [
-      backupSettled ? resetBackup : null,
-      restoreSettled ? resetRestore : null,
-      reloadSettled ? resetReload : null,
-      cleanupSettled ? resetCleanup : null,
-      shutdownSettled ? resetShutdown : null,
-    ].filter((reset): reset is () => void => reset !== null);
-    if (resetters.length === 0) return;
-
-    const timeout = setTimeout(() => {
-      for (const reset of resetters) reset();
-    }, 5000);
-    return () => clearTimeout(timeout);
-  }, [
-    backupSettled,
-    cleanupSettled,
-    reloadSettled,
-    resetBackup,
-    resetCleanup,
-    resetReload,
-    resetRestore,
-    resetShutdown,
-    restoreSettled,
-    shutdownSettled,
-  ]);
+  useSettledMutationReset(backupSettled, resetBackup);
+  useSettledMutationReset(restoreSettled, resetRestore);
+  useSettledMutationReset(reloadSettled, resetReload);
+  useSettledMutationReset(cleanupSettled, resetCleanup);
+  useSettledMutationReset(shutdownSettled, resetShutdown);
 
   // --- Derived data ---
   const snapshot = snapshotQuery.data ?? null;
