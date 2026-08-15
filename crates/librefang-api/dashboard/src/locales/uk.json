@@ -537,7 +537,10 @@
       "err_label": "помилка",
       "system_prompt_placeholder": "Ви — корисний ШІ-асистент...",
       "description_placeholder": "Що змінилося в цій версії?",
-      "experiment_name_placeholder": "Мій A/B тест"
+      "experiment_name_placeholder": "Мій A/B тест",
+      "delete_version_title": "Видалити версію промпту",
+      "delete_version_message": "Назавжди видалити версію v{{version}}? Цю дію неможливо скасувати.",
+      "variant_limit": "Відсотковий розподіл трафіку підтримує щонайбільше {{count}} варіантів."
     },
     "thinking": "Розширене мислення",
     "thinking_enabled": "Увімкнено",

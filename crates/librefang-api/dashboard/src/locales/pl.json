@@ -537,7 +537,10 @@
       "err_label": "błąd",
       "system_prompt_placeholder": "Jesteś pomocnym asystentem AI...",
       "description_placeholder": "Co się zmieniło w tej wersji?",
-      "experiment_name_placeholder": "Mój test A/B"
+      "experiment_name_placeholder": "Mój test A/B",
+      "delete_version_title": "Usuń wersję promptu",
+      "delete_version_message": "Trwale usunąć wersję v{{version}}? Tej operacji nie można cofnąć.",
+      "variant_limit": "Procentowy podział ruchu obsługuje maksymalnie {{count}} wariantów."
     },
     "thinking": "Rozszerzone myślenie",
     "thinking_enabled": "Włączone",
