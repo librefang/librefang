@@ -767,8 +767,11 @@ fn is_host_allowed(hostname: &str, ip: &IpAddr, allowed_hosts: &[String]) -> boo
 }
 
 fn hostname_matches_glob_suffix(hostname: &str, suffix: &str) -> bool {
-    let hostname = hostname.to_ascii_lowercase();
-    let suffix = suffix.to_ascii_lowercase();
+    let hostname = hostname.trim_end_matches('.').to_ascii_lowercase();
+    let suffix = suffix.trim_end_matches('.').to_ascii_lowercase();
+    if suffix.is_empty() {
+        return false;
+    }
     if suffix.starts_with('.') {
         return hostname.ends_with(&suffix);
     }
@@ -833,16 +836,17 @@ fn is_private_ip(ip: &IpAddr) -> bool {
     }
 }
 
-/// GET /api/a2a/agents/{id} — Get a specific external A2A agent by index, URL, or name.
+/// GET /api/a2a/agents/{id} — Get a specific external A2A agent by URL or name.
 #[utoipa::path(
     get,
     path = "/api/a2a/agents/{id}",
     tag = "a2a",
     params(
-        ("id" = String, Path, description = "Id"),
+        ("id" = String, Path, description = "Canonical URL or agent name"),
     ),
     responses(
-        (status = 200, description = "Get a specific external A2A agent", body = crate::types::JsonObject)
+        (status = 200, description = "Get a specific external A2A agent", body = crate::types::JsonObject),
+        (status = 404, description = "No external A2A agent found for the given identity")
     )
 )]
 pub async fn a2a_get_external_agent(
@@ -1287,6 +1291,7 @@ pub async fn a2a_external_task_status(
     ),
     responses(
         (status = 200, description = "Agent approved and promoted to trusted list", body = crate::types::JsonObject),
+        (status = 400, description = "The pending-agent identity is not a valid HTTP(S) URL"),
         (status = 404, description = "No pending agent found for the given URL")
     )
 )]
@@ -2003,7 +2008,8 @@ pub async fn comms_events(
     path = "/api/comms/events/stream",
     tag = "network",
     responses(
-        (status = 200, description = "SSE stream of inter-agent events", body = crate::types::JsonObject)
+        (status = 200, description = "SSE stream of inter-agent events", body = crate::types::JsonObject),
+        (status = 429, description = "The process-wide communication stream limit is exhausted", body = crate::types::JsonObject)
     )
 )]
 pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::response::Response {
@@ -2487,6 +2493,11 @@ mod tests {
             "example.com"
         ));
         assert!(!hostname_matches_glob_suffix("example.com", ".example.com"));
+        assert!(hostname_matches_glob_suffix(
+            "api.example.com.",
+            ".example.com"
+        ));
+        assert!(!hostname_matches_glob_suffix("attacker.example.", "."));
     }
 
     #[test]
