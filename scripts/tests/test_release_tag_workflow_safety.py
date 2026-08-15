@@ -208,6 +208,27 @@ def main() -> None:
     workspace_script = workspace_step.get("run") if isinstance(workspace_step, dict) else None
     if not isinstance(workspace_script, str) or "tomllib.load" not in workspace_script:
         raise SystemExit("release-tag workflow does not parse workspace version as TOML")
+    create_tag_step = next(
+        (
+            step
+            for step in release_tag_job.get("steps", [])
+            if step.get("name") == "Create + push tag"
+        ),
+        None,
+    )
+    create_tag_script = (
+        create_tag_step.get("run") if isinstance(create_tag_step, dict) else None
+    )
+    if not isinstance(create_tag_script, str) or not all(
+        fragment in create_tag_script
+        for fragment in (
+            "git fetch --no-tags origin refs/heads/main",
+            "CHECKED_OUT_SHA=$(git rev-parse HEAD)",
+            "CURRENT_MAIN_SHA=$(git rev-parse FETCH_HEAD)",
+            'if [ "$CHECKED_OUT_SHA" != "$CURRENT_MAIN_SHA" ]',
+        )
+    ):
+        raise SystemExit("release-tag workflow can tag a stale main checkout")
     manifest_text = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
     manifest = tomllib.loads(manifest_text)
     current_version = manifest["workspace"]["package"]["version"]
