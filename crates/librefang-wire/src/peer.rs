@@ -18,7 +18,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -160,6 +160,20 @@ impl PeerRateLimiter {
         }
     }
 
+    fn lock_counts<'a, T>(lock: &'a Mutex<T>, counter: &'static str) -> MutexGuard<'a, T> {
+        match lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!(
+                    counter,
+                    "OFP: peer rate limiter lock poisoned; preserving counters and recovering"
+                );
+                lock.clear_poison();
+                poisoned.into_inner()
+            }
+        }
+    }
+
     /// Check whether the peer identified by `peer_id` is within rate limits.
     ///
     /// Returns `Ok(())` if the message should proceed, or `Err(reason)` with a
@@ -186,10 +200,7 @@ impl PeerRateLimiter {
                 ));
             }
 
-            let mut counts = self
-                .msg_counts
-                .lock()
-                .map_err(|_| "Peer message rate limiter lock is poisoned".to_string())?;
+            let mut counts = Self::lock_counts(&self.msg_counts, "messages");
             if !counts.contains_key(peer_id) && counts.len() >= MAX_RATE_LIMIT_PEERS {
                 counts.retain(|_, (_, started)| now.duration_since(*started) < one_minute);
                 if counts.len() >= MAX_RATE_LIMIT_PEERS {
@@ -255,10 +266,7 @@ impl PeerRateLimiter {
         let now = Instant::now();
         let one_hour = Duration::from_secs(3600);
 
-        let mut counts = self
-            .token_counts
-            .lock()
-            .map_err(|_| "Peer token limiter lock is poisoned".to_string())?;
+        let mut counts = Self::lock_counts(&self.token_counts, "tokens");
         if !counts.contains_key(peer_id) && counts.len() >= MAX_RATE_LIMIT_PEERS {
             counts.retain(|_, (_, started)| now.duration_since(*started) < one_hour);
             if counts.len() >= MAX_RATE_LIMIT_PEERS {
@@ -300,11 +308,11 @@ impl PeerRateLimiter {
 #[cfg(test)]
 impl PeerRateLimiter {
     fn message_peer_count(&self) -> usize {
-        self.msg_counts.lock().unwrap().len()
+        Self::lock_counts(&self.msg_counts, "messages").len()
     }
 
     fn token_peer_count(&self) -> usize {
-        self.token_counts.lock().unwrap().len()
+        Self::lock_counts(&self.token_counts, "tokens").len()
     }
 }
 
@@ -2435,6 +2443,38 @@ mod tests {
 
         assert!(error.contains("capacity"));
         assert_eq!(limiter.token_peer_count(), MAX_RATE_LIMIT_PEERS);
+    }
+
+    #[test]
+    fn peer_rate_limiters_preserve_counters_and_clear_lock_poison() {
+        let limiter = PeerRateLimiter::new(2, Some(10));
+        limiter.check_message("preserved").unwrap();
+        limiter.record_tokens("preserved", 3).unwrap();
+
+        let message_poisoner = limiter.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = message_poisoner.msg_counts.lock().unwrap();
+            panic!("poison message counter lock");
+        })
+        .join()
+        .is_err());
+        let token_poisoner = limiter.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = token_poisoner.token_counts.lock().unwrap();
+            panic!("poison token counter lock");
+        })
+        .join()
+        .is_err());
+
+        limiter.check_message("preserved").unwrap();
+        let message_error = limiter.check_message("preserved").unwrap_err();
+        limiter.record_tokens("preserved", 4).unwrap();
+        let token_error = limiter.record_tokens("preserved", 4).unwrap_err();
+
+        assert!(message_error.contains("3 messages"));
+        assert!(token_error.contains("11 tokens"));
+        assert!(!limiter.msg_counts.is_poisoned());
+        assert!(!limiter.token_counts.is_poisoned());
     }
 
     #[test]

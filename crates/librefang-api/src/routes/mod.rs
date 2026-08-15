@@ -109,28 +109,90 @@ use crate::middleware::RequestLanguage;
 use crate::rate_limiter::KeyedRateLimiter;
 use dashmap::DashMap;
 use librefang_kernel::KernelApi;
-use librefang_types::i18n::{self, ErrorTranslator};
+use librefang_types::i18n;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
-
-/// Extract an [`ErrorTranslator`] from the request extensions.
-///
-/// Uses the language resolved by the `accept_language` middleware, or falls
-/// back to English if the middleware hasn't run (e.g. in tests).
-#[allow(dead_code)]
-pub(crate) fn translator_from_extensions(extensions: &axum::http::Extensions) -> ErrorTranslator {
-    let lang = extensions
-        .get::<RequestLanguage>()
-        .map(|rl| rl.0)
-        .unwrap_or(i18n::DEFAULT_LANGUAGE);
-    ErrorTranslator::new(lang)
-}
+use std::time::{Duration, Instant};
 
 /// Resolve the client language from an optional `RequestLanguage` extension.
-#[allow(dead_code)]
 pub(crate) fn resolve_lang(lang: Option<&axum::Extension<RequestLanguage>>) -> &'static str {
     lang.map(|l| l.0 .0).unwrap_or(i18n::DEFAULT_LANGUAGE)
+}
+
+const PROVIDER_TEST_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const PENDING_A2A_AGENT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Result of a user-triggered provider connectivity test.
+pub struct ProviderTestResult {
+    pub(crate) tested_at: Instant,
+    pub(crate) latency_ms: u128,
+    pub(crate) tested_rfc3339: String,
+    pub(crate) reachable: bool,
+}
+
+impl ProviderTestResult {
+    pub(crate) fn new(latency_ms: u128, reachable: bool) -> Self {
+        Self {
+            tested_at: Instant::now(),
+            latency_ms,
+            tested_rfc3339: chrono::Utc::now().to_rfc3339(),
+            reachable,
+        }
+    }
+
+    pub(crate) fn is_fresh(&self) -> bool {
+        self.is_fresh_at(Instant::now())
+    }
+
+    fn is_fresh_at(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.tested_at) < PROVIDER_TEST_CACHE_TTL
+    }
+}
+
+/// An unapproved A2A discovery and the time its lease was last refreshed.
+pub struct PendingA2aAgent {
+    pub(crate) card: librefang_kernel::a2a::AgentCard,
+    pub(crate) discovered_at: Instant,
+}
+
+impl PendingA2aAgent {
+    pub(crate) fn new(card: librefang_kernel::a2a::AgentCard) -> Self {
+        Self {
+            card,
+            discovered_at: Instant::now(),
+        }
+    }
+
+    fn is_fresh_at(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.discovered_at) < PENDING_A2A_AGENT_TTL
+    }
+}
+
+pub(crate) struct RouteCachePruneCounts {
+    pub(crate) provider_tests: usize,
+    pub(crate) pending_a2a_agents: usize,
+}
+
+pub(crate) fn prune_route_caches(
+    provider_tests: &DashMap<String, ProviderTestResult>,
+    pending_a2a_agents: &DashMap<String, PendingA2aAgent>,
+) -> RouteCachePruneCounts {
+    prune_route_caches_at(provider_tests, pending_a2a_agents, Instant::now())
+}
+
+fn prune_route_caches_at(
+    provider_tests: &DashMap<String, ProviderTestResult>,
+    pending_a2a_agents: &DashMap<String, PendingA2aAgent>,
+    now: Instant,
+) -> RouteCachePruneCounts {
+    let provider_before = provider_tests.len();
+    provider_tests.retain(|_, result| result.is_fresh_at(now));
+    let pending_before = pending_a2a_agents.len();
+    pending_a2a_agents.retain(|_, pending| pending.is_fresh_at(now));
+    RouteCachePruneCounts {
+        provider_tests: provider_before.saturating_sub(provider_tests.len()),
+        pending_a2a_agents: pending_before.saturating_sub(pending_a2a_agents.len()),
+    }
 }
 
 /// Whether the current API principal may access an agent-scoped resource.
@@ -214,7 +276,7 @@ pub struct AppState {
     pub provider_probe_cache: librefang_kernel::provider_health::ProbeCache,
     /// Cache for manual provider test results (latency, timestamp, reachable).
     /// Populated by POST /api/providers/{name}/test, consumed by GET /api/providers.
-    pub provider_test_cache: DashMap<String, (Instant, u128, String, bool)>,
+    pub provider_test_cache: DashMap<String, ProviderTestResult>,
     /// Webhook subscription store for outbound event notifications.
     pub webhook_store: crate::webhook_store::WebhookStore,
     /// Active session tokens issued by dashboard login.
@@ -246,10 +308,11 @@ pub struct AppState {
     // NOTE: taking this lock is NOT the same as being allowed to write.
     // Managed mode (#6695) is enforced by `guard_config_write` below, which every config-persisting handler must call before it starts building a new file.
     /// Pending A2A agents awaiting operator approval (Bug #3786).
-    /// Maps discovery URL → AgentCard. Agents here are NOT trusted yet and
-    /// cannot receive tasks. Use POST /api/a2a/agents/{url}/approve to promote
-    /// them into the kernel's trusted external-agent list.
-    pub pending_a2a_agents: DashMap<String, librefang_kernel::a2a::AgentCard>,
+    /// Maps discovery URL → pending card plus lease timestamp. Agents here are
+    /// NOT trusted yet and cannot receive tasks. Use
+    /// POST /api/a2a/agents/{url}/approve to promote them into the kernel's
+    /// trusted external-agent list.
+    pub pending_a2a_agents: DashMap<String, PendingA2aAgent>,
     /// Per-IP brute-force limiter for authentication endpoints.
     /// Shared between the auth-endpoint middleware layer and the background
     /// prune task so stale entries are reclaimed every 5 minutes.
@@ -331,5 +394,63 @@ pub fn managed_config_response() -> axum::response::Response {
             })),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent_card(name: &str) -> librefang_kernel::a2a::AgentCard {
+        librefang_kernel::a2a::AgentCard {
+            name: name.to_string(),
+            description: String::new(),
+            url: format!("https://{name}.example/a2a"),
+            version: "1".to_string(),
+            capabilities: Default::default(),
+            skills: Vec::new(),
+            default_input_modes: Vec::new(),
+            default_output_modes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn route_cache_prune_removes_expired_entries_and_keeps_fresh_entries() {
+        let provider_tests = DashMap::new();
+        provider_tests.insert("stale".to_string(), ProviderTestResult::new(34, false));
+
+        let pending_agents = DashMap::new();
+        pending_agents.insert(
+            "https://stale.example/a2a".to_string(),
+            PendingA2aAgent::new(agent_card("stale")),
+        );
+
+        let sweep_at = Instant::now()
+            .checked_add(PENDING_A2A_AGENT_TTL + Duration::from_secs(1))
+            .expect("24-hour test offset must fit in Instant");
+        let mut fresh_provider = ProviderTestResult::new(12, true);
+        fresh_provider.tested_at = sweep_at;
+        provider_tests.insert("fresh".to_string(), fresh_provider);
+        let mut fresh_pending = PendingA2aAgent::new(agent_card("fresh"));
+        fresh_pending.discovered_at = sweep_at;
+        pending_agents.insert("https://fresh.example/a2a".to_string(), fresh_pending);
+
+        let removed = prune_route_caches_at(&provider_tests, &pending_agents, sweep_at);
+
+        assert_eq!(removed.provider_tests, 1);
+        assert_eq!(removed.pending_a2a_agents, 1);
+        assert!(provider_tests.contains_key("fresh"));
+        assert!(!provider_tests.contains_key("stale"));
+        assert!(pending_agents.contains_key("https://fresh.example/a2a"));
+        assert!(!pending_agents.contains_key("https://stale.example/a2a"));
+    }
+
+    #[test]
+    fn named_provider_result_preserves_field_meaning() {
+        let result = ProviderTestResult::new(27, false);
+
+        assert_eq!(result.latency_ms, 27);
+        assert!(!result.reachable);
+        assert!(!result.tested_rfc3339.is_empty());
     }
 }
