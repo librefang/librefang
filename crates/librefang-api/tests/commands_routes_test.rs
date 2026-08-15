@@ -76,7 +76,7 @@ async fn builtins_win_collisions_and_skill_commands_remain_queryable() {
     install_skill(
         &harness.state,
         &skills_dir,
-        "help",
+        "HeLp",
         "A skill must not replace builtin help",
     );
     install_skill(
@@ -91,7 +91,11 @@ async fn builtins_win_collisions_and_skill_commands_remain_queryable() {
     let commands = body["commands"].as_array().unwrap();
     let help: Vec<_> = commands
         .iter()
-        .filter(|entry| entry["cmd"] == "/help")
+        .filter(|entry| {
+            entry["cmd"]
+                .as_str()
+                .is_some_and(|command| command.eq_ignore_ascii_case("/help"))
+        })
         .collect();
     assert_eq!(help.len(), 1);
     assert!(help[0].get("source").is_none());
@@ -102,7 +106,7 @@ async fn builtins_win_collisions_and_skill_commands_remain_queryable() {
     assert_eq!(weather["source"], "skill");
     assert_eq!(weather["desc"], "Show the current weather");
 
-    let (status, help) = get_json(&harness.app, "/api/commands/help").await;
+    let (status, help) = get_json(&harness.app, "/api/commands/HELP").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(help["cmd"], "/help");
     assert!(help.get("source").is_none());
