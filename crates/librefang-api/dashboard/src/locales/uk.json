@@ -3658,7 +3658,7 @@
     },
     "errors": {
       "non_negative": "{{field}} має бути скінченним невід'ємним числом",
-      "threshold_range": "alert_threshold має бути в межах 0.0..=1.0"
+      "threshold_range": "alert_threshold має бути більше 0 і не більше 1"
     },
     "toast": {
       "saved": "Ліміт витрат збережено"

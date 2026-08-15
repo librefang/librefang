@@ -3652,7 +3652,7 @@
     },
     "errors": {
       "non_negative": "{{field}} must be a finite, non-negative number",
-      "threshold_range": "alert_threshold must be in 0.0..=1.0"
+      "threshold_range": "alert_threshold must be greater than 0 and at most 1"
     },
     "toast": {
       "saved": "Spend cap saved"

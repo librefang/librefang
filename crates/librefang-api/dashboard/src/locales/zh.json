@@ -3652,7 +3652,7 @@
     },
     "errors": {
       "non_negative": "{{field}} 必须是有限的非负数",
-      "threshold_range": "alert_threshold 必须在 0.0..=1.0 范围内"
+      "threshold_range": "alert_threshold 必须大于 0 且不大于 1"
     },
     "toast": {
       "saved": "支出上限已保存"
