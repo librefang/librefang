@@ -85,8 +85,7 @@ async fn start_test_server_with_provider(
     state.kernel.clone().set_self_handle();
 
     // Exercise the same identity attribution as the production router.
-    // With no auth configured, loopback requests receive the synthetic
-    // Owner principal that authorizes the daemon's own MCP bridge headers.
+    // With no auth configured, loopback requests receive the synthetic Owner principal that authorizes the daemon's own MCP bridge headers.
     let auth_state = middleware::AuthState {
         api_key_lock: state.api_key_lock.clone(),
         master_key: state.master_key.clone(),
@@ -2948,9 +2947,8 @@ async fn test_mcp_http_channel_send_cross_account_guard_uses_account_header() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_mcp_http_invalid_agent_header_is_rejected() {
-    // A client-supplied agent identity must never degrade to the
-    // header-less path. Otherwise a forged or stale identity could
-    // silently bypass the agent-scoped authorization contract.
+    // A client-supplied agent identity must never degrade to the header-less path.
+    // Otherwise a forged or stale identity could silently bypass the agent-scoped authorization contract.
     let server = start_test_server().await;
 
     let (status, body) = call_mcp_cron_list(&server, Some("not-a-uuid")).await;
