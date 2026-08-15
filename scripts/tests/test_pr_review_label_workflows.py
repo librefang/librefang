@@ -17,17 +17,28 @@ class PrReviewLabelWorkflowTests(unittest.TestCase):
         cls.applier = APPLIER.read_text(encoding="utf-8")
 
     def test_collector_keeps_only_latest_review_per_pr(self) -> None:
-        self.assertIn("group: pr-review-collector-${{ github.event.pull_request.number }}", self.collector)
+        self.assertIn("github.event.pull_request.number || github.run_id", self.collector)
+        self.assertIn("github.event.review.state == 'approved'", self.collector)
+        self.assertIn("github.event.review.state == 'changes_requested'", self.collector)
         self.assertIn("cancel-in-progress: true", self.collector)
 
     def test_applier_serializes_each_pr_without_interrupting_mutations(self) -> None:
-        self.assertIn("github.event.workflow_run.pull_requests[0].number", self.applier)
-        self.assertIn("github.event.workflow_run.head_sha", self.applier)
+        self.assertIn("pr_number: ${{ steps.payload.outputs.pr_number }}", self.applier)
+        self.assertIn("group: pr-review-applier-${{ needs.prepare.outputs.pr_number }}", self.applier)
+        self.assertNotIn("github.event.workflow_run.pull_requests", self.applier)
+        self.assertNotIn("github.event.workflow_run.head_sha", self.applier)
         self.assertIn("cancel-in-progress: false", self.applier)
 
     def test_both_jobs_are_bounded(self) -> None:
         self.assertEqual(self.collector.count("timeout-minutes: 5"), 1)
-        self.assertEqual(self.applier.count("timeout-minutes: 5"), 1)
+        self.assertEqual(self.applier.count("timeout-minutes: 5"), 2)
+
+    def test_payload_is_validated_before_the_mutating_job(self) -> None:
+        self.assertIn("id: payload", self.applier)
+        self.assertIn("core.setOutput('pr_number', String(prNumber))", self.applier)
+        self.assertIn("core.setOutput('review_state', reviewState)", self.applier)
+        self.assertIn("PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}", self.applier)
+        self.assertIn("REVIEW_STATE: ${{ needs.prepare.outputs.review_state }}", self.applier)
 
     def test_removal_only_ignores_missing_labels(self) -> None:
         self.assertNotIn(".catch(() => {})", self.applier)

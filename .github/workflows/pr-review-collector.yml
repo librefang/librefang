@@ -21,7 +21,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr-review-collector-${{ github.event.pull_request.number }}
+  # Non-actionable submitted reviews still start this workflow before the job
+  # filter skips them. Give those runs a unique group so they cannot cancel an
+  # in-flight approved/changes-requested collector for the same PR.
+  group: pr-review-collector-${{ (github.event.review.state == 'approved' || github.event.review.state == 'changes_requested') && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
