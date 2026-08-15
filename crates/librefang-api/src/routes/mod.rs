@@ -141,7 +141,11 @@ impl ProviderTestResult {
     }
 
     pub(crate) fn is_fresh(&self) -> bool {
-        self.tested_at.elapsed() < PROVIDER_TEST_CACHE_TTL
+        self.is_fresh_at(Instant::now())
+    }
+
+    fn is_fresh_at(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.tested_at) < PROVIDER_TEST_CACHE_TTL
     }
 }
 
@@ -159,8 +163,8 @@ impl PendingA2aAgent {
         }
     }
 
-    fn is_fresh(&self) -> bool {
-        self.discovered_at.elapsed() < PENDING_A2A_AGENT_TTL
+    fn is_fresh_at(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.discovered_at) < PENDING_A2A_AGENT_TTL
     }
 }
 
@@ -173,10 +177,18 @@ pub(crate) fn prune_route_caches(
     provider_tests: &DashMap<String, ProviderTestResult>,
     pending_a2a_agents: &DashMap<String, PendingA2aAgent>,
 ) -> RouteCachePruneCounts {
+    prune_route_caches_at(provider_tests, pending_a2a_agents, Instant::now())
+}
+
+fn prune_route_caches_at(
+    provider_tests: &DashMap<String, ProviderTestResult>,
+    pending_a2a_agents: &DashMap<String, PendingA2aAgent>,
+    now: Instant,
+) -> RouteCachePruneCounts {
     let provider_before = provider_tests.len();
-    provider_tests.retain(|_, result| result.is_fresh());
+    provider_tests.retain(|_, result| result.is_fresh_at(now));
     let pending_before = pending_a2a_agents.len();
-    pending_a2a_agents.retain(|_, pending| pending.is_fresh());
+    pending_a2a_agents.retain(|_, pending| pending.is_fresh_at(now));
     RouteCachePruneCounts {
         provider_tests: provider_before.saturating_sub(provider_tests.len()),
         pending_a2a_agents: pending_before.saturating_sub(pending_a2a_agents.len()),
@@ -405,21 +417,25 @@ mod tests {
     #[test]
     fn route_cache_prune_removes_expired_entries_and_keeps_fresh_entries() {
         let provider_tests = DashMap::new();
-        provider_tests.insert("fresh".to_string(), ProviderTestResult::new(12, true));
-        let mut stale_provider = ProviderTestResult::new(34, false);
-        stale_provider.tested_at = Instant::now() - PROVIDER_TEST_CACHE_TTL;
-        provider_tests.insert("stale".to_string(), stale_provider);
+        provider_tests.insert("stale".to_string(), ProviderTestResult::new(34, false));
 
         let pending_agents = DashMap::new();
         pending_agents.insert(
-            "https://fresh.example/a2a".to_string(),
-            PendingA2aAgent::new(agent_card("fresh")),
+            "https://stale.example/a2a".to_string(),
+            PendingA2aAgent::new(agent_card("stale")),
         );
-        let mut stale_pending = PendingA2aAgent::new(agent_card("stale"));
-        stale_pending.discovered_at = Instant::now() - PENDING_A2A_AGENT_TTL;
-        pending_agents.insert("https://stale.example/a2a".to_string(), stale_pending);
 
-        let removed = prune_route_caches(&provider_tests, &pending_agents);
+        let sweep_at = Instant::now()
+            .checked_add(PENDING_A2A_AGENT_TTL + Duration::from_secs(1))
+            .expect("24-hour test offset must fit in Instant");
+        let mut fresh_provider = ProviderTestResult::new(12, true);
+        fresh_provider.tested_at = sweep_at;
+        provider_tests.insert("fresh".to_string(), fresh_provider);
+        let mut fresh_pending = PendingA2aAgent::new(agent_card("fresh"));
+        fresh_pending.discovered_at = sweep_at;
+        pending_agents.insert("https://fresh.example/a2a".to_string(), fresh_pending);
+
+        let removed = prune_route_caches_at(&provider_tests, &pending_agents, sweep_at);
 
         assert_eq!(removed.provider_tests, 1);
         assert_eq!(removed.pending_a2a_agents, 1);
