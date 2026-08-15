@@ -35,13 +35,34 @@ describe("classifyRouteError", () => {
 });
 
 describe("reload timestamp storage", () => {
-  it("falls back when storage reads throw", () => {
+  function createHistory(initialState: unknown = null) {
+    let state = initialState;
+    return {
+      get state() { return state; },
+      replaceState: vi.fn((nextState: unknown) => { state = nextState; }),
+    };
+  }
+
+  it("falls back to history state when storage reads throw", () => {
     const storage = { getItem: vi.fn(() => { throw new DOMException("blocked", "SecurityError"); }) };
-    expect(readReloadTimestamp(storage)).toBe(0);
+    const history = createHistory({ __librefang_chunk_reload: 123 });
+    expect(readReloadTimestamp(storage, history)).toBe(123);
   });
 
-  it("ignores storage write failures", () => {
+  it("persists a reload guard in history when storage writes fail", () => {
     const storage = { setItem: vi.fn(() => { throw new DOMException("full", "QuotaExceededError"); }) };
-    expect(() => writeReloadTimestamp(123, storage)).not.toThrow();
+    const history = createHistory({ router: "state" });
+    expect(writeReloadTimestamp(123, storage, history)).toBe(true);
+    expect(readReloadTimestamp({ getItem: vi.fn(() => null) }, history)).toBe(123);
+    expect(history.state).toEqual({ router: "state", __librefang_chunk_reload: 123 });
+  });
+
+  it("declines recovery when neither storage nor history can persist the guard", () => {
+    const storage = { setItem: vi.fn(() => { throw new DOMException("blocked", "SecurityError"); }) };
+    const history = {
+      state: null,
+      replaceState: vi.fn(() => { throw new DOMException("blocked", "SecurityError"); }),
+    };
+    expect(writeReloadTimestamp(123, storage, history)).toBe(false);
   });
 });

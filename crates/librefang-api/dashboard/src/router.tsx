@@ -9,6 +9,7 @@ import { App } from "./App";
 // Safari:  "Importing a module script failed"
 // Webpack: "Loading chunk ... failed"
 const CHUNK_RELOAD_KEY = "__chunk_reload";
+const CHUNK_RELOAD_HISTORY_KEY = "__librefang_chunk_reload";
 
 const CHUNK_ERROR_RE = /dynamically imported module|importing a module script|Loading chunk .* failed/i;
 
@@ -39,19 +40,47 @@ export function parseCanvasSearch(search: Record<string, unknown>): { t?: number
   return out;
 }
 
-export function readReloadTimestamp(storage?: Pick<Storage, "getItem">): number {
-  try {
-    return Number((storage ?? window.sessionStorage).getItem(CHUNK_RELOAD_KEY) || "0");
-  } catch {
-    return 0;
-  }
+function validReloadTimestamp(value: unknown): number {
+  const timestamp = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(timestamp) && timestamp >= 0 ? timestamp : 0;
 }
 
-export function writeReloadTimestamp(timestamp: number, storage?: Pick<Storage, "setItem">): void {
+type ReloadHistory = Pick<History, "state" | "replaceState">;
+
+export function readReloadTimestamp(
+  storage: Pick<Storage, "getItem"> = window.sessionStorage,
+  history: ReloadHistory = window.history,
+): number {
+  let stored = 0;
   try {
-    (storage ?? window.sessionStorage).setItem(CHUNK_RELOAD_KEY, String(timestamp));
+    stored = validReloadTimestamp(storage.getItem(CHUNK_RELOAD_KEY));
   } catch {
-    // Reload recovery must still proceed when browser storage is unavailable.
+    // History state remains available when storage access is blocked.
+  }
+  const historyState = history.state;
+  const fallback = historyState && typeof historyState === "object"
+    ? validReloadTimestamp((historyState as Record<string, unknown>)[CHUNK_RELOAD_HISTORY_KEY])
+    : 0;
+  return Math.max(stored, fallback);
+}
+
+export function writeReloadTimestamp(
+  timestamp: number,
+  storage: Pick<Storage, "setItem"> = window.sessionStorage,
+  history: ReloadHistory = window.history,
+): boolean {
+  try {
+    storage.setItem(CHUNK_RELOAD_KEY, String(timestamp));
+    return true;
+  } catch {
+    try {
+      const historyState = history.state;
+      const state = historyState && typeof historyState === "object" ? historyState : {};
+      history.replaceState({ ...state, [CHUNK_RELOAD_HISTORY_KEY]: timestamp }, "");
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -59,7 +88,16 @@ function clearReloadTimestamp(): void {
   try {
     window.sessionStorage.removeItem(CHUNK_RELOAD_KEY);
   } catch {
-    // A manual reload remains useful even when browser storage is unavailable.
+    // Continue clearing the history fallback.
+  }
+  try {
+    const historyState = window.history.state;
+    if (historyState && typeof historyState === "object") {
+      const { [CHUNK_RELOAD_HISTORY_KEY]: _removed, ...rest } = historyState as Record<string, unknown>;
+      window.history.replaceState(rest, "");
+    }
+  } catch {
+    // A manual reload remains useful even when recovery state is unavailable.
   }
 }
 
@@ -71,8 +109,10 @@ function clearReloadTimestamp(): void {
 function tryAutoReload(kind: RouteErrorKind): boolean {
   if (kind === "other") return false;
   const last = readReloadTimestamp();
-  if (Date.now() - last <= 10_000) return false;
-  writeReloadTimestamp(Date.now());
+  const now = Date.now();
+  const elapsed = now - last;
+  if (elapsed >= 0 && elapsed <= 10_000) return false;
+  if (!writeReloadTimestamp(now)) return false;
   window.location.reload();
   return true;
 }
