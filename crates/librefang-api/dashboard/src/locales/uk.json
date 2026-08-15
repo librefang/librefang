@@ -3122,7 +3122,8 @@
     "status_submitted": "надіслано",
     "status_completed": "завершено",
     "status_failed": "помилка",
-    "image_too_large": "Зображення завелике для показу"
+    "image_too_large": "Зображення завелике для показу",
+    "image_unavailable": "Зображення недоступне"
   },
   "auth": {
     "title": "Потрібен API-ключ",

@@ -3120,7 +3120,8 @@
     "status_submitted": "submitted",
     "status_completed": "completed",
     "status_failed": "failed",
-    "image_too_large": "Image too large to display"
+    "image_too_large": "Image too large to display",
+    "image_unavailable": "Image unavailable"
   },
   "auth": {
     "title": "API Key Required",
