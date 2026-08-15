@@ -2,8 +2,6 @@
 //! Holds the synchronous "does this tool require approval?" predicates and the async request/submit/resolve flow used by the agent loop.
 //! Hand-tagged agents (curated trusted packages) auto-approve on the context-carrying non-blocking path unless per-user policy demanded human approval (RBAC M3, #3054).
 
-use std::sync::Arc;
-
 use tracing::{debug, info};
 
 use librefang_runtime::kernel_handle;
@@ -435,6 +433,18 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         ),
         kernel_handle::KernelOpError,
     > {
+        // Resolving removes the pending request and records its terminal
+        // decision. Acquire the handle needed to resume deferred work first,
+        // so a malformed kernel cannot terminalize an approval and then lose
+        // the approved tool with no retry path.
+        let kernel = self
+            .self_handle
+            .get()
+            .and_then(|weak| weak.upgrade())
+            .ok_or_else(|| {
+                kernel_handle::KernelOpError::Internal("Kernel self-handle unavailable".to_string())
+            })?;
+
         // #3541 follow-up: classify the missing-id case as
         // `KernelOpError::AgentNotFound` / `Internal` so the API
         // boundary surfaces 404 via the typed mapping. The underlying
@@ -466,13 +476,6 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         // not block on slow tools.
         if let Some(ref def) = deferred {
             let decision_clone = response.decision.clone();
-            let kernel = Arc::clone(
-                self.self_handle
-                    .get()
-                    .and_then(|w| w.upgrade())
-                    .as_ref()
-                    .ok_or_else(|| "Kernel self-handle unavailable".to_string())?,
-            );
             let deferred_clone = def.clone();
             spawn_logged("approval_resolution", async move {
                 kernel
@@ -506,5 +509,93 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
             }
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use librefang_types::approval::{ApprovalDecision, ApprovalRequest, RiskLevel};
+    use librefang_types::config::KernelConfig;
+    use librefang_types::tool::DeferredToolExecution;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn missing_self_handle_leaves_deferred_approval_pending() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = KernelConfig {
+            home_dir: tmp.path().to_path_buf(),
+            data_dir: tmp.path().join("data"),
+            ..KernelConfig::default()
+        };
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
+        assert!(kernel.self_handle.get().is_none());
+
+        let request_id = uuid::Uuid::new_v4();
+        let request = ApprovalRequest {
+            id: request_id,
+            agent_id: AgentId::new().to_string(),
+            tool_name: "shell_exec".to_string(),
+            description: "run command".to_string(),
+            action_summary: "run command".to_string(),
+            risk_level: RiskLevel::High,
+            requested_at: chrono::Utc::now(),
+            timeout_secs: 60,
+            sender_id: None,
+            channel: None,
+            chat_id: None,
+            route_to: Vec::new(),
+            escalation_count: 0,
+            session_id: None,
+            tool_use_id: Some("tool-use-test".to_string()),
+        };
+        let deferred = DeferredToolExecution {
+            agent_id: request.agent_id.clone(),
+            tool_use_id: "tool-use-test".to_string(),
+            tool_name: request.tool_name.clone(),
+            input: serde_json::json!({}),
+            allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
+            sender_id: None,
+            channel: None,
+            chat_id: None,
+            account_id: None,
+            workspace_root: None,
+            force_human: false,
+            session_id: None,
+        };
+        kernel
+            .governance
+            .approval_manager
+            .submit_request(request, deferred)
+            .expect("submit approval");
+
+        let error = kernel_handle::ApprovalGate::resolve_tool_approval(
+            &kernel,
+            request_id,
+            ApprovalDecision::Approved,
+            Some("test".to_string()),
+            false,
+            None,
+        )
+        .await
+        .expect_err("missing self-handle must fail before resolution");
+
+        assert!(matches!(
+            error,
+            kernel_handle::KernelOpError::Internal(ref message)
+                if message == "Kernel self-handle unavailable"
+        ));
+        assert!(
+            kernel
+                .governance
+                .approval_manager
+                .get_pending(request_id)
+                .is_some(),
+            "failed preflight must leave approval retryable"
+        );
+
+        kernel.shutdown();
     }
 }
