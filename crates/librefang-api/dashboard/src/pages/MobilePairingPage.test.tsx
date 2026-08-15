@@ -114,9 +114,9 @@ describe("MobilePairingPage", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    removeMutate = vi.fn();
+    removeMutate = vi.fn().mockResolvedValue(undefined);
     useRemovePairedDeviceMock.mockReturnValue({
-      mutate: removeMutate,
+      mutateAsync: removeMutate,
       isPending: false,
       isError: false,
       error: null,
@@ -231,6 +231,20 @@ describe("MobilePairingPage", () => {
     vi.useRealTimers();
   });
 
+  it("treats an invalid expiry timestamp as expired", () => {
+    usePairingRequestMock.mockReturnValue({
+      data: { qr_uri: "librefang://pair?t=invalid", expires_at: "not-a-date" },
+      error: null,
+      isLoading: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    expect(screen.getByText("QR code expired — refresh to get a new one.")).toBeInTheDocument();
+    expect(screen.queryByText(/NaN/)).not.toBeInTheDocument();
+  });
+
   it("shows a visible fallback when QR rendering rejects", async () => {
     vi.mocked(QRCode.toCanvas).mockRejectedValueOnce(new Error("too large"));
     usePairingRequestMock.mockReturnValue({
@@ -308,7 +322,7 @@ describe("MobilePairingPage", () => {
       ],
     });
     useRemovePairedDeviceMock.mockReturnValue({
-      mutate: removeMutate,
+      mutateAsync: removeMutate,
       isPending: false,
       isError: true,
       error: new Error("forbidden"),
@@ -319,7 +333,7 @@ describe("MobilePairingPage", () => {
     expect(screen.getByText(/forbidden/)).toBeInTheDocument();
   });
 
-  it("only disables the device currently being removed", () => {
+  it("tracks every concurrent device removal independently", () => {
     usePairingRequestMock.mockReturnValue({
       data: { qr_uri: "librefang://pair?t=abc", expires_at: FUTURE_ISO },
       error: null,
@@ -332,10 +346,10 @@ describe("MobilePairingPage", () => {
         { device_id: "dev-2", display_name: "iPhone", platform: "ios", paired_at: FUTURE_ISO },
       ],
     });
+    removeMutate.mockImplementation(() => new Promise<void>(() => {}));
     useRemovePairedDeviceMock.mockReturnValue({
-      mutate: removeMutate,
-      isPending: true,
-      variables: "dev-1",
+      mutateAsync: removeMutate,
+      isPending: false,
       isError: false,
       error: null,
     });
@@ -343,8 +357,34 @@ describe("MobilePairingPage", () => {
     renderPage();
 
     const buttons = screen.getAllByRole("button", { name: "Remove device" });
+    fireEvent.click(buttons[0]);
     expect(buttons[0]).toBeDisabled();
     expect(buttons[1]).not.toBeDisabled();
+    fireEvent.click(buttons[1]);
+    expect(buttons[0]).toBeDisabled();
+    expect(buttons[1]).toBeDisabled();
+    expect(removeMutate).toHaveBeenCalledTimes(2);
+  });
+
+  it("surfaces an asynchronous device-removal failure", async () => {
+    removeMutate.mockRejectedValueOnce(new Error("device is busy"));
+    usePairingRequestMock.mockReturnValue({
+      data: { qr_uri: "librefang://pair?t=abc", expires_at: FUTURE_ISO },
+      error: null,
+      isLoading: false,
+      refetch: vi.fn(),
+    });
+    usePairedDevicesMock.mockReturnValue({
+      data: [
+        { device_id: "dev-1", display_name: "Pixel", platform: "android", paired_at: FUTURE_ISO },
+      ],
+    });
+
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Remove device" }));
+
+    expect(await screen.findByText(/device is busy/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove device" })).not.toBeDisabled();
   });
 
   it("hides the paired-devices section entirely when the list is empty", () => {

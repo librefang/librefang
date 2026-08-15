@@ -44,7 +44,9 @@ function QRCanvas({ uri }: { uri: string }) {
 }
 
 function secondsUntil(expiresAt: string): number {
-  return Math.max(0, Math.ceil((new Date(expiresAt).getTime() - Date.now()) / 1000));
+  const expiresAtMs = new Date(expiresAt).getTime();
+  if (!Number.isFinite(expiresAtMs)) return 0;
+  return Math.max(0, Math.ceil((expiresAtMs - Date.now()) / 1000));
 }
 
 function useRemainingSeconds(expiresAt: string | undefined): number {
@@ -89,12 +91,38 @@ export function MobilePairingPage() {
   const { data: req, error, isLoading, refetch } = usePairingRequest(true);
   const { data: devices = [] } = usePairedDevices();
   const removeDevice = useRemovePairedDevice();
+  const [removingDeviceIds, setRemovingDeviceIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [removeFailure, setRemoveFailure] = useState<Error | null>(null);
   const remainingSecs = useRemainingSeconds(req?.expires_at);
   const expired = !!req && remainingSecs === 0;
+  const removeError = removeFailure ?? (removeDevice.isError ? removeDevice.error : null);
 
   const refresh = () => {
     qc.removeQueries({ queryKey: pairingKeys.request() });
     refetch();
+  };
+
+  const removePairedDevice = async (deviceId: string) => {
+    if (removingDeviceIds.has(deviceId)) return;
+    setRemoveFailure(null);
+    setRemovingDeviceIds((current) => new Set(current).add(deviceId));
+    try {
+      await removeDevice.mutateAsync(deviceId);
+    } catch (error) {
+      setRemoveFailure(
+        error instanceof Error
+          ? error
+          : new Error(t("mobile_pairing.remove_unknown_error")),
+      );
+    } finally {
+      setRemovingDeviceIds((current) => {
+        const next = new Set(current);
+        next.delete(deviceId);
+        return next;
+      });
+    }
   };
 
   if (error) {
@@ -186,15 +214,14 @@ export function MobilePairingPage() {
           <h2 className="text-sm font-bold uppercase tracking-wider text-text-dim">
             {t("mobile_pairing.paired_devices_heading")}
           </h2>
-          {removeDevice.isError && (
+          {removeError && (
             <div className="flex items-center gap-2 rounded-lg border border-error/20 bg-error/5 p-2.5 text-sm text-error">
               <AlertCircle className="w-4 h-4 shrink-0" />
               <span>
                 {t("mobile_pairing.remove_failed", {
-                  reason:
-                    removeDevice.error instanceof Error
-                      ? removeDevice.error.message
-                      : t("mobile_pairing.remove_unknown_error"),
+                  reason: removeError instanceof Error
+                    ? removeError.message
+                    : t("mobile_pairing.remove_unknown_error"),
                 })}
               </span>
             </div>
@@ -218,8 +245,8 @@ export function MobilePairingPage() {
                   </div>
                 </div>
                 <button
-                  onClick={() => removeDevice.mutate(d.device_id)}
-                  disabled={removeDevice.isPending && removeDevice.variables === d.device_id}
+                  onClick={() => void removePairedDevice(d.device_id)}
+                  disabled={removingDeviceIds.has(d.device_id)}
                   className="rounded-lg p-1.5 text-text-dim hover:text-error transition-colors"
                   title={t("mobile_pairing.remove_title")}
                 >
