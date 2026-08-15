@@ -39,8 +39,7 @@ pub enum AcpError {
     Internal(String),
 
     /// An optional ACP capability became temporarily unavailable.
-    /// Kernel-facing adapters map this to `KernelOpError::Unavailable`
-    /// so callers can use their documented local fallback.
+    /// Kernel-facing adapters map this to `KernelOpError::Unavailable` so callers can use their documented local fallback.
     #[error("acp capability unavailable: {0}")]
     Unavailable(String),
 }
@@ -53,8 +52,7 @@ impl AcpError {
         Self::Internal(msg.into())
     }
 
-    /// Construct an [`AcpError::Unavailable`] for a reverse-RPC transport
-    /// that can no longer serve an optional editor capability.
+    /// Construct an [`AcpError::Unavailable`] for a reverse-RPC transport that can no longer serve an optional editor capability.
     pub fn unavailable(msg: impl Into<String>) -> Self {
         Self::Unavailable(msg.into())
     }
