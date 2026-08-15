@@ -53,7 +53,15 @@ jobs:
               `${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-pr-links.js`,
             );
             const LABEL = 'has-pr';
-            const pr = context.payload.pull_request;
+            const eventPr = context.payload.pull_request;
+            // Queued workflow jobs can execute after a newer body edit or
+            // reopen/close event. Re-read the PR so an older webhook payload
+            // cannot overwrite the latest link state when it runs last.
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: eventPr.number,
+            });
             const currentNumbers = extractIssueNumbers(pr.body, context.repo);
             const previousNumbers = extractIssueNumbers(
               context.payload.changes?.body?.from,
@@ -96,7 +104,7 @@ jobs:
                 openPrs,
                 num,
                 context.repo,
-                pr.number,
+                eventPr.number,
               );
               const shouldHaveLabel = issue.state === 'open' && (linkedByCurrent || linkedBySnapshot);
 
