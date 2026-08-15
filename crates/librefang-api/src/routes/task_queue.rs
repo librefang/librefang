@@ -5,7 +5,7 @@
 //! `/tasks/{id}/retry`.
 
 use super::AppState;
-use crate::middleware::RequestLanguage;
+use crate::middleware::{AuthenticatedApiUser, RequestLanguage};
 use crate::types::ApiErrorResponse;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -100,7 +100,13 @@ pub async fn task_queue_status(
                     "in_progress" => in_progress += 1,
                     "completed" => completed += 1,
                     "failed" => failed += 1,
-                    _ => {}
+                    unknown => {
+                        tracing::warn!(
+                            status = unknown,
+                            task_id = t["id"].as_str().unwrap_or("<unknown>"),
+                            "task queue status summary encountered an unknown status"
+                        );
+                    }
                 }
             }
             (
@@ -171,12 +177,11 @@ pub async fn task_queue_retry(
             StatusCode::OK,
             Json(serde_json::json!({"status": "retried", "id": id})),
         ),
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": err_task_not_retryable
-            })),
-        ),
+        Ok(false) => match state.kernel.task_get(&id).await {
+            Ok(Some(_)) => ApiErrorResponse::conflict(err_task_not_retryable).into_json_tuple(),
+            Ok(None) => ApiErrorResponse::not_found(err_task_not_retryable).into_json_tuple(),
+            Err(e) => map_kernel_op_err(e).into_json_tuple(),
+        },
         Err(e) => map_kernel_op_err(e).into_json_tuple(),
     }
 }
@@ -197,13 +202,13 @@ pub async fn task_queue_list_root(
             if let Some(assignee) = params.get("assigned_to") {
                 tasks.retain(|t| t["assigned_to"].as_str().unwrap_or("") == assignee.as_str());
             }
+            let total = tasks.len();
             // Apply limit
             if let Some(limit_str) = params.get("limit") {
                 if let Ok(limit) = limit_str.parse::<usize>() {
                     tasks.truncate(limit);
                 }
             }
-            let total = tasks.len();
             (
                 StatusCode::OK,
                 Json(serde_json::json!({"tasks": tasks, "total": total})),
@@ -215,15 +220,16 @@ pub async fn task_queue_list_root(
 
 /// POST /api/tasks — Enqueue a task on behalf of an external caller.
 ///
-/// Body: `{"title": "...", "description": "...", "assigned_to": "<agent-id>"?, "created_by": "<agent-id>"?}`
+/// Body: `{"title": "...", "description": "...", "assigned_to": "<agent-id>"?}`
 ///
 /// Wraps `KernelHandle::task_post` so HTTP clients (skill subprocesses,
 /// cron scripts, external integrations) can enqueue tasks without a
 /// runtime/agent context. The agent-side `task_post` tool keeps the
-/// caller's agent id automatically; this HTTP form takes `created_by`
-/// as an optional explicit field for provenance.
+/// caller's agent id automatically; this HTTP form derives `created_by`
+/// from the authenticated principal so clients cannot spoof provenance.
 pub async fn task_queue_post_root(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
     _lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -246,10 +252,10 @@ pub async fn task_queue_post_root(
         }
     };
     let assigned_to = body["assigned_to"].as_str();
-    let created_by = body["created_by"].as_str();
+    let created_by = api_user.as_ref().map(|user| user.0.user_id.to_string());
     match state
         .kernel
-        .task_post(title, description, assigned_to, created_by)
+        .task_post(title, description, assigned_to, created_by.as_deref())
         .await
     {
         Ok(task_id) => (
@@ -280,7 +286,7 @@ pub async fn task_queue_get(
 /// PATCH /api/tasks/{id} — Update task status.
 ///
 /// Body: `{"status": "pending"}` or `{"status": "cancelled"}`
-/// - `pending`: resets a failed/in_progress task so it can be re-claimed
+/// - `pending`: resets a failed task so it can be re-claimed
 /// - `cancelled`: cancels a pending/in_progress task
 pub async fn task_queue_patch(
     State(state): State<Arc<AppState>>,
@@ -314,7 +320,14 @@ pub async fn task_queue_patch(
             StatusCode::OK,
             Json(serde_json::json!({"id": id, "status": new_status})),
         ),
-        Ok(false) => ApiErrorResponse::not_found(err_not_found).into_json_tuple(),
+        Ok(false) => match state.kernel.task_get(&id).await {
+            Ok(Some(_)) => ApiErrorResponse::conflict(format!(
+                "task '{id}' cannot transition to '{new_status}' from its current status"
+            ))
+            .into_json_tuple(),
+            Ok(None) => ApiErrorResponse::not_found(err_not_found).into_json_tuple(),
+            Err(e) => map_kernel_op_err(e).into_json_tuple(),
+        },
         Err(e) => map_kernel_op_err(e).into_json_tuple(),
     }
 }

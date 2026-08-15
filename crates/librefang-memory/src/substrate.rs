@@ -1398,7 +1398,7 @@ impl MemorySubstrate {
 
     /// Update a task's status to `pending` (reset) or `cancelled`.
     ///
-    /// Only `in_progress` / `pending` tasks can be reset to `pending`.
+    /// Only failed tasks can be reset to `pending`.
     /// Any non-terminal task can be cancelled.
     /// Returns `false` when the task was not found or the transition is invalid.
     pub async fn task_update_status(
@@ -1422,7 +1422,7 @@ impl MemorySubstrate {
                     "UPDATE task_queue \
                      SET status = 'pending', claimed_at = NULL, assigned_to = '', \
                          finished_at = NULL \
-                     WHERE id = ?1 AND status IN ('in_progress', 'failed')",
+                     WHERE id = ?1 AND status = 'failed'",
                     rusqlite::params![task_id],
                 ),
                 // Cancellation is a terminal transition like complete/fail,
@@ -2523,6 +2523,33 @@ mod tests {
             finished_at.is_none(),
             "reset to pending must clear finished_at"
         );
+    }
+
+    #[tokio::test]
+    async fn test_task_reset_to_pending_rejects_in_progress_task() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let task_id = substrate
+            .task_post("t", "d", Some("worker"), None)
+            .await
+            .unwrap();
+
+        let claimed = substrate
+            .task_claim("worker-id", Some("worker"))
+            .await
+            .unwrap();
+        assert_eq!(claimed.unwrap()["id"], task_id);
+
+        let changed = substrate
+            .task_update_status(&task_id, "pending")
+            .await
+            .unwrap();
+        assert!(
+            !changed,
+            "an in-progress task must not be re-queued while its worker may still be running"
+        );
+
+        let task = substrate.task_get(&task_id).await.unwrap().unwrap();
+        assert_eq!(task["status"], "in_progress");
     }
 
     /// #3501: `remove_agent` cascade-deletes sessions, memories, and the
