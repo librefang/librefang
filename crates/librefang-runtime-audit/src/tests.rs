@@ -1046,6 +1046,10 @@ fn soft_cap_eviction_keeps_anchor_seq_synced_across_restart() {
         log.persisted_len() > log.len(),
         "soft-cap eviction must be externally detectable"
     );
+    let (retained, persisted) = log.retained_snapshot();
+    assert_eq!(persisted, 12);
+    assert_eq!(retained.len(), log.len());
+    assert!(persisted > retained.len());
 
     // Even on the live log the anchor must already track the persisted
     // population, not the shrunken in-memory window.

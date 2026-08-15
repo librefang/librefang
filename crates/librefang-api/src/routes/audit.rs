@@ -262,8 +262,8 @@ pub async fn audit_query(
     // look-back window silently omitted older matches while presenting the
     // response as complete. Audit retention already bounds this collection.
     let audit = state.kernel.audit();
-    let pool = audit.recent(audit.len());
-    let history_truncated = audit.persisted_len() > pool.len();
+    let (pool, persisted_len) = audit.retained_snapshot();
+    let history_truncated = persisted_len > pool.len();
     let derived_user_id = derived_filter_user_id(&filter);
 
     let mut filtered: Vec<&AuditEntry> = pool
@@ -354,8 +354,8 @@ pub async fn audit_export(
     let limit = filter.limit.unwrap_or(EXPORT_DEFAULT).clamp(1, EXPORT_MAX);
 
     let audit = state.kernel.audit();
-    let pool = audit.recent(audit.len());
-    let history_truncated = audit.persisted_len() > pool.len();
+    let (pool, persisted_len) = audit.retained_snapshot();
+    let history_truncated = persisted_len > pool.len();
     let derived_user_id = derived_filter_user_id(&filter);
     let mut filtered: Vec<AuditEntry> = pool
         .into_iter()
