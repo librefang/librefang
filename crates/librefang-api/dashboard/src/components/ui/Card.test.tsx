@@ -32,4 +32,30 @@ describe("Card", () => {
     fireEvent.keyDown(screen.getByRole("button"), { key: "Enter" });
     expect(onClick).not.toHaveBeenCalled();
   });
+
+  it("does not activate a clickable card from a nested control", () => {
+    const onClick = vi.fn();
+    render(
+      <Card onClick={onClick}>
+        <button type="button">Nested action</button>
+      </Card>,
+    );
+
+    fireEvent.keyDown(screen.getByText("Nested action"), {
+      key: "Enter",
+    });
+    expect(onClick).not.toHaveBeenCalled();
+  });
+
+  it("lets composite callers opt out of implicit button semantics", () => {
+    render(
+      <Card role="group" aria-label="Provider" onClick={() => undefined}>
+        <button type="button">Configure</button>
+      </Card>,
+    );
+
+    const card = screen.getByRole("group", { name: "Provider" });
+    expect(card).not.toHaveAttribute("tabindex");
+    expect(screen.getByRole("button", { name: "Configure" })).toBeInTheDocument();
+  });
 });

@@ -32,16 +32,19 @@ export function Card({
   // mislead users into clicking cards that have nothing wired up
   // (e.g. FangHub skill cards in browse view, plain stat cards).
   const isClickable = typeof onClick === "function";
+  const hasButtonSemantics =
+    isClickable && (role === undefined || role === "button");
   return (
     <div
       role={role ?? (isClickable ? "button" : undefined)}
-      tabIndex={tabIndex ?? (isClickable ? 0 : undefined)}
+      tabIndex={tabIndex ?? (hasButtonSemantics ? 0 : undefined)}
       onClick={onClick}
       onKeyDown={
-        isClickable
+        hasButtonSemantics
           ? (event) => {
               onKeyDown?.(event);
               if (event.defaultPrevented) return;
+              if (event.target !== event.currentTarget) return;
               if (event.key === "Enter" || event.key === " ") {
                 event.preventDefault();
                 event.currentTarget.click();
