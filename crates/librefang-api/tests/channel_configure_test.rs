@@ -90,3 +90,77 @@ async fn configure_rejects_included_sidecar_without_partial_writes() {
     );
     assert!(!harness.home.join("secrets.env").exists());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_rolls_back_secrets_when_config_write_fails() {
+    let harness = boot_router().await;
+    let config_path = harness.home.join("config.toml");
+    let secrets_path = harness.home.join("secrets.env");
+    let original_config = "sidecar_channels = \"not-an-array\"\n";
+    let original_secrets = "TELEGRAM_BOT_TOKEN=old-secret\nKEEP_ME=unchanged\n";
+    std::fs::write(&config_path, original_config).unwrap();
+    std::fs::write(&secrets_path, original_secrets).unwrap();
+
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/api/channels/sidecar/telegram/configure")
+        .header(header::AUTHORIZATION, format!("Bearer {API_KEY}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({"values": {"TELEGRAM_BOT_TOKEN": "new-secret"}}).to_string(),
+        ))
+        .unwrap();
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let response_text = String::from_utf8_lossy(&body);
+    assert!(!response_text.contains("not-an-array"));
+    assert!(!response_text.contains(&harness.home.display().to_string()));
+    assert_eq!(
+        std::fs::read_to_string(config_path).unwrap(),
+        original_config
+    );
+    assert_eq!(
+        std::fs::read_to_string(secrets_path).unwrap(),
+        original_secrets
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registry_returns_typed_metadata_array() {
+    let harness = boot_router().await;
+    let channels_dir = harness.home.join("channels");
+    std::fs::create_dir_all(&channels_dir).unwrap();
+    std::fs::write(
+        channels_dir.join("audit-test.toml"),
+        "id = \"audit-test\"\nname = \"Audit Test\"\ndescription = \"typed response\"\n",
+    )
+    .unwrap();
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/api/channels/registry")
+        .header(header::AUTHORIZATION, format!("Bearer {API_KEY}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let metadata: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let entry = metadata
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == "audit-test")
+        .unwrap();
+    assert_eq!(entry["name"], "Audit Test");
+    assert_eq!(entry["description"], "typed response");
+}
