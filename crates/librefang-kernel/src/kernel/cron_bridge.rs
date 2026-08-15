@@ -177,6 +177,21 @@ pub(super) async fn cron_fan_out_targets(
     }
 }
 
+async fn post_legacy_webhook(
+    client: Result<reqwest::Client, String>,
+    url: &str,
+    payload: &serde_json::Value,
+) -> Result<reqwest::StatusCode, String> {
+    let client = client?;
+    client
+        .post(url)
+        .json(payload)
+        .send()
+        .await
+        .map(|response| response.status())
+        .map_err(|error| error.to_string())
+}
+
 /// Deliver a cron job's agent response to the configured delivery target.
 pub(super) async fn cron_deliver_response(
     kernel: &LibreFangKernel,
@@ -238,22 +253,17 @@ pub(super) async fn cron_deliver_response(
         }
         CronDelivery::Webhook { url } => {
             tracing::debug!(url = %url, "Cron: delivering via webhook");
-            let client = librefang_runtime::http_client::proxied_client_builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build();
-            if let Ok(client) = client {
-                let payload = serde_json::json!({
-                    "agent_id": agent_id.to_string(),
-                    "response": response,
-                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                });
-                match client.post(url).json(&payload).send().await {
-                    Ok(resp) => {
-                        tracing::debug!(status = %resp.status(), "Cron webhook delivered");
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Cron webhook delivery failed");
-                    }
+            let payload = serde_json::json!({
+                "agent_id": agent_id.to_string(),
+                "response": response,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            });
+            match post_legacy_webhook(shared_fan_out_http_client(), url, &payload).await {
+                Ok(status) => {
+                    tracing::debug!(status = %status, "Cron webhook delivered");
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "Cron webhook delivery failed");
                 }
             }
         }
@@ -309,6 +319,19 @@ mod tests {
             .expect_err("invalid user-agent must fail client construction");
 
         assert!(error.contains("HTTP client unavailable for cron fan-out"));
+    }
+
+    #[tokio::test]
+    async fn legacy_webhook_reports_cached_client_build_failure() {
+        let error = post_legacy_webhook(
+            Err("HTTP client unavailable: simulated build failure".to_string()),
+            "https://example.invalid/hook",
+            &serde_json::json!({"response": "payload"}),
+        )
+        .await
+        .expect_err("cached client failure must be returned");
+
+        assert!(error.contains("simulated build failure"));
     }
 
     /// `shared_fan_out_http_client` must hand back a `reqwest::Client` that
