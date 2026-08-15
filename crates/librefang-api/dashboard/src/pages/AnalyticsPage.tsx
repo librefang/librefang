@@ -440,10 +440,10 @@ export function AnalyticsPage() {
     const avgLatency = totalCalls > 0 ? weightedLatency / totalCalls : 0;
     const avgCostPerCall = totalCalls > 0 ? totalCost / totalCalls : 0;
     return [
-      { icon: Activity, label: t("analytics.avg_latency") || "Avg Latency", value: `${avgLatency.toFixed(0)}ms`, color: "text-blue-500", bg: "bg-blue-500/10" },
-      { icon: Gauge, label: t("analytics.fastest_model") || "Fastest Model", value: fastest?.model?.slice(0, 12) ?? "-", color: "text-success", bg: "bg-success/10" },
-      { icon: Target, label: t("analytics.avg_cost_per_call") || "Avg Cost/Call", value: `$${avgCostPerCall.toFixed(4)}`, color: "text-purple-500", bg: "bg-purple-500/10" },
-      { icon: Clock, label: t("analytics.total_calls") || "Total Calls", value: totalCalls.toString(), color: "text-warning", bg: "bg-warning/10" },
+      { icon: Activity, label: t("analytics.avg_latency", { defaultValue: "Avg Latency" }), value: `${avgLatency.toFixed(0)}ms`, color: "text-blue-500", bg: "bg-blue-500/10" },
+      { icon: Gauge, label: t("analytics.fastest_model", { defaultValue: "Fastest Model" }), value: fastest?.model?.slice(0, 12) ?? "-", color: "text-success", bg: "bg-success/10" },
+      { icon: Target, label: t("analytics.avg_cost_per_call", { defaultValue: "Avg Cost/Call" }), value: `$${avgCostPerCall.toFixed(4)}`, color: "text-purple-500", bg: "bg-purple-500/10" },
+      { icon: Clock, label: t("analytics.total_calls", { defaultValue: "Total Calls" }), value: totalCalls.toString(), color: "text-warning", bg: "bg-warning/10" },
     ];
   }, [modelPerformance, t]);
 
@@ -640,19 +640,19 @@ export function AnalyticsPage() {
               {/* Model Performance Table */}
               <Card padding="lg" hover>
                 <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
-                  <Cpu className="w-4 h-4 text-brand" /> {t("analytics.model_performance_table") || "Model Performance Details"}
+                  <Cpu className="w-4 h-4 text-brand" /> {t("analytics.model_performance_table", { defaultValue: "Model Performance Details" })}
                 </h2>
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="border-b border-border-subtle">
-                        <th className="text-left py-2 px-3 font-bold text-text-dim/60">{t("analytics.model") || "Model"}</th>
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.calls") || "Calls"}</th>
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.total_cost") || "Total Cost"}</th>
+                        <th className="text-left py-2 px-3 font-bold text-text-dim/60">{t("analytics.model", { defaultValue: "Model" })}</th>
+                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.calls", { defaultValue: "Calls" })}</th>
+                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.total_cost", { defaultValue: "Total Cost" })}</th>
                         <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.cost_call", { defaultValue: "Cost/Call" })}</th>
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.avg_latency") || "Avg Latency"}</th>
+                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.avg_latency", { defaultValue: "Avg Latency" })}</th>
                         <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.min_max", { defaultValue: "Min/Max" })}</th>
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.tokens") || "Tokens"}</th>
+                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.tokens", { defaultValue: "Tokens" })}</th>
                       </tr>
                     </thead>
                     <tbody>

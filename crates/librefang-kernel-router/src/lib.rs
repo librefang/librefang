@@ -178,6 +178,7 @@ static HAND_ROUTE_HOME_DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 fn lock_router_state<'a, T>(mutex: &'a Mutex<T>, state: &'static str) -> MutexGuard<'a, T> {
     mutex.lock().unwrap_or_else(|poisoned| {
         tracing::warn!(state, "router state lock poisoned; recovering inner state");
+        mutex.clear_poison();
         poisoned.into_inner()
     })
 }
@@ -1181,10 +1182,14 @@ mod tests {
         });
 
         assert!(poison.is_err());
+        assert!(state.is_poisoned());
         let mut recovered = lock_router_state(&state, "test_cache");
+        assert!(!state.is_poisoned());
         assert_eq!(&*recovered, &["cached", "stale"]);
         recovered.clear();
         assert!(recovered.is_empty());
+        drop(recovered);
+        assert!(state.lock().unwrap().is_empty());
     }
 
     fn ensure_registry() {
