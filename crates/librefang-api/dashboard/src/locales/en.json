@@ -1264,6 +1264,7 @@
     "alert_threshold": "Alert Threshold",
     "budget_saved": "Budget limits updated.",
     "budget_no_changes": "Enter at least one valid budget value before saving.",
+    "budget_bad_input": "{{field}} has an invalid value. Use a finite non-negative number; token caps must be integers and alert threshold must be 0–1.",
     "total_cost": "Total Cost",
     "avg_latency": "Avg Latency",
     "usage_by_agent": "Usage by Agent",

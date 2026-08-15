@@ -241,6 +241,24 @@ describe("AnalyticsPage", () => {
     expect(mutate).not.toHaveBeenCalled();
   });
 
+  it("rejects a partial global budget save when any entered field is invalid", () => {
+    setLoadedEmptyState();
+    const mutate = vi.fn();
+    setMutationDefault(mutate);
+    renderPage();
+
+    const inputs = screen.getAllByPlaceholderText("-");
+    fireEvent.change(inputs[0], { target: { value: "5" } });
+    fireEvent.change(inputs[3], { target: { value: "1.5" } });
+    fireEvent.click(screen.getByText("common.save"));
+    expect(mutate).not.toHaveBeenCalled();
+
+    fireEvent.change(inputs[3], { target: { value: "1000" } });
+    fireEvent.change(inputs[4], { target: { value: "1.1" } });
+    fireEvent.click(screen.getByText("common.save"));
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
   it("rejects invalid provider caps instead of converting them to unlimited", () => {
     setLoadedEmptyState();
     const providerMutate = vi.fn();

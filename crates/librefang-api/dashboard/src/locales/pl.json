@@ -1264,6 +1264,7 @@
     "alert_threshold": "Próg ostrzegawczy",
     "budget_saved": "Zaktualizowano limity budżetu.",
     "budget_no_changes": "Przed zapisaniem wprowadź co najmniej jedną prawidłową wartość budżetu.",
+    "budget_bad_input": "{{field}} ma nieprawidłową wartość. Użyj skończonej liczby nieujemnej; limit tokenów musi być całkowity, a próg alertu mieścić się w zakresie 0–1.",
     "total_cost": "Łączny koszt",
     "avg_latency": "Średnie opóźnienie",
     "usage_by_agent": "Zużycie według agenta",

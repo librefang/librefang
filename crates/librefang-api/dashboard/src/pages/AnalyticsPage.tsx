@@ -39,6 +39,30 @@ interface BudgetForm {
   alert?: string;
 }
 
+const GLOBAL_BUDGET_FIELDS: readonly {
+  formKey: keyof BudgetForm;
+  payloadKey: string;
+  labelKey: string;
+  integer?: boolean;
+  max?: number;
+}[] = [
+  { formKey: "hourly", payloadKey: "max_hourly_usd", labelKey: "analytics.hourly_limit" },
+  { formKey: "daily", payloadKey: "max_daily_usd", labelKey: "analytics.daily_limit" },
+  { formKey: "monthly", payloadKey: "max_monthly_usd", labelKey: "analytics.monthly_limit" },
+  {
+    formKey: "tokens",
+    payloadKey: "default_max_llm_tokens_per_hour",
+    labelKey: "analytics.token_limit",
+    integer: true,
+  },
+  {
+    formKey: "alert",
+    payloadKey: "alert_threshold",
+    labelKey: "analytics.alert_threshold",
+    max: 1,
+  },
+];
+
 function providerCapTone(pct: number, alertThreshold: number): string {
   if (pct >= alertThreshold) return "bg-error shadow-[0_0_6px_rgba(239,68,68,0.45)]";
   if (pct >= alertThreshold * 0.6) return "bg-warning";
@@ -696,25 +720,22 @@ export function AnalyticsPage() {
               <Button variant="primary" size="sm"
                 onClick={() => {
                   const payload: Record<string, number> = {};
-                  if (budgetForm.hourly) {
-                    const parsed = parseFloat(budgetForm.hourly);
-                    if (!isNaN(parsed) && parsed >= 0) payload.max_hourly_usd = parsed;
-                  }
-                  if (budgetForm.daily) {
-                    const parsed = parseFloat(budgetForm.daily);
-                    if (!isNaN(parsed) && parsed >= 0) payload.max_daily_usd = parsed;
-                  }
-                  if (budgetForm.monthly) {
-                    const parsed = parseFloat(budgetForm.monthly);
-                    if (!isNaN(parsed) && parsed >= 0) payload.max_monthly_usd = parsed;
-                  }
-                  if (budgetForm.tokens) {
-                    const parsed = parseInt(budgetForm.tokens);
-                    if (!isNaN(parsed) && parsed >= 0) payload.default_max_llm_tokens_per_hour = parsed;
-                  }
-                  if (budgetForm.alert) {
-                    const parsed = parseFloat(budgetForm.alert);
-                    if (!isNaN(parsed) && parsed >= 0) payload.alert_threshold = parsed;
+                  for (const field of GLOBAL_BUDGET_FIELDS) {
+                    const raw = budgetForm[field.formKey];
+                    if (raw === undefined || raw.trim() === "") continue;
+                    const parsed = parseNonNegative(raw, field.integer ?? false);
+                    if (parsed === null || (field.max !== undefined && parsed > field.max)) {
+                      addToast(
+                        t(
+                          "analytics.budget_bad_input",
+                          "{{field}} has an invalid value. Use a finite non-negative number; token caps must be integers and alert threshold must be 0–1.",
+                          { field: t(field.labelKey) },
+                        ),
+                        "error",
+                      );
+                      return;
+                    }
+                    payload[field.payloadKey] = parsed;
                   }
                   if (Object.keys(payload).length === 0) {
                     addToast(

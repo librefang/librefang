@@ -1264,6 +1264,7 @@
     "alert_threshold": "告警阈值",
     "budget_saved": "预算限额已更新。",
     "budget_no_changes": "保存前请至少输入一个有效的预算值。",
+    "budget_bad_input": "{{field}} 的值无效。请输入有限的非负数；Token 上限必须为整数，告警阈值必须在 0–1 之间。",
     "total_cost": "总消耗",
     "avg_latency": "平均延迟",
     "usage_by_agent": "智能体消耗",

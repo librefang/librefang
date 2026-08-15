@@ -1264,6 +1264,7 @@
     "alert_threshold": "경고 임계값",
     "budget_saved": "예산 한도가 업데이트되었습니다.",
     "budget_no_changes": "저장하기 전에 유효한 예산 값을 하나 이상 입력하세요.",
+    "budget_bad_input": "{{field}} 값이 잘못되었습니다. 유한한 음이 아닌 수를 입력하고, 토큰 한도는 정수, 알림 임계값은 0~1로 설정하세요.",
     "total_cost": "총 비용",
     "avg_latency": "평균 지연 시간",
     "usage_by_agent": "에이전트별 사용량",
