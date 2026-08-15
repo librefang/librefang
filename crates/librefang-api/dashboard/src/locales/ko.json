@@ -2025,6 +2025,8 @@
     "totp_recovery_title": "복구 코드(안전한 곳에 저장하세요):",
     "totp_recovery_reveal": "코드 공개",
     "totp_recovery_hide": "코드 숨기기",
+    "totp_secret_reveal": "비밀 키 공개",
+    "totp_secret_hide": "비밀 키 숨기기",
     "totp_reset_placeholder": "현재 TOTP 또는 복구 코드",
     "totp_verify_reset": "확인 및 재설정",
     "totp_revoke_placeholder": "TOTP 또는 복구 코드",
@@ -2093,6 +2095,7 @@
     "export_config_btn": "구성 내보내기",
     "export_config_desc": "현재 구성을 TOML 파일로 다운로드합니다.",
     "export_config_title": "구성 내보내기",
+    "export_config_failed": "구성을 내보낼 수 없습니다.",
     "totp_qr_alt": "TOTP QR 코드"
   },
   "config": {

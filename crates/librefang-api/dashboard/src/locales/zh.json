@@ -1991,6 +1991,8 @@
     "totp_recovery_title": "恢复码（请保存到安全的地方）：",
     "totp_recovery_reveal": "显示恢复码",
     "totp_recovery_hide": "隐藏恢复码",
+    "totp_secret_reveal": "显示密钥",
+    "totp_secret_hide": "隐藏密钥",
     "totp_reset_placeholder": "当前 TOTP 或恢复码",
     "totp_verify_reset": "验证并重置",
     "totp_revoke_placeholder": "TOTP 或恢复码",
@@ -2059,6 +2061,7 @@
     "export_config_btn": "导出配置",
     "export_config_desc": "将当前配置下载为 TOML 文件。",
     "export_config_title": "导出配置",
+    "export_config_failed": "无法导出配置。",
     "totp_qr_alt": "TOTP 二维码"
   },
   "config": {

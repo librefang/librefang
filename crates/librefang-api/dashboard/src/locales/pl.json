@@ -2027,6 +2027,8 @@
     "totp_recovery_title": "Kody odzyskiwania (zapisz je w bezpiecznym miejscu):",
     "totp_recovery_reveal": "Pokaż kody",
     "totp_recovery_hide": "Ukryj kody",
+    "totp_secret_reveal": "Pokaż sekret",
+    "totp_secret_hide": "Ukryj sekret",
     "totp_reset_placeholder": "Bieżący kod TOTP lub kod odzyskiwania",
     "totp_verify_reset": "Zweryfikuj i zresetuj",
     "totp_revoke_placeholder": "Kod TOTP lub kod odzyskiwania",
@@ -2095,6 +2097,7 @@
     "export_config_btn": "Eksportuj konfigurację",
     "export_config_desc": "Pobierz bieżącą konfigurację jako plik TOML.",
     "export_config_title": "Eksportuj konfigurację",
+    "export_config_failed": "Nie udało się wyeksportować konfiguracji.",
     "totp_qr_alt": "Kod QR TOTP"
   },
   "config": {

@@ -2025,6 +2025,8 @@
     "totp_recovery_title": "Recovery Codes (save these somewhere safe):",
     "totp_recovery_reveal": "Reveal codes",
     "totp_recovery_hide": "Hide codes",
+    "totp_secret_reveal": "Reveal secret",
+    "totp_secret_hide": "Hide secret",
     "totp_reset_placeholder": "Current TOTP or recovery code",
     "totp_verify_reset": "Verify & Reset",
     "totp_revoke_placeholder": "TOTP or recovery code",
@@ -2093,6 +2095,7 @@
     "export_config_btn": "Export Config",
     "export_config_desc": "Download your current configuration as a TOML file.",
     "export_config_title": "Export Configuration",
+    "export_config_failed": "Could not export config.",
     "totp_qr_alt": "TOTP QR Code"
   },
   "config": {
