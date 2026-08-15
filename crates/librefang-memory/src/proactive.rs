@@ -1342,6 +1342,27 @@ impl ProactiveMemoryStore {
         self.semantic.count_by_agent()
     }
 
+    /// List one filtered dashboard page without a hidden candidate cap.
+    pub fn list_page(
+        &self,
+        agent_id: Option<&str>,
+        category: Option<&str>,
+        level: Option<MemoryLevel>,
+        offset: usize,
+        limit: usize,
+    ) -> LibreFangResult<(Vec<MemoryItem>, usize)> {
+        let agent_id = agent_id.map(Self::parse_agent_id).transpose()?;
+        let scope = level.map(|value| value.scope_str());
+        let (fragments, total) = self
+            .semantic
+            .list_page(agent_id, category, scope, offset, limit)?;
+        let items = fragments
+            .into_iter()
+            .map(MemoryItem::from_fragment)
+            .collect();
+        Ok((items, total))
+    }
+
     /// List memories across ALL agents, optionally filtered by category.
     ///
     /// Used by the dashboard to show all memories without agent scoping.
@@ -1765,6 +1786,29 @@ impl ProactiveMemoryStore {
         let mut items = self.list_all(category).await?;
         guard.redact_all(&mut items);
         Ok(items)
+    }
+
+    /// Paginated dashboard listing wrapper.
+    ///
+    /// Applies namespace authorization before reading and PII redaction after
+    /// the SQL page is materialized, matching the existing list wrappers.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn list_page_with_guard(
+        &self,
+        agent_id: Option<&str>,
+        category: Option<&str>,
+        level: Option<librefang_types::memory::MemoryLevel>,
+        offset: usize,
+        limit: usize,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<(Vec<librefang_types::memory::MemoryItem>, usize)>
+    {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_read("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        let (mut items, total) = self.list_page(agent_id, category, level, offset, limit)?;
+        guard.redact_all(&mut items);
+        Ok((items, total))
     }
 
     /// Per-user list wrapper used by `/memory/user/{user_id}` and the

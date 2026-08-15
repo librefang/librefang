@@ -558,29 +558,30 @@ pub async fn memory_list(
     let limit = params.limit.min(100);
     let offset = params.offset;
 
-    // List across ALL agents so the dashboard shows all memories
+    // List across ALL agents so the dashboard shows all memories. Filtering,
+    // counting, and pagination happen in one SQL snapshot; do not route this
+    // through the recall API, whose candidate cap would hide older rows.
     match store
-        .list_all_with_guard(params.category.as_deref(), &guard)
+        .list_page_with_guard(
+            None,
+            params.category.as_deref(),
+            level,
+            offset,
+            limit,
+            &guard,
+        )
         .await
     {
-        Ok(items) => {
-            let items: Vec<_> = items
-                .into_iter()
-                .filter(|item| level.is_none_or(|level| item.level == level))
-                .collect();
-            let total = items.len();
-            let page: Vec<_> = items.into_iter().skip(offset).take(limit).collect();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "memories": page,
-                    "total": total,
-                    "offset": offset,
-                    "limit": limit,
-                    "proactive_enabled": true,
-                })),
-            )
-        }
+        Ok((page, total)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "memories": page,
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "proactive_enabled": true,
+            })),
+        ),
         Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
             auth_denied(&state, request.extensions(), reason)
         }
@@ -1040,26 +1041,25 @@ pub async fn memory_list_agent(
     let offset = params.offset;
 
     match store
-        .list_with_guard(&agent_id, params.category.as_deref(), &guard)
+        .list_page_with_guard(
+            Some(&agent_id),
+            params.category.as_deref(),
+            level,
+            offset,
+            limit,
+            &guard,
+        )
         .await
     {
-        Ok(items) => {
-            let items: Vec<_> = items
-                .into_iter()
-                .filter(|item| level.is_none_or(|level| item.level == level))
-                .collect();
-            let total = items.len();
-            let page: Vec<_> = items.into_iter().skip(offset).take(limit).collect();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "memories": page,
-                    "total": total,
-                    "offset": offset,
-                    "limit": limit,
-                })),
-            )
-        }
+        Ok((page, total)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "memories": page,
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+            })),
+        ),
         Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
             auth_denied(&state, request.extensions(), reason)
         }
