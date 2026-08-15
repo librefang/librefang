@@ -13,8 +13,12 @@ git -C "$WORK" config commit.gpgsign false
 
 FILE='path with $meta[1].rs'
 mkdir -p "$WORK/$(dirname "$FILE")"
-printf '%s\n' 'fn staged(   ) {println!("staged"  );}' >"$WORK/$FILE"
-git -C "$WORK" add -- "$FILE"
+cat >"$WORK/rustfmt.toml" <<'EOF'
+edition = "2021"
+use_field_init_shorthand = true
+EOF
+printf '%s\n' 'struct Item { value: i32 } fn staged(   ) { let value = 1; let _item = Item { value: value }; println!("staged"  );}' >"$WORK/$FILE"
+git -C "$WORK" add -- rustfmt.toml "$FILE"
 printf '%s\n' 'fn working(   ) {println!("unstaged"  );}' >"$WORK/$FILE"
 
 (cd "$WORK" && "$SCRIPT" -m 'test: commit staged blob')
@@ -24,6 +28,10 @@ working=$(cat "$WORK/$FILE")
 case "$committed" in
     *'fn staged()'*'println!("staged");'*) ;;
     *) echo "FAIL: committed index blob was not formatted" >&2; exit 1 ;;
+esac
+case "$committed" in
+    *'Item { value }'*) ;;
+    *) echo "FAIL: staged rustfmt.toml was not applied" >&2; exit 1 ;;
 esac
 case "$committed" in
     *unstaged*) echo "FAIL: unstaged working content entered the commit" >&2; exit 1 ;;

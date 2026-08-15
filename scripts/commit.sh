@@ -94,7 +94,12 @@ if [ "${#FILES[@]}" -gt 0 ]; then
     if command -v rustfmt >/dev/null 2>&1; then
         FORMATTED=()
         INDEX_INFO="$WORK_TMP/index-info"
+        RUSTFMT_CONFIG="$WORK_TMP/rustfmt.toml"
         : >"$INDEX_INFO"
+        if ! git show :rustfmt.toml >"$RUSTFMT_CONFIG"; then
+            echo "scripts/commit.sh: failed to read staged rustfmt.toml" >&2
+            exit 5
+        fi
         for file in "${FILES[@]}"; do
             staged_copy="$WORK_TMP/tree/$file"
             mkdir -p "$(dirname "$staged_copy")"
@@ -104,7 +109,8 @@ if [ "${#FILES[@]}" -gt 0 ]; then
             fi
             FORMATTED+=("$staged_copy")
         done
-        if ! rustfmt --edition 2021 "${FORMATTED[@]}"; then
+        if ! rustfmt --edition 2021 --config-path "$RUSTFMT_CONFIG" \
+            "${FORMATTED[@]}"; then
             echo "scripts/commit.sh: rustfmt failed; staged set unchanged" >&2
             exit 3
         fi
