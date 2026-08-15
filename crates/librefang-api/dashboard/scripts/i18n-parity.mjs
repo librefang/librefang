@@ -16,22 +16,26 @@ const here = dirname(fileURLToPath(import.meta.url));
 const LOCALES_DIR = join(here, "..", "src", "locales");
 const REFERENCE = "en.json";
 
-export function flatten(node, prefix = "") {
-  if (!prefix && (node === null || typeof node !== "object" || Array.isArray(node))) {
-    throw new TypeError("Locale root must be a JSON object");
-  }
+function flattenValue(node, prefix) {
   if (Array.isArray(node)) {
-    if (node.length === 0) return [prefix];
-    return node.flatMap((value, index) => flatten(value, `${prefix}.${index}`));
+    if (node.length === 0) return [`${prefix}[]`];
+    return node.flatMap((value, index) => flattenValue(value, `${prefix}[${index}]`));
   }
   if (node === null || typeof node !== "object") {
     return [prefix];
   }
   const out = [];
-  for (const [k, v] of Object.entries(node)) {
-    out.push(...flatten(v, prefix ? `${prefix}.${k}` : k));
+  for (const [key, value] of Object.entries(node)) {
+    out.push(...flattenValue(value, prefix ? `${prefix}.${key}` : key));
   }
   return out;
+}
+
+export function flatten(node) {
+  if (node === null || typeof node !== "object" || Array.isArray(node)) {
+    throw new TypeError("Locale root must be a JSON object");
+  }
+  return flattenValue(node, "");
 }
 
 export function loadFlat(file, localesDir = LOCALES_DIR) {

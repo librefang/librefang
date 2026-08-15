@@ -15,10 +15,16 @@ const parity = await import(/* @vite-ignore */ modulePath) as ParityScript;
 describe("i18n parity script", () => {
   it("walks arrays by index instead of collapsing their shape", () => {
     expect(parity.flatten({ messages: ["first", { label: "second" }] })).toEqual([
-      "messages.0",
-      "messages.1.label",
+      "messages[0]",
+      "messages[1].label",
     ]);
-    expect(parity.flatten({ messages: [] })).toEqual(["messages"]);
+    expect(parity.flatten({ messages: [] })).toEqual(["messages[]"]);
+    expect(parity.flatten({ messages: ["first"] })).not.toEqual(
+      parity.flatten({ messages: { "0": "first" } }),
+    );
+    expect(parity.flatten({ messages: [] })).not.toEqual(
+      parity.flatten({ messages: "first" }),
+    );
   });
 
   it("rejects malformed locale roots", () => {
