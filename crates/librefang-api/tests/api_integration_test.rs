@@ -84,6 +84,19 @@ async fn start_test_server_with_provider(
     let (state, _tmp, _) = test.into_parts();
     state.kernel.clone().set_self_handle();
 
+    // Exercise the same identity attribution as the production router.
+    // With no auth configured, loopback requests receive the synthetic Owner principal that authorizes the daemon's own MCP bridge headers.
+    let auth_state = middleware::AuthState {
+        api_key_lock: state.api_key_lock.clone(),
+        master_key: state.master_key.clone(),
+        active_sessions: state.active_sessions.clone(),
+        dashboard_auth_enabled: false,
+        user_api_keys: state.user_api_keys.clone(),
+        require_auth_for_reads: false,
+        allow_no_auth: false,
+        audit_log: None,
+    };
+
     let app = Router::new()
         .route("/api/health", axum::routing::get(routes::health))
         .route("/api/status", axum::routing::get(routes::status))
@@ -152,6 +165,10 @@ async fn start_test_server_with_provider(
         .route("/api/tools/{name}", axum::routing::get(routes::get_tool))
         .route("/mcp", axum::routing::post(routes::mcp_http))
         .route("/api/shutdown", axum::routing::post(routes::shutdown))
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            middleware::auth,
+        ))
         .layer(axum::middleware::from_fn(middleware::request_logging))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
@@ -2929,30 +2946,22 @@ async fn test_mcp_http_channel_send_cross_account_guard_uses_account_header() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_mcp_http_invalid_agent_header_falls_back_to_unauthenticated() {
-    // An unparseable or unknown agent ID must degrade gracefully to
-    // the unauthenticated path (same behaviour as no header) rather
-    // than 500-ing. Keeps external MCP clients working even if a
-    // misconfigured bridge stuffs a garbage ID into the header.
+async fn test_mcp_http_invalid_agent_header_is_rejected() {
+    // A client-supplied agent identity must never degrade to the header-less path.
+    // Otherwise a forged or stale identity could silently bypass the agent-scoped authorization contract.
     let server = start_test_server().await;
 
     let (status, body) = call_mcp_cron_list(&server, Some("not-a-uuid")).await;
     assert_eq!(status, 200);
-    let is_error = body["result"]["isError"].as_bool().unwrap_or(false);
-    assert!(
-        is_error,
-        "invalid header must still yield the unauthenticated error path"
-    );
+    assert_eq!(body["error"]["code"], -32001, "{body}");
+    assert!(body.get("result").is_none(), "{body}");
 
-    // Well-formed UUID but not a registered agent — same deal.
+    // A well-formed but unknown UUID must fail closed too.
     let (status, body) =
         call_mcp_cron_list(&server, Some("00000000-0000-0000-0000-000000000000")).await;
     assert_eq!(status, 200);
-    let is_error = body["result"]["isError"].as_bool().unwrap_or(false);
-    assert!(
-        is_error,
-        "unknown agent ID must still yield the unauthenticated error path"
-    );
+    assert_eq!(body["error"]["code"], -32001, "{body}");
+    assert!(body.get("result").is_none(), "{body}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
