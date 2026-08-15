@@ -75,14 +75,26 @@ impl fmt::Display for RefreshError {
 /// (`mcp_auth.rs`, `skills.rs`, `boot.rs` all call `::new`), so the lock map
 /// must be process-global to serialize refreshes across every instance, not
 /// just within one. Keyed by `server_url` so distinct servers never contend.
-type RefreshLocks = std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
+type RefreshLockMap = HashMap<String, Arc<tokio::sync::Mutex<()>>>;
+type RefreshLocks = std::sync::Mutex<RefreshLockMap>;
 
 static REFRESH_LOCKS: LazyLock<RefreshLocks> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
+fn lock_refresh_locks(locks: &RefreshLocks) -> std::sync::MutexGuard<'_, RefreshLockMap> {
+    match locks.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!("MCP OAuth refresh-lock registry poisoned; preserving entries and recovering");
+            locks.clear_poison();
+            poisoned.into_inner()
+        }
+    }
+}
+
 /// Get (or lazily create) the single-flight lock for `server_url`.
 fn refresh_lock_for(server_url: &str) -> Arc<tokio::sync::Mutex<()>> {
-    let mut map = REFRESH_LOCKS.lock().expect("REFRESH_LOCKS mutex poisoned");
+    let mut map = lock_refresh_locks(&REFRESH_LOCKS);
     map.entry(server_url.to_string())
         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
         .clone()
@@ -1564,6 +1576,31 @@ mod tests {
             !Arc::ptr_eq(&a1, &b1),
             "distinct server_urls must yield distinct locks so they don't contend"
         );
+    }
+
+    #[test]
+    fn refresh_lock_registry_preserves_entries_and_clears_poison() {
+        let locks = RefreshLocks::default();
+        let preserved = Arc::new(tokio::sync::Mutex::new(()));
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut map = locks.lock().unwrap();
+                    map.insert("preserved".to_string(), Arc::clone(&preserved));
+                    panic!("poison refresh-lock registry");
+                })
+                .join()
+        });
+
+        assert!(poison.is_err());
+        assert!(locks.is_poisoned());
+        let mut recovered = lock_refresh_locks(&locks);
+        assert!(Arc::ptr_eq(&recovered["preserved"], &preserved));
+        recovered.insert("new".to_string(), Arc::new(tokio::sync::Mutex::new(())));
+        drop(recovered);
+
+        assert!(!locks.is_poisoned());
+        assert_eq!(lock_refresh_locks(&locks).len(), 2);
     }
 
     /// Single-flight recheck: when a peer has already refreshed the token
