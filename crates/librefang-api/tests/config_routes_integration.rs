@@ -13,8 +13,7 @@
 //!   - POST /api/migrate, /api/migrate/scan, GET /api/migrate/detect — touches
 //!     real on-disk migration state outside the tempdir.
 //!   - POST /api/shutdown / /api/init — would tear down the harness kernel.
-//!   - GET  /api/metrics, /api/health, /api/version, /api/status — covered
-//!     elsewhere or trivial.
+//!   - GET  /api/health, /api/version, /api/status — covered elsewhere or trivial.
 //!
 //! All tests use a tempdir-backed kernel (config.home_dir = tempdir) so any
 //! write-through to `config.toml` lands in the test sandbox, never the real
@@ -24,7 +23,11 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
 use librefang_api::server;
 use librefang_kernel::LibreFangKernel;
+use librefang_types::agent::{
+    AgentEntry, AgentId, AgentManifest, AgentMode, AgentState, SessionId,
+};
 use librefang_types::config::{DefaultModelConfig, ExternalAuthConfig, KernelConfig, OidcProvider};
+use librefang_types::message::TokenUsage;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -114,6 +117,47 @@ fn anon_get(path: &str) -> Request<Body> {
         .uri(path)
         .body(Body::empty())
         .unwrap()
+}
+
+fn register_metrics_agent(
+    state: &librefang_api::routes::AppState,
+    name: &str,
+    provider: &str,
+    model: &str,
+) {
+    let id = AgentId::new();
+    let mut manifest = AgentManifest {
+        name: name.to_string(),
+        description: "metrics escaping test".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    manifest.model.provider = provider.to_string();
+    manifest.model.model = model.to_string();
+    let resources = manifest.resources.clone();
+    let entry = AgentEntry {
+        id,
+        name: name.to_string(),
+        manifest,
+        state: AgentState::Running,
+        mode: AgentMode::default(),
+        created_at: chrono::Utc::now(),
+        last_active: chrono::Utc::now(),
+        session_id: SessionId::new(),
+        ..Default::default()
+    };
+
+    state.kernel.agent_registry().register(entry).unwrap();
+    state.kernel.scheduler_ref().register(id, resources);
+    state.kernel.scheduler_ref().record_usage(
+        id,
+        &TokenUsage {
+            input_tokens: 1,
+            output_tokens: 2,
+            ..Default::default()
+        },
+    );
 }
 
 fn auth_post_json(path: &str, body: serde_json::Value) -> Request<Body> {
@@ -1918,4 +1962,32 @@ async fn config_schema_reports_the_paths_the_write_endpoint_refuses() {
         StatusCode::OK,
         "the path reported as writable must actually be accepted"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn metrics_escapes_untrusted_label_values() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    register_metrics_agent(
+        &h.state,
+        "metrics\"agent\\path\ninjected_agent_metric 1",
+        "provider\"\\\ninjected_provider_metric 1",
+        "model\"\\\ninjected_model_metric 1",
+    );
+
+    let (status, body) = send(h.app.clone(), auth_get("/api/metrics")).await;
+    assert_eq!(status, StatusCode::OK);
+    let body = String::from_utf8(body).expect("metrics response is UTF-8");
+
+    let expected = r#"librefang_tokens{agent="metrics\"agent\\path\ninjected_agent_metric 1",provider="provider\"\\\ninjected_provider_metric 1",model="model\"\\\ninjected_model_metric 1"} 3"#;
+    assert!(body.contains(expected), "missing escaped metric: {body}");
+    for injected_name in [
+        "injected_agent_metric",
+        "injected_provider_metric",
+        "injected_model_metric",
+    ] {
+        assert!(
+            !body.lines().any(|line| line.starts_with(injected_name)),
+            "label content escaped into a metric line: {body}"
+        );
+    }
 }
