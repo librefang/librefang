@@ -55,13 +55,13 @@
 //! ## Concurrency
 //!
 //! Two sidecars (e.g. telegram and discord) spawning at once both
-//! enter `ensure_extracted`. The function is idempotent (the marker
-//! file gates re-extraction) and uses `rename`-into-place from a
-//! per-pid temporary to make the visible final directory atomic with
-//! respect to other readers / racing processes. The `OnceLock`
-//! around the content hash avoids re-hashing 1MB of embedded files
-//! on every spawn.
+//! enter `ensure_extracted`. An advisory file lock serializes work for
+//! one content hash across threads and daemon processes. The marker is
+//! re-checked after locking, then extraction uses `rename`-into-place
+//! from a per-process temporary. The `OnceLock` around the content hash
+//! avoids re-hashing 1MB of embedded files on every spawn.
 
+use fs2::FileExt;
 use include_dir::{include_dir, Dir, DirEntry};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -148,7 +148,7 @@ fn collect_files<'a>(dir: &'a Dir<'a>, out: &mut Vec<(PathBuf, &'a [u8])>) {
     }
 }
 
-/// Idempotent extract. Returns the directory that should be prepended
+/// Idempotent extract. Returns the directory that should be appended
 /// to `PYTHONPATH` (i.e. the directory that has `librefang/` as an
 /// immediate child).
 ///
@@ -167,25 +167,30 @@ pub(crate) fn ensure_extracted(home_dir: &Path) -> std::io::Result<PathBuf> {
 
     std::fs::create_dir_all(&root)?;
 
+    // The lock lives beside the hash directory so it remains valid while a
+    // torn target is removed and replaced. File locks are released by the OS
+    // on process exit, so a crashed extractor cannot leave a stale owner.
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(root.join(format!("{hash}.lock")))?;
+    lock_file.lock_exclusive()?;
+
+    // Another extractor may have completed while this caller waited for the
+    // lock. Only the lock owner may inspect or replace a torn target.
+    if marker.exists() {
+        return Ok(target);
+    }
+
     // Torn previous run? An existing `target` directory without the
     // `.complete` marker means a prior extract was killed before it
     // could finish — its tree may be partial, byte-corrupt, or stale.
     // POSIX `rename` of a directory onto a non-empty directory is
     // ENOTEMPTY, so we have to clear it before staging. Concurrent
-    // recovery is best-effort: if a racing process removes it first,
-    // the NotFound is swallowed.
+    // recovery is serialized by the per-hash lock above.
     if target.exists() {
-        // Another extractor may have completed after the first marker check.
-        // Never remove a tree that became authoritative while this caller was
-        // waiting to inspect the target.
-        if marker.exists() {
-            return Ok(target);
-        }
-        if let Err(e) = std::fs::remove_dir_all(&target) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(e);
-            }
-        }
+        std::fs::remove_dir_all(&target)?;
     }
 
     // Extract into a sibling pid-tagged staging dir, then atomically
@@ -509,6 +514,33 @@ mod tests {
         let out = ensure_extracted(tmp.path()).expect("recovers");
         assert!(out.join(".complete").exists());
         assert!(out.join("librefang/__init__.py").exists());
+    }
+
+    #[test]
+    fn concurrent_extractors_serialize_torn_tree_recovery() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("sidecar-python").join(embedded_hash());
+        std::fs::create_dir_all(target.join("librefang")).unwrap();
+        std::fs::write(target.join("librefang/garbage.py"), b"truncated").unwrap();
+
+        let home = Arc::new(tmp.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(8));
+        let mut threads = Vec::new();
+        for _ in 0..8 {
+            let home = Arc::clone(&home);
+            let barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                ensure_extracted(&home)
+            }));
+        }
+
+        for thread in threads {
+            assert_eq!(thread.join().unwrap().unwrap(), target);
+        }
+        assert!(target.join(".complete").exists());
+        assert!(target.join("librefang/__init__.py").exists());
+        assert!(!target.join("librefang/garbage.py").exists());
     }
 
     #[test]
