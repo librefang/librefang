@@ -127,12 +127,19 @@ pub async fn tool_browser_type(
 
 /// Decode and persist browser-provided screenshot bytes when present.
 async fn persist_screenshot(
-    image_base64: &str,
+    image_base64: Option<&serde_json::Value>,
     upload_dir: &std::path::Path,
 ) -> Result<Option<String>, ToolError> {
-    if image_base64.is_empty() {
-        return Ok(None);
-    }
+    let image_base64 = match image_base64 {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(serde_json::Value::String(value)) if value.is_empty() => return Ok(None),
+        Some(serde_json::Value::String(value)) => value,
+        Some(_) => {
+            return Err(ToolError::upstream_msg(
+                "Invalid screenshot data: image_base64 must be a string",
+            ));
+        }
+    };
 
     use base64::Engine;
     let decoded = base64::engine::general_purpose::STANDARD
@@ -163,10 +170,9 @@ pub async fn tool_browser_screenshot(
     }
 
     let data = resp.data.unwrap_or_default();
-    let b64 = data["image_base64"].as_str().unwrap_or("");
     let url = data["url"].as_str().unwrap_or("");
 
-    let image_urls: Vec<String> = persist_screenshot(b64, upload_dir)
+    let image_urls: Vec<String> = persist_screenshot(data.get("image_base64"), upload_dir)
         .await?
         .into_iter()
         .collect();
@@ -382,10 +388,21 @@ mod tests {
     #[tokio::test]
     async fn screenshot_rejects_invalid_base64() {
         let dir = tempfile::tempdir().unwrap();
-        let error = persist_screenshot("not base64!", dir.path())
+        let image = serde_json::json!("not base64!");
+        let error = persist_screenshot(Some(&image), dir.path())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("Invalid screenshot data"));
+    }
+
+    #[tokio::test]
+    async fn screenshot_rejects_non_string_base64() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = serde_json::json!({ "bytes": "cG5n" });
+        let error = persist_screenshot(Some(&image), dir.path())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("image_base64 must be a string"));
     }
 
     #[tokio::test]
@@ -394,7 +411,10 @@ mod tests {
         let upload_path = dir.path().join("not-a-directory");
         tokio::fs::write(&upload_path, b"occupied").await.unwrap();
 
-        let error = persist_screenshot("cG5n", &upload_path).await.unwrap_err();
+        let image = serde_json::json!("cG5n");
+        let error = persist_screenshot(Some(&image), &upload_path)
+            .await
+            .unwrap_err();
         assert!(error
             .to_string()
             .contains("Failed to create upload directory"));
