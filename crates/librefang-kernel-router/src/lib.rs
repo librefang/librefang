@@ -923,18 +923,22 @@ impl RegexCache {
 /// manifest pattern would otherwise live in the cache forever).
 static REGEX_CACHE: OnceLock<Mutex<RegexCache>> = OnceLock::new();
 
+fn cached_regex(cache: &Mutex<RegexCache>, pattern: &str) -> Option<Regex> {
+    let mut guard = lock_router_state(cache, "regex_cache");
+    guard.get_or_compile(pattern).cloned()
+}
+
 fn regex_matches(message: &str, pattern: &str) -> bool {
     let cache = REGEX_CACHE.get_or_init(|| Mutex::new(RegexCache::new()));
-    let mut guard = lock_router_state(cache, "regex_cache");
     // None == compile error → never matches. Mirrors the historical
     // "never-match sentinel" branch but without the panic-risk of
     // the previous `Regex::new("(?!x)x").unwrap()` (regex_lite
     // doesn't support look-around, so the sentinel would have
     // panicked the first time any invalid pattern reached this
-    // path).
-    guard
-        .get_or_compile(pattern)
-        .map(|r| r.is_match(message))
+    // path). Clone the compiled regex out of the cache so matching
+    // does not serialize every routing request on the global mutex.
+    cached_regex(cache, pattern)
+        .map(|regex| regex.is_match(message))
         .unwrap_or(false)
 }
 
@@ -1745,6 +1749,20 @@ system_prompt = "override"
             1,
             "exactly one entry for a single distinct pattern"
         );
+    }
+
+    #[test]
+    fn cached_regex_releases_lock_before_matching() {
+        let cache = Mutex::new(RegexCache::new());
+        let regex = cached_regex(&cache, "hello").expect("valid pattern compiles");
+
+        let guard = cache
+            .try_lock()
+            .expect("cache lock must be released after cloning the regex");
+        assert_eq!(guard.entries.len(), 1);
+        drop(guard);
+
+        assert!(regex.is_match("hello world"));
     }
 
     #[test]
