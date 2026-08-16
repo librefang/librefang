@@ -206,17 +206,13 @@ pub(super) fn init_git_if_missing(home_dir: &Path) {
     }
 
     let gitignore = home_dir.join(".gitignore");
+    let gitignore_was_dirty = existing_repo && git_path_is_dirty(home_dir, ".gitignore");
     let ignore_changed = if gitignore.exists() {
         let Ok(mut contents) = std::fs::read_to_string(&gitignore) else {
             tracing::warn!(path = %gitignore.display(), "Failed to read home gitignore");
             return;
         };
-        let ignores_workspaces = contents.lines().any(|line| {
-            matches!(
-                line.trim(),
-                "workspaces" | "workspaces/" | "/workspaces" | "/workspaces/"
-            )
-        });
+        let ignores_workspaces = gitignore_ignores_workspaces(&contents);
         if ignores_workspaces {
             false
         } else {
@@ -240,7 +236,9 @@ pub(super) fn init_git_if_missing(home_dir: &Path) {
 
     if !existing_repo {
         let _ = run_git(home_dir, &["add", "-A"]);
-        let _ = commit_home_git(home_dir, "chore: initial librefang config");
+        if !commit_home_git(home_dir, "chore: initial librefang config") {
+            tracing::warn!("Failed to create initial home Git commit");
+        }
         info!("Initialized git repo in {}", home_dir.display());
         return;
     }
@@ -269,15 +267,20 @@ pub(super) fn init_git_if_missing(home_dir: &Path) {
         tracing::warn!("Failed to remove runtime workspaces from the home Git index");
         return;
     }
-    if ignore_changed {
+    if ignore_changed && !gitignore_was_dirty {
         let _ = run_git(home_dir, &["add", "--", ".gitignore"]);
     }
 
-    if (ignore_changed || tracked_workspaces) && !had_staged_changes {
-        let _ = commit_home_git(home_dir, "chore: ignore runtime workspaces");
-    } else if (ignore_changed || tracked_workspaces) && had_staged_changes {
+    let migration_needed = ignore_changed || tracked_workspaces;
+    if migration_needed && !had_staged_changes && !gitignore_was_dirty {
+        if !commit_home_git(home_dir, "chore: ignore runtime workspaces") {
+            tracing::warn!("Failed to commit home Git workspace-ignore migration");
+        }
+    } else if migration_needed && (had_staged_changes || gitignore_was_dirty) {
         tracing::warn!(
-            "Home Git migration was staged but not committed because the index already had changes"
+            staged_changes = had_staged_changes,
+            dirty_gitignore = gitignore_was_dirty,
+            "Home Git migration was not committed because it would include user-owned changes"
         );
     }
     if tracked_workspaces {
@@ -285,6 +288,45 @@ pub(super) fn init_git_if_missing(home_dir: &Path) {
             "Runtime workspace files were removed from the home Git index; prior Git history may still contain sensitive data and must be purged before sharing"
         );
     }
+}
+
+fn gitignore_ignores_workspaces(contents: &str) -> bool {
+    let mut ignored = false;
+    for line in contents.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (negated, pattern) = match line.strip_prefix('!') {
+            Some(pattern) => (true, pattern.trim()),
+            None => (false, line),
+        };
+        if matches!(
+            pattern,
+            "workspaces" | "workspaces/" | "/workspaces" | "/workspaces/"
+        ) {
+            // Git applies matching ignore rules in order. A later negation
+            // cancels an earlier `workspaces/`, so only the last matching
+            // rule establishes whether the runtime tree is protected.
+            ignored = !negated;
+        }
+    }
+    ignored
+}
+
+fn git_path_is_dirty(home_dir: &Path, path: &str) -> bool {
+    std::process::Command::new("git")
+        .args([
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            path,
+        ])
+        .current_dir(home_dir)
+        .output()
+        .map_or(true, |output| {
+            !output.status.success() || !output.stdout.is_empty()
+        })
 }
 
 fn run_git(home_dir: &Path, args: &[&str]) -> bool {
@@ -370,6 +412,64 @@ mod home_git_tests {
         assert_eq!(
             git_output(home.path(), &["log", "-1", "--format=%s"]).trim(),
             "chore: ignore runtime workspaces"
+        );
+    }
+
+    #[test]
+    fn later_gitignore_negation_is_overridden_by_the_migration() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(run_git(home.path(), &["init", "-q", "-b", "main"]));
+        std::fs::write(
+            home.path().join(".gitignore"),
+            "workspaces/\n!workspaces/\n",
+        )
+        .unwrap();
+        let workspace_file = home.path().join("workspaces/agent/private.txt");
+        std::fs::create_dir_all(workspace_file.parent().unwrap()).unwrap();
+        std::fs::write(&workspace_file, "private").unwrap();
+        assert!(run_git(home.path(), &["add", "-A"]));
+        assert!(commit_home_git(home.path(), "legacy negation"));
+
+        init_git_if_missing(home.path());
+
+        let gitignore = std::fs::read_to_string(home.path().join(".gitignore")).unwrap();
+        assert!(gitignore.ends_with("!workspaces/\nworkspaces/\n"));
+        assert!(run_git(
+            home.path(),
+            &["check-ignore", "-q", "--no-index", "--", "workspaces/probe"]
+        ));
+        assert!(git_output(home.path(), &["ls-files", "--", "workspaces"]).is_empty());
+        assert!(workspace_file.exists());
+    }
+
+    #[test]
+    fn dirty_gitignore_is_not_folded_into_an_automatic_commit() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(run_git(home.path(), &["init", "-q", "-b", "main"]));
+        std::fs::write(home.path().join(".gitignore"), "logs/\n").unwrap();
+        let workspace_file = home.path().join("workspaces/agent/private.txt");
+        std::fs::create_dir_all(workspace_file.parent().unwrap()).unwrap();
+        std::fs::write(&workspace_file, "private").unwrap();
+        assert!(run_git(home.path(), &["add", "-A"]));
+        assert!(commit_home_git(home.path(), "legacy snapshot"));
+        std::fs::write(home.path().join(".gitignore"), "logs/\ncustom/\n").unwrap();
+
+        init_git_if_missing(home.path());
+
+        assert_eq!(
+            git_output(home.path(), &["log", "-1", "--format=%s"]).trim(),
+            "legacy snapshot",
+            "the migration must not commit pre-existing user edits"
+        );
+        let committed_gitignore = git_output(home.path(), &["show", "HEAD:.gitignore"]);
+        assert_eq!(committed_gitignore, "logs/\n");
+        let working_gitignore = std::fs::read_to_string(home.path().join(".gitignore")).unwrap();
+        assert_eq!(working_gitignore, "logs/\ncustom/\nworkspaces/\n");
+        assert!(workspace_file.exists());
+        assert_eq!(
+            git_output(home.path(), &["diff", "--cached", "--name-only"]).trim(),
+            "workspaces/agent/private.txt",
+            "only the workspace removal may be staged"
         );
     }
 }
