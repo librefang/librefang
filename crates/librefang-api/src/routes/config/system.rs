@@ -607,6 +607,19 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
 // ---------------------------------------------------------------------------
 // Prometheus metrics endpoint
 // ---------------------------------------------------------------------------
+fn escape_prometheus_label_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' | '\r' => escaped.push_str("\\n"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
 /// GET /api/metrics — Prometheus text-format metrics.
 ///
 /// Returns counters and gauges for monitoring LibreFang in production:
@@ -665,10 +678,10 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
     out.push_str("# HELP librefang_llm_calls LLM API calls made (rolling 1h window).\n");
     out.push_str("# TYPE librefang_llm_calls gauge\n");
     for agent in &agents {
-        let name = &agent.name;
-        let provider = &agent.manifest.model.provider;
-        let model = &agent.manifest.model.model;
         if let Some(snap) = state.kernel.scheduler_ref().get_usage(agent.id) {
+            let name = escape_prometheus_label_value(&agent.name);
+            let provider = escape_prometheus_label_value(&agent.manifest.model.provider);
+            let model = escape_prometheus_label_value(&agent.manifest.model.model);
             let labels = format!("agent=\"{name}\",provider=\"{provider}\",model=\"{model}\"");
             out.push_str(&format!(
                 "librefang_tokens{{{labels}}} {}\n",
