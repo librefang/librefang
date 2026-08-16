@@ -54,21 +54,17 @@ async fn atomic_create(target: &Path, content: &str) -> std::io::Result<()> {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent directory")
     })?;
     tokio::fs::create_dir_all(parent).await?;
-    let tmp_path = parent.join(format!(
-        ".librefang-new-{}-{}",
-        target
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "patch".to_string()),
-        rand::random::<u64>()
-    ));
+    // Keep the staging name independent of the target name. A valid target can
+    // already be close to NAME_MAX, and prefixing that full name would make
+    // otherwise valid Add File operations fail.
+    let tmp_path = parent.join(format!(".librefang-new-{:016x}", rand::random::<u64>()));
 
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
+        .await?;
     let publish_result = async {
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)
-            .await?;
         file.write_all(content.as_bytes()).await?;
         file.sync_all().await?;
         drop(file);
@@ -930,6 +926,28 @@ mod tests {
         assert!(!result.is_ok());
         assert_eq!(result.files_added, 0);
         assert_eq!(tokio::fs::read_to_string(target).await.unwrap(), "original");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn add_file_supports_long_valid_target_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = format!("{}.txt", "a".repeat(220));
+        let ops = vec![PatchOp::AddFile {
+            path: name.clone(),
+            content: "created".to_string(),
+        }];
+
+        let result = apply_patch(&ops, dir.path(), &[]).await;
+
+        assert!(result.is_ok(), "{:?}", result.errors);
+        assert_eq!(result.files_added, 1);
+        assert_eq!(
+            tokio::fs::read_to_string(dir.path().join(name))
+                .await
+                .unwrap(),
+            "created"
+        );
     }
 
     #[tokio::test]
