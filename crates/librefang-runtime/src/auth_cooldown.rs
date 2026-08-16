@@ -384,16 +384,18 @@ impl ProviderCooldown {
             .collect()
     }
 
-    /// Clear expired cooldowns (call periodically, e.g. every 60s).
+    /// Clear closed cooldown entries (call periodically, e.g. every 60s).
+    ///
+    /// A failed entry whose cooldown duration elapsed is still `HalfOpen` and
+    /// retains the error count needed for the next backoff step. Only a
+    /// successful, fully reset entry is safe to discard.
     pub fn clear_expired(&self) {
         self.states.retain(|provider, state| {
-            let expired = state
-                .cooldown_start
-                .is_some_and(|start| start.elapsed() >= state.cooldown_duration);
-            if expired {
-                debug!(provider, "circuit breaker: cleared expired entry");
+            let closed = state.error_count == 0 && state.cooldown_start.is_none();
+            if closed {
+                debug!(provider, "circuit breaker: cleared closed entry");
             }
-            !expired
+            !closed
         });
     }
 
@@ -670,18 +672,33 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_expired() {
+    fn test_clear_expired_removes_closed_entries() {
         let mut config = fast_config();
         config.base_cooldown_secs = 0;
         let cb = ProviderCooldown::new(config);
 
         cb.record_failure("openai", false);
-        assert_eq!(cb.states.get("openai").unwrap().error_count, 1);
+        cb.record_success("openai");
+        assert_eq!(cb.states.get("openai").unwrap().error_count, 0);
         assert!(cb.states.contains_key("openai"));
 
         cb.clear_expired();
 
         assert!(!cb.states.contains_key("openai"));
+    }
+
+    #[test]
+    fn test_clear_expired_preserves_half_open_failure_state() {
+        let mut config = fast_config();
+        config.base_cooldown_secs = 0;
+        let cb = ProviderCooldown::new(config);
+
+        cb.record_failure("openai", false);
+        cb.clear_expired();
+
+        assert_eq!(cb.states.get("openai").unwrap().error_count, 1);
+        assert_eq!(cb.get_state("openai"), CircuitState::HalfOpen);
+        assert_eq!(cb.check("openai"), CooldownVerdict::AllowProbe);
     }
 
     #[test]
