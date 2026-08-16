@@ -62,8 +62,6 @@
   --glow-primary: rgba(2, 132, 199, 0.4);
   --glow-secondary: rgba(2, 132, 199, 0.18);
   --glow-medium: rgba(2, 132, 199, 0.25);
-  --scrollbar-thumb: color-mix(in srgb, var(--text-muted) 22%, transparent);
-  --scrollbar-thumb-hover: color-mix(in srgb, var(--text-muted) 45%, transparent);
 }
 
 :root.dark {
@@ -153,6 +151,14 @@ body {
     0 0 36px -10px var(--glow-secondary);
 }
 
+.dark .card-glow:hover {
+  border-color: var(--glow-primary);
+  box-shadow:
+    0 0 0 1px var(--glow-secondary),
+    0 8px 28px -12px var(--glow-medium),
+    0 0 36px -10px var(--glow-secondary);
+}
+
 /* ── Surface "lit" highlight — subtle inner top-light ─── */
 .surface-lit { position: relative; }
 .surface-lit::before {
@@ -165,7 +171,7 @@ body {
 }
 
 /* ── Glow text (KPI accent values) ─────────────────── */
-.glow-text { text-shadow: 0 0 24px var(--glow-medium); }
+.glow-text { text-shadow: 0 0 24px rgba(56, 189, 248, 0.35); }
 
 /* ── Status dot pulse — scale-based, tighter than animate-pulse ── */
 @keyframes pulse-soft {
@@ -191,16 +197,18 @@ body {
 /* ── Smooth scrollbar ───────────────────────────── */
 .scrollbar-thin {
   scrollbar-width: thin;
-  scrollbar-color: var(--scrollbar-thumb) transparent;
+  scrollbar-color: var(--border-color) transparent;
 }
 .scrollbar-thin::-webkit-scrollbar { width: 5px; }
 .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
 .scrollbar-thin::-webkit-scrollbar-thumb {
-  background: var(--scrollbar-thumb);
+  background: rgba(0,0,0,0.12);
   border-radius: 10px;
   transition: background 0.2s;
 }
-.scrollbar-thin::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
+.scrollbar-thin::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.25); }
+.dark .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); }
+.dark .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
 
 @media (prefers-reduced-motion: reduce) {
   *,
