@@ -122,10 +122,19 @@ impl SessionStore {
         })
     }
 
-    pub(crate) fn insert(&self, id: AcpSessionId, state: SessionState) {
+    /// Insert or replace a session.
+    ///
+    /// Replacement cancels the displaced state's prompt token before
+    /// returning it to the caller for downstream handle cleanup.
+    pub(crate) fn insert(
+        &self,
+        id: AcpSessionId,
+        state: SessionState,
+    ) -> Option<Arc<SessionState>> {
         let librefang_id = state.librefang_session_id;
         let mut maps = self.write_maps();
-        if let Some(previous) = maps.by_acp_id.insert(id.clone(), Arc::new(state)) {
+        let previous = maps.by_acp_id.insert(id.clone(), Arc::new(state));
+        if let Some(previous) = previous.as_ref() {
             let previous_librefang_id = previous.librefang_session_id;
             if previous_librefang_id != librefang_id
                 && maps
@@ -137,6 +146,12 @@ impl SessionStore {
             }
         }
         maps.by_librefang_id.insert(librefang_id, id);
+        drop(maps);
+
+        if let Some(previous) = previous.as_ref() {
+            previous.cancel.cancel();
+        }
+        previous
     }
 
     pub(crate) fn get(&self, id: &AcpSessionId) -> Option<Arc<SessionState>> {
@@ -224,7 +239,7 @@ mod tests {
         let id: AcpSessionId = "sess-1".into();
         let state = SessionState::new(PathBuf::from("/tmp/proj"));
         let lf_id = state.librefang_session_id;
-        store.insert(id.clone(), state);
+        assert!(store.insert(id.clone(), state).is_none());
         let fetched = store.get(&id).expect("session should exist");
         assert_eq!(fetched.cwd, PathBuf::from("/tmp/proj"));
         let fetched_again = store.get(&id).expect("session should still exist");
@@ -247,7 +262,7 @@ mod tests {
         let id: AcpSessionId = "sess-2".into();
         let state = SessionState::new(PathBuf::from("/tmp"));
         let token = state.cancel.clone();
-        store.insert(id.clone(), state);
+        assert!(store.insert(id.clone(), state).is_none());
         assert!(!token.is_cancelled());
         assert!(store.cancel(&id));
         assert!(token.is_cancelled());
@@ -276,9 +291,12 @@ mod tests {
         let second = SessionState::new(PathBuf::from("/second"));
         let second_lf_id = second.librefang_session_id;
 
-        store.insert(id.clone(), first);
-        store.insert(id.clone(), second);
+        let first_cancel = first.cancel.clone();
+        assert!(store.insert(id.clone(), first).is_none());
+        let displaced = store.insert(id.clone(), second).expect("displaced state");
 
+        assert_eq!(displaced.librefang_session_id, first_lf_id);
+        assert!(first_cancel.is_cancelled());
         assert!(store.find_by_librefang_id(&first_lf_id).is_none());
         assert_eq!(store.find_by_librefang_id(&second_lf_id), Some(id));
     }
@@ -289,7 +307,7 @@ mod tests {
         let id: AcpSessionId = "drain-me".into();
         let state = SessionState::new(PathBuf::from("/tmp"));
         let lf_id = state.librefang_session_id;
-        store.insert(id.clone(), state);
+        assert!(store.insert(id.clone(), state).is_none());
 
         assert_eq!(store.drain_active(), vec![(id.clone(), lf_id)]);
         assert!(store.get(&id).is_none());
@@ -322,7 +340,7 @@ mod tests {
         let id: AcpSessionId = "after-poison".into();
         let state = SessionState::new(PathBuf::from("/tmp"));
         let lf_id = state.librefang_session_id;
-        store.insert(id.clone(), state);
+        assert!(store.insert(id.clone(), state).is_none());
 
         assert!(!store.maps.is_poisoned());
         assert!(store.get(&id).is_some());
