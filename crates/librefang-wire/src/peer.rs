@@ -394,7 +394,7 @@ pub const HANDSHAKE_READ_TIMEOUT_SECS: u64 = 10;
 
 /// SECURITY: Maximum frame length accepted on a pre-handshake read.
 ///
-/// The handshake timeout above bounds how *long* an unauthenticated client can pin a buffer, but not how *large* that buffer is: the body allocation is sized from the attacker-declared length header, up to `MAX_MESSAGE_SIZE` (16 MiB) per connection.
+/// The handshake timeout above bounds how *long* an unauthenticated client can pin a buffer; the size cap below independently limits that allocation to 64 KiB per connection.
 /// Handshake / HandshakeAck frames are small — node IDs, a UUID nonce, a 64-char HMAC, base64 Ed25519 / X25519 keys, and the advertised `Vec<RemoteAgentInfo>` — roughly 1 KiB typical, and only a node advertising hundreds of richly-described agents approaches tens of KiB.
 /// 64 KiB therefore leaves generous headroom for legitimate handshakes while shrinking the worst-case pre-auth allocation 256×.
 /// Deliberately a separate constant from `MAX_PEER_MESSAGE_BYTES` (same value today): that cap guards the post-auth kernel/LLM payload boundary, this one guards pre-auth transport framing, and the two may diverge independently.
