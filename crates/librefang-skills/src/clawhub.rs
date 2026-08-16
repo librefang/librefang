@@ -623,12 +623,7 @@ impl ClawHubClient {
             let bytes = bytes.to_vec();
             let slug = slug.to_string();
             tokio::task::spawn_blocking(move || -> Result<bool, SkillError> {
-                // Defensive: clean up if a path collision somehow occurred.
-                if tmp_dir.exists() {
-                    let _ = std::fs::remove_dir_all(&tmp_dir);
-                }
-                std::fs::create_dir_all(&tmp_dir)?;
-                let mut cleanup = StagingCleanup::new(&tmp_dir);
+                let mut cleanup = prepare_staging_dir(&tmp_dir)?;
 
                 // Detect content type and extract accordingly
                 let content_str = String::from_utf8_lossy(&bytes);
@@ -896,6 +891,18 @@ impl Drop for StagingCleanup {
             }
         }
     }
+}
+
+fn prepare_staging_dir(path: &Path) -> std::io::Result<StagingCleanup> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let cleanup = StagingCleanup::new(path);
+    std::fs::create_dir_all(path)?;
+    Ok(cleanup)
 }
 
 fn promote_staged_skill(staged: &Path, target: &Path) -> std::io::Result<()> {
@@ -1357,5 +1364,19 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect::<Vec<_>>();
         assert_eq!(entries, vec![std::ffi::OsString::from("skill")]);
+    }
+
+    #[test]
+    fn staging_setup_replaces_a_stale_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("stale"), "old").unwrap();
+
+        let mut cleanup = prepare_staging_dir(&staging).unwrap();
+
+        assert!(staging.is_dir());
+        assert!(!staging.join("stale").exists());
+        cleanup.disarm();
     }
 }
