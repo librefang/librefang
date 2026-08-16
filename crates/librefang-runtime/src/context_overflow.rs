@@ -95,7 +95,7 @@ pub fn recover_from_overflow(
             let removed = drain_unpinned_from_front(messages, target_remove);
             // Re-check after trim
             let new_est = estimate_tokens(messages, system_prompt, tools);
-            if new_est <= threshold_90 {
+            if removed > 0 && new_est <= threshold_90 {
                 return RecoveryStage::AutoCompaction { removed };
             }
         }
@@ -122,7 +122,7 @@ pub fn recover_from_overflow(
             }
 
             let new_est = estimate_tokens(messages, system_prompt, tools);
-            if new_est <= threshold_90 {
+            if removed > 0 && new_est <= threshold_90 {
                 return RecoveryStage::OverflowCompaction { removed };
             }
         }
@@ -246,6 +246,26 @@ mod tests {
         let new_est = estimate_tokens(&msgs, system_prompt, &[]);
         assert!(new_est > (context_window as f64 * 0.70) as usize);
         assert!(new_est <= (context_window as f64 * 0.90) as usize);
+    }
+
+    #[test]
+    fn trim_stages_do_not_report_success_without_mutation() {
+        let system_prompt = "system";
+        let mut msgs = make_messages(11, 300);
+        for msg in &mut msgs {
+            msg.pinned = true;
+        }
+        let original = serde_json::to_value(&msgs).expect("serialize original messages");
+        let estimated = estimate_tokens(&msgs, system_prompt, &[]);
+        let context_window = (estimated as f64 / 0.80).ceil() as usize;
+
+        let stage = recover_from_overflow(&mut msgs, system_prompt, &[], context_window);
+
+        assert_eq!(stage, RecoveryStage::FinalError);
+        assert_eq!(
+            serde_json::to_value(&msgs).expect("serialize recovered messages"),
+            original
+        );
     }
 
     #[test]
