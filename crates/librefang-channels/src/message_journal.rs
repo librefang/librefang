@@ -13,9 +13,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
+
+static NEXT_COMPACTION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Status of a journaled message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -587,7 +590,7 @@ impl MessageJournal {
             let entries: Vec<JournalEntry> = inner.pending.values().cloned().collect();
             (path, snapshot, entries)
         };
-        let tmp_path = path.with_extension(format!("jsonl.tmp.{}", std::process::id()));
+        let tmp_path = Self::compaction_temp_path(&path);
         let remaining = entries.len();
 
         let tmp_for_write = tmp_path.clone();
@@ -716,6 +719,11 @@ impl MessageJournal {
         snapshot == current
     }
 
+    fn compaction_temp_path(path: &Path) -> PathBuf {
+        let sequence = NEXT_COMPACTION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        path.with_extension(format!("jsonl.tmp.{}.{sequence}", std::process::id()))
+    }
+
     #[cfg(unix)]
     fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
         let parent = path
@@ -805,6 +813,17 @@ mod tests {
         assert!(!MessageJournal::compaction_snapshot_is_current(
             &snapshot, &appended
         ));
+    }
+
+    #[test]
+    fn concurrent_compactions_use_distinct_staging_paths() {
+        let path = Path::new("message_journal.jsonl");
+        let first = MessageJournal::compaction_temp_path(path);
+        let second = MessageJournal::compaction_temp_path(path);
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), path.parent());
+        assert_eq!(second.parent(), path.parent());
     }
 
     #[tokio::test]
