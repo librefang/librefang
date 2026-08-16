@@ -26,8 +26,8 @@
 //!   Their workflow is unchanged.
 //! - Otherwise (the new-user case — no SDK installed anywhere), we
 //!   lazily extract the embedded tree once to `<home>/sidecar-python/
-//!   <content_hash>/` and prepend that directory to the child's
-//!   `PYTHONPATH`.
+//!   <content_hash>/` and append that directory as a fallback on the
+//!   child's `PYTHONPATH`.
 //!
 //! Skipping the inject when a real install exists is what keeps
 //! developers' editable installs authoritative — the embedded copy
@@ -175,6 +175,12 @@ pub(crate) fn ensure_extracted(home_dir: &Path) -> std::io::Result<PathBuf> {
     // recovery is best-effort: if a racing process removes it first,
     // the NotFound is swallowed.
     if target.exists() {
+        // Another extractor may have completed after the first marker check.
+        // Never remove a tree that became authoritative while this caller was
+        // waiting to inspect the target.
+        if marker.exists() {
+            return Ok(target);
+        }
         if let Err(e) = std::fs::remove_dir_all(&target) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 return Err(e);
@@ -343,10 +349,10 @@ const PYTHONPATH_SEP: &str = ":";
 /// `existing_pythonpath` is the value already in the merged env about
 /// to be passed to the child — either operator-explicit
 /// `[sidecar_channels.env]` or inherited from the daemon's own env.
-/// When set, our extracted dir is **prepended** so the user's
-/// PYTHONPATH still wins for any module they're explicitly overriding;
-/// our entry only provides resolution for names that nobody else
-/// claimed.
+/// When set, the user's entries stay first and our extracted directory is
+/// appended as a fallback. Explicit operator modules therefore remain
+/// authoritative while names absent from those paths resolve from the
+/// embedded package.
 pub fn pythonpath_with_embedded(
     command: &str,
     home_dir: &Path,
@@ -375,7 +381,7 @@ pub fn pythonpath_with_embedded(
     let entry = extracted.to_string_lossy().into_owned();
     let composed = match existing_pythonpath {
         Some(existing) if !existing.is_empty() => {
-            format!("{entry}{PYTHONPATH_SEP}{existing}")
+            format!("{existing}{PYTHONPATH_SEP}{entry}")
         }
         _ => entry,
     };
@@ -536,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn pythonpath_composition_prepends_extracted_dir() {
+    fn pythonpath_composition_keeps_operator_entries_first() {
         // Drives the no-real-sdk branch via an interpreter path whose
         // basename matches the Python detector (`python3`) but whose
         // file does NOT exist, so `has_real_sdk_installed` reliably
@@ -552,13 +558,13 @@ mod tests {
         let composed = result.expect("should compose when sdk absent");
         let sep = PYTHONPATH_SEP;
         assert!(
-            composed.ends_with(&format!("{sep}/operator/explicit/path")),
-            "operator PYTHONPATH must be preserved at the tail: got {composed}"
+            composed.starts_with(&format!("/operator/explicit/path{sep}")),
+            "operator PYTHONPATH must remain authoritative: got {composed}"
         );
         let extract_target = tmp.path().join("sidecar-python").join(embedded_hash());
         assert!(
-            composed.starts_with(&extract_target.to_string_lossy().to_string()),
-            "extracted dir must be prepended: got {composed}"
+            composed.ends_with(&extract_target.to_string_lossy().to_string()),
+            "extracted dir must remain a fallback: got {composed}"
         );
     }
 
