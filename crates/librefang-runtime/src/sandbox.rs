@@ -746,10 +746,20 @@ impl WasmSandbox {
                  msg_ptr: i32,
                  msg_len: i32| {
                     let mut caller = caller;
-                    // Clamp the guest-supplied length before touching memory.
-                    let clamped_len = (msg_len as usize).min(MAX_LOG_BYTES) as i32;
-                    let was_truncated = (msg_len as usize) > MAX_LOG_BYTES;
-                    let original_len = msg_len as usize;
+                    // Reject signed ABI underflow before converting to usize,
+                    // then clamp the validated length before touching memory.
+                    let (clamped_len, original_len, was_truncated) =
+                        match Self::clamp_host_log_len(msg_len) {
+                            Ok(lengths) => lengths,
+                            Err(error) => {
+                                tracing::error!(
+                                    agent = %caller.data().agent_id,
+                                    error = %error,
+                                    "host_log rejected invalid guest length"
+                                );
+                                return;
+                            }
+                        };
 
                     match Self::read_guest_bytes(&mut caller, msg_ptr, clamped_len, "host_log") {
                         Ok(bytes) => {
@@ -903,6 +913,15 @@ impl WasmSandbox {
         let range = Self::checked_guest_range(ptr, len, data.len(), op)?;
 
         Ok(data[range].to_vec())
+    }
+
+    fn clamp_host_log_len(len: i32) -> Result<(i32, usize, bool), SandboxError> {
+        let original_len = usize::try_from(len).map_err(|_| {
+            SandboxError::AbiError(format!("host_log: negative length (len={len})"))
+        })?;
+        let was_truncated = original_len > MAX_LOG_BYTES;
+        let clamped_len = original_len.min(MAX_LOG_BYTES) as i32;
+        Ok((clamped_len, original_len, was_truncated))
     }
 
     fn guest_abi_len(len: usize, op: &str) -> Result<i32, SandboxError> {
@@ -1553,6 +1572,20 @@ mod tests {
         assert_eq!(
             WasmSandbox::checked_guest_range(2, 3, 5, "test").unwrap(),
             2..5
+        );
+    }
+
+    #[test]
+    fn test_host_log_length_rejects_negative_before_clamping() {
+        let error = WasmSandbox::clamp_host_log_len(-1).unwrap_err();
+        assert!(matches!(
+            error,
+            SandboxError::AbiError(message)
+                if message.contains("negative length") && message.contains("len=-1")
+        ));
+        assert_eq!(
+            WasmSandbox::clamp_host_log_len(MAX_LOG_BYTES as i32 + 7).unwrap(),
+            (MAX_LOG_BYTES as i32, MAX_LOG_BYTES + 7, true)
         );
     }
 
