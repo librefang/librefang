@@ -1234,7 +1234,7 @@ impl PeerNode {
         // Read the incoming handshake request under the size and duration
         // bounds enforced by `read_message`.
         let msg = read_message(&mut reader).await?;
-        let (peer_node_id, session_key) = match &msg.kind {
+        let (peer_node_id, session_key, owns_registry_connection) = match &msg.kind {
             WireMessageKind::Request(WireRequest::Handshake {
                 node_id,
                 node_name,
@@ -1397,18 +1397,28 @@ impl PeerNode {
                     agents.len()
                 );
 
-                // Register the peer
-                registry.add_peer(PeerEntry {
-                    node_id: node_id.clone(),
-                    node_name: node_name.clone(),
-                    address: addr,
-                    agents: agents.clone(),
-                    state: PeerState::Connected,
-                    connected_at: chrono::Utc::now(),
-                    protocol_version: *protocol_version,
-                });
+                // A short-lived authenticated request or notification may
+                // arrive alongside an established connection. Preserve that
+                // connection's listen address and lifecycle ownership instead
+                // of replacing it with this socket's ephemeral source port.
+                let has_existing_connection = registry
+                    .get_peer(node_id)
+                    .is_some_and(|peer| peer.state == PeerState::Connected);
+                if has_existing_connection {
+                    registry.update_agents(node_id, agents.clone());
+                } else {
+                    registry.add_peer(PeerEntry {
+                        node_id: node_id.clone(),
+                        node_name: node_name.clone(),
+                        address: addr,
+                        agents: agents.clone(),
+                        state: PeerState::Connected,
+                        connected_at: chrono::Utc::now(),
+                        protocol_version: *protocol_version,
+                    });
+                }
 
-                (node_id.clone(), session_key)
+                (node_id.clone(), session_key, !has_existing_connection)
             }
             // SECURITY: Reject all non-Handshake initial messages.
             // Clients MUST complete HMAC-authenticated handshake before sending
@@ -1447,7 +1457,9 @@ impl PeerNode {
         {
             debug!("OFP: connection with {} ended: {}", peer_node_id, e);
         }
-        registry.mark_disconnected(&peer_node_id);
+        if owns_registry_connection {
+            registry.mark_disconnected(&peer_node_id);
+        }
 
         Ok(())
     }
@@ -2027,15 +2039,31 @@ mod tests {
         )
         .await
         .unwrap();
-        sender_registry.add_peer(PeerEntry {
-            node_id: "broadcast-server".to_string(),
-            node_name: "receiver".to_string(),
-            address: receiver.local_addr(),
-            agents: Vec::new(),
-            state: PeerState::Connected,
-            connected_at: chrono::Utc::now(),
-            protocol_version: PROTOCOL_VERSION,
-        });
+        sender
+            .connect_to_peer_with_id(
+                receiver.local_addr(),
+                sender_handle.clone(),
+                "broadcast-server",
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if receiver_registry
+                    .get_peer("broadcast-client")
+                    .is_some_and(|peer| peer.state == PeerState::Connected)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("persistent peer connection was not registered");
+        let persistent_address = receiver_registry
+            .get_peer("broadcast-client")
+            .expect("connected sender is registered")
+            .address;
 
         let spawned = RemoteAgentInfo {
             id: "broadcast-agent".to_string(),
@@ -2068,6 +2096,13 @@ mod tests {
         })
         .await
         .expect("authenticated broadcast notification was not delivered");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let peer = receiver_registry
+            .get_peer("broadcast-client")
+            .expect("sender remains registered");
+        assert_eq!(peer.state, PeerState::Connected);
+        assert_eq!(peer.address, persistent_address);
     }
 
     /// Regression (#3920): the production `bootstrap_peers` path dials via `connect_to_peer`, which leaves `recipient_node_id` empty because the remote node ID is unknown in advance — `bootstrap_peers` lists addresses, not identities.
