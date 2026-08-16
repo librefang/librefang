@@ -97,7 +97,10 @@ export function RuntimePage() {
   const addToast = useUIStore((s) => s.addToast);
   const [showShutdownConfirm, setShowShutdownConfirm] = useState(false);
   const [backupConfirm, setBackupConfirm] = useState<BackupConfirmState | null>(null);
-  const [reloadResult, setReloadResult] = useState<string | null>(null);
+  const [reloadResult, setReloadResult] = useState<{
+    status: string;
+    warnings?: string[];
+  } | null>(null);
   const reloadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -124,7 +127,7 @@ export function RuntimePage() {
   });
   const reloadMutation = useReloadConfig({
     onSuccess: (data) => {
-      setReloadResult(data.status);
+      setReloadResult(data);
       if (reloadTimeoutRef.current) {
         clearTimeout(reloadTimeoutRef.current);
       }
@@ -802,7 +805,13 @@ export function RuntimePage() {
                 {t("runtime.shutdown")}
               </Button>
             </div>
-            {reloadResult && <p className="text-xs text-success mt-3">{t("runtime.reload_success", { status: reloadResult })}</p>}
+            {reloadResult && (
+              <p className={`text-xs mt-3 ${reloadResult.warnings?.length ? "text-warning" : "text-success"}`}>
+                {reloadResult.warnings?.length
+                  ? reloadResult.warnings.join(" ")
+                  : t("runtime.reload_success", { status: reloadResult.status })}
+              </p>
+            )}
             {reloadMutation.isError && <p className="text-xs text-error mt-3">{t("runtime.reload_error")}</p>}
             {cleanupMutation.isSuccess && <p className="text-xs text-success mt-3">{t("runtime.sessions_deleted", { count: cleanupMutation.data?.sessions_deleted ?? 0 })}</p>}
             {shutdownMutation.isError && <p className="text-xs text-error mt-3">{t("runtime.shutdown_error")}</p>}

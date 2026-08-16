@@ -2842,8 +2842,15 @@ export async function shutdownServer(): Promise<{ status: string }> {
   return post<{ status: string }>("/api/shutdown", {});
 }
 
-export async function reloadConfig(): Promise<{ status: string; restart_required?: boolean; restart_reasons?: string[] }> {
-  return post<{ status: string; restart_required?: boolean; restart_reasons?: string[] }>("/api/config/reload", {});
+export type ReloadConfigResult = {
+  status: string;
+  restart_required?: boolean;
+  restart_reasons?: string[];
+  warnings?: string[];
+};
+
+export async function reloadConfig(): Promise<ReloadConfigResult> {
+  return post<ReloadConfigResult>("/api/config/reload", {});
 }
 
 export interface HealthDetailResponse {
