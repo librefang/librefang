@@ -288,7 +288,11 @@ fn llm_health_snapshot(state: &AppState) -> LlmHealthSnapshot {
 fn redact_url_credentials(url: &str) -> String {
     if let Some(scheme_end) = url.find("://") {
         let after_scheme = &url[scheme_end + 3..];
-        if let Some(at_pos) = after_scheme.find('@') {
+        let authority_end = after_scheme
+            .find(|character: char| matches!(character, '/' | '?' | '#'))
+            .unwrap_or(after_scheme.len());
+        let authority = &after_scheme[..authority_end];
+        if let Some(at_pos) = authority.rfind('@') {
             let host_and_rest = &after_scheme[at_pos..]; // includes '@'
             return format!("{}://***{}", &url[..scheme_end], host_and_rest);
         }

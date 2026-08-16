@@ -1766,6 +1766,24 @@ mod config_read_write_parity_tests {
         assert!(!rendered.contains("notify-password"));
     }
 
+    #[test]
+    fn pairing_ntfy_url_preserves_at_signs_outside_the_authority() {
+        for url in [
+            "https://ntfy.example.test/topic@tenant",
+            "https://ntfy.example.test/topic?contact=ops@example.test",
+        ] {
+            let mut config = KernelConfig::default();
+            config.pairing.ntfy_url = Some(url.to_string());
+
+            let payload = super::redacted_config_json(&config, &BudgetConfig::default());
+            let rendered = lookup(&payload, "pairing.ntfy_url")
+                .and_then(|value| value.as_str())
+                .expect("configured ntfy URL remains visible");
+
+            assert_eq!(rendered, url);
+        }
+    }
+
     /// The specific paths the #6596 report listed as writable-but-unreadable, pinned by name so a regression names the issue rather than surfacing as one entry in the bulk diff above.
     #[test]
     fn reported_missing_paths_are_present() {
