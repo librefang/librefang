@@ -445,7 +445,7 @@ pub(super) async fn stream_with_retry(
                 // classification, log lines, error stringification through
                 // `LibreFangError::LlmDriver(e.to_string())`) only ever read
                 // `partial_text_len` and pay nothing for the body.
-                if !cascade_leak_aborted {
+                if !content_emitted_sticky && !cascade_leak_aborted {
                     if let Some(body) = partial_text.as_deref() {
                         if !body.is_empty() {
                             let _ = tx
@@ -523,6 +523,35 @@ mod tests {
         }
     }
 
+    /// A streaming driver that emits a delta and then reports the same body
+    /// through the timeout fallback.
+    struct PartialThenTimedOut;
+
+    #[async_trait::async_trait]
+    impl LlmDriver for PartialThenTimedOut {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            unreachable!("this mock is only exercised through stream()")
+        }
+
+        async fn stream(
+            &self,
+            _req: CompletionRequest,
+            tx: mpsc::Sender<StreamEvent>,
+        ) -> Result<CompletionResponse, LlmError> {
+            tx.send(StreamEvent::TextDelta {
+                text: "partial".to_string(),
+            })
+            .await
+            .unwrap();
+            Err(LlmError::TimedOut {
+                inactivity_secs: 30,
+                partial_text: Some(std::sync::Arc::from("partial")),
+                partial_text_len: 7,
+                last_activity: "text_delta".to_string(),
+            })
+        }
+    }
+
     /// Regression (#6512 review [2]): once observable content has reached the caller's `tx`, a retryable mid-stream error (Overloaded / RateLimited / transient) must NOT be retried — a retry re-streams a second full response onto the same `tx`, concatenating a duplicate/garbled answer.
     /// The caller must receive the error and exactly ONE copy of the partial content.
     #[tokio::test]
@@ -546,5 +575,21 @@ mod tests {
             deltas, 1,
             "the partial content must reach the caller exactly once — a retry would duplicate it"
         );
+    }
+
+    #[tokio::test]
+    async fn timeout_does_not_repeat_already_streamed_partial_text() {
+        let driver = PartialThenTimedOut;
+        let (tx, mut rx) = mpsc::channel(64);
+        let result = stream_with_retry(&driver, CompletionRequest::default(), tx, None, None).await;
+
+        assert!(result.is_err());
+        let mut texts = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let StreamEvent::TextDelta { text } = event {
+                texts.push(text);
+            }
+        }
+        assert_eq!(texts, ["partial"]);
     }
 }
