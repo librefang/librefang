@@ -49,12 +49,37 @@ describe("reload timestamp storage", () => {
     expect(readReloadTimestamp(storage, history)).toBe(123);
   });
 
+  it("falls back when accessing session storage itself throws", () => {
+    const storage = vi.spyOn(window, "sessionStorage", "get").mockImplementation(() => {
+      throw new DOMException("blocked", "SecurityError");
+    });
+    const history = createHistory({ __librefang_chunk_reload: 123 });
+    try {
+      expect(readReloadTimestamp(undefined, history)).toBe(123);
+    } finally {
+      storage.mockRestore();
+    }
+  });
+
   it("persists a reload guard in history when storage writes fail", () => {
     const storage = { setItem: vi.fn(() => { throw new DOMException("full", "QuotaExceededError"); }) };
     const history = createHistory({ router: "state" });
     expect(writeReloadTimestamp(123, storage, history)).toBe(true);
     expect(readReloadTimestamp({ getItem: vi.fn(() => null) }, history)).toBe(123);
     expect(history.state).toEqual({ router: "state", __librefang_chunk_reload: 123 });
+  });
+
+  it("persists in history when accessing session storage itself throws", () => {
+    const storage = vi.spyOn(window, "sessionStorage", "get").mockImplementation(() => {
+      throw new DOMException("blocked", "SecurityError");
+    });
+    const history = createHistory({ router: "state" });
+    try {
+      expect(writeReloadTimestamp(123, undefined, history)).toBe(true);
+      expect(history.state).toEqual({ router: "state", __librefang_chunk_reload: 123 });
+    } finally {
+      storage.mockRestore();
+    }
   });
 
   it("declines recovery when neither storage nor history can persist the guard", () => {

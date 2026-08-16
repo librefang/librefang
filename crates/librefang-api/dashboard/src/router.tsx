@@ -48,12 +48,12 @@ function validReloadTimestamp(value: unknown): number {
 type ReloadHistory = Pick<History, "state" | "replaceState">;
 
 export function readReloadTimestamp(
-  storage: Pick<Storage, "getItem"> = window.sessionStorage,
+  storage?: Pick<Storage, "getItem">,
   history: ReloadHistory = window.history,
 ): number {
   let stored = 0;
   try {
-    stored = validReloadTimestamp(storage.getItem(CHUNK_RELOAD_KEY));
+    stored = validReloadTimestamp((storage ?? window.sessionStorage).getItem(CHUNK_RELOAD_KEY));
   } catch {
     // History state remains available when storage access is blocked.
   }
@@ -66,11 +66,11 @@ export function readReloadTimestamp(
 
 export function writeReloadTimestamp(
   timestamp: number,
-  storage: Pick<Storage, "setItem"> = window.sessionStorage,
+  storage?: Pick<Storage, "setItem">,
   history: ReloadHistory = window.history,
 ): boolean {
   try {
-    storage.setItem(CHUNK_RELOAD_KEY, String(timestamp));
+    (storage ?? window.sessionStorage).setItem(CHUNK_RELOAD_KEY, String(timestamp));
     return true;
   } catch {
     try {
