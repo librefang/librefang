@@ -5,6 +5,12 @@ category = "data"
 icon = "lucide:leaf"
 tags = ["database", "nosql", "document", "mongo", "queries"]
 
+setup_instructions = """
+1. Obtain your MongoDB connection URI from MongoDB Atlas (Clusters > Connect > Drivers) or your self-hosted instance.
+2. Ensure the database user has the necessary read/write permissions for the collections you want to access.
+3. Paste the full connection URI into the MONGODB_URI field above.
+"""
+
 [transport]
 type = "stdio"
 command = "npx"
@@ -20,13 +26,6 @@ get_url = ""
 [health_check]
 interval_secs = 60
 unhealthy_threshold = 3
-
-setup_instructions = """
-1. Obtain your MongoDB connection URI from MongoDB Atlas (Clusters > Connect > Drivers) or your self-hosted instance.
-2. Ensure the database user has the necessary read/write permissions for the collections you want to access.
-3. Paste the full connection URI into the MONGODB_URI field above.
-"""
-
 
 [i18n.zh]
 name = "MongoDB"

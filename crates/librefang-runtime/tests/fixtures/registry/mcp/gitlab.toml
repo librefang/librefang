@@ -5,6 +5,12 @@ category = "devtools"
 icon = "lucide:flame"
 tags = ["git", "vcs", "code", "merge-requests", "ci", "devops"]
 
+setup_instructions = """
+1. Navigate to GitLab > User Settings > Access Tokens (https://gitlab.com/-/user_settings/personal_access_tokens).
+2. Create a new personal access token with the 'api' scope and an appropriate expiration date.
+3. Paste the token into the GITLAB_PERSONAL_ACCESS_TOKEN field above.
+"""
+
 [transport]
 type = "stdio"
 command = "npx"
@@ -20,13 +26,6 @@ get_url = "https://gitlab.com/-/user_settings/personal_access_tokens"
 [health_check]
 interval_secs = 60
 unhealthy_threshold = 3
-
-setup_instructions = """
-1. Navigate to GitLab > User Settings > Access Tokens (https://gitlab.com/-/user_settings/personal_access_tokens).
-2. Create a new personal access token with the 'api' scope and an appropriate expiration date.
-3. Paste the token into the GITLAB_PERSONAL_ACCESS_TOKEN field above.
-"""
-
 
 [i18n.zh]
 name = "GitLab"
