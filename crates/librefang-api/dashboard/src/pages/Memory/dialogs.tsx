@@ -323,20 +323,13 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                       const nextModel =
                         !nextProvider
                           ? ""
-                          : !form.embedding_model ||
-                              nextSuggestions.includes(form.embedding_model)
+                          : nextSuggestions.includes(form.embedding_model)
                             ? form.embedding_model
                             : (nextSuggestions[0] ?? form.embedding_model);
-                      const knownKeyEnvs = new Set(
-                        Object.values(EMBEDDING_PROVIDER_API_KEY_ENVS).filter(Boolean),
-                      );
                       const nextApiKeyEnv =
-                        !form.embedding_api_key_env ||
-                        knownKeyEnvs.has(form.embedding_api_key_env)
-                          ? isKnownEmbeddingProvider(nextProvider)
-                            ? EMBEDDING_PROVIDER_API_KEY_ENVS[nextProvider]
-                            : ""
-                          : form.embedding_api_key_env;
+                        isKnownEmbeddingProvider(nextProvider)
+                          ? EMBEDDING_PROVIDER_API_KEY_ENVS[nextProvider]
+                          : "";
                       setEmbeddingCustomSelected(false);
                       setForm({
                         ...form,

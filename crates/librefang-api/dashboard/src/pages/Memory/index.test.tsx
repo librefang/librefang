@@ -368,6 +368,34 @@ describe("MemoryPage (redesigned)", () => {
     });
   });
 
+  it("replaces empty models and stale custom key variables when the provider changes", async () => {
+    useMemoryConfigMock.mockReturnValue({
+      data: {
+        ...CONFIG,
+        embedding_model: "",
+        embedding_api_key_env: "CUSTOM_OPENAI_KEY",
+      },
+      isLoading: false,
+      isError: false,
+    });
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /Settings/i }));
+
+    const [providerSelect, embeddingModelSelect] = screen.getAllByRole("combobox");
+    fireEvent.change(providerSelect, { target: { value: "cohere" } });
+
+    expect(embeddingModelSelect).toHaveValue("embed-multilingual-v3.0");
+    expect(screen.getByPlaceholderText("OPENAI_API_KEY")).toHaveValue("COHERE_API_KEY");
+
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+    await waitFor(() => expect(configMutateAsync).toHaveBeenCalledTimes(1));
+    expect(configMutateAsync.mock.calls[0][0]).toMatchObject({
+      embedding_provider: "cohere",
+      embedding_model: "embed-multilingual-v3.0",
+      embedding_api_key_env: "COHERE_API_KEY",
+    });
+  });
+
   it("persists auto-detected embedding defaults as explicit clears", async () => {
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: /Settings/i }));
