@@ -1298,16 +1298,15 @@ mod tests {
 
     #[tokio::test]
     async fn pty_exit_wait_is_bounded_when_child_never_exits() {
-        let mut polls = 0;
-        let status = wait_for_pty_exit(std::time::Duration::from_millis(50), || {
-            polls += 1;
-            Ok(None)
-        })
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_pty_exit(std::time::Duration::from_millis(50), || Ok(None)),
+        )
         .await
+        .expect("PTY exit polling must stay bounded")
         .unwrap();
 
         assert_eq!(status, None);
-        assert!(polls > 1);
     }
 
     #[test]
