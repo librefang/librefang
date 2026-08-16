@@ -35,21 +35,21 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(300);
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct ThreadKey {
     /// Adapter-qualified channel slug (e.g. `"slack"`, `"discord"`).
-    pub(crate) channel: String,
+    channel: String,
     /// Bot account this message reached, when the adapter is multi-tenant (e.g. one Slack workspace id, one Telegram bot token slug).
     /// Two accounts on the same channel-type never share a claim.
-    pub(crate) account_id: Option<String>,
+    account_id: Option<String>,
     /// Chat / group / DM container id.
     /// Distinguishes two chats that reuse the same platform-side `thread` id (rare but possible for forum topics).
-    pub(crate) chat_id: Option<String>,
+    chat_id: Option<String>,
     /// Platform thread identifier (Slack `thread_ts`, Discord thread ID, a forum-topic id, …).
     /// Callers without a forum topic pass the `chat_id` here so a topic-less group still gets a stable claim.
     /// Empty string is invalid; callers should not invoke the registry without a real thread.
-    pub(crate) thread: String,
+    thread: String,
     /// Conversational partner (the individual sender).
     /// Scoping the claim to a peer lets two users in the same thread talk to two different agents without contaminating each other.
     /// `None` => thread-wide claim.
-    pub(crate) peer_id: Option<String>,
+    peer_id: Option<String>,
 }
 
 impl ThreadKey {
