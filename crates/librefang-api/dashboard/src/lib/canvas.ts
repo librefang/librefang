@@ -172,29 +172,64 @@ export function parseCanvasImport(value: unknown): CanvasImport {
     throw new Error("Canvas import contains a self-referencing edge");
   }
 
-  const labelToId = new Map<string, string | null>();
-  for (const node of value.nodes) {
-    const label = node.data.label;
-    if (!label) continue;
-    labelToId.set(label, labelToId.has(label) ? null : node.id);
-  }
-  for (const node of value.nodes) {
-    if (node.data._groupId && !nodeIds.has(node.data._groupId)) {
-      throw new Error("Canvas import contains an unknown group reference");
-    }
-    if (node.data._childIds?.some((id) => id === node.id || !nodeIds.has(id))) {
-      throw new Error("Canvas import contains an invalid group child reference");
-    }
-    if (node.data.dependsOn?.some((dependency) => {
-      const targetId = nodeIds.has(dependency) ? dependency : labelToId.get(dependency);
-      return !targetId || targetId === node.id;
-    })) {
-      throw new Error("Canvas import contains an invalid dependency reference");
+  for (const edge of value.edges) {
+    if (isRecord(edge.data)) {
+      for (const field of ["_origSource", "_origTarget"]) {
+        const endpoint = edge.data[field];
+        if (typeof endpoint === "string" && !nodeIds.has(endpoint)) {
+          throw new Error("Canvas import contains an unknown restored edge endpoint");
+        }
+      }
     }
   }
 
+  const stepNodes = value.nodes.filter((node) => node.data.agentId || node.data.agentName);
+  const dependencyOptions = stepNodes.map((node, index) => ({
+    id: node.id,
+    label: node.data.label || `Step ${index + 1}`,
+  }));
+  const stepIds = new Set(stepNodes.map((node) => node.id));
+  const normalizedNodes = value.nodes.map((node) => {
+    if (node.parentId && (node.parentId === node.id || !nodeIds.has(node.parentId))) {
+      throw new Error("Canvas import contains an invalid parent reference");
+    }
+    if (node.data._groupId
+      && (node.data._groupId === node.id || !nodeIds.has(node.data._groupId))) {
+      throw new Error("Canvas import contains an invalid group reference");
+    }
+    if (node.data._childIds) {
+      const childIds = new Set(node.data._childIds);
+      if (childIds.size !== node.data._childIds.length
+        || node.data._childIds.some((id) => id === node.id || !nodeIds.has(id))) {
+        throw new Error("Canvas import contains an invalid group child reference");
+      }
+    }
+
+    const dependencies = node.data.dependsOn;
+    let resolvedDependencies: string[] | undefined;
+    if (dependencies && dependencies.length > 0) {
+      const uniqueDependencies = new Set(dependencies);
+      resolvedDependencies = resolveDependencyIds(dependencies, dependencyOptions);
+      if (!stepIds.has(node.id)
+        || uniqueDependencies.size !== dependencies.length
+        || resolvedDependencies.length !== dependencies.length
+        || resolvedDependencies.includes(node.id)) {
+        throw new Error("Canvas import contains an invalid dependency reference");
+      }
+    }
+
+    return {
+      ...node,
+      data: {
+        ...node.data,
+        dependsOn: resolvedDependencies,
+        _runState: undefined,
+      },
+    };
+  });
+
   return {
-    nodes: value.nodes,
+    nodes: normalizedNodes,
     edges: value.edges,
     name: value.name,
     description: value.description,
@@ -220,11 +255,14 @@ export function resolveDependencyIds(dependencies: string[], options: Dependency
 /** Resolve stable canvas IDs to the current names required by the workflow API. */
 export function resolveDependencyNames(dependencies: string[], options: DependencyOption[]): string[] {
   const idToLabel = new Map(options.map((option) => [option.id, option.label]));
-  const labels = new Set(options.map((option) => option.label));
+  const labelCounts = new Map<string, number>();
+  for (const option of options) {
+    labelCounts.set(option.label, (labelCounts.get(option.label) ?? 0) + 1);
+  }
   const resolved = dependencies.flatMap((dependency) => {
     const currentLabel = idToLabel.get(dependency);
     if (currentLabel) return [currentLabel];
-    return labels.has(dependency) ? [dependency] : [];
+    return labelCounts.get(dependency) === 1 ? [dependency] : [];
   });
   return [...new Set(resolved)];
 }

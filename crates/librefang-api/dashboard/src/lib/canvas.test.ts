@@ -171,6 +171,14 @@ describe("parseCanvasImport", () => {
       nodes: [mkNode("a")],
       edges: [mkEdge("e1", "a", "a")],
     })).toThrow();
+    expect(() => parseCanvasImport({
+      nodes: [mkNode("a"), mkNode("b")],
+      edges: [{ ...mkEdge("e1", "a", "b"), data: { _origSource: "missing" } }],
+    })).toThrow();
+    expect(() => parseCanvasImport({
+      nodes: [{ ...mkNode("a"), parentId: "missing" }],
+      edges: [],
+    })).toThrow();
   });
 
   it("rejects unknown, ambiguous, and self dependency references", () => {
@@ -190,6 +198,19 @@ describe("parseCanvasImport", () => {
       nodes: [{ ...mkNode("a"), data: { label: "A", dependsOn: ["a"] } }],
       edges: [],
     })).toThrow();
+  });
+
+  it("migrates valid legacy step dependencies and clears runtime state", () => {
+    const imported = parseCanvasImport({
+      nodes: [
+        { ...mkNode("a"), data: { label: "Collect", agentId: "agent-a", _runState: "done" } },
+        { ...mkNode("b"), data: { label: "Summarize", agentId: "agent-b", dependsOn: ["Collect"] } },
+      ],
+      edges: [],
+    });
+
+    expect(imported.nodes[0].data._runState).toBeUndefined();
+    expect(imported.nodes[1].data.dependsOn).toEqual(["a"]);
   });
 });
 
@@ -215,5 +236,12 @@ describe("canvas dependency references", () => {
       { id: "node-a", label: "Collect renamed" },
       options[1],
     ])).toEqual(["Collect renamed"]);
+  });
+
+  it("does not preserve ambiguous legacy labels when building the workflow API", () => {
+    expect(resolveDependencyNames(["Duplicate"], [
+      { id: "node-a", label: "Duplicate" },
+      { id: "node-b", label: "Duplicate" },
+    ])).toEqual([]);
   });
 });
