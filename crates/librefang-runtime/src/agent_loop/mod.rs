@@ -165,7 +165,7 @@ fn apply_context_compaction(
     let compacted_new_messages_start = first_new_message_json
         .as_ref()
         .and_then(|first| {
-            compacted.iter().position(|message| {
+            compacted.iter().rposition(|message| {
                 serde_json::to_value(message).is_ok_and(|candidate| candidate == *first)
             })
         })

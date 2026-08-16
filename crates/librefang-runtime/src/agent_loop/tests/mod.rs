@@ -121,6 +121,40 @@ fn context_compaction_preserves_current_turn_when_engine_omits_it() {
     assert_eq!(working.len(), session.messages.len());
 }
 
+#[test]
+fn context_compaction_uses_last_duplicate_as_current_turn_boundary() {
+    let duplicate_user = Message::user("same request");
+    let original = vec![
+        duplicate_user.clone(),
+        Message::assistant("old answer"),
+        duplicate_user.clone(),
+    ];
+    let mut session = Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id: librefang_types::agent::AgentId::new(),
+        messages: original.clone(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    let mut working = original.clone();
+    let mut new_messages_start = 2;
+
+    apply_context_compaction(
+        &mut session,
+        &mut working,
+        &mut new_messages_start,
+        String::new(),
+        original,
+    );
+
+    assert_eq!(new_messages_start, 2);
+    assert_eq!(working.len(), session.messages.len());
+}
+
 // ── push_accumulated_text bounded growth ──────────────────────────────
 
 #[test]
