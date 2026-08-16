@@ -370,6 +370,7 @@ describe("escapeCsvField", () => {
     expect(escapeCsvField("=HYPERLINK(\"https://example.test\")")).toBe("\"'=HYPERLINK(\"\"https://example.test\"\")\"");
     expect(escapeCsvField("+1+1")).toBe("'+1+1");
     expect(escapeCsvField("@SUM(A1:A2)")).toBe("'@SUM(A1:A2)");
+    expect(escapeCsvField("\n=1+1")).toBe("\"'\n=1+1\"");
   });
 
   it("retains standard CSV quoting", () => {

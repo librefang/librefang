@@ -79,7 +79,7 @@ function parseNonNegative(raw: string, integer = false): number | null {
 export function escapeCsvField(value: unknown): string {
   if (value == null) return "";
   const raw = String(value);
-  const safe = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+  const safe = /^[=+\-@\t\r\n]/.test(raw) ? `'${raw}` : raw;
   return /[",\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
