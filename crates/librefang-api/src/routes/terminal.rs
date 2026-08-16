@@ -32,6 +32,30 @@ pub const MAX_WS_MSG_SIZE: usize = 64 * 1024;
 
 const MAX_COLS: u16 = 1000;
 const MAX_ROWS: u16 = 500;
+const PTY_EXIT_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+const PTY_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+async fn wait_for_pty_exit<P>(
+    timeout: Duration,
+    mut poll: P,
+) -> std::io::Result<Option<(u32, Option<String>)>>
+where
+    P: FnMut() -> std::io::Result<Option<(u32, Option<String>)>>,
+{
+    match tokio::time::timeout(timeout, async {
+        loop {
+            if let Some(status) = poll()? {
+                return Ok(status);
+            }
+            tokio::time::sleep(PTY_EXIT_POLL_INTERVAL).await;
+        }
+    })
+    .await
+    {
+        Ok(result) => result.map(Some),
+        Err(_) => Ok(None),
+    }
+}
 
 fn lock_terminal_last_activity(
     last_activity: &std::sync::Mutex<std::time::Instant>,
@@ -1214,20 +1238,31 @@ async fn handle_terminal_ws(
         }
     }
 
-    // For ClientClose and Timeout the child may still be running — kill it first
-    // so that wait_exit() returns promptly with the real exit code.
+    // Stop the reader regardless of how the session ended. Waiting for child
+    // exit must not keep this task alive.
+    pty_read_handle.abort();
+
+    // For ClientClose and Timeout the child may still be running — kill it first.
     if !matches!(exit_reason, ExitReason::ProcessExited) {
         pty.kill();
     }
 
-    // Always wait for the real exit code, regardless of why the loop ended.
-    let (code, signal) = match pty.wait_exit() {
-        Ok(pair) => pair,
-        Err(e) => {
-            warn!(error = %e, "Failed to wait for child exit");
-            (1, None)
-        }
-    };
+    // Poll instead of calling the blocking child.wait() on a Tokio worker.
+    // Bound the poll so a child that ignores termination cannot retain the
+    // WebSocket task or its per-IP connection slot indefinitely.
+    let (code, signal) =
+        match wait_for_pty_exit(PTY_EXIT_WAIT_TIMEOUT, || pty.try_wait_exit()).await {
+            Ok(Some(pair)) => pair,
+            Ok(None) => {
+                warn!(pid = pty.pid, "Timed out waiting for terminal child exit");
+                pty.kill();
+                (1, None)
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to wait for child exit");
+                (1, None)
+            }
+        };
     let _ = send_json(
         &sender,
         &serde_json::json!({
@@ -1238,7 +1273,6 @@ async fn handle_terminal_ws(
     )
     .await;
 
-    pty_read_handle.abort();
     info!("Terminal WebSocket disconnected");
 }
 
@@ -1246,9 +1280,34 @@ async fn handle_terminal_ws(
 mod tests {
     use crate::routes::terminal::{
         initial_terminal_dimension, mark_terminal_activity, router, terminal_idle_duration,
-        terminal_idle_timeout_elapsed, ClientMessage, ServerMessage, MAX_COLS, MAX_ROWS,
+        terminal_idle_timeout_elapsed, wait_for_pty_exit, ClientMessage, ServerMessage, MAX_COLS,
+        MAX_ROWS,
     };
     use crate::terminal::shell_for_current_os;
+
+    #[tokio::test]
+    async fn pty_exit_wait_returns_an_immediate_status() {
+        let status = wait_for_pty_exit(std::time::Duration::from_secs(1), || {
+            Ok(Some((7, Some("TERM".to_string()))))
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(status, Some((7, Some("TERM".to_string()))));
+    }
+
+    #[tokio::test]
+    async fn pty_exit_wait_is_bounded_when_child_never_exits() {
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_pty_exit(std::time::Duration::from_millis(50), || Ok(None)),
+        )
+        .await
+        .expect("PTY exit polling must stay bounded")
+        .unwrap();
+
+        assert_eq!(status, None);
+    }
 
     #[test]
     fn terminal_last_activity_recovers_after_held_lock_panic() {
@@ -2025,6 +2084,7 @@ mod hash_only_terminal_auth_tests {
             pending_a2a_agents: dashmap::DashMap::new(),
             auth_login_limiter: Arc::new(crate::rate_limiter::AuthLoginLimiter::new()),
             gcra_limiter: crate::rate_limiter::create_rate_limiter(0),
+            gcra_tokens_per_minute: 1,
             trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
             trust_forwarded_for: false,
             idempotency_store,
