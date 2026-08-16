@@ -9,34 +9,53 @@ enum MigrationTaskError {
 fn relocate_migrated_agent_dirs(
     target_dir: &std::path::Path,
     workspaces_agents_dir: &std::path::Path,
+    report: &librefang_import::report::MigrationReport,
 ) -> Result<Vec<(std::path::PathBuf, std::path::PathBuf)>, String> {
     let legacy_agents = target_dir.join("agents");
-    if legacy_agents == workspaces_agents_dir {
-        return Ok(Vec::new());
-    }
     if !legacy_agents.is_dir() {
         return Ok(Vec::new());
     }
 
-    let entries = std::fs::read_dir(&legacy_agents)
-        .map_err(|error| format!("read {}: {error}", legacy_agents.display()))?;
-    let mut moved = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            format!(
-                "read directory entry in {}: {error}",
-                legacy_agents.display()
-            )
-        })?;
-        let source = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("inspect {}: {error}", source.display()))?;
-        if !file_type.is_dir() || !source.join("agent.toml").is_file() {
+    let mut imported_agent_dirs = std::collections::BTreeSet::new();
+    for item in &report.imported {
+        let Ok(relative) = std::path::Path::new(&item.destination).strip_prefix(&legacy_agents)
+        else {
             continue;
-        }
+        };
+        let Some(std::path::Component::Normal(agent_name)) = relative.components().next() else {
+            continue;
+        };
+        imported_agent_dirs.insert(legacy_agents.join(agent_name));
+    }
+    imported_agent_dirs.retain(|source| source.join("agent.toml").is_file());
+    if imported_agent_dirs.is_empty() {
+        return Ok(Vec::new());
+    }
 
-        let destination = workspaces_agents_dir.join(entry.file_name());
+    std::fs::create_dir_all(workspaces_agents_dir)
+        .map_err(|error| format!("create {}: {error}", workspaces_agents_dir.display()))?;
+    let canonical_legacy = legacy_agents
+        .canonicalize()
+        .map_err(|error| format!("resolve {}: {error}", legacy_agents.display()))?;
+    let canonical_workspaces = workspaces_agents_dir
+        .canonicalize()
+        .map_err(|error| format!("resolve {}: {error}", workspaces_agents_dir.display()))?;
+    if canonical_legacy == canonical_workspaces {
+        return Ok(Vec::new());
+    }
+
+    let moves: Vec<_> = imported_agent_dirs
+        .into_iter()
+        .map(|source| {
+            let destination = workspaces_agents_dir.join(
+                source
+                    .file_name()
+                    .expect("imported agent directory always has a name"),
+            );
+            (source, destination)
+        })
+        .collect();
+    for (source, destination) in &moves {
         if destination.exists() {
             return Err(format!(
                 "cannot relocate {} because {} already exists",
@@ -44,29 +63,39 @@ fn relocate_migrated_agent_dirs(
                 destination.display()
             ));
         }
-        std::fs::create_dir_all(workspaces_agents_dir)
-            .map_err(|error| format!("create {}: {error}", workspaces_agents_dir.display()))?;
-        std::fs::rename(&source, &destination).map_err(|error| {
-            format!(
-                "relocate {} to {}: {error}",
+    }
+
+    let mut moved: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::with_capacity(moves.len());
+    for (source, destination) in moves {
+        if let Err(error) = std::fs::rename(&source, &destination) {
+            let mut rollback_errors = Vec::new();
+            for (previous_source, previous_destination) in moved.iter().rev() {
+                if let Err(rollback_error) = std::fs::rename(previous_destination, previous_source)
+                {
+                    rollback_errors.push(format!(
+                        "restore {} to {}: {rollback_error}",
+                        previous_destination.display(),
+                        previous_source.display()
+                    ));
+                }
+            }
+            let rollback = if rollback_errors.is_empty() {
+                String::new()
+            } else {
+                format!("; rollback failures: {}", rollback_errors.join("; "))
+            };
+            return Err(format!(
+                "relocate {} to {}: {error}{rollback}",
                 source.display(),
                 destination.display()
-            )
-        })?;
+            ));
+        }
         moved.push((source, destination));
     }
 
-    match std::fs::remove_dir(&legacy_agents) {
-        Ok(()) => {}
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-            ) => {}
-        Err(error) => {
-            return Err(format!("remove {}: {error}", legacy_agents.display()));
-        }
-    }
+    // An unrelated legacy directory may remain. Removal is cleanup only;
+    // every imported agent has already reached its canonical destination.
+    let _ = std::fs::remove_dir(&legacy_agents);
     Ok(moved)
 }
 
@@ -76,8 +105,8 @@ fn rewrite_relocated_agent_destinations(
 ) {
     for item in &mut report.imported {
         for (source, destination) in moved {
-            if std::path::Path::new(&item.destination) == source.join("agent.toml") {
-                item.destination = destination.join("agent.toml").display().to_string();
+            if let Ok(relative) = std::path::Path::new(&item.destination).strip_prefix(source) {
+                item.destination = destination.join(relative).display().to_string();
                 break;
             }
         }
@@ -281,7 +310,7 @@ pub async fn run_migrate(
         let mut report = librefang_import::run_migration(&options)
             .map_err(|error| MigrationTaskError::Migration(error.to_string()))?;
         if !dry_run {
-            let moved = relocate_migrated_agent_dirs(&target_dir, &workspaces_agents_dir)
+            let moved = relocate_migrated_agent_dirs(&target_dir, &workspaces_agents_dir, &report)
                 .map_err(MigrationTaskError::Relocation)?;
             rewrite_relocated_agent_destinations(&mut report, &moved);
         }
@@ -357,8 +386,16 @@ mod tests {
             name: "main".to_string(),
             destination: source_agent.join("agent.toml").display().to_string(),
         });
+        report.imported.push(librefang_import::report::MigrateItem {
+            kind: librefang_import::report::ItemKind::Memory,
+            name: "main/MEMORY.md".to_string(),
+            destination: source_agent
+                .join("imported_memory.md")
+                .display()
+                .to_string(),
+        });
 
-        let moved = relocate_migrated_agent_dirs(&target, &canonical_agents).unwrap();
+        let moved = relocate_migrated_agent_dirs(&target, &canonical_agents, &report).unwrap();
         rewrite_relocated_agent_destinations(&mut report, &moved);
 
         let canonical_manifest = canonical_agents.join("main").join("agent.toml");
@@ -367,6 +404,14 @@ mod tests {
         assert_eq!(
             report.imported[0].destination,
             canonical_manifest.display().to_string()
+        );
+        assert_eq!(
+            report.imported[1].destination,
+            canonical_agents
+                .join("main")
+                .join("imported_memory.md")
+                .display()
+                .to_string()
         );
     }
 
@@ -378,11 +423,75 @@ mod tests {
         let manifest = canonical_agents.join("main").join("agent.toml");
         std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
         std::fs::write(&manifest, "name = \"main\"\n").unwrap();
+        let mut report = librefang_import::report::MigrationReport::default();
+        report.imported.push(librefang_import::report::MigrateItem {
+            kind: librefang_import::report::ItemKind::Agent,
+            name: "main".to_string(),
+            destination: manifest.display().to_string(),
+        });
 
-        let moved = relocate_migrated_agent_dirs(&target, &canonical_agents).unwrap();
+        let moved = relocate_migrated_agent_dirs(&target, &canonical_agents, &report).unwrap();
 
         assert!(moved.is_empty());
         assert!(manifest.is_file());
+    }
+
+    #[test]
+    fn relocation_ignores_agents_not_imported_by_this_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let imported_agent = target.join("agents").join("imported");
+        let unrelated_agent = target.join("agents").join("unrelated");
+        let canonical_agents = dir.path().join("workspaces").join("agents");
+        for agent in [&imported_agent, &unrelated_agent] {
+            std::fs::create_dir_all(agent).unwrap();
+            std::fs::write(agent.join("agent.toml"), "name = \"agent\"\n").unwrap();
+        }
+        let mut report = librefang_import::report::MigrationReport::default();
+        report.imported.push(librefang_import::report::MigrateItem {
+            kind: librefang_import::report::ItemKind::Agent,
+            name: "imported".to_string(),
+            destination: imported_agent.join("agent.toml").display().to_string(),
+        });
+
+        let moved = relocate_migrated_agent_dirs(&target, &canonical_agents, &report).unwrap();
+
+        assert_eq!(moved.len(), 1);
+        assert!(!imported_agent.exists());
+        assert!(canonical_agents
+            .join("imported")
+            .join("agent.toml")
+            .is_file());
+        assert!(unrelated_agent.join("agent.toml").is_file());
+    }
+
+    #[test]
+    fn relocation_preflights_all_destinations_before_moving_any_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let legacy_agents = target.join("agents");
+        let canonical_agents = dir.path().join("workspaces").join("agents");
+        let mut report = librefang_import::report::MigrationReport::default();
+        for name in ["first", "second"] {
+            let source = legacy_agents.join(name);
+            std::fs::create_dir_all(&source).unwrap();
+            std::fs::write(source.join("agent.toml"), format!("name = \"{name}\"\n")).unwrap();
+            report.imported.push(librefang_import::report::MigrateItem {
+                kind: librefang_import::report::ItemKind::Agent,
+                name: name.to_string(),
+                destination: source.join("agent.toml").display().to_string(),
+            });
+        }
+        let conflicting = canonical_agents.join("second");
+        std::fs::create_dir_all(&conflicting).unwrap();
+        std::fs::write(conflicting.join("agent.toml"), "name = \"existing\"\n").unwrap();
+
+        let error = relocate_migrated_agent_dirs(&target, &canonical_agents, &report).unwrap_err();
+
+        assert!(error.contains("already exists"));
+        assert!(legacy_agents.join("first").join("agent.toml").is_file());
+        assert!(legacy_agents.join("second").join("agent.toml").is_file());
+        assert!(!canonical_agents.join("first").exists());
     }
 
     #[test]
