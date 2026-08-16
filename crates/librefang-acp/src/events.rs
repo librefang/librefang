@@ -60,7 +60,6 @@ pub(crate) struct EventTranslator {
     /// per name so parallel calls of the same tool don't get conflated.
     in_flight_by_name: HashMap<String, InFlightCalls>,
     tracked_tool_calls: usize,
-    next_orphan_id: u64,
 }
 
 impl EventTranslator {
@@ -152,9 +151,13 @@ impl EventTranslator {
                         (id, max_concurrent, drained, false)
                     }
                     None => {
-                        let orphan_id = self.next_orphan_id;
-                        self.next_orphan_id = self.next_orphan_id.wrapping_add(1);
-                        let id = ToolCallId::new(format!("orphan-{orphan_id}-{name}"));
+                        // A translator is recreated for every prompt, while ACP
+                        // tool-call ids live in the longer session timeline. A
+                        // per-translator counter would therefore repeat across
+                        // turns and let a client attach a new orphan result to
+                        // an old card.
+                        let id =
+                            ToolCallId::new(format!("librefang-orphan-{}", uuid::Uuid::new_v4()));
                         tracing::warn!(
                             tool_name = %name,
                             tool_call_id = %id,
@@ -246,13 +249,13 @@ pub(crate) fn infer_tool_kind(name: &str) -> ToolKind {
         ToolKind::Read
     } else if has("write") || has("patch") || (has("edit") && has_edit_target) {
         ToolKind::Edit
-    } else if has("delete") || has("rm") {
+    } else if has("delete") || has("remove") || has("rm") {
         ToolKind::Delete
     } else if has("move") || has("rename") {
         ToolKind::Move
     } else if has("search") || has("grep") || has("find") || has("glob") {
         ToolKind::Search
-    } else if has("bash") || has("exec") || has("shell") || is_run_action {
+    } else if has("bash") || has("exec") || has("execute") || has("shell") || is_run_action {
         ToolKind::Execute
     } else if has("think") || has("plan") {
         ToolKind::Think
@@ -492,6 +495,24 @@ mod tests {
             _ => panic!("expected synthetic ToolCall first"),
         };
         assert_ne!(synthetic_id, next_id, "synthetic ids must not collide");
+
+        // EventTranslator is recreated for every prompt. IDs must remain
+        // unique across those instances because the ACP client keeps the
+        // session timeline from earlier prompts.
+        let mut next_prompt_translator = EventTranslator::new();
+        let next_prompt = next_prompt_translator.translate(StreamEvent::ToolExecutionResult {
+            name: "web_fetch".into(),
+            result_preview: "later prompt orphan".into(),
+            is_error: false,
+        });
+        let next_prompt_id = match &next_prompt[0] {
+            SessionUpdate::ToolCall(call) => call.tool_call_id.to_string(),
+            _ => panic!("expected synthetic ToolCall first"),
+        };
+        assert_ne!(
+            synthetic_id, next_prompt_id,
+            "synthetic ids must not repeat across prompt translators"
+        );
     }
 
     #[test]
@@ -502,9 +523,11 @@ mod tests {
             ("file_edit", ToolKind::Edit),
             ("apply_patch", ToolKind::Edit),
             ("file_delete", ToolKind::Delete),
+            ("skill_evolve_remove_file", ToolKind::Delete),
             ("rename_file", ToolKind::Move),
             ("memory_search", ToolKind::Search),
             ("shell_exec", ToolKind::Execute),
+            ("execute_command", ToolKind::Execute),
             ("plan", ToolKind::Think),
             ("web_fetch", ToolKind::Fetch),
             ("http_get", ToolKind::Fetch),
