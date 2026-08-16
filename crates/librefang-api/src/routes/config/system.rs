@@ -17,6 +17,42 @@ fn status_default_model_snapshot(
     (effective.provider.clone(), effective.model.clone())
 }
 
+#[derive(serde::Serialize)]
+struct QuickInitConfig<'a> {
+    log_level: &'a str,
+    api_listen: &'a str,
+    default_model: QuickInitDefaultModel<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct QuickInitDefaultModel<'a> {
+    provider: &'a str,
+    model: &'a str,
+    api_key_env: &'a str,
+}
+
+fn quick_init_config_content(
+    provider: &str,
+    model: &str,
+    api_key_env: &str,
+) -> Result<String, toml::ser::Error> {
+    let config = QuickInitConfig {
+        log_level: "info",
+        api_listen: "127.0.0.1:4545",
+        default_model: QuickInitDefaultModel {
+            provider,
+            model,
+            api_key_env,
+        },
+    };
+    let serialized = toml::to_string_pretty(&config)?;
+    Ok(format!(
+        "# LibreFang configuration (auto-generated)\n\
+         # Run `librefang init --upgrade` for full annotated config.\n\n\
+         {serialized}"
+    ))
+}
+
 #[utoipa::path(
     get,
     path = "/api/status",
@@ -135,20 +171,21 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::R
         .automatic_default_model_for_provider(&provider)
         .unwrap_or_else(|| "auto".to_string());
 
-    // Write minimal config.toml
-    let config_content = format!(
-        r#"# LibreFang configuration (auto-generated)
-# Run `librefang init --upgrade` for full annotated config.
-
-log_level = "info"
-api_listen = "127.0.0.1:4545"
-
-[default_model]
-provider = "{provider}"
-model = "{model}"
-api_key_env = "{api_key_env}"
-"#
-    );
+    // Use the TOML serializer so catalog-provided identifiers cannot escape their string values.
+    let config_content = match quick_init_config_content(&provider, &model, &api_key_env) {
+        Ok(content) => content,
+        Err(error) => {
+            tracing::error!(%error, "failed to serialize quick init config");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "message": "Internal server error"
+                })),
+            )
+                .into_response();
+        }
+    };
 
     if let Some(locked) = crate::routes::guard_config_write() {
         return locked.into_response();
@@ -236,7 +273,9 @@ fn write_quick_init_config(home: &std::path::Path, contents: &[u8]) -> std::io::
 
 #[cfg(test)]
 mod tests {
-    use super::{status_default_model_snapshot, write_quick_init_config};
+    use super::{
+        quick_init_config_content, status_default_model_snapshot, write_quick_init_config,
+    };
     use librefang_types::config::DefaultModelConfig;
     use std::sync::RwLock;
 
@@ -301,6 +340,30 @@ mod tests {
             std::fs::read_to_string(home.join("config.toml")).unwrap(),
             "first = true\n"
         );
+    }
+
+    #[test]
+    fn quick_init_config_serializes_untrusted_model_fields_as_toml_strings() {
+        let provider = "provider\"\n[network]\nenabled = true\n#";
+        let model = "vendor\\model\"\n[default_model]";
+        let api_key_env = "KEY\\NAME\nVALUE";
+
+        let contents = quick_init_config_content(provider, model, api_key_env).unwrap();
+        let parsed: toml::Value = toml::from_str(&contents).unwrap();
+
+        assert_eq!(parsed["default_model"]["provider"].as_str(), Some(provider));
+        assert_eq!(parsed["default_model"]["model"].as_str(), Some(model));
+        assert_eq!(
+            parsed["default_model"]["api_key_env"].as_str(),
+            Some(api_key_env)
+        );
+        assert!(parsed.get("network").is_none());
+        assert_eq!(parsed.as_table().unwrap().len(), 3);
+
+        let config: librefang_types::config::KernelConfig = toml::from_str(&contents).unwrap();
+        assert_eq!(config.default_model.provider, provider);
+        assert_eq!(config.default_model.model, model);
+        assert_eq!(config.default_model.api_key_env, api_key_env);
     }
 }
 
