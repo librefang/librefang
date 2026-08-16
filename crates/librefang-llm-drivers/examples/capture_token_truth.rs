@@ -119,18 +119,25 @@ fn is_retryable_capture_error(error: &LlmError) -> bool {
             true
         }
         LlmError::Api { status, code, .. } => {
-            if matches!(*status, 401 | 402 | 403 | 404 | 413) {
-                false
-            } else {
-                matches!(*status, 408 | 429 | 500 | 502 | 503 | 504)
-                    || matches!(
-                        code,
-                        Some(
-                            ProviderErrorCode::RateLimit
-                                | ProviderErrorCode::ServerUnavailable
-                                | ProviderErrorCode::ServerError
-                        )
-                    )
+            if matches!(*status, 401 | 402 | 404 | 413) {
+                return false;
+            }
+            if *status == 403 {
+                // Some OpenAI-compatible providers use 403 for throttling.
+                // Only an explicit typed rate-limit code makes that otherwise
+                // permanent status safe to retry.
+                return matches!(code, Some(ProviderErrorCode::RateLimit));
+            }
+            match code {
+                Some(
+                    ProviderErrorCode::RateLimit
+                    | ProviderErrorCode::ServerUnavailable
+                    | ProviderErrorCode::ServerError,
+                ) => true,
+                // A typed permanent code is more precise than a contradictory
+                // generic 5xx status and must not consume the retry budget.
+                Some(_) => false,
+                None => matches!(*status, 408 | 429 | 500 | 502 | 503 | 504),
             }
         }
         LlmError::Http(message) => llm_errors::is_transient(message),
@@ -334,6 +341,7 @@ mod tests {
             api_error(504, None),
             api_error(400, Some(ProviderErrorCode::ServerUnavailable)),
             api_error(400, Some(ProviderErrorCode::ServerError)),
+            api_error(403, Some(ProviderErrorCode::RateLimit)),
             LlmError::Http("connection reset by peer".to_string()),
         ] {
             assert!(is_retryable_capture_error(&error), "{error:?}");
@@ -349,10 +357,13 @@ mod tests {
             LlmError::Parse("invalid response".to_string()),
             api_error(400, None),
             api_error(401, None),
+            api_error(403, None),
             api_error(404, None),
             api_error(501, None),
             api_error(400, Some(ProviderErrorCode::BadRequest)),
             api_error(401, Some(ProviderErrorCode::ServerError)),
+            api_error(500, Some(ProviderErrorCode::AuthError)),
+            api_error(503, Some(ProviderErrorCode::BadRequest)),
             LlmError::Http("invalid base URL".to_string()),
         ] {
             assert!(!is_retryable_capture_error(&error), "{error:?}");
