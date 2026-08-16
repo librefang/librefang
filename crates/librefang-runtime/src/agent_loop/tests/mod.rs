@@ -155,6 +155,49 @@ fn context_compaction_uses_last_duplicate_as_current_turn_boundary() {
     assert_eq!(working.len(), session.messages.len());
 }
 
+#[test]
+fn context_compaction_keeps_full_current_turn_when_first_message_repeats() {
+    let repeated_user = Message::user("same request");
+    let original = vec![
+        Message::user("old request"),
+        repeated_user.clone(),
+        Message::assistant("intermediate answer"),
+        repeated_user,
+    ];
+    let mut session = Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id: librefang_types::agent::AgentId::new(),
+        messages: original.clone(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    let mut working = original.clone();
+    let mut new_messages_start = 1;
+
+    apply_context_compaction(
+        &mut session,
+        &mut working,
+        &mut new_messages_start,
+        String::new(),
+        original,
+    );
+
+    assert_eq!(new_messages_start, 1);
+    let current_turn_text: Vec<_> = session.messages[new_messages_start..]
+        .iter()
+        .map(|message| message.content.text_content())
+        .collect();
+    assert_eq!(
+        current_turn_text,
+        ["same request", "intermediate answer", "same request"]
+    );
+    assert_eq!(working.len(), session.messages.len());
+}
+
 // ── push_accumulated_text bounded growth ──────────────────────────────
 
 #[test]

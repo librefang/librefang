@@ -138,15 +138,15 @@ fn apply_context_compaction(
     kept_messages: Vec<Message>,
 ) {
     let previous_new_messages_start = (*new_messages_start).min(session.messages.len());
-    let first_new_message = session.messages.get(previous_new_messages_start);
-    let first_new_message_json =
-        first_new_message.and_then(|message| match serde_json::to_value(message) {
-            Ok(value) => Some(value),
-            Err(error) => {
-                warn!(%error, "Failed to identify current-turn boundary during compaction");
-                None
-            }
-        });
+    let current_turn = &session.messages[previous_new_messages_start..];
+    let current_turn_json = current_turn
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            warn!(%error, "Failed to identify current-turn boundary during compaction");
+        })
+        .ok();
 
     let mut compacted = Vec::with_capacity(kept_messages.len() + usize::from(!summary.is_empty()));
     if !summary.is_empty() {
@@ -162,19 +162,30 @@ fn apply_context_compaction(
     }
     compacted.extend(kept_messages);
 
-    let compacted_new_messages_start = first_new_message_json
+    let compacted_new_messages_start = current_turn_json
         .as_ref()
-        .and_then(|first| {
-            compacted.iter().rposition(|message| {
-                serde_json::to_value(message).is_ok_and(|candidate| candidate == *first)
-            })
+        .and_then(|turn| {
+            if turn.is_empty() {
+                return Some(compacted.len());
+            }
+            let compacted_json = compacted
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    warn!(%error, "Failed to identify compacted current-turn boundary");
+                })
+                .ok()?;
+            compacted_json
+                .windows(turn.len())
+                .rposition(|window| window == turn.as_slice())
         })
         .unwrap_or_else(|| {
             // A custom context engine may omit or rewrite the current turn.
             // Keep it in persistent history and in the next LLM request rather
             // than letting a stale pre-compaction boundary hide or lose it.
             let start = compacted.len();
-            compacted.extend_from_slice(&session.messages[previous_new_messages_start..]);
+            compacted.extend_from_slice(current_turn);
             start
         });
 
