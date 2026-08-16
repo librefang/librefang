@@ -663,8 +663,9 @@ fn build_model_probe_request(
     model: &str,
     api_key: Option<&str>,
 ) -> reqwest::RequestBuilder {
+    let normalized_provider = provider.to_ascii_lowercase();
     let is_anthropic = matches!(
-        librefang_llm_drivers::drivers::provider_api_format(provider),
+        librefang_llm_drivers::drivers::provider_api_format(&normalized_provider),
         Some(librefang_llm_drivers::drivers::ApiFormat::Anthropic)
     );
     let path = if is_anthropic {
@@ -905,7 +906,7 @@ mod tests {
 
     #[test]
     fn test_anthropic_model_probe_request() {
-        for provider in ["anthropic", "byteplus_coding"] {
+        for provider in ["anthropic", "Anthropic", "kimi_coding", "byteplus_coding"] {
             let request = build_model_probe_request(
                 &reqwest::Client::new(),
                 provider,
