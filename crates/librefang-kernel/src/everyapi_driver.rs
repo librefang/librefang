@@ -2,6 +2,7 @@
 
 use crate::everyapi_credentials::{self, CredentialError, EveryApiCredential};
 use async_trait::async_trait;
+use librefang_llm_driver::llm_errors::ProviderErrorCode;
 use librefang_llm_driver::{
     CompletionRequest, CompletionResponse, DriverConfig, LlmDriver, LlmError, LlmFamily,
     StreamEvent,
@@ -112,9 +113,16 @@ impl ManagedEveryApiDriver {
     }
 
     async fn resolve_initial_driver(&self) -> Result<(Arc<dyn LlmDriver>, u64), LlmError> {
-        let generation = *self.credential_generation.lock().await;
-        let driver = self.resolve_driver(false).await?;
-        Ok((driver, generation))
+        loop {
+            let generation = *self.credential_generation.lock().await;
+            let driver = self.resolve_driver(false).await?;
+            if *self.credential_generation.lock().await == generation {
+                return Ok((driver, generation));
+            }
+            // A refresh completed while the credential source was resolving.
+            // Resolve again so the returned driver and observed generation
+            // describe the same credential snapshot.
+        }
     }
 
     async fn resolve_after_authentication_failure(
@@ -157,7 +165,12 @@ fn credential_error_to_llm(error: CredentialError) -> LlmError {
 fn is_authentication_error(error: &LlmError) -> bool {
     matches!(
         error,
-        LlmError::AuthenticationFailed(_) | LlmError::Api { status: 401, .. }
+        LlmError::AuthenticationFailed(_)
+            | LlmError::Api { status: 401, .. }
+            | LlmError::Api {
+                code: Some(ProviderErrorCode::AuthError),
+                ..
+            }
     )
 }
 
@@ -234,6 +247,7 @@ mod tests {
     use chrono::Utc;
     use librefang_llm_driver::{CompletionRequest, LlmDriver};
     use librefang_types::message::Message;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Mutex};
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -267,6 +281,38 @@ mod tests {
             self.invalidations.lock().unwrap().push(invalidate);
             if invalidate {
                 self.fresh.store(true, Ordering::Release);
+            }
+            Ok(EveryApiCredential {
+                base_url: self.base_url.clone(),
+                api_key: if self.fresh.load(Ordering::Acquire) {
+                    "fresh-key"
+                } else {
+                    "old-key"
+                }
+                .to_string(),
+                expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+            })
+        }
+    }
+
+    struct InterleavingSource {
+        invalidations: Mutex<Vec<bool>>,
+        fresh: AtomicBool,
+        non_invalidating_lookups: AtomicUsize,
+        initial_started: tokio::sync::Notify,
+        release_initial: tokio::sync::Notify,
+        base_url: String,
+    }
+
+    #[async_trait]
+    impl EveryApiCredentialSource for InterleavingSource {
+        async fn resolve(&self, invalidate: bool) -> Result<EveryApiCredential, CredentialError> {
+            self.invalidations.lock().unwrap().push(invalidate);
+            if invalidate {
+                self.fresh.store(true, Ordering::Release);
+            } else if self.non_invalidating_lookups.fetch_add(1, Ordering::AcqRel) == 0 {
+                self.initial_started.notify_one();
+                self.release_initial.notified().await;
             }
             Ok(EveryApiCredential {
                 base_url: self.base_url.clone(),
@@ -393,6 +439,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initial_resolution_retries_when_refresh_changes_generation() {
+        let source = Arc::new(InterleavingSource {
+            invalidations: Mutex::new(Vec::new()),
+            fresh: AtomicBool::new(false),
+            non_invalidating_lookups: AtomicUsize::new(0),
+            initial_started: tokio::sync::Notify::new(),
+            release_initial: tokio::sync::Notify::new(),
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+        });
+        let driver = Arc::new(ManagedEveryApiDriver::with_source(source.clone(), 0));
+        let initial = {
+            let driver = Arc::clone(&driver);
+            tokio::spawn(async move { driver.resolve_initial_driver().await })
+        };
+
+        source.initial_started.notified().await;
+        driver
+            .resolve_after_authentication_failure(0)
+            .await
+            .unwrap();
+        source.release_initial.notify_one();
+
+        let (_, generation) = initial.await.unwrap().unwrap();
+        assert_eq!(generation, 1);
+        assert_eq!(
+            *source.invalidations.lock().unwrap(),
+            [false, true, false],
+            "the overlapping initial lookup must be repeated after refresh"
+        );
+    }
+
+    #[tokio::test]
     async fn stream_attempt_reports_any_forwarded_event() {
         for (emit_event, expected) in [(false, false), (true, true)] {
             let (tx, mut rx) = tokio::sync::mpsc::channel(4);
@@ -424,6 +502,11 @@ mod tests {
             status: 403,
             message: "quota or policy rejection".to_string(),
             code: None,
+        }));
+        assert!(is_authentication_error(&LlmError::Api {
+            status: 403,
+            message: "credential rejected".to_string(),
+            code: Some(ProviderErrorCode::AuthError),
         }));
     }
 
