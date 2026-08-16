@@ -1,4 +1,4 @@
-use librefang_types::mcp::McpCatalogEntry;
+use librefang_types::mcp::{McpCatalogEntry, McpCatalogTransport};
 use std::path::PathBuf;
 
 #[test]
@@ -26,5 +26,31 @@ fn every_mcp_fixture_keeps_setup_instructions_at_the_catalog_root() {
             "{} lost top-level setup_instructions (check TOML table ordering)",
             path.display(),
         );
+    }
+}
+
+#[test]
+fn sqlite_fixture_forwards_the_declared_database_path() {
+    let entry =
+        toml::from_str::<McpCatalogEntry>(include_str!("fixtures/registry/mcp/sqlite-mcp.toml"))
+            .expect("SQLite MCP fixture must parse");
+
+    assert!(entry
+        .required_env
+        .iter()
+        .any(|env| env.name == "SQLITE_DB_PATH"));
+    match entry.transport {
+        McpCatalogTransport::Stdio { command, args } => {
+            assert_eq!(command, "uvx");
+            assert_eq!(
+                args,
+                [
+                    "mcp-server-sqlite==2025.4.25",
+                    "--db-path",
+                    "$SQLITE_DB_PATH",
+                ]
+            );
+        }
+        _ => panic!("SQLite MCP fixture must use stdio transport"),
     }
 }

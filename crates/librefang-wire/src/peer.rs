@@ -994,18 +994,19 @@ impl PeerNode {
         Ok(())
     }
 
-    /// Send a message to a specific peer and await the response.
-    ///
-    /// SECURITY: Opens a new connection to the peer, performs a full HMAC
-    /// handshake, sends the agent message, and reads the response.
-    pub async fn send_to_peer(
+    /// Open a fresh authenticated connection to a known peer.
+    async fn open_authenticated_connection(
         &self,
         node_id: &str,
-        agent: &str,
-        message: &str,
-        sender: Option<&str>,
-        handle: Arc<dyn PeerHandle>,
-    ) -> Result<String, WireError> {
+        handle: &dyn PeerHandle,
+    ) -> Result<
+        (
+            tokio::net::tcp::OwnedReadHalf,
+            tokio::net::tcp::OwnedWriteHalf,
+            String,
+        ),
+        WireError,
+    > {
         let peer = self
             .registry
             .get_peer(node_id)
@@ -1014,13 +1015,12 @@ impl PeerNode {
         let stream = TcpStream::connect(peer.address).await?;
         let (mut reader, mut writer) = stream.into_split();
 
-        // SECURITY (#3875): Perform HMAC handshake before sending any data.
-        // auth_data binds nonce + sender_node_id + recipient_node_id so a
-        // captured handshake cannot be replayed to a different federation peer.
+        // SECURITY (#3875): Bind the handshake to the expected recipient so
+        // it cannot be replayed to another federation node sharing the secret.
         let our_nonce = uuid::Uuid::new_v4().to_string();
         let auth_data = format!("{}|{}|{}", our_nonce, self.config.node_id, node_id);
         let auth_hmac = hmac_sign(&self.config.shared_secret, auth_data.as_bytes());
-        // SECURITY (#4269): per-handshake X25519 ephemeral.
+        // SECURITY (#4269): Per-handshake X25519 ephemeral.
         let our_kex = crate::kex::EphemeralKex::generate()
             .map_err(|e| WireError::HandshakeFailed(format!("X25519 keygen failed: {e}")))?;
         let our_eph = our_kex.public_b64().to_string();
@@ -1043,7 +1043,6 @@ impl PeerNode {
         };
         write_message(&mut writer, &handshake).await?;
 
-        // Verify handshake ack and derive session key
         let ack = read_message(&mut reader).await?;
         let session_key = match &ack.kind {
             WireMessageKind::Response(WireResponse::HandshakeAck {
@@ -1062,8 +1061,6 @@ impl PeerNode {
                         remote: *protocol_version,
                     });
                 }
-                // SECURITY (#3875): Verify ack HMAC — includes our own node_id
-                // as recipient so the ack is bound to this node specifically.
                 let expected_ack_data =
                     format!("{}|{}|{}", ack_nonce, ack_node_id, self.config.node_id);
                 if !hmac_verify(
@@ -1075,8 +1072,11 @@ impl PeerNode {
                         "HMAC verification failed on HandshakeAck".into(),
                     ));
                 }
-                // SECURITY (#3873): Verify Ed25519 identity + TOFU pin
-                // (#4269: scope also covers the server's ephemeral pubkey).
+                if ack_node_id != node_id {
+                    return Err(WireError::HandshakeFailed(format!(
+                        "HandshakeAck node ID mismatch: expected {node_id}, got {ack_node_id}"
+                    )));
+                }
                 self.verify_and_pin_identity(
                     ack_node_id,
                     ack_pubkey,
@@ -1084,12 +1084,9 @@ impl PeerNode {
                     expected_ack_data.as_bytes(),
                     ack_eph.as_deref(),
                 )?;
-                // SECURITY (#3880): Record nonce AFTER HMAC verification.
                 if let Err(replay_err) = self.nonce_tracker.check_and_record(ack_nonce) {
                     return Err(WireError::HandshakeFailed(replay_err));
                 }
-                // SECURITY (#4269): ECDH-derived session_key when both
-                // peers brought an ephemeral; legacy fallback otherwise.
                 match ack_eph {
                     Some(remote_eph) => {
                         let transcript = crate::kex::handshake_transcript(&our_nonce, ack_nonce);
@@ -1114,6 +1111,25 @@ impl PeerNode {
             }
         };
 
+        Ok((reader, writer, session_key))
+    }
+
+    /// Send a message to a specific peer and await the response.
+    ///
+    /// SECURITY: Opens a new connection to the peer, performs a full HMAC
+    /// handshake, sends the agent message, and reads the response.
+    pub async fn send_to_peer(
+        &self,
+        node_id: &str,
+        agent: &str,
+        message: &str,
+        sender: Option<&str>,
+        handle: Arc<dyn PeerHandle>,
+    ) -> Result<String, WireError> {
+        let (mut reader, mut writer, session_key) = self
+            .open_authenticated_connection(node_id, handle.as_ref())
+            .await?;
+
         // SECURITY: Send agent message with per-message HMAC authentication
         let msg = WireMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1135,6 +1151,44 @@ impl PeerNode {
                 "Unexpected response type".to_string(),
             )),
         }
+    }
+
+    /// Broadcast a notification to every peer currently marked connected.
+    ///
+    /// Each delivery opens a fresh connection, completes the same
+    /// HMAC-authenticated, identity-verified, X25519 handshake used by
+    /// [`PeerNode::send_to_peer`], and signs the notification with the derived
+    /// session key. Failures are returned per peer so callers can report or
+    /// retry partial delivery.
+    pub async fn broadcast_notification(
+        &self,
+        notification: WireNotification,
+        handle: Arc<dyn PeerHandle>,
+    ) -> Vec<(String, WireError)> {
+        let peers = self.registry.connected_peers();
+        let mut errors = Vec::new();
+
+        for peer in peers {
+            let result = async {
+                let (_reader, mut writer, session_key) = self
+                    .open_authenticated_connection(&peer.node_id, handle.as_ref())
+                    .await?;
+                let msg = WireMessage {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    kind: WireMessageKind::Notification(notification.clone()),
+                };
+                write_message_authenticated(&mut writer, &msg, &session_key).await?;
+                writer.shutdown().await?;
+                Ok::<(), WireError>(())
+            }
+            .await;
+
+            if let Err(error) = result {
+                errors.push((peer.node_id, error));
+            }
+        }
+
+        errors
     }
 
     /// Internal accept loop — runs in a spawned task.
@@ -1180,7 +1234,7 @@ impl PeerNode {
         // Read the incoming handshake request under the size and duration
         // bounds enforced by `read_message`.
         let msg = read_message(&mut reader).await?;
-        let (peer_node_id, session_key) = match &msg.kind {
+        let (peer_node_id, session_key, owns_registry_connection) = match &msg.kind {
             WireMessageKind::Request(WireRequest::Handshake {
                 node_id,
                 node_name,
@@ -1343,18 +1397,28 @@ impl PeerNode {
                     agents.len()
                 );
 
-                // Register the peer
-                registry.add_peer(PeerEntry {
-                    node_id: node_id.clone(),
-                    node_name: node_name.clone(),
-                    address: addr,
-                    agents: agents.clone(),
-                    state: PeerState::Connected,
-                    connected_at: chrono::Utc::now(),
-                    protocol_version: *protocol_version,
-                });
+                // A short-lived authenticated request or notification may
+                // arrive alongside an established connection. Preserve that
+                // connection's listen address and lifecycle ownership instead
+                // of replacing it with this socket's ephemeral source port.
+                let has_existing_connection = registry
+                    .get_peer(node_id)
+                    .is_some_and(|peer| peer.state == PeerState::Connected);
+                if has_existing_connection {
+                    registry.update_agents(node_id, agents.clone());
+                } else {
+                    registry.add_peer(PeerEntry {
+                        node_id: node_id.clone(),
+                        node_name: node_name.clone(),
+                        address: addr,
+                        agents: agents.clone(),
+                        state: PeerState::Connected,
+                        connected_at: chrono::Utc::now(),
+                        protocol_version: *protocol_version,
+                    });
+                }
 
-                (node_id.clone(), session_key)
+                (node_id.clone(), session_key, !has_existing_connection)
             }
             // SECURITY: Reject all non-Handshake initial messages.
             // Clients MUST complete HMAC-authenticated handshake before sending
@@ -1393,7 +1457,9 @@ impl PeerNode {
         {
             debug!("OFP: connection with {} ended: {}", peer_node_id, e);
         }
-        registry.mark_disconnected(&peer_node_id);
+        if owns_registry_connection {
+            registry.mark_disconnected(&peer_node_id);
+        }
 
         Ok(())
     }
@@ -1845,43 +1911,6 @@ pub async fn read_message_authenticated_observed(
     Ok(msg)
 }
 
-/// Broadcast an HMAC-authenticated notification to all connected peers.
-///
-/// SECURITY: Each peer connection gets a unique HMAC signature derived from
-/// the shared secret and a fresh nonce, preventing forgery and replay attacks.
-pub async fn broadcast_notification(
-    registry: &PeerRegistry,
-    notification: WireNotification,
-    shared_secret: &str,
-) -> Vec<(String, WireError)> {
-    let peers = registry.connected_peers();
-    let mut errors = Vec::new();
-
-    for peer in peers {
-        let msg = WireMessage {
-            id: uuid::Uuid::new_v4().to_string(),
-            kind: WireMessageKind::Notification(notification.clone()),
-        };
-
-        match TcpStream::connect(peer.address).await {
-            Ok(stream) => {
-                let (_, mut writer) = stream.into_split();
-                // SECURITY: Derive a per-message key from shared secret + fresh nonce
-                let nonce = uuid::Uuid::new_v4().to_string();
-                let session_key = hmac_sign(shared_secret, nonce.as_bytes());
-                if let Err(e) = write_message_authenticated(&mut writer, &msg, &session_key).await {
-                    errors.push((peer.node_id.clone(), e));
-                }
-            }
-            Err(e) => {
-                errors.push((peer.node_id.clone(), WireError::Io(e)));
-            }
-        }
-    }
-
-    errors
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1987,6 +2016,93 @@ mod tests {
         // Give the accept loop a moment to process
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(registry1.connected_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn broadcast_notification_handshakes_and_delivers() {
+        let receiver_registry = PeerRegistry::new();
+        let receiver_handle = Arc::new(TestHandle::new());
+        let (receiver, _receiver_task) = PeerNode::start(
+            test_config("broadcast-server", "receiver"),
+            receiver_registry.clone(),
+            receiver_handle,
+        )
+        .await
+        .unwrap();
+
+        let sender_registry = PeerRegistry::new();
+        let sender_handle = Arc::new(TestHandle::new());
+        let (sender, _sender_task) = PeerNode::start(
+            test_config("broadcast-client", "sender"),
+            sender_registry.clone(),
+            sender_handle.clone(),
+        )
+        .await
+        .unwrap();
+        sender
+            .connect_to_peer_with_id(
+                receiver.local_addr(),
+                sender_handle.clone(),
+                "broadcast-server",
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if receiver_registry
+                    .get_peer("broadcast-client")
+                    .is_some_and(|peer| peer.state == PeerState::Connected)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("persistent peer connection was not registered");
+        let persistent_address = receiver_registry
+            .get_peer("broadcast-client")
+            .expect("connected sender is registered")
+            .address;
+
+        let spawned = RemoteAgentInfo {
+            id: "broadcast-agent".to_string(),
+            name: "broadcast agent".to_string(),
+            description: "delivered over an authenticated notification".to_string(),
+            tags: Vec::new(),
+            tools: Vec::new(),
+            state: "running".to_string(),
+        };
+        let errors = sender
+            .broadcast_notification(
+                WireNotification::AgentSpawned {
+                    agent: spawned.clone(),
+                },
+                sender_handle,
+            )
+            .await;
+        assert!(errors.is_empty(), "broadcast failed: {errors:?}");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let delivered = receiver_registry
+                    .get_peer("broadcast-client")
+                    .is_some_and(|peer| peer.agents.iter().any(|agent| agent.id == spawned.id));
+                if delivered {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("authenticated broadcast notification was not delivered");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let peer = receiver_registry
+            .get_peer("broadcast-client")
+            .expect("sender remains registered");
+        assert_eq!(peer.state, PeerState::Connected);
+        assert_eq!(peer.address, persistent_address);
     }
 
     /// Regression (#3920): the production `bootstrap_peers` path dials via `connect_to_peer`, which leaves `recipient_node_id` empty because the remote node ID is unknown in advance — `bootstrap_peers` lists addresses, not identities.
