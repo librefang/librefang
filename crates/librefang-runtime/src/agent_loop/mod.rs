@@ -130,6 +130,30 @@ fn repair_session_before_save(session: &mut Session, agent_id: &str, reason: &st
     session.last_repaired_generation = Some(session.messages_generation);
 }
 
+fn apply_context_compaction(
+    session: &mut Session,
+    messages: &mut Vec<Message>,
+    summary: String,
+    kept_messages: Vec<Message>,
+) {
+    let mut compacted = Vec::with_capacity(kept_messages.len() + usize::from(!summary.is_empty()));
+    if !summary.is_empty() {
+        compacted.push(Message {
+            role: Role::User,
+            content: MessageContent::Text(format!(
+                "[Context compaction summary] Earlier conversation turns were summarised to \
+                 preserve context space. Summary of removed messages: {summary}"
+            )),
+            pinned: false,
+            timestamp: None,
+        });
+    }
+    compacted.extend(kept_messages);
+
+    session.set_messages(compacted.clone());
+    *messages = compacted;
+}
+
 /// Maximum consecutive iterations where every executed tool failed before
 /// the loop exits with `RepeatedToolFailures`. Catches expensive wheel-spinning
 /// when the LLM cannot fix a tool call (bad auth, permanent 404, etc.).
@@ -1004,26 +1028,12 @@ async fn run_agent_loop_inner(
                             kept = result.kept_messages.len(),
                             "Context engine compaction complete"
                         );
-                        // Inject the LLM-generated summary as a synthetic user message
-                        // so the agent retains context about what was compacted.
-                        // Without this, the summary is silently discarded and the agent
-                        // loses all knowledge of earlier turns.
-                        let mut compacted = Vec::with_capacity(result.kept_messages.len() + 1);
-                        if !result.summary.is_empty() {
-                            compacted.push(Message {
-                                role: Role::User,
-                                content: MessageContent::Text(format!(
-                                    "[Context compaction summary] Earlier conversation turns \
-                                     were summarised to preserve context space. Summary of \
-                                     removed messages: {}",
-                                    result.summary
-                                )),
-                                pinned: false,
-                                timestamp: None,
-                            });
-                        }
-                        compacted.extend(result.kept_messages);
-                        messages = compacted;
+                        apply_context_compaction(
+                            session,
+                            &mut messages,
+                            result.summary,
+                            result.kept_messages,
+                        );
                         // `last_prompt_tokens` is intentionally NOT reset here.
                         // A second compaction should only fire after the next
                         // LLM call raises it above threshold again.  Resetting

@@ -29,6 +29,54 @@ fn test_max_iterations_constant() {
     );
 }
 
+#[test]
+fn context_compaction_updates_working_and_persistent_messages() {
+    let original = vec![Message::user("old user"), Message::assistant("old answer")];
+    let mut session = Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id: librefang_types::agent::AgentId::new(),
+        messages: original.clone(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 7,
+        last_repaired_generation: Some(7),
+        peer_id: None,
+    };
+    let mut working = original;
+    let kept = Message::assistant("kept answer");
+
+    apply_context_compaction(
+        &mut session,
+        &mut working,
+        "earlier facts".to_string(),
+        vec![kept.clone()],
+    );
+
+    assert_eq!(working.len(), session.messages.len());
+    for (working_message, persisted_message) in working.iter().zip(&session.messages) {
+        assert_eq!(working_message.role, persisted_message.role);
+        assert_eq!(
+            working_message.content.text_content(),
+            persisted_message.content.text_content()
+        );
+        assert_eq!(working_message.pinned, persisted_message.pinned);
+    }
+    assert_eq!(session.messages_generation, 8);
+    assert_eq!(session.last_repaired_generation, Some(7));
+    assert_eq!(session.messages.len(), 2);
+    assert_eq!(session.messages[0].role, Role::User);
+    assert!(session.messages[0]
+        .content
+        .text_content()
+        .contains("earlier facts"));
+    assert_eq!(session.messages[1].role, kept.role);
+    assert_eq!(
+        session.messages[1].content.text_content(),
+        kept.content.text_content()
+    );
+}
+
 // ── push_accumulated_text bounded growth ──────────────────────────────
 
 #[test]
