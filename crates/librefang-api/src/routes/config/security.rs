@@ -2,6 +2,7 @@ use super::*;
 
 fn security_status_payload(
     rate_limit: &librefang_types::config::RateLimitConfig,
+    gcra_tokens_per_minute: u32,
     trusted_manifest_signers: &[String],
     api_key_empty: bool,
     audit_count: usize,
@@ -11,7 +12,10 @@ fn security_status_payload(
     } else {
         "bearer_token"
     };
-    let manifest_signing_available = !trusted_manifest_signers.is_empty();
+    let manifest_signing_available = !trusted_manifest_signers.is_empty()
+        && trusted_manifest_signers.iter().all(|signer| {
+            hex::decode(signer.trim()).is_ok_and(|public_key| public_key.len() == 32)
+        });
 
     serde_json::json!({
         // These are runtime invariants, not operator-configurable switches.
@@ -28,8 +32,7 @@ fn security_status_payload(
         "configurable": {
             "rate_limiter": {
                 "enabled": true,
-                // The middleware clamps zero to one when constructing its quota.
-                "tokens_per_minute": rate_limit.api_requests_per_minute.max(1),
+                "tokens_per_minute": gcra_tokens_per_minute,
                 "algorithm": "GCRA"
             },
             "websocket_limits": {
@@ -104,6 +107,7 @@ pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoRes
 
     Json(security_status_payload(
         &config.rate_limit,
+        state.gcra_tokens_per_minute,
         &config.trusted_manifest_signers,
         api_key_empty,
         audit_count,
@@ -124,13 +128,13 @@ mod tests {
             ws_idle_timeout_secs: 73,
             ..RateLimitConfig::default()
         };
-        let signers = vec!["trusted-key".to_string()];
+        let signers = vec!["00".repeat(32)];
 
-        let status = security_status_payload(&rate_limit, &signers, false, 12);
+        let status = security_status_payload(&rate_limit, 193, &signers, false, 12);
 
         assert_eq!(
             status["configurable"]["rate_limiter"]["tokens_per_minute"],
-            237
+            193
         );
         assert_eq!(status["configurable"]["websocket_limits"]["max_per_ip"], 9);
         assert_eq!(
@@ -153,7 +157,7 @@ mod tests {
             ..RateLimitConfig::default()
         };
 
-        let status = security_status_payload(&rate_limit, &[], true, 0);
+        let status = security_status_payload(&rate_limit, 1, &[], true, 0);
 
         assert_eq!(
             status["configurable"]["rate_limiter"]["tokens_per_minute"],
@@ -162,5 +166,19 @@ mod tests {
         assert_eq!(status["monitoring"]["manifest_signing"]["available"], false);
         assert_eq!(status["configurable"]["auth"]["mode"], "localhost_only");
         assert_eq!(status["total_features"], 14);
+    }
+
+    #[test]
+    fn security_status_rejects_malformed_manifest_trust_anchors() {
+        let rate_limit = RateLimitConfig::default();
+        for signers in [
+            vec!["not-hex".to_string()],
+            vec!["00".repeat(31)],
+            vec!["00".repeat(32), "invalid".to_string()],
+        ] {
+            let status = security_status_payload(&rate_limit, 500, &signers, false, 0);
+            assert_eq!(status["monitoring"]["manifest_signing"]["available"], false);
+            assert_eq!(status["total_features"], 14);
+        }
     }
 }

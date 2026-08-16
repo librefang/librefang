@@ -2025,6 +2025,7 @@ mod hash_only_terminal_auth_tests {
             pending_a2a_agents: dashmap::DashMap::new(),
             auth_login_limiter: Arc::new(crate::rate_limiter::AuthLoginLimiter::new()),
             gcra_limiter: crate::rate_limiter::create_rate_limiter(0),
+            gcra_tokens_per_minute: 1,
             trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
             trust_forwarded_for: false,
             idempotency_store,
