@@ -4,7 +4,6 @@ pub(crate) use super::agents;
 pub(crate) use super::resolve_lang;
 // `super::channels::FieldType` import removed alongside
 // the channel-config write helpers that consumed it.
-use super::config::json_to_toml_value;
 use super::AppState;
 use super::RequestLanguage;
 use crate::mcp_oauth::KernelOAuthProvider;
@@ -764,23 +763,6 @@ pub(crate) struct PatchMcpTaintRequest {
     pub taint_policy: Option<librefang_types::config::McpTaintPolicy>,
 }
 
-fn strip_json_null_fields(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(fields) => {
-            fields.retain(|_, value| !value.is_null());
-            for value in fields.values_mut() {
-                strip_json_null_fields(value);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                strip_json_null_fields(value);
-            }
-        }
-        _ => {}
-    }
-}
-
 /// Upsert an MCP server entry in config.toml's `[[mcp_servers]]` array.
 ///
 /// If an entry with the same name already exists it is replaced; otherwise a
@@ -800,13 +782,14 @@ fn upsert_mcp_server_config(
         toml::value::Table::new()
     };
 
-    // TOML has no null value. Strip absent object fields structurally before
-    // the JSON-to-TOML bridge so a future Option field cannot silently become
-    // an empty string merely because its serde annotation omitted
-    // `skip_serializing_if`.
-    let mut entry_json = serde_json::to_value(entry).map_err(|e| e.to_string())?;
-    strip_json_null_fields(&mut entry_json);
-    let entry_toml = json_to_toml_value(&entry_json);
+    // Serialize directly through TOML's serde implementation. It omits
+    // `Option::None` map fields even without a per-field skip annotation.
+    // Going through `serde_json::Value` first would erase that distinction:
+    // both an absent Option and an operator-authored JSON null become `Null`.
+    // The generic JSON bridge then has to corrupt one of them by either
+    // dropping it or converting it to an empty string.
+    let entry_toml = toml::Value::try_from(entry)
+        .map_err(|e| format!("MCP server config is not representable as TOML: {e}"))?;
 
     let servers = table
         .entry("mcp_servers".to_string())
@@ -1338,10 +1321,8 @@ mod tests {
 
     /// Regression for #2319: adding an MCP server through the UI wrote each
     /// entry as a JSON-stringified blob inside `mcp_servers = ['{"name":...}']`
-    /// instead of a `[[mcp_servers]]` TOML table, because the top-level object
-    /// hit the catch-all in `json_to_toml_value` and got stringified. After
-    /// the fix, the on-disk file must round-trip back into a real
-    /// `McpServerConfigEntry` via `toml::from_str`.
+    /// instead of a `[[mcp_servers]]` TOML table. The on-disk file must
+    /// round-trip back into a real `McpServerConfigEntry` via `toml::from_str`.
     #[test]
     fn upsert_mcp_server_writes_inline_table_not_stringified_json() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1397,6 +1378,43 @@ mod tests {
             }
             other => panic!("expected stdio transport, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn upsert_mcp_server_omits_none_without_skip_annotation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        std::fs::write(&config_path, "").unwrap();
+
+        let entry = McpServerConfigEntry {
+            name: "disabled".to_string(),
+            template_id: None,
+            // Unlike the other optional fields, `transport` intentionally has
+            // no `skip_serializing_if` annotation. This pins the TOML
+            // serializer's structural omission of `Option::None`.
+            transport: None,
+            timeout_secs: 30,
+            env: vec![],
+            headers: vec![],
+            oauth: None,
+            taint_scanning: true,
+            taint_policy: None,
+        };
+
+        upsert_mcp_server_config(&config_path, &entry).expect("upsert should succeed");
+
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !raw.contains("transport"),
+            "an absent Option without a skip annotation must be omitted:\n{raw}"
+        );
+
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            mcp_servers: Vec<McpServerConfigEntry>,
+        }
+        let parsed: Wrapper = toml::from_str(&raw).expect("written config must reload");
+        assert!(parsed.mcp_servers[0].transport.is_none());
     }
 
     /// A second upsert for the same name must replace the entry in-place,
@@ -1456,10 +1474,12 @@ mod tests {
         }
     }
 
-    /// #6612 — the `File` store round-trips an entry through `serde_json` → `json_to_toml_value` → `toml` → disk → serde, and TOML has no null.
-    /// `json_to_toml_value` maps `Null` to an *empty string* (`routes/config/mod.rs`) rather than dropping the key. The writer now strips null object fields structurally in addition to the serde annotations on current Option fields.
+    /// #6612 — TOML has no null, but direct TOML serialization distinguishes
+    /// an absent `Option` from free-form data before crossing that boundary.
     ///
-    /// `HttpCompatHeaderConfig` has two `Option<String>` fields under exactly that path. Their current serde attributes skip absent values, and the writer-level null stripping now makes that safety property independent of every future field repeating the annotation.
+    /// `HttpCompatHeaderConfig` has two `Option<String>` fields under exactly
+    /// that path. The TOML serializer omits absent map fields structurally,
+    /// independent of every future field repeating a skip annotation.
     /// That is not cosmetic: `apply_http_compat_headers` tests `value` *before* `value_env`, so an empty-string `value` wins and the transport sends an empty header instead of resolving the variable — a silent credential failure.
     #[test]
     fn upsert_mcp_server_preserves_an_env_sourced_http_compat_header_6612() {
@@ -1558,40 +1578,50 @@ mod tests {
     }
 
     #[test]
-    fn strip_json_null_fields_recurses_through_nested_config_objects() {
-        let mut value = serde_json::json!({
-            "template_id": null,
-            "transport": {
-                "type": "http_compat",
-                "tools": [
-                    {
-                        "name": "lookup",
-                        "headers": [
-                            {"name": "authorization", "value": null, "value_env": "TOKEN"}
-                        ],
-                        "body": null
-                    }
-                ]
-            }
-        });
+    fn upsert_mcp_server_rejects_json_null_without_mutating_config() {
+        use librefang_types::config::HttpCompatToolConfig;
 
-        strip_json_null_fields(&mut value);
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let original = "listen_addr = \"127.0.0.1:4545\"\n";
+        std::fs::write(&config_path, original).unwrap();
 
-        assert_eq!(
-            value,
-            serde_json::json!({
-                "transport": {
-                    "type": "http_compat",
-                    "tools": [
-                        {
-                            "name": "lookup",
-                            "headers": [
-                                {"name": "authorization", "value_env": "TOKEN"}
-                            ]
+        let entry = McpServerConfigEntry {
+            name: "compat".to_string(),
+            template_id: None,
+            transport: Some(McpTransportEntry::HttpCompat {
+                base_url: "https://example.invalid".to_string(),
+                headers: vec![],
+                tools: vec![HttpCompatToolConfig {
+                    name: "lookup".to_string(),
+                    path: "/lookup".to_string(),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string", "default": null}
                         }
-                    ]
-                }
-            })
+                    }),
+                    ..Default::default()
+                }],
+            }),
+            timeout_secs: 30,
+            env: vec![],
+            headers: vec![],
+            oauth: None,
+            taint_scanning: true,
+            taint_policy: None,
+        };
+
+        let error = upsert_mcp_server_config(&config_path, &entry)
+            .expect_err("JSON null cannot be represented faithfully in TOML");
+        assert!(
+            error.contains("not representable as TOML"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            original,
+            "a rejected schema must not partially rewrite config.toml"
         );
     }
 
