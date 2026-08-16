@@ -250,7 +250,15 @@ pub fn record_from_snapshot(
     reason: Option<String>,
 ) {
     let cooldown = pick_cooldown(snapshot, retry_after);
-    let until = SystemTime::now() + cooldown;
+    let now = SystemTime::now();
+    let until = now.checked_add(cooldown).unwrap_or_else(|| {
+        warn!(
+            target: "librefang::shared_rate_guard",
+            ?cooldown,
+            "rate-limit cooldown exceeded SystemTime range; using default cooldown"
+        );
+        now.checked_add(DEFAULT_COOLDOWN).unwrap_or(now)
+    });
     record(provider, key_id, until, reason);
 }
 
@@ -263,25 +271,36 @@ fn pick_cooldown(
         // providers (Nous Portal, OpenAI tier-1).  A 1-hour reset is the
         // dangerous case we must not forget across restarts.
         // `reset_after_secs` is parsed from an upstream `X-RateLimit-Reset`
-        // header (f64). `rph > 0.0` excludes negatives and NaN but admits
-        // `f64::INFINITY` (a malformed/overflowing header like `1e400` or
-        // `inf` parses to +inf), and `Duration::from_secs_f64(INFINITY)`
-        // panics in this driver hot path. Require a finite, positive value.
+        // header (f64). Use the checked constructor so non-finite and huge
+        // finite values fall through instead of panicking in this hot path.
         let rph = snap.requests_per_hour.reset_after_secs;
-        if snap.requests_per_hour.has_data() && rph.is_finite() && rph > 0.0 {
-            return Duration::from_secs_f64(rph);
+        if snap.requests_per_hour.has_data() {
+            if let Some(duration) = reset_duration(rph) {
+                return duration;
+            }
         }
         let rpm = snap.requests_per_minute.reset_after_secs;
-        if snap.requests_per_minute.has_data() && rpm.is_finite() && rpm > 0.0 {
-            return Duration::from_secs_f64(rpm);
+        if snap.requests_per_minute.has_data() {
+            if let Some(duration) = reset_duration(rpm) {
+                return duration;
+            }
         }
     }
     if let Some(d) = retry_after {
-        if !d.is_zero() {
+        if cooldown_fits_system_time(d) {
             return d;
         }
     }
     DEFAULT_COOLDOWN
+}
+
+fn reset_duration(seconds: f64) -> Option<Duration> {
+    let duration = Duration::try_from_secs_f64(seconds).ok()?;
+    cooldown_fits_system_time(duration).then_some(duration)
+}
+
+fn cooldown_fits_system_time(duration: Duration) -> bool {
+    !duration.is_zero() && SystemTime::now().checked_add(duration).is_some()
 }
 
 /// Check whether `(provider, key_id)` is currently locked out.
@@ -670,7 +689,7 @@ mod tests {
         unsafe { std::env::remove_var("LIBREFANG_HOME") };
     }
 
-    // -- #5136: non-finite reset header must not panic the cooldown path ----
+    // -- #5136: invalid reset headers must not panic the cooldown path -------
 
     #[test]
     fn pick_cooldown_rejects_infinite_rph_reset() {
@@ -714,5 +733,65 @@ mod tests {
         };
         let cd = pick_cooldown(Some(&snap), None);
         assert_eq!(cd, DEFAULT_COOLDOWN);
+    }
+
+    #[test]
+    fn pick_cooldown_rejects_huge_finite_resets() {
+        use crate::rate_limit_tracker::{RateLimitBucket, RateLimitSnapshot};
+        use std::time::Instant;
+        let snap = RateLimitSnapshot {
+            requests_per_minute: RateLimitBucket {
+                limit: 60,
+                remaining: 0,
+                reset_after_secs: 30.0,
+                captured_at: Instant::now(),
+            },
+            requests_per_hour: RateLimitBucket {
+                limit: 1000,
+                remaining: 0,
+                reset_after_secs: 1e300,
+                captured_at: Instant::now(),
+            },
+            ..Default::default()
+        };
+
+        assert_eq!(pick_cooldown(Some(&snap), None), Duration::from_secs(30));
+
+        let rpm_only = RateLimitSnapshot {
+            requests_per_minute: RateLimitBucket {
+                limit: 60,
+                remaining: 0,
+                reset_after_secs: 1e300,
+                captured_at: Instant::now(),
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            pick_cooldown(Some(&rpm_only), Some(Duration::from_secs(42))),
+            Duration::from_secs(42)
+        );
+
+        // This value still fits in `Duration`, but cannot be added to the
+        // current wall clock on supported platforms. The checked Duration
+        // conversion alone is therefore insufficient to protect the record
+        // path from `SystemTime` addition overflow.
+        let system_time_overflow = i64::MAX as f64;
+        assert!(Duration::try_from_secs_f64(system_time_overflow).is_ok());
+        let snap = RateLimitSnapshot {
+            requests_per_minute: RateLimitBucket {
+                limit: 60,
+                remaining: 0,
+                reset_after_secs: 30.0,
+                captured_at: Instant::now(),
+            },
+            requests_per_hour: RateLimitBucket {
+                limit: 1000,
+                remaining: 0,
+                reset_after_secs: system_time_overflow,
+                captured_at: Instant::now(),
+            },
+            ..Default::default()
+        };
+        assert_eq!(pick_cooldown(Some(&snap), None), Duration::from_secs(30));
     }
 }
