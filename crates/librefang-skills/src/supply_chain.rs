@@ -180,13 +180,22 @@ pub fn scan(skill_dir: &Path) -> Result<(), Vec<Violation>> {
 /// Read at most `max_bytes + 1` bytes so a file that grows after its metadata
 /// check still cannot force an unbounded allocation.
 fn read_scannable_text(path: &Path, max_bytes: u64) -> std::io::Result<ScannableText> {
-    let metadata = path.symlink_metadata()?;
-    if metadata.len() > max_bytes {
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    read_scannable_text_from(file, metadata.len(), max_bytes)
+}
+
+fn read_scannable_text_from(
+    reader: impl Read,
+    initial_len: u64,
+    max_bytes: u64,
+) -> std::io::Result<ScannableText> {
+    if initial_len > max_bytes {
         return Ok(ScannableText::TooLarge);
     }
 
-    let mut bytes = Vec::with_capacity(metadata.len().min(max_bytes) as usize);
-    std::fs::File::open(path)?
+    let mut bytes = Vec::with_capacity(initial_len.min(max_bytes) as usize);
+    reader
         .take(max_bytes.saturating_add(1))
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > max_bytes {
@@ -390,12 +399,8 @@ mod tests {
     #[test]
     #[serial]
     fn bounded_reader_rejects_content_beyond_the_requested_limit() {
-        let tmp = make_dir();
-        let path = tmp.path().join("small.prompt");
-        std::fs::write(&path, b"12345").unwrap();
-
         assert!(matches!(
-            read_scannable_text(&path, 4).unwrap(),
+            read_scannable_text_from(std::io::Cursor::new(b"12345"), 4, 4).unwrap(),
             ScannableText::TooLarge
         ));
     }
