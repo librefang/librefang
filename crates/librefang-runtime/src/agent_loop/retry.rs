@@ -285,6 +285,10 @@ pub(super) async fn stream_with_retry(
     // So a retryable error (RateLimited / Overloaded / transient) that arrives AFTER content was emitted must be surfaced, not retried — mirroring the content-emitted guard in FallbackChain / FallbackDriver.
     // (Retry is still safe when the error precedes any content.)
     let mut content_emitted_sticky = false;
+    // Timeout errors carry the complete partial text body. Track text
+    // separately so thinking/tool events still prevent a retry without
+    // suppressing a partial body that has not reached the caller yet.
+    let mut text_emitted_sticky = false;
 
     for attempt in 0..=MAX_RETRIES {
         // If a previous attempt already triggered the leak guard, do not
@@ -326,6 +330,7 @@ pub(super) async fn stream_with_retry(
             let mut leak_fired = false;
             // Whether any observable output reached the caller's `tx` on this attempt (drives the no-retry-after-content guard below).
             let mut content_emitted = false;
+            let mut text_emitted = false;
             while let Some(event) = proxy_rx.recv().await {
                 match &event {
                     StreamEvent::TextDelta { text } if !leak_fired => {
@@ -353,6 +358,7 @@ pub(super) async fn stream_with_retry(
                         }
                         // Forward the delta; ignore send errors (client gone).
                         content_emitted = true;
+                        text_emitted = true;
                         let _ = outer_tx
                             .send(StreamEvent::TextDelta { text: text.clone() })
                             .await;
@@ -377,7 +383,7 @@ pub(super) async fn stream_with_retry(
                     }
                 }
             }
-            (leak_fired, content_emitted)
+            (leak_fired, content_emitted, text_emitted)
         });
 
         // Drive the LLM stream, then join the forwarding task exactly once.
@@ -386,12 +392,14 @@ pub(super) async fn stream_with_retry(
         let driver_result = driver.stream(request.clone(), proxy_tx).await;
         // proxy_tx is dropped when driver returns (moved into driver.stream).
         // forward_task drains the proxy channel and finishes.
-        let (cascade_leak_aborted, content_emitted) = forward_task.await.unwrap_or((false, false));
+        let (cascade_leak_aborted, content_emitted, text_emitted) =
+            forward_task.await.unwrap_or((false, false, false));
         // Propagate to the sticky flag so any retry iteration short-circuits.
         if cascade_leak_aborted {
             leak_fired_sticky = true;
         }
         content_emitted_sticky |= content_emitted;
+        text_emitted_sticky |= text_emitted;
 
         match driver_result {
             Ok(response) => {
@@ -445,7 +453,7 @@ pub(super) async fn stream_with_retry(
                 // classification, log lines, error stringification through
                 // `LibreFangError::LlmDriver(e.to_string())`) only ever read
                 // `partial_text_len` and pay nothing for the body.
-                if !content_emitted_sticky && !cascade_leak_aborted {
+                if !text_emitted_sticky && !cascade_leak_aborted {
                     if let Some(body) = partial_text.as_deref() {
                         if !body.is_empty() {
                             let _ = tx
@@ -552,6 +560,35 @@ mod tests {
         }
     }
 
+    /// A streaming driver that emits non-text content before timing out with
+    /// a text body that has not reached the caller yet.
+    struct ThinkingThenTimedOut;
+
+    #[async_trait::async_trait]
+    impl LlmDriver for ThinkingThenTimedOut {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            unreachable!("this mock is only exercised through stream()")
+        }
+
+        async fn stream(
+            &self,
+            _req: CompletionRequest,
+            tx: mpsc::Sender<StreamEvent>,
+        ) -> Result<CompletionResponse, LlmError> {
+            tx.send(StreamEvent::ThinkingDelta {
+                text: "reasoning".to_string(),
+            })
+            .await
+            .unwrap();
+            Err(LlmError::TimedOut {
+                inactivity_secs: 30,
+                partial_text: Some(std::sync::Arc::from("answer")),
+                partial_text_len: 6,
+                last_activity: "thinking_delta".to_string(),
+            })
+        }
+    }
+
     /// Regression (#6512 review [2]): once observable content has reached the caller's `tx`, a retryable mid-stream error (Overloaded / RateLimited / transient) must NOT be retried — a retry re-streams a second full response onto the same `tx`, concatenating a duplicate/garbled answer.
     /// The caller must receive the error and exactly ONE copy of the partial content.
     #[tokio::test]
@@ -591,5 +628,25 @@ mod tests {
             }
         }
         assert_eq!(texts, ["partial"]);
+    }
+
+    #[tokio::test]
+    async fn timeout_delivers_partial_text_after_non_text_content() {
+        let driver = ThinkingThenTimedOut;
+        let (tx, mut rx) = mpsc::channel(64);
+        let result = stream_with_retry(&driver, CompletionRequest::default(), tx, None, None).await;
+
+        assert!(result.is_err());
+        let mut saw_thinking = false;
+        let mut texts = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                StreamEvent::ThinkingDelta { .. } => saw_thinking = true,
+                StreamEvent::TextDelta { text } => texts.push(text),
+                _ => {}
+            }
+        }
+        assert!(saw_thinking);
+        assert_eq!(texts, ["answer"]);
     }
 }
