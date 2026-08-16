@@ -394,7 +394,7 @@ pub const HANDSHAKE_READ_TIMEOUT_SECS: u64 = 10;
 
 /// SECURITY: Maximum frame length accepted on a pre-handshake read.
 ///
-/// The handshake timeout above bounds how *long* an unauthenticated client can pin a buffer, but not how *large* that buffer is: the body allocation is sized from the attacker-declared length header, up to `MAX_MESSAGE_SIZE` (16 MiB) per connection.
+/// The handshake timeout above bounds how *long* an unauthenticated client can pin a buffer; the size cap below independently limits that allocation to 64 KiB per connection.
 /// Handshake / HandshakeAck frames are small — node IDs, a UUID nonce, a 64-char HMAC, base64 Ed25519 / X25519 keys, and the advertised `Vec<RemoteAgentInfo>` — roughly 1 KiB typical, and only a node advertising hundreds of richly-described agents approaches tens of KiB.
 /// 64 KiB therefore leaves generous headroom for legitimate handshakes while shrinking the worst-case pre-auth allocation 256×.
 /// Deliberately a separate constant from `MAX_PEER_MESSAGE_BYTES` (same value today): that cap guards the post-auth kernel/LLM payload boundary, this one guards pre-auth transport framing, and the two may diverge independently.
@@ -1177,28 +1177,9 @@ impl PeerNode {
     ) -> Result<(), WireError> {
         let (mut reader, mut writer) = stream.into_split();
 
-        // Read the incoming handshake request under a deadline. This runs
-        // before any authentication and `read_message` allocates a body buffer
-        // from the wire length header, so an unauthenticated client must not be
-        // able to claim a large frame and then stall, pinning the allocation
-        // indefinitely (pre-handshake memory-exhaustion DoS). Two bounds apply:
-        // `read_message` caps the declared frame length at
-        // MAX_PREHANDSHAKE_MESSAGE_SIZE before allocating (size), and the
-        // timeout below frees whatever was allocated if the body never
-        // arrives (duration).
-        let msg = match tokio::time::timeout(
-            std::time::Duration::from_secs(HANDSHAKE_READ_TIMEOUT_SECS),
-            read_message(&mut reader),
-        )
-        .await
-        {
-            Ok(result) => result?,
-            Err(_) => {
-                return Err(WireError::HandshakeFailed(format!(
-                    "handshake not received within {HANDSHAKE_READ_TIMEOUT_SECS}s"
-                )));
-            }
-        };
+        // Read the incoming handshake request under the size and duration
+        // bounds enforced by `read_message`.
+        let msg = read_message(&mut reader).await?;
         let (peer_node_id, session_key) = match &msg.kind {
             WireMessageKind::Request(WireRequest::Handshake {
                 node_id,
@@ -1701,11 +1682,29 @@ pub async fn write_message_authenticated(
 
 /// Read a framed message (4-byte length + JSON) from a TCP stream, pre-handshake.
 ///
-/// SECURITY: this is the entry point for every read that happens *before* the peer has authenticated (inbound `Handshake`, outbound `HandshakeAck`), so the declared frame length is capped at [`MAX_PREHANDSHAKE_MESSAGE_SIZE`] — the cap is enforced before the body buffer is allocated, so an unauthenticated peer cannot pin a `MAX_MESSAGE_SIZE`-sized allocation by claiming a huge frame and stalling.
+/// SECURITY: this is the entry point for every read that happens *before* the peer has authenticated (inbound `Handshake`, outbound `HandshakeAck`), so the declared frame length is capped at [`MAX_PREHANDSHAKE_MESSAGE_SIZE`] and the entire read is capped at [`HANDSHAKE_READ_TIMEOUT_SECS`].
+/// The size cap is enforced before the body buffer is allocated, while the deadline releases any allowed allocation when a peer sends a length header and then stalls.
 pub async fn read_message(
     reader: &mut tokio::net::tcp::OwnedReadHalf,
 ) -> Result<WireMessage, WireError> {
-    read_message_bounded(reader, "<pre-handshake>", MAX_PREHANDSHAKE_MESSAGE_SIZE).await
+    read_message_with_timeout(reader, Duration::from_secs(HANDSHAKE_READ_TIMEOUT_SECS)).await
+}
+
+async fn read_message_with_timeout(
+    reader: &mut tokio::net::tcp::OwnedReadHalf,
+    timeout: Duration,
+) -> Result<WireMessage, WireError> {
+    match tokio::time::timeout(
+        timeout,
+        read_message_bounded(reader, "<pre-handshake>", MAX_PREHANDSHAKE_MESSAGE_SIZE),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(WireError::HandshakeFailed(format!(
+            "handshake message not received within {timeout:?}"
+        ))),
+    }
 }
 
 /// Read a framed message and additionally emit a `warn!` on the
@@ -2609,6 +2608,33 @@ mod tests {
     }
 
     // ── Pre-handshake frame-length cap (unauthenticated allocation DoS) ──
+
+    /// SECURITY TEST: every pre-handshake read must release an allocated body buffer when a peer sends an allowed length header and then stalls.
+    #[tokio::test]
+    async fn test_prehandshake_partial_body_times_out() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let (mut server_reader, _server_writer) = server_stream.into_split();
+        let (_client_reader, mut client_writer) = client.into_split();
+
+        client_writer
+            .write_all(&1024_u32.to_be_bytes())
+            .await
+            .unwrap();
+        client_writer.write_all(b"partial").await.unwrap();
+        client_writer.flush().await.unwrap();
+
+        let result = read_message_with_timeout(&mut server_reader, Duration::from_millis(50)).await;
+
+        match result {
+            Err(WireError::HandshakeFailed(message)) => {
+                assert_eq!(message, "handshake message not received within 50ms");
+            }
+            other => panic!("Expected HandshakeFailed timeout, got {other:?}"),
+        }
+    }
 
     /// SECURITY TEST: a pre-handshake read must reject an attacker-declared
     /// length above MAX_PREHANDSHAKE_MESSAGE_SIZE from the 4-byte header
