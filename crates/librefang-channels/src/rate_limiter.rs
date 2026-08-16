@@ -679,11 +679,15 @@ mod tests {
                     limiter
                         .check_with_capacity("telegram", &format!("concurrent{i}"), 1, TEST_CAP, 4)
                         .unwrap();
-                    assert!(limiter.len() <= TEST_CAP);
                 });
             }
         });
 
+        // Observe the size only after all writers have stopped. `DashMap::len`
+        // locks and sums shards one at a time, so a concurrent eviction from
+        // one shard plus insertion into another can produce a non-linearizable
+        // transient count even though admissions are serialized by
+        // `insert_lock` and the map never contains more than `TEST_CAP` keys.
         assert!(limiter.len() <= TEST_CAP);
     }
 
