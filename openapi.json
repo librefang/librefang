@@ -11975,7 +11975,7 @@
           "required": true
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Trigger created",
             "content": {
               "application/json": {
@@ -11987,6 +11987,15 @@
           },
           "400": {
             "description": "Invalid trigger definition"
+          },
+          "404": {
+            "description": "Owner or target agent not found"
+          },
+          "500": {
+            "description": "Unexpected kernel failure"
+          },
+          "503": {
+            "description": "Trigger registration temporarily unavailable"
           }
         }
       }
