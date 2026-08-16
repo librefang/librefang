@@ -123,6 +123,61 @@ pub fn extract_text_from_pdf(bytes: &[u8]) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    fn text_pdf(text: &str) -> Vec<u8> {
+        use pdf_extract::content::{Content, Operation};
+        use pdf_extract::{dictionary, Document, Object, Stream};
+
+        let mut document = Document::with_version("1.5");
+        let pages_id = document.new_object_id();
+        let font_id = document.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        });
+        let resources_id = document.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font_id },
+        });
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 12.into()]),
+                Operation::new("Td", vec![72.into(), 720.into()]),
+                Operation::new("Tj", vec![Object::string_literal(text)]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        let content_id = document.add_object(Stream::new(
+            dictionary! {},
+            content.encode().expect("test PDF content should encode"),
+        ));
+        let page_id = document.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        });
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page_id.into()],
+                "Count" => 1,
+            }),
+        );
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+
+        let mut bytes = Vec::new();
+        document
+            .save_to(&mut bytes)
+            .expect("test PDF should serialize");
+        bytes
+    }
+
     #[test]
     fn empty_input_errors() {
         assert!(extract_text_from_pdf(&[]).is_err());
@@ -133,6 +188,13 @@ mod tests {
         // Random bytes that look nothing like a PDF — must not panic the test.
         let result = extract_text_from_pdf(b"not a pdf, definitely not");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn valid_pdf_text_flows_through_capped_writer() {
+        let text = extract_text_from_pdf(&text_pdf("bounded output")).unwrap();
+        assert!(text.contains("bounded output"));
+        assert!(!text.contains(TRUNCATION_MARKER));
     }
 
     #[test]
