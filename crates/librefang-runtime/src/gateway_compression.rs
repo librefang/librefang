@@ -280,10 +280,10 @@ fn drop_oldest_until_under(
 }
 
 /// Return the index of the oldest non-pinned, non-system message that is
-/// safe to drop. A `tool_use` with a later pinned matching `tool_result` is NOT
-/// safe (dropping the tool_use would orphan the pinned tool_result), so
-/// we step past it and keep looking. Returns `None` when no droppable
-/// candidate exists.
+/// safe to drop. A `tool_use` with a later pinned matching `tool_result` is
+/// not safe. Nor is a `tool_result` whose preceding `tool_use` remains in
+/// history. We step past either half of such a locked pair and keep looking.
+/// Returns `None` when no droppable candidate exists.
 fn next_droppable_index(history: &[Message]) -> Option<usize> {
     let mut i = 0;
     while i < history.len() {
@@ -302,9 +302,44 @@ fn next_droppable_index(history: &[Message]) -> Option<usize> {
             i += 1;
             continue;
         }
+        // A result may only be dropped by the branch that simultaneously
+        // removes its use, or after the use is already absent. Otherwise a
+        // pinned/system use (or a use locked by another pinned result) would
+        // remain unmatched and providers reject the resulting history.
+        let tool_result_ids = message_tool_result_ids(msg);
+        if !tool_result_ids.is_empty()
+            && history
+                .iter()
+                .take(i)
+                .any(|candidate| message_has_tool_use_for(candidate, &tool_result_ids))
+        {
+            i += 1;
+            continue;
+        }
         return Some(i);
     }
     None
+}
+
+fn message_tool_result_ids(msg: &Message) -> Vec<&str> {
+    match &msg.content {
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                _ => None,
+            })
+            .collect(),
+        MessageContent::Text(_) => Vec::new(),
+    }
+}
+
+fn message_has_tool_use_for<T: AsRef<str>>(msg: &Message, tool_result_ids: &[T]) -> bool {
+    message_tool_use_ids(msg).iter().any(|tool_use_id| {
+        tool_result_ids
+            .iter()
+            .any(|candidate| candidate.as_ref() == *tool_use_id)
+    })
 }
 
 fn message_tool_use_ids(msg: &Message) -> Vec<&str> {
@@ -698,6 +733,28 @@ mod tests {
         assert!(history
             .iter()
             .any(|msg| { msg.pinned && message_has_tool_result_for(msg, &["call-keep"]) }));
+    }
+
+    #[test]
+    fn pinned_tool_use_keeps_unpinned_matching_result() {
+        let mut pinned_use = tool_use_msg("call-keep", "demo");
+        pinned_use.pinned = true;
+        let mut history = vec![
+            pinned_use,
+            tool_result_msg("call-keep", "result"),
+            small_user("droppable padding"),
+            small_user("recent"),
+        ];
+
+        let dropped = drop_oldest_until_under(&mut history, 0, 1);
+
+        assert_eq!(dropped, 2);
+        assert!(history
+            .iter()
+            .any(|msg| { msg.pinned && !message_tool_use_ids(msg).is_empty() }));
+        assert!(history
+            .iter()
+            .any(|msg| { message_has_tool_result_for(msg, &["call-keep"]) }));
     }
 
     #[test]
