@@ -82,6 +82,25 @@ fn is_worktree_clean(root: &Path) -> Result<bool, Box<dyn std::error::Error>> {
     Ok(git(root, &["status", "--porcelain", "--untracked-files=normal"])?.is_empty())
 }
 
+fn git_diff_has_changes(root: &Path, cached: bool) -> Result<bool, Box<dyn std::error::Error>> {
+    let mut command = Command::new("git");
+    command.arg("diff");
+    if cached {
+        command.arg("--cached");
+    }
+    let output = command.arg("--quiet").current_dir(root).output()?;
+    match output.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => Err(format!(
+            "git diff{} --quiet failed: {}",
+            if cached { " --cached" } else { "" },
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into()),
+    }
+}
+
 /// Paths the release commit stages, on top of a generated Dev.to article.
 ///
 /// The last entry is a directory, and deliberately so: the fold step
@@ -237,6 +256,33 @@ fn validate_calver(version: &str) -> Result<(), Box<dyn std::error::Error>> {
         )
         .into())
     }
+}
+
+fn print_dry_run(current: &str, version: &str) {
+    let tag = format!("v{}", version);
+    let is_lts = version.contains("-lts");
+    let is_prerelease = version.contains("-beta") || version.contains("-rc");
+    println!();
+    println!("=== Dry Run ===");
+    println!("  Version: {} -> {}", current, version);
+    println!("  Tag:     {}", tag);
+    if is_lts {
+        let lts_version = version.split("-lts").next().unwrap_or(version);
+        let parts: Vec<&str> = lts_version.split('.').collect();
+        let branch = if parts.len() >= 2 {
+            format!("release/{}.{}", parts[0], parts[1])
+        } else {
+            format!("release/{}", lts_version)
+        };
+        println!("  Type:    LTS");
+        println!("  Branch:  {} (auto-created by CI)", branch);
+    } else if is_prerelease {
+        println!("  Type:    pre-release");
+    } else {
+        println!("  Type:    stable");
+    }
+    println!();
+    println!("No changes made.");
 }
 
 fn prompt(message: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -543,30 +589,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(ref v) = args.version {
             validate_calver(v)?;
             let current = read_workspace_version(&root).unwrap_or_default();
-            let tag = format!("v{}", v);
-            let is_lts = v.contains("-lts");
-            let is_pre = v.contains("-beta") || v.contains("-rc");
-            println!();
-            println!("=== Dry Run ===");
-            println!("  Version: {} -> {}", current, v);
-            println!("  Tag:     {}", tag);
-            if is_lts {
-                let lts_ver = v.split("-lts").next().unwrap_or(v);
-                let parts: Vec<&str> = lts_ver.split('.').collect();
-                let branch = if parts.len() >= 2 {
-                    format!("release/{}.{}", parts[0], parts[1])
-                } else {
-                    format!("release/{}", lts_ver)
-                };
-                println!("  Type:    LTS");
-                println!("  Branch:  {} (auto-created by CI)", branch);
-            } else if is_pre {
-                println!("  Type:    pre-release");
-            } else {
-                println!("  Type:    stable");
-            }
-            println!();
-            println!("No changes made.");
+            print_dry_run(&current, v);
             return Ok(());
         }
     }
@@ -593,8 +616,10 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    println!("Pulling latest main...");
-    git(&root, &["pull", "--rebase", "origin", "main"])?;
+    if !args.dry_run {
+        println!("Pulling latest main...");
+        git(&root, &["pull", "--rebase", "origin", "main"])?;
+    }
 
     let current = read_workspace_version(&root)?;
     // Include prerelease tags so rc/beta compare against previous rc/beta
@@ -745,6 +770,11 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         // before confirmation so both the preview and changelog use the same
         // version-aware, channel-appropriate base.
         prev_tag = find_previous_tag(&root, &tag, is_prerelease)?;
+    }
+
+    if args.dry_run {
+        print_dry_run(&current, &version);
+        return Ok(());
     }
 
     // --- Confirmation ---
@@ -1028,12 +1058,7 @@ pip install librefang-sdk
     }
 
     // Check if there are staged changes
-    let has_changes = !Command::new("git")
-        .args(["diff", "--cached", "--quiet"])
-        .current_dir(&root)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(true);
+    let has_changes = git_diff_has_changes(&root, true)?;
 
     // --- Create release branch BEFORE committing ---
     // This avoids committing on main (which has branch protection).
@@ -1176,6 +1201,7 @@ fn run_lts_patch(root: &Path, args: &ReleaseArgs) -> Result<(), Box<dyn std::err
     let existing = git(root, &["tag", "-l", &pattern])?;
     let patch = next_lts_patch(&existing, series);
     let version = format!("{}.{}-lts", series, patch);
+    validate_calver(&version)?;
     let tag = format!("v{}", version);
     if tag_exists(root, &tag)? {
         return Err(format!("refusing to overwrite existing LTS tag {}", tag).into());
@@ -1242,12 +1268,7 @@ fn run_lts_patch(root: &Path, args: &ReleaseArgs) -> Result<(), Box<dyn std::err
     }
 
     // Commit version bump if there are changes
-    let has_changes = !Command::new("git")
-        .args(["diff", "--quiet"])
-        .current_dir(root)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(true);
+    let has_changes = git_diff_has_changes(root, false)?;
 
     if has_changes {
         git(
@@ -1613,6 +1634,7 @@ mod tests {
         assert!(validate_calver("2026.5.4-beta.1").is_ok());
         assert!(validate_calver("2026.5.4-beta").is_err());
         assert!(validate_calver("v2026.5.4").is_err());
+        assert!(validate_calver("foo.0-lts").is_err());
     }
 
     #[test]
@@ -1689,5 +1711,41 @@ mod tests {
         assert!(!is_worktree_clean(&root).unwrap());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_diff_change_detection_distinguishes_changes_from_errors() {
+        let root = std::env::temp_dir().join(format!(
+            "lf-release-diff-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "."]).unwrap();
+        git(&root, &["config", "user.email", "release@example.invalid"]).unwrap();
+        git(&root, &["config", "user.name", "release test"]).unwrap();
+        fs::write(root.join("seed"), "before").unwrap();
+        git(&root, &["add", "seed"]).unwrap();
+        git(&root, &["commit", "-qm", "seed"]).unwrap();
+
+        assert!(!git_diff_has_changes(&root, false).unwrap());
+        assert!(!git_diff_has_changes(&root, true).unwrap());
+
+        fs::write(root.join("seed"), "after").unwrap();
+        assert!(git_diff_has_changes(&root, false).unwrap());
+        assert!(!git_diff_has_changes(&root, true).unwrap());
+
+        git(&root, &["add", "seed"]).unwrap();
+        assert!(!git_diff_has_changes(&root, false).unwrap());
+        assert!(git_diff_has_changes(&root, true).unwrap());
+
+        let non_repository = root.with_extension("not-a-repository");
+        let _ = fs::remove_dir_all(&non_repository);
+        fs::create_dir_all(&non_repository).unwrap();
+        assert!(git_diff_has_changes(&non_repository, false).is_err());
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&non_repository);
     }
 }
