@@ -77,6 +77,18 @@ fn remove_task_if_owned(
         .map(|(_, entry)| entry)
 }
 
+fn stop_task_if_owned(
+    tasks: &DashMap<AgentId, AgentTaskEntry>,
+    agent_id: AgentId,
+    stopped: &Arc<AtomicBool>,
+) -> bool {
+    let Some(entry) = remove_task_if_owned(tasks, agent_id, stopped) else {
+        return false;
+    };
+    stop_task_entry(agent_id, entry);
+    true
+}
+
 /// Maximum number of concurrent background LLM calls across all agents.
 const MAX_CONCURRENT_BG_LLM: usize = 5;
 
@@ -423,7 +435,7 @@ impl BackgroundExecutor {
                     // closed), but only while this loop still owns the map
                     // entry. A replacement may already be registered under
                     // the same agent ID.
-                    remove_task_if_owned(&tasks_for_cleanup, agent_id, &stopped_cleanup);
+                    stop_task_if_owned(&tasks_for_cleanup, agent_id, &stopped_cleanup);
                 });
 
                 self.install_task(
@@ -576,7 +588,7 @@ impl BackgroundExecutor {
                     // Self-cleanup on any break path (cap, shutdown, semaphore
                     // closed). See the continuous loop for the ownership
                     // rationale.
-                    remove_task_if_owned(&tasks_for_cleanup, agent_id, &stopped_cleanup);
+                    stop_task_if_owned(&tasks_for_cleanup, agent_id, &stopped_cleanup);
                 });
 
                 self.install_task(
@@ -1180,23 +1192,33 @@ mod tests {
         let agent_id = AgentId::new();
         let stale_stopped = Arc::new(AtomicBool::new(false));
         let current_stopped = Arc::new(AtomicBool::new(false));
+        let current_outer = tokio::spawn(std::future::pending());
+        let current_outer_abort = current_outer.abort_handle();
+        let current_watcher = tokio::spawn(std::future::pending());
+        let current_watcher_abort = current_watcher.abort_handle();
         let current = AgentTaskEntry {
-            outer: tokio::spawn(std::future::pending()),
-            watchers: Arc::new(std::sync::Mutex::new(Vec::new())),
+            outer: current_outer,
+            watchers: Arc::new(std::sync::Mutex::new(vec![current_watcher])),
             stopped: current_stopped.clone(),
         };
         tasks.insert(agent_id, current);
 
         assert!(
-            remove_task_if_owned(&tasks, agent_id, &stale_stopped).is_none(),
+            !stop_task_if_owned(&tasks, agent_id, &stale_stopped),
             "an exiting stale loop must not remove the replacement entry"
         );
         assert_eq!(tasks.len(), 1);
+        assert!(!current_stopped.load(Ordering::Acquire));
 
-        let current = remove_task_if_owned(&tasks, agent_id, &current_stopped)
-            .expect("the owning loop must still be able to remove itself");
-        stop_task_entry(agent_id, current);
+        assert!(
+            stop_task_if_owned(&tasks, agent_id, &current_stopped),
+            "the owning loop must still be able to stop itself"
+        );
+        tokio::task::yield_now().await;
         assert!(tasks.is_empty());
+        assert!(current_stopped.load(Ordering::Acquire));
+        assert!(current_outer_abort.is_finished());
+        assert!(current_watcher_abort.is_finished());
     }
 
     #[tokio::test]
