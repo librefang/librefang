@@ -11856,12 +11856,12 @@ mod tests {
     fn build_thread_key_falls_back_to_chat_id_without_topic() {
         let mut msg = group_thread_message("topic-1", false);
         let k = build_thread_key(&msg).expect("key");
-        assert_eq!(k.thread, "topic-1");
-        assert_eq!(k.chat_id.as_deref(), Some("u1"));
+        assert_eq!(k.thread(), "topic-1");
+        assert_eq!(k.chat_id(), Some("u1"));
         // A topic-less group still gets a stable claim keyed by chat id.
         msg.thread_id = None;
         let k2 = build_thread_key(&msg).expect("key");
-        assert_eq!(k2.thread, "u1");
+        assert_eq!(k2.thread(), "u1");
     }
 
     #[test]
@@ -11872,8 +11872,8 @@ mod tests {
         msg.metadata
             .insert(SENDER_USER_ID_KEY.into(), serde_json::json!("peer-9"));
         let k = build_thread_key(&msg).expect("key");
-        assert_eq!(k.account_id.as_deref(), Some("acct-1"));
-        assert_eq!(k.peer_id.as_deref(), Some("peer-9"));
+        assert_eq!(k.account_id(), Some("acct-1"));
+        assert_eq!(k.peer_id(), Some("peer-9"));
     }
 
     #[tokio::test]

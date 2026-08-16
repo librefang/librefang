@@ -5,15 +5,6 @@ category = "devtools"
 icon = "📁"
 tags = ["files", "local", "read", "write", "search"]
 
-[transport]
-type = "stdio"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem@latest", "$HOME"]
-
-[health_check]
-interval_secs = 60
-unhealthy_threshold = 3
-
 setup_instructions = """
 Exposes your home directory to agents by default.
 
@@ -32,6 +23,14 @@ args = ["-y", "@modelcontextprotocol/server-filesystem@latest", "/path/to/expose
 Requires Node.js / npx.
 """
 
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem@latest", "$HOME"]
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
 
 [i18n.zh]
 name = "Filesystem"

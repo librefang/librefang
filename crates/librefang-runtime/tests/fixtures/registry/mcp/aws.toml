@@ -5,6 +5,12 @@ category = "cloud"
 icon = "lucide:cloud"
 tags = ["cloud", "amazon", "infrastructure", "s3", "ec2", "lambda", "devops"]
 
+setup_instructions = """
+1. Go to the AWS IAM Console (https://console.aws.amazon.com/iam/) and create or select an IAM user with programmatic access.
+2. Generate an access key pair and note down the Access Key ID and Secret Access Key.
+3. Paste both credentials and your preferred AWS region (default: us-east-1) into the fields above.
+"""
+
 [transport]
 type = "stdio"
 command = "npx"
@@ -34,13 +40,6 @@ get_url = ""
 [health_check]
 interval_secs = 60
 unhealthy_threshold = 3
-
-setup_instructions = """
-1. Go to the AWS IAM Console (https://console.aws.amazon.com/iam/) and create or select an IAM user with programmatic access.
-2. Generate an access key pair and note down the Access Key ID and Secret Access Key.
-3. Paste both credentials and your preferred AWS region (default: us-east-1) into the fields above.
-"""
-
 
 [i18n.zh]
 name = "AWS"

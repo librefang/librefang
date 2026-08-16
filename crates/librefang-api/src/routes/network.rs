@@ -620,7 +620,7 @@ pub async fn a2a_list_external_agents(State(state): State<Arc<AppState>>) -> imp
         .collect();
     // Include pending (unapproved) agents so the operator can see and approve them.
     for entry in state.pending_a2a_agents.iter() {
-        let card = entry.value();
+        let card = &entry.value().card;
         items.push(serde_json::json!({
             "name": card.name,
             "url": card.url,
@@ -973,7 +973,7 @@ pub async fn a2a_discover_external(
             if let Some(entry) = state
                 .pending_a2a_agents
                 .iter()
-                .find(|e| e.value().name == card.name && e.key() != &url)
+                .find(|e| e.value().card.name == card.name && e.key() != &url)
             {
                 return (
                     StatusCode::CONFLICT,
@@ -1011,7 +1011,9 @@ pub async fn a2a_discover_external(
             // list. The agent cannot receive tasks until the operator explicitly
             // approves it via POST /api/a2a/agents/{url}/approve.
             let card_name = card.name.clone();
-            state.pending_a2a_agents.insert(url.clone(), card);
+            state
+                .pending_a2a_agents
+                .insert(url.clone(), super::PendingA2aAgent::new(card));
 
             // Bug #3786: audit every discovery so silent agent enumeration is detectable.
             state.kernel.audit().record_with_context(
@@ -1314,7 +1316,8 @@ pub async fn a2a_approve_external(
     };
 
     match state.pending_a2a_agents.remove(&url) {
-        Some((_, card)) => {
+        Some((_, pending)) => {
+            let card = pending.card;
             tracing::info!(
                 url = %url,
                 agent_name = %card.name,
@@ -2389,6 +2392,7 @@ mod tests {
             pending_a2a_agents: dashmap::DashMap::new(),
             auth_login_limiter: Arc::new(crate::rate_limiter::AuthLoginLimiter::new()),
             gcra_limiter: crate::rate_limiter::create_rate_limiter(0),
+            gcra_tokens_per_minute: 1,
             trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
             trust_forwarded_for: false,
             idempotency_store,
