@@ -21,6 +21,10 @@ use zeroize::Zeroizing;
 /// No real response carries anywhere near this many parallel tool calls.
 const MAX_STREAMED_TOOL_CALLS: usize = 256;
 
+type MoonshotUploadLock = tokio::sync::Mutex<()>;
+type MoonshotUploadLocks =
+    std::sync::Arc<tokio::sync::Mutex<HashMap<[u8; 32], std::sync::Weak<MoonshotUploadLock>>>>;
+
 /// OpenAI-compatible API driver.
 pub struct OpenAIDriver {
     api_key: Zeroizing<String>,
@@ -36,6 +40,9 @@ pub struct OpenAIDriver {
     /// Cache of uploaded file IDs for Moonshot/Kimi (hash of bytes → file_id).
     /// Avoids re-uploading the same file across agent loop iterations.
     moonshot_file_cache: std::sync::Arc<tokio::sync::Mutex<HashMap<[u8; 32], String>>>,
+    /// Per-content single-flight locks for Moonshot uploads.
+    /// Weak values avoid retaining one lock forever for every file ever seen.
+    moonshot_upload_locks: MoonshotUploadLocks,
     /// Per-provider HTTP request timeout in seconds.
     /// Overrides the HTTP client's default read timeout when set.
     request_timeout_secs: Option<u64>,
@@ -88,6 +95,7 @@ impl OpenAIDriver {
             use_api_key_header: false,
             url_query: None,
             moonshot_file_cache: Default::default(),
+            moonshot_upload_locks: Default::default(),
             request_timeout_secs,
             emit_caller_trace_headers: true,
             max_retries: 3,
@@ -134,6 +142,7 @@ impl OpenAIDriver {
             use_api_key_header: true,
             url_query: Some(format!("api-version={}", api_version)),
             moonshot_file_cache: Default::default(),
+            moonshot_upload_locks: Default::default(),
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
             max_retries: 3,
@@ -234,6 +243,85 @@ impl OpenAIDriver {
             .ok_or_else(|| LlmError::Http(format!("Moonshot file upload: missing 'id' in {body}")))
     }
 
+    /// Return the cached Moonshot file ID or upload it exactly once per content
+    /// hash while concurrent callers wait on the same per-hash lock.
+    async fn upload_file_to_moonshot_cached(
+        &self,
+        hash: [u8; 32],
+        data: &[u8],
+        filename: &str,
+        mime: &str,
+    ) -> Result<String, LlmError> {
+        if let Some(id) = self.moonshot_file_cache.lock().await.get(&hash).cloned() {
+            return Ok(id);
+        }
+
+        let upload_lock = {
+            let mut locks = self.moonshot_upload_locks.lock().await;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(&hash).and_then(std::sync::Weak::upgrade) {
+                lock
+            } else {
+                let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(hash, std::sync::Arc::downgrade(&lock));
+                lock
+            }
+        };
+
+        let _upload_guard = upload_lock.lock().await;
+        if let Some(id) = self.moonshot_file_cache.lock().await.get(&hash).cloned() {
+            return Ok(id);
+        }
+
+        let id = self.upload_file_to_moonshot(data, filename, mime).await?;
+        debug!(file_id = %id, filename = %filename, "Uploaded file to Moonshot");
+
+        let mut cache = self.moonshot_file_cache.lock().await;
+        // The cache is only a deduplication optimization. A full eviction is
+        // acceptable: a later miss merely uploads the content again.
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert(hash, id.clone());
+        Ok(id)
+    }
+
+    /// Resolve local `ImageFile` blocks asynchronously before the synchronous
+    /// request-shape builder runs. Missing files retain the historical
+    /// warn-and-skip behavior.
+    async fn preprocess_image_files(&self, request: &mut CompletionRequest) {
+        use base64::Engine;
+
+        let messages = std::sync::Arc::make_mut(&mut request.messages);
+        for message in messages {
+            let MessageContent::Blocks(blocks) = &mut message.content else {
+                continue;
+            };
+            let mut index = 0;
+            while index < blocks.len() {
+                let ContentBlock::ImageFile { media_type, path } = &blocks[index] else {
+                    index += 1;
+                    continue;
+                };
+                let media_type = media_type.clone();
+                let path = path.clone();
+                match tokio::fs::read(&path).await {
+                    Ok(bytes) => {
+                        blocks[index] = ContentBlock::Image {
+                            media_type,
+                            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                        };
+                        index += 1;
+                    }
+                    Err(error) => {
+                        warn!(path = %path, %error, "ImageFile missing, skipping");
+                        blocks.remove(index);
+                    }
+                }
+            }
+        }
+    }
+
     /// Pre-process a CompletionRequest for Moonshot: upload non-image files and
     /// replace eligible ContentBlock::Image/ImageFile with a text marker that
     /// `build_request()` converts to `OaiContentPart::File`.
@@ -318,30 +406,9 @@ impl OpenAIDriver {
                 // Hash full file content with SHA-256 for cache key
                 let hash: [u8; 32] = Sha256::digest(&bytes).into();
 
-                // Short lock: check cache only, release before any network I/O
-                let cached = {
-                    let cache = self.moonshot_file_cache.lock().await;
-                    cache.get(&hash).cloned()
-                };
-
-                let file_id = if let Some(id) = cached {
-                    id
-                } else {
-                    let id = self
-                        .upload_file_to_moonshot(&bytes, &filename, &mime)
-                        .await?;
-                    debug!(file_id = %id, filename = %filename, "Uploaded file to Moonshot");
-                    // Short lock: insert result into cache
-                    let mut cache = self.moonshot_file_cache.lock().await;
-                    // Cap at 256 entries — full eviction (not true LRU) is acceptable
-                    // because the cache is only a dedup optimisation; stale entries just
-                    // trigger a re-upload which Moonshot handles idempotently.
-                    if cache.len() >= 256 {
-                        cache.clear();
-                    }
-                    cache.insert(hash, id.clone());
-                    id
-                };
+                let file_id = self
+                    .upload_file_to_moonshot_cached(hash, &bytes, &filename, &mime)
+                    .await?;
 
                 // Replace the block with a text marker
                 blocks[i] = ContentBlock::Text {
@@ -988,22 +1055,10 @@ impl OpenAIDriver {
                                     },
                                 });
                             }
-                            ContentBlock::ImageFile { media_type, path } => {
-                                match tokio::task::block_in_place(|| std::fs::read(path)) {
-                                    Ok(bytes) => {
-                                        use base64::Engine;
-                                        let data = base64::engine::general_purpose::STANDARD
-                                            .encode(&bytes);
-                                        parts.push(OaiContentPart::ImageUrl {
-                                            image_url: OaiImageUrl {
-                                                url: format!("data:{media_type};base64,{data}"),
-                                            },
-                                        });
-                                    }
-                                    Err(e) => {
-                                        warn!(path = %path, error = %e, "ImageFile missing, skipping");
-                                    }
-                                }
+                            ContentBlock::ImageFile { path, .. } => {
+                                return Err(LlmError::Http(format!(
+                                    "ImageFile was not asynchronously preprocessed: {path}"
+                                )));
                             }
                             ContentBlock::Thinking { .. } => {}
                             _ => {}
@@ -1225,6 +1280,7 @@ impl LlmDriver for OpenAIDriver {
         if self.is_moonshot() {
             self.preprocess_moonshot_files(&mut request).await?;
         }
+        self.preprocess_image_files(&mut request).await;
         let mut oai_request = self.build_request(&request)?;
 
         // Cross-process / cross-restart rate-limit guard. A previously
@@ -1657,6 +1713,7 @@ impl LlmDriver for OpenAIDriver {
         if self.is_moonshot() {
             self.preprocess_moonshot_files(&mut request).await?;
         }
+        self.preprocess_image_files(&mut request).await;
         let mut oai_request = self.build_request(&request)?;
         oai_request.stream = true;
         oai_request.stream_options = Some(serde_json::json!({"include_usage": true}));
@@ -2131,10 +2188,11 @@ impl LlmDriver for OpenAIDriver {
                                     continue;
                                 }
 
-                                // Ensure tool_accum has enough entries
-                                while tool_accum.len() <= idx {
-                                    tool_accum.push((String::new(), String::new(), String::new()));
-                                }
+                                // Grow to a sparse provider-supplied index in
+                                // one allocation rather than one push per slot.
+                                tool_accum.resize_with(idx + 1, || {
+                                    (String::new(), String::new(), String::new())
+                                });
 
                                 // ID (sent in first chunk for this tool)
                                 if let Some(id) = call["id"].as_str() {
@@ -2189,36 +2247,38 @@ impl LlmDriver for OpenAIDriver {
             // bytes surface as U+FFFD instead of vanishing (#3448).
             buffer.push_str(&utf8.finish());
 
+            if receiver_dropped {
+                return Err(LlmError::Http("stream receiver dropped".to_string()));
+            }
+
             // Flush any remaining buffered content from the think filter
             // (e.g. partial tag at stream end, or unclosed think block).
-            // The receiver may have already disconnected mid-stream; if so we
-            // skip the flush. We don't update `receiver_dropped` again here
-            // because nothing after this block reads it.
-            if !receiver_dropped {
-                for action in think_filter.flush() {
-                    match action {
-                        FilterAction::EmitText(t) => {
-                            if tx.send(StreamEvent::TextDelta { text: t }).await.is_err() {
-                                break;
-                            }
+            for action in think_filter.flush() {
+                match action {
+                    FilterAction::EmitText(t) => {
+                        if tx.send(StreamEvent::TextDelta { text: t }).await.is_err() {
+                            return Err(LlmError::Http("stream receiver dropped".to_string()));
                         }
-                        FilterAction::EmitThinking(t) => {
-                            if tx
-                                .send(StreamEvent::ThinkingDelta { text: t })
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
+                    }
+                    FilterAction::EmitThinking(t) => {
+                        if tx
+                            .send(StreamEvent::ThinkingDelta { text: t })
+                            .await
+                            .is_err()
+                        {
+                            return Err(LlmError::Http("stream receiver dropped".to_string()));
                         }
                     }
                 }
             }
 
             // Log stream summary for diagnostics
+            let has_complete_tool_call = tool_accum
+                .iter()
+                .any(|(id, name, _)| !id.is_empty() && !name.is_empty());
             let is_empty_stream = text_content.is_empty()
                 && reasoning_content.is_empty()
-                && tool_accum.is_empty()
+                && !has_complete_tool_call
                 && usage.input_tokens == 0
                 && usage.output_tokens == 0;
             if is_empty_stream {
@@ -2229,6 +2289,21 @@ impl LlmDriver for OpenAIDriver {
                     buffer_remaining = buffer.len(),
                     "SSE stream returned empty: 0 content, 0 tokens — likely a silently failed request"
                 );
+                let error = LlmError::Http(
+                    "OpenAI-compatible SSE stream ended without content, tool calls, or usage"
+                        .to_string(),
+                );
+                if attempt < max_retries {
+                    let delay = standard_retry_delay(attempt + 1, std::time::Duration::ZERO);
+                    warn!(
+                        attempt,
+                        delay_ms = delay.as_millis(),
+                        "Empty SSE stream, retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return Err(error);
             } else {
                 debug!(
                     chunks = chunk_count,
@@ -2489,7 +2564,6 @@ fn extract_thinking_summary(thinking: &str) -> String {
     }
 }
 
-/// Parse Groq's `tool_use_failed` error and extract the tool call from `failed_generation`.
 /// Extract the max_tokens limit from an API error message.
 /// Looks for patterns like: `must be less than or equal to \`8192\``
 fn extract_max_tokens_limit(body: &str) -> Option<u32> {
@@ -2514,6 +2588,8 @@ fn extract_max_tokens_limit(body: &str) -> Option<u32> {
     None
 }
 
+/// Parse Groq's `tool_use_failed` error and extract tool calls from
+/// `failed_generation`.
 ///
 /// Some models (e.g. Llama 3.3) generate tool calls as XML: `<function=NAME ARGS></function>`
 /// instead of the proper JSON format. Groq rejects these with `tool_use_failed` but includes
@@ -2528,11 +2604,15 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
     // Format: <function=tool_name{"arg":"val"}></function> or <function=tool_name {"arg":"val"}></function>
     let mut tool_calls = Vec::new();
     let mut remaining = failed;
+    let mut truncated_function = false;
 
     while let Some(start) = remaining.find("<function=") {
         remaining = &remaining[start + 10..]; // skip "<function="
                                               // Find the end tag
-        let end = remaining.find("</function>")?;
+        let Some(end) = remaining.find("</function>") else {
+            truncated_function = true;
+            break;
+        };
         let mut call_content = &remaining[..end];
         remaining = &remaining[end + 11..]; // skip "</function>"
 
@@ -2571,6 +2651,9 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
     }
 
     if tool_calls.is_empty() {
+        if truncated_function {
+            return None;
+        }
         // No tool calls found — the model generated plain text but Groq rejected it.
         // Return it as a normal text response instead of failing.
         if !failed.trim().is_empty() {
@@ -2696,10 +2779,8 @@ pub const TRUNCATED_ARGS_KEY: &str = "__args_truncated";
 
 /// Build a tool input object for truncated/malformed JSON from the LLM.
 ///
-/// Tries to repair the truncated JSON by closing unclosed strings and braces.
-/// If repair succeeds, returns the partially-parsed object with a truncation
-/// marker so the tool can still execute (partial content is better than nothing).
-/// If repair fails, returns an object with just the marker and error message.
+/// Returns an object containing a truncation marker and the original parse
+/// error so the tool can reject or handle incomplete arguments explicitly.
 pub(crate) fn malformed_tool_input(
     error: &serde_json::Error,
     args_len: usize,
@@ -2798,6 +2879,15 @@ mod tests {
         assert!(result.is_some());
         let resp = result.unwrap();
         assert_eq!(resp.tool_calls[0].name, "shell_exec");
+    }
+
+    #[test]
+    fn groq_recovery_keeps_complete_calls_before_a_truncated_call() {
+        let body = r#"{"error":{"code":"tool_use_failed","failed_generation":"<function=web_fetch{\"url\":\"https://example.com\"}></function><function=shell_exec{\"command\":\"ls\"}"}}"#;
+        let response = parse_groq_failed_tool_call(body).expect("first complete call must survive");
+
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "web_fetch");
     }
 
     #[test]
@@ -4227,16 +4317,11 @@ mod tests {
         );
     }
 
-    /// Regression: `ContentBlock::ImageFile` paths must be read via
-    /// `tokio::task::block_in_place` so a multi-MB image read does not
-    /// stall the tokio worker pool. The base64-encoded bytes embedded
-    /// in the resulting `OaiContentPart::ImageUrl` data URL must match
-    /// the bytes on disk.
-    ///
-    /// Wrap with `flavor = "multi_thread"` so `block_in_place` does not
-    /// panic on a single-threaded runtime.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn build_request_imagefile_reads_bytes_without_blocking_worker() {
+    /// Local images are read asynchronously before request construction.
+    /// Running this on a current-thread runtime guards against reintroducing
+    /// `block_in_place`, which panics on that runtime flavor.
+    #[tokio::test(flavor = "current_thread")]
+    async fn imagefile_preprocessing_works_on_current_thread_runtime() {
         use base64::Engine;
         use librefang_types::message::Message;
         use std::io::Write;
@@ -4249,7 +4334,7 @@ mod tests {
             .expect("write png");
 
         let driver = OpenAIDriver::new("k".to_string(), "https://api.openai.com/v1".to_string());
-        let request = CompletionRequest {
+        let mut request = CompletionRequest {
             model: "gpt-4o-mini".to_string(),
             messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
@@ -4278,6 +4363,7 @@ mod tests {
 
             ..Default::default()
         };
+        driver.preprocess_image_files(&mut request).await;
         let wire = driver.build_request(&request).expect("build");
         let user = wire
             .messages
@@ -4475,6 +4561,35 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn concurrent_moonshot_uploads_are_single_flight_per_content_hash() {
+        use sha2::{Digest, Sha256};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/files"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "file-shared"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let driver = OpenAIDriver::new("test-key".to_string(), server.uri());
+        let bytes = b"same moonshot document";
+        let hash: [u8; 32] = Sha256::digest(bytes).into();
+        let (first, second) = tokio::join!(
+            driver.upload_file_to_moonshot_cached(hash, bytes, "document.txt", "text/plain"),
+            driver.upload_file_to_moonshot_cached(hash, bytes, "document.txt", "text/plain")
+        );
+
+        assert_eq!(first.unwrap(), "file-shared");
+        assert_eq!(second.unwrap(), "file-shared");
+        server.verify().await;
+    }
+
     // ── #10: transport-error retry behaviour ────────────────────────────
 
     /// Spawn a fake HTTP server that drops (resets) its first `drop_first`
@@ -4550,6 +4665,62 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn empty_sse_stream_is_an_error_instead_of_a_blank_success() {
+        let base = spawn_sse_server("data: [DONE]\n".to_string()).await;
+        let driver = OpenAIDriver::new("test-key".to_string(), base).with_max_retries(0);
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+
+        let error = driver
+            .stream(transport_retry_request(), tx)
+            .await
+            .expect_err("empty provider stream must fail");
+
+        assert!(
+            matches!(error, LlmError::Http(ref message) if message.contains("ended without content")),
+            "unexpected empty-stream error: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_sse_stream_retries_before_returning_success() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _backoff = crate::backoff::enable_test_zero_backoff();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw("data: [DONE]\n", "text/event-stream"),
+            )
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}\n\
+                 data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\
+                 data: [DONE]\n",
+                "text/event-stream",
+            ))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+
+        let driver = OpenAIDriver::new("test-key".to_string(), server.uri()).with_max_retries(1);
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let response = driver
+            .stream(transport_retry_request(), tx)
+            .await
+            .expect("second stream should recover");
+
+        assert_eq!(response.text(), "recovered");
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
     }
 
     #[tokio::test]
