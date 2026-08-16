@@ -319,14 +319,17 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                         isKnownEmbeddingProvider(nextProvider)
                           ? KNOWN_EMBEDDING_MODELS[nextProvider]
                           : Array.from(new Set(Object.values(KNOWN_EMBEDDING_MODELS).flat()));
+                      const nextModel =
+                        !nextProvider ||
+                        !form.embedding_model ||
+                        nextSuggestions.includes(form.embedding_model)
+                          ? form.embedding_model
+                          : (nextSuggestions[0] ?? form.embedding_model);
                       setEmbeddingCustomSelected(false);
                       setForm({
                         ...form,
                         embedding_provider: nextProvider,
-                        embedding_model:
-                          !form.embedding_model || nextSuggestions.includes(form.embedding_model)
-                            ? form.embedding_model
-                            : "",
+                        embedding_model: nextModel,
                       });
                     }}
                     className={inputCls}

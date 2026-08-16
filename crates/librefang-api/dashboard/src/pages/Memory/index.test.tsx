@@ -350,20 +350,20 @@ describe("MemoryPage (redesigned)", () => {
     expect(configMutateAsync.mock.calls[0][0].embedding_model).toBe("custom/embed-v1");
   });
 
-  it("clears a model that is invalid for the newly selected embedding provider", async () => {
+  it("selects a valid model for the newly selected embedding provider", async () => {
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: /Settings/i }));
 
     const [providerSelect, embeddingModelSelect] = screen.getAllByRole("combobox");
     expect(embeddingModelSelect).toHaveValue("text-embedding-3-small");
     fireEvent.change(providerSelect, { target: { value: "cohere" } });
-    expect(embeddingModelSelect).toHaveValue("");
+    expect(embeddingModelSelect).toHaveValue("embed-multilingual-v3.0");
 
     fireEvent.click(screen.getByRole("button", { name: "common.save" }));
     await waitFor(() => expect(configMutateAsync).toHaveBeenCalledTimes(1));
     expect(configMutateAsync.mock.calls[0][0]).toMatchObject({
       embedding_provider: "cohere",
-      embedding_model: undefined,
+      embedding_model: "embed-multilingual-v3.0",
     });
   });
 
