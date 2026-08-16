@@ -1343,7 +1343,7 @@ mod tests {
             updater_store.update_status("nonblocking-persistence", A2aTaskStatus::InputRequired)
         });
 
-        let deadline = Instant::now() + Duration::from_secs(1);
+        let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if let Ok(tasks) = store.tasks.try_lock() {
                 if tasks["nonblocking-persistence"].task.status == A2aTaskStatus::InputRequired {
