@@ -295,26 +295,34 @@ impl MessageJournal {
         }
     }
 
+    fn sweep_stale_entries(inner: &mut JournalInner, now: DateTime<Utc>) {
+        inner.pending.retain(|id, entry| {
+            let age_from = if entry.status == JournalStatus::Deferred {
+                entry.next_retry_after.unwrap_or(entry.updated_at)
+            } else {
+                entry.received_at
+            };
+            let stale = now - age_from > Self::MAX_RECOVERY_AGE;
+            if stale {
+                debug!(
+                    id,
+                    status = ?entry.status,
+                    "Discarding stale journal entry (older than MAX_RECOVERY_AGE)"
+                );
+            }
+            !stale
+        });
+    }
+
     /// Return Deferred entries whose `next_retry_after` deadline has passed.
     ///
-    /// Skips entries older than [`Self::MAX_RECOVERY_AGE`] — the same stale
-    /// window applied by [`pending_entries`].
+    /// Skips entries whose retry deadline is older than
+    /// [`Self::MAX_RECOVERY_AGE`] — the same stale window applied by
+    /// [`pending_entries`].
     pub async fn due_deferred_entries(&self) -> Vec<JournalEntry> {
         let now = Utc::now();
         let mut inner = self.inner.lock().await;
-        let stale_ids: Vec<String> = inner
-            .pending
-            .values()
-            .filter(|e| now - e.received_at > Self::MAX_RECOVERY_AGE)
-            .map(|e| e.message_id.clone())
-            .collect();
-        for id in &stale_ids {
-            debug!(
-                id,
-                "Discarding stale journal entry (older than MAX_RECOVERY_AGE)"
-            );
-            inner.pending.remove(id);
-        }
+        Self::sweep_stale_entries(&mut inner, now);
         inner
             .pending
             .values()
@@ -335,19 +343,7 @@ impl MessageJournal {
     pub async fn recoverable_entries(&self) -> Vec<JournalEntry> {
         let now = Utc::now();
         let mut inner = self.inner.lock().await;
-        let stale_ids: Vec<String> = inner
-            .pending
-            .values()
-            .filter(|e| now - e.received_at > Self::MAX_RECOVERY_AGE)
-            .map(|e| e.message_id.clone())
-            .collect();
-        for id in &stale_ids {
-            debug!(
-                id,
-                "Discarding stale journal entry (older than MAX_RECOVERY_AGE)"
-            );
-            inner.pending.remove(id);
-        }
+        Self::sweep_stale_entries(&mut inner, now);
         inner
             .pending
             .values()
@@ -528,26 +524,17 @@ impl MessageJournal {
         None => unreachable!(),
     };
 
+    /// Pending and Processing entries age from receipt. Deferred entries age
+    /// from their retry deadline, so a long provider quota window cannot make
+    /// them stale before they are eligible to run.
+    ///
     /// Get all entries that need (re-)processing.
     /// Returns entries with status Pending or Processing (from a previous crash).
     /// Skips entries older than `MAX_RECOVERY_AGE` — they are too stale to recover.
     pub async fn pending_entries(&self) -> Vec<JournalEntry> {
         let now = Utc::now();
         let mut inner = self.inner.lock().await;
-        // Remove stale entries
-        let stale_ids: Vec<String> = inner
-            .pending
-            .values()
-            .filter(|e| now - e.received_at > Self::MAX_RECOVERY_AGE)
-            .map(|e| e.message_id.clone())
-            .collect();
-        for id in &stale_ids {
-            debug!(
-                id,
-                "Discarding stale journal entry (older than MAX_RECOVERY_AGE)"
-            );
-            inner.pending.remove(id);
-        }
+        Self::sweep_stale_entries(&mut inner, now);
         inner
             .pending
             .values()
@@ -1021,6 +1008,37 @@ mod tests {
 
         let rec = journal.recoverable_entries().await;
         assert_eq!(rec.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn deferred_staleness_starts_at_retry_deadline() {
+        let dir = TempDir::new().unwrap();
+        let journal = MessageJournal::open(dir.path()).unwrap();
+        let now = Utc::now();
+        let mut entry = test_entry("msg-old-but-deferred");
+        entry.received_at = now - chrono::Duration::hours(7);
+        entry.updated_at = entry.received_at;
+        entry.status = JournalStatus::Deferred;
+        entry.next_retry_after = Some(now + chrono::Duration::hours(1));
+        assert!(journal.record(entry).await);
+
+        assert!(journal.pending_entries().await.is_empty());
+        assert!(journal.contains("msg-old-but-deferred").await);
+        assert!(journal.recoverable_entries().await.is_empty());
+        assert!(journal.contains("msg-old-but-deferred").await);
+        assert!(journal.due_deferred_entries().await.is_empty());
+        assert!(journal.contains("msg-old-but-deferred").await);
+
+        let mut inner = journal.inner.lock().await;
+        inner
+            .pending
+            .get_mut("msg-old-but-deferred")
+            .unwrap()
+            .next_retry_after = Some(now - chrono::Duration::hours(7));
+        drop(inner);
+
+        assert!(journal.due_deferred_entries().await.is_empty());
+        assert!(!journal.contains("msg-old-but-deferred").await);
     }
 
     #[tokio::test]
