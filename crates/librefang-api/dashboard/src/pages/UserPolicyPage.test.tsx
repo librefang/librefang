@@ -377,6 +377,10 @@ describe("UserPolicyPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Policy saved.")).toBeInTheDocument();
     });
+    expect(screen.getByText("No unsaved changes")).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("button", { name: /Save/ }).every(button => button.hasAttribute("disabled")),
+    ).toBe(true);
   });
 
   it("surfaces a submit error when the mutation rejects", async () => {

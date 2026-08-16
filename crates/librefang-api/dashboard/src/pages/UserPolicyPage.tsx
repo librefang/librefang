@@ -389,13 +389,22 @@ export function UserPolicyPage() {
       setSubmitError(validationError);
       return;
     }
+    const submittedForm = form;
+    const submittedName = name;
+    const baselineAtSubmit = baselineFormRef.current;
     try {
       await updateMutation.mutateAsync({
-        name,
-        policy: formToPayload(form),
+        name: submittedName,
+        policy: formToPayload(submittedForm),
       });
+      if (seededNameRef.current !== submittedName) return;
+      if (baselineFormRef.current === baselineAtSubmit) {
+        baselineFormRef.current = submittedForm;
+        setBaselineForm(submittedForm);
+      }
       setSubmitOk(true);
     } catch (err) {
+      if (seededNameRef.current !== submittedName) return;
       setSubmitError(err instanceof Error ? err.message : String(err));
     }
   };
