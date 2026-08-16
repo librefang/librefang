@@ -199,7 +199,8 @@ impl ChannelRateLimiter {
     /// Like [`Self::new`] but lets the caller override the sweep cadence.
     /// Reserved for tests — production code should stick with [`Self::new`]
     /// (i.e. [`SWEEP_INTERVAL`]).
-    fn new_with_interval(interval: Duration) -> Self {
+    #[doc(hidden)]
+    pub fn new_with_interval(interval: Duration) -> Self {
         let inner = Arc::new(Inner::default());
         let sweep_shutdown = Arc::new(Notify::new());
         spawn_sweeper(
