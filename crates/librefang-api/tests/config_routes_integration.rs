@@ -670,6 +670,8 @@ async fn config_set_writes_allowlisted_path_to_tempdir_toml() {
         "expected 200 for allowlisted log_level write, got {status}: {}",
         String::from_utf8_lossy(&body)
     );
+    let response: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    let response_status = response["status"].as_str().expect("status string");
 
     // Verify the write landed in the tempdir's config.toml — NOT the user's
     // real ~/.librefang/config.toml. (kernel.home_dir is the tempdir.)
@@ -680,6 +682,16 @@ async fn config_set_writes_allowlisted_path_to_tempdir_toml() {
 
     // And the in-memory kernel config reflects it (post-reload).
     assert_eq!(h.state.kernel.config_ref().log_level, "debug");
+
+    let audit = h
+        .state
+        .kernel
+        .audit()
+        .recent(20)
+        .into_iter()
+        .find(|entry| entry.detail == "config set: log_level")
+        .expect("config set audit entry");
+    assert_eq!(audit.outcome, response_status);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1005,6 +1017,21 @@ async fn config_reload_returns_no_changes_when_disk_matches_memory() {
         json.get("status").is_some(),
         "missing 'status' field: {json}"
     );
+    let expected_audit_outcome = if status == StatusCode::OK {
+        json["status"].as_str().expect("reload status")
+    } else {
+        "failed"
+    };
+    let audit = h
+        .state
+        .kernel
+        .audit()
+        .recent(20)
+        .into_iter()
+        .find(|entry| entry.detail == "config reload requested via API")
+        .expect("config reload audit entry");
+    assert_eq!(audit.outcome, expected_audit_outcome);
+    assert_ne!(audit.outcome, "pending");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1076,6 +1103,15 @@ async fn config_reload_with_invalid_toml_returns_error_and_preserves_live_config
         err_str.contains("invalid TOML") && err_str.contains("live config unchanged"),
         "error must be operator-actionable; got: {err_str}"
     );
+    let audit = h
+        .state
+        .kernel
+        .audit()
+        .recent(20)
+        .into_iter()
+        .find(|entry| entry.detail == "config reload requested via API")
+        .expect("failed config reload audit entry");
+    assert_eq!(audit.outcome, "failed");
 
     // Live config must be unchanged — the failed reload did not blow away
     // `default_model.model` (which is the symptom that broke the dashboard).
