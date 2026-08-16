@@ -1438,6 +1438,9 @@ pub struct SidecarAdapter {
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
+    /// Owned supervisor task. `stop()` joins this before its final child
+    /// cleanup so no in-flight restart can outlive adapter shutdown.
+    supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Current status.
     status: Arc<std::sync::Mutex<ChannelStatus>>,
     /// Capabilities declared by the adapter's `ready` event.
@@ -1582,6 +1585,7 @@ impl SidecarAdapter {
             child: Arc::new(Mutex::new(None)),
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
+            supervisor: Mutex::new(None),
             status: Arc::new(std::sync::Mutex::new(ChannelStatus::default())),
             caps: Arc::new(RwLock::new(Caps::default())),
             account_id_cell: Arc::new(OnceLock::new()),
@@ -1658,7 +1662,11 @@ impl ChannelAdapter for SidecarAdapter {
         // after the configured max retries; never restart on a clean
         // shutdown, once the bridge dropped the stream, or when
         // `restart = false`.
-        tokio::spawn(async move {
+        let mut supervisor = self.supervisor.lock().await;
+        if supervisor.is_some() {
+            return Err("Sidecar supervisor is already running".into());
+        }
+        let handle = tokio::spawn(async move {
             let mut attempt: u32 = 0;
             loop {
                 if *shutdown_rx.borrow() {
@@ -1797,6 +1805,8 @@ impl ChannelAdapter for SidecarAdapter {
             }
             debug!(adapter = %ctx.name, "Sidecar supervisor exiting");
         });
+        *supervisor = Some(handle);
+        drop(supervisor);
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         Ok(Box::pin(stream))
@@ -1847,6 +1857,26 @@ impl ChannelAdapter for SidecarAdapter {
         {
             let mut guard = self.stdin_tx.lock().await;
             *guard = None;
+        }
+
+        // Wait for the restart loop to observe shutdown before the final
+        // child cleanup. Otherwise a spawn already in progress can publish a
+        // new child after the cleanup below and survive `stop()`.
+        let supervisor = self.supervisor.lock().await.take();
+        if let Some(mut supervisor) = supervisor {
+            let timeout =
+                std::time::Duration::from_secs(self.sup.shutdown_grace_secs.saturating_add(1));
+            match tokio::time::timeout(timeout, &mut supervisor).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    warn!(name = %self.name, %error, "Sidecar supervisor task failed during shutdown");
+                }
+                Err(_) => {
+                    warn!(name = %self.name, "Sidecar supervisor did not stop in time; aborting task");
+                    supervisor.abort();
+                    let _ = supervisor.await;
+                }
+            }
         }
 
         // Wait briefly, then kill the child process
@@ -3427,6 +3457,50 @@ mod tests {
         // already taken.
         assert!(a.typing_events().is_some());
         assert!(a.typing_events().is_none(), "receiver handed out once");
+    }
+
+    #[tokio::test]
+    async fn stop_waits_for_the_owned_supervisor_task() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let adapter = dummy_adapter();
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_by_task = Arc::clone(&finished);
+        *adapter.supervisor.lock().await = Some(tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            finished_by_task.store(true, Ordering::Release);
+        }));
+
+        adapter.stop().await.unwrap();
+
+        assert!(finished.load(Ordering::Acquire));
+        assert!(adapter.supervisor.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stop_aborts_and_reaps_a_stuck_supervisor() {
+        struct MarkDropped(Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for MarkDropped {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+
+        let mut adapter = dummy_adapter();
+        adapter.sup.shutdown_grace_secs = 0;
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dropped_by_task = Arc::clone(&dropped);
+        *adapter.supervisor.lock().await = Some(tokio::spawn(async move {
+            let _mark_dropped = MarkDropped(dropped_by_task);
+            std::future::pending::<()>().await;
+        }));
+        tokio::task::yield_now().await;
+
+        adapter.stop().await.unwrap();
+
+        assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+        assert!(adapter.supervisor.lock().await.is_none());
     }
 
     #[tokio::test]
