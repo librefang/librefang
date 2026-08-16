@@ -565,7 +565,11 @@ fn redacted_config_json(
         "token_expiry_secs": config.pairing.token_expiry_secs,
         "public_base_url": config.pairing.public_base_url,
         "push_provider": config.pairing.push_provider,
-        "ntfy_url": config.pairing.ntfy_url,
+        "ntfy_url": config
+            .pairing
+            .ntfy_url
+            .as_deref()
+            .map(redact_url_credentials),
         "ntfy_topic": config.pairing.ntfy_topic,
     });
 
@@ -1744,6 +1748,22 @@ mod config_read_write_parity_tests {
                  variant name"
             );
         }
+    }
+
+    #[test]
+    fn pairing_ntfy_url_hides_embedded_credentials() {
+        let mut config = KernelConfig::default();
+        config.pairing.ntfy_url =
+            Some("https://notify-user:notify-password@ntfy.example.test/topic".to_string());
+
+        let payload = super::redacted_config_json(&config, &BudgetConfig::default());
+        let rendered = lookup(&payload, "pairing.ntfy_url")
+            .and_then(|value| value.as_str())
+            .expect("configured ntfy URL remains visible in redacted form");
+
+        assert_eq!(rendered, "https://***@ntfy.example.test/topic");
+        assert!(!rendered.contains("notify-user"));
+        assert!(!rendered.contains("notify-password"));
     }
 
     /// The specific paths the #6596 report listed as writable-but-unreadable, pinned by name so a regression names the issue rather than surfacing as one entry in the bulk diff above.
