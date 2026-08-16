@@ -133,9 +133,21 @@ fn repair_session_before_save(session: &mut Session, agent_id: &str, reason: &st
 fn apply_context_compaction(
     session: &mut Session,
     messages: &mut Vec<Message>,
+    new_messages_start: &mut usize,
     summary: String,
     kept_messages: Vec<Message>,
 ) {
+    let previous_new_messages_start = (*new_messages_start).min(session.messages.len());
+    let first_new_message = session.messages.get(previous_new_messages_start);
+    let first_new_message_json =
+        first_new_message.and_then(|message| match serde_json::to_value(message) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                warn!(%error, "Failed to identify current-turn boundary during compaction");
+                None
+            }
+        });
+
     let mut compacted = Vec::with_capacity(kept_messages.len() + usize::from(!summary.is_empty()));
     if !summary.is_empty() {
         compacted.push(Message {
@@ -150,8 +162,25 @@ fn apply_context_compaction(
     }
     compacted.extend(kept_messages);
 
+    let compacted_new_messages_start = first_new_message_json
+        .as_ref()
+        .and_then(|first| {
+            compacted.iter().position(|message| {
+                serde_json::to_value(message).is_ok_and(|candidate| candidate == *first)
+            })
+        })
+        .unwrap_or_else(|| {
+            // A custom context engine may omit or rewrite the current turn.
+            // Keep it in persistent history and in the next LLM request rather
+            // than letting a stale pre-compaction boundary hide or lose it.
+            let start = compacted.len();
+            compacted.extend_from_slice(&session.messages[previous_new_messages_start..]);
+            start
+        });
+
     session.set_messages(compacted.clone());
     *messages = compacted;
+    *new_messages_start = compacted_new_messages_start;
 }
 
 /// Maximum consecutive iterations where every executed tool failed before
@@ -1031,6 +1060,7 @@ async fn run_agent_loop_inner(
                         apply_context_compaction(
                             session,
                             &mut messages,
+                            &mut new_messages_start,
                             result.summary,
                             result.kept_messages,
                         );

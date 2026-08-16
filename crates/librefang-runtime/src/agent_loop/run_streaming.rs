@@ -592,6 +592,7 @@ async fn run_agent_loop_streaming_inner(
                         apply_context_compaction(
                             session,
                             &mut messages,
+                            &mut new_messages_start,
                             result.summary,
                             result.kept_messages,
                         );
