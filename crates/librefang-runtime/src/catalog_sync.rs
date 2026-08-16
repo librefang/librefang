@@ -99,18 +99,51 @@ pub async fn sync_catalog_to(
     let mut models_count = 0usize;
 
     if repo_providers.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&repo_providers) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().is_some_and(|e| e == "toml") {
-                    file_count += 1;
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        if let Ok(file) = toml::from_str::<ProviderCatalogFile>(&content) {
-                            models_count += file.models.len();
+        match std::fs::read_dir(&repo_providers) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to inspect provider catalog entry");
+                            continue;
                         }
+                    };
+                    let path = entry.path();
+                    if path.extension().is_none_or(|e| e != "toml") {
+                        continue;
                     }
+                    let content = match std::fs::read_to_string(&path) {
+                        Ok(content) => content,
+                        Err(error) => {
+                            tracing::warn!(
+                                path = %path.display(),
+                                %error,
+                                "failed to read provider catalog"
+                            );
+                            continue;
+                        }
+                    };
+                    let file = match toml::from_str::<ProviderCatalogFile>(&content) {
+                        Ok(file) => file,
+                        Err(error) => {
+                            tracing::warn!(
+                                path = %path.display(),
+                                %error,
+                                "failed to parse provider catalog"
+                            );
+                            continue;
+                        }
+                    };
+                    file_count += 1;
+                    models_count += file.models.len();
                 }
             }
+            Err(error) => tracing::warn!(
+                path = %repo_providers.display(),
+                %error,
+                "failed to scan provider catalogs"
+            ),
         }
     } else {
         tracing::warn!(
@@ -243,6 +276,22 @@ supports_streaming = true
             result.models_count >= 1,
             "its models must reach the catalog; got {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn malformed_provider_is_not_reported_as_downloaded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let providers = tmp.path().join("registry").join("providers");
+        std::fs::create_dir_all(&providers).expect("create providers dir");
+        std::fs::write(providers.join("broken.toml"), "[[models]")
+            .expect("write malformed provider catalog");
+
+        let result = sync_catalog_to(tmp.path(), "", None, false)
+            .await
+            .expect("catalog rebuild should skip malformed provider files");
+
+        assert_eq!(result.files_downloaded, 0);
+        assert_eq!(result.models_count, 0);
     }
 
     #[test]
