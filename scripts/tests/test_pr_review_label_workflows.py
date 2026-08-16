@@ -49,6 +49,14 @@ class PrReviewLabelWorkflowTests(unittest.TestCase):
         self.assertIn("freshLabels.includes('has-conflicts')", self.applier)
         self.assertIn("await removeLabel(READY)", self.applier)
 
+    def test_applier_reconciles_latest_review_instead_of_payload_order(self) -> None:
+        self.assertIn("github.rest.pulls.listReviews", self.applier)
+        self.assertIn("const latestReview = reviews", self.applier)
+        self.assertIn("Date.parse(left.submitted_at || '')", self.applier)
+        self.assertIn("const reviewState = latestReview.state.toLowerCase()", self.applier)
+        self.assertIn("stale payload ${payloadReviewState}", self.applier)
+        self.assertNotIn("const reviewState = process.env.REVIEW_STATE", self.applier)
+
 
 if __name__ == "__main__":
     unittest.main()

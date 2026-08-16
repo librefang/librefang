@@ -89,17 +89,53 @@ jobs:
         with:
           script: |
             const prNumber = Number(process.env.PR_NUMBER);
-            const reviewState = process.env.REVIEW_STATE;
+            const payloadReviewState = process.env.REVIEW_STATE;
 
             if (!Number.isInteger(prNumber) || prNumber <= 0) {
               throw new Error(`Invalid prepared pr_number: ${process.env.PR_NUMBER}`);
             }
-            if (reviewState !== 'changes_requested' && reviewState !== 'approved') {
-              throw new Error(`Invalid prepared review_state: ${reviewState}`);
+            if (payloadReviewState !== 'changes_requested' && payloadReviewState !== 'approved') {
+              throw new Error(`Invalid prepared review_state: ${payloadReviewState}`);
             }
 
             const READY = 'ready-for-review';
             const NEEDS = 'needs-changes';
+
+            // `prepare` jobs from different workflow runs can finish out of
+            // event order. Concurrency serializes mutations, but it does not
+            // make an older payload that arrived late authoritative. Resolve
+            // the latest actionable review from GitHub immediately before
+            // writing labels so every queued job converges on current state.
+            const reviews = await github.paginate(
+              github.rest.pulls.listReviews,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                per_page: 100,
+              },
+            );
+            const latestReview = reviews
+              .filter((review) => {
+                const state = review.state.toLowerCase();
+                return state === 'changes_requested' || state === 'approved';
+              })
+              .sort((left, right) => {
+                const timeDelta = Date.parse(left.submitted_at || '') -
+                  Date.parse(right.submitted_at || '');
+                return timeDelta || left.id - right.id;
+              })
+              .at(-1);
+            if (!latestReview) {
+              core.info(`#${prNumber}: no current actionable review; nothing to reconcile`);
+              return;
+            }
+            const reviewState = latestReview.state.toLowerCase();
+            if (reviewState !== payloadReviewState) {
+              core.info(
+                `#${prNumber}: stale payload ${payloadReviewState}; reconciling latest ${reviewState}`,
+              );
+            }
 
             async function addLabel(label) {
               await github.rest.issues.addLabels({
