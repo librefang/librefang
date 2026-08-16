@@ -582,7 +582,10 @@ export function ConfigPage({ category }: { category: string }) {
   const [pendingChanges, setPendingChanges] = useState<Record<string, unknown>>({});
   const [saveStatus, setSaveStatus] = useState<Record<string, { ok: boolean; msg: string }>>({});
   const [searchQuery, setSearchQuery] = useState("");
-  const [reloadStatus, setReloadStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [reloadStatus, setReloadStatus] = useState<{
+    kind: "success" | "warning" | "error";
+    msg: string;
+  } | null>(null);
   const [activeSection, setActiveSection] = useState<string | null>(null);
   const [showRawToml, setShowRawToml] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -850,11 +853,25 @@ export function ConfigPage({ category }: { category: string }) {
   );
 
   const reloadMutation = useReloadConfig({
-    onSuccess: () => {
-      setReloadStatus({ ok: true, msg: t("config.reload_success", "Config reloaded") });
+    onSuccess: (data) => {
+      const details = [
+        ...(data.warnings ?? []),
+        ...(data.restart_required ? (data.restart_reasons ?? []) : []),
+      ].filter(Boolean);
+      const isPartial = data.status === "partial"
+        || data.restart_required === true
+        || details.length > 0;
+      setReloadStatus({
+        kind: isPartial ? "warning" : "success",
+        msg: details.length > 0
+          ? `${t("runtime.reload_success", { status: data.status })} — ${details.join(" ")}`
+          : isPartial
+            ? t("runtime.reload_success", { status: data.status })
+            : t("config.reload_success", "Config reloaded"),
+      });
     },
     onError: (err: Error) => {
-      setReloadStatus({ ok: false, msg: err.message });
+      setReloadStatus({ kind: "error", msg: err.message });
     },
   });
 
@@ -960,7 +977,13 @@ export function ConfigPage({ category }: { category: string }) {
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {reloadStatus && (
-            <span className={`text-xs font-semibold ${reloadStatus.ok ? "text-success" : "text-danger"}`}>
+            <span className={`text-xs font-semibold ${
+              reloadStatus.kind === "success"
+                ? "text-success"
+                : reloadStatus.kind === "warning"
+                  ? "text-warning"
+                  : "text-danger"
+            }`}>
               {reloadStatus.msg}
             </span>
           )}
