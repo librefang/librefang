@@ -854,10 +854,20 @@ export function ConfigPage({ category }: { category: string }) {
 
   const reloadMutation = useReloadConfig({
     onSuccess: (data) => {
-      const warning = data.warnings?.filter(Boolean).join(" ");
+      const details = [
+        ...(data.warnings ?? []),
+        ...(data.restart_required ? (data.restart_reasons ?? []) : []),
+      ].filter(Boolean);
+      const isPartial = data.status === "partial"
+        || data.restart_required === true
+        || details.length > 0;
       setReloadStatus({
-        kind: warning ? "warning" : "success",
-        msg: warning || t("config.reload_success", "Config reloaded"),
+        kind: isPartial ? "warning" : "success",
+        msg: details.length > 0
+          ? `${t("runtime.reload_success", { status: data.status })} — ${details.join(" ")}`
+          : isPartial
+            ? t("runtime.reload_success", { status: data.status })
+            : t("config.reload_success", "Config reloaded"),
       });
     },
     onError: (err: Error) => {

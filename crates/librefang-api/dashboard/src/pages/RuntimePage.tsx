@@ -1,7 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { useUIStore } from "../lib/store";
-import type { HealthCheck, AuditEntry, BackupItem, TaskQueueItem } from "../api";
+import type {
+  HealthCheck,
+  AuditEntry,
+  BackupItem,
+  TaskQueueItem,
+  ReloadConfigResult,
+} from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { isProviderAvailable } from "../lib/status";
@@ -97,10 +103,7 @@ export function RuntimePage() {
   const addToast = useUIStore((s) => s.addToast);
   const [showShutdownConfirm, setShowShutdownConfirm] = useState(false);
   const [backupConfirm, setBackupConfirm] = useState<BackupConfirmState | null>(null);
-  const [reloadResult, setReloadResult] = useState<{
-    status: string;
-    warnings?: string[];
-  } | null>(null);
+  const [reloadResult, setReloadResult] = useState<ReloadConfigResult | null>(null);
   const reloadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -148,6 +151,17 @@ export function RuntimePage() {
   const hd = healthDetailQuery.data ?? null;
   const security = securityQuery.data ?? null;
   const status = snapshot?.status;
+  const reloadDetails = reloadResult
+    ? [
+        ...(reloadResult.warnings ?? []),
+        ...(reloadResult.restart_required ? (reloadResult.restart_reasons ?? []) : []),
+      ].filter(Boolean)
+    : [];
+  const reloadIsPartial = reloadResult !== null && (
+    reloadResult.status === "partial"
+    || reloadResult.restart_required === true
+    || reloadDetails.length > 0
+  );
 
   const uptimeStr = formatUptime(status?.uptime_seconds);
   const healthChecks = snapshot?.health?.checks ?? [];
@@ -806,10 +820,9 @@ export function RuntimePage() {
               </Button>
             </div>
             {reloadResult && (
-              <p className={`text-xs mt-3 ${reloadResult.warnings?.length ? "text-warning" : "text-success"}`}>
-                {reloadResult.warnings?.length
-                  ? reloadResult.warnings.join(" ")
-                  : t("runtime.reload_success", { status: reloadResult.status })}
+              <p className={`text-xs mt-3 ${reloadIsPartial ? "text-warning" : "text-success"}`}>
+                {t("runtime.reload_success", { status: reloadResult.status })}
+                {reloadDetails.length > 0 ? ` — ${reloadDetails.join(" ")}` : ""}
               </p>
             )}
             {reloadMutation.isError && <p className="text-xs text-error mt-3">{t("runtime.reload_error")}</p>}

@@ -326,9 +326,37 @@ describe("RuntimePage", () => {
     });
 
     expect(
-      screen.getByText("Channel adapters could not be restarted; see server logs"),
+      screen.getByText(
+        "runtime.reload_success — Channel adapters could not be restarted; see server logs",
+      ),
     ).toBeInTheDocument();
-    expect(screen.queryByText("runtime.reload_success")).not.toBeInTheDocument();
+  });
+
+  it("surfaces restart-required reloads as warnings with their reasons", () => {
+    let onSuccess: ((data: {
+      status: string;
+      restart_required?: boolean;
+      restart_reasons?: string[];
+    }) => void) | undefined;
+    useReloadConfigMock.mockImplementation((options) => {
+      onSuccess = options?.onSuccess as typeof onSuccess;
+      return makeMutation();
+    });
+    renderPage();
+
+    act(() => {
+      onSuccess?.({
+        status: "partial",
+        restart_required: true,
+        restart_reasons: ["api_listen changed"],
+      });
+    });
+
+    const notice = screen.getByText(
+      "runtime.reload_success — api_listen changed",
+    );
+    expect(notice).toBeInTheDocument();
+    expect(notice).toHaveClass("text-warning");
   });
 
   it("invokes createBackup mutation when create backup button is clicked", () => {
