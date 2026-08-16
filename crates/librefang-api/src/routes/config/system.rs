@@ -359,6 +359,11 @@ mod tests {
         );
         assert!(parsed.get("network").is_none());
         assert_eq!(parsed.as_table().unwrap().len(), 3);
+
+        let config: librefang_types::config::KernelConfig = toml::from_str(&contents).unwrap();
+        assert_eq!(config.default_model.provider, provider);
+        assert_eq!(config.default_model.model, model);
+        assert_eq!(config.default_model.api_key_env, api_key_env);
     }
 }
 
