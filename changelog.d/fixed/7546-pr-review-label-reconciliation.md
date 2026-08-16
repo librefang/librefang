@@ -1,1 +1,1 @@
-Serialize review-label mutations on the exact PR number from the validated collector payload, and prevent non-actionable reviews from cancelling actionable events. (#7546) (@houko)
+Serialize review-label mutations on the exact PR number, reconcile queued jobs against the latest actionable review, preserve actionable collectors, and propagate unexpected label failures. (#7546) (@houko)
