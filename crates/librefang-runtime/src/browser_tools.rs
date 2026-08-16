@@ -125,6 +125,25 @@ pub async fn tool_browser_type(
     Ok(format!("Typed into {selector}: {text}"))
 }
 
+/// Decode and persist browser-provided screenshot bytes when present.
+async fn persist_screenshot(
+    image_base64: &str,
+    upload_dir: &std::path::Path,
+) -> Result<Option<String>, ToolError> {
+    if image_base64.is_empty() {
+        return Ok(None);
+    }
+
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(image_base64)
+        .map_err(|error| ToolError::upstream_msg(format!("Invalid screenshot data: {error}")))?;
+    crate::uploaded_file::save_shared_upload(upload_dir, &decoded, "image/png", "screenshot.png")
+        .await
+        .map(Some)
+        .map_err(ToolError::upstream_msg)
+}
+
 /// browser_screenshot: Take a screenshot of the current page.
 pub async fn tool_browser_screenshot(
     _input: &serde_json::Value,
@@ -147,23 +166,10 @@ pub async fn tool_browser_screenshot(
     let b64 = data["image_base64"].as_str().unwrap_or("");
     let url = data["url"].as_str().unwrap_or("");
 
-    let mut image_urls: Vec<String> = Vec::new();
-    if !b64.is_empty() {
-        use base64::Engine;
-        if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(b64) {
-            match crate::uploaded_file::save_shared_upload(
-                upload_dir,
-                &decoded,
-                "image/png",
-                "screenshot.png",
-            )
-            .await
-            {
-                Ok(url) => image_urls.push(url),
-                Err(error) => tracing::warn!(%error, "failed to persist browser screenshot"),
-            }
-        }
-    }
+    let image_urls: Vec<String> = persist_screenshot(b64, upload_dir)
+        .await?
+        .into_iter()
+        .collect();
 
     Ok(serde_json::json!({
         "screenshot": true,
@@ -371,5 +377,26 @@ mod tests {
             render_page("https://example.com/", &data),
             crate::web_content::wrap_external_content("https://example.com/", "Just prose.")
         );
+    }
+
+    #[tokio::test]
+    async fn screenshot_rejects_invalid_base64() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = persist_screenshot("not base64!", dir.path())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Invalid screenshot data"));
+    }
+
+    #[tokio::test]
+    async fn screenshot_surfaces_shared_upload_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let upload_path = dir.path().join("not-a-directory");
+        tokio::fs::write(&upload_path, b"occupied").await.unwrap();
+
+        let error = persist_screenshot("cG5n", &upload_path).await.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Failed to create upload directory"));
     }
 }
