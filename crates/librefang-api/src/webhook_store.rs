@@ -424,6 +424,24 @@ pub struct WebhookStore {
     path: PathBuf,
 }
 
+fn settle_webhook_write(
+    path: &std::path::Path,
+    result: Result<(), crate::AtomicWriteError>,
+) -> std::io::Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(crate::AtomicWriteError::BeforeCommit(error)) => Err(error),
+        Err(crate::AtomicWriteError::AfterCommit(error)) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "Webhook store replaced but parent directory sync failed"
+            );
+            Ok(())
+        }
+    }
+}
+
 impl WebhookStore {
     /// Load or create a webhook store at the given path.
     ///
@@ -478,7 +496,8 @@ impl WebhookStore {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            crate::atomic_write(&path, json.as_bytes())?;
+            let write_result = crate::atomic_write_detailed(&path, json.as_bytes());
+            settle_webhook_write(&path, write_result)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -676,6 +695,31 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[test]
+    fn webhook_write_accepts_only_post_commit_sync_failures() {
+        let path = std::path::Path::new("webhooks.json");
+        let post_commit = super::settle_webhook_write(
+            path,
+            Err(crate::AtomicWriteError::AfterCommit(std::io::Error::other(
+                "injected parent sync failure",
+            ))),
+        );
+        assert!(post_commit.is_ok());
+
+        let before_commit = super::settle_webhook_write(
+            path,
+            Err(crate::AtomicWriteError::BeforeCommit(
+                std::io::Error::other("injected write failure"),
+            )),
+        );
+        assert_eq!(
+            before_commit
+                .expect_err("pre-commit failure must propagate")
+                .to_string(),
+            "injected write failure"
+        );
     }
 
     #[tokio::test]
