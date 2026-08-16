@@ -3478,6 +3478,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_aborts_and_reaps_a_stuck_supervisor() {
+        struct MarkDropped(Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for MarkDropped {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+
+        let mut adapter = dummy_adapter();
+        adapter.sup.shutdown_grace_secs = 0;
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dropped_by_task = Arc::clone(&dropped);
+        *adapter.supervisor.lock().await = Some(tokio::spawn(async move {
+            let _mark_dropped = MarkDropped(dropped_by_task);
+            std::future::pending::<()>().await;
+        }));
+        tokio::task::yield_now().await;
+
+        adapter.stop().await.unwrap();
+
+        assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+        assert!(adapter.supervisor.lock().await.is_none());
+    }
+
+    #[tokio::test]
     async fn test_sidecar_adapter_spawn_echo() {
         // Integration test: spawn the Python echo adapter if python3 is available
         let python = which_python();
