@@ -35,7 +35,8 @@ fn workflow_template_serialization_error(
         ("category" = Option<String>, Query, description = "Filter by category"),
     ),
     responses(
-        (status = 200, description = "List of workflow templates", body = Vec<serde_json::Value>)
+        (status = 200, description = "List of workflow templates", body = Vec<serde_json::Value>),
+        (status = 500, description = "Template serialization failed")
     )
 )]
 pub async fn list_workflow_templates(
@@ -94,7 +95,8 @@ pub async fn list_workflow_templates(
     params(("id" = String, Path, description = "Template ID")),
     responses(
         (status = 200, description = "Template details", body = crate::types::JsonObject),
-        (status = 404, description = "Template not found")
+        (status = 404, description = "Template not found"),
+        (status = 500, description = "Template serialization failed")
     )
 )]
 pub async fn get_workflow_template(
