@@ -36,8 +36,11 @@ fn trigger_registration_error_response(
     tag = "workflows",
     request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Trigger created", body = crate::types::JsonObject),
-        (status = 400, description = "Invalid trigger definition")
+        (status = 201, description = "Trigger created", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid trigger definition"),
+        (status = 404, description = "Owner or target agent not found"),
+        (status = 500, description = "Unexpected kernel failure"),
+        (status = 503, description = "Trigger registration temporarily unavailable")
     )
 )]
 pub async fn create_trigger(
