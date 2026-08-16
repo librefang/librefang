@@ -190,6 +190,8 @@ impl SessionStore {
         {
             maps.by_librefang_id.remove(&librefang_id);
         }
+        drop(maps);
+        state.cancel.cancel();
         Some(state)
     }
 
@@ -222,9 +224,14 @@ impl SessionStore {
     pub(crate) fn drain_active(&self) -> Vec<(AcpSessionId, LfSessionId)> {
         let mut maps = self.write_maps();
         maps.by_librefang_id.clear();
-        std::mem::take(&mut maps.by_acp_id)
+        let states = std::mem::take(&mut maps.by_acp_id);
+        drop(maps);
+        states
             .into_iter()
-            .map(|(id, state)| (id, state.librefang_session_id))
+            .map(|(id, state)| {
+                state.cancel.cancel();
+                (id, state.librefang_session_id)
+            })
             .collect()
     }
 }
@@ -239,6 +246,7 @@ mod tests {
         let id: AcpSessionId = "sess-1".into();
         let state = SessionState::new(PathBuf::from("/tmp/proj"));
         let lf_id = state.librefang_session_id;
+        let cancel = state.cancel.clone();
         assert!(store.insert(id.clone(), state).is_none());
         let fetched = store.get(&id).expect("session should exist");
         assert_eq!(fetched.cwd, PathBuf::from("/tmp/proj"));
@@ -252,6 +260,7 @@ mod tests {
 
         let removed = store.remove(&id).expect("remove session");
         assert_eq!(removed.librefang_session_id, lf_id);
+        assert!(cancel.is_cancelled());
         assert!(store.get(&id).is_none());
         assert!(store.find_by_librefang_id(&lf_id).is_none());
     }
@@ -307,9 +316,11 @@ mod tests {
         let id: AcpSessionId = "drain-me".into();
         let state = SessionState::new(PathBuf::from("/tmp"));
         let lf_id = state.librefang_session_id;
+        let cancel = state.cancel.clone();
         assert!(store.insert(id.clone(), state).is_none());
 
         assert_eq!(store.drain_active(), vec![(id.clone(), lf_id)]);
+        assert!(cancel.is_cancelled());
         assert!(store.get(&id).is_none());
         assert!(store.find_by_librefang_id(&lf_id).is_none());
     }
