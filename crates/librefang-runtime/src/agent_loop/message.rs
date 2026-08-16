@@ -540,10 +540,11 @@ mod safe_trim_session_repair_tests {
     }
 
     #[test]
-    fn safe_trim_synthesizes_user_in_persisted_session_without_user_turns() {
-        let mut session: Vec<Message> = (0..20)
-            .map(|i| Message::assistant(format!("assistant-only-{i}")))
-            .collect();
+    fn safe_trim_preserves_system_and_synthesizes_user_in_persisted_session() {
+        let mut system = Message::system("pinned system policy");
+        system.pinned = true;
+        let mut session = vec![system];
+        session.extend((0..20).map(|i| Message::assistant(format!("assistant-only-{i}"))));
         let mut working = session.clone();
 
         let (_, session_mutated) = safe_trim_messages(
@@ -555,8 +556,10 @@ mod safe_trim_session_repair_tests {
         );
 
         assert!(session_mutated);
-        assert_eq!(session.len(), 1);
-        assert_eq!(session[0].role, Role::User);
-        assert_eq!(session[0].content.text_content(), "current user message");
+        assert_eq!(session.len(), 2);
+        assert_eq!(session[0].role, Role::System);
+        assert_eq!(session[0].content.text_content(), "pinned system policy");
+        assert_eq!(session[1].role, Role::User);
+        assert_eq!(session[1].content.text_content(), "current user message");
     }
 }
