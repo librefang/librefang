@@ -421,6 +421,13 @@ mod tests {
                     error TEXT,
                     input_preview TEXT,
                     output_preview TEXT
+                );
+                INSERT INTO hook_traces (
+                    trace_id, correlation_id, plugin, hook, started_at,
+                    elapsed_ms, success
+                ) VALUES (
+                    'legacy0000000000', '', 'legacy-plugin', 'legacy-hook',
+                    '2026-04-06T00:00:00Z', 7, 1
                 );",
             )
             .unwrap();
@@ -433,6 +440,12 @@ mod tests {
         });
         {
             let store = TraceStore::open(&db_path).unwrap();
+            let legacy = store
+                .query_by_trace_id("legacy0000000000")
+                .unwrap()
+                .expect("legacy trace should survive migration");
+            assert!(legacy["annotations"].is_null());
+
             let mut trace = make_trace("annotated", true);
             trace.annotations = Some(annotations.clone());
             store.insert_blocking("plugin-a", &trace);
