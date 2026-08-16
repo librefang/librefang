@@ -13,9 +13,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
+
+static NEXT_COMPACTION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Status of a journaled message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,7 +62,7 @@ pub fn parse_defer_marker(err: &str) -> Option<u64> {
 }
 
 /// A single journal entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JournalEntry {
     /// Platform-specific unique message ID.
     pub message_id: String,
@@ -573,23 +576,21 @@ impl MessageJournal {
     ///    holding it across `sync_all` serializes all channel traffic
     ///    behind the compactor regardless of which scheduler runs the I/O).
     /// 3. **Re-acquire lock for atomic rename** — before swapping
-    ///    `tmp.jsonl → journal.jsonl`, take the lock again and verify no
-    ///    new entries were appended to `pending` since the snapshot. If
-    ///    any are present, `record()` has already appended their lines to
-    ///    the live file; renaming our stale tmp over it would truncate
-    ///    those lines and lose just-journaled messages on the next crash
-    ///    (audit of #3967). When that happens, abort this compaction
-    ///    (the next tick retries) and clean up the tmp file.
+    ///    `tmp.jsonl → journal.jsonl`, take the lock again and verify the
+    ///    complete pending map still matches the snapshot. Any addition,
+    ///    removal, or status update was already appended to the live file;
+    ///    renaming our stale tmp over it would lose that transition on the
+    ///    next restart. When the map changed, abort this compaction (the
+    ///    next tick retries) and clean up the tmp file.
     pub async fn compact(&self) {
-        use std::collections::HashSet;
-        let (path, snapshot_ids, entries) = {
+        let (path, snapshot, entries) = {
             let inner = self.inner.lock().await;
             let path = inner.path.clone();
-            let snapshot_ids: HashSet<String> = inner.pending.keys().cloned().collect();
+            let snapshot = inner.pending.clone();
             let entries: Vec<JournalEntry> = inner.pending.values().cloned().collect();
-            (path, snapshot_ids, entries)
+            (path, snapshot, entries)
         };
-        let tmp_path = path.with_extension(format!("jsonl.tmp.{}", std::process::id()));
+        let tmp_path = Self::compaction_temp_path(&path);
         let remaining = entries.len();
 
         let tmp_for_write = tmp_path.clone();
@@ -625,21 +626,24 @@ impl MessageJournal {
         // Re-acquire the lock for the rename. `record()` holds this same
         // mutex across its disk-append spawn_blocking, so once we own it
         // again no append can interleave with our rename. We also detect
-        // any append that happened *during* the slow write window above
-        // and abort if so — otherwise the rename would overwrite those
-        // freshly-journaled lines on disk.
+        // any mutation that happened *during* the slow write window above
+        // and abort if so — otherwise the rename would overwrite newer
+        // lines on disk with the stale snapshot.
         let inner = self.inner.lock().await;
-        let raced: Vec<String> = inner
-            .pending
-            .keys()
-            .filter(|id| !snapshot_ids.contains(*id))
-            .cloned()
-            .collect();
-        if !raced.is_empty() {
+        if !Self::compaction_snapshot_is_current(&snapshot, &inner.pending) {
+            let changed = snapshot
+                .iter()
+                .filter(|(id, entry)| inner.pending.get(*id) != Some(*entry))
+                .count()
+                + inner
+                    .pending
+                    .keys()
+                    .filter(|id| !snapshot.contains_key(*id))
+                    .count();
             drop(inner);
             warn!(
-                appended = raced.len(),
-                "Journal compaction aborted: entries were appended during compact; will retry next cycle",
+                changed,
+                "Journal compaction aborted: entries changed during compact; will retry next cycle",
             );
             let cleanup = tmp_path.clone();
             let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(cleanup)).await;
@@ -648,9 +652,11 @@ impl MessageJournal {
 
         let path_for_rename = path.clone();
         let tmp_for_rename = tmp_path.clone();
-        let rename_join =
-            tokio::task::spawn_blocking(move || std::fs::rename(&tmp_for_rename, &path_for_rename))
-                .await;
+        let rename_join = tokio::task::spawn_blocking(move || {
+            std::fs::rename(&tmp_for_rename, &path_for_rename)?;
+            Self::sync_parent_directory(&path_for_rename)
+        })
+        .await;
         drop(inner);
 
         match rename_join {
@@ -686,12 +692,49 @@ impl MessageJournal {
     /// Intended for use inside `tokio::task::spawn_blocking` so that the
     /// sync `OpenOptions::open` + `flush` calls do not stall the async runtime.
     fn write_line_to_path(path: &Path, line: &str) -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
+        let (mut file, created) = match std::fs::OpenOptions::new()
             .append(true)
-            .open(path)?;
+            .create_new(true)
+            .open(path)
+        {
+            Ok(file) => (file, true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                (std::fs::OpenOptions::new().append(true).open(path)?, false)
+            }
+            Err(error) => return Err(error),
+        };
         writeln!(file, "{line}")?;
         file.flush()?;
+        file.sync_data()?;
+        if created {
+            Self::sync_parent_directory(path)?;
+        }
+        Ok(())
+    }
+
+    fn compaction_snapshot_is_current(
+        snapshot: &HashMap<String, JournalEntry>,
+        current: &HashMap<String, JournalEntry>,
+    ) -> bool {
+        snapshot == current
+    }
+
+    fn compaction_temp_path(path: &Path) -> PathBuf {
+        let sequence = NEXT_COMPACTION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        path.with_extension(format!("jsonl.tmp.{}.{sequence}", std::process::id()))
+    }
+
+    #[cfg(unix)]
+    fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::File::open(parent)?.sync_all()
+    }
+
+    #[cfg(not(unix))]
+    fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
         Ok(())
     }
 }
@@ -741,6 +784,46 @@ mod tests {
 
         assert!(!journal.record(test_entry("msg-1")).await);
         assert!(journal.pending_entries().await.is_empty());
+    }
+
+    #[test]
+    fn compaction_snapshot_detects_every_pending_map_change() {
+        let mut snapshot = HashMap::new();
+        snapshot.insert("msg-1".to_string(), test_entry("msg-1"));
+        snapshot.insert("msg-2".to_string(), test_entry("msg-2"));
+
+        assert!(MessageJournal::compaction_snapshot_is_current(
+            &snapshot, &snapshot
+        ));
+
+        let mut removed = snapshot.clone();
+        removed.remove("msg-1");
+        assert!(!MessageJournal::compaction_snapshot_is_current(
+            &snapshot, &removed
+        ));
+
+        let mut updated = snapshot.clone();
+        updated.get_mut("msg-1").unwrap().status = JournalStatus::Processing;
+        assert!(!MessageJournal::compaction_snapshot_is_current(
+            &snapshot, &updated
+        ));
+
+        let mut appended = snapshot.clone();
+        appended.insert("msg-3".to_string(), test_entry("msg-3"));
+        assert!(!MessageJournal::compaction_snapshot_is_current(
+            &snapshot, &appended
+        ));
+    }
+
+    #[test]
+    fn concurrent_compactions_use_distinct_staging_paths() {
+        let path = Path::new("message_journal.jsonl");
+        let first = MessageJournal::compaction_temp_path(path);
+        let second = MessageJournal::compaction_temp_path(path);
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), path.parent());
+        assert_eq!(second.parent(), path.parent());
     }
 
     #[tokio::test]
