@@ -72,7 +72,7 @@ function providerCapTone(pct: number, alertThreshold: number): string {
 function parseNonNegative(raw: string, integer = false): number | null {
   if (raw.trim() === "") return null;
   const value = Number(raw);
-  if (!Number.isFinite(value) || value < 0 || (integer && !Number.isInteger(value))) return null;
+  if (!Number.isFinite(value) || value < 0 || (integer && !Number.isSafeInteger(value))) return null;
   return value;
 }
 
