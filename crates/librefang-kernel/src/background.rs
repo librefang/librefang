@@ -57,6 +57,26 @@ struct AgentTaskEntry {
     stopped: Arc<AtomicBool>,
 }
 
+fn stop_task_entry(agent_id: AgentId, entry: AgentTaskEntry) {
+    entry.stopped.store(true, Ordering::Release);
+    entry.outer.abort();
+    let mut watchers = lock_watchers_recover(&entry.watchers);
+    for watcher in watchers.drain(..) {
+        watcher.abort();
+    }
+    debug!(id = %agent_id, "Background task entry stopped");
+}
+
+fn remove_task_if_owned(
+    tasks: &DashMap<AgentId, AgentTaskEntry>,
+    agent_id: AgentId,
+    stopped: &Arc<AtomicBool>,
+) -> Option<AgentTaskEntry> {
+    tasks
+        .remove_if(&agent_id, |_, entry| Arc::ptr_eq(&entry.stopped, stopped))
+        .map(|(_, entry)| entry)
+}
+
 /// Maximum number of concurrent background LLM calls across all agents.
 const MAX_CONCURRENT_BG_LLM: usize = 5;
 
@@ -145,6 +165,13 @@ pub struct BackgroundExecutor {
 }
 
 impl BackgroundExecutor {
+    fn install_task(&self, agent_id: AgentId, entry: AgentTaskEntry) {
+        if let Some(previous) = self.tasks.insert(agent_id, entry) {
+            stop_task_entry(agent_id, previous);
+            info!(id = %agent_id, "Replaced prior background loop");
+        }
+    }
+
     /// Create a new executor bound to the supervisor's shutdown signal,
     /// using compiled-in defaults for every knob.
     pub fn new(shutdown_rx: watch::Receiver<bool>) -> Self {
@@ -269,6 +296,7 @@ impl BackgroundExecutor {
                 let watcher_handles_loop = watcher_handles.clone();
                 let stopped = Arc::new(AtomicBool::new(false));
                 let stopped_loop = stopped.clone();
+                let stopped_cleanup = stopped.clone();
                 // Self-cleanup: when this outer loop exits (cap, shutdown, or
                 // any other break path), drop the DashMap entry so a stale
                 // `AgentTaskEntry` does not keep `active_count()` inflated and
@@ -392,16 +420,13 @@ impl BackgroundExecutor {
                     }
 
                     // Self-cleanup on any break path (cap, shutdown, semaphore
-                    // closed). Without this the entry survives as a zombie
-                    // visible to `active_count()` and a subsequent
-                    // `start_agent` for the same id silently overwrites it
-                    // (DashMap insert is replace-semantic). `stop_agent`
-                    // takes the same `remove` path, so this is a no-op when
-                    // an operator stop arrived first.
-                    tasks_for_cleanup.remove(&agent_id);
+                    // closed), but only while this loop still owns the map
+                    // entry. A replacement may already be registered under
+                    // the same agent ID.
+                    remove_task_if_owned(&tasks_for_cleanup, agent_id, &stopped_cleanup);
                 });
 
-                self.tasks.insert(
+                self.install_task(
                     agent_id,
                     AgentTaskEntry {
                         outer: handle,
@@ -442,6 +467,7 @@ impl BackgroundExecutor {
                 let watcher_handles_loop = watcher_handles.clone();
                 let stopped = Arc::new(AtomicBool::new(false));
                 let stopped_loop = stopped.clone();
+                let stopped_cleanup = stopped.clone();
                 // Self-cleanup on outer-task exit — see the continuous loop
                 // for the rationale (issue #5174 review).
                 let tasks_for_cleanup = self.tasks.clone();
@@ -548,15 +574,12 @@ impl BackgroundExecutor {
                     }
 
                     // Self-cleanup on any break path (cap, shutdown, semaphore
-                    // closed). See the continuous loop for the rationale —
-                    // without this the entry survives as a zombie visible to
-                    // `active_count()` and a later `start_agent` for the same
-                    // id silently overwrites it (DashMap insert is
-                    // replace-semantic).
-                    tasks_for_cleanup.remove(&agent_id);
+                    // closed). See the continuous loop for the ownership
+                    // rationale.
+                    remove_task_if_owned(&tasks_for_cleanup, agent_id, &stopped_cleanup);
                 });
 
-                self.tasks.insert(
+                self.install_task(
                     agent_id,
                     AgentTaskEntry {
                         outer: handle,
@@ -580,13 +603,7 @@ impl BackgroundExecutor {
     pub fn stop_agent(&self, agent_id: AgentId) {
         self.pause_flags.remove(&agent_id);
         if let Some((_, entry)) = self.tasks.remove(&agent_id) {
-            entry.stopped.store(true, Ordering::Release);
-            entry.outer.abort();
-            // Abort all tracked inner watcher tasks so they release LLM permits.
-            let mut guards = lock_watchers_recover(&entry.watchers);
-            for watcher in guards.drain(..) {
-                watcher.abort();
-            }
+            stop_task_entry(agent_id, entry);
             info!(id = %agent_id, "Background loop stopped");
         }
     }
@@ -1155,6 +1172,83 @@ mod tests {
             "re-starting after self-cleanup must install a fresh entry"
         );
         executor.stop_agent(agent_id);
+    }
+
+    #[tokio::test]
+    async fn stale_task_cleanup_does_not_remove_replacement() {
+        let tasks = DashMap::new();
+        let agent_id = AgentId::new();
+        let stale_stopped = Arc::new(AtomicBool::new(false));
+        let current_stopped = Arc::new(AtomicBool::new(false));
+        let current = AgentTaskEntry {
+            outer: tokio::spawn(std::future::pending()),
+            watchers: Arc::new(std::sync::Mutex::new(Vec::new())),
+            stopped: current_stopped.clone(),
+        };
+        tasks.insert(agent_id, current);
+
+        assert!(
+            remove_task_if_owned(&tasks, agent_id, &stale_stopped).is_none(),
+            "an exiting stale loop must not remove the replacement entry"
+        );
+        assert_eq!(tasks.len(), 1);
+
+        let current = remove_task_if_owned(&tasks, agent_id, &current_stopped)
+            .expect("the owning loop must still be able to remove itself");
+        stop_task_entry(agent_id, current);
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn restarting_agent_aborts_old_loop_and_keeps_new_loop_tracked() {
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let executor = BackgroundExecutor::new(shutdown_rx);
+        let agent_id = AgentId::new();
+        let schedule = ScheduleMode::Continuous {
+            check_interval_secs: 1,
+        };
+        let old_ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let old_ticks_for_send = old_ticks.clone();
+        executor.start_agent(agent_id, "old-loop", &schedule, move |_id, _msg| {
+            let ticks = old_ticks_for_send.clone();
+            tokio::spawn(async move {
+                ticks.fetch_add(1, Ordering::SeqCst);
+                TickOutcome::Ok
+            })
+        });
+
+        let new_ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let new_ticks_for_send = new_ticks.clone();
+        executor.start_agent(agent_id, "new-loop", &schedule, move |_id, _msg| {
+            let ticks = new_ticks_for_send.clone();
+            tokio::spawn(async move {
+                ticks.fetch_add(1, Ordering::SeqCst);
+                TickOutcome::Ok
+            })
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(2_200)).await;
+        assert_eq!(
+            old_ticks.load(Ordering::SeqCst),
+            0,
+            "the replaced loop must be aborted before it can fire"
+        );
+        assert!(
+            new_ticks.load(Ordering::SeqCst) >= 1,
+            "the replacement loop must remain active"
+        );
+        assert_eq!(
+            executor.active_count(),
+            1,
+            "the replacement must retain ownership of the tracked entry"
+        );
+
+        executor.stop_agent(agent_id);
+        tokio::task::yield_now().await;
+        let stopped_at = new_ticks.load(Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        assert_eq!(new_ticks.load(Ordering::SeqCst), stopped_at);
+        assert_eq!(executor.active_count(), 0);
     }
 
     /// The cap MUST be configurable. With
