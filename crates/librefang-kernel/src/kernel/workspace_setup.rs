@@ -198,29 +198,105 @@ pub(super) fn migrate_root_state_files(home_dir: &Path) {
 
 /// Initialize a git repo in the home directory for config version control.
 pub(super) fn init_git_if_missing(home_dir: &Path) {
-    if home_dir.join(".git").exists() {
+    const DEFAULT_GITIGNORE: &str = "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\ndashboard/\nbackups/\ninbox/\nworkspaces/\n.vscode/\n*.db\n*.db-shm\n*.db-wal\n";
+
+    let existing_repo = home_dir.join(".git").exists();
+    if !existing_repo && !run_git(home_dir, &["init", "-q", "-b", "main"]) {
         return;
     }
-    let ok = std::process::Command::new("git")
-        .args(["init", "-q", "-b", "main"])
-        .current_dir(home_dir)
-        .status()
-        .is_ok_and(|s| s.success());
-    if !ok {
-        return;
-    }
+
     let gitignore = home_dir.join(".gitignore");
-    if !gitignore.exists() {
-        let _ = std::fs::write(
-            &gitignore,
-            "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\ndashboard/\nbackups/\ninbox/\n.vscode/\n*.db\n*.db-shm\n*.db-wal\n",
+    let ignore_changed = if gitignore.exists() {
+        let Ok(mut contents) = std::fs::read_to_string(&gitignore) else {
+            tracing::warn!(path = %gitignore.display(), "Failed to read home gitignore");
+            return;
+        };
+        let ignores_workspaces = contents.lines().any(|line| {
+            matches!(
+                line.trim(),
+                "workspaces" | "workspaces/" | "/workspaces" | "/workspaces/"
+            )
+        });
+        if ignores_workspaces {
+            false
+        } else {
+            if !contents.is_empty() && !contents.ends_with('\n') {
+                contents.push('\n');
+            }
+            contents.push_str("workspaces/\n");
+            if let Err(error) = std::fs::write(&gitignore, contents) {
+                tracing::warn!(path = %gitignore.display(), %error, "Failed to update home gitignore");
+                return;
+            }
+            true
+        }
+    } else {
+        if let Err(error) = std::fs::write(&gitignore, DEFAULT_GITIGNORE) {
+            tracing::warn!(path = %gitignore.display(), %error, "Failed to create home gitignore");
+            return;
+        }
+        true
+    };
+
+    if !existing_repo {
+        let _ = run_git(home_dir, &["add", "-A"]);
+        let _ = commit_home_git(home_dir, "chore: initial librefang config");
+        info!("Initialized git repo in {}", home_dir.display());
+        return;
+    }
+
+    let had_staged_changes = !run_git(home_dir, &["diff", "--cached", "--quiet"]);
+    let tracked_workspaces = std::process::Command::new("git")
+        .args(["ls-files", "--", "workspaces"])
+        .current_dir(home_dir)
+        .output()
+        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty());
+
+    if tracked_workspaces
+        && !run_git(
+            home_dir,
+            &[
+                "rm",
+                "-q",
+                "-r",
+                "--cached",
+                "--ignore-unmatch",
+                "--",
+                "workspaces",
+            ],
+        )
+    {
+        tracing::warn!("Failed to remove runtime workspaces from the home Git index");
+        return;
+    }
+    if ignore_changed {
+        let _ = run_git(home_dir, &["add", "--", ".gitignore"]);
+    }
+
+    if (ignore_changed || tracked_workspaces) && !had_staged_changes {
+        let _ = commit_home_git(home_dir, "chore: ignore runtime workspaces");
+    } else if (ignore_changed || tracked_workspaces) && had_staged_changes {
+        tracing::warn!(
+            "Home Git migration was staged but not committed because the index already had changes"
         );
     }
-    let _ = std::process::Command::new("git")
-        .args(["add", "-A"])
+    if tracked_workspaces {
+        tracing::warn!(
+            "Runtime workspace files were removed from the home Git index; prior Git history may still contain sensitive data and must be purged before sharing"
+        );
+    }
+}
+
+fn run_git(home_dir: &Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .args(args)
         .current_dir(home_dir)
-        .status();
-    let _ = std::process::Command::new("git")
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn commit_home_git(home_dir: &Path, message: &str) -> bool {
+    std::process::Command::new("git")
         .args([
             "-c",
             "user.name=LibreFang",
@@ -229,11 +305,73 @@ pub(super) fn init_git_if_missing(home_dir: &Path) {
             "commit",
             "-q",
             "-m",
-            "chore: initial librefang config",
+            message,
         ])
         .current_dir(home_dir)
-        .status();
-    info!("Initialized git repo in {}", home_dir.display());
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(test)]
+mod home_git_tests {
+    use super::*;
+
+    fn git_output(home_dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(home_dir)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    #[test]
+    fn fresh_home_repo_does_not_track_runtime_workspaces() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("config.toml"), "[kernel]\n").unwrap();
+        let identity = home
+            .path()
+            .join("workspaces/agents/alice/.identity/USER.md");
+        std::fs::create_dir_all(identity.parent().unwrap()).unwrap();
+        std::fs::write(&identity, "private identity").unwrap();
+
+        init_git_if_missing(home.path());
+
+        assert!(identity.exists(), "runtime files must remain on disk");
+        let gitignore = std::fs::read_to_string(home.path().join(".gitignore")).unwrap();
+        assert!(gitignore.lines().any(|line| line == "workspaces/"));
+        let tracked = git_output(home.path(), &["ls-files"]);
+        assert!(tracked.lines().any(|line| line == "config.toml"));
+        assert!(!tracked.lines().any(|line| line.starts_with("workspaces/")));
+    }
+
+    #[test]
+    fn existing_home_repo_untracks_runtime_workspaces_without_deleting_them() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(run_git(home.path(), &["init", "-q", "-b", "main"]));
+        std::fs::write(home.path().join(".gitignore"), "logs/\n").unwrap();
+        let identity = home
+            .path()
+            .join("workspaces/agents/alice/.identity/USER.md");
+        std::fs::create_dir_all(identity.parent().unwrap()).unwrap();
+        std::fs::write(&identity, "private identity").unwrap();
+        assert!(run_git(home.path(), &["add", "-A"]));
+        assert!(commit_home_git(home.path(), "legacy snapshot"));
+
+        init_git_if_missing(home.path());
+
+        assert!(identity.exists(), "migration must preserve runtime files");
+        assert!(git_output(home.path(), &["ls-files", "--", "workspaces"]).is_empty());
+        let committed_gitignore = git_output(home.path(), &["show", "HEAD:.gitignore"]);
+        assert!(committed_gitignore
+            .lines()
+            .any(|line| line == "workspaces/"));
+        assert_eq!(
+            git_output(home.path(), &["log", "-1", "--format=%s"]).trim(),
+            "chore: ignore runtime workspaces"
+        );
+    }
 }
 
 /// Create workspace directory structure for an agent.
