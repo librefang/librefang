@@ -21,6 +21,15 @@ use zeroize::Zeroizing;
 /// No real response carries anywhere near this many parallel tool calls.
 const MAX_STREAMED_TOOL_CALLS: usize = 256;
 
+#[derive(Default)]
+struct StreamedToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+    start_emitted: bool,
+    arguments_emitted: usize,
+}
+
 type MoonshotUploadLock = tokio::sync::Mutex<()>;
 type MoonshotUploadLocks =
     std::sync::Arc<tokio::sync::Mutex<HashMap<[u8; 32], std::sync::Weak<MoonshotUploadLock>>>>;
@@ -1970,8 +1979,10 @@ impl LlmDriver for OpenAIDriver {
             // Filter <think>...</think> tags from streaming text deltas so they
             // don't leak through to the client as visible text.
             let mut think_filter = StreamingThinkFilter::new();
-            // Track tool calls: index -> (id, name, arguments)
-            let mut tool_accum: Vec<(String, String, String)> = Vec::new();
+            // Track provider-indexed tool calls. Some compatible providers
+            // deliver function metadata before the call ID, so emission is
+            // deferred until both required fields are available.
+            let mut tool_accum: Vec<StreamedToolCall> = Vec::new();
             let mut finish_reason: Option<String> = None;
             let mut usage = TokenUsage::default();
             let mut cached_prompt_tokens: u64 = 0;
@@ -2190,44 +2201,58 @@ impl LlmDriver for OpenAIDriver {
 
                                 // Grow to a sparse provider-supplied index in
                                 // one allocation rather than one push per slot.
-                                tool_accum.resize_with(idx + 1, || {
-                                    (String::new(), String::new(), String::new())
-                                });
+                                tool_accum.resize_with(idx + 1, StreamedToolCall::default);
 
                                 // ID (sent in first chunk for this tool)
                                 if let Some(id) = call["id"].as_str() {
-                                    tool_accum[idx].0 = id.to_string();
+                                    tool_accum[idx].id = id.to_string();
                                 }
 
                                 if let Some(func) = call.get("function") {
                                     // Name (sent in first chunk)
                                     if let Some(name) = func["name"].as_str() {
-                                        tool_accum[idx].1 = name.to_string();
-                                        if tx
-                                            .send(StreamEvent::ToolUseStart {
-                                                id: tool_accum[idx].0.clone(),
-                                                name: name.to_string(),
-                                            })
-                                            .await
-                                            .is_err()
-                                        {
-                                            receiver_dropped = true;
-                                        }
+                                        tool_accum[idx].name = name.to_string();
                                     }
 
                                     // Arguments delta
                                     if let Some(args) = func["arguments"].as_str() {
-                                        tool_accum[idx].2.push_str(args);
-                                        if !args.is_empty()
-                                            && tx
-                                                .send(StreamEvent::ToolInputDelta {
-                                                    text: args.to_string(),
-                                                })
-                                                .await
-                                                .is_err()
-                                        {
-                                            receiver_dropped = true;
-                                        }
+                                        tool_accum[idx].arguments.push_str(args);
+                                    }
+                                }
+
+                                let accumulated = &mut tool_accum[idx];
+                                if !accumulated.start_emitted
+                                    && !accumulated.id.is_empty()
+                                    && !accumulated.name.is_empty()
+                                {
+                                    if tx
+                                        .send(StreamEvent::ToolUseStart {
+                                            id: accumulated.id.clone(),
+                                            name: accumulated.name.clone(),
+                                        })
+                                        .await
+                                        .is_err()
+                                    {
+                                        receiver_dropped = true;
+                                    } else {
+                                        accumulated.start_emitted = true;
+                                    }
+                                }
+
+                                if accumulated.start_emitted
+                                    && accumulated.arguments_emitted < accumulated.arguments.len()
+                                {
+                                    let arguments = accumulated.arguments
+                                        [accumulated.arguments_emitted..]
+                                        .to_string();
+                                    if tx
+                                        .send(StreamEvent::ToolInputDelta { text: arguments })
+                                        .await
+                                        .is_err()
+                                    {
+                                        receiver_dropped = true;
+                                    } else {
+                                        accumulated.arguments_emitted = accumulated.arguments.len();
                                     }
                                 }
                             }
@@ -2275,7 +2300,7 @@ impl LlmDriver for OpenAIDriver {
             // Log stream summary for diagnostics
             let has_complete_tool_call = tool_accum
                 .iter()
-                .any(|(id, name, _)| !id.is_empty() && !name.is_empty());
+                .any(|call| !call.id.is_empty() && !call.name.is_empty());
             let is_empty_stream = text_content.is_empty()
                 && reasoning_content.is_empty()
                 && !has_complete_tool_call
@@ -2360,7 +2385,7 @@ impl LlmDriver for OpenAIDriver {
             let has_thinking = content
                 .iter()
                 .any(|b| matches!(b, ContentBlock::Thinking { .. }));
-            if has_thinking && !has_text && tool_accum.is_empty() {
+            if has_thinking && !has_text && !has_complete_tool_call {
                 let thinking_text = content
                     .iter()
                     .find_map(|b| match b {
@@ -2379,41 +2404,41 @@ impl LlmDriver for OpenAIDriver {
                 });
             }
 
-            for (id, name, arguments) in &tool_accum {
+            for call in &tool_accum {
                 // Skip malformed tool calls (empty ID or name can happen if
                 // streaming chunks arrive out of order or are dropped by proxy,
                 // e.g. the GitHub Copilot proxy occasionally drops the function
                 // name chunk). Replaying these to the API yields
                 // "tool call must have a tool call ID and function name" errors.
-                if id.is_empty() || name.is_empty() {
+                if call.id.is_empty() || call.name.is_empty() {
                     warn!(
-                        tool_id = %id,
-                        tool_name = %name,
+                        tool_id = %call.id,
+                        tool_name = %call.name,
                         "Skipping tool call with empty ID or name from streaming response"
                     );
                     continue;
                 }
-                let input: serde_json::Value = match parse_tool_args(arguments) {
+                let input: serde_json::Value = match parse_tool_args(&call.arguments) {
                     Ok(v) => ensure_object(v),
                     Err(e) => {
                         tracing::warn!(
-                            tool = %name,
-                            raw_args_len = arguments.len(),
+                            tool = %call.name,
+                            raw_args_len = call.arguments.len(),
                             error = %e,
                             "Malformed tool call arguments from LLM stream"
                         );
-                        malformed_tool_input(&e, arguments.len())
+                        malformed_tool_input(&e, call.arguments.len())
                     }
                 };
                 content.push(ContentBlock::ToolUse {
-                    id: id.clone(),
-                    name: name.clone(),
+                    id: call.id.clone(),
+                    name: call.name.clone(),
                     input: input.clone(),
                     provider_metadata: None,
                 });
                 tool_calls.push(ToolCall {
-                    id: id.clone(),
-                    name: name.clone(),
+                    id: call.id.clone(),
+                    name: call.name.clone(),
                     input: input.clone(),
                 });
 
@@ -2421,8 +2446,8 @@ impl LlmDriver for OpenAIDriver {
                 // final response below so the caller (if present) gets it.
                 let _ = tx
                     .send(StreamEvent::ToolUseEnd {
-                        id: id.clone(),
-                        name: name.clone(),
+                        id: call.id.clone(),
+                        name: call.name.clone(),
                         input,
                     })
                     .await;
@@ -4761,6 +4786,55 @@ mod tests {
             "out-of-range tool index must not appear in the response"
         );
         assert_eq!(resp.text(), "ok");
+    }
+
+    #[tokio::test]
+    async fn streamed_tool_call_waits_for_late_id_before_emitting_events() {
+        let sse_body = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"shell_exec\",\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}}]}}]}\n\
+             data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_late\"}]}}]}\n\
+             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\
+             data: [DONE]\n"
+            .to_string();
+        let base = spawn_sse_server(sse_body).await;
+        let driver = OpenAIDriver::new("test-key".to_string(), base);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let response = driver
+            .stream(transport_retry_request(), tx)
+            .await
+            .expect("late tool ID should still produce a valid call");
+
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].id, "call_late");
+        assert_eq!(response.tool_calls[0].name, "shell_exec");
+        assert_eq!(response.tool_calls[0].input["command"], "pwd");
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        assert!(matches!(
+            events.first(),
+            Some(StreamEvent::ToolUseStart { id, name })
+                if id == "call_late" && name == "shell_exec"
+        ));
+        assert!(matches!(
+            events.get(1),
+            Some(StreamEvent::ToolInputDelta { text })
+                if text == "{\"command\":\"pwd\"}"
+        ));
+        assert!(matches!(
+            events.get(2),
+            Some(StreamEvent::ToolUseEnd { id, name, .. })
+                if id == "call_late" && name == "shell_exec"
+        ));
+        assert!(matches!(
+            events.get(3),
+            Some(StreamEvent::ContentComplete {
+                stop_reason: StopReason::ToolUse,
+                ..
+            })
+        ));
     }
 
     /// Regression: an OpenAI-compatible provider (OpenRouter / Groq) can send a terminal error as an SSE `data:` frame over an already-HTTP-200 body instead of a non-2xx status.
