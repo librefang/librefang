@@ -12762,6 +12762,9 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Template serialization failed"
           }
         }
       }
@@ -12797,6 +12800,9 @@
           },
           "404": {
             "description": "Template not found"
+          },
+          "500": {
+            "description": "Template serialization failed"
           }
         }
       }
