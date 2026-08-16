@@ -44,6 +44,18 @@ export const EMBEDDING_PROVIDER_LABELS: Record<EmbeddingProvider, string> = {
   lmstudio: "LM Studio",
 };
 
+export const EMBEDDING_PROVIDER_API_KEY_ENVS: Record<EmbeddingProvider, string> = {
+  openai: "OPENAI_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
+  mistral: "MISTRAL_API_KEY",
+  together: "TOGETHER_API_KEY",
+  fireworks: "FIREWORKS_API_KEY",
+  cohere: "COHERE_API_KEY",
+  ollama: "",
+  vllm: "",
+  lmstudio: "",
+};
+
 // Sentinel value for the "Custom…" option in the model `<select>`s. Picking
 // it switches the field into a free-text input rendered alongside the select;
 // an existing stored value that isn't in the catalog is also treated as custom

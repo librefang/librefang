@@ -13,6 +13,7 @@ import { useMemoryConfig } from "../../lib/queries/memory";
 import { useModels } from "../../lib/queries/models";
 import {
   KNOWN_EMBEDDING_MODELS,
+  EMBEDDING_PROVIDER_API_KEY_ENVS,
   EMBEDDING_PROVIDER_LABELS,
   EMBEDDING_PROVIDERS,
   isKnownEmbeddingProvider,
@@ -246,9 +247,9 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
     if (!numericFieldsValid) return;
     try {
       await updateConfig.mutateAsync({
-        embedding_provider: form.embedding_provider || undefined,
-        embedding_model: form.embedding_model || undefined,
-        embedding_api_key_env: form.embedding_api_key_env || undefined,
+        embedding_provider: form.embedding_provider || null,
+        embedding_model: form.embedding_model || null,
+        embedding_api_key_env: form.embedding_api_key_env || null,
         decay_rate: decayParsed,
         proactive_memory: {
           enabled: form.pm_enabled,
@@ -320,16 +321,28 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                           ? KNOWN_EMBEDDING_MODELS[nextProvider]
                           : Array.from(new Set(Object.values(KNOWN_EMBEDDING_MODELS).flat()));
                       const nextModel =
-                        !nextProvider ||
-                        !form.embedding_model ||
-                        nextSuggestions.includes(form.embedding_model)
-                          ? form.embedding_model
-                          : (nextSuggestions[0] ?? form.embedding_model);
+                        !nextProvider
+                          ? ""
+                          : !form.embedding_model ||
+                              nextSuggestions.includes(form.embedding_model)
+                            ? form.embedding_model
+                            : (nextSuggestions[0] ?? form.embedding_model);
+                      const knownKeyEnvs = new Set(
+                        Object.values(EMBEDDING_PROVIDER_API_KEY_ENVS).filter(Boolean),
+                      );
+                      const nextApiKeyEnv =
+                        !form.embedding_api_key_env ||
+                        knownKeyEnvs.has(form.embedding_api_key_env)
+                          ? isKnownEmbeddingProvider(nextProvider)
+                            ? EMBEDDING_PROVIDER_API_KEY_ENVS[nextProvider]
+                            : ""
+                          : form.embedding_api_key_env;
                       setEmbeddingCustomSelected(false);
                       setForm({
                         ...form,
                         embedding_provider: nextProvider,
                         embedding_model: nextModel,
+                        embedding_api_key_env: nextApiKeyEnv,
                       });
                     }}
                     className={inputCls}

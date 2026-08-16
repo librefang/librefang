@@ -418,6 +418,61 @@ async fn patch_memory_config_hot_reloads_and_reports_applied() {
     assert_eq!(body["proactive_memory"]["auto_memorize"], false);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_memory_config_null_clears_embedding_overrides() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+    let config_path = harness.tmp.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "api_key = \"{TEST_KEY}\"\n\
+             \n\
+             [default_model]\n\
+             provider = \"ollama\"\n\
+             model = \"test-model\"\n\
+             api_key_env = \"OLLAMA_API_KEY\"\n\
+             \n\
+             [memory]\n\
+             embedding_provider = \"openai\"\n\
+             embedding_model = \"custom-model\"\n\
+             embedding_api_key_env = \"CUSTOM_EMBEDDING_KEY\"\n"
+        ),
+    )
+    .expect("seed config.toml");
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_json(
+            Method::PATCH,
+            "/api/memory/config",
+            serde_json::json!({
+                "embedding_provider": null,
+                "embedding_model": null,
+                "embedding_api_key_env": null,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = read_json(resp).await;
+    assert_eq!(body["embedding_provider"], serde_json::Value::Null);
+    assert_eq!(body["embedding_model"], "text-embedding-3-small");
+    assert_eq!(body["embedding_api_key_env"], serde_json::Value::Null);
+
+    let persisted: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).expect("read updated config.toml"))
+            .expect("parse updated config.toml");
+    let memory = persisted
+        .get("memory")
+        .and_then(toml::Value::as_table)
+        .expect("memory table");
+    assert!(!memory.contains_key("embedding_provider"));
+    assert!(!memory.contains_key("embedding_model"));
+    assert!(!memory.contains_key("embedding_api_key_env"));
+}
+
 // ---------------------------------------------------------------------------
 // DELETE /api/memory/agents/{id}/level/{level} — input validation
 // ---------------------------------------------------------------------------

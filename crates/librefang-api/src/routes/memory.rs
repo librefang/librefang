@@ -1614,6 +1614,22 @@ pub async fn memory_config_get(State(state): State<Arc<AppState>>) -> impl IntoR
 // PATCH /api/memory/config — Update memory configuration (writes config.toml)
 // ---------------------------------------------------------------------------
 
+fn apply_optional_string_patch(
+    table: &mut toml::map::Map<String, toml::Value>,
+    request: &serde_json::Value,
+    key: &str,
+) {
+    match request.get(key) {
+        Some(serde_json::Value::String(value)) => {
+            table.insert(key.to_string(), toml::Value::String(value.clone()));
+        }
+        Some(serde_json::Value::Null) => {
+            table.remove(key);
+        }
+        _ => {}
+    }
+}
+
 #[utoipa::path(patch, path = "/api/memory/config", tag = "memory", request_body = crate::types::JsonObject, responses((status = 200, description = "Memory configuration updated", body = crate::types::JsonObject)))]
 pub async fn memory_config_patch(
     State(state): State<Arc<AppState>>,
@@ -1661,21 +1677,9 @@ pub async fn memory_config_patch(
             .into_json_tuple();
         }
     };
-    if let Some(v) = req.get("embedding_provider").and_then(|v| v.as_str()) {
-        memory_tbl.insert(
-            "embedding_provider".into(),
-            toml::Value::String(v.to_string()),
-        );
-    }
-    if let Some(v) = req.get("embedding_model").and_then(|v| v.as_str()) {
-        memory_tbl.insert("embedding_model".into(), toml::Value::String(v.to_string()));
-    }
-    if let Some(v) = req.get("embedding_api_key_env").and_then(|v| v.as_str()) {
-        memory_tbl.insert(
-            "embedding_api_key_env".into(),
-            toml::Value::String(v.to_string()),
-        );
-    }
+    apply_optional_string_patch(memory_tbl, &req, "embedding_provider");
+    apply_optional_string_patch(memory_tbl, &req, "embedding_model");
+    apply_optional_string_patch(memory_tbl, &req, "embedding_api_key_env");
     if let Some(v) = req.get("decay_rate").and_then(|v| v.as_f64()) {
         memory_tbl.insert("decay_rate".into(), toml::Value::Float(v));
     }
@@ -1797,14 +1801,35 @@ pub async fn memory_config_patch(
             .and_then(|n| u64::try_from(n).ok())
     };
 
+    let provider_cleared = req
+        .get("embedding_provider")
+        .is_some_and(serde_json::Value::is_null);
+    let model_cleared = req
+        .get("embedding_model")
+        .is_some_and(serde_json::Value::is_null);
+    let api_key_env_cleared = req
+        .get("embedding_api_key_env")
+        .is_some_and(serde_json::Value::is_null);
     let live = state.kernel.config_ref();
     let body = serde_json::json!({
-        "embedding_provider": toml_str(memory_section, "embedding_provider")
-            .or_else(|| live.memory.embedding_provider.clone()),
-        "embedding_model": toml_str(memory_section, "embedding_model")
-            .unwrap_or_else(|| live.memory.embedding_model.clone()),
-        "embedding_api_key_env": toml_str(memory_section, "embedding_api_key_env")
-            .or_else(|| live.memory.embedding_api_key_env.clone()),
+        "embedding_provider": if provider_cleared {
+            None
+        } else {
+            toml_str(memory_section, "embedding_provider")
+                .or_else(|| live.memory.embedding_provider.clone())
+        },
+        "embedding_model": if model_cleared {
+            librefang_types::config::MemoryConfig::default().embedding_model
+        } else {
+            toml_str(memory_section, "embedding_model")
+                .unwrap_or_else(|| live.memory.embedding_model.clone())
+        },
+        "embedding_api_key_env": if api_key_env_cleared {
+            None
+        } else {
+            toml_str(memory_section, "embedding_api_key_env")
+                .or_else(|| live.memory.embedding_api_key_env.clone())
+        },
         "decay_rate": toml_f64(memory_section, "decay_rate")
             .unwrap_or(live.memory.decay_rate),
         "proactive_memory": {
@@ -2229,6 +2254,32 @@ mod tests {
     use librefang_kernel::MemorySubsystemApi;
     use librefang_memory::namespace_acl::{MemoryNamespaceGuard, NamespaceGate};
     use librefang_types::config::KernelConfig;
+
+    #[test]
+    fn optional_string_patch_removes_explicit_nulls() {
+        let mut table = toml::map::Map::new();
+        table.insert(
+            "embedding_provider".to_string(),
+            toml::Value::String("openai".to_string()),
+        );
+        table.insert(
+            "embedding_model".to_string(),
+            toml::Value::String("old-model".to_string()),
+        );
+        let request = serde_json::json!({
+            "embedding_provider": null,
+            "embedding_model": "new-model",
+        });
+
+        apply_optional_string_patch(&mut table, &request, "embedding_provider");
+        apply_optional_string_patch(&mut table, &request, "embedding_model");
+
+        assert!(!table.contains_key("embedding_provider"));
+        assert_eq!(
+            table.get("embedding_model").and_then(toml::Value::as_str),
+            Some("new-model")
+        );
+    }
 
     #[test]
     fn anonymous_fallback_denies_pii_export_and_delete() {

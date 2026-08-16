@@ -364,6 +364,24 @@ describe("MemoryPage (redesigned)", () => {
     expect(configMutateAsync.mock.calls[0][0]).toMatchObject({
       embedding_provider: "cohere",
       embedding_model: "embed-multilingual-v3.0",
+      embedding_api_key_env: "COHERE_API_KEY",
+    });
+  });
+
+  it("persists auto-detected embedding defaults as explicit clears", async () => {
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /Settings/i }));
+
+    const [providerSelect, embeddingModelSelect] = screen.getAllByRole("combobox");
+    fireEvent.change(providerSelect, { target: { value: "" } });
+
+    expect(embeddingModelSelect).toHaveValue("");
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+    await waitFor(() => expect(configMutateAsync).toHaveBeenCalledTimes(1));
+    expect(configMutateAsync.mock.calls[0][0]).toMatchObject({
+      embedding_provider: null,
+      embedding_model: null,
+      embedding_api_key_env: null,
     });
   });
 

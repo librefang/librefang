@@ -2946,9 +2946,9 @@ export async function getHealth(): Promise<{ status?: string }> {
 }
 
 export interface MemoryConfigResponse {
-  embedding_provider?: string;
+  embedding_provider?: string | null;
   embedding_model?: string;
-  embedding_api_key_env?: string;
+  embedding_api_key_env?: string | null;
   decay_rate?: number;
   proactive_memory?: {
     enabled?: boolean;
@@ -2971,9 +2971,9 @@ export async function getMemoryConfig(): Promise<MemoryConfigResponse> {
 }
 
 export async function updateMemoryConfig(payload: {
-  embedding_provider?: string;
-  embedding_model?: string;
-  embedding_api_key_env?: string;
+  embedding_provider?: string | null;
+  embedding_model?: string | null;
+  embedding_api_key_env?: string | null;
   decay_rate?: number;
   proactive_memory?: {
     enabled?: boolean;
