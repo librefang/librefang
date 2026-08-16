@@ -764,6 +764,23 @@ pub(crate) struct PatchMcpTaintRequest {
     pub taint_policy: Option<librefang_types::config::McpTaintPolicy>,
 }
 
+fn strip_json_null_fields(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            fields.retain(|_, value| !value.is_null());
+            for value in fields.values_mut() {
+                strip_json_null_fields(value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                strip_json_null_fields(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Upsert an MCP server entry in config.toml's `[[mcp_servers]]` array.
 ///
 /// If an entry with the same name already exists it is replaced; otherwise a
@@ -783,8 +800,12 @@ fn upsert_mcp_server_config(
         toml::value::Table::new()
     };
 
-    // Serialize the entry to a TOML value via JSON round-trip
-    let entry_json = serde_json::to_value(entry).map_err(|e| e.to_string())?;
+    // TOML has no null value. Strip absent object fields structurally before
+    // the JSON-to-TOML bridge so a future Option field cannot silently become
+    // an empty string merely because its serde annotation omitted
+    // `skip_serializing_if`.
+    let mut entry_json = serde_json::to_value(entry).map_err(|e| e.to_string())?;
+    strip_json_null_fields(&mut entry_json);
     let entry_toml = json_to_toml_value(&entry_json);
 
     let servers = table
@@ -1436,10 +1457,10 @@ mod tests {
     }
 
     /// #6612 — the `File` store round-trips an entry through `serde_json` → `json_to_toml_value` → `toml` → disk → serde, and TOML has no null.
-    /// `json_to_toml_value` maps `Null` to an *empty string* (`routes/config/mod.rs:942`) rather than dropping the key, which is why `McpServerConfigEntry::template_id` and `oauth` both carry `skip_serializing_if = "Option::is_none"` with comments calling it load-bearing.
+    /// `json_to_toml_value` maps `Null` to an *empty string* (`routes/config/mod.rs`) rather than dropping the key. The writer now strips null object fields structurally in addition to the serde annotations on current Option fields.
     ///
-    /// `HttpCompatHeaderConfig` has two `Option<String>` fields under exactly that path and neither is skipped, so an env-sourced header would be written as `value = ""` and reload as `Some("")`.
-    /// That is not cosmetic: `apply_http_compat_headers` tests `value` *before* `value_env` (`librefang-runtime-mcp/src/lib.rs:3363`), so an empty-string `value` wins and the transport sends an empty header instead of resolving the variable — a silent credential failure, the same class of bug the guard on these structs exists to prevent.
+    /// `HttpCompatHeaderConfig` has two `Option<String>` fields under exactly that path. Their current serde attributes skip absent values, and the writer-level null stripping now makes that safety property independent of every future field repeating the annotation.
+    /// That is not cosmetic: `apply_http_compat_headers` tests `value` *before* `value_env`, so an empty-string `value` wins and the transport sends an empty header instead of resolving the variable — a silent credential failure.
     #[test]
     fn upsert_mcp_server_preserves_an_env_sourced_http_compat_header_6612() {
         use librefang_types::config::{HttpCompatHeaderConfig, HttpCompatToolConfig};
@@ -1534,6 +1555,44 @@ mod tests {
             }
             other => panic!("expected http_compat transport, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn strip_json_null_fields_recurses_through_nested_config_objects() {
+        let mut value = serde_json::json!({
+            "template_id": null,
+            "transport": {
+                "type": "http_compat",
+                "tools": [
+                    {
+                        "name": "lookup",
+                        "headers": [
+                            {"name": "authorization", "value": null, "value_env": "TOKEN"}
+                        ],
+                        "body": null
+                    }
+                ]
+            }
+        });
+
+        strip_json_null_fields(&mut value);
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "transport": {
+                    "type": "http_compat",
+                    "tools": [
+                        {
+                            "name": "lookup",
+                            "headers": [
+                                {"name": "authorization", "value_env": "TOKEN"}
+                            ]
+                        }
+                    ]
+                }
+            })
+        );
     }
 
     /// Regression for #5799: patching taint_scanning=false on one server must
