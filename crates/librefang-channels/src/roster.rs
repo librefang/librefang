@@ -219,6 +219,7 @@ impl GroupRosterStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
 
     fn mk_member(jid: &str, display: &str) -> ParticipantRef {
         ParticipantRef {
@@ -340,5 +341,60 @@ mod tests {
         assert_eq!(store.drop_chat("telegram", "chat-1"), 1);
         store.clear();
         assert_eq!(store.chat_count(), 0);
+    }
+
+    #[test]
+    fn concurrent_chat_admission_never_exceeds_the_limit() {
+        let store = GroupRosterStore::new();
+        let barrier = Arc::new(Barrier::new(32));
+        let mut threads = Vec::new();
+        for index in 0..32 {
+            let store = store.clone();
+            let barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                store.upsert_with_limits(
+                    "telegram",
+                    &format!("chat-{index}"),
+                    mk_member(&format!("user-{index}"), "Member"),
+                    4,
+                    4,
+                )
+            }));
+        }
+
+        for thread in threads {
+            assert!(thread.join().unwrap());
+        }
+        assert_eq!(store.chat_count(), 4);
+    }
+
+    #[test]
+    fn concurrent_member_admission_never_exceeds_the_limit() {
+        let store = GroupRosterStore::new();
+        let barrier = Arc::new(Barrier::new(32));
+        let mut threads = Vec::new();
+        for index in 0..32 {
+            let store = store.clone();
+            let barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                store.upsert_with_limits(
+                    "telegram",
+                    "chat",
+                    mk_member(&format!("user-{index}"), "Member"),
+                    4,
+                    4,
+                )
+            }));
+        }
+
+        let accepted = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .filter(|accepted| *accepted)
+            .count();
+        assert_eq!(accepted, 4);
+        assert_eq!(store.member_count("telegram", "chat"), 4);
     }
 }
