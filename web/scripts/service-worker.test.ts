@@ -148,6 +148,20 @@ describe('public service worker static cache', () => {
     expect(online).toHaveBeenCalledTimes(2)
     expect(loaded.cache.put).not.toHaveBeenCalled()
   })
+
+  it('returns the network response when a cache refill fails', async () => {
+    const online = vi.fn(async () => new Response('logo', { status: 200 }))
+    const loaded = loadServiceWorker(online as typeof fetch)
+    loaded.cache.put.mockRejectedValueOnce(new Error('quota exceeded'))
+
+    const response = await dispatchFetch(
+      loaded.listener,
+      new Request(`${ORIGIN}/logo.png`),
+    )
+
+    expect(await response.text()).toBe('logo')
+    expect(online).toHaveBeenCalledOnce()
+  })
 })
 
 describe('public service worker lifecycle', () => {
