@@ -500,6 +500,15 @@ async fn read_body_capped(mut resp: reqwest::Response, max_bytes: usize) -> Resu
     ))
 }
 
+fn build_net_fetch_client(
+    builder: reqwest::ClientBuilder,
+) -> Result<reqwest::Client, serde_json::Value> {
+    builder.build().map_err(|error| {
+        tracing::warn!(%error, "failed to build WASM guest HTTP client");
+        json!({"error": "HTTP client initialization failed"})
+    })
+}
+
 fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
     let url = match params.get("url").and_then(|u| u.as_str()) {
         Some(u) => u,
@@ -551,7 +560,10 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
                 let builder = librefang_http::direct_client_builder()
                     .redirect(reqwest::redirect::Policy::none())
                     .resolve_to_addrs(&ssrf_result.hostname, &ssrf_result.resolved);
-                let client = builder.build().expect("HTTP client build");
+                let client = match build_net_fetch_client(builder) {
+                    Ok(client) => client,
+                    Err(error) => return error,
+                };
                 let request = match current_method.as_str() {
                     "POST" => client.post(&current_url).body(current_body.clone()),
                     "PUT" => client.put(&current_url).body(current_body.clone()),
@@ -1081,6 +1093,13 @@ mod tests {
         let mut fresh: Vec<u8> = Vec::new();
         assert!(append_capped(&mut fresh, &vec![0u8; max + 1], max).is_err());
         assert!(fresh.is_empty());
+    }
+
+    #[test]
+    fn guest_http_client_build_failure_returns_json_error() {
+        let builder = reqwest::Client::builder().user_agent("invalid\nuser-agent");
+        let error = build_net_fetch_client(builder).unwrap_err();
+        assert_eq!(error, json!({"error": "HTTP client initialization failed"}));
     }
 
     /// Word-boundary blocklist: real secret-shaped names match, benign
