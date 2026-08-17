@@ -1037,6 +1037,19 @@ fn soft_cap_eviction_keeps_anchor_seq_synced_across_restart() {
         .query_row("SELECT COUNT(*) FROM audit_entries", [], |row| row.get(0))
         .unwrap();
     assert_eq!(db_rows, 12, "all rows must remain persisted after eviction");
+    assert_eq!(
+        log.persisted_len(),
+        12,
+        "public persisted count must disclose rows outside the memory window"
+    );
+    assert!(
+        log.persisted_len() > log.len(),
+        "soft-cap eviction must be externally detectable"
+    );
+    let (retained, persisted) = log.retained_snapshot();
+    assert_eq!(persisted, 12);
+    assert_eq!(retained.len(), log.len());
+    assert!(persisted > retained.len());
 
     // Even on the live log the anchor must already track the persisted
     // population, not the shrunken in-memory window.
@@ -1050,6 +1063,7 @@ fn soft_cap_eviction_keeps_anchor_seq_synced_across_restart() {
     drop(log);
     let reopened = AuditLog::with_db_anchored(pool.clone(), anchor_path.clone());
     assert_eq!(reopened.len(), 12, "restart reloads every persisted row");
+    assert_eq!(reopened.persisted_len(), 12);
     assert!(
         reopened.verify_integrity().is_ok(),
         "restart after soft-cap eviction must not raise a spurious anchor mismatch"

@@ -132,7 +132,7 @@ export interface MediaVideoResult {
 }
 
 export interface MediaVideoStatus {
-  status: string;
+  status: "submitted" | "pending" | "queued" | "processing" | "completed" | "failed";
   task_id?: string;
   result?: MediaVideoResult;
   error?: string;
@@ -909,6 +909,7 @@ export interface MemoryListResponse {
 
 export interface MemoryStatsResponse {
   total?: number;
+  by_agent?: Record<string, number>;
   user_count?: number;
   session_count?: number;
   agent_count?: number;
@@ -2842,8 +2843,15 @@ export async function shutdownServer(): Promise<{ status: string }> {
   return post<{ status: string }>("/api/shutdown", {});
 }
 
-export async function reloadConfig(): Promise<{ status: string; restart_required?: boolean; restart_reasons?: string[] }> {
-  return post<{ status: string; restart_required?: boolean; restart_reasons?: string[] }>("/api/config/reload", {});
+export type ReloadConfigResult = {
+  status: string;
+  restart_required?: boolean;
+  restart_reasons?: string[];
+  warnings?: string[];
+};
+
+export async function reloadConfig(): Promise<ReloadConfigResult> {
+  return post<ReloadConfigResult>("/api/config/reload", {});
 }
 
 export interface HealthDetailResponse {
@@ -2946,9 +2954,9 @@ export async function getHealth(): Promise<{ status?: string }> {
 }
 
 export interface MemoryConfigResponse {
-  embedding_provider?: string;
+  embedding_provider?: string | null;
   embedding_model?: string;
-  embedding_api_key_env?: string;
+  embedding_api_key_env?: string | null;
   decay_rate?: number;
   proactive_memory?: {
     enabled?: boolean;
@@ -2971,9 +2979,9 @@ export async function getMemoryConfig(): Promise<MemoryConfigResponse> {
 }
 
 export async function updateMemoryConfig(payload: {
-  embedding_provider?: string;
-  embedding_model?: string;
-  embedding_api_key_env?: string;
+  embedding_provider?: string | null;
+  embedding_model?: string | null;
+  embedding_api_key_env?: string | null;
   decay_rate?: number;
   proactive_memory?: {
     enabled?: boolean;
@@ -3487,6 +3495,7 @@ export async function listMemories(params?: {
   offset?: number;
   limit?: number;
   category?: string;
+  level?: string;
 }): Promise<MemoryListResponse> {
   const offset = Number.isFinite(params?.offset) ? Math.max(0, Math.floor(params?.offset ?? 0)) : 0;
   const limit = Number.isFinite(params?.limit) ? Math.max(1, Math.floor(params?.limit ?? 20)) : 20;
@@ -3494,6 +3503,7 @@ export async function listMemories(params?: {
   query.set("offset", String(offset));
   query.set("limit", String(limit));
   if (params?.category) query.set("category", params.category);
+  if (params?.level) query.set("level", params.level);
 
   const path = params?.agentId
     ? `/api/memory/agents/${encodeURIComponent(params.agentId)}?${query.toString()}`
@@ -3504,12 +3514,14 @@ export async function listMemories(params?: {
 export async function searchMemories(params: {
   query: string;
   agentId?: string;
+  level?: string;
   limit?: number;
 }): Promise<MemoryItem[]> {
   const limit = Number.isFinite(params.limit) ? Math.max(1, Math.floor(params.limit ?? 20)) : 20;
   const query = new URLSearchParams();
   query.set("q", params.query);
   query.set("limit", String(limit));
+  if (params.level) query.set("level", params.level);
 
   const path = params.agentId
     ? `/api/memory/agents/${encodeURIComponent(params.agentId)}/search?${query.toString()}`
