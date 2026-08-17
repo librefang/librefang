@@ -198,19 +198,6 @@ html {
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
   }
-
-  /* Keep functional loading state perceptible without the default rapid
-   * rotation or pulse used when reduced motion is not requested. */
-  .animate-spin {
-    animation-duration: 3s !important;
-    animation-iteration-count: infinite !important;
-  }
-
-  .animate-pulse,
-  .cursor-blink {
-    animation-duration: 2s !important;
-    animation-iteration-count: infinite !important;
-  }
 }
 
 /* Visible focus ring for keyboard navigation — focus-visible only, so
