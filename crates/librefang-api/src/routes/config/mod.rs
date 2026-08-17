@@ -282,9 +282,9 @@ fn llm_health_snapshot(state: &AppState) -> LlmHealthSnapshot {
 
 /// Strip embedded `user:pass@` credentials from a URL, keeping host/port.
 ///
-/// Used for telemetry / OTLP endpoints that may legitimately contain a
-/// basic-auth tuple in the URL. Returns the input unchanged when no `@`
-/// follows the scheme — i.e. when there is nothing to redact.
+/// Used for configured endpoints, including pairing and OTLP, that may
+/// legitimately contain a basic-auth tuple in the URL. Returns the input
+/// unchanged when the authority has no `@` delimiter.
 fn redact_url_credentials(url: &str) -> String {
     if let Some(scheme_end) = url.find("://") {
         let after_scheme = &url[scheme_end + 3..];

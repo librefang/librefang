@@ -1771,6 +1771,7 @@ mod config_read_write_parity_tests {
         for url in [
             "https://ntfy.example.test/topic@tenant",
             "https://ntfy.example.test/topic?contact=ops@example.test",
+            "https://ntfy.example.test/topic#owner@tenant",
         ] {
             let mut config = KernelConfig::default();
             config.pairing.ntfy_url = Some(url.to_string());
