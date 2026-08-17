@@ -222,10 +222,16 @@ export function applyForeignTerminalFrame<M extends TerminalRoutableMessage>(
             ...m,
             content: frame.content || m.content,
             isStreaming: false,
-            tokens: { output: frame.output_tokens, input: frame.input_tokens },
-            cost_usd: frame.cost_usd,
-            memories_saved: frame.memories_saved,
-            memories_used: frame.memories_used,
+            tokens:
+              frame.output_tokens != null || frame.input_tokens != null
+                ? {
+                    output: frame.output_tokens ?? m.tokens?.output,
+                    input: frame.input_tokens ?? m.tokens?.input,
+                  }
+                : m.tokens,
+            cost_usd: frame.cost_usd ?? m.cost_usd,
+            memories_saved: frame.memories_saved ?? m.memories_saved,
+            memories_used: frame.memories_used ?? m.memories_used,
             thinking: typeof frame.thinking === "string" ? frame.thinking : m.thinking,
             thinkingCollapsed: m.thinkingCollapsed ?? true,
             error: undefined,

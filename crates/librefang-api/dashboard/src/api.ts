@@ -2842,8 +2842,15 @@ export async function shutdownServer(): Promise<{ status: string }> {
   return post<{ status: string }>("/api/shutdown", {});
 }
 
-export async function reloadConfig(): Promise<{ status: string; restart_required?: boolean; restart_reasons?: string[] }> {
-  return post<{ status: string; restart_required?: boolean; restart_reasons?: string[] }>("/api/config/reload", {});
+export type ReloadConfigResult = {
+  status: string;
+  restart_required?: boolean;
+  restart_reasons?: string[];
+  warnings?: string[];
+};
+
+export async function reloadConfig(): Promise<ReloadConfigResult> {
+  return post<ReloadConfigResult>("/api/config/reload", {});
 }
 
 export interface HealthDetailResponse {
@@ -2946,9 +2953,9 @@ export async function getHealth(): Promise<{ status?: string }> {
 }
 
 export interface MemoryConfigResponse {
-  embedding_provider?: string;
+  embedding_provider?: string | null;
   embedding_model?: string;
-  embedding_api_key_env?: string;
+  embedding_api_key_env?: string | null;
   decay_rate?: number;
   proactive_memory?: {
     enabled?: boolean;
@@ -2971,9 +2978,9 @@ export async function getMemoryConfig(): Promise<MemoryConfigResponse> {
 }
 
 export async function updateMemoryConfig(payload: {
-  embedding_provider?: string;
-  embedding_model?: string;
-  embedding_api_key_env?: string;
+  embedding_provider?: string | null;
+  embedding_model?: string | null;
+  embedding_api_key_env?: string | null;
   decay_rate?: number;
   proactive_memory?: {
     enabled?: boolean;

@@ -110,6 +110,12 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
         // Track files we have already queued so a slow send_message doesn't
         // cause double-processing before the file is moved.
         let mut in_flight: HashSet<PathBuf> = HashSet::new();
+        // Files whose message dispatch has finished but which could not yet be
+        // moved or quarantined. These are retried as finalization-only work so
+        // a transient filesystem failure never causes duplicate delivery.
+        let mut pending_finalization: HashSet<PathBuf> = HashSet::new();
+        let (completion_tx, mut completion_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(PathBuf, bool)>();
 
         loop {
             interval.tick().await;
@@ -118,6 +124,17 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
                 info!("Inbox watcher stopping (shutdown)");
                 break;
             }
+
+            while let Ok((path, finalized)) = completion_rx.try_recv() {
+                if finalized {
+                    in_flight.remove(&path);
+                } else {
+                    pending_finalization.insert(path);
+                }
+            }
+
+            retry_pending_finalizations(&mut pending_finalization, &mut in_flight, &processed_dir)
+                .await;
 
             let entries = match tokio::fs::read_dir(&inbox_dir).await {
                 Ok(e) => e,
@@ -131,9 +148,15 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
 
-                // Skip directories and the processed subdirectory
-                if path.is_dir() {
-                    continue;
+                // Skip directories and the processed subdirectory without a
+                // blocking metadata call on the async watcher task.
+                match entry.file_type().await {
+                    Ok(file_type) if file_type.is_dir() => continue,
+                    Ok(_) => {}
+                    Err(error) => {
+                        debug!(path = %path.display(), error = %error, "Inbox: failed to inspect directory entry");
+                        continue;
+                    }
                 }
 
                 // Skip files already in-flight
@@ -141,7 +164,7 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
                     continue;
                 }
 
-                // Skip files quarantined by a previous failed empty-file move.
+                // Skip files quarantined by a previous failed finalization.
                 // Match the exact suffix shape `*.quarantined.YYYYMMDD_HHMMSS`
                 // (optionally with a `.NNNN` nanosecond tiebreaker) instead
                 // of a loose substring, so a user file named e.g.
@@ -187,27 +210,14 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
                 };
 
                 if content.trim().is_empty() {
-                    // Move empty files to processed without sending.
-                    // #3751 — never silently delete the user's file.  If the
-                    // move fails (read-only processed dir, disk full, EACCES),
-                    // try to rename it in place with a `.quarantined` suffix
-                    // so subsequent polls skip it without spinning.  If even
-                    // that rename fails, park the path in `in_flight` so we
-                    // skip it for the rest of this process lifetime.
-                    if let Err(e) = move_to_processed(&path, &processed_dir).await {
-                        warn!(
-                            path = %path.display(),
-                            error = %e,
-                            "Inbox: failed to move empty file to processed dir, attempting quarantine rename"
+                    // Move empty files to processed without sending. If both
+                    // archival paths fail, retry finalization on later polls.
+                    if !finalize_inbox_file(&path, &processed_dir).await {
+                        track_pending_finalization(
+                            path.clone(),
+                            &mut in_flight,
+                            &mut pending_finalization,
                         );
-                        if let Err(e2) = quarantine_in_place(&path).await {
-                            warn!(
-                                path = %path.display(),
-                                error = %e2,
-                                "Inbox: quarantine rename also failed; suppressing rescan via in_flight"
-                            );
-                            in_flight.insert(path.clone());
-                        }
                     }
                     continue;
                 }
@@ -222,6 +232,13 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
                             path = %path.display(),
                             "Inbox: no target agent (no agent: directive and no default_agent configured)"
                         );
+                        if !finalize_inbox_file(&path, &processed_dir).await {
+                            track_pending_finalization(
+                                path.clone(),
+                                &mut in_flight,
+                                &mut pending_finalization,
+                            );
+                        }
                         continue;
                     }
                 };
@@ -236,6 +253,13 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
                             agent = %agent_name,
                             "Inbox: target agent not found in registry"
                         );
+                        if !finalize_inbox_file(&path, &processed_dir).await {
+                            track_pending_finalization(
+                                path.clone(),
+                                &mut in_flight,
+                                &mut pending_finalization,
+                            );
+                        }
                         continue;
                     }
                 };
@@ -246,6 +270,7 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
                 let kernel_clone = Arc::clone(&kernel);
                 let processed_dir_clone = processed_dir.clone();
                 let path_clone = path.clone();
+                let completion_tx = completion_tx.clone();
                 let file_name = path
                     .file_name()
                     .unwrap_or_default()
@@ -280,20 +305,13 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
                         }
                     }
 
-                    // Move to processed regardless of send result (avoid infinite retry)
-                    if let Err(e) = move_to_processed(&path_clone, &processed_dir_clone).await {
-                        warn!(
-                            path = %path_clone.display(),
-                            error = %e,
-                            "Inbox: failed to move file to processed"
-                        );
-                    }
+                    // Finalize regardless of send result (avoid redelivery).
+                    // On a double filesystem failure, report the path back to
+                    // the watcher for finalization-only retries.
+                    let finalized = finalize_inbox_file(&path_clone, &processed_dir_clone).await;
+                    let _ = completion_tx.send((path_clone, finalized));
                 });
             }
-
-            // Clean up in-flight set: remove entries whose files no longer exist
-            // in the inbox directory (they've been moved to processed).
-            in_flight.retain(|p| p.exists());
         }
     });
 }
@@ -323,13 +341,39 @@ fn parse_inbox_file(content: &str, config: &InboxConfig) -> (Option<String>, Str
 /// Move a file to the processed directory, appending a timestamp to avoid
 /// collisions.
 async fn move_to_processed(src: &Path, processed_dir: &Path) -> std::io::Result<()> {
+    move_to_processed_at(src, processed_dir, chrono::Utc::now()).await
+}
+
+async fn move_to_processed_at(
+    src: &Path,
+    processed_dir: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> std::io::Result<()> {
     let stem = src.file_stem().unwrap_or_default().to_string_lossy();
     let ext = src
         .extension()
         .map(|e| format!(".{}", e.to_string_lossy()))
         .unwrap_or_default();
-    let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-    let dest = processed_dir.join(format!("{stem}_{ts}{ext}"));
+    let ts = now.format("%Y%m%d_%H%M%S");
+    let dest_base = processed_dir.join(format!("{stem}_{ts}{ext}"));
+    let dest = if !tokio::fs::try_exists(&dest_base).await? {
+        dest_base
+    } else {
+        let nanos = now.timestamp_nanos_opt().unwrap_or(0);
+        let mut counter = 0_u32;
+        loop {
+            let candidate = processed_dir.join(format!("{stem}_{ts}.{nanos}.{counter}{ext}"));
+            if !tokio::fs::try_exists(&candidate).await? {
+                break candidate;
+            }
+            counter = counter.checked_add(1).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "exhausted processed-file collision suffixes",
+                )
+            })?;
+        }
+    };
 
     tokio::fs::rename(src, &dest).await?;
     debug!(
@@ -338,6 +382,65 @@ async fn move_to_processed(src: &Path, processed_dir: &Path) -> std::io::Result<
         "Inbox: moved file to processed"
     );
     Ok(())
+}
+
+/// Move a terminal inbox file out of the active directory without deleting it.
+///
+/// A broken processed directory falls back to a same-directory quarantine.
+/// `false` means both operations failed and the caller must retry later.
+async fn finalize_inbox_file(src: &Path, processed_dir: &Path) -> bool {
+    if let Err(move_error) = move_to_processed(src, processed_dir).await {
+        warn!(
+            path = %src.display(),
+            error = %move_error,
+            "Inbox: failed to move file to processed dir, attempting quarantine rename"
+        );
+        if let Err(quarantine_error) = quarantine_in_place(src).await {
+            warn!(
+                path = %src.display(),
+                error = %quarantine_error,
+                "Inbox: quarantine rename also failed; deferring finalization"
+            );
+            return false;
+        }
+    }
+    true
+}
+
+fn track_pending_finalization(
+    path: PathBuf,
+    in_flight: &mut HashSet<PathBuf>,
+    pending_finalization: &mut HashSet<PathBuf>,
+) {
+    in_flight.insert(path.clone());
+    pending_finalization.insert(path);
+}
+
+async fn retry_pending_finalizations(
+    pending_finalization: &mut HashSet<PathBuf>,
+    in_flight: &mut HashSet<PathBuf>,
+    processed_dir: &Path,
+) {
+    let pending: Vec<PathBuf> = pending_finalization.iter().cloned().collect();
+    for path in pending {
+        let finalized = match tokio::fs::try_exists(&path).await {
+            Ok(false) => true,
+            Ok(true) => finalize_inbox_file(&path, processed_dir).await,
+            Err(error) => {
+                warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "Inbox: failed to inspect pending finalization"
+                );
+                false
+            }
+        };
+
+        if finalized {
+            pending_finalization.remove(&path);
+            in_flight.remove(&path);
+        }
+    }
 }
 
 /// Rename a file in place by appending `.quarantined.<timestamp>` so the inbox
@@ -354,14 +457,14 @@ async fn quarantine_in_place(src: &Path) -> std::io::Result<()> {
     let dest_base = src.with_file_name(format!("{file_name}.quarantined.{ts}"));
     // Collision is unlikely but possible if poll_interval < 1s.  Try the
     // nanosecond-suffix variant; if that also exists, give up and let the
-    // caller fall back to the in_flight blocklist rather than silently
-    // overwriting a pre-existing quarantine file.
-    let dest = if !dest_base.exists() {
+    // caller retain the file for a later finalization retry rather than
+    // silently overwriting a pre-existing quarantine file.
+    let dest = if !tokio::fs::try_exists(&dest_base).await? {
         dest_base
     } else {
         let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let dest_nanos = src.with_file_name(format!("{file_name}.quarantined.{ts}.{nanos}"));
-        if dest_nanos.exists() {
+        if tokio::fs::try_exists(&dest_nanos).await? {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 format!("quarantine target already exists: {}", dest_nanos.display()),
@@ -590,6 +693,70 @@ mod tests {
             entries.iter().any(|n| n.contains(".quarantined.")),
             "expected a .quarantined.* sibling, got {entries:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn move_to_processed_preserves_both_files_on_name_collision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let processed = tmp.path().join("processed");
+        std::fs::create_dir(&processed).unwrap();
+        let src = tmp.path().join("message.txt");
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-17T12:34:56Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        std::fs::write(&src, "first").unwrap();
+        move_to_processed_at(&src, &processed, now).await.unwrap();
+        std::fs::write(&src, "second").unwrap();
+        move_to_processed_at(&src, &processed, now).await.unwrap();
+
+        let mut contents: Vec<String> = std::fs::read_dir(&processed)
+            .unwrap()
+            .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+            .collect();
+        contents.sort();
+        assert_eq!(contents, ["first", "second"]);
+    }
+
+    #[tokio::test]
+    async fn terminal_file_uses_quarantine_when_processed_dir_is_unavailable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("unaddressable.txt");
+        std::fs::write(&src, "no target").unwrap();
+
+        assert!(
+            finalize_inbox_file(&src, &tmp.path().join("missing/processed")).await,
+            "same-directory quarantine should complete finalization"
+        );
+        assert!(!src.exists());
+        assert!(std::fs::read_dir(tmp.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".quarantined.")
+        }));
+    }
+
+    #[tokio::test]
+    async fn pending_finalization_retries_without_releasing_in_flight_early() {
+        let tmp = tempfile::tempdir().unwrap();
+        let processed = tmp.path().join("processed");
+        std::fs::create_dir(&processed).unwrap();
+        let src = tmp.path().join("delivered.txt");
+        std::fs::write(&src, "already delivered").unwrap();
+        let mut in_flight = HashSet::new();
+        let mut pending = HashSet::new();
+        track_pending_finalization(src.clone(), &mut in_flight, &mut pending);
+
+        assert!(in_flight.contains(&src));
+        assert!(pending.contains(&src));
+        retry_pending_finalizations(&mut pending, &mut in_flight, &processed).await;
+
+        assert!(pending.is_empty());
+        assert!(in_flight.is_empty());
+        assert!(!src.exists());
+        assert_eq!(count_text_files(&processed), 1);
     }
 
     #[test]

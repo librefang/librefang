@@ -1156,6 +1156,27 @@ impl AuditLog {
         lock_audit_recover(&self.entries, "entries").len()
     }
 
+    /// Returns the number of rows retained in persistent storage.
+    ///
+    /// This can exceed [`Self::len`] after the in-memory soft cap evicts an
+    /// old prefix without deleting its SQLite rows. Callers that can only
+    /// inspect the in-memory window use this value to disclose that their
+    /// result is incomplete rather than presenting a partial audit history
+    /// as exhaustive.
+    pub fn persisted_len(&self) -> usize {
+        self.persisted_rows.load(Ordering::Relaxed)
+    }
+
+    /// Returns the complete retained in-memory window and persisted row count from one consistent snapshot.
+    ///
+    /// Append, trim, and prune paths update both values while holding the entries mutex.
+    /// Sampling the count under the same mutex prevents callers from misclassifying a concurrent append or eviction as a history gap.
+    pub fn retained_snapshot(&self) -> (Vec<AuditEntry>, usize) {
+        let entries = lock_audit_recover(&self.entries, "entries");
+        let persisted_rows = self.persisted_rows.load(Ordering::Relaxed);
+        (entries.clone(), persisted_rows)
+    }
+
     /// Returns the configured external tip-anchor path, if any.
     ///
     /// When `Some`, every audit append mirrors the new tip hash to this
