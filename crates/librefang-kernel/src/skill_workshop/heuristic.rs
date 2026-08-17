@@ -154,7 +154,7 @@ fn is_conversational_filler(sentence: &str, trigger: &str) -> bool {
     // Look at up to the 2 words preceding the trigger.
     let prefix = lower[..idx].trim_end();
     let has_narrative_subject = prefix
-        .rsplit(|c: char| c.is_whitespace())
+        .rsplit(|c: char| !c.is_ascii_alphabetic() && c != '\'')
         .filter(|w| !w.is_empty())
         .take(2)
         .any(|word| matches!(word, "i" | "we" | "you" | "he" | "she" | "they"));
@@ -499,6 +499,16 @@ mod tests {
             )
             .is_none(),
             "a narrative subject within the two-word lookback must be detected"
+        );
+        assert!(
+            extract_explicit_instruction("Well, they—always run the formatter before submitting.")
+                .is_none(),
+            "punctuation between the subject and trigger must remain a word boundary"
+        );
+        assert!(
+            extract_explicit_instruction("They don't always run the formatter before submitting.")
+                .is_none(),
+            "an apostrophe word must count as one lookback word"
         );
     }
 
