@@ -157,11 +157,6 @@
   -webkit-overflow-scrolling: touch;
 }
 
-:focus-visible {
-  outline: 1px solid #06b6d4;
-  outline-offset: 2px;
-}
-
 :focus:not(:focus-visible) {
   outline: none;
 }
@@ -187,7 +182,7 @@
 
 /* Prevent horizontal overflow */
 html {
-  overflow-x: hidden;
+  overflow-x: clip;
 }
 
 /* Respect the user's OS setting — disable all animations and transitions
@@ -202,6 +197,19 @@ html {
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
+  }
+
+  /* Keep functional loading state perceptible without the default rapid
+   * rotation or pulse used when reduced motion is not requested. */
+  .animate-spin {
+    animation-duration: 3s !important;
+    animation-iteration-count: infinite !important;
+  }
+
+  .animate-pulse,
+  .cursor-blink {
+    animation-duration: 2s !important;
+    animation-iteration-count: infinite !important;
   }
 }
 
@@ -232,24 +240,20 @@ html {
   }
 }
 
-/* High-contrast mode support — users with prefers-contrast: more need
- * stronger divides and text. Bump border opacity (default muted blacks sit
- * near WCAG AA threshold) and darken dim text so secondary copy reads. */
+/* High-contrast mode support uses the palette contract rather than emitted
+ * Tailwind selectors, so utilities can be regenerated without losing it. */
 @media (prefers-contrast: more) {
-  .border-black\/10,
-  .border-black\/5 {
-    border-color: rgb(0 0 0 / 0.35) !important;
+  :root {
+    --border: rgb(0 0 0 / 0.35);
+    --text-secondary: #374151;
+    --text-muted: #374151;
+    --color-gray-400: var(--text-muted);
+    --color-gray-500: var(--text-secondary);
   }
-  .dark .border-white\/10,
-  .dark .border-white\/5 {
-    border-color: rgb(255 255 255 / 0.45) !important;
-  }
-  .text-gray-400,
-  .text-gray-500 {
-    color: rgb(55 65 81) !important; /* gray-700 */
-  }
-  .dark .text-gray-400,
-  .dark .text-gray-500 {
-    color: rgb(209 213 219) !important; /* gray-300 */
+
+  .dark {
+    --border: rgb(255 255 255 / 0.45);
+    --text-secondary: #d1d5db;
+    --text-muted: #d1d5db;
   }
 }
