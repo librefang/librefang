@@ -2451,7 +2451,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "GET /api/agents/{id}/sessions/{session_id}/stream — attach to a session's\nin-flight stream events (SSE).",
+        "summary": "GET /api/agents/{id}/sessions/{session_id}/stream — attach to a session's\nin-flight stream events (SSE or WebSocket).",
         "description": "Any client can subscribe to the events emitted by an active turn on this\nsession: the originating client (CLI, Tauri desktop, web) plus any number\nof additional clients. Late attachers begin receiving events from the\nmoment they subscribe — partial-turn snapshots are not replayed.\n\nReturns 404 if the session does not exist or belongs to a different agent.",
         "operationId": "attach_session_stream",
         "parameters": [
@@ -2475,6 +2475,9 @@
           }
         ],
         "responses": {
+          "101": {
+            "description": "WebSocket session event stream"
+          },
           "200": {
             "description": "Server-sent events stream of session events"
           },
