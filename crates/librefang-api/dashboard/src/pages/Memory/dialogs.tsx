@@ -13,7 +13,10 @@ import { useMemoryConfig } from "../../lib/queries/memory";
 import { useModels } from "../../lib/queries/models";
 import {
   KNOWN_EMBEDDING_MODELS,
+  EMBEDDING_PROVIDER_API_KEY_ENVS,
   EMBEDDING_PROVIDER_LABELS,
+  EMBEDDING_PROVIDERS,
+  isKnownEmbeddingProvider,
   CUSTOM_OPTION,
 } from "./constants";
 
@@ -189,6 +192,7 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
   const chatModels = modelsQuery.data?.models ?? [];
 
   const [form, setForm] = useState<MemoryConfigForm | null>(null);
+  const [embeddingCustomSelected, setEmbeddingCustomSelected] = useState(false);
 
   // Suggestion list for the Embedding Model dropdown. When the provider is
   // pinned and known, surface only that provider's catalog. When the provider
@@ -197,13 +201,14 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
   // `text-embedding-3-small` would be flagged Custom whenever the user hasn't
   // explicitly pinned `openai`, which is wrong and surprising.
   const embeddingProvider = form?.embedding_provider ?? "";
-  const embeddingProviderKnown = embeddingProvider in KNOWN_EMBEDDING_MODELS;
+  const embeddingProviderKnown = isKnownEmbeddingProvider(embeddingProvider);
   const embeddingProviderSuggestions = embeddingProviderKnown
     ? KNOWN_EMBEDDING_MODELS[embeddingProvider]
     : Array.from(new Set(Object.values(KNOWN_EMBEDDING_MODELS).flat()));
-  const embeddingKnownSet = new Set(embeddingProviderSuggestions);
+  const embeddingKnownSet = new Set<string>(embeddingProviderSuggestions);
   const embeddingIsCustom =
-    !!form?.embedding_model && !embeddingKnownSet.has(form.embedding_model);
+    embeddingCustomSelected ||
+    (!!form?.embedding_model && !embeddingKnownSet.has(form.embedding_model));
   const chatModelIdSet = new Set(chatModels.map((m) => m.id));
   // Guard on isSuccess so the stored value doesn't flicker through Custom
   // during the initial useModels() fetch (chatModels is [] while loading).
@@ -242,9 +247,9 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
     if (!numericFieldsValid) return;
     try {
       await updateConfig.mutateAsync({
-        embedding_provider: form.embedding_provider || undefined,
-        embedding_model: form.embedding_model || undefined,
-        embedding_api_key_env: form.embedding_api_key_env || undefined,
+        embedding_provider: form.embedding_provider || null,
+        embedding_model: form.embedding_model || null,
+        embedding_api_key_env: form.embedding_api_key_env || null,
         decay_rate: decayParsed,
         proactive_memory: {
           enabled: form.pm_enabled,
@@ -309,30 +314,40 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                   </span>
                   <select
                     value={form.embedding_provider ?? ""}
-                    onChange={(e) => setForm({ ...form, embedding_provider: e.target.value })}
+                    onChange={(e) => {
+                      const nextProvider = e.target.value;
+                      const nextSuggestions: readonly string[] =
+                        isKnownEmbeddingProvider(nextProvider)
+                          ? KNOWN_EMBEDDING_MODELS[nextProvider]
+                          : Array.from(new Set(Object.values(KNOWN_EMBEDDING_MODELS).flat()));
+                      const nextModel =
+                        !nextProvider
+                          ? ""
+                          : nextSuggestions.includes(form.embedding_model)
+                            ? form.embedding_model
+                            : (nextSuggestions[0] ?? form.embedding_model);
+                      const nextApiKeyEnv =
+                        isKnownEmbeddingProvider(nextProvider)
+                          ? EMBEDDING_PROVIDER_API_KEY_ENVS[nextProvider]
+                          : "";
+                      setEmbeddingCustomSelected(false);
+                      setForm({
+                        ...form,
+                        embedding_provider: nextProvider,
+                        embedding_model: nextModel,
+                        embedding_api_key_env: nextApiKeyEnv,
+                      });
+                    }}
                     className={inputCls}
                   >
                     <option value="">
                       {t("memory.auto_detect", { defaultValue: "Auto-detect" })}
                     </option>
-                    <option value="openai">
-                      {t("memory.provider_openai", { defaultValue: "OpenAI" })}
-                    </option>
-                    <option value="ollama">
-                      {t("memory.provider_ollama", { defaultValue: "Ollama" })}
-                    </option>
-                    <option value="vllm">
-                      {t("memory.provider_vllm", { defaultValue: "vLLM" })}
-                    </option>
-                    <option value="lmstudio">
-                      {t("memory.provider_lmstudio", { defaultValue: "LM Studio" })}
-                    </option>
-                    <option value="gemini">
-                      {t("memory.provider_gemini", { defaultValue: "Gemini" })}
-                    </option>
-                    <option value="minimax">
-                      {t("memory.provider_minimax", { defaultValue: "MiniMax" })}
-                    </option>
+                    {EMBEDDING_PROVIDERS.map((provider) => (
+                      <option key={provider} value={provider}>
+                        {EMBEDDING_PROVIDER_LABELS[provider]}
+                      </option>
+                    ))}
                   </select>
                 </div>
                 <div>
@@ -344,8 +359,10 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                     onChange={(e) => {
                       const v = e.target.value;
                       if (v === CUSTOM_OPTION) {
+                        setEmbeddingCustomSelected(true);
                         if (!embeddingIsCustom) setForm({ ...form, embedding_model: "" });
                       } else {
+                        setEmbeddingCustomSelected(false);
                         setForm({ ...form, embedding_model: v });
                       }
                     }}
@@ -363,12 +380,12 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                         </option>
                       ))
                     ) : (
-                      Object.entries(KNOWN_EMBEDDING_MODELS).map(([prov, names]) => (
+                      EMBEDDING_PROVIDERS.map((prov) => (
                         <optgroup
                           key={prov}
-                          label={EMBEDDING_PROVIDER_LABELS[prov] ?? prov}
+                          label={EMBEDDING_PROVIDER_LABELS[prov]}
                         >
-                          {names.map((name) => (
+                          {KNOWN_EMBEDDING_MODELS[prov].map((name) => (
                             <option key={`${prov}:${name}`} value={name}>
                               {name}
                             </option>
