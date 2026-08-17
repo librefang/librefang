@@ -257,6 +257,7 @@ pub(super) fn init_git_if_missing(home_dir: &Path) {
                 "rm",
                 "-q",
                 "-r",
+                "-f",
                 "--cached",
                 "--ignore-unmatch",
                 "--",
@@ -470,6 +471,36 @@ mod home_git_tests {
             git_output(home.path(), &["diff", "--cached", "--name-only"]).trim(),
             "workspaces/agent/private.txt",
             "only the workspace removal may be staged"
+        );
+    }
+
+    #[test]
+    fn migration_untracks_partially_staged_workspace_edits_without_deleting_them() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(run_git(home.path(), &["init", "-q", "-b", "main"]));
+        std::fs::write(home.path().join(".gitignore"), "logs/\n").unwrap();
+        let workspace_file = home.path().join("workspaces/agent/private.txt");
+        std::fs::create_dir_all(workspace_file.parent().unwrap()).unwrap();
+        std::fs::write(&workspace_file, "original\n").unwrap();
+        assert!(run_git(home.path(), &["add", "-A"]));
+        assert!(commit_home_git(home.path(), "legacy snapshot"));
+
+        std::fs::write(&workspace_file, "staged edit\n").unwrap();
+        assert!(run_git(home.path(), &["add", "--", "workspaces"]));
+        std::fs::write(&workspace_file, "staged edit\nworking edit\n").unwrap();
+
+        init_git_if_missing(home.path());
+
+        assert_eq!(
+            std::fs::read_to_string(&workspace_file).unwrap(),
+            "staged edit\nworking edit\n",
+            "migration must preserve the latest runtime file on disk"
+        );
+        assert!(git_output(home.path(), &["ls-files", "--", "workspaces"]).is_empty());
+        assert_eq!(
+            git_output(home.path(), &["log", "-1", "--format=%s"]).trim(),
+            "legacy snapshot",
+            "pre-existing staged workspace edits must prevent an automatic commit"
         );
     }
 }
