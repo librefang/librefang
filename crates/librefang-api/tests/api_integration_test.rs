@@ -3186,7 +3186,8 @@ async fn test_attach_session_stream_fans_out_to_multiple_clients() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_attach_session_stream_accepts_websocket_upgrade() {
     use futures::StreamExt as _;
-    use librefang_kernel::llm_driver::StreamEvent;
+    use librefang_kernel::llm_driver::{StreamEvent, PHASE_RESPONSE_COMPLETE};
+    use librefang_types::message::{StopReason, TokenUsage};
     use std::time::Duration;
     use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 
@@ -3249,7 +3250,73 @@ async fn test_attach_session_stream_accepts_websocket_upgrade() {
     assert_eq!(envelope["content"], "hello-websocket-attach");
     assert_eq!(envelope["done"], false);
 
-    socket.close(None).await.unwrap();
+    sender
+        .send(StreamEvent::ContentComplete {
+            stop_reason: StopReason::ToolUse,
+            usage: TokenUsage {
+                input_tokens: 3,
+                output_tokens: 2,
+                ..TokenUsage::default()
+            },
+        })
+        .expect("intermediate completion should reach the subscriber");
+    sender
+        .send(StreamEvent::TextDelta {
+            text: "after-tool".to_string(),
+        })
+        .expect("stream should remain attached after an intermediate completion");
+
+    let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .expect("post-tool event should arrive")
+        .expect("WebSocket should remain open")
+        .expect("WebSocket frame should be valid");
+    let Message::Text(text) = message else {
+        panic!("expected a text frame, got {message:?}");
+    };
+    let envelope: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(envelope["type"], "chunk");
+    assert_eq!(envelope["content"], "after-tool");
+
+    sender
+        .send(StreamEvent::ContentComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage {
+                input_tokens: 4,
+                output_tokens: 6,
+                ..TokenUsage::default()
+            },
+        })
+        .expect("final completion usage should reach the subscriber");
+    sender
+        .send(StreamEvent::PhaseChange {
+            phase: PHASE_RESPONSE_COMPLETE.to_string(),
+            detail: None,
+        })
+        .expect("response completion should reach the subscriber");
+    let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .expect("terminal event should arrive")
+        .expect("WebSocket should deliver the terminal frame")
+        .expect("WebSocket terminal frame should be valid");
+    let Message::Text(text) = message else {
+        panic!("expected a terminal text frame, got {message:?}");
+    };
+    let envelope: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(envelope["type"], "done");
+    assert_eq!(envelope["done"], true);
+    assert_eq!(envelope["usage"]["input_tokens"], 7);
+    assert_eq!(envelope["usage"]["output_tokens"], 8);
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(message) = socket.next().await {
+            if matches!(message, Ok(Message::Close(_))) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("server should close the completed session stream");
     tokio::time::timeout(Duration::from_secs(2), async {
         while sender.receiver_count() != 0 {
             tokio::task::yield_now().await;
