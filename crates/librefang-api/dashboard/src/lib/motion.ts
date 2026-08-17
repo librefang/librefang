@@ -6,30 +6,29 @@ export const APPLE_EASE: [number, number, number, number] = [0.25, 0.1, 0.25, 1]
 export const APPLE_SPRING: [number, number, number, number] = [0.22, 1, 0.36, 1];
 export const APPLE_BOUNCE: [number, number, number, number] = [0.34, 1.56, 0.64, 1];
 
-// Modal / dialog entrance: scale up + deblur. Replaces .animate-fade-in-scale.
+// Modal / dialog entrance. Replaces .animate-fade-in-scale.
 export const fadeInScale: Variants = {
-  initial: { opacity: 0, scale: 0.92, filter: "blur(8px)" },
+  initial: { opacity: 0, scale: 0.92 },
   animate: {
     opacity: 1,
     scale: 1,
-    filter: "blur(0px)",
     transition: { duration: 0.5, ease: APPLE_BOUNCE },
   },
   exit: {
     opacity: 0,
     scale: 0.96,
-    filter: "blur(6px)",
     transition: { duration: 0.22, ease: APPLE_EASE },
   },
 };
 
-// Page / hero entrance: fade + 16px rise + deblur. Replaces .animate-fade-in-up.
+const fadeInUpInitial = { opacity: 0, y: 16 };
+const fadeInUpAnimate = { opacity: 1, y: 0 };
+
+// Page / hero entrance: fade + 16px rise. Replaces .animate-fade-in-up.
 export const fadeInUp: Variants = {
-  initial: { opacity: 0, y: 16, filter: "blur(4px)" },
+  initial: fadeInUpInitial,
   animate: {
-    opacity: 1,
-    y: 0,
-    filter: "blur(0px)",
+    ...fadeInUpAnimate,
     transition: { duration: 0.6, ease: APPLE_SPRING },
   },
   exit: {
@@ -75,11 +74,9 @@ export const staggerContainer: Variants = {
 
 // Single staggered child — same shape as fadeInUp but slightly faster (0.5s).
 export const staggerItem: Variants = {
-  initial: { opacity: 0, y: 16, filter: "blur(4px)" },
+  initial: fadeInUpInitial,
   animate: {
-    opacity: 1,
-    y: 0,
-    filter: "blur(0px)",
+    ...fadeInUpAnimate,
     transition: { duration: 0.5, ease: APPLE_SPRING },
   },
 };

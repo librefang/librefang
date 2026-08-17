@@ -1333,6 +1333,14 @@ pub struct BridgeManager {
 }
 
 impl BridgeManager {
+    fn lock_abort_handles(&self) -> std::sync::MutexGuard<'_, Vec<tokio::task::AbortHandle>> {
+        self.abort_handles.lock().unwrap_or_else(|poisoned| {
+            warn!("Channel bridge abort-handle lock poisoned; recovering tracked tasks");
+            self.abort_handles.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+
     pub fn new(handle: Arc<dyn ChannelBridgeHandle>, router: Arc<AgentRouter>) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let sanitize_config = librefang_types::config::SanitizeConfig::default();
@@ -2123,9 +2131,7 @@ impl BridgeManager {
     /// owns MUST go through here so the two collections never drift —
     /// otherwise `abort()` would silently leak the un-mirrored task.
     fn track(&mut self, handle: tokio::task::JoinHandle<()>) {
-        if let Ok(mut guard) = self.abort_handles.lock() {
-            guard.push(handle.abort_handle());
-        }
+        self.lock_abort_handles().push(handle.abort_handle());
         self.tasks.push(handle);
     }
 
@@ -2160,17 +2166,16 @@ impl BridgeManager {
         if let Err(e) = self.shutdown_tx.send(true) {
             debug!(error = %e, "Channel bridge shutdown signal had no live receivers");
         }
-        if let Ok(mut guard) = self.abort_handles.lock() {
-            let n = guard.len();
-            for h in guard.drain(..) {
-                h.abort();
-            }
-            if n > 0 {
-                debug!(
-                    tasks = n,
-                    "Channel bridge tasks aborted via shared-ref abort()"
-                );
-            }
+        let mut guard = self.lock_abort_handles();
+        let n = guard.len();
+        for h in guard.drain(..) {
+            h.abort();
+        }
+        if n > 0 {
+            debug!(
+                tasks = n,
+                "Channel bridge tasks aborted via shared-ref abort()"
+            );
         }
     }
 
@@ -2197,9 +2202,7 @@ impl BridgeManager {
         // The graceful join above completed every task, so the mirrored
         // abort handles are now stale no-ops; clear them so a later
         // `abort()` on a re-shared Arc doesn't iterate dead handles.
-        if let Ok(mut guard) = self.abort_handles.lock() {
-            guard.clear();
-        }
+        self.lock_abort_handles().clear();
     }
 }
 
@@ -11723,6 +11726,50 @@ mod tests {
         drop(shared);
     }
 
+    #[tokio::test]
+    async fn bridge_abort_handles_recover_after_held_lock_panic() {
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![]),
+        });
+        let router = Arc::new(AgentRouter::new());
+        let mut mgr = BridgeManager::new(handle, router);
+
+        let first = tokio::spawn(std::future::pending::<()>());
+        let first_probe = first.abort_handle();
+        mgr.track_task(first);
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = mgr.abort_handles.lock().unwrap();
+            panic!("poison channel bridge abort-handle lock");
+        }));
+        assert!(mgr.abort_handles.is_poisoned());
+
+        let second = tokio::spawn(std::future::pending::<()>());
+        let second_probe = second.abort_handle();
+        mgr.track_task(second);
+        assert!(!mgr.abort_handles.is_poisoned());
+        assert_eq!(mgr.abort_handles.lock().unwrap().len(), 2);
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = mgr.abort_handles.lock().unwrap();
+            panic!("re-poison channel bridge abort-handle lock");
+        }));
+        assert!(mgr.abort_handles.is_poisoned());
+
+        mgr.abort();
+
+        assert!(!mgr.abort_handles.is_poisoned());
+        assert!(mgr.abort_handles.lock().unwrap().is_empty());
+        for _ in 0..50 {
+            if first_probe.is_finished() && second_probe.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(first_probe.is_finished());
+        assert!(second_probe.is_finished());
+    }
+
     /// Audit: cron-channel-name-not-reserved. Operator-supplied
     /// `ChannelType::Custom("cron")` MUST NOT derive the same
     /// SessionId as the kernel-internal cron-fire path. The
@@ -11809,12 +11856,12 @@ mod tests {
     fn build_thread_key_falls_back_to_chat_id_without_topic() {
         let mut msg = group_thread_message("topic-1", false);
         let k = build_thread_key(&msg).expect("key");
-        assert_eq!(k.thread, "topic-1");
-        assert_eq!(k.chat_id.as_deref(), Some("u1"));
+        assert_eq!(k.thread(), "topic-1");
+        assert_eq!(k.chat_id(), Some("u1"));
         // A topic-less group still gets a stable claim keyed by chat id.
         msg.thread_id = None;
         let k2 = build_thread_key(&msg).expect("key");
-        assert_eq!(k2.thread, "u1");
+        assert_eq!(k2.thread(), "u1");
     }
 
     #[test]
@@ -11825,8 +11872,8 @@ mod tests {
         msg.metadata
             .insert(SENDER_USER_ID_KEY.into(), serde_json::json!("peer-9"));
         let k = build_thread_key(&msg).expect("key");
-        assert_eq!(k.account_id.as_deref(), Some("acct-1"));
-        assert_eq!(k.peer_id.as_deref(), Some("peer-9"));
+        assert_eq!(k.account_id(), Some("acct-1"));
+        assert_eq!(k.peer_id(), Some("peer-9"));
     }
 
     #[tokio::test]

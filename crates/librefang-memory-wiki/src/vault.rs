@@ -27,7 +27,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
@@ -189,6 +189,14 @@ impl WikiVault {
         self.render_mode
     }
 
+    fn lock_write_recover(&self) -> MutexGuard<'_, ()> {
+        self.write_lock.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("Wiki vault write lock poisoned; recovering write serialization");
+            self.write_lock.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+
     /// Render the canonical body (with `[[topic]]` placeholders) into the
     /// flavor the vault is configured for and write the page atomically.
     ///
@@ -214,7 +222,7 @@ impl WikiVault {
                 cap: MAX_BODY_BYTES,
             });
         }
-        let _guard = self.write_lock.lock().expect("vault write lock poisoned");
+        let _guard = self.lock_write_recover();
 
         let path = self.page_path(topic);
         let mut compile_state = self.load_compile_state()?;
@@ -1012,6 +1020,60 @@ mod tests {
         let page = vault.get("shared").unwrap();
         // Provenance is monotonic: surviving writes appended their entries.
         assert_eq!(page.frontmatter.provenance.len(), ok_count);
+    }
+
+    #[test]
+    fn write_recovers_poison_and_preserves_vault_invariants() {
+        let (vault, dir) = fresh_vault(RenderMode::Obsidian);
+        vault
+            .write("existing", "original body", provenance("before"), false)
+            .unwrap();
+
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = vault.write_lock.lock().unwrap();
+            panic!("poison vault write lock");
+        });
+        assert!(vault.write_lock.is_poisoned());
+
+        vault
+            .write(
+                "source",
+                "links to [[existing]]",
+                provenance("after"),
+                false,
+            )
+            .unwrap();
+        assert!(!vault.write_lock.is_poisoned());
+        assert!(vault.write_lock.lock().is_ok());
+
+        assert!(vault
+            .get("existing")
+            .unwrap()
+            .body
+            .contains("original body"));
+        assert!(vault.get("source").unwrap().body.contains("[[existing]]"));
+        assert_eq!(
+            vault.backlinks().unwrap(),
+            vec![BacklinkEntry {
+                source: "source".into(),
+                target: "existing".into(),
+            }]
+        );
+        let index = fs::read_to_string(dir.path().join("index.md")).unwrap();
+        assert!(index.contains("[[existing]]"));
+        assert!(index.contains("[[source]]"));
+        let state = vault.load_compile_state().unwrap();
+        assert!(state.pages.contains_key("existing"));
+        assert!(state.pages.contains_key("source"));
+
+        let source_path = dir.path().join("source.md");
+        let mut raw = fs::read_to_string(&source_path).unwrap();
+        raw.push_str("\nexternal edit\n");
+        fs::write(source_path, raw).unwrap();
+        assert!(matches!(
+            vault.write("source", "replacement", provenance("later"), false),
+            Err(WikiError::HandEditConflict { .. })
+        ));
     }
 
     #[test]
