@@ -1337,6 +1337,32 @@ impl ProactiveMemoryStore {
         })
     }
 
+    /// Count memories for every agent in one grouped SQL query.
+    pub fn count_by_agent(&self) -> LibreFangResult<HashMap<String, usize>> {
+        self.semantic.count_by_agent()
+    }
+
+    /// List one filtered dashboard page without a hidden candidate cap.
+    pub fn list_page(
+        &self,
+        agent_id: Option<&str>,
+        category: Option<&str>,
+        level: Option<MemoryLevel>,
+        offset: usize,
+        limit: usize,
+    ) -> LibreFangResult<(Vec<MemoryItem>, usize)> {
+        let agent_id = agent_id.map(Self::parse_agent_id).transpose()?;
+        let scope = level.map(|value| value.scope_str());
+        let (fragments, total) = self
+            .semantic
+            .list_page(agent_id, category, scope, offset, limit)?;
+        let items = fragments
+            .into_iter()
+            .map(MemoryItem::from_fragment)
+            .collect();
+        Ok((items, total))
+    }
+
     /// List memories across ALL agents, optionally filtered by category.
     ///
     /// Used by the dashboard to show all memories without agent scoping.
@@ -1384,6 +1410,74 @@ impl ProactiveMemoryStore {
             .take(limit)
             .collect();
 
+        Ok(items)
+    }
+
+    /// Search the dashboard memory corpus with optional agent and level filters.
+    ///
+    /// Filters are passed into semantic recall before its result limit is
+    /// applied. This prevents a level-scoped search from losing valid matches
+    /// merely because another level occupied the first `limit` candidates.
+    pub async fn search_dashboard_with_guard(
+        &self,
+        query: &str,
+        agent_id: Option<&str>,
+        level: Option<MemoryLevel>,
+        limit: usize,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> LibreFangResult<Vec<MemoryItem>> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_read("proactive") {
+            return Err(LibreFangError::AuthDenied(reason));
+        }
+
+        // Match the pre-existing maintenance behavior: agent-scoped search
+        // invokes it, while cross-agent dashboard search does not.
+        if agent_id.is_some() {
+            self.maybe_run_maintenance();
+        }
+        let parsed_agent_id = agent_id.map(Self::parse_agent_id).transpose()?;
+        let filter = if parsed_agent_id.is_some() || level.is_some() {
+            Some(MemoryFilter {
+                agent_id: parsed_agent_id,
+                scope: level.map(|value| value.scope_str().to_string()),
+                ..Default::default()
+            })
+        } else {
+            None
+        };
+
+        let results = if let Some(ref embedding) = self.embedding {
+            if let Ok(query_embedding) = embedding.embed_one(query).await {
+                self.semantic
+                    .recall_with_embedding(query, limit, filter, Some(&query_embedding))?
+            } else {
+                self.semantic.recall(query, limit, filter)?
+            }
+        } else {
+            self.semantic.recall(query, limit, filter)?
+        };
+
+        let mut items: Vec<MemoryItem> = results
+            .into_iter()
+            .map(MemoryItem::from_fragment)
+            .take(limit)
+            .collect();
+
+        // Preserve the existing agent-scoped graph enrichment, but never add
+        // an Agent-level synthetic item to a User/Session-filtered result set.
+        if parsed_agent_id.is_some()
+            && level.is_none_or(|value| value == MemoryLevel::Agent)
+            && items.len() < limit
+        {
+            if let Some(graph_context) = self.graph_context(query) {
+                items.push(
+                    MemoryItem::new(graph_context, MemoryLevel::Agent)
+                        .with_category("knowledge_graph"),
+                );
+            }
+        }
+
+        guard.redact_all(&mut items);
         Ok(items)
     }
 
@@ -1760,6 +1854,29 @@ impl ProactiveMemoryStore {
         let mut items = self.list_all(category).await?;
         guard.redact_all(&mut items);
         Ok(items)
+    }
+
+    /// Paginated dashboard listing wrapper.
+    ///
+    /// Applies namespace authorization before reading and PII redaction after
+    /// the SQL page is materialized, matching the existing list wrappers.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn list_page_with_guard(
+        &self,
+        agent_id: Option<&str>,
+        category: Option<&str>,
+        level: Option<librefang_types::memory::MemoryLevel>,
+        offset: usize,
+        limit: usize,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<(Vec<librefang_types::memory::MemoryItem>, usize)>
+    {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_read("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        let (mut items, total) = self.list_page(agent_id, category, level, offset, limit)?;
+        guard.redact_all(&mut items);
+        Ok((items, total))
     }
 
     /// Per-user list wrapper used by `/memory/user/{user_id}` and the
@@ -4336,6 +4453,14 @@ mod tests {
             Err(librefang_types::error::LibreFangError::AuthDenied(_))
         ));
 
+        let err = store
+            .search_dashboard_with_guard("topsecret", None, None, 10, &guard)
+            .await;
+        assert!(matches!(
+            err,
+            Err(librefang_types::error::LibreFangError::AuthDenied(_))
+        ));
+
         let err = store.list_all_with_guard(None, &guard).await;
         assert!(matches!(
             err,
@@ -4352,6 +4477,72 @@ mod tests {
             .await
             .unwrap();
         assert!(!ok.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dashboard_search_filters_agent_and_level_before_limit() {
+        use crate::namespace_acl::MemoryNamespaceGuard;
+        use librefang_types::user_policy::UserMemoryAccess;
+
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent_a = AgentId::new().to_string();
+        let agent_b = AgentId::new().to_string();
+
+        store
+            .add_with_level(
+                &[serde_json::json!({"role": "user", "content": "needle user A"})],
+                &agent_a,
+                MemoryLevel::User,
+            )
+            .await
+            .unwrap();
+        for index in 0..60 {
+            store
+                .add_with_level(
+                    &[serde_json::json!({
+                        "role": "user",
+                        "content": format!("needle session {index}")
+                    })],
+                    &agent_a,
+                    MemoryLevel::Session,
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .add_with_level(
+                &[serde_json::json!({"role": "user", "content": "needle user B"})],
+                &agent_b,
+                MemoryLevel::User,
+            )
+            .await
+            .unwrap();
+
+        let guard = MemoryNamespaceGuard::new(UserMemoryAccess {
+            readable_namespaces: vec!["proactive".into()],
+            ..Default::default()
+        });
+        let scoped = store
+            .search_dashboard_with_guard(
+                "needle",
+                Some(&agent_a),
+                Some(MemoryLevel::User),
+                50,
+                &guard,
+            )
+            .await
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].content, "needle user A");
+        assert_eq!(scoped[0].level, MemoryLevel::User);
+
+        let global = store
+            .search_dashboard_with_guard("needle", None, Some(MemoryLevel::User), 50, &guard)
+            .await
+            .unwrap();
+        assert_eq!(global.len(), 2);
+        assert!(global.iter().all(|item| item.level == MemoryLevel::User));
     }
 
     /// PII redaction MUST replace fields when the guard's `pii_access=false`.
@@ -4383,7 +4574,7 @@ mod tests {
             ..Default::default()
         });
         let items = store
-            .search_all_with_guard("alice", 10, &guard)
+            .search_dashboard_with_guard("alice", None, None, 10, &guard)
             .await
             .unwrap();
         for item in items {
