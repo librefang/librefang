@@ -326,12 +326,29 @@ pub async fn poll_video_task(
         }
     }
 
-    // Return current status for non-completed tasks
-    Json(serde_json::json!({
-        "status": status,
-        "task_id": task_id,
-    }))
-    .into_response()
+    // Keep the HTTP contract flat and stable. `MediaTaskStatus` itself is a
+    // tagged enum (`{"state":"failed","error":"..."}`), but dashboard
+    // consumers expect a string status plus an optional sibling error.
+    Json(video_task_status_json(status, &task_id)).into_response()
+}
+
+fn video_task_status_json(
+    status: librefang_types::media::MediaTaskStatus,
+    task_id: &str,
+) -> serde_json::Value {
+    match status {
+        librefang_types::media::MediaTaskStatus::Failed { error } => {
+            serde_json::json!({
+                "status": "failed",
+                "task_id": task_id,
+                "error": error,
+            })
+        }
+        status => serde_json::json!({
+            "status": status.to_string(),
+            "task_id": task_id,
+        }),
+    }
 }
 
 // ── POST /media/music ───────────────────────────────────────────────────
@@ -506,4 +523,35 @@ pub async fn list_media_providers(State(state): State<Arc<AppState>>) -> impl In
     Json(serde_json::json!({
         "providers": providers,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::video_task_status_json;
+    use librefang_types::media::MediaTaskStatus;
+
+    #[test]
+    fn video_task_status_json_flattens_active_status() {
+        assert_eq!(
+            video_task_status_json(MediaTaskStatus::Processing, "task-1"),
+            serde_json::json!({"status": "processing", "task_id": "task-1"}),
+        );
+    }
+
+    #[test]
+    fn video_task_status_json_flattens_failure_error() {
+        assert_eq!(
+            video_task_status_json(
+                MediaTaskStatus::Failed {
+                    error: "provider failed".to_string(),
+                },
+                "task-2",
+            ),
+            serde_json::json!({
+                "status": "failed",
+                "task_id": "task-2",
+                "error": "provider failed",
+            }),
+        );
+    }
 }

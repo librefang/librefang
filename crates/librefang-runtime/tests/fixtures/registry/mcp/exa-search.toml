@@ -5,6 +5,12 @@ category = "ai"
 icon = "lucide:search"
 tags = ["search", "web", "ai", "neural", "semantic", "information-retrieval"]
 
+setup_instructions = """
+1. Go to https://dashboard.exa.ai/ and create an account or sign in.
+2. Navigate to API Keys (https://dashboard.exa.ai/api-keys) and generate a new key.
+3. Paste the API key into the EXA_API_KEY field above.
+"""
+
 [transport]
 type = "stdio"
 command = "npx"
@@ -20,13 +26,6 @@ get_url = "https://dashboard.exa.ai/api-keys"
 [health_check]
 interval_secs = 60
 unhealthy_threshold = 3
-
-setup_instructions = """
-1. Go to https://dashboard.exa.ai/ and create an account or sign in.
-2. Navigate to API Keys (https://dashboard.exa.ai/api-keys) and generate a new key.
-3. Paste the API key into the EXA_API_KEY field above.
-"""
-
 
 [i18n.zh]
 name = "Exa Search"

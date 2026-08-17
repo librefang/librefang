@@ -81,6 +81,22 @@ async fn json_request(
     (status, value)
 }
 
+async fn assert_pollable_run_id(h: &Harness, body: &serde_json::Value) {
+    let run_id = body["run_id"]
+        .as_str()
+        .expect("202 workflow response must include run_id");
+    uuid::Uuid::parse_str(run_id).expect("run_id must be a UUID");
+
+    let path = format!("/api/workflows/runs/{run_id}");
+    let (status, run) = json_request(h, Method::GET, &path, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "run_id must be immediately pollable"
+    );
+    assert_eq!(run["id"], run_id);
+}
+
 /// Create a minimal 1-step workflow via the HTTP API and return its id string.
 async fn create_workflow(h: &Harness) -> String {
     let agent_id = uuid::Uuid::new_v4().to_string();
@@ -608,6 +624,9 @@ async fn post_run_wait_true_with_short_timeout_does_not_hang() {
         ),
         "unexpected status from short-timeout run: {status} {body:?}"
     );
+    if status == StatusCode::ACCEPTED {
+        assert_pollable_run_id(&h, &body).await;
+    }
 }
 
 /// POST /run with ?wait=true&timeout_ms=0 — `tokio::time::timeout` polls
@@ -649,4 +668,7 @@ async fn post_run_wait_true_with_zero_timeout_does_not_return_ok() {
         "timeout_ms=0 must not return 200 OK (workflow cannot complete in zero ms); \
          got: {status} {body:?}"
     );
+    if status == StatusCode::ACCEPTED {
+        assert_pollable_run_id(&h, &body).await;
+    }
 }

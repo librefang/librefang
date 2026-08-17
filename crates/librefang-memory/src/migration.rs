@@ -237,9 +237,9 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // already has its row.
     let final_version = get_schema_version(conn)?;
     let mut backfilled: u32 = 0;
-    let mut backfill_failed = false;
+    let backfill_tx = conn.unchecked_transaction()?;
     for v in 1..=final_version {
-        let exists: i64 = match conn.query_row(
+        let exists: i64 = match backfill_tx.query_row(
             "SELECT COUNT(*) FROM migrations WHERE version = ?1",
             [v],
             |row| row.get(0),
@@ -251,12 +251,11 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
                     error = %e,
                     "Migration audit query failed; cannot verify drift for this version"
                 );
-                backfill_failed = true;
-                break;
+                return Err(e);
             }
         };
         if exists == 0 {
-            if let Err(e) = conn.execute(
+            if let Err(e) = backfill_tx.execute(
                 "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
                  VALUES (?1, datetime('now'), 'audit-row backfill (#3538)')",
                 [v],
@@ -266,13 +265,13 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
                     error = %e,
                     "Migration audit backfill failed for this version"
                 );
-                backfill_failed = true;
-                break;
+                return Err(e);
             }
             backfilled += 1;
         }
     }
-    if backfilled > 0 && !backfill_failed {
+    backfill_tx.commit()?;
+    if backfilled > 0 {
         tracing::warn!(
             user_version = final_version,
             backfilled,
@@ -2197,6 +2196,60 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM migrations", [], |row| row.get(0))
             .unwrap();
         assert_eq!(before, after, "second backfill must be a no-op");
+    }
+
+    #[test]
+    fn test_run_migrations_fails_and_rolls_back_when_audit_backfill_fails() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        for version in [13u32, 17u32] {
+            conn.execute("DELETE FROM migrations WHERE version = ?1", [version])
+                .unwrap();
+        }
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER fail_audit_backfill
+             BEFORE INSERT ON migrations
+             WHEN NEW.version = 17
+             BEGIN
+                 SELECT RAISE(ABORT, 'forced audit backfill failure');
+             END;",
+        )
+        .unwrap();
+
+        let error = run_migrations(&conn)
+            .expect_err("an audit-row insert failure must fail the migration run");
+
+        assert!(
+            error.to_string().contains("forced audit backfill failure"),
+            "unexpected error: {error}"
+        );
+        for version in [13u32, 17u32] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM migrations WHERE version = ?1",
+                    [version],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                count, 0,
+                "failed backfill must roll back every audit row from the transaction"
+            );
+        }
+
+        conn.execute_batch("DROP TRIGGER fail_audit_backfill;")
+            .unwrap();
+        run_migrations(&conn).expect("a later healthy run must heal the audit drift");
+        for version in [13u32, 17u32] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM migrations WHERE version = ?1",
+                    [version],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "retry must restore migration v{version}");
+        }
     }
 
     /// Regression for #4874: a DB that crossed `migrate_v17` on a binary
