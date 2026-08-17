@@ -184,6 +184,32 @@ describe("agentManifest validator", () => {
     expect(validateManifestForm(form)).toContain("schedule.cron");
   });
 
+  it.each(["", "0", "-1", "1.5", "invalid", "9223372036854775808"])(
+    "requires a positive TOML integer for continuous schedules: %j",
+    (check_interval_secs) => {
+      const form = emptyManifestForm();
+      form.name = "agent";
+      form.model.provider = "openai";
+      form.model.model = "gpt-4o";
+      form.schedule = { mode: "continuous", check_interval_secs };
+
+      expect(validateManifestForm(form)).toContain("schedule.check_interval_secs");
+    },
+  );
+
+  it("accepts the largest TOML integer for a continuous schedule", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.schedule = {
+      mode: "continuous",
+      check_interval_secs: "9223372036854775807",
+    };
+
+    expect(validateManifestForm(form)).not.toContain("schedule.check_interval_secs");
+  });
+
   it.each(["", "{not-json"])(
     "requires valid JSON for json_schema response format: %j",
     (schema) => {
@@ -265,6 +291,34 @@ describe("agentManifest validator", () => {
 });
 
 describe("agentManifest parser", () => {
+  it("assigns deterministic parse-local list ids", () => {
+    const source = `name = "a"
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+
+[[fallback_models]]
+provider = "qwen"
+model = "qwen-3.6"
+
+[[context_injection]]
+name = "rules"
+content = "Be concise"
+`;
+
+    const first = parseManifestToml(source);
+    const second = parseManifestToml(source);
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+
+    expect(first.form.fallback_models[0]._uid).toBe("parsed-1");
+    expect(first.form.context_injection[0]._uid).toBe("parsed-2");
+    expect(second.form.fallback_models[0]._uid).toBe("parsed-1");
+    expect(second.form.context_injection[0]._uid).toBe("parsed-2");
+  });
+
   it("parses the minimum viable manifest", () => {
     const result = parseManifestToml(
       'name = "researcher"\nmodule = "builtin:chat"\n\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\n',
@@ -751,7 +805,7 @@ params = { region = "us" }
     if (!reparsed.ok) return;
 
     // The form state and extras should match exactly after a full round-trip.
-    // _uid is an ephemeral React key, regenerated on each parse, so strip it.
+    // _uid is an ephemeral React key rather than manifest data, so strip it.
     const stripUids = <
       T extends Record<string, unknown> & { _uid?: string },
     >(items: T[]): Omit<T, "_uid">[] =>

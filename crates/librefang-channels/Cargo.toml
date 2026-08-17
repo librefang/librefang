@@ -57,6 +57,9 @@ rustls = { workspace = true }
 # behaviour. Same crate the dashboard SPA bundle uses
 # (`librefang-api` dep, version pinned at the workspace level).
 include_dir = "0.7"
+# Serializes extraction of one embedded SDK hash across daemon processes.
+# The lock is advisory and released automatically when the file handle drops.
+fs2 = "0.4"
 # Content hash of the embedded SDK tree — drives the
 # `<home>/sidecar-python/<hash>/` directory name so a daemon upgrade
 # extracts to a fresh subdirectory. The wider `librefang-channels`

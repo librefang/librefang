@@ -5,6 +5,12 @@ category = "communication"
 icon = "lucide:gamepad-2"
 tags = ["chat", "messaging", "community", "gaming", "voice"]
 
+setup_instructions = """
+1. Go to the Discord Developer Portal (https://discord.com/developers/applications) and create a new application.
+2. Navigate to the 'Bot' section, click 'Add Bot', and copy the bot token.
+3. Invite the bot to your server using the OAuth2 URL generator with the required permissions, then paste the token into the DISCORD_BOT_TOKEN field above.
+"""
+
 [transport]
 type = "stdio"
 command = "npx"
@@ -20,13 +26,6 @@ get_url = "https://discord.com/developers/applications"
 [health_check]
 interval_secs = 60
 unhealthy_threshold = 3
-
-setup_instructions = """
-1. Go to the Discord Developer Portal (https://discord.com/developers/applications) and create a new application.
-2. Navigate to the 'Bot' section, click 'Add Bot', and copy the bot token.
-3. Invite the bot to your server using the OAuth2 URL generator with the required permissions, then paste the token into the DISCORD_BOT_TOKEN field above.
-"""
-
 
 [i18n.zh]
 name = "Discord"
