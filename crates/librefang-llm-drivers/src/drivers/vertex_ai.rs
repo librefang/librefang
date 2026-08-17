@@ -75,6 +75,16 @@ impl TokenManager {
         Ok(token.access_token)
     }
 
+    fn invalidate(&mut self, rejected_token: &str) {
+        if self
+            .cached
+            .as_ref()
+            .is_some_and(|cached| cached.access_token == rejected_token)
+        {
+            self.cached = None;
+        }
+    }
+
     /// Exchange a service account JWT assertion for an access token.
     async fn token_from_service_account(
         sa_json: &serde_json::Value,
@@ -263,6 +273,11 @@ impl VertexAiDriver {
             base_url_override: Some(base_url),
             max_retries: 3,
         }
+    }
+
+    async fn authentication_error(&self, rejected_token: &str, response_body: &str) -> LlmError {
+        self.token_manager.write().await.invalidate(rejected_token);
+        LlmError::AuthenticationFailed(super::gemini::parse_gemini_error(response_body))
     }
 
     /// Build the full endpoint URL for a model.
@@ -523,9 +538,7 @@ impl LlmDriver for VertexAiDriver {
                 continue;
             }
             if status.as_u16() == 401 || status.as_u16() == 403 {
-                return Err(LlmError::AuthenticationFailed(
-                    super::gemini::parse_gemini_error(&resp_body),
-                ));
+                return Err(self.authentication_error(&token, &resp_body).await);
             }
             if status.as_u16() == 404 {
                 return Err(LlmError::ModelNotFound(super::gemini::parse_gemini_error(
@@ -630,9 +643,7 @@ impl LlmDriver for VertexAiDriver {
                 continue;
             }
             if status.as_u16() == 401 || status.as_u16() == 403 {
-                return Err(LlmError::AuthenticationFailed(
-                    super::gemini::parse_gemini_error(&resp_body),
-                ));
+                return Err(self.authentication_error(&token, &resp_body).await);
             }
             if status.as_u16() == 404 {
                 return Err(LlmError::ModelNotFound(super::gemini::parse_gemini_error(
@@ -658,6 +669,47 @@ impl LlmDriver for VertexAiDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn authentication_error_invalidates_rejected_cached_token() {
+        let driver = VertexAiDriver::new_for_test(
+            "rejected-token".to_string(),
+            "http://unused.invalid".to_string(),
+        );
+        let token = driver
+            .token_manager
+            .write()
+            .await
+            .get_token()
+            .await
+            .expect("static token");
+
+        let error = driver
+            .authentication_error(&token, r#"{"error":{"message":"revoked"}}"#)
+            .await;
+
+        assert!(matches!(error, LlmError::AuthenticationFailed(_)));
+        assert!(driver.token_manager.read().await.cached.is_none());
+    }
+
+    #[test]
+    fn invalidation_preserves_a_concurrently_refreshed_token() {
+        let mut manager = TokenManager::new(CredentialSource::StaticToken("unused".to_string()));
+        manager.cached = Some(CachedToken {
+            access_token: "new-token".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        });
+
+        manager.invalidate("old-token");
+
+        assert_eq!(
+            manager
+                .cached
+                .as_ref()
+                .map(|token| token.access_token.as_str()),
+            Some("new-token")
+        );
+    }
 
     #[test]
     fn service_account_jwt_uses_rs256_and_verifies_with_public_key() {

@@ -12,6 +12,7 @@
 use super::*;
 use crate::mcp;
 use crate::web_search::WebToolsContext;
+use librefang_kernel_handle::KernelOpError;
 use librefang_skills::registry::SkillRegistry;
 use librefang_types::taint::TaintSink;
 use librefang_types::tool::{ToolDefinition, ToolResult};
@@ -301,7 +302,7 @@ pub async fn execute_tool_raw(
                     let path = std::path::PathBuf::from(path_str);
                     let line = input["line"].as_u64().and_then(|v| u32::try_from(v).ok());
                     let limit = input["limit"].as_u64().and_then(|v| u32::try_from(v).ok());
-                    return match client.read_text_file(path.clone(), line, limit).await {
+                    match client.read_text_file(path.clone(), line, limit).await {
                         Ok(content) => {
                             // #4971: dedup repeated reads of the same buffer.
                             // Only applies when no slicing args were supplied —
@@ -313,13 +314,18 @@ pub async fn execute_tool_raw(
                             } else {
                                 content
                             };
-                            ToolResult::ok(tool_use_id.to_string(), final_content)
+                            return ToolResult::ok(tool_use_id.to_string(), final_content);
                         }
-                        Err(e) => ToolResult::error(
-                            tool_use_id.to_string(),
-                            format!("ACP fs/read_text_file failed: {e}"),
-                        ),
-                    };
+                        Err(KernelOpError::Unavailable(reason)) => {
+                            debug!(%reason, "ACP file read unavailable; falling back to local filesystem");
+                        }
+                        Err(e) => {
+                            return ToolResult::error(
+                                tool_use_id.to_string(),
+                                format!("ACP fs/read_text_file failed: {e}"),
+                            );
+                        }
+                    }
                 }
             }
             let extra_refs: Vec<&Path> = allowed.iter().map(|p| p.as_path()).collect();
@@ -390,16 +396,23 @@ pub async fn execute_tool_raw(
                         );
                     };
                     let path = std::path::PathBuf::from(path_str);
-                    return match client.write_text_file(path, content.to_string()).await {
-                        Ok(()) => ToolResult::ok(
-                            tool_use_id.to_string(),
-                            format!("Wrote {path_str} via editor"),
-                        ),
-                        Err(e) => ToolResult::error(
-                            tool_use_id.to_string(),
-                            format!("ACP fs/write_text_file failed: {e}"),
-                        ),
-                    };
+                    match client.write_text_file(path, content.to_string()).await {
+                        Ok(()) => {
+                            return ToolResult::ok(
+                                tool_use_id.to_string(),
+                                format!("Wrote {path_str} via editor"),
+                            );
+                        }
+                        Err(KernelOpError::Unavailable(reason)) => {
+                            debug!(%reason, "ACP file write unavailable; falling back to local filesystem");
+                        }
+                        Err(e) => {
+                            return ToolResult::error(
+                                tool_use_id.to_string(),
+                                format!("ACP fs/write_text_file failed: {e}"),
+                            );
+                        }
+                    }
                 }
             }
             let extra_refs: Vec<&Path> = writable.iter().map(|p| p.as_path()).collect();
