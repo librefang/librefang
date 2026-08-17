@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { Edge, Node } from "@xyflow/react";
-import { removeEdgeById, removeNodeAndCascadeEdges } from "./canvas";
+import {
+  parseCanvasImport,
+  removeEdgeById,
+  removeNodeAndCascadeEdges,
+  resolveDependencyIds,
+  resolveDependencyNames,
+} from "./canvas";
 
 type N = Node<{ label: string }>;
 type E = Edge;
@@ -111,5 +117,131 @@ describe("removeEdgeById", () => {
     const edges = [mkEdge("e1", "a", "b")];
 
     expect(removeEdgeById(edges, "missing")).toBe(edges);
+  });
+});
+
+describe("parseCanvasImport", () => {
+  it("accepts a complete exported canvas", () => {
+    const imported = parseCanvasImport({
+      nodes: [mkNode("a"), mkNode("b")],
+      edges: [mkEdge("e1", "a", "b")],
+      name: "Pipeline",
+      description: "Imported workflow",
+    });
+
+    expect(imported.nodes.map((node) => node.id)).toEqual(["a", "b"]);
+    expect(imported.edges.map((edge) => edge.id)).toEqual(["e1"]);
+    expect(imported.name).toBe("Pipeline");
+  });
+
+  it("rejects missing arrays and malformed nodes", () => {
+    expect(() => parseCanvasImport({ nodes: [] })).toThrow();
+    expect(() => parseCanvasImport({
+      nodes: [{ id: "a", position: { x: "0", y: 0 }, data: {} }],
+      edges: [],
+    })).toThrow();
+    expect(() => parseCanvasImport({
+      nodes: [{ id: "a", position: { x: 0, y: 0 }, data: { label: { unsafe: true } } }],
+      edges: [],
+    })).toThrow();
+    expect(() => parseCanvasImport({
+      nodes: [{ id: "a", position: { x: 0, y: 0 }, data: { dependsOn: [42] } }],
+      edges: [],
+    })).toThrow();
+  });
+
+  it("rejects duplicate IDs and orphaned edges", () => {
+    expect(() => parseCanvasImport({ nodes: [mkNode("a"), mkNode("a")], edges: [] })).toThrow();
+    expect(() => parseCanvasImport({
+      nodes: [mkNode("a")],
+      edges: [mkEdge("e1", "a", "missing")],
+    })).toThrow();
+  });
+
+  it("rejects malformed React Flow state and self-references", () => {
+    expect(() => parseCanvasImport({
+      nodes: [{ ...mkNode("a"), hidden: "yes" }],
+      edges: [],
+    })).toThrow();
+    expect(() => parseCanvasImport({
+      nodes: [mkNode("a"), mkNode("b")],
+      edges: [{ ...mkEdge("e1", "a", "b"), data: { _origSource: 42 } }],
+    })).toThrow();
+    expect(() => parseCanvasImport({
+      nodes: [mkNode("a")],
+      edges: [mkEdge("e1", "a", "a")],
+    })).toThrow();
+    expect(() => parseCanvasImport({
+      nodes: [mkNode("a"), mkNode("b")],
+      edges: [{ ...mkEdge("e1", "a", "b"), data: { _origSource: "missing" } }],
+    })).toThrow();
+    expect(() => parseCanvasImport({
+      nodes: [{ ...mkNode("a"), parentId: "missing" }],
+      edges: [],
+    })).toThrow();
+  });
+
+  it("rejects unknown, ambiguous, and self dependency references", () => {
+    expect(() => parseCanvasImport({
+      nodes: [{ ...mkNode("a"), data: { label: "A", dependsOn: ["missing"] } }],
+      edges: [],
+    })).toThrow();
+    expect(() => parseCanvasImport({
+      nodes: [
+        { ...mkNode("a"), data: { label: "Duplicate" } },
+        { ...mkNode("b"), data: { label: "Duplicate" } },
+        { ...mkNode("c"), data: { label: "C", dependsOn: ["Duplicate"] } },
+      ],
+      edges: [],
+    })).toThrow();
+    expect(() => parseCanvasImport({
+      nodes: [{ ...mkNode("a"), data: { label: "A", dependsOn: ["a"] } }],
+      edges: [],
+    })).toThrow();
+  });
+
+  it("migrates valid legacy step dependencies and clears runtime state", () => {
+    const imported = parseCanvasImport({
+      nodes: [
+        { ...mkNode("a"), data: { label: "Collect", agentId: "agent-a", _runState: "done" } },
+        { ...mkNode("b"), data: { label: "Summarize", agentId: "agent-b", dependsOn: ["Collect"] } },
+      ],
+      edges: [],
+    });
+
+    expect(imported.nodes[0].data._runState).toBeUndefined();
+    expect(imported.nodes[1].data.dependsOn).toEqual(["a"]);
+  });
+});
+
+describe("canvas dependency references", () => {
+  const options = [
+    { id: "node-a", label: "Collect" },
+    { id: "node-b", label: "Summarize" },
+  ];
+
+  it("stores current and unambiguous legacy dependencies as node IDs", () => {
+    expect(resolveDependencyIds(["node-a", "Summarize", "missing"], options)).toEqual(["node-a", "node-b"]);
+  });
+
+  it("does not guess when a legacy label is ambiguous", () => {
+    expect(resolveDependencyIds(["Duplicate"], [
+      { id: "node-a", label: "Duplicate" },
+      { id: "node-b", label: "Duplicate" },
+    ])).toEqual([]);
+  });
+
+  it("resolves a stored ID to the node's latest label for the workflow API", () => {
+    expect(resolveDependencyNames(["node-a"], [
+      { id: "node-a", label: "Collect renamed" },
+      options[1],
+    ])).toEqual(["Collect renamed"]);
+  });
+
+  it("does not preserve ambiguous legacy labels when building the workflow API", () => {
+    expect(resolveDependencyNames(["Duplicate"], [
+      { id: "node-a", label: "Duplicate" },
+      { id: "node-b", label: "Duplicate" },
+    ])).toEqual([]);
   });
 });

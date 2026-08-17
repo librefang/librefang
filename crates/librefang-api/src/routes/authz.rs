@@ -52,35 +52,38 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 /// don't blanket-trust an unauthenticated origin even on loopback. To
 /// use this endpoint in a no-auth deployment, configure at least one
 /// user with an admin api_key.
-fn require_admin(state: &AppState, api_user: Option<&AuthenticatedApiUser>) -> Option<Response> {
+fn require_admin(
+    state: &AppState,
+    api_user: Option<&AuthenticatedApiUser>,
+    endpoint: &'static str,
+) -> Option<Response> {
     match api_user {
         Some(u) if u.role >= UserRole::Admin => None,
         Some(u) => {
             state.kernel.audit().record_with_context(
                 "system",
                 librefang_kernel::audit::AuditAction::PermissionDenied,
-                format!("authz/effective endpoint denied for role {}", u.role),
+                format!("{endpoint} endpoint denied for role {}", u.role),
                 "denied",
                 Some(u.user_id),
                 Some("api".to_string()),
             );
             Some(
-                ApiErrorResponse::forbidden("Admin role required for effective-permissions access")
-                    .into_response(),
+                ApiErrorResponse::forbidden("Admin role required for authz access").into_response(),
             )
         }
         None => {
             state.kernel.audit().record_with_context(
                 "system",
                 librefang_kernel::audit::AuditAction::PermissionDenied,
-                "authz/effective endpoint denied for anonymous caller",
+                format!("{endpoint} endpoint denied for anonymous caller"),
                 "denied",
                 None,
                 Some("api".to_string()),
             );
             Some(
                 ApiErrorResponse::forbidden(
-                    "Authenticated Admin role required for effective-permissions access \
+                    "Authenticated Admin role required for authz access \
                      (configure an admin api_key)",
                 )
                 .into_response(),
@@ -115,7 +118,7 @@ pub async fn effective_permissions(
     api_user: Option<axum::Extension<AuthenticatedApiUser>>,
 ) -> Response {
     let api_user_ref = api_user.as_ref().map(|e| &e.0);
-    if let Some(deny) = require_admin(&state, api_user_ref) {
+    if let Some(deny) = require_admin(&state, api_user_ref, "authz/effective") {
         return deny;
     }
 
@@ -228,7 +231,7 @@ pub async fn check(
     api_user: Option<axum::Extension<AuthenticatedApiUser>>,
 ) -> Response {
     let api_user_ref = api_user.as_ref().map(|e| &e.0);
-    if let Some(deny) = require_admin(&state, api_user_ref) {
+    if let Some(deny) = require_admin(&state, api_user_ref, "authz/check") {
         return deny;
     }
 
@@ -239,7 +242,10 @@ pub async fn check(
 
     // Bail out 404 BEFORE asking the gate, so an unknown user isn't
     // silently returned as the guest decision (which would mask a
-    // misconfigured channel binding from the operator).
+    // misconfigured channel binding from the operator). This check is
+    // load-bearing: `UserId::from_name` always returns a UUID after parse
+    // failure, so resolving the identifier above does not prove that the
+    // requested user is configured.
     let auth = state.kernel.auth_manager();
     if auth.effective_permissions(user_id).is_none() {
         return ApiErrorResponse::not_found(format!(
