@@ -33,9 +33,10 @@ impl WikiAccess for WikiHandle {
         match vault.get(topic) {
             Ok(page) => serde_json::to_value(&page)
                 .map_err(|e| KernelOpError::Internal(format!("Wiki get serialize: {e}"))),
-            Err(WikiError::NotFound(_)) => Err(KernelOpError::Internal(format!(
-                "wiki topic `{topic}` not found"
-            ))),
+            Err(WikiError::NotFound(_)) => Err(KernelOpError::ResourceNotFound {
+                kind: "wiki topic".to_string(),
+                id: topic.to_string(),
+            }),
             Err(err) => Err(KernelOpError::Internal(format!("Wiki get failed: {err}"))),
         }
     }
@@ -71,7 +72,7 @@ impl WikiAccess for WikiHandle {
         match vault.write(topic, body, prov, force) {
             Ok(outcome) => serde_json::to_value(&outcome)
                 .map_err(|e| KernelOpError::Internal(format!("Wiki write serialize: {e}"))),
-            Err(WikiError::HandEditConflict { topic }) => Err(KernelOpError::Internal(format!(
+            Err(WikiError::HandEditConflict { topic }) => Err(KernelOpError::Conflict(format!(
                 "wiki page `{topic}` was edited externally; re-read the file or pass force=true"
             ))),
             Err(WikiError::InvalidTopic { topic, reason }) => Err(KernelOpError::InvalidInput(
@@ -111,6 +112,46 @@ fn disabled_handle_returns_per_method_unavailable() {
     match handle.wiki_write("x", "y", serde_json::json!({}), false) {
         Err(KernelOpError::Unavailable(c)) if c == "wiki_write" => {}
         other => panic!("expected Unavailable(\"wiki_write\"), got {other:?}"),
+    }
+}
+
+#[test]
+fn missing_topic_preserves_resource_not_found() {
+    let dir = TempDir::new().unwrap();
+    let handle = vault_handle(&dir);
+
+    match handle.wiki_get("missing") {
+        Err(KernelOpError::ResourceNotFound { kind, id }) => {
+            assert_eq!(kind, "wiki topic");
+            assert_eq!(id, "missing");
+        }
+        other => panic!("expected ResourceNotFound, got {other:?}"),
+    }
+}
+
+#[test]
+fn external_edit_preserves_conflict() {
+    let dir = TempDir::new().unwrap();
+    let handle = vault_handle(&dir);
+    let provenance = || {
+        serde_json::json!({
+            "agent": "contract-test",
+            "at": chrono::Utc::now().to_rfc3339(),
+        })
+    };
+    handle
+        .wiki_write("notes", "original", provenance(), false)
+        .unwrap();
+    let path = dir.path().join("notes.md");
+    let mut content = std::fs::read_to_string(&path).unwrap();
+    content.push_str("\nexternal edit\n");
+    std::fs::write(path, content).unwrap();
+
+    match handle.wiki_write("notes", "replacement", provenance(), false) {
+        Err(KernelOpError::Conflict(message)) => {
+            assert!(message.contains("edited externally"));
+        }
+        other => panic!("expected Conflict, got {other:?}"),
     }
 }
 
