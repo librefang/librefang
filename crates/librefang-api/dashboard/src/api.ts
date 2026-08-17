@@ -909,6 +909,7 @@ export interface MemoryListResponse {
 
 export interface MemoryStatsResponse {
   total?: number;
+  by_agent?: Record<string, number>;
   user_count?: number;
   session_count?: number;
   agent_count?: number;
@@ -3494,6 +3495,7 @@ export async function listMemories(params?: {
   offset?: number;
   limit?: number;
   category?: string;
+  level?: string;
 }): Promise<MemoryListResponse> {
   const offset = Number.isFinite(params?.offset) ? Math.max(0, Math.floor(params?.offset ?? 0)) : 0;
   const limit = Number.isFinite(params?.limit) ? Math.max(1, Math.floor(params?.limit ?? 20)) : 20;
@@ -3501,6 +3503,7 @@ export async function listMemories(params?: {
   query.set("offset", String(offset));
   query.set("limit", String(limit));
   if (params?.category) query.set("category", params.category);
+  if (params?.level) query.set("level", params.level);
 
   const path = params?.agentId
     ? `/api/memory/agents/${encodeURIComponent(params.agentId)}?${query.toString()}`
@@ -3511,12 +3514,14 @@ export async function listMemories(params?: {
 export async function searchMemories(params: {
   query: string;
   agentId?: string;
+  level?: string;
   limit?: number;
 }): Promise<MemoryItem[]> {
   const limit = Number.isFinite(params.limit) ? Math.max(1, Math.floor(params.limit ?? 20)) : 20;
   const query = new URLSearchParams();
   query.set("q", params.query);
   query.set("limit", String(limit));
+  if (params.level) query.set("level", params.level);
 
   const path = params.agentId
     ? `/api/memory/agents/${encodeURIComponent(params.agentId)}/search?${query.toString()}`

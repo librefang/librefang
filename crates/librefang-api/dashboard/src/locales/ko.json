@@ -1325,6 +1325,7 @@
     "add": "추가",
     "filter_all": "모두",
     "showing": "{{count}} / {{total}} 표시 중",
+    "search_result_cap": "첫 50개 일치 항목",
     "no_memories": "아직 메모리가 없습니다",
     "created": "생성됨",
     "config_title": "메모리 구성",

@@ -7708,6 +7708,15 @@
             }
           },
           {
+            "name": "level",
+            "in": "query",
+            "description": "Optional memory level filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "offset",
             "in": "query",
             "description": "Pagination offset (default 0)",
@@ -7738,6 +7747,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid memory level filter"
           }
         }
       },
@@ -7798,6 +7810,15 @@
             }
           },
           {
+            "name": "level",
+            "in": "query",
+            "description": "Optional memory level filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "offset",
             "in": "query",
             "description": "Pagination offset (default 0)",
@@ -7828,6 +7849,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid memory level filter"
           }
         }
       },
@@ -8364,6 +8388,15 @@
             }
           },
           {
+            "name": "level",
+            "in": "query",
+            "description": "Optional memory level filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "Max results (default 10)",
@@ -8384,6 +8417,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid memory level filter"
           }
         }
       }
@@ -8665,6 +8701,15 @@
             }
           },
           {
+            "name": "level",
+            "in": "query",
+            "description": "Optional memory level filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "Max results (default 10)",
@@ -8685,6 +8730,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid memory level filter"
           }
         }
       }

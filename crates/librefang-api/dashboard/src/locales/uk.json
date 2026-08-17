@@ -1325,6 +1325,7 @@
     "add": "Додати",
     "filter_all": "Всі",
     "showing": "Відображено {{count}} / {{total}}",
+    "search_result_cap": "перші 50 збігів",
     "no_memories": "Поки що немає записів пам'яті",
     "created": "Створено",
     "config_title": "Конфігурація пам'яті",

@@ -41,6 +41,7 @@ use axum::http::{Method, Request, StatusCode};
 use librefang_api::server;
 use librefang_kernel::LibreFangKernel;
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
+use librefang_types::memory::{MemoryLevel, ProactiveMemory};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -223,6 +224,75 @@ async fn get_memory_clamps_limit_to_100() {
     assert_eq!(body["offset"], serde_json::json!(42));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn get_memory_rejects_an_unknown_level_filter() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_get("/api/memory?level=unknown"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn search_memory_rejects_an_unknown_level_filter() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+
+    for path in [
+        "/api/memory/search?q=needle&level=unknown",
+        "/api/memory/agents/agent-id/search?q=needle&level=unknown",
+    ] {
+        let resp = harness.app.clone().oneshot(authed_get(path)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "path: {path}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_agent_memory_filters_before_count_and_pagination() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+    let agent_id = librefang_types::agent::AgentId::new();
+    let store = harness
+        ._state
+        .kernel
+        .proactive_memory_store()
+        .expect("kernel should expose proactive memory store");
+    for (content, level) in [
+        ("user-one", MemoryLevel::User),
+        ("session-one", MemoryLevel::Session),
+        ("user-two", MemoryLevel::User),
+    ] {
+        store
+            .add_with_level(
+                &[serde_json::json!({"content": content})],
+                &agent_id.to_string(),
+                level,
+            )
+            .await
+            .unwrap();
+    }
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_get(&format!(
+            "/api/memory/agents/{agent_id}?level=user&offset=1&limit=1"
+        )))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+
+    assert_eq!(body["total"], serde_json::json!(2));
+    assert_eq!(body["offset"], serde_json::json!(1));
+    assert_eq!(body["limit"], serde_json::json!(1));
+    let memories = body["memories"].as_array().expect("memories array");
+    assert_eq!(memories.len(), 1);
+    assert_eq!(memories[0]["level"], serde_json::json!("user"));
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/memory/stats
 // ---------------------------------------------------------------------------
@@ -249,6 +319,11 @@ async fn get_memory_stats_returns_200_with_proactive_enabled_flag() {
         body["proactive_enabled"],
         serde_json::Value::Bool(true),
         "expected proactive_enabled merged into stats, got: {body}"
+    );
+    assert_eq!(
+        body["by_agent"],
+        serde_json::json!({}),
+        "empty fixtures should expose an empty grouped count map"
     );
 }
 

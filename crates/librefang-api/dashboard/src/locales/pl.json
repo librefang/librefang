@@ -1325,6 +1325,7 @@
     "add": "Dodaj",
     "filter_all": "Wszystkie",
     "showing": "Wyświetlanie {{count}} / {{total}}",
+    "search_result_cap": "pierwsze 50 wyników",
     "no_memories": "Brak pamięci",
     "created": "Utworzono",
     "config_title": "Konfiguracja pamięci",

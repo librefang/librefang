@@ -1325,6 +1325,7 @@
     "add": "添加",
     "filter_all": "全部",
     "showing": "显示 {{count}} / {{total}} 条",
+    "search_result_cap": "前 50 个匹配项",
     "no_memories": "暂无记忆",
     "created": "创建于",
     "config_title": "记忆配置",
