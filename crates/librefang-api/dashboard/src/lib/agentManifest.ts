@@ -376,6 +376,11 @@ const parseUnsignedTomlInteger = (raw: string): string | null => {
   return value.toString();
 };
 
+const isPositiveUnsignedTomlInteger = (raw: string): boolean => {
+  const value = parseUnsignedTomlInteger(raw);
+  return value !== null && BigInt(value) > 0n;
+};
+
 const parseFloatish = (raw: string): number | null => {
   const trimmed = raw.trim();
   if (!trimmed) return null;
@@ -810,6 +815,12 @@ export const validateManifestForm = (form: ManifestFormState): string[] => {
   if (form.schedule.mode === "periodic" && !form.schedule.cron.trim()) {
     errors.push("schedule.cron");
   }
+  if (
+    form.schedule.mode === "continuous" &&
+    !isPositiveUnsignedTomlInteger(form.schedule.check_interval_secs)
+  ) {
+    errors.push("schedule.check_interval_secs");
+  }
   if (form.response_format.mode === "json_schema") {
     const schema = form.response_format.schema.trim();
     if (!schema || parseSupportedJsonSchema(schema) === undefined) {
@@ -884,6 +895,8 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
 
   const form = emptyManifestForm();
   const extras = emptyManifestExtras();
+  let parsedUid = 0;
+  const generateParsedUid = (): string => `parsed-${++parsedUid}`;
 
   form.name = asString(parsed.name);
   form.version = asString(parsed.version) || form.version;
@@ -949,7 +962,7 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   // so e.g. Qwen's enable_memory survives a TOML→Form→TOML round-trip.
   if (Array.isArray(parsed.fallback_models)) {
     form.fallback_models = parsed.fallback_models.filter(isTomlTable).map((fb) => ({
-      _uid: generateUid(),
+      _uid: generateParsedUid(),
       provider: asString(fb.provider),
       model: asString(fb.model),
       api_key_env: asString(fb.api_key_env),
@@ -1019,7 +1032,7 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
     form.context_injection = parsed.context_injection
       .filter(isTomlTable)
       .map((ci) => ({
-        _uid: generateUid(),
+        _uid: generateParsedUid(),
         name: asString(ci.name),
         content: asString(ci.content),
         position: asEnum(ci.position, INJECTION_POSITIONS, "system"),

@@ -121,6 +121,23 @@ async fn plugin_bus_first_lag_burst_advances_warn_timestamp() {
 }
 
 #[tokio::test]
+async fn plugin_bus_drop_warning_lock_recovers_after_held_lock_panic() {
+    let bus = PluginEventBus::new(8);
+    let before = *bus.last_drop_warn.lock().unwrap();
+    let _ = std::panic::catch_unwind(|| {
+        let _guard = bus.last_drop_warn.lock().unwrap();
+        panic!("poison plugin bus drop-warning lock");
+    });
+    assert!(bus.last_drop_warn.is_poisoned());
+
+    bus.record_consumer_lag(2, "poison_recovery_test");
+
+    assert_eq!(bus.dropped_count(), 2);
+    assert!(!bus.last_drop_warn.is_poisoned());
+    assert!(*bus.last_drop_warn.lock().unwrap() > before);
+}
+
+#[tokio::test]
 async fn test_ingest_stable_prefix_mode() {
     let config = ContextEngineConfig {
         stable_prefix_mode: true,
