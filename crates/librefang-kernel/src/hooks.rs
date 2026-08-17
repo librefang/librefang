@@ -11,7 +11,10 @@
 //! events:
 //!   - agent:end
 //!   - session:start
-//! command: /home/user/.librefang/hooks/my-hook/run.sh
+//! command: /home/user/my hooks/run.sh
+//! args:
+//!   - --message
+//!   - "agent finished"
 //! ```
 //!
 //! ## Wildcard matching
@@ -130,8 +133,18 @@ pub struct HookManifest {
     pub name: String,
     /// Event patterns this hook subscribes to. Supports wildcards.
     pub events: Vec<String>,
-    /// Executable or shell command to invoke when the hook fires.
+    /// Executable to invoke when the hook fires.
+    ///
+    /// For backward compatibility, this is split on whitespace when `args` is
+    /// omitted. Set `args` (including an empty list) to treat this value as an
+    /// exact executable path, including any spaces.
     pub command: String,
+    /// Optional argument vector passed verbatim to the executable.
+    ///
+    /// Prefer this over embedding arguments in `command`; individual entries
+    /// may contain whitespace without quoting or shell parsing.
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
     /// Optional description (informational only).
     #[serde(default)]
     pub description: String,
@@ -278,6 +291,7 @@ impl ExternalHookSystem {
             }
 
             let command = loaded.manifest.command.clone();
+            let command_args = loaded.manifest.args.clone();
             let hook_name = loaded.manifest.name.clone();
             let hook_dir = loaded.dir.clone();
             let ev = event_str.clone();
@@ -287,7 +301,15 @@ impl ExternalHookSystem {
             // thread so the caller is never blocked (fire-and-forget in both paths).
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
-                    Self::run_hook(&hook_name, &ev, &command, &hook_dir, &payload).await;
+                    Self::run_hook(
+                        &hook_name,
+                        &ev,
+                        &command,
+                        command_args.as_deref(),
+                        &hook_dir,
+                        &payload,
+                    )
+                    .await;
                 });
             } else {
                 // No runtime active (e.g. called from a sync kernel API).
@@ -299,7 +321,12 @@ impl ExternalHookSystem {
                         .build()
                     {
                         rt.block_on(Self::run_hook(
-                            &hook_name, &ev, &command, &hook_dir, &payload,
+                            &hook_name,
+                            &ev,
+                            &command,
+                            command_args.as_deref(),
+                            &hook_dir,
+                            &payload,
                         ));
                     } else {
                         warn!(
@@ -317,6 +344,7 @@ impl ExternalHookSystem {
         hook_name: &str,
         ev: &str,
         command: &str,
+        command_args: Option<&[String]>,
         dir: &std::path::Path,
         payload: &str,
     ) {
@@ -339,17 +367,11 @@ impl ExternalHookSystem {
             "Firing external hook"
         );
 
-        // Support commands that include arguments (e.g. `/usr/bin/python3 script.py`).
-        // `Command::new` treats its argument as the binary path verbatim, so a
-        // string like "/usr/bin/python3 script.py" would fail with ENOENT.
-        // Split on whitespace: first token is the binary, the rest are args.
-        let mut parts = command.split_whitespace();
-        let binary = parts.next().unwrap_or(command);
-        let args: Vec<&str> = parts.collect();
+        let (binary, args) = resolve_hook_command(command, command_args);
 
         let result = tokio::time::timeout(
             Duration::from_secs(30),
-            tokio::process::Command::new(binary)
+            tokio::process::Command::new(&binary)
                 .args(&args)
                 .current_dir(dir)
                 .env("HOOK_EVENT", ev)
@@ -406,9 +428,74 @@ impl ExternalHookSystem {
     }
 }
 
+/// Resolve a hook executable and its argument vector.
+///
+/// An explicit `args` field is an opt-in to lossless process arguments: the
+/// executable path and every argument are passed through verbatim. Manifests
+/// without `args` retain the historical whitespace splitting behavior.
+fn resolve_hook_command(command: &str, args: Option<&[String]>) -> (String, Vec<String>) {
+    if let Some(args) = args {
+        return (command.to_owned(), args.to_vec());
+    }
+
+    let mut parts = command.split_whitespace();
+    let binary = parts.next().unwrap_or(command).to_owned();
+    let args = parts.map(str::to_owned).collect();
+    (binary, args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_hook_args_preserve_spaces() {
+        let args = vec!["--message".to_string(), "hello world".to_string()];
+        let (binary, resolved_args) =
+            resolve_hook_command("/home/user/my hooks/run.sh", Some(&args));
+
+        assert_eq!(binary, "/home/user/my hooks/run.sh");
+        assert_eq!(resolved_args, args);
+    }
+
+    #[test]
+    fn omitted_hook_args_preserve_legacy_whitespace_splitting() {
+        let (binary, args) = resolve_hook_command("/usr/bin/python3 script.py --quiet", None);
+
+        assert_eq!(binary, "/usr/bin/python3");
+        assert_eq!(args, ["script.py", "--quiet"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_hook_args_execute_paths_and_arguments_with_spaces() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("hook with spaces.sh");
+        let output = dir.path().join("hook output.txt");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf '%s' \"$1\" > \"hook output.txt\"\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let args = vec!["hello world".to_string()];
+        ExternalHookSystem::run_hook(
+            "space-hook",
+            "agent:end",
+            script.to_str().unwrap(),
+            Some(&args),
+            dir.path(),
+            "{}",
+        )
+        .await;
+
+        assert_eq!(std::fs::read_to_string(output).unwrap(), "hello world");
+    }
 
     #[test]
     fn test_exact_match() {
@@ -486,11 +573,18 @@ events:
   - agent:start
   - agent:end
 command: /usr/bin/env
+args:
+  - --message
+  - "hello world"
 "#;
         std::fs::write(hook_dir.join("HOOK.yaml"), yaml).unwrap();
 
         let system = ExternalHookSystem::load(dir.path().to_path_buf());
         assert_eq!(system.len(), 1);
+        assert_eq!(
+            system.hooks[0].manifest.args.as_deref(),
+            Some(["--message".to_string(), "hello world".to_string()].as_slice())
+        );
     }
 
     #[test]

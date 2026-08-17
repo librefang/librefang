@@ -32,6 +32,19 @@ const BASE_DELAY_MS: u64 = 1_500;
 /// Maximum delay cap in milliseconds.
 const MAX_DELAY_MS: u64 = 30_000;
 
+fn exponential_backoff_with_jitter(attempt: u32) -> u64 {
+    let base = BASE_DELAY_MS.saturating_mul(1u64 << attempt.min(5));
+    let delay_ms = base.min(MAX_DELAY_MS);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    // Wrapping multiplication intentionally mixes the low-resolution clock bits into a cheap process-local jitter value.
+    let mixed = nanos.wrapping_mul(2_654_435_761);
+    let fraction = f64::from(mixed) / f64::from(u32::MAX);
+    delay_ms + (delay_ms as f64 * fraction * 0.25) as u64
+}
+
 // ---------------------------------------------------------------------------
 // API response types (matching actual ClawHub v1 API — verified Feb 2026)
 // ---------------------------------------------------------------------------
@@ -297,30 +310,15 @@ impl ClawHubClient {
         context: &str,
     ) -> Result<reqwest::Response, SkillError> {
         let mut last_status: Option<u16> = None;
+        let mut next_delay_ms: Option<u64> = None;
 
         for attempt in 0..MAX_RETRIES {
-            if attempt > 0 {
-                // Compute delay: use Retry-After from previous response if we
-                // saved it, otherwise exponential backoff with jitter.
-                let base = BASE_DELAY_MS.saturating_mul(1u64 << attempt.min(5));
-                let delay_ms = base.min(MAX_DELAY_MS);
-                // Add light jitter (0-25%) using system clock nanos.
-                let jitter = {
-                    let nanos = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .subsec_nanos();
-                    let frac = (nanos.wrapping_mul(2654435761) as f64) / (u32::MAX as f64);
-                    (delay_ms as f64 * frac * 0.25) as u64
-                };
-                let total = delay_ms + jitter;
+            if let Some(delay_ms) = next_delay_ms.take() {
                 debug!(
                     attempt,
-                    delay_ms = total,
-                    context,
-                    "retrying ClawHub request after rate limit / server error"
+                    delay_ms, context, "retrying ClawHub request after rate limit / server error"
                 );
-                tokio::time::sleep(std::time::Duration::from_millis(total)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }
 
             let result = self
@@ -342,22 +340,12 @@ impl ClawHubClient {
                     if status.as_u16() == 429 || status.is_server_error() {
                         last_status = Some(status.as_u16());
 
-                        // If the server sent Retry-After, respect it (capped).
-                        if let Some(ra) = resp
+                        let retry_after_ms = resp
                             .headers()
                             .get("retry-after")
                             .and_then(|v| v.to_str().ok())
                             .and_then(|v| v.parse::<u64>().ok())
-                        {
-                            let capped = (ra * 1000).min(MAX_DELAY_MS);
-                            if attempt + 1 < MAX_RETRIES {
-                                debug!(
-                                    retry_after_secs = ra,
-                                    "ClawHub sent Retry-After, sleeping {capped}ms"
-                                );
-                                tokio::time::sleep(std::time::Duration::from_millis(capped)).await;
-                            }
-                        }
+                            .map(|seconds| seconds.saturating_mul(1000).min(MAX_DELAY_MS));
 
                         let is_last = attempt + 1 >= MAX_RETRIES;
                         if is_last {
@@ -372,7 +360,10 @@ impl ClawHubClient {
                                 "{context} returned {status} after {MAX_RETRIES} attempts"
                             )));
                         }
-                        // Loop around to retry.
+                        next_delay_ms = Some(
+                            retry_after_ms
+                                .unwrap_or_else(|| exponential_backoff_with_jitter(attempt + 1)),
+                        );
                         continue;
                     }
 
@@ -388,6 +379,7 @@ impl ClawHubClient {
                             "{context} failed after {MAX_RETRIES} attempts: {e}"
                         )));
                     }
+                    next_delay_ms = Some(exponential_backoff_with_jitter(attempt + 1));
                     warn!(attempt, context, error = %e, "ClawHub request failed, will retry");
                 }
             }
@@ -527,15 +519,9 @@ impl ClawHubClient {
     ) -> Result<ClawHubInstallResult, SkillError> {
         validate_slug(slug)?;
 
-        // Step 0: Fetch skill detail to get expected_sha256 (best-effort —
-        // if the registry does not provide it we still install with a warning).
-        let expected_sha256: Option<String> = match self.get_skill(slug).await {
-            Ok(detail) => detail.expected_sha256,
-            Err(e) => {
-                warn!(slug, error = %e, "Could not fetch ClawHub skill detail; proceeding without checksum verification");
-                None
-            }
-        };
+        // Step 0: Fetch skill detail before downloading the archive.
+        // A failed detail request must not silently downgrade a verifiable install into the unverified path.
+        let expected_sha256 = self.get_skill(slug).await?.expected_sha256;
 
         // Use /api/v1/download?slug=... endpoint
         let url = format!("{}/download?slug={}", self.base_url, urlencoded(slug));
@@ -637,11 +623,7 @@ impl ClawHubClient {
             let bytes = bytes.to_vec();
             let slug = slug.to_string();
             tokio::task::spawn_blocking(move || -> Result<bool, SkillError> {
-                // Defensive: clean up if a path collision somehow occurred.
-                if tmp_dir.exists() {
-                    let _ = std::fs::remove_dir_all(&tmp_dir);
-                }
-                std::fs::create_dir_all(&tmp_dir)?;
+                let mut cleanup = prepare_staging_dir(&tmp_dir)?;
 
                 // Detect content type and extract accordingly
                 let content_str = String::from_utf8_lossy(&bytes);
@@ -650,7 +632,7 @@ impl ClawHubClient {
                 if is_skillmd {
                     let skill_md_path = resolve_skill_child_path(&tmp_dir, Path::new("SKILL.md"))?;
                     std::fs::write(skill_md_path, &bytes)?;
-                } else if bytes.len() >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4b {
+                } else if bytes.starts_with(&[0x50, 0x4b, 0x03, 0x04]) {
                     // Zip archive — extract all files
                     let cursor = std::io::Cursor::new(&bytes);
                     match zip::ZipArchive::new(cursor) {
@@ -720,6 +702,7 @@ impl ClawHubClient {
                         resolve_skill_child_path(&tmp_dir, Path::new("package.json"))?;
                     std::fs::write(package_path, &bytes)?;
                 }
+                cleanup.disarm();
                 Ok(is_skillmd)
             })
             .await
@@ -736,6 +719,7 @@ impl ClawHubClient {
             let skill_dir = skill_dir.clone();
             let slug = slug.to_string();
             tokio::task::spawn_blocking(move || -> Result<ClawHubInstallResult, SkillError> {
+                let mut cleanup = StagingCleanup::new(&tmp_dir);
                 let mut all_warnings = Vec::new();
                 let mut tool_translations = Vec::new();
                 let mut is_prompt_only = false;
@@ -757,7 +741,6 @@ impl ClawHubClient {
                             .filter(|warning| warning.severity == WarningSeverity::Critical)
                             .map(|warning| warning.message.clone())
                             .collect::<Vec<_>>();
-                        let _ = std::fs::remove_dir_all(&tmp_dir);
                         return Err(SkillError::SecurityBlocked(format!(
                             "Skill blocked due to prompt injection: {}",
                             critical_msgs.join("; ")
@@ -778,7 +761,6 @@ impl ClawHubClient {
                 } else if openclaw_compat::detect_openclaw_skill(&tmp_dir) {
                     openclaw_compat::convert_openclaw_skill(&tmp_dir)?
                 } else {
-                    let _ = std::fs::remove_dir_all(&tmp_dir);
                     return Err(SkillError::InvalidManifest(
                         "Downloaded content is not a recognized skill format".to_string(),
                     ));
@@ -788,7 +770,6 @@ impl ClawHubClient {
                 openclaw_compat::write_librefang_manifest(&tmp_dir, &manifest)?;
 
                 if let Err(violations) = crate::supply_chain::scan(&tmp_dir) {
-                    let _ = std::fs::remove_dir_all(&tmp_dir);
                     let summary = violations
                         .iter()
                         .map(|violation| violation.to_string())
@@ -799,10 +780,8 @@ impl ClawHubClient {
                     )));
                 }
 
-                if skill_dir.exists() {
-                    std::fs::remove_dir_all(&skill_dir)?;
-                }
-                std::fs::rename(&tmp_dir, &skill_dir)?;
+                promote_staged_skill(&tmp_dir, &skill_dir)?;
+                cleanup.disarm();
 
                 Ok(ClawHubInstallResult {
                     skill_name: manifest.skill.name.clone(),
@@ -884,8 +863,95 @@ fn resolve_skill_child_path(skill_dir: &Path, relative: &Path) -> Result<PathBuf
     Ok(skill_dir.join(relative))
 }
 
+struct StagingCleanup {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl StagingCleanup {
+    fn new(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StagingCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Err(error) = std::fs::remove_dir_all(&self.path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    warn!(path = %self.path.display(), %error, "Could not remove failed skill staging directory");
+                }
+            }
+        }
+    }
+}
+
+fn prepare_staging_dir(path: &Path) -> std::io::Result<StagingCleanup> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let cleanup = StagingCleanup::new(path);
+    std::fs::create_dir_all(path)?;
+    Ok(cleanup)
+}
+
+fn promote_staged_skill(staged: &Path, target: &Path) -> std::io::Result<()> {
+    static PROMOTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = PROMOTION_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let target_exists = match std::fs::symlink_metadata(target) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    if !target_exists {
+        return std::fs::rename(staged, target);
+    }
+
+    static BACKUP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = BACKUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let target_name = target
+        .file_name()
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing target name")
+        })?
+        .to_string_lossy();
+    let backup = target.with_file_name(format!(
+        ".backup-{target_name}-{}-{sequence}",
+        std::process::id()
+    ));
+
+    std::fs::rename(target, &backup)?;
+    match std::fs::rename(staged, target) {
+        Ok(()) => {
+            if let Err(error) = std::fs::remove_dir_all(&backup) {
+                warn!(path = %backup.display(), %error, "Installed skill but could not remove backup directory");
+            }
+            Ok(())
+        }
+        Err(promotion_error) => match std::fs::rename(&backup, target) {
+            Ok(()) => Err(promotion_error),
+            Err(restore_error) => Err(std::io::Error::other(format!(
+                "skill promotion failed: {promotion_error}; restoring prior install from {} failed: {restore_error}",
+                backup.display()
+            ))),
+        },
+    }
+}
+
 /// RFC 3986 percent-encoding for query parameters.
-/// Unreserved characters pass through, space becomes `+`, everything else is `%XX`.
+/// Unreserved characters pass through and every other byte becomes `%XX`.
 fn urlencoded(s: &str) -> String {
     const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
     let mut result = String::with_capacity(s.len() * 3);
@@ -894,7 +960,6 @@ fn urlencoded(s: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 result.push(b as char);
             }
-            b' ' => result.push('+'),
             _ => {
                 result.push('%');
                 result.push(HEX_UPPER[(b >> 4) as usize] as char);
@@ -926,6 +991,22 @@ fn which_check(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn scripted_http_server(responses: Vec<String>) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request).await.unwrap();
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+        });
+        (format!("http://{address}"), task)
+    }
 
     #[test]
     fn test_browse_entry_serde_real_format() {
@@ -1085,7 +1166,7 @@ mod tests {
 
     #[test]
     fn test_urlencoded() {
-        assert_eq!(urlencoded("hello world"), "hello+world");
+        assert_eq!(urlencoded("hello world"), "hello%20world");
         assert_eq!(urlencoded("a&b=c"), "a%26b%3Dc");
         assert_eq!(urlencoded("path/to#frag"), "path%2Fto%23frag");
         // Previously missed characters
@@ -1185,5 +1266,117 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect::<Vec<_>>();
         assert_eq!(entries, vec![std::ffi::OsString::from("safe-skill")]);
+    }
+
+    #[tokio::test]
+    async fn retry_after_replaces_exponential_backoff() {
+        let body = r#"{"results":[]}"#;
+        let responses = vec![
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+        ];
+        let (base_url, server) = scripted_http_server(responses).await;
+        let client = ClawHubClient::with_url(&base_url, PathBuf::new());
+
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), client.search("test", 1))
+                .await
+                .expect("Retry-After: 0 must not be followed by exponential backoff")
+                .unwrap();
+
+        assert!(result.results.is_empty());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn install_fails_closed_when_skill_detail_is_unavailable() {
+        let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let (base_url, server) = scripted_http_server(vec![response.to_string()]).await;
+        let client = ClawHubClient::with_url(&base_url, PathBuf::new());
+        let target = tempfile::tempdir().unwrap();
+
+        let error = client
+            .install("missing-skill", target.path())
+            .await
+            .expect_err("detail failure must stop before an unverified download");
+
+        assert!(matches!(error, SkillError::Network(_)));
+        assert!(std::fs::read_dir(target.path()).unwrap().next().is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn late_conversion_failure_removes_staging_directory() {
+        let target = tempfile::tempdir().unwrap();
+        let client = ClawHubClient::new(PathBuf::new());
+        let malformed = b"---\nname: [unterminated\n---\nbody\n";
+
+        client
+            .install_from_bytes("broken-skill", target.path(), malformed)
+            .await
+            .expect_err("malformed frontmatter must fail conversion");
+
+        assert!(std::fs::read_dir(target.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn failed_skill_promotion_restores_prior_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("missing-staged");
+        let target = dir.path().join("skill");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("version"), "old").unwrap();
+
+        promote_staged_skill(&staged, &target).expect_err("missing staging must fail promotion");
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("version")).unwrap(),
+            "old"
+        );
+        let entries = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![std::ffi::OsString::from("skill")]);
+    }
+
+    #[test]
+    fn successful_skill_promotion_removes_prior_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("staged");
+        let target = dir.path().join("skill");
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::write(staged.join("version"), "new").unwrap();
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("version"), "old").unwrap();
+
+        promote_staged_skill(&staged, &target).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("version")).unwrap(),
+            "new"
+        );
+        let entries = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![std::ffi::OsString::from("skill")]);
+    }
+
+    #[test]
+    fn staging_setup_replaces_a_stale_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("stale"), "old").unwrap();
+
+        let mut cleanup = prepare_staging_dir(&staging).unwrap();
+
+        assert!(staging.is_dir());
+        assert!(!staging.join("stale").exists());
+        cleanup.disarm();
     }
 }

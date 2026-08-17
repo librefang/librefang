@@ -831,15 +831,17 @@ pub async fn inject_message(
                 .with_code("backpressure")
                 .into_response()
         }
-        Err(e) => if e.to_string().contains("not found") {
-            ApiErrorResponse::not_found(e.to_string())
-        } else {
+        Err(crate::error::KernelError::LibreFang(
+            librefang_types::error::LibreFangError::AgentNotFound(_),
+        )) => ApiErrorResponse::not_found("agent not found")
+            .with_code("agent_not_found")
+            .into_response(),
+        Err(e) => {
             // Scrub the catch-all 500 (audit: rusqlite-errors-leak):
             // an inject failure rooted in the memory substrate would
             // otherwise leak SQL detail. Full error logged in scrub.
-            ApiErrorResponse::internal_scrub(&e)
+            ApiErrorResponse::internal_scrub(&e).into_response()
         }
-        .into_response(),
     }
 }
 
@@ -931,13 +933,21 @@ pub async fn push_message(
                 "agent_id": agent_id.to_string(),
             })),
         ),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({
-                "success": false,
-                "detail": e,
-                "agent_id": agent_id.to_string(),
-            })),
-        ),
+        Err(e) => {
+            tracing::warn!(
+                agent_id = %agent_id,
+                channel = %req.channel,
+                error = %e,
+                "Channel adapter rejected proactive message"
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "success": false,
+                    "detail": "Channel adapter rejected the message",
+                    "agent_id": agent_id.to_string(),
+                })),
+            )
+        }
     }
 }
