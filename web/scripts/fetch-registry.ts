@@ -75,11 +75,14 @@ async function responseError(label: string, response: Response): Promise<Error> 
   return new Error(`Failed to fetch ${label}: HTTP ${response.status}${detail}`)
 }
 
-export async function fetchDir(path: string, request: RequestFn = fetchWithRetry): Promise<GHItem[]> {
+export async function fetchDir(
+  path: string,
+  request: RequestFn = fetchWithRetry,
+  allowMissing = false,
+): Promise<GHItem[]> {
   const res = await request(`${API}/${path}`, { headers: HEADERS })
   if (!res.ok) {
-    // 404 is expected for optional categories (skills, mcp may not exist yet).
-    if (res.status === 404) return []
+    if (res.status === 404 && allowMissing) return []
     throw await responseError(path, res)
   }
   const items: GHItem[] = await res.json()
@@ -261,8 +264,8 @@ async function main() {
     fetchDir('workflows'),
     fetchDir('agents'),
     fetchDir('plugins'),
-    fetchDir('skills'),
-    fetchDir('mcp'),
+    fetchDir('skills', fetchWithRetry, true),
+    fetchDir('mcp', fetchWithRetry, true),
   ])
 
   const filter = (items: GHItem[]) => items.filter(f => f.name !== 'README.md')

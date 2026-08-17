@@ -66,14 +66,22 @@ describe('registry requests', () => {
     })).rejects.toMatchObject({ name: 'AbortError' })
   })
 
-  it('keeps optional directory 404s empty but fails with GitHub diagnostics otherwise', async () => {
+  it('keeps only explicitly optional directory 404s empty', async () => {
     const missing = await fetchDir(
       'optional',
       async () => new Response('missing', { status: 404 }),
+      true,
     )
 
     expect(missing).toEqual([])
 
+    await expect(fetchDir(
+      'hands',
+      async () => new Response('missing', { status: 404 }),
+    )).rejects.toThrow('Failed to fetch hands: HTTP 404: missing')
+  })
+
+  it('fails non-404 directory requests with GitHub diagnostics', async () => {
     await expect(fetchDir(
       'mcp',
       async () => new Response('{"message":"API rate limit exceeded"}', { status: 403 }),
