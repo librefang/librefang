@@ -20,10 +20,18 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # Non-actionable submitted reviews still start this workflow before the job
+  # filter skips them. Give those runs a unique group so they cannot cancel an
+  # in-flight approved/changes-requested collector for the same PR.
+  group: pr-review-collector-${{ (github.event.review.state == 'approved' || github.event.review.state == 'changes_requested') && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   collect:
     name: Capture review event
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     # Only the two states the applier acts on need a full collection
     # run; commented/dismissed/pending events are dropped here so we
     # don't churn artifacts.

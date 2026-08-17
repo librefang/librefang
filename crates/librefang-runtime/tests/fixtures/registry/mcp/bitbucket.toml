@@ -5,6 +5,12 @@ category = "devtools"
 icon = "lucide:package"
 tags = ["git", "vcs", "code", "pull-requests", "ci", "atlassian"]
 
+setup_instructions = """
+1. Go to Bitbucket > Personal Settings > App passwords (https://bitbucket.org/account/settings/app-passwords/).
+2. Create an app password with 'Repositories: Read/Write' and 'Pull requests: Read/Write' permissions.
+3. Enter your Bitbucket username and paste the app password into the fields above.
+"""
+
 [transport]
 type = "stdio"
 command = "npx"
@@ -27,13 +33,6 @@ get_url = "https://bitbucket.org/account/settings/app-passwords/"
 [health_check]
 interval_secs = 60
 unhealthy_threshold = 3
-
-setup_instructions = """
-1. Go to Bitbucket > Personal Settings > App passwords (https://bitbucket.org/account/settings/app-passwords/).
-2. Create an app password with 'Repositories: Read/Write' and 'Pull requests: Read/Write' permissions.
-3. Enter your Bitbucket username and paste the app password into the fields above.
-"""
-
 
 [i18n.zh]
 name = "Bitbucket"

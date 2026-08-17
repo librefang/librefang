@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, act } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RuntimePage } from "./RuntimePage";
 import {
@@ -308,6 +308,55 @@ describe("RuntimePage", () => {
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: "runtime.reload_config" }));
     expect(mutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces config reload warnings instead of reporting plain success", () => {
+    let onSuccess: ((data: { status: string; warnings?: string[] }) => void) | undefined;
+    useReloadConfigMock.mockImplementation((options) => {
+      onSuccess = options?.onSuccess as typeof onSuccess;
+      return makeMutation();
+    });
+    renderPage();
+
+    act(() => {
+      onSuccess?.({
+        status: "partial",
+        warnings: ["Channel adapters could not be restarted; see server logs"],
+      });
+    });
+
+    expect(
+      screen.getByText(
+        "runtime.reload_success — Channel adapters could not be restarted; see server logs",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces restart-required reloads as warnings with their reasons", () => {
+    let onSuccess: ((data: {
+      status: string;
+      restart_required?: boolean;
+      restart_reasons?: string[];
+    }) => void) | undefined;
+    useReloadConfigMock.mockImplementation((options) => {
+      onSuccess = options?.onSuccess as typeof onSuccess;
+      return makeMutation();
+    });
+    renderPage();
+
+    act(() => {
+      onSuccess?.({
+        status: "partial",
+        restart_required: true,
+        restart_reasons: ["api_listen changed"],
+      });
+    });
+
+    const notice = screen.getByText(
+      "runtime.reload_success — api_listen changed",
+    );
+    expect(notice).toBeInTheDocument();
+    expect(notice).toHaveClass("text-warning");
   });
 
   it("invokes createBackup mutation when create backup button is clicked", () => {

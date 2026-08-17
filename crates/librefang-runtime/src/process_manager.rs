@@ -76,7 +76,7 @@ async fn collect_output_tail(
 /// A managed persistent process.
 struct ManagedProcess {
     /// stdin writer.
-    stdin: Option<tokio::process::ChildStdin>,
+    stdin: Option<Arc<Mutex<tokio::process::ChildStdin>>>,
     /// Accumulated stdout output.
     stdout_buf: Arc<Mutex<Vec<String>>>,
     /// Accumulated stderr output.
@@ -230,7 +230,7 @@ impl ProcessManager {
         // already exited exposes no pid → no tracking.
         let completion_sink = child.id().and_then(on_spawn);
 
-        let stdin = child.stdin.take();
+        let stdin = child.stdin.take().map(|stdin| Arc::new(Mutex::new(stdin)));
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
@@ -372,25 +372,29 @@ impl ProcessManager {
     /// "not found" so a caller cannot probe or write to another agent's
     /// process via a guessable `proc_N` id.
     pub async fn write(&self, process_id: &str, agent_id: &str, data: &str) -> Result<(), String> {
-        let mut entry = match self.processes.get_mut(process_id) {
+        let entry = match self.processes.get(process_id) {
             Some(e) if e.agent_id == agent_id => e,
             _ => return Err(format!("Process '{}' not found", process_id)),
         };
+        let stdin = entry
+            .stdin
+            .clone()
+            .ok_or_else(|| "Process stdin is closed".to_string())?;
+        drop(entry);
 
-        let proc = entry.value_mut();
-        if let Some(stdin) = &mut proc.stdin {
-            stdin
-                .write_all(data.as_bytes())
-                .await
-                .map_err(|e| format!("Write failed: {}", e))?;
-            stdin
-                .flush()
-                .await
-                .map_err(|e| format!("Flush failed: {}", e))?;
-            Ok(())
-        } else {
-            Err("Process stdin is closed".to_string())
-        }
+        // Serialize writes on the pipe itself. The DashMap guard has already
+        // been released, so slow pipe I/O cannot block unrelated registry
+        // reads, kills, cleanup, or the natural-exit reaper on this shard.
+        let mut stdin = stdin.lock().await;
+        stdin
+            .write_all(data.as_bytes())
+            .await
+            .map_err(|e| format!("Write failed: {}", e))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|e| format!("Flush failed: {}", e))?;
+        Ok(())
     }
 
     /// Read accumulated stdout/stderr (non-blocking drain).
@@ -735,6 +739,40 @@ mod tests {
         // The owner still has full access.
         assert!(pm.read(&id, "owner").await.is_ok());
         pm.kill(&id, "owner").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_stdin_write_does_not_hold_process_registry_guard() {
+        let pm = Arc::new(ProcessManager::new(5));
+        let (cmd, args) = long_running_proc();
+        let (id, _) = pm.start("agent1", cmd, &args, &[], &[]).await.unwrap();
+        let stdin = {
+            let entry = pm.processes.get(&id).expect("registered process");
+            entry.stdin.clone().expect("piped stdin")
+        };
+        let stdin_guard = stdin.lock().await;
+
+        // Poll once while the pipe mutex is held. `write` must reach the
+        // mutex wait only after cloning stdin and dropping its DashMap guard.
+        let mut write = Box::pin(pm.write(&id, "agent1", "data\n"));
+        assert!(matches!(
+            futures::poll!(&mut write),
+            std::task::Poll::Pending
+        ));
+
+        let list_pm = pm.clone();
+        let list = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            tokio::task::spawn_blocking(move || list_pm.list("agent1")),
+        )
+        .await
+        .expect("registry listing must not wait for stdin I/O")
+        .expect("listing task must not panic");
+        assert_eq!(list.len(), 1);
+
+        drop(write);
+        drop(stdin_guard);
+        pm.kill(&id, "agent1").await.unwrap();
     }
 
     /// Test sink that forwards every delivered [`ProcessOutcome`] onto a
