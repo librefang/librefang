@@ -198,6 +198,17 @@ describe('Cloudflare Pages _worker.js — fallback contracts', () => {
     expect(await res.text()).toBe('<!doctype html>');
     expect(res.headers.get('content-security-policy')).toContain("default-src 'self'");
   });
+
+  it('does not mark SPA fallback HTML as an immutable asset', async () => {
+    const env = makeEnv({
+      '/': new Response('<!doctype html>', { status: 200 }),
+    });
+
+    const res = await worker.fetch(req('/assets/missing.js'), env);
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control') ?? '').not.toContain('immutable');
+  });
 });
 
 describe('Cloudflare Pages _worker.js — canonical routes', () => {
@@ -213,6 +224,15 @@ describe('Cloudflare Pages _worker.js — canonical routes', () => {
       expect(env.ASSETS.fetch).not.toHaveBeenCalled();
     },
   );
+
+  it.each(['/pl', '/uk'])('canonicalizes the supported locale root %s', async (path) => {
+    const env = makeEnv({});
+
+    const res = await worker.fetch(req(path), env);
+
+    expect(res.status).toBe(301);
+    expect(res.headers.get('location')).toBe(`https://librefang.ai${path}/`);
+  });
 
   it('collapses repeated trailing slashes on published roots', async () => {
     const env = makeEnv({});

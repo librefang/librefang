@@ -45,7 +45,7 @@ function addHeaders(response, url, cacheAssets = true) {
   });
 }
 
-const LOCALES = ['zh-TW', 'zh', 'ja', 'ko', 'de', 'es'];
+const LOCALES = ['zh-TW', 'zh', 'ja', 'ko', 'de', 'es', 'pl', 'uk'];
 const TRAILING_SLASH_ROOTS = new Set([
   ...LOCALES.map((locale) => '/' + locale),
   '/deploy',
@@ -151,7 +151,7 @@ async function handleRequest(request, env) {
     console.error('SPA fallback index failed with status', indexResponse.status);
     return internalErrorResponse(url);
   }
-  return addHeaders(indexResponse, url);
+  return addHeaders(indexResponse, url, false);
 }
 
 export default {
