@@ -112,6 +112,7 @@ use crate::types::ApiErrorResponse;
 #[derive(serde::Deserialize)]
 pub struct MemorySearchQuery {
     pub q: String,
+    pub level: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: usize,
 }
@@ -120,9 +121,22 @@ fn default_limit() -> usize {
     10
 }
 
+fn parse_memory_level_filter(
+    level: Option<&str>,
+) -> Result<Option<librefang_types::memory::MemoryLevel>, String> {
+    match level {
+        None => Ok(None),
+        Some("user") => Ok(Some(librefang_types::memory::MemoryLevel::User)),
+        Some("session") => Ok(Some(librefang_types::memory::MemoryLevel::Session)),
+        Some("agent") => Ok(Some(librefang_types::memory::MemoryLevel::Agent)),
+        Some(_) => Err("Invalid memory level; expected user, session, or agent".to_string()),
+    }
+}
+
 #[derive(serde::Deserialize)]
 pub struct MemoryListQuery {
     pub category: Option<String>,
+    pub level: Option<String>,
     #[serde(default)]
     pub offset: usize,
     #[serde(default = "default_limit")]
@@ -464,15 +478,24 @@ fn auth_denied_for(
     tag = "proactive-memory",
     params(
         ("q" = String, Query, description = "Search query"),
+        ("level" = Option<String>, Query, description = "Optional memory level filter"),
         ("limit" = usize, Query, description = "Max results (default 10)"),
     ),
-    responses((status = 200, description = "Search results", body = crate::types::JsonObject))
+    responses(
+        (status = 200, description = "Search results", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid memory level filter")
+    )
 )]
 pub async fn memory_search(
     State(state): State<Arc<AppState>>,
     Query(params): Query<MemorySearchQuery>,
     request: axum::extract::Request,
 ) -> impl IntoResponse {
+    let level = match parse_memory_level_filter(params.level.as_deref()) {
+        Ok(level) => level,
+        Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
+    };
+
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -481,7 +504,10 @@ pub async fn memory_search(
     let guard = guard_for_request(&state, request.extensions());
     let limit = params.limit.min(100);
     // Search across ALL agents so the dashboard shows all memories
-    match store.search_all_with_guard(&params.q, limit, &guard).await {
+    match store
+        .search_dashboard_with_guard(&params.q, None, level, limit, &guard)
+        .await
+    {
         Ok(items) => (
             StatusCode::OK,
             Json(serde_json::json!({ "memories": items })),
@@ -508,16 +534,25 @@ pub async fn memory_search(
     tag = "proactive-memory",
     params(
         ("category" = Option<String>, Query, description = "Optional category filter"),
+        ("level" = Option<String>, Query, description = "Optional memory level filter"),
         ("offset" = Option<usize>, Query, description = "Pagination offset (default 0)"),
         ("limit" = Option<usize>, Query, description = "Page size (default 10, max 100)"),
     ),
-    responses((status = 200, description = "Paginated memory list", body = crate::types::JsonObject))
+    responses(
+        (status = 200, description = "Paginated memory list", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid memory level filter")
+    )
 )]
 pub async fn memory_list(
     State(state): State<Arc<AppState>>,
     Query(params): Query<MemoryListQuery>,
     request: axum::extract::Request,
 ) -> impl IntoResponse {
+    let level = match parse_memory_level_filter(params.level.as_deref()) {
+        Ok(level) => level,
+        Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
+    };
+
     // Graceful degradation: proactive memory disabled → empty list, not 500.
     let Some(store) = state.kernel.proactive_memory_store().cloned() else {
         return (
@@ -536,25 +571,30 @@ pub async fn memory_list(
     let limit = params.limit.min(100);
     let offset = params.offset;
 
-    // List across ALL agents so the dashboard shows all memories
+    // List across ALL agents so the dashboard shows all memories. Filtering,
+    // counting, and pagination happen in one SQL snapshot; do not route this
+    // through the recall API, whose candidate cap would hide older rows.
     match store
-        .list_all_with_guard(params.category.as_deref(), &guard)
+        .list_page_with_guard(
+            None,
+            params.category.as_deref(),
+            level,
+            offset,
+            limit,
+            &guard,
+        )
         .await
     {
-        Ok(items) => {
-            let total = items.len();
-            let page: Vec<_> = items.into_iter().skip(offset).take(limit).collect();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "memories": page,
-                    "total": total,
-                    "offset": offset,
-                    "limit": limit,
-                    "proactive_enabled": true,
-                })),
-            )
-        }
+        Ok((page, total)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "memories": page,
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "proactive_enabled": true,
+            })),
+        ),
         Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
             auth_denied(&state, request.extensions(), reason)
         }
@@ -866,10 +906,15 @@ pub async fn memory_stats(State(state): State<Arc<AppState>>) -> impl IntoRespon
         Ok(stats) => {
             let mut value = serde_json::json!(stats);
             if let Some(obj) = value.as_object_mut() {
+                let counts = match store.count_by_agent() {
+                    Ok(counts) => counts,
+                    Err(error) => return internal_error(error),
+                };
                 obj.insert(
                     "proactive_enabled".to_string(),
                     serde_json::Value::Bool(true),
                 );
+                obj.insert("by_agent".to_string(), serde_json::json!(counts));
             }
             (StatusCode::OK, Json(value))
         }
@@ -979,10 +1024,14 @@ pub async fn memory_clear_level(
     params(
         ("id" = String, Path, description = "Agent ID"),
         ("category" = Option<String>, Query, description = "Optional category filter"),
+        ("level" = Option<String>, Query, description = "Optional memory level filter"),
         ("offset" = Option<usize>, Query, description = "Pagination offset (default 0)"),
         ("limit" = Option<usize>, Query, description = "Page size (default 10, max 100)"),
     ),
-    responses((status = 200, description = "Paginated agent memory list", body = crate::types::JsonObject))
+    responses(
+        (status = 200, description = "Paginated agent memory list", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid memory level filter")
+    )
 )]
 pub async fn memory_list_agent(
     State(state): State<Arc<AppState>>,
@@ -990,6 +1039,11 @@ pub async fn memory_list_agent(
     Query(params): Query<MemoryListQuery>,
     request: axum::extract::Request,
 ) -> impl IntoResponse {
+    let level = match parse_memory_level_filter(params.level.as_deref()) {
+        Ok(level) => level,
+        Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
+    };
+
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -1000,22 +1054,25 @@ pub async fn memory_list_agent(
     let offset = params.offset;
 
     match store
-        .list_with_guard(&agent_id, params.category.as_deref(), &guard)
+        .list_page_with_guard(
+            Some(&agent_id),
+            params.category.as_deref(),
+            level,
+            offset,
+            limit,
+            &guard,
+        )
         .await
     {
-        Ok(items) => {
-            let total = items.len();
-            let page: Vec<_> = items.into_iter().skip(offset).take(limit).collect();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "memories": page,
-                    "total": total,
-                    "offset": offset,
-                    "limit": limit,
-                })),
-            )
-        }
+        Ok((page, total)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "memories": page,
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+            })),
+        ),
         Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
             auth_denied(&state, request.extensions(), reason)
         }
@@ -1035,9 +1092,13 @@ pub async fn memory_list_agent(
     params(
         ("id" = String, Path, description = "Agent ID"),
         ("q" = String, Query, description = "Search query"),
+        ("level" = Option<String>, Query, description = "Optional memory level filter"),
         ("limit" = usize, Query, description = "Max results (default 10)"),
     ),
-    responses((status = 200, description = "Search results", body = crate::types::JsonObject))
+    responses(
+        (status = 200, description = "Search results", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid memory level filter")
+    )
 )]
 pub async fn memory_search_agent(
     State(state): State<Arc<AppState>>,
@@ -1045,6 +1106,11 @@ pub async fn memory_search_agent(
     Query(params): Query<MemorySearchQuery>,
     request: axum::extract::Request,
 ) -> impl IntoResponse {
+    let level = match parse_memory_level_filter(params.level.as_deref()) {
+        Ok(level) => level,
+        Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
+    };
+
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -1053,7 +1119,7 @@ pub async fn memory_search_agent(
     let guard = guard_for_request(&state, request.extensions());
     let limit = params.limit.min(100);
     match store
-        .search_with_guard(&params.q, &agent_id, limit, &guard)
+        .search_dashboard_with_guard(&params.q, Some(&agent_id), level, limit, &guard)
         .await
     {
         Ok(items) => (
