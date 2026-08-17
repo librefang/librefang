@@ -1263,6 +1263,8 @@
     "token_limit": "Tokeny/godzinę",
     "alert_threshold": "Próg ostrzegawczy",
     "budget_saved": "Zaktualizowano limity budżetu.",
+    "budget_no_changes": "Przed zapisaniem wprowadź co najmniej jedną prawidłową wartość budżetu.",
+    "budget_bad_input": "{{field}} ma nieprawidłową wartość. Użyj skończonej liczby nieujemnej; limit tokenów musi być całkowity, a próg alertu mieścić się w zakresie 0–1.",
     "total_cost": "Łączny koszt",
     "avg_latency": "Średnie opóźnienie",
     "usage_by_agent": "Zużycie według agenta",
@@ -1323,6 +1325,7 @@
     "add": "Dodaj",
     "filter_all": "Wszystkie",
     "showing": "Wyświetlanie {{count}} / {{total}}",
+    "search_result_cap": "pierwsze 50 wyników",
     "no_memories": "Brak pamięci",
     "created": "Utworzono",
     "config_title": "Konfiguracja pamięci",
@@ -1339,12 +1342,6 @@
     "embedding_section": "Osadzanie",
     "provider": "Dostawca",
     "auto_detect": "Automatyczne wykrywanie",
-    "provider_openai": "OpenAI",
-    "provider_ollama": "Ollama",
-    "provider_vllm": "vLLM",
-    "provider_lmstudio": "LM Studio",
-    "provider_gemini": "Gemini",
-    "provider_minimax": "MiniMax",
     "model": "Model",
     "api_key_env": "Zmienna środowiskowa klucza API",
     "api_key_env_hint": "Lokalni dostawcy (Ollama / vLLM / LM Studio) zazwyczaj nie wymagają klucza — pozostaw puste.",
@@ -3670,7 +3667,6 @@
       "not_set": "Nie ustawiono"
     },
     "errors": {
-      "empty_entry": "{{field}} zawiera pusty wpis",
       "duplicate_entry": "{{field}} zawiera zduplikowany wpis '{{item}}'",
       "writable_not_subset": "memory_access.writable_namespaces['{{ns}}'] nie znajduje się w readable_namespaces (zapisywalne muszą być podzbiorem odczytywalnych)"
     },
@@ -3884,6 +3880,7 @@
     "error_disabled_body": "Włącz parowanie w <a>Konfiguracja → Bezpieczeństwo</a> (<code>pairing.enabled = true</code>).",
     "error_generic_title": "Nie udało się wygenerować kodu parowania",
     "qr_aria_label": "Kod QR do sparowania z urządzeniem mobilnym",
+    "qr_render_failed": "Nie udało się wyświetlić kodu QR parowania. Odśwież, aby spróbować ponownie.",
     "btn_try_again": "Spróbuj ponownie"
   },
   "shortcuts_help": {
@@ -4003,6 +4000,9 @@
   },
   "errors": {
     "something_went_wrong": "Coś poszło nie tak",
+    "page_assets_updated": "Zasoby strony zostały zaktualizowane",
+    "react_state_reset": "Stan React został zresetowany — ponowne ładowanie",
+    "new_version_available": "Dostępna jest nowa wersja. Przeładuj stronę, aby ją pobrać.",
     "unexpected": "Wystąpił nieoczekiwany błąd.",
     "force_reload_title": "Czyści czas oczekiwania na automatyczne przeładowanie i wymusza świeże ładowanie",
     "force_reload": "Wymuś przeładowanie",

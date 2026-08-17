@@ -408,6 +408,7 @@ fn make_dedup_kernel(enabled: bool) -> Arc<dyn KernelHandle> {
         named: vec![],
         download_dir: None,
         dedup_enabled: enabled,
+        acp_client: None,
     })
 }
 
