@@ -12,8 +12,8 @@
 //! (the conversion impls live in `librefang-extensions`).
 //!
 //! The variants intentionally preserve the discriminants the API layer maps
-//! to HTTP status codes (`NotFound` → 404; everything else → 500), so the
-//! switch from `ExtensionError` does not silently change response shapes.
+//! to HTTP status codes (missing resources → 404; everything else → 500), so
+//! the switch from `ExtensionError` does not silently change response shapes.
 
 use crate::config::McpServerConfigEntry;
 use crate::mcp::McpStatus;
@@ -64,6 +64,14 @@ pub enum IntegrationError {
     #[error("MCP catalog entry not found: {0}")]
     NotFound(String),
 
+    /// The requested MCP server was not configured.
+    #[error("MCP server not configured: {0}")]
+    NotInstalled(String),
+
+    /// A required credential was not present in the configured sources.
+    #[error("Credential not found: {0}")]
+    CredentialNotFound(String),
+
     /// An MCP server with this id / name is already configured.
     #[error("MCP server already configured: {0}")]
     AlreadyInstalled(String),
@@ -96,6 +104,14 @@ mod tests {
         assert_eq!(
             IntegrationError::NotFound("github".into()).to_string(),
             "MCP catalog entry not found: github"
+        );
+        assert_eq!(
+            IntegrationError::NotInstalled("github".into()).to_string(),
+            "MCP server not configured: github"
+        );
+        assert_eq!(
+            IntegrationError::CredentialNotFound("GITHUB_TOKEN".into()).to_string(),
+            "Credential not found: GITHUB_TOKEN"
         );
         assert_eq!(
             IntegrationError::AlreadyInstalled("slack".into()).to_string(),

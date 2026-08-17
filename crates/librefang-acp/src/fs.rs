@@ -130,10 +130,10 @@ impl FsClientHandle {
         match tokio::time::timeout(FS_RPC_TIMEOUT, rx).await {
             Ok(Ok(Ok(resp))) => Ok(resp.content),
             Ok(Ok(Err(e))) => Err(AcpError::Transport(e)),
-            Ok(Err(_)) => Err(AcpError::internal(
+            Ok(Err(_)) => Err(AcpError::unavailable(
                 "fs/read_text_file response channel dropped",
             )),
-            Err(_) => Err(AcpError::internal("fs/read_text_file timed out")),
+            Err(_) => Err(AcpError::unavailable("fs/read_text_file timed out")),
         }
     }
 
@@ -155,10 +155,10 @@ impl FsClientHandle {
         match tokio::time::timeout(FS_RPC_TIMEOUT, rx).await {
             Ok(Ok(Ok(_resp))) => Ok(()),
             Ok(Ok(Err(e))) => Err(AcpError::Transport(e)),
-            Ok(Err(_)) => Err(AcpError::internal(
+            Ok(Err(_)) => Err(AcpError::unavailable(
                 "fs/write_text_file response channel dropped",
             )),
-            Err(_) => Err(AcpError::internal("fs/write_text_file timed out")),
+            Err(_) => Err(AcpError::unavailable("fs/write_text_file timed out")),
         }
     }
 
@@ -215,7 +215,10 @@ impl AcpFsClient for FsClientHandle {
 }
 
 fn acp_to_kernel_err(e: AcpError) -> KernelOpError {
-    KernelOpError::Internal(e.to_string())
+    match e {
+        AcpError::Unavailable(reason) => KernelOpError::unavailable(reason),
+        other => KernelOpError::Internal(other.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -252,5 +255,24 @@ mod tests {
         let caps = FsCapabilities::from_client(&client_caps);
         assert!(caps.read_text_file);
         assert!(!caps.write_text_file);
+    }
+
+    #[test]
+    fn unavailable_reverse_rpc_maps_to_kernel_unavailable() {
+        let error = acp_to_kernel_err(AcpError::unavailable("fs request timed out"));
+        assert!(matches!(
+            error,
+            KernelOpError::Unavailable(reason) if reason == "fs request timed out"
+        ));
+    }
+
+    #[test]
+    fn protocol_and_internal_errors_do_not_enable_local_fallback() {
+        let error = acp_to_kernel_err(AcpError::internal("unexpected response"));
+        assert!(matches!(
+            error,
+            KernelOpError::Internal(reason)
+                if reason == "internal acp error: unexpected response"
+        ));
     }
 }

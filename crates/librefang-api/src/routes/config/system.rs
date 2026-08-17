@@ -1,4 +1,57 @@
 use super::*;
+use librefang_types::config::DefaultModelConfig;
+use std::sync::RwLock;
+
+fn status_default_model_snapshot(
+    model_override: &RwLock<Option<DefaultModelConfig>>,
+    configured: &DefaultModelConfig,
+) -> (String, String) {
+    let guard = model_override.read().unwrap_or_else(|poisoned| {
+        tracing::warn!(
+            "System status default-model override lock poisoned; recovering response state"
+        );
+        model_override.clear_poison();
+        poisoned.into_inner()
+    });
+    let effective = guard.as_ref().unwrap_or(configured);
+    (effective.provider.clone(), effective.model.clone())
+}
+
+#[derive(serde::Serialize)]
+struct QuickInitConfig<'a> {
+    log_level: &'a str,
+    api_listen: &'a str,
+    default_model: QuickInitDefaultModel<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct QuickInitDefaultModel<'a> {
+    provider: &'a str,
+    model: &'a str,
+    api_key_env: &'a str,
+}
+
+fn quick_init_config_content(
+    provider: &str,
+    model: &str,
+    api_key_env: &str,
+) -> Result<String, toml::ser::Error> {
+    let config = QuickInitConfig {
+        log_level: "info",
+        api_listen: "127.0.0.1:4545",
+        default_model: QuickInitDefaultModel {
+            provider,
+            model,
+            api_key_env,
+        },
+    };
+    let serialized = toml::to_string_pretty(&config)?;
+    Ok(format!(
+        "# LibreFang configuration (auto-generated)\n\
+         # Run `librefang init --upgrade` for full annotated config.\n\n\
+         {serialized}"
+    ))
+}
 
 #[utoipa::path(
     get,
@@ -52,6 +105,10 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .unwrap_or(0);
 
     let cfg = state.kernel.config_snapshot();
+    let (default_provider, default_model) = status_default_model_snapshot(
+        state.kernel.default_model_override_ref(),
+        &cfg.default_model,
+    );
     Json(serde_json::json!({
         "status": "running",
         "version": env!("CARGO_PKG_VERSION"),
@@ -59,8 +116,8 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "active_agent_count": active_agent_count,
         "session_count": session_count,
         "memory_used_mb": memory_used_mb,
-        "default_provider": state.kernel.default_model_override_ref().read().ok().and_then(|g| g.as_ref().map(|dm| dm.provider.clone())).unwrap_or_else(|| cfg.default_model.provider.clone()),
-        "default_model": state.kernel.default_model_override_ref().read().ok().and_then(|g| g.as_ref().map(|dm| dm.model.clone())).unwrap_or_else(|| cfg.default_model.model.clone()),
+        "default_provider": default_provider,
+        "default_model": default_model,
         "uptime_seconds": uptime,
         "api_listen": cfg.api_listen,
         "home_dir": state.kernel.home_dir().display().to_string(),
@@ -114,20 +171,21 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::R
         .automatic_default_model_for_provider(&provider)
         .unwrap_or_else(|| "auto".to_string());
 
-    // Write minimal config.toml
-    let config_content = format!(
-        r#"# LibreFang configuration (auto-generated)
-# Run `librefang init --upgrade` for full annotated config.
-
-log_level = "info"
-api_listen = "127.0.0.1:4545"
-
-[default_model]
-provider = "{provider}"
-model = "{model}"
-api_key_env = "{api_key_env}"
-"#
-    );
+    // Use the TOML serializer so catalog-provided identifiers cannot escape their string values.
+    let config_content = match quick_init_config_content(&provider, &model, &api_key_env) {
+        Ok(content) => content,
+        Err(error) => {
+            tracing::error!(%error, "failed to serialize quick init config");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "message": "Internal server error"
+                })),
+            )
+                .into_response();
+        }
+    };
 
     if let Some(locked) = crate::routes::guard_config_write() {
         return locked.into_response();
@@ -215,7 +273,60 @@ fn write_quick_init_config(home: &std::path::Path, contents: &[u8]) -> std::io::
 
 #[cfg(test)]
 mod tests {
-    use super::write_quick_init_config;
+    use super::{
+        quick_init_config_content, status_default_model_snapshot, write_quick_init_config,
+    };
+    use librefang_types::config::DefaultModelConfig;
+    use std::sync::RwLock;
+
+    #[test]
+    fn status_model_snapshot_recovers_consistent_override_after_poison() {
+        let configured = DefaultModelConfig {
+            provider: "configured-provider".to_string(),
+            model: "configured-model".to_string(),
+            ..DefaultModelConfig::default()
+        };
+        let model_override = RwLock::new(Some(DefaultModelConfig {
+            provider: "override-provider".to_string(),
+            model: "override-model".to_string(),
+            ..DefaultModelConfig::default()
+        }));
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = model_override.write().unwrap();
+            panic!("poison status default-model override");
+        });
+        assert!(model_override.is_poisoned());
+
+        assert_eq!(
+            status_default_model_snapshot(&model_override, &configured),
+            (
+                "override-provider".to_string(),
+                "override-model".to_string()
+            )
+        );
+
+        assert!(!model_override.is_poisoned());
+        assert!(model_override.read().is_ok());
+        assert!(model_override.write().is_ok());
+    }
+
+    #[test]
+    fn status_model_snapshot_uses_configured_pair_without_override() {
+        let configured = DefaultModelConfig {
+            provider: "configured-provider".to_string(),
+            model: "configured-model".to_string(),
+            ..DefaultModelConfig::default()
+        };
+        let model_override = RwLock::new(None);
+
+        assert_eq!(
+            status_default_model_snapshot(&model_override, &configured),
+            (
+                "configured-provider".to_string(),
+                "configured-model".to_string()
+            )
+        );
+    }
 
     #[test]
     fn quick_init_write_is_create_once_and_preserves_existing_config() {
@@ -229,6 +340,30 @@ mod tests {
             std::fs::read_to_string(home.join("config.toml")).unwrap(),
             "first = true\n"
         );
+    }
+
+    #[test]
+    fn quick_init_config_serializes_untrusted_model_fields_as_toml_strings() {
+        let provider = "provider\"\n[network]\nenabled = true\n#";
+        let model = "vendor\\model\"\n[default_model]";
+        let api_key_env = "KEY\\NAME\nVALUE";
+
+        let contents = quick_init_config_content(provider, model, api_key_env).unwrap();
+        let parsed: toml::Value = toml::from_str(&contents).unwrap();
+
+        assert_eq!(parsed["default_model"]["provider"].as_str(), Some(provider));
+        assert_eq!(parsed["default_model"]["model"].as_str(), Some(model));
+        assert_eq!(
+            parsed["default_model"]["api_key_env"].as_str(),
+            Some(api_key_env)
+        );
+        assert!(parsed.get("network").is_none());
+        assert_eq!(parsed.as_table().unwrap().len(), 3);
+
+        let config: librefang_types::config::KernelConfig = toml::from_str(&contents).unwrap();
+        assert_eq!(config.default_model.provider, provider);
+        assert_eq!(config.default_model.model, model);
+        assert_eq!(config.default_model.api_key_env, api_key_env);
     }
 }
 
@@ -535,6 +670,19 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
 // ---------------------------------------------------------------------------
 // Prometheus metrics endpoint
 // ---------------------------------------------------------------------------
+fn escape_prometheus_label_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' | '\r' => escaped.push_str("\\n"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
 /// GET /api/metrics — Prometheus text-format metrics.
 ///
 /// Returns counters and gauges for monitoring LibreFang in production:
@@ -593,10 +741,10 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
     out.push_str("# HELP librefang_llm_calls LLM API calls made (rolling 1h window).\n");
     out.push_str("# TYPE librefang_llm_calls gauge\n");
     for agent in &agents {
-        let name = &agent.name;
-        let provider = &agent.manifest.model.provider;
-        let model = &agent.manifest.model.model;
         if let Some(snap) = state.kernel.scheduler_ref().get_usage(agent.id) {
+            let name = escape_prometheus_label_value(&agent.name);
+            let provider = escape_prometheus_label_value(&agent.manifest.model.provider);
+            let model = escape_prometheus_label_value(&agent.manifest.model.model);
             let labels = format!("agent=\"{name}\",provider=\"{provider}\",model=\"{model}\"");
             out.push_str(&format!(
                 "librefang_tokens{{{labels}}} {}\n",

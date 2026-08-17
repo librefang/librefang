@@ -1,0 +1,1 @@
+Let dashboard section-label callers reliably override layout classes, centralize compact-label typography, and harden Overview range, memoization, timestamp, and typed-navigation contracts. (#7322) (@houko)
