@@ -221,12 +221,77 @@ fn malformed_persisted_row_fails_integrity_verification() {
         .unwrap();
     }
 
-    let log = AuditLog::with_db(pool);
+    let log = AuditLog::with_db(pool.clone());
 
     assert_eq!(log.len(), 0, "malformed rows must not enter the chain");
+    assert!(
+        log.db.is_none(),
+        "an incomplete reload must disable durable appends"
+    );
     let error = log.verify_integrity().unwrap_err();
     assert!(error.contains("only partially loaded"), "{error}");
     assert!(error.contains("ordered index 0"), "{error}");
+
+    log.record("agent-2", AuditAction::ShellExec, "after reload", "ok");
+    assert_eq!(log.len(), 1, "in-memory auditing should remain available");
+    let persisted: i64 = pool
+        .get()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM audit_entries", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(persisted, 1, "the damaged database must not be extended");
+}
+
+#[test]
+fn unknown_persisted_action_is_not_coerced_or_extended() {
+    let pool = Pool::builder()
+        .max_size(1)
+        .build(SqliteConnectionManager::memory())
+        .unwrap();
+    pool.get()
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            );
+            INSERT INTO audit_entries VALUES (
+                0, '2026-01-01T00:00:00Z', 'agent-1', 'FutureAction', 'detail', 'ok',
+                NULL, NULL,
+                '0000000000000000000000000000000000000000000000000000000000000000',
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+            );",
+        )
+        .unwrap();
+
+    let anchor_dir = tempfile::tempdir().unwrap();
+    let anchor_path = anchor_dir.path().join("audit.anchor");
+    let log = AuditLog::with_db_anchored(pool.clone(), anchor_path.clone());
+    assert_eq!(log.len(), 0, "unknown actions must not enter the chain");
+    assert!(log.db.is_none());
+    assert!(
+        !anchor_path.exists(),
+        "a partial reload must not seed an anchor from an incomplete chain"
+    );
+    let error = log.verify_integrity().unwrap_err();
+    assert!(error.contains("only partially loaded"), "{error}");
+    assert!(error.contains("unknown audit action"), "{error}");
+
+    log.record("agent-2", AuditAction::ToolInvoke, "after reload", "ok");
+    let persisted: i64 = pool
+        .get()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM audit_entries", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(persisted, 1, "the unknown-action row must remain untouched");
 }
 
 #[test]
@@ -972,6 +1037,19 @@ fn soft_cap_eviction_keeps_anchor_seq_synced_across_restart() {
         .query_row("SELECT COUNT(*) FROM audit_entries", [], |row| row.get(0))
         .unwrap();
     assert_eq!(db_rows, 12, "all rows must remain persisted after eviction");
+    assert_eq!(
+        log.persisted_len(),
+        12,
+        "public persisted count must disclose rows outside the memory window"
+    );
+    assert!(
+        log.persisted_len() > log.len(),
+        "soft-cap eviction must be externally detectable"
+    );
+    let (retained, persisted) = log.retained_snapshot();
+    assert_eq!(persisted, 12);
+    assert_eq!(retained.len(), log.len());
+    assert!(persisted > retained.len());
 
     // Even on the live log the anchor must already track the persisted
     // population, not the shrunken in-memory window.
@@ -985,6 +1063,7 @@ fn soft_cap_eviction_keeps_anchor_seq_synced_across_restart() {
     drop(log);
     let reopened = AuditLog::with_db_anchored(pool.clone(), anchor_path.clone());
     assert_eq!(reopened.len(), 12, "restart reloads every persisted row");
+    assert_eq!(reopened.persisted_len(), 12);
     assert!(
         reopened.verify_integrity().is_ok(),
         "restart after soft-cap eviction must not raise a spurious anchor mismatch"

@@ -25,7 +25,7 @@
 
 use dashmap::DashMap;
 use smallvec::SmallVec;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
@@ -74,6 +74,23 @@ impl Bucket {
             None => true,
         }
     }
+
+    fn check(&mut self, now: Instant, max_per_minute: u32) -> Result<(), String> {
+        let window = Duration::from_secs(60);
+        self.timestamps
+            .retain(|ts| now.duration_since(*ts) < window);
+
+        if self.timestamps.len() >= max_per_minute as usize {
+            self.last_seen = Some(now);
+            return Err(format!(
+                "Rate limit exceeded ({max_per_minute} messages/minute). Please wait."
+            ));
+        }
+
+        self.timestamps.push(now);
+        self.last_seen = Some(now);
+        Ok(())
+    }
 }
 
 /// Holds the shared map. Wrapped in `Arc` so `Clone` of
@@ -81,6 +98,54 @@ impl Bucket {
 #[derive(Debug, Default)]
 struct Inner {
     buckets: DashMap<String, Bucket>,
+    /// Serializes admission of previously unseen keys so [`MAX_BUCKETS`]
+    /// remains a hard bound under concurrent synthetic-identity floods.
+    insert_lock: Mutex<()>,
+}
+
+impl Inner {
+    /// Drop buckets that are empty (no in-window timestamps) AND idle.
+    fn sweep(&self) {
+        let now = Instant::now();
+        let window = Duration::from_secs(60);
+        self.buckets.retain(|_, bucket| {
+            bucket
+                .timestamps
+                .retain(|ts| now.duration_since(*ts) < window);
+            !bucket.timestamps.is_empty() || !bucket.is_idle(now, SWEEP_TTL)
+        });
+    }
+
+    /// Evict up to `count` oldest buckets from the observed snapshot.
+    fn evict_oldest(&self, count: usize) {
+        if count == 0 {
+            return;
+        }
+
+        let mut snapshot: Vec<(String, Option<Instant>)> = self
+            .buckets
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().last_seen))
+            .collect();
+        if snapshot.len() > count {
+            snapshot.select_nth_unstable_by(count, |(_, a), (_, b)| match (*a, *b) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (Some(a), Some(b)) => a.cmp(&b),
+            });
+            snapshot.truncate(count);
+        }
+
+        for (key, observed_last_seen) in snapshot {
+            self.remove_if_unchanged(&key, observed_last_seen);
+        }
+    }
+
+    fn remove_if_unchanged(&self, key: &str, observed_last_seen: Option<Instant>) {
+        self.buckets
+            .remove_if(key, |_, bucket| bucket.last_seen == observed_last_seen);
+    }
 }
 
 /// Sliding-window rate limiter for channel messages.
@@ -159,39 +224,51 @@ impl ChannelRateLimiter {
         platform_id: &str,
         max_per_minute: u32,
     ) -> Result<(), String> {
+        self.check_with_capacity(
+            channel_type,
+            platform_id,
+            max_per_minute,
+            MAX_BUCKETS,
+            OVERFLOW_EVICT_CHUNK,
+        )
+    }
+
+    fn check_with_capacity(
+        &self,
+        channel_type: &str,
+        platform_id: &str,
+        max_per_minute: u32,
+        max_buckets: usize,
+        overflow_evict_chunk: usize,
+    ) -> Result<(), String> {
         if max_per_minute == 0 {
             return Ok(());
         }
 
         let key = format!("{channel_type}:{platform_id}");
         let now = Instant::now();
-        let window = Duration::from_secs(60);
 
-        // LRU-on-overflow: if we're about to add a new bucket past the cap,
-        // make room first. Read-side check is cheap (atomic load); the
-        // expensive scan only runs when we actually overflow. We re-check
-        // membership *after* the scan because another thread may have raced
-        // us, and we never want to evict a bucket we're about to use.
-        if self.inner.buckets.len() >= MAX_BUCKETS && !self.inner.buckets.contains_key(&key) {
-            self.evict_oldest(OVERFLOW_EVICT_CHUNK);
+        if let Some(mut bucket) = self.inner.buckets.get_mut(&key) {
+            return bucket.check(now, max_per_minute);
+        }
+
+        // Admission of a previously unseen key is serialized, then
+        // membership and capacity are re-checked under the gate. Existing
+        // buckets took the concurrent fast path above.
+        let _insertion_guard = self
+            .inner
+            .insert_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.inner.buckets.contains_key(&key) {
+            let max_buckets = max_buckets.max(1);
+            while self.inner.buckets.len() >= max_buckets {
+                self.inner.evict_oldest(overflow_evict_chunk.max(1));
+            }
         }
 
         let mut entry = self.inner.buckets.entry(key).or_default();
-        // Evict timestamps older than 1 minute
-        entry
-            .timestamps
-            .retain(|ts| now.duration_since(*ts) < window);
-
-        if entry.timestamps.len() >= max_per_minute as usize {
-            entry.last_seen = Some(now);
-            return Err(format!(
-                "Rate limit exceeded ({max_per_minute} messages/minute). Please wait."
-            ));
-        }
-
-        entry.timestamps.push(now);
-        entry.last_seen = Some(now);
-        Ok(())
+        entry.check(now, max_per_minute)
     }
 
     /// Drop buckets that are empty (no in-window timestamps) AND idle
@@ -200,19 +277,7 @@ impl ChannelRateLimiter {
     /// Public so the background sweeper task and unit tests can invoke it.
     /// Cheap when the map is small; `DashMap::retain` shards the work.
     pub fn sweep(&self) {
-        let now = Instant::now();
-        let window = Duration::from_secs(60);
-        self.inner.buckets.retain(|_, bucket| {
-            // First, drop stale timestamps from the sliding window so we
-            // get an honest is-empty signal.
-            bucket
-                .timestamps
-                .retain(|ts| now.duration_since(*ts) < window);
-            // Keep the bucket if it still has live timestamps OR it was
-            // touched recently. The TTL gate prevents flapping for a user
-            // who sends one message every two minutes (window 60s, TTL 5min).
-            !bucket.timestamps.is_empty() || !bucket.is_idle(now, SWEEP_TTL)
-        });
+        self.inner.sweep();
     }
 
     /// Current bucket count. Primarily for tests + observability.
@@ -225,47 +290,6 @@ impl ChannelRateLimiter {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.inner.buckets.is_empty()
-    }
-
-    /// Evict the `count` oldest buckets (by `last_seen`) in a single O(n) pass.
-    /// Called from the LRU-on-overflow path in [`Self::check`].
-    fn evict_oldest(&self, count: usize) {
-        if count == 0 {
-            return;
-        }
-        // Collect (key, last_seen) pairs. Buckets without a `last_seen`
-        // (shouldn't happen post-`check`, but guard against the
-        // race where another thread inserted via `entry().or_default()`
-        // but hasn't reached the assignment yet) sort to the front (evict
-        // first) by treating `None` as older than any `Some(Instant)`.
-        //
-        // We avoid `Instant::now() - 1day` here because on freshly booted
-        // systems (Windows CI runners that have been up < 24h) that
-        // subtraction panics with "overflow when subtracting duration from
-        // instant" (#5726). Instead, sort `None` explicitly before `Some`.
-        let mut snapshot: Vec<(String, Option<Instant>)> = self
-            .inner
-            .buckets
-            .iter()
-            .map(|e| (e.key().clone(), e.value().last_seen))
-            .collect();
-        // Partial sort: None (never seen) sorts before Some(older) before
-        // Some(newer). `select_nth_unstable_by` is O(n) average.
-        if snapshot.len() > count {
-            snapshot.select_nth_unstable_by(count, |(_, a), (_, b)| {
-                // `Instant` is Copy, so deref is cheap.
-                match (*a, *b) {
-                    (None, None) => std::cmp::Ordering::Equal,
-                    (None, Some(_)) => std::cmp::Ordering::Less, // None evicts first
-                    (Some(_), None) => std::cmp::Ordering::Greater,
-                    (Some(a), Some(b)) => a.cmp(&b), // older Instant evicts first
-                }
-            });
-            snapshot.truncate(count);
-        }
-        for (key, _) in snapshot {
-            self.inner.buckets.remove(&key);
-        }
     }
 }
 
@@ -296,20 +320,7 @@ fn spawn_sweeper(weak: std::sync::Weak<Inner>, sweep_shutdown: Arc<Notify>, inte
                     let Some(strong) = weak.upgrade() else {
                         return;
                     };
-                    // Materialize a transient limiter purely to reuse
-                    // `sweep()`. The `sweep_shutdown` clone here is a
-                    // formality — `sweep()` doesn't touch it.
-                    let limiter = ChannelRateLimiter {
-                        inner: strong,
-                        sweep_shutdown: Arc::clone(&sweep_shutdown),
-                    };
-                    limiter.sweep();
-                    // Drop `limiter` before looping so the strong Arc
-                    // is released between sweeps; otherwise the
-                    // transient `ChannelRateLimiter` clone would fire
-                    // its own `Drop` and spuriously wake us. Explicit
-                    // drop also covers that.
-                    drop(limiter);
+                    strong.sweep();
                 }
                 _ = &mut notified => {
                     // Last public clone went away. Drain any pending
@@ -644,6 +655,58 @@ mod tests {
             len >= MAX_BUCKETS - OVERFLOW_EVICT_CHUNK * 2,
             "buckets={len} unexpectedly low; eviction too aggressive?"
         );
+    }
+
+    #[test]
+    fn concurrent_new_keys_stay_within_capacity() {
+        const TEST_CAP: usize = 32;
+        const WORKERS: usize = 64;
+
+        let limiter = ChannelRateLimiter::default();
+        for i in 0..(TEST_CAP - 1) {
+            limiter
+                .check_with_capacity("telegram", &format!("seed{i}"), 1, TEST_CAP, 4)
+                .unwrap();
+        }
+
+        let barrier = Arc::new(std::sync::Barrier::new(WORKERS));
+        std::thread::scope(|scope| {
+            for i in 0..WORKERS {
+                let limiter = &limiter;
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    limiter
+                        .check_with_capacity("telegram", &format!("concurrent{i}"), 1, TEST_CAP, 4)
+                        .unwrap();
+                });
+            }
+        });
+
+        // Observe the size only after all writers have stopped. `DashMap::len`
+        // locks and sums shards one at a time, so a concurrent eviction from
+        // one shard plus insertion into another can produce a non-linearizable
+        // transient count even though admissions are serialized by
+        // `insert_lock` and the map never contains more than `TEST_CAP` keys.
+        assert!(limiter.len() <= TEST_CAP);
+    }
+
+    #[test]
+    fn overflow_snapshot_does_not_remove_a_bucket_touched_later() {
+        let inner = Inner::default();
+        let old_seen = Instant::now() - Duration::from_secs(1);
+        inner.buckets.insert(
+            "telegram:user".to_string(),
+            Bucket {
+                timestamps: SmallVec::new(),
+                last_seen: Some(old_seen),
+            },
+        );
+
+        inner.buckets.get_mut("telegram:user").unwrap().last_seen = Some(Instant::now());
+        inner.remove_if_unchanged("telegram:user", Some(old_seen));
+
+        assert!(inner.buckets.contains_key("telegram:user"));
     }
 
     /// When the cap is hit, the oldest entries must go — never the freshly

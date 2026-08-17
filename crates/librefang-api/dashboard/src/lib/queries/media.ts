@@ -11,6 +11,7 @@ const STALE_MS = 60_000;
 const REFRESH_MS = 60_000;
 const VIDEO_TASK_STALE_MS = 5_000;
 const VIDEO_TASK_REFETCH_MS = 5_000;
+const VIDEO_TASK_GC_MS = 5 * 60_000;
 
 type VideoTaskParams = {
   taskId: string;
@@ -31,7 +32,7 @@ export const mediaQueries = {
       queryKey: mediaKeys.videoTask(taskId, provider),
       queryFn: () => pollVideo(taskId, provider),
       staleTime: VIDEO_TASK_STALE_MS,
-      gcTime: 0,
+      gcTime: VIDEO_TASK_GC_MS,
     }),
 };
 
@@ -41,7 +42,12 @@ export function useMediaProviders(options: QueryOverrides = {}) {
 
 function shouldPollVideoTask(status?: MediaVideoStatus) {
   if (!status) return true;
-  return status.status !== "completed" && status.status !== "failed" && !status.error;
+  return (
+    status.status === "submitted" ||
+    status.status === "pending" ||
+    status.status === "queued" ||
+    status.status === "processing"
+  );
 }
 
 export function useVideoTask(params: VideoTaskParams | null, options: QueryOverrides = {}) {
@@ -49,9 +55,7 @@ export function useVideoTask(params: VideoTaskParams | null, options: QueryOverr
     ...withOverrides(mediaQueries.videoTask(params ?? { taskId: "", provider: "" }), options),
     enabled: Boolean(params) && options.enabled !== false,
     refetchIntervalInBackground: true,
-    refetchInterval: (query) => {
-      const data = query.state.data;
-      return shouldPollVideoTask(data) ? VIDEO_TASK_REFETCH_MS : false;
-    },
+    refetchInterval: options.refetchInterval ?? ((query) =>
+      shouldPollVideoTask(query.state.data) ? VIDEO_TASK_REFETCH_MS : false),
   });
 }

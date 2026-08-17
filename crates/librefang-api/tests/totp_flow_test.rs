@@ -269,6 +269,8 @@ async fn setup_reset_does_not_rotate_when_replay_claim_persistence_fails() {
     .await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "got: {body}");
+    assert_eq!(body["error"]["message"], "Internal server error");
+    assert!(!body.to_string().contains("totp_used_codes"));
     assert_eq!(
         h.state.kernel.vault_get("totp_secret").as_deref(),
         Some(original_secret.as_str()),
@@ -376,6 +378,8 @@ async fn confirm_does_not_activate_when_replay_claim_persistence_fails() {
     .await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "got: {body}");
+    assert_eq!(body["error"]["message"], "Internal server error");
+    assert!(!body.to_string().contains("totp_used_codes"));
     assert_eq!(
         h.state.kernel.vault_get("totp_confirmed").as_deref(),
         Some("false")
@@ -529,6 +533,8 @@ async fn revoke_does_not_disable_totp_when_replay_claim_persistence_fails() {
     .await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "got: {body}");
+    assert_eq!(body["error"]["message"], "Internal server error");
+    assert!(!body.to_string().contains("totp_used_codes"));
     assert_eq!(
         h.state.kernel.vault_get("totp_confirmed").as_deref(),
         Some("true")

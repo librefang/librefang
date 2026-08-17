@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { ChannelItem } from "../api";
+import type { ChannelItem, QrState } from "../api";
 import { useChannels, useChannelQr } from "../lib/queries/channels";
 import {
   useReloadChannels,
@@ -57,6 +57,25 @@ type SortOrder = "asc" | "desc";
 type ViewMode = "grid" | "list";
 
 type Channel = ChannelItem;
+
+function qrStatusMessage(qr: QrState, channelName: string, t: TFunc): string {
+  if (qr.message) return qr.message;
+  switch (qr.status) {
+    case "confirmed":
+      return t("channels.login_success", { defaultValue: "Login successful" });
+    case "expired":
+      return t("channels.qr_expired_restart", {
+        defaultValue: "QR code expired — restart the sidecar to try again",
+      });
+    case "failed":
+      return t("channels.qr_failed", { defaultValue: "QR login failed" });
+    default:
+      return t("channels.qr_scan_with_app", {
+        defaultValue: "Scan with your {{channel}} app",
+        channel: channelName,
+      });
+  }
+}
 
 interface ChannelCardProps {
   channel: Channel;
@@ -220,8 +239,14 @@ function ChannelQrSection({ channelName, t }: { channelName: string; t: (key: st
   // value in hammering the daemon at 2s while we wait for the
   // operator to react.
   const [terminal, setTerminal] = useState(false);
+  const [noQrSession, setNoQrSession] = useState(false);
+  useEffect(() => {
+    setTerminal(false);
+    setNoQrSession(false);
+    renderedQrRef.current = null;
+  }, [channelName]);
   const qrQuery = useChannelQr(channelName, {
-    enabled: true,
+    enabled: !noQrSession,
     refetchInterval: terminal ? false : undefined,
   });
   useEffect(() => {
@@ -230,6 +255,9 @@ function ChannelQrSection({ channelName, t }: { channelName: string; t: (key: st
       setTerminal(true);
     }
   }, [qrQuery.data?.status]);
+  useEffect(() => {
+    if (qrQuery.isError || qrQuery.data === null) setNoQrSession(true);
+  }, [qrQuery.data, qrQuery.isError]);
 
   useEffect(() => {
     const qr = qrQuery.data;
@@ -290,19 +318,7 @@ function ChannelQrSection({ channelName, t }: { channelName: string; t: (key: st
           </div>
         )}
         <p className="text-xs text-text-dim text-center max-w-xs">
-          {qr.message ||
-            (qr.status === "confirmed"
-              ? t("channels.login_success", { defaultValue: "Login successful" })
-              : qr.status === "expired"
-              ? t("channels.qr_expired_restart", {
-                  defaultValue: "QR code expired — restart the sidecar to try again",
-                })
-              : qr.status === "failed"
-              ? t("channels.qr_failed", { defaultValue: "QR login failed" })
-              : t("channels.qr_scan_with_app", {
-                  defaultValue: "Scan with your {{channel}} app",
-                  channel: channelName,
-                }))}
+          {qrStatusMessage(qr, channelName, t)}
         </p>
         {terminal && qr.status !== "confirmed" && (
           <Button
@@ -316,7 +332,7 @@ function ChannelQrSection({ channelName, t }: { channelName: string; t: (key: st
               qrQuery.refetch();
             }}
           >
-            {t("common.retry") || "Retry"}
+            {t("common.retry", { defaultValue: "Retry" })}
           </Button>
         )}
       </div>
@@ -577,29 +593,22 @@ function SidecarForm({
       { name: channel.name, values: payload },
       {
         onSuccess: (res) => {
-          addToast(
-            res.restart_required
-              ? t("channels.saved_restart_required", {
-                  defaultValue: "Saved — restart daemon to apply",
-                })
-              : t("channels.saved", { defaultValue: "Saved" }),
-            "success",
-          );
-          // Plan Risk #5: surface shell-environment shadowing of secret
-          // fields. `addToast` has no "warning" variant (success | error
-          // | info), so fall back to "error" with an explicit prefix —
-          // visually distinct from the "Saved" success toast above, and
-          // tells the operator the save *did* happen but the new value
-          // is being shadowed until they unset the shell export.
+          const savedMessage = res.restart_required
+            ? t("channels.saved_restart_required", {
+                defaultValue: "Saved — restart daemon to apply",
+              })
+            : t("channels.saved", { defaultValue: "Saved" });
           if (res.shadowed_secrets && res.shadowed_secrets.length > 0) {
             addToast(
-              t("channels.shadowed_secrets_warning", {
+              `${savedMessage} — ${t("channels.shadowed_secrets_warning", {
                 defaultValue:
                   "Warning: these tokens are shadowed by shell environment variables and won't take effect until you unset them and restart: {{keys}}",
                 keys: res.shadowed_secrets.join(", "),
-              }),
-              "error",
+              })}`,
+              "info",
             );
+          } else {
+            addToast(savedMessage, "success");
           }
           onClose();
         },
@@ -833,15 +842,27 @@ export function ChannelsPage() {
     });
   }, []);
 
-  const handleSelectAll = () => {
-    if (selectedIds.size === filteredChannels.length) {
-      setSelectedIds(new Set());
-    } else {
-      setSelectedIds(new Set(filteredChannels.map(c => c.name)));
-    }
-  };
+  useEffect(() => {
+    const liveNames = new Set(channels.map((channel) => channel.name));
+    setSelectedIds((previous) => {
+      const next = new Set([...previous].filter((name) => liveNames.has(name)));
+      return next.size === previous.size ? previous : next;
+    });
+  }, [channels]);
 
-  const allSelected = filteredChannels.length > 0 && selectedIds.size === filteredChannels.length;
+  const allSelected = filteredChannels.length > 0
+    && filteredChannels.every((channel) => selectedIds.has(channel.name));
+
+  const handleSelectAll = () => {
+    setSelectedIds((previous) => {
+      const next = new Set(previous);
+      for (const channel of filteredChannels) {
+        if (allSelected) next.delete(channel.name);
+        else next.add(channel.name);
+      }
+      return next;
+    });
+  };
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -882,7 +903,7 @@ export function ChannelsPage() {
         <div className="flex-1">
           <Input
             value={search}
-            onChange={(e) => { setSearch(e.target.value); setSelectedIds(new Set()); }}
+            onChange={(e) => setSearch(e.target.value)}
             placeholder={t("common.search")}
             leftIcon={<Search className="w-4 h-4" />}
             rightIcon={search && (
