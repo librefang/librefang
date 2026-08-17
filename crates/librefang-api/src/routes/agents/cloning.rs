@@ -184,20 +184,56 @@ fn copy_clone_identity_files(
     let src_identity = src_can.join(".identity");
     let dst_identity = dst_can.join(".identity");
     std::fs::create_dir_all(&dst_identity)?;
+    let mut first_error = None;
     for &filename in KNOWN_IDENTITY_FILES {
         // Source: prefer .identity/ (post-migration), fall back to workspace root.
         let migrated_source = src_identity.join(filename);
-        let source = if migrated_source.exists() {
-            migrated_source
-        } else {
-            src_can.join(filename)
+        let source = match migrated_source.try_exists() {
+            Ok(true) => Some(migrated_source),
+            Ok(false) => {
+                let legacy_source = src_can.join(filename);
+                match legacy_source.try_exists() {
+                    Ok(true) => Some(legacy_source),
+                    Ok(false) => None,
+                    Err(error) => {
+                        first_error.get_or_insert_with(|| {
+                            std::io::Error::new(
+                                error.kind(),
+                                format!(
+                                    "failed to inspect legacy identity file {filename}: {error}"
+                                ),
+                            )
+                        });
+                        continue;
+                    }
+                }
+            }
+            Err(error) => {
+                first_error.get_or_insert_with(|| {
+                    std::io::Error::new(
+                        error.kind(),
+                        format!("failed to inspect migrated identity file {filename}: {error}"),
+                    )
+                });
+                continue;
+            }
         };
-        if source.exists() {
+        if let Some(source) = source {
             let destination = dst_identity.join(filename);
-            std::fs::copy(&source, destination)?;
+            if let Err(error) = std::fs::copy(&source, destination) {
+                first_error.get_or_insert_with(|| {
+                    std::io::Error::new(
+                        error.kind(),
+                        format!("failed to copy identity file {filename}: {error}"),
+                    )
+                });
+            }
         }
     }
-    Ok(())
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -237,6 +273,40 @@ mod tests {
         let error = copy_clone_identity_files(&source, &temp.path().join("missing"))
             .expect_err("missing destination must be reported");
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn clone_identity_files_report_source_inspection_errors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        std::fs::create_dir_all(&source).expect("source workspace");
+        std::fs::create_dir_all(&destination).expect("destination workspace");
+        std::fs::write(source.join(".identity"), "not a directory")
+            .expect("malformed identity path");
+        std::fs::write(source.join("SOUL.md"), "legacy soul").expect("legacy soul");
+
+        let error = copy_clone_identity_files(&source, &destination)
+            .expect_err("malformed migrated identity path must be reported");
+        assert!(error.to_string().contains("migrated identity file SOUL.md"));
+    }
+
+    #[test]
+    fn clone_identity_files_continue_after_one_copy_fails() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        std::fs::create_dir_all(source.join(".identity/SOUL.md"))
+            .expect("directory in place of identity file");
+        std::fs::create_dir_all(&destination).expect("destination workspace");
+        std::fs::write(source.join("IDENTITY.md"), "legacy identity").expect("legacy identity");
+
+        copy_clone_identity_files(&source, &destination)
+            .expect_err("directory copy must be reported");
+        assert_eq!(
+            std::fs::read_to_string(destination.join(".identity/IDENTITY.md")).unwrap(),
+            "legacy identity"
+        );
     }
 
     #[test]
