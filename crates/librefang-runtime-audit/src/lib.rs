@@ -532,6 +532,14 @@ impl AuditLog {
         let mut log = Self::with_db(pool);
         log.anchor_path = Some(anchor_path.clone());
 
+        if log.db.is_none() {
+            tracing::error!(
+                path = ?anchor_path,
+                "Audit anchor verification and initialization skipped because database reload was incomplete"
+            );
+            return log;
+        }
+
         // Compare against the anchor file (if any) and warn loudly on
         // divergence. The call to `verify_integrity` below will also
         // return `Err` in that case so `/api/audit/verify` surfaces it.
@@ -650,15 +658,13 @@ impl AuditLog {
                             // any coercion recomputes a different `action.to_string()`
                             // than the persisted one and would trip `verify_integrity`
                             // with a false hash mismatch on every subsequent boot.
-                            let action = action_str.parse::<AuditAction>().unwrap_or_else(|e| {
-                                tracing::warn!(
-                                    seq = row.get::<_, i64>(0).unwrap_or_default(),
-                                    "Audit reload hit {e}; retaining the row but its hash \
-                             will not recompute until this binary is upgraded to a \
-                             version that knows the action"
-                                );
-                                AuditAction::ToolInvoke
-                            });
+                            let action = action_str.parse::<AuditAction>().map_err(|e| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    3,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(e),
+                                )
+                            })?;
                             let seq_raw: i64 = row.get(0)?;
                             let seq = u64::try_from(seq_raw).map_err(|_| {
                                 rusqlite::Error::IntegralValueOutOfRange(0, seq_raw)
@@ -729,10 +735,23 @@ impl AuditLog {
             _ => None,
         };
 
+        // A partial reload cannot safely derive the next persisted sequence or
+        // chain tip. Keep the decoded rows available for inspection, but detach
+        // the database so later records cannot overwrite or extend an unknown
+        // on-disk tail.
+        let db = if load_error.is_some() {
+            tracing::error!(
+                "Audit database reload was incomplete; durable appends are disabled for this process"
+            );
+            None
+        } else {
+            Some(pool)
+        };
+
         let log = Self {
             entries: Mutex::new(entries),
             tip: Mutex::new(tip),
-            db: Some(pool),
+            db,
             anchor_path: None,
             chain_anchor: Mutex::new(recovered_anchor),
             max_in_memory_entries: AtomicUsize::new(0),
@@ -999,13 +1018,15 @@ impl AuditLog {
         // append because of a filesystem hiccup would lose an audit
         // record, which is strictly worse than an anchor that trails by
         // one tick.
-        if let Some(ref anchor_path) = self.anchor_path {
-            let count = self.persisted_rows.load(Ordering::Relaxed) as u64;
-            if let Err(e) = Self::write_anchor(anchor_path, count, &hash) {
-                tracing::warn!(
-                    path = ?anchor_path,
-                    "Failed to update audit anchor (entry still persisted): {e}"
-                );
+        if self.db.is_some() {
+            if let Some(ref anchor_path) = self.anchor_path {
+                let count = self.persisted_rows.load(Ordering::Relaxed) as u64;
+                if let Err(e) = Self::write_anchor(anchor_path, count, &hash) {
+                    tracing::warn!(
+                        path = ?anchor_path,
+                        "Failed to update audit anchor (entry still persisted): {e}"
+                    );
+                }
             }
         }
 
@@ -1133,6 +1154,27 @@ impl AuditLog {
     /// Returns the number of entries in the log.
     pub fn len(&self) -> usize {
         lock_audit_recover(&self.entries, "entries").len()
+    }
+
+    /// Returns the number of rows retained in persistent storage.
+    ///
+    /// This can exceed [`Self::len`] after the in-memory soft cap evicts an
+    /// old prefix without deleting its SQLite rows. Callers that can only
+    /// inspect the in-memory window use this value to disclose that their
+    /// result is incomplete rather than presenting a partial audit history
+    /// as exhaustive.
+    pub fn persisted_len(&self) -> usize {
+        self.persisted_rows.load(Ordering::Relaxed)
+    }
+
+    /// Returns the complete retained in-memory window and persisted row count from one consistent snapshot.
+    ///
+    /// Append, trim, and prune paths update both values while holding the entries mutex.
+    /// Sampling the count under the same mutex prevents callers from misclassifying a concurrent append or eviction as a history gap.
+    pub fn retained_snapshot(&self) -> (Vec<AuditEntry>, usize) {
+        let entries = lock_audit_recover(&self.entries, "entries");
+        let persisted_rows = self.persisted_rows.load(Ordering::Relaxed);
+        (entries.clone(), persisted_rows)
     }
 
     /// Returns the configured external tip-anchor path, if any.

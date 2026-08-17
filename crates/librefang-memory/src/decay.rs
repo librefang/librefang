@@ -18,7 +18,7 @@ use librefang_types::config::MemoryDecayConfig;
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Run time-based decay on the memories table.
 ///
@@ -30,7 +30,11 @@ use tracing::{debug, info};
 /// fractional-second precision diverge), we wrap both sides in
 /// `datetime(...)` so SQLite parses them as real timestamps before comparing.
 ///
-/// Returns the number of memories soft-deleted.
+/// A zero TTL disables expiry for that scope. Rows with missing or malformed
+/// `accessed_at` values are left intact and reported for operator attention.
+///
+/// Returns the number of memories soft-deleted. SESSION and AGENT updates are
+/// committed atomically.
 pub fn run_decay(
     pool: &Pool<SqliteConnectionManager>,
     config: &MemoryDecayConfig,
@@ -39,17 +43,33 @@ pub fn run_decay(
         return Ok(0);
     }
 
-    let db = pool.get().map_err(LibreFangError::memory)?;
+    let mut db = pool.get().map_err(LibreFangError::memory)?;
 
     let now = Utc::now();
     let now_unix = now.timestamp();
     let mut total_deleted: usize = 0;
+    let tx = db.transaction().map_err(LibreFangError::memory)?;
 
     // Decay SESSION scope memories — soft-delete only.
     if config.session_ttl_days > 0 {
         let cutoff = now - chrono::Duration::days(i64::from(config.session_ttl_days));
         let cutoff_str = cutoff.to_rfc3339();
-        let deleted = db
+        let malformed = tx
+            .query_row(
+                "SELECT COUNT(*) FROM memories \
+                 WHERE deleted = 0 AND scope = ?1 \
+                   AND (accessed_at IS NULL OR datetime(accessed_at) IS NULL)",
+                ["session_memory"],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(LibreFangError::memory)?;
+        if malformed > 0 {
+            warn!(
+                scope = "SESSION",
+                malformed, "Memory decay skipped rows with invalid accessed_at"
+            );
+        }
+        let deleted = tx
             .execute(
                 "UPDATE memories \
                  SET deleted = 1, deleted_at = ?3 \
@@ -68,7 +88,22 @@ pub fn run_decay(
     if config.agent_ttl_days > 0 {
         let cutoff = now - chrono::Duration::days(i64::from(config.agent_ttl_days));
         let cutoff_str = cutoff.to_rfc3339();
-        let deleted = db
+        let malformed = tx
+            .query_row(
+                "SELECT COUNT(*) FROM memories \
+                 WHERE deleted = 0 AND scope = ?1 \
+                   AND (accessed_at IS NULL OR datetime(accessed_at) IS NULL)",
+                ["agent_memory"],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(LibreFangError::memory)?;
+        if malformed > 0 {
+            warn!(
+                scope = "AGENT",
+                malformed, "Memory decay skipped rows with invalid accessed_at"
+            );
+        }
+        let deleted = tx
             .execute(
                 "UPDATE memories \
                  SET deleted = 1, deleted_at = ?3 \
@@ -82,6 +117,8 @@ pub fn run_decay(
         }
         total_deleted += deleted;
     }
+
+    tx.commit().map_err(LibreFangError::memory)?;
 
     if total_deleted > 0 {
         info!(total_deleted, "Memory decay sweep completed");
@@ -355,6 +392,76 @@ mod tests {
             })
             .unwrap();
         assert_eq!(remaining_id, "user-old");
+    }
+
+    #[test]
+    fn test_decay_rolls_back_all_scopes_when_one_update_fails() {
+        let pool = make_pool();
+        let conn = pool.get().unwrap();
+        let old_time = (Utc::now() - chrono::Duration::days(50)).to_rfc3339();
+        insert_memory(&conn, "session-old", "session_memory", &old_time);
+        insert_memory(&conn, "agent-old", "agent_memory", &old_time);
+        conn.execute_batch(
+            "CREATE TRIGGER reject_agent_decay
+             BEFORE UPDATE OF deleted ON memories
+             WHEN OLD.scope = 'agent_memory'
+             BEGIN
+                 SELECT RAISE(ABORT, 'reject agent decay');
+             END;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let config = MemoryDecayConfig {
+            enabled: true,
+            session_ttl_days: 7,
+            agent_ttl_days: 30,
+            decay_interval_hours: 1,
+        };
+        assert!(run_decay(&pool, &config).is_err());
+
+        let db = pool.get().unwrap();
+        assert_eq!(count_memories(&db), 2, "SESSION decay must roll back");
+    }
+
+    #[test]
+    fn test_decay_leaves_malformed_timestamps_for_operator_repair() {
+        let pool = make_pool();
+        let conn = pool.get().unwrap();
+        insert_memory(&conn, "malformed", "session_memory", "not-a-timestamp");
+        drop(conn);
+
+        let config = MemoryDecayConfig {
+            enabled: true,
+            session_ttl_days: 7,
+            agent_ttl_days: 30,
+            decay_interval_hours: 1,
+        };
+        assert_eq!(run_decay(&pool, &config).unwrap(), 0);
+
+        let db = pool.get().unwrap();
+        assert_eq!(count_memories(&db), 1);
+    }
+
+    #[test]
+    fn test_zero_ttl_disables_expiry_for_each_scope() {
+        let pool = make_pool();
+        let conn = pool.get().unwrap();
+        let old_time = (Utc::now() - chrono::Duration::days(50)).to_rfc3339();
+        insert_memory(&conn, "session-old", "session_memory", &old_time);
+        insert_memory(&conn, "agent-old", "agent_memory", &old_time);
+        drop(conn);
+
+        let config = MemoryDecayConfig {
+            enabled: true,
+            session_ttl_days: 0,
+            agent_ttl_days: 0,
+            decay_interval_hours: 1,
+        };
+        assert_eq!(run_decay(&pool, &config).unwrap(), 0);
+
+        let db = pool.get().unwrap();
+        assert_eq!(count_memories(&db), 2);
     }
 
     /// Total row count regardless of `deleted` flag.

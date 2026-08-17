@@ -1,0 +1,1 @@
+- Recover poisoned terminal activity tracking so live PTY sessions retain accurate idle-timeout behavior. (#7141) (@houko)

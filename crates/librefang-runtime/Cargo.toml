@@ -84,6 +84,9 @@ russh = { version = "0.61", optional = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 # Linux-only LSM / seccomp sandboxing backends. Platform-gated so the
 # `landlock-sandbox` / `seccomp-sandbox` features can ship in `default`
 # without dragging Linux-only crates into the macOS / Windows dependency
