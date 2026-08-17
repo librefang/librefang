@@ -1658,6 +1658,7 @@ pub async fn build_router(
         pending_a2a_agents: dashmap::DashMap::new(),
         auth_login_limiter: auth_login_limiter.clone(),
         gcra_limiter: gcra_limiter_arc.clone(),
+        gcra_tokens_per_minute: rl_cfg_early.api_requests_per_minute.max(1),
         trusted_proxies: trusted_proxies_arc.clone(),
         trust_forwarded_for: trust_forwarded_for_cached,
         idempotency_store,

@@ -321,6 +321,10 @@ pub struct AppState {
     /// task can call `retain_recent()` to evict stale per-IP entries and prevent
     /// the DashMap from growing unbounded over a long-running daemon. See #3668.
     pub gcra_limiter: Arc<KeyedRateLimiter>,
+    /// Effective quota captured with `gcra_limiter` at server boot.
+    /// A mixed config reload can update `config_ref()` without rebuilding this
+    /// restart-required limiter, so status routes must use this applied value.
+    pub gcra_tokens_per_minute: u32,
     /// Compiled `trusted_proxies` allowlist — built once at boot and shared with
     /// the GCRA + auth-login middlewares (see `server.rs`). Re-used by WS
     /// upgrade handlers (`ws::agent_ws`, `routes::terminal::terminal_ws`) to
