@@ -5,6 +5,12 @@ category = "devtools"
 icon = "lucide:ruler"
 tags = ["project-management", "issues", "agile", "tracking", "sprint"]
 
+setup_instructions = """
+1. Open Linear and go to Settings > API (https://linear.app/settings/api).
+2. Click 'Create key' to generate a new personal API key.
+3. Paste the key into the LINEAR_API_KEY field above.
+"""
+
 [transport]
 type = "stdio"
 command = "npx"
@@ -20,13 +26,6 @@ get_url = "https://linear.app/settings/api"
 [health_check]
 interval_secs = 60
 unhealthy_threshold = 3
-
-setup_instructions = """
-1. Open Linear and go to Settings > API (https://linear.app/settings/api).
-2. Click 'Create key' to generate a new personal API key.
-3. Paste the key into the LINEAR_API_KEY field above.
-"""
-
 
 [i18n.zh]
 name = "Linear"

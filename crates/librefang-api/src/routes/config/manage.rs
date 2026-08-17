@@ -942,6 +942,20 @@ fn redacted_config_json(
 // ---------------------------------------------------------------------------
 // Config Reload endpoint
 // ---------------------------------------------------------------------------
+fn config_reload_status(
+    restart_required: bool,
+    has_changes: bool,
+    channel_reload_failed: bool,
+) -> &'static str {
+    if restart_required || channel_reload_failed {
+        "partial"
+    } else if has_changes {
+        "applied"
+    } else {
+        "no_changes"
+    }
+}
+
 /// POST /api/config/reload — Reload configuration from disk and apply hot-reloadable changes.
 ///
 /// Reads the config file, diffs against current config, validates the new config,
@@ -959,16 +973,7 @@ pub async fn config_reload(
     State(state): State<Arc<AppState>>,
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
-    // SECURITY: Record config reload in audit trail with caller attribution.
     let user_id = api_user.as_ref().map(|u| u.0.user_id);
-    state.kernel.audit().record_with_context(
-        "system",
-        librefang_kernel::audit::AuditAction::ConfigChange,
-        "config reload requested via API",
-        "pending",
-        user_id,
-        Some("api".to_string()),
-    );
     match state.kernel.reload_config().await {
         Ok(plan) => {
             // `api_key` / `api_key_hash` are classified as read-live in
@@ -986,6 +991,7 @@ pub async fn config_reload(
             // If channel config changed, the kernel already cleared the adapter
             // registry — but we also need to stop the old BridgeManager and
             // restart adapters from the new config.
+            let mut warnings = Vec::new();
             if plan.hot_actions.contains(&HotAction::ReloadChannels) {
                 match crate::channel_bridge::reload_channels_from_disk(&state).await {
                     Ok(names) => {
@@ -997,33 +1003,54 @@ pub async fn config_reload(
                     }
                     Err(e) => {
                         tracing::error!("Hot-reload: failed to restart channel bridge: {e}");
+                        warnings.push(
+                            "Channel adapters could not be restarted; see server logs".to_string(),
+                        );
                     }
                 }
             }
 
-            let status = if plan.restart_required {
-                "partial"
-            } else if plan.has_changes() {
-                "applied"
-            } else {
-                "no_changes"
-            };
+            let status = config_reload_status(
+                plan.restart_required,
+                plan.has_changes(),
+                !warnings.is_empty(),
+            );
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_kernel::audit::AuditAction::ConfigChange,
+                "config reload requested via API",
+                status,
+                user_id,
+                Some("api".to_string()),
+            );
 
+            let mut body = serde_json::json!({
+                "status": status,
+                "restart_required": plan.restart_required,
+                "restart_reasons": plan.restart_reasons,
+                "hot_actions_applied": plan.hot_actions.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>(),
+                "noop_changes": plan.noop_changes,
+            });
+            if !warnings.is_empty() {
+                body["warnings"] = serde_json::json!(warnings);
+            }
+
+            (StatusCode::OK, Json(body))
+        }
+        Err(e) => {
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_kernel::audit::AuditAction::ConfigChange,
+                "config reload requested via API",
+                "failed",
+                user_id,
+                Some("api".to_string()),
+            );
             (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": status,
-                    "restart_required": plan.restart_required,
-                    "restart_reasons": plan.restart_reasons,
-                    "hot_actions_applied": plan.hot_actions.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>(),
-                    "noop_changes": plan.noop_changes,
-                })),
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"status": "error", "error": e})),
             )
         }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"status": "error", "error": e})),
-        ),
     }
 }
 
@@ -1562,7 +1589,7 @@ pub async fn config_set(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
         format!("config set: {path}"),
-        "completed",
+        reload_status,
         user_id,
         Some("api".to_string()),
     );
@@ -1572,6 +1599,24 @@ pub async fn config_set(
         body["reload_error"] = serde_json::Value::String(err);
     }
     (StatusCode::OK, Json(body))
+}
+
+#[cfg(test)]
+mod config_reload_outcome_tests {
+    use super::config_reload_status;
+
+    #[test]
+    fn channel_restart_failure_forces_partial_reload_status() {
+        assert_eq!(config_reload_status(false, true, true), "partial");
+        assert_eq!(config_reload_status(false, false, true), "partial");
+    }
+
+    #[test]
+    fn reload_status_preserves_existing_success_states() {
+        assert_eq!(config_reload_status(true, true, false), "partial");
+        assert_eq!(config_reload_status(false, true, false), "applied");
+        assert_eq!(config_reload_status(false, false, false), "no_changes");
+    }
 }
 
 // ---------------------------------------------------------------------------
