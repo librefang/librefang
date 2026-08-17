@@ -3,12 +3,15 @@ import { loadDashboardSnapshot, getVersionInfo } from "../http/client";
 import { overviewKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
+const SNAPSHOT_POLL_INTERVAL_MS = 5_000;
+const VERSION_STALE_MS = 5 * 60_000;
+
 export const dashboardSnapshotQueryOptions = () =>
   queryOptions({
     queryKey: overviewKeys.snapshot(),
     queryFn: loadDashboardSnapshot,
-    staleTime: 5_000,
-    refetchInterval: 5_000,
+    staleTime: SNAPSHOT_POLL_INTERVAL_MS,
+    refetchInterval: SNAPSHOT_POLL_INTERVAL_MS,
     // #3393: every mounted page using `useDashboardSnapshot` would otherwise
     // refetch every 5 s while the tab is backgrounded. The QueryClient
     // default in `main.tsx` also pins this to false, but we set it
@@ -21,8 +24,12 @@ export const versionInfoQueryOptions = () =>
   queryOptions({
     queryKey: overviewKeys.version(),
     queryFn: getVersionInfo,
-    staleTime: Infinity,
+    // A long-lived SPA can survive a backend deploy. Keep the cached value,
+    // but allow a focus/remount refresh once it is five minutes old.
+    staleTime: VERSION_STALE_MS,
     gcTime: Infinity,
+    // The dashboard QueryClient disables focus refetching globally.
+    refetchOnWindowFocus: true,
   });
 
 export function useDashboardSnapshot(options: QueryOverrides = {}) {
