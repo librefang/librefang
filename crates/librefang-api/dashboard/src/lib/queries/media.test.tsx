@@ -44,4 +44,35 @@ describe("video task query", () => {
     }).observers;
     expect(observers[0]?.options.refetchInterval).toBe(false);
   });
+
+  it("polls active tasks and stops after a terminal status by default", () => {
+    vi.mocked(pollVideo).mockResolvedValue({ status: "processing" });
+    const { queryClient, wrapper } = createQueryClientWrapper();
+
+    renderHook(
+      () => useVideoTask(
+        { taskId: "task-1", provider: "fal" },
+        { enabled: false },
+      ),
+      { wrapper },
+    );
+
+    const query = queryClient.getQueryCache().find({
+      queryKey: mediaQueries.videoTask({ taskId: "task-1", provider: "fal" }).queryKey,
+    });
+    const observers = (query as unknown as {
+      observers: Array<{
+        options: {
+          refetchInterval?: number | false | ((query: unknown) => number | false);
+        };
+      }>;
+    }).observers;
+    const refetchInterval = observers[0]?.options.refetchInterval;
+    expect(refetchInterval).toBeTypeOf("function");
+
+    const intervalFor = refetchInterval as (query: unknown) => number | false;
+    expect(intervalFor({ state: { data: { status: "processing" } } })).toBe(5_000);
+    expect(intervalFor({ state: { data: { status: "completed" } } })).toBe(false);
+    expect(intervalFor({ state: { data: { status: "failed", error: "failed" } } })).toBe(false);
+  });
 });
