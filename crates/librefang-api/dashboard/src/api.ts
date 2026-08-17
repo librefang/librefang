@@ -3514,12 +3514,14 @@ export async function listMemories(params?: {
 export async function searchMemories(params: {
   query: string;
   agentId?: string;
+  level?: string;
   limit?: number;
 }): Promise<MemoryItem[]> {
   const limit = Number.isFinite(params.limit) ? Math.max(1, Math.floor(params.limit ?? 20)) : 20;
   const query = new URLSearchParams();
   query.set("q", params.query);
   query.set("limit", String(limit));
+  if (params.level) query.set("level", params.level);
 
   const path = params.agentId
     ? `/api/memory/agents/${encodeURIComponent(params.agentId)}/search?${query.toString()}`

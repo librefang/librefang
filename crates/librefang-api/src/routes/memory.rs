@@ -112,6 +112,7 @@ use crate::types::ApiErrorResponse;
 #[derive(serde::Deserialize)]
 pub struct MemorySearchQuery {
     pub q: String,
+    pub level: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: usize,
 }
@@ -477,15 +478,24 @@ fn auth_denied_for(
     tag = "proactive-memory",
     params(
         ("q" = String, Query, description = "Search query"),
+        ("level" = Option<String>, Query, description = "Optional memory level filter"),
         ("limit" = usize, Query, description = "Max results (default 10)"),
     ),
-    responses((status = 200, description = "Search results", body = crate::types::JsonObject))
+    responses(
+        (status = 200, description = "Search results", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid memory level filter")
+    )
 )]
 pub async fn memory_search(
     State(state): State<Arc<AppState>>,
     Query(params): Query<MemorySearchQuery>,
     request: axum::extract::Request,
 ) -> impl IntoResponse {
+    let level = match parse_memory_level_filter(params.level.as_deref()) {
+        Ok(level) => level,
+        Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
+    };
+
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -494,7 +504,10 @@ pub async fn memory_search(
     let guard = guard_for_request(&state, request.extensions());
     let limit = params.limit.min(100);
     // Search across ALL agents so the dashboard shows all memories
-    match store.search_all_with_guard(&params.q, limit, &guard).await {
+    match store
+        .search_dashboard_with_guard(&params.q, None, level, limit, &guard)
+        .await
+    {
         Ok(items) => (
             StatusCode::OK,
             Json(serde_json::json!({ "memories": items })),
@@ -1079,9 +1092,13 @@ pub async fn memory_list_agent(
     params(
         ("id" = String, Path, description = "Agent ID"),
         ("q" = String, Query, description = "Search query"),
+        ("level" = Option<String>, Query, description = "Optional memory level filter"),
         ("limit" = usize, Query, description = "Max results (default 10)"),
     ),
-    responses((status = 200, description = "Search results", body = crate::types::JsonObject))
+    responses(
+        (status = 200, description = "Search results", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid memory level filter")
+    )
 )]
 pub async fn memory_search_agent(
     State(state): State<Arc<AppState>>,
@@ -1089,6 +1106,11 @@ pub async fn memory_search_agent(
     Query(params): Query<MemorySearchQuery>,
     request: axum::extract::Request,
 ) -> impl IntoResponse {
+    let level = match parse_memory_level_filter(params.level.as_deref()) {
+        Ok(level) => level,
+        Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
+    };
+
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -1097,7 +1119,7 @@ pub async fn memory_search_agent(
     let guard = guard_for_request(&state, request.extensions());
     let limit = params.limit.min(100);
     match store
-        .search_with_guard(&params.q, &agent_id, limit, &guard)
+        .search_dashboard_with_guard(&params.q, Some(&agent_id), level, limit, &guard)
         .await
     {
         Ok(items) => (

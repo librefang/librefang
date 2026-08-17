@@ -238,6 +238,19 @@ async fn get_memory_rejects_an_unknown_level_filter() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn search_memory_rejects_an_unknown_level_filter() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+
+    for path in [
+        "/api/memory/search?q=needle&level=unknown",
+        "/api/memory/agents/agent-id/search?q=needle&level=unknown",
+    ] {
+        let resp = harness.app.clone().oneshot(authed_get(path)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "path: {path}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn get_agent_memory_filters_before_count_and_pagination() {
     let harness = boot_router_with_api_key(TEST_KEY).await;
     let agent_id = librefang_types::agent::AgentId::new();

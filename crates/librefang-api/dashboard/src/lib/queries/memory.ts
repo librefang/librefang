@@ -73,12 +73,10 @@ export const memorySearchOrListQueryOptions = ({
         const items = await searchMemories({
           query: search.trim(),
           agentId,
+          level,
           limit: MEMORY_SEARCH_LIMIT,
         });
-        const filtered = level
-          ? items.filter((item) => item.level === level)
-          : items;
-        return { memories: filtered, total: filtered.length };
+        return { memories: items, total: items.length };
       }
       const res = await listMemories({ agentId, level, offset, limit });
       return {
