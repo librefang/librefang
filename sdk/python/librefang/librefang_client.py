@@ -942,14 +942,14 @@ class _PluginsResource(_Resource):
 
 class _ProactiveMemoryResource(_Resource):
 
-    def memory_list(self, category: Any = None, offset: Any = None, limit: Any = None):
-        return self._c._request("GET", "/api/memory", None, query={"category": category, "offset": offset, "limit": limit})
+    def memory_list(self, category: Any = None, level: Any = None, offset: Any = None, limit: Any = None):
+        return self._c._request("GET", "/api/memory", None, query={"category": category, "level": level, "offset": offset, "limit": limit})
 
     def memory_add(self, **data):
         return self._c._request("POST", "/api/memory", data)
 
-    def memory_list_agent(self, id: str, category: Any = None, offset: Any = None, limit: Any = None):
-        return self._c._request("GET", f"/api/memory/agents/{id}", None, query={"category": category, "offset": offset, "limit": limit})
+    def memory_list_agent(self, id: str, category: Any = None, level: Any = None, offset: Any = None, limit: Any = None):
+        return self._c._request("GET", f"/api/memory/agents/{id}", None, query={"category": category, "level": level, "offset": offset, "limit": limit})
 
     def memory_reset_agent(self, id: str):
         return self._c._request("DELETE", f"/api/memory/agents/{id}")
@@ -978,8 +978,8 @@ class _ProactiveMemoryResource(_Resource):
     def memory_store_relations(self, id: str, **data):
         return self._c._request("POST", f"/api/memory/agents/{id}/relations", data)
 
-    def memory_search_agent(self, id: str, q: Any = None, limit: Any = None):
-        return self._c._request("GET", f"/api/memory/agents/{id}/search", None, query={"q": q, "limit": limit})
+    def memory_search_agent(self, id: str, q: Any = None, level: Any = None, limit: Any = None):
+        return self._c._request("GET", f"/api/memory/agents/{id}/search", None, query={"q": q, "level": level, "limit": limit})
 
     def memory_stats_agent(self, id: str):
         return self._c._request("GET", f"/api/memory/agents/{id}/stats")
@@ -1002,8 +1002,8 @@ class _ProactiveMemoryResource(_Resource):
     def memory_history(self, memory_id: str):
         return self._c._request("GET", f"/api/memory/items/{memory_id}/history")
 
-    def memory_search(self, q: Any = None, limit: Any = None):
-        return self._c._request("GET", "/api/memory/search", None, query={"q": q, "limit": limit})
+    def memory_search(self, q: Any = None, level: Any = None, limit: Any = None):
+        return self._c._request("GET", "/api/memory/search", None, query={"q": q, "level": level, "limit": limit})
 
     def memory_stats(self):
         return self._c._request("GET", "/api/memory/stats")

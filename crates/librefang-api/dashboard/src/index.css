@@ -211,11 +211,15 @@ body {
 .dark .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
 
 @media (prefers-reduced-motion: reduce) {
-  .animate-pulse-soft,
-  .animate-rise,
-  .card-glow {
-    animation: none !important;
-    transition: none !important;
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
   }
 }
 

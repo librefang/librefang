@@ -12,10 +12,16 @@ import { healthDetailQueryOptions } from "./runtime";
 import { memoryKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
-const REFRESH_MS = 30_000;
-const STALE_MS = 30_000;
+// Records are the active workspace surface, so they refresh every 30 seconds.
+// Aggregate count cards tolerate a slower 60-second cadence. Both remain fresh
+// for 30 seconds so focus/remount does not duplicate an interval fetch.
+const RECORD_REFRESH_MS = 30_000;
+const STATS_REFRESH_MS = 60_000;
+const MEMORY_STALE_MS = 30_000;
 const CONFIG_STALE_MS = 300_000;
 const KV_STALE_MS = 30_000;
+export const MEMORY_PAGE_SIZE = 50;
+const MEMORY_SEARCH_LIMIT = 50;
 
 export const memoryQueries = {
 
@@ -23,8 +29,8 @@ export const memoryQueries = {
     queryOptions({
       queryKey: memoryKeys.stats(agentId),
       queryFn: () => getMemoryStats(agentId),
-      staleTime: STALE_MS,
-      refetchInterval: REFRESH_MS * 2,
+      staleTime: MEMORY_STALE_MS,
+      refetchInterval: STATS_REFRESH_MS,
       refetchIntervalInBackground: false, // #3393
     }),
   config: () =>
@@ -37,38 +43,58 @@ export const memoryQueries = {
 
 
 
-// Propagates `proactive_enabled` from the list endpoint so the page can
-// decide whether to render proactive sections without making a second
-// request. The search endpoint does not expose this flag today; in search
-// mode we leave it `undefined` and let the page rely on the list-mode
-// response (search is hidden when proactive is disabled, so this never
-// becomes ambiguous in practice).
-export const memorySearchOrListQueryOptions = (search: string) =>
+// List mode uses the server's real offset/limit contract. Search has no
+// pagination or total today, so it deliberately returns a named bounded set.
+export interface MemorySearchOrListParams {
+  search: string;
+  agentId?: string;
+  level?: string;
+  offset?: number;
+  limit?: number;
+}
+
+export const memorySearchOrListQueryOptions = ({
+  search,
+  agentId,
+  level,
+  offset = 0,
+  limit = MEMORY_PAGE_SIZE,
+}: MemorySearchOrListParams) =>
   queryOptions<{
     memories: MemoryItem[];
     total: number;
     proactive_enabled?: boolean;
   }>({
-    queryKey: memoryKeys.searchOrList(search),
+    queryKey: memoryKeys.searchOrList({ search, agentId, level, offset, limit }),
     queryFn: async () => {
       if (search.trim()) {
-        const items = await searchMemories({ query: search.trim(), limit: 50 });
+        // Search has no offset/total contract. Keep the server's bounded result
+        // explicit until that endpoint supports real pagination.
+        const items = await searchMemories({
+          query: search.trim(),
+          agentId,
+          level,
+          limit: MEMORY_SEARCH_LIMIT,
+        });
         return { memories: items, total: items.length };
       }
-      const res = await listMemories({ offset: 0, limit: 10000 });
+      const res = await listMemories({ agentId, level, offset, limit });
       return {
         memories: res.memories ?? [],
         total: res.total ?? 0,
         proactive_enabled: res.proactive_enabled,
       };
     },
-    staleTime: STALE_MS,
-    refetchInterval: REFRESH_MS,
+    staleTime: MEMORY_STALE_MS,
+    refetchInterval: RECORD_REFRESH_MS,
     refetchIntervalInBackground: false, // #3393
   });
 
-export function useMemorySearchOrList(search: string) {
-  return useQuery(memorySearchOrListQueryOptions(search));
+export function useMemorySearchOrList(
+  params: MemorySearchOrListParams,
+  options: QueryOverrides = {},
+) {
+  return useQuery(withOverrides(memorySearchOrListQueryOptions(params), options));
 }
 
 // Per-agent KV memory store. Independent of proactive memory — works even
@@ -90,12 +116,12 @@ export function useAgentKvMemory(agentId: string, options: QueryOverrides = {}) 
   return useQuery(withOverrides(agentKvMemoryQueryOptions(agentId), options));
 }
 
-export function useMemoryStats(agentId?: string) {
-  return useQuery(memoryQueries.stats(agentId));
+export function useMemoryStats(agentId?: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(memoryQueries.stats(agentId), options));
 }
 
-export function useMemoryConfig() {
-  return useQuery(memoryQueries.config());
+export function useMemoryConfig(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(memoryQueries.config(), options));
 }
 
 /**
