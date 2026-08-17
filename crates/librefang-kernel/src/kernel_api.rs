@@ -54,6 +54,7 @@ use crate::kernel_handle::KernelHandle;
 use crate::pairing::PairingManager;
 use crate::registry::AgentRegistry;
 use crate::scheduler::AgentScheduler;
+use crate::session_lifecycle::SessionLifecycleBus;
 use crate::session_stream_hub::SessionStreamHub;
 use crate::supervisor::Supervisor;
 use crate::trajectory::TrajectoryBundle;
@@ -104,6 +105,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn processes(&self) -> &Arc<librefang_runtime::process_manager::ProcessManager>;
     fn process_registry(&self) -> &Arc<librefang_runtime::process_registry::ProcessRegistry>;
     fn scheduler_ref(&self) -> &AgentScheduler;
+    fn session_lifecycle_bus(&self) -> Arc<SessionLifecycleBus>;
     fn session_stream_hub(&self) -> Arc<SessionStreamHub>;
     fn supervisor_ref(&self) -> &Supervisor;
     fn templates(&self) -> &crate::workflow::WorkflowTemplateRegistry;
@@ -857,6 +859,9 @@ impl KernelApi for LibreFangKernel {
     }
     fn scheduler_ref(&self) -> &AgentScheduler {
         <Self as crate::AgentSubsystemApi>::scheduler_ref(self)
+    }
+    fn session_lifecycle_bus(&self) -> Arc<SessionLifecycleBus> {
+        Self::session_lifecycle_bus(self)
     }
     fn session_stream_hub(&self) -> Arc<SessionStreamHub> {
         Self::session_stream_hub(self)

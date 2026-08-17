@@ -1,7 +1,7 @@
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { AnimatePresence, motion } from "motion/react";
+import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { fadeInScale, pageTransition } from "./lib/motion";
 import {
   Globe,
@@ -861,7 +861,7 @@ const FULL_HEIGHT_ROUTES = new Set(["/terminal"]);
 // no API key yet, so the AuthDialog gate would deadlock the first launch.
 const NO_AUTH_ROUTES = new Set(["/connect"]);
 
-export function App() {
+function DashboardApp() {
   const { t } = useTranslation();
   const theme = useUIStore((s) => s.theme);
   const toggleTheme = useUIStore((s) => s.toggleTheme);
@@ -1419,5 +1419,13 @@ export function App() {
       <ShortcutsHelp isOpen={showShortcuts} onClose={() => setShowShortcuts(false)} />
       {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} />}
     </div>
+  );
+}
+
+export function App() {
+  return (
+    <MotionConfig reducedMotion="user">
+      <DashboardApp />
+    </MotionConfig>
   );
 }

@@ -62,6 +62,36 @@ async fn json_request(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> (StatusCode, serde_json::Value) {
+    json_request_with_user(h, method, path, body, None).await
+}
+
+async fn json_request_as_owner(
+    h: &Harness,
+    method: Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    json_request_with_user(
+        h,
+        method,
+        path,
+        body,
+        Some(librefang_api::middleware::AuthenticatedApiUser {
+            name: "root".to_string(),
+            role: librefang_api::middleware::UserRole::Owner,
+            user_id: librefang_types::agent::UserId::from_name("root-test"),
+        }),
+    )
+    .await
+}
+
+async fn json_request_with_user(
+    h: &Harness,
+    method: Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+    user: Option<librefang_api::middleware::AuthenticatedApiUser>,
+) -> (StatusCode, serde_json::Value) {
     let mut builder = Request::builder().method(method).uri(path);
     let body_bytes = match body {
         Some(v) => {
@@ -70,7 +100,10 @@ async fn json_request(
         }
         None => Vec::new(),
     };
-    let req = builder.body(Body::from(body_bytes)).unwrap();
+    let mut req = builder.body(Body::from(body_bytes)).unwrap();
+    if let Some(user) = user {
+        req.extensions_mut().insert(user);
+    }
     let resp = h.app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
@@ -419,17 +452,22 @@ async fn comms_send_rejects_oversize_message() {
     // One byte past the byte cap so `check_message_size` rejects with 413,
     // regardless of how the cap is tuned over time (byte-vs-char-cap audit).
     let oversize = "x".repeat(librefang_api::validation::MAX_MESSAGE_BYTES + 1);
-    let (status, body) = json_request(
+    let request_body = serde_json::json!({
+        "from_agent_id": agent_a.id.to_string(),
+        "to_agent_id": agent_b.id.to_string(),
+        "message": oversize,
+    });
+    let (anonymous_status, anonymous_body) = json_request(
         &h,
         Method::POST,
         "/api/comms/send",
-        Some(serde_json::json!({
-            "from_agent_id": agent_a.id.to_string(),
-            "to_agent_id": agent_b.id.to_string(),
-            "message": oversize,
-        })),
+        Some(request_body.clone()),
     )
     .await;
+    assert_eq!(anonymous_status, StatusCode::FORBIDDEN, "{anonymous_body}");
+
+    let (status, body) =
+        json_request_as_owner(&h, Method::POST, "/api/comms/send", Some(request_body)).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
     assert!(
         body["error"]
@@ -448,11 +486,9 @@ async fn comms_send_refuses_impersonation_of_owned_from_agent() {
     // non-empty `manifest.author` is owned by a named human. This bare
     // router has no auth middleware, so `comms_send` sees no
     // `AuthenticatedApiUser` — the loopback / `require_auth = false`
-    // path. On that path the handler must still refuse to mint a message
-    // FROM an owned agent (the `None => author.is_empty()` branch),
-    // otherwise any caller could forge inter-agent traffic from someone
-    // else's agent. The companion happy path (empty author → allowed on
-    // loopback) is exercised by `comms_send_rejects_oversize_message`.
+    // path. On that path the handler must refuse to mint a message from every
+    // agent; production trusted no-auth mode injects a synthetic Owner rather
+    // than reaching this unattributed branch.
     let h = boot();
 
     let owned = librefang_types::agent::AgentEntry {
@@ -513,10 +549,9 @@ async fn comms_send_refuses_impersonation_of_owned_from_agent() {
 /// own `AgentMessage` row only records token usage for the receiver —
 /// it does not capture the from→to relationship.
 ///
-/// This test exercises the route end-to-end with the bare network
-/// router (no auth middleware → unattributed entry, matching loopback
-/// / `require_auth = false` mode) and inspects the audit log on
-/// success. It tolerates the kernel returning Err (no live LLM
+/// This test exercises the route end-to-end with an Owner extension matching
+/// the production auth middleware and inspects the audit log on success. It
+/// tolerates the kernel returning Err (no live LLM
 /// configured in the mock kernel) by asserting the failure path does
 /// NOT record `comms_send`, which is the other half of the contract:
 /// audit fires only on success.
@@ -565,7 +600,7 @@ async fn comms_send_records_audit_entry_on_success_or_skips_on_failure() {
 
     let msg = "héllo 漢字 🎉"; // multi-byte; len-in-bytes != chars-count
     let expected_chars = msg.chars().count();
-    let (status, _body) = json_request(
+    let (status, _body) = json_request_as_owner(
         &h,
         Method::POST,
         "/api/comms/send",

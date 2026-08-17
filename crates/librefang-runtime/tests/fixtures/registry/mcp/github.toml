@@ -5,6 +5,12 @@ category = "devtools"
 icon = "lucide:github"
 tags = ["git", "vcs", "code", "issues", "pull-requests", "ci"]
 
+setup_instructions = """
+1. Go to https://github.com/settings/tokens and create a Personal Access Token (classic or fine-grained) with 'repo' and 'read:org' scopes.
+2. Paste the token into the GITHUB_PERSONAL_ACCESS_TOKEN field above.
+3. Alternatively, use the OAuth flow to authorize LibreFang directly with your GitHub account.
+"""
+
 [transport]
 type = "stdio"
 command = "npx"
@@ -26,13 +32,6 @@ token_url = "https://github.com/login/oauth/access_token"
 [health_check]
 interval_secs = 60
 unhealthy_threshold = 3
-
-setup_instructions = """
-1. Go to https://github.com/settings/tokens and create a Personal Access Token (classic or fine-grained) with 'repo' and 'read:org' scopes.
-2. Paste the token into the GITHUB_PERSONAL_ACCESS_TOKEN field above.
-3. Alternatively, use the OAuth flow to authorize LibreFang directly with your GitHub account.
-"""
-
 
 [i18n.zh]
 name = "GitHub"
