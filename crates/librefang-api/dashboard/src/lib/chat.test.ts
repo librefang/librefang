@@ -249,6 +249,65 @@ describe("applyForeignTerminalFrame (#6390)", () => {
     expect(next[0].errorCode).toBeUndefined();
   });
 
+  it("preserves metadata omitted by a partial foreign `response`", () => {
+    const meteredBubble: TerminalRoutableMessage = {
+      ...bubbleA,
+      tokens: { input: 11, output: 22 },
+      cost_usd: 0.25,
+      memories_saved: ["saved"],
+      memories_used: ["used"],
+    };
+
+    const next = applyForeignTerminalFrame([meteredBubble], {
+      type: "response",
+      message_id: "bot-A",
+      content: "complete",
+      output_tokens: 30,
+    });
+
+    expect(next[0].tokens).toEqual({ input: 11, output: 30 });
+    expect(next[0].cost_usd).toBe(0.25);
+    expect(next[0].memories_saved).toEqual(["saved"]);
+    expect(next[0].memories_used).toEqual(["used"]);
+  });
+
+  it("keeps the existing token object when a foreign `response` omits both counts", () => {
+    const tokens = { input: 11, output: 22 };
+    const meteredBubble: TerminalRoutableMessage = {
+      ...bubbleA,
+      tokens,
+    };
+
+    const next = applyForeignTerminalFrame([meteredBubble], {
+      type: "response",
+      message_id: "bot-A",
+      content: "complete",
+    });
+
+    expect(next[0].tokens).toBe(tokens);
+  });
+
+  it("accepts explicit zero and empty metadata from a foreign `response`", () => {
+    const meteredBubble: TerminalRoutableMessage = {
+      ...bubbleA,
+      cost_usd: 0.25,
+      memories_saved: ["saved"],
+      memories_used: ["used"],
+    };
+
+    const next = applyForeignTerminalFrame([meteredBubble], {
+      type: "response",
+      message_id: "bot-A",
+      cost_usd: 0,
+      memories_saved: [],
+      memories_used: [],
+    });
+
+    expect(next[0].cost_usd).toBe(0);
+    expect(next[0].memories_saved).toEqual([]);
+    expect(next[0].memories_used).toEqual([]);
+  });
+
   it("removes only the owning bubble on a foreign `silent_complete`", () => {
     const next = applyForeignTerminalFrame([bubbleA, bubbleB], { type: "silent_complete", message_id: "bot-A" });
     expect(next.map(m => m.id)).toEqual(["bot-B"]);

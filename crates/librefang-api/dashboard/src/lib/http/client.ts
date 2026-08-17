@@ -174,6 +174,7 @@ export type {
   UserBudgetPayload,
   ListSessionsResult,
   SidecarSaveResult,
+  ReloadConfigResult,
   // workflows — HITL operator-step (#4977)
   OperatorPause,
   OperatorActionVerb,
