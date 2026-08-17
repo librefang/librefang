@@ -61,6 +61,14 @@ describe("reload timestamp storage", () => {
     }
   });
 
+  it("keeps the storage timestamp when history state access throws", () => {
+    const history = {
+      get state(): never { throw new DOMException("blocked", "SecurityError"); },
+      replaceState: vi.fn(),
+    };
+    expect(readReloadTimestamp({ getItem: vi.fn(() => "123") }, history)).toBe(123);
+  });
+
   it("persists a reload guard in history when storage writes fail", () => {
     const storage = { setItem: vi.fn(() => { throw new DOMException("full", "QuotaExceededError"); }) };
     const history = createHistory({ router: "state" });

@@ -57,10 +57,15 @@ export function readReloadTimestamp(
   } catch {
     // History state remains available when storage access is blocked.
   }
-  const historyState = history.state;
-  const fallback = historyState && typeof historyState === "object"
-    ? validReloadTimestamp((historyState as Record<string, unknown>)[CHUNK_RELOAD_HISTORY_KEY])
-    : 0;
+  let fallback = 0;
+  try {
+    const historyState = history.state;
+    fallback = historyState && typeof historyState === "object"
+      ? validReloadTimestamp((historyState as Record<string, unknown>)[CHUNK_RELOAD_HISTORY_KEY])
+      : 0;
+  } catch {
+    // Keep the storage value when browser history state is unavailable.
+  }
   return Math.max(stored, fallback);
 }
 
