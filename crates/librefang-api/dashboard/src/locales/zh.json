@@ -1263,6 +1263,8 @@
     "token_limit": "Token/小时",
     "alert_threshold": "告警阈值",
     "budget_saved": "预算限额已更新。",
+    "budget_no_changes": "保存前请至少输入一个有效的预算值。",
+    "budget_bad_input": "{{field}} 的值无效。请输入有限的非负数；Token 上限必须为整数，告警阈值必须在 0–1 之间。",
     "total_cost": "总消耗",
     "avg_latency": "平均延迟",
     "usage_by_agent": "智能体消耗",
@@ -1339,12 +1341,6 @@
     "embedding_section": "向量嵌入",
     "provider": "Provider",
     "auto_detect": "自动检测",
-    "provider_openai": "OpenAI",
-    "provider_ollama": "Ollama",
-    "provider_vllm": "vLLM",
-    "provider_lmstudio": "LM Studio",
-    "provider_gemini": "Gemini",
-    "provider_minimax": "MiniMax",
     "model": "模型",
     "api_key_env": "API 密钥环境变量",
     "api_key_env_hint": "本地 provider（Ollama / vLLM / LM Studio）通常无需密钥——留空即可。",
@@ -3664,7 +3660,6 @@
       "not_set": "未设置"
     },
     "errors": {
-      "empty_entry": "{{field}} 中存在空白条目",
       "duplicate_entry": "{{field}} 中存在重复条目 '{{item}}'",
       "writable_not_subset": "memory_access.writable_namespaces['{{ns}}'] 不在 readable_namespaces 中（可写必须是可读的子集）"
     },
@@ -3878,6 +3873,7 @@
     "error_disabled_body": "请在 <a>配置 → 安全</a> 中启用配对（<code>pairing.enabled = true</code>）。",
     "error_generic_title": "无法生成配对码",
     "qr_aria_label": "用于与移动设备配对的二维码",
+    "qr_render_failed": "无法显示配对二维码。请刷新后重试。",
     "btn_try_again": "重试"
   },
   "shortcuts_help": {
