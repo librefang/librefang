@@ -49,7 +49,11 @@ export default function RegistryIcon({ icon, className = 'w-5 h-5', fallbackClas
   if (!icon) return null
   if (/^lucide:/i.test(icon)) {
     const name = icon.slice(7).trim().toLowerCase()
-    const Cmp = MAP[name] ?? Box
+    const mappedIcon = MAP[name]
+    if (!mappedIcon && import.meta.env.DEV) {
+      console.warn(`Unknown registry icon: ${icon}`)
+    }
+    const Cmp = mappedIcon ?? Box
     return <Cmp className={className} aria-hidden />
   }
   // Legacy emoji — render as glyph.
