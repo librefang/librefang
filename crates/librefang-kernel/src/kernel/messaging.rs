@@ -2189,6 +2189,13 @@ impl LibreFangKernel {
                                 usage: result.total_usage,
                             })
                             .await;
+                        let _ = tx
+                            .send(StreamEvent::PhaseChange {
+                                phase: librefang_runtime::llm_driver::PHASE_RESPONSE_COMPLETE
+                                    .to_string(),
+                                detail: None,
+                            })
+                            .await;
                         // Settle pre-charged reservation (#3736)
                         token_reservation.settle(&result.total_usage);
                         // Release the global USD hold — non-LLM modules incur
