@@ -35,6 +35,7 @@ import {
 import { CUSTOM_OPTION } from "./constants";
 
 vi.mock("../../lib/queries/memory", () => ({
+  MEMORY_PAGE_SIZE: 50,
   useMemoryStats: vi.fn(),
   useMemoryConfig: vi.fn(),
   useMemoryHealth: vi.fn(),
@@ -176,7 +177,7 @@ const useAbortAutoDreamMock = useAbortAutoDream as unknown as ReturnType<typeof 
 const useSetAutoDreamEnabledMock = useSetAutoDreamEnabled as unknown as ReturnType<typeof vi.fn>;
 const useSetAutoDreamGlobalEnabledMock = useSetAutoDreamGlobalEnabled as unknown as ReturnType<typeof vi.fn>;
 
-const STATS = { total: 7, user_count: 2, session_count: 3, agent_count: 2 };
+const STATS = { total: 7, by_agent: {}, user_count: 2, session_count: 3, agent_count: 2 };
 const CONFIG = {
   embedding_provider: "openai",
   embedding_model: "text-embedding-3-small",
@@ -281,10 +282,8 @@ describe("MemoryPage (redesigned)", () => {
 
   it("renders scope summary with totals from useMemoryStats", () => {
     renderPage();
-    // STATS.total = 7 — rendered as the headline number in ScopeSummary
-    // (uniquely "7"; user/session/agent counts of 2/3/2 share digits with
-    // each other so assert on the unique total).
-    expect(screen.getByText("7")).toBeInTheDocument();
+    // STATS.total = 7 — rendered in the summary and records tab badge.
+    expect(screen.getAllByText("7")).toHaveLength(2);
     // session_count=3 is also unique among the breakdown chips.
     expect(screen.getByText("3")).toBeInTheDocument();
   });
@@ -294,6 +293,71 @@ describe("MemoryPage (redesigned)", () => {
     expect(screen.getByText("mem-aaaaaaaa")).toBeInTheDocument();
     expect(screen.getByText("mem-bbbbbbbb")).toBeInTheDocument();
     expect(screen.getByText("remember to water the plants")).toBeInTheDocument();
+  });
+
+  it("pages record-list requests through the server contract", () => {
+    useMemorySearchOrListMock.mockReturnValue({
+      data: { memories: MEMORIES, total: 120, proactive_enabled: true },
+      isLoading: false,
+      isError: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+    renderPage();
+
+    expect(useMemorySearchOrListMock).toHaveBeenLastCalledWith({
+      search: "",
+      agentId: undefined,
+      level: undefined,
+      offset: 0,
+      limit: 50,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "common.next" }));
+    expect(useMemorySearchOrListMock).toHaveBeenLastCalledWith({
+      search: "",
+      agentId: undefined,
+      level: undefined,
+      offset: 50,
+      limit: 50,
+    });
+  });
+
+  it("returns to the last valid page when a refreshed total shrinks", async () => {
+    useMemorySearchOrListMock.mockImplementation((params: { offset: number }) => ({
+      data:
+        params.offset === 0
+          ? { memories: MEMORIES, total: 120, proactive_enabled: true }
+          : { memories: [], total: 50, proactive_enabled: true },
+      isLoading: false,
+      isError: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    }));
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: "common.next" }));
+    expect(useMemorySearchOrListMock).toHaveBeenCalledWith(
+      expect.objectContaining({ offset: 50 }),
+    );
+    await waitFor(() =>
+      expect(useMemorySearchOrListMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ offset: 0 }),
+      ),
+    );
+  });
+
+  it("sends level filters through the paginated list query", () => {
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: "user" }));
+
+    expect(useMemorySearchOrListMock).toHaveBeenLastCalledWith({
+      search: "",
+      agentId: undefined,
+      level: "user",
+      offset: 0,
+      limit: 50,
+    });
   });
 
   it("switches to KV tab when the KV tab button is clicked", () => {

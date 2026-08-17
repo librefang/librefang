@@ -218,8 +218,9 @@ describe("query key factories", () => {
     });
 
     it("searchOrList is nested under lists", () => {
-      const searchKey = memoryKeys.searchOrList("test");
-      expect(searchKey).toEqual(["memory", "list", "searchOrList", "test"]);
+      const params = { search: "test", agentId: "a1", offset: 50, limit: 50 };
+      const searchKey = memoryKeys.searchOrList(params);
+      expect(searchKey).toEqual(["memory", "list", "searchOrList", params]);
       const listsPrefix = memoryKeys.lists();
       expect(searchKey.slice(0, listsPrefix.length)).toEqual(listsPrefix);
     });
