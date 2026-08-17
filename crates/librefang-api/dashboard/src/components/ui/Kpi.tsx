@@ -24,7 +24,7 @@ export function Kpi({ label, value, unit, delta, trend = "flat", sub, sparkline,
       onClick={onClick}
       className="relative overflow-hidden surface-lit p-3.5"
     >
-      <div className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-text-dim">{label}</div>
+      <div className="text-label font-semibold uppercase tracking-label text-text-dim">{label}</div>
       <div className="flex items-baseline gap-1 mt-2">
         <span
           className={`font-mono font-semibold text-[26px] tracking-[-0.02em] tabular-nums ${

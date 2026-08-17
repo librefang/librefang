@@ -3,7 +3,11 @@ import {
   useQueryClient,
   type UseMutationOptions,
 } from "@tanstack/react-query";
-import { setConfigValue, reloadConfig } from "../http/client";
+import {
+  setConfigValue,
+  reloadConfig,
+  type ReloadConfigResult,
+} from "../http/client";
 import { configKeys, overviewKeys } from "../queries/keys";
 
 type SetConfigResult = {
@@ -62,12 +66,6 @@ export function useBatchSetConfigValues(
     },
   });
 }
-
-type ReloadConfigResult = {
-  status: string;
-  restart_required?: boolean;
-  restart_reasons?: string[];
-};
 
 export function useReloadConfig(
   options?: Partial<
