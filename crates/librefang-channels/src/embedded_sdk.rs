@@ -26,8 +26,8 @@
 //!   Their workflow is unchanged.
 //! - Otherwise (the new-user case — no SDK installed anywhere), we
 //!   lazily extract the embedded tree once to `<home>/sidecar-python/
-//!   <content_hash>/` and prepend that directory to the child's
-//!   `PYTHONPATH`.
+//!   <content_hash>/` and append that directory as a fallback on the
+//!   child's `PYTHONPATH`.
 //!
 //! Skipping the inject when a real install exists is what keeps
 //! developers' editable installs authoritative — the embedded copy
@@ -55,13 +55,13 @@
 //! ## Concurrency
 //!
 //! Two sidecars (e.g. telegram and discord) spawning at once both
-//! enter `ensure_extracted`. The function is idempotent (the marker
-//! file gates re-extraction) and uses `rename`-into-place from a
-//! per-pid temporary to make the visible final directory atomic with
-//! respect to other readers / racing processes. The `OnceLock`
-//! around the content hash avoids re-hashing 1MB of embedded files
-//! on every spawn.
+//! enter `ensure_extracted`. An advisory file lock serializes work for
+//! one content hash across threads and daemon processes. The marker is
+//! re-checked after locking, then extraction uses `rename`-into-place
+//! from a per-process temporary. The `OnceLock` around the content hash
+//! avoids re-hashing 1MB of embedded files on every spawn.
 
+use fs2::FileExt;
 use include_dir::{include_dir, Dir, DirEntry};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -148,7 +148,7 @@ fn collect_files<'a>(dir: &'a Dir<'a>, out: &mut Vec<(PathBuf, &'a [u8])>) {
     }
 }
 
-/// Idempotent extract. Returns the directory that should be prepended
+/// Idempotent extract. Returns the directory that should be appended
 /// to `PYTHONPATH` (i.e. the directory that has `librefang/` as an
 /// immediate child).
 ///
@@ -167,19 +167,30 @@ pub(crate) fn ensure_extracted(home_dir: &Path) -> std::io::Result<PathBuf> {
 
     std::fs::create_dir_all(&root)?;
 
+    // The lock lives beside the hash directory so it remains valid while a
+    // torn target is removed and replaced. File locks are released by the OS
+    // on process exit, so a crashed extractor cannot leave a stale owner.
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(root.join(format!("{hash}.lock")))?;
+    lock_file.lock_exclusive()?;
+
+    // Another extractor may have completed while this caller waited for the
+    // lock. Only the lock owner may inspect or replace a torn target.
+    if marker.exists() {
+        return Ok(target);
+    }
+
     // Torn previous run? An existing `target` directory without the
     // `.complete` marker means a prior extract was killed before it
     // could finish — its tree may be partial, byte-corrupt, or stale.
     // POSIX `rename` of a directory onto a non-empty directory is
     // ENOTEMPTY, so we have to clear it before staging. Concurrent
-    // recovery is best-effort: if a racing process removes it first,
-    // the NotFound is swallowed.
+    // recovery is serialized by the per-hash lock above.
     if target.exists() {
-        if let Err(e) = std::fs::remove_dir_all(&target) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(e);
-            }
-        }
+        std::fs::remove_dir_all(&target)?;
     }
 
     // Extract into a sibling pid-tagged staging dir, then atomically
@@ -291,23 +302,35 @@ fn command_is_python_interpreter(command: &str) -> bool {
 fn has_real_sdk_installed(command: &str) -> bool {
     static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(guard) = cache.lock() {
-        if let Some(&v) = guard.get(command) {
-            return v;
-        }
+    probe_sdk_cached(cache, command, || {
+        Command::new(command)
+            .args(["-c", "import librefang.sidecar"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
+}
+
+fn probe_sdk_cached(
+    cache: &Mutex<HashMap<String, bool>>,
+    command: &str,
+    probe: impl FnOnce() -> bool,
+) -> bool {
+    let mut guard = cache.lock().unwrap_or_else(|poisoned| {
+        warn!("embedded SDK probe cache lock poisoned; recovering inner state");
+        cache.clear_poison();
+        poisoned.into_inner()
+    });
+    if let Some(&installed) = guard.get(command) {
+        return installed;
     }
-    let probed = Command::new(command)
-        .args(["-c", "import librefang.sidecar"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if let Ok(mut guard) = cache.lock() {
-        guard.insert(command.to_string(), probed);
-    }
-    probed
+
+    let installed = probe();
+    guard.insert(command.to_string(), installed);
+    installed
 }
 
 /// Single platform-correct PATH separator for `PYTHONPATH` composition.
@@ -331,10 +354,10 @@ const PYTHONPATH_SEP: &str = ":";
 /// `existing_pythonpath` is the value already in the merged env about
 /// to be passed to the child — either operator-explicit
 /// `[sidecar_channels.env]` or inherited from the daemon's own env.
-/// When set, our extracted dir is **prepended** so the user's
-/// PYTHONPATH still wins for any module they're explicitly overriding;
-/// our entry only provides resolution for names that nobody else
-/// claimed.
+/// When set, the user's entries stay first and our extracted directory is
+/// appended as a fallback. Explicit operator modules therefore remain
+/// authoritative while names absent from those paths resolve from the
+/// embedded package.
 pub fn pythonpath_with_embedded(
     command: &str,
     home_dir: &Path,
@@ -363,7 +386,7 @@ pub fn pythonpath_with_embedded(
     let entry = extracted.to_string_lossy().into_owned();
     let composed = match existing_pythonpath {
         Some(existing) if !existing.is_empty() => {
-            format!("{entry}{PYTHONPATH_SEP}{existing}")
+            format!("{existing}{PYTHONPATH_SEP}{entry}")
         }
         _ => entry,
     };
@@ -373,6 +396,8 @@ pub fn pythonpath_with_embedded(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
 
     #[test]
@@ -492,6 +517,33 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_extractors_serialize_torn_tree_recovery() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("sidecar-python").join(embedded_hash());
+        std::fs::create_dir_all(target.join("librefang")).unwrap();
+        std::fs::write(target.join("librefang/garbage.py"), b"truncated").unwrap();
+
+        let home = Arc::new(tmp.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(8));
+        let mut threads = Vec::new();
+        for _ in 0..8 {
+            let home = Arc::clone(&home);
+            let barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                ensure_extracted(&home)
+            }));
+        }
+
+        for thread in threads {
+            assert_eq!(thread.join().unwrap().unwrap(), target);
+        }
+        assert!(target.join(".complete").exists());
+        assert!(target.join("librefang/__init__.py").exists());
+        assert!(!target.join("librefang/garbage.py").exists());
+    }
+
+    #[test]
     fn command_python_detector_accepts_canonical_names() {
         assert!(command_is_python_interpreter("python"));
         assert!(command_is_python_interpreter("python3"));
@@ -522,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn pythonpath_composition_prepends_extracted_dir() {
+    fn pythonpath_composition_keeps_operator_entries_first() {
         // Drives the no-real-sdk branch via an interpreter path whose
         // basename matches the Python detector (`python3`) but whose
         // file does NOT exist, so `has_real_sdk_installed` reliably
@@ -538,13 +590,13 @@ mod tests {
         let composed = result.expect("should compose when sdk absent");
         let sep = PYTHONPATH_SEP;
         assert!(
-            composed.ends_with(&format!("{sep}/operator/explicit/path")),
-            "operator PYTHONPATH must be preserved at the tail: got {composed}"
+            composed.starts_with(&format!("/operator/explicit/path{sep}")),
+            "operator PYTHONPATH must remain authoritative: got {composed}"
         );
         let extract_target = tmp.path().join("sidecar-python").join(embedded_hash());
         assert!(
-            composed.starts_with(&extract_target.to_string_lossy().to_string()),
-            "extracted dir must be prepended: got {composed}"
+            composed.ends_with(&extract_target.to_string_lossy().to_string()),
+            "extracted dir must remain a fallback: got {composed}"
         );
     }
 
@@ -615,5 +667,62 @@ mod tests {
             !tmp.path().join("sidecar-python").exists(),
             "non-python command must not trigger extraction"
         );
+    }
+
+    #[test]
+    fn sdk_probe_cache_coalesces_concurrent_misses() {
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let probes = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(8));
+        let mut threads = Vec::new();
+
+        for _ in 0..8 {
+            let cache = cache.clone();
+            let probes = probes.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                probe_sdk_cached(&cache, "/test/python3", || {
+                    probes.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    true
+                })
+            }));
+        }
+
+        for thread in threads {
+            assert!(thread.join().unwrap());
+        }
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sdk_probe_cache_recovers_poison_and_preserves_entries() {
+        let cache = Arc::new(Mutex::new(HashMap::from([(
+            "/cached/python3".to_string(),
+            true,
+        )])));
+        let poisoned_cache = cache.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poisoned_cache.lock().unwrap();
+            panic!("poison SDK probe cache");
+        });
+        assert!(cache.is_poisoned());
+
+        let probes = AtomicUsize::new(0);
+        assert!(probe_sdk_cached(&cache, "/cached/python3", || {
+            probes.fetch_add(1, Ordering::SeqCst);
+            false
+        }));
+        assert_eq!(probes.load(Ordering::SeqCst), 0);
+        assert!(!cache.is_poisoned());
+
+        assert!(!probe_sdk_cached(&cache, "/new/python3", || {
+            probes.fetch_add(1, Ordering::SeqCst);
+            false
+        }));
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.lock().unwrap().len(), 2);
     }
 }

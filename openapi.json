@@ -173,13 +173,13 @@
         "tags": [
           "a2a"
         ],
-        "summary": "GET /api/a2a/agents/{id} — Get a specific external A2A agent by index, URL, or name.",
+        "summary": "GET /api/a2a/agents/{id} — Get a specific external A2A agent by URL or name.",
         "operationId": "a2a_get_external_agent",
         "parameters": [
           {
             "name": "id",
             "in": "path",
-            "description": "Id",
+            "description": "Canonical URL or agent name",
             "required": true,
             "schema": {
               "type": "string"
@@ -196,6 +196,9 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "No external A2A agent found for the given identity"
           }
         }
       }
@@ -229,6 +232,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "The pending-agent identity is not a valid HTTP(S) URL"
           },
           "404": {
             "description": "No pending agent found for the given URL"
@@ -5541,6 +5547,16 @@
         "responses": {
           "200": {
             "description": "SSE stream of inter-agent events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The process-wide communication stream limit is exhausted",
             "content": {
               "application/json": {
                 "schema": {
@@ -11983,7 +11999,7 @@
           "required": true
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Trigger created",
             "content": {
               "application/json": {
@@ -11995,6 +12011,15 @@
           },
           "400": {
             "description": "Invalid trigger definition"
+          },
+          "404": {
+            "description": "Owner or target agent not found"
+          },
+          "500": {
+            "description": "Unexpected kernel failure"
+          },
+          "503": {
+            "description": "Trigger registration temporarily unavailable"
           }
         }
       }
@@ -12761,6 +12786,9 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Template serialization failed"
           }
         }
       }
@@ -12796,6 +12824,9 @@
           },
           "404": {
             "description": "Template not found"
+          },
+          "500": {
+            "description": "Template serialization failed"
           }
         }
       }

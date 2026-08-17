@@ -200,6 +200,15 @@ fn persist_run(store: &Option<GoalRunStore>, state: &GoalRunState) {
     }
 }
 
+/// Persist the first snapshot of a new run, replacing any durable predecessor
+/// in one SQLite statement so a crash cannot land between delete and insert.
+fn persist_new_run(store: &Option<GoalRunStore>, state: &GoalRunState) {
+    let Some(store) = store else { return };
+    if let Err(e) = store.start_run(&row_from_state(state)) {
+        warn!(goal_id = %state.goal_id, "Failed to persist new goal run state: {e}");
+    }
+}
+
 /// Drop the durable mirror once a run ends. Same failure policy as
 /// [`persist_run`]: log and swallow.
 fn delete_persisted_run(store: &Option<GoalRunStore>, goal_id: GoalId) {
@@ -344,7 +353,6 @@ impl GoalRunner {
         // Replace any prior run for this goal. `stop_locked` (not `stop`)
         // because we already hold `start_lock`, which is non-reentrant.
         self.stop_locked(goal_id);
-
         let now = Utc::now();
         let initial = GoalRunState {
             goal_id,
@@ -358,8 +366,10 @@ impl GoalRunner {
             updated_at: now,
         };
         // Persist the initial Running row before the first tick so a crash
-        // mid-tick still leaves a recoverable record at the next boot.
-        persist_run(&self.store, &initial);
+        // mid-tick still leaves a recoverable record at the next boot. The
+        // new-run upsert also atomically replaces a terminal predecessor's
+        // start time if one survived an earlier daemon restart.
+        persist_new_run(&self.store, &initial);
         let state = Arc::new(Mutex::new(initial));
         let stop = Arc::new(AtomicBool::new(false));
         let generation = self.next_gen.fetch_add(1, Ordering::SeqCst);
@@ -1115,6 +1125,52 @@ mod tests {
             store.get_run(&goal.id.to_string()).unwrap().is_none(),
             "a completed run must be removed from the durable store"
         );
+    }
+
+    #[tokio::test]
+    async fn start_replaces_terminal_row_with_a_fresh_started_at() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let store = store_from(&substrate);
+        let goal_id = GoalId::new();
+        let agent_id = AgentId::new();
+        let stale_started = Utc::now() - chrono::Duration::days(1);
+        store
+            .save_run(&GoalRunRow {
+                goal_id: goal_id.to_string(),
+                agent_id: agent_id.to_string(),
+                phase: GoalRunPhase::Stopped.to_string(),
+                iteration: 5,
+                max_iterations: 25,
+                last_progress: 50,
+                last_error: Some("Interrupted by daemon restart".to_string()),
+                started_at: stale_started.to_rfc3339(),
+                updated_at: stale_started.to_rfc3339(),
+            })
+            .unwrap();
+
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store.clone());
+        runner.start(
+            goal_id,
+            agent_id,
+            25,
+            substrate,
+            |_agent_id, _message| async move {
+                std::future::pending::<Result<String, String>>().await
+            },
+        );
+
+        let row = store.get_run(&goal_id.to_string()).unwrap().unwrap();
+        let started_at = chrono::DateTime::parse_from_rfc3339(&row.started_at)
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(row.phase, GoalRunPhase::Running.to_string());
+        assert!(
+            started_at > stale_started,
+            "a new run must not inherit the predecessor's started_at"
+        );
+
+        assert!(runner.stop(goal_id));
     }
 
     #[test]

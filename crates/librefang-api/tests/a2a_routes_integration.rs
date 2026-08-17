@@ -116,6 +116,49 @@ async fn send(
     (status, value)
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn protocol_task_caller_ignores_spoofable_identity_header() {
+    let h = boot("test-secret-key").await;
+    let agent = librefang_types::agent::AgentEntry {
+        id: librefang_types::agent::AgentId::new(),
+        name: "target".to_string(),
+        state: librefang_types::agent::AgentState::Running,
+        ..Default::default()
+    };
+    h.state
+        .kernel
+        .agent_registry()
+        .register(agent.clone())
+        .expect("register target");
+    let body = serde_json::json!({
+        "params": {
+            "agentId": agent.id.to_string(),
+            "message": {"parts": [{"type": "text", "text": "hello"}]}
+        }
+    });
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/a2a/tasks/send")
+        .header("authorization", format!("Bearer {}", h.api_key))
+        .header("x-a2a-agent-id", "spoofed-agent")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+
+    let response = h.app.clone().oneshot(request).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let response_body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    let caller = response_body["callerA2aAgentId"]
+        .as_str()
+        .or_else(|| response_body["caller_a2a_agent_id"].as_str())
+        .expect("authenticated caller label");
+    assert_ne!(caller, "spoofed-agent");
+    assert!(caller.starts_with("user:"), "{response_body}");
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/a2a/agents
 // ---------------------------------------------------------------------------
@@ -405,6 +448,21 @@ async fn approve_unknown_pending_returns_404() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn approve_rejects_noncanonical_url_key() {
+    let h = boot("test-secret-key").await;
+    let (status, body) = send(
+        &h,
+        Method::POST,
+        "/api/a2a/agents/not-a-url/approve",
+        None,
+        true,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
 }
 
 /// Approve endpoint requires auth.

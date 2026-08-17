@@ -5,9 +5,8 @@ name: PR Review Sync (applier)
 # needs-changes labels.
 #
 # Runs in the default-branch context, so the GITHUB_TOKEN here gets
-# the workflow's declared permissions (issues: write, pull-requests:
-# write) — unlike the collector's pull_request_review token, which
-# GitHub forces read-only.
+# the job's declared permissions — unlike the collector's
+# pull_request_review token, which GitHub forces read-only.
 
 on:
   workflow_run:
@@ -16,18 +15,20 @@ on:
 
 permissions:
   contents: read
-  # Required by `actions/download-artifact` when fetching an artifact
-  # from a different workflow run (the collector). Without this the
-  # download step 403s — once a workflow declares `permissions:`,
-  # unspecified scopes default to `none`.
-  actions: read
-  issues: write
-  pull-requests: write
 
 jobs:
-  apply:
-    name: Apply review-state labels
+  prepare:
+    name: Validate review-state payload
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # Required by `actions/download-artifact` when fetching an artifact
+      # from a different workflow run (the collector).
+      actions: read
+      contents: read
+    outputs:
+      pr_number: ${{ steps.payload.outputs.pr_number }}
+      review_state: ${{ steps.payload.outputs.review_state }}
     # Skip if the collector failed (e.g. the review state filter
     # excluded it, jq missing, etc.). The artifact would also be
     # absent in that case.
@@ -41,7 +42,8 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: ./payload
 
-      - name: Apply labels
+      - name: Validate payload
+        id: payload
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
@@ -54,46 +56,105 @@ jobs:
             // Defensive: collector pre-filters but double-check here so
             // a stale or hand-crafted artifact can't drive label state.
             if (reviewState !== 'changes_requested' && reviewState !== 'approved') {
-              core.info(`Ignoring review_state=${reviewState}`);
-              return;
+              throw new Error(`Invalid review_state in payload: ${reviewState}`);
             }
             if (!Number.isInteger(prNumber) || prNumber <= 0) {
-              core.setFailed(`Invalid pr_number in payload: ${prNumber}`);
-              return;
+              throw new Error(`Invalid pr_number in payload: ${prNumber}`);
+            }
+
+            core.setOutput('pr_number', String(prNumber));
+            core.setOutput('review_state', reviewState);
+
+  apply:
+    name: Apply review-state labels
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    # `workflow_run.pull_requests` is empty for pull_request_review runs in
+    # practice. Resolve the PR from the trusted collector artifact first, then
+    # serialize the mutating job on that exact PR number.
+    concurrency:
+      group: pr-review-applier-${{ needs.prepare.outputs.pr_number }}
+      cancel-in-progress: false
+    steps:
+      - name: Apply labels
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+          REVIEW_STATE: ${{ needs.prepare.outputs.review_state }}
+        with:
+          script: |
+            const prNumber = Number(process.env.PR_NUMBER);
+            const payloadReviewState = process.env.REVIEW_STATE;
+
+            if (!Number.isInteger(prNumber) || prNumber <= 0) {
+              throw new Error(`Invalid prepared pr_number: ${process.env.PR_NUMBER}`);
+            }
+            if (payloadReviewState !== 'changes_requested' && payloadReviewState !== 'approved') {
+              throw new Error(`Invalid prepared review_state: ${payloadReviewState}`);
             }
 
             const READY = 'ready-for-review';
             const NEEDS = 'needs-changes';
 
-            const { data: pr } = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: prNumber,
-            });
-            const labels = pr.labels.map(l => l.name);
+            // `prepare` jobs from different workflow runs can finish out of
+            // event order. Concurrency serializes mutations, but it does not
+            // make an older payload that arrived late authoritative. Resolve
+            // the latest actionable review from GitHub immediately before
+            // writing labels so every queued job converges on current state.
+            const reviews = await github.paginate(
+              github.rest.pulls.listReviews,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                per_page: 100,
+              },
+            );
+            const latestReview = reviews
+              .filter((review) => {
+                const state = review.state.toLowerCase();
+                return state === 'changes_requested' || state === 'approved';
+              })
+              .sort((left, right) => {
+                const timeDelta = Date.parse(left.submitted_at || '') -
+                  Date.parse(right.submitted_at || '');
+                return timeDelta || left.id - right.id;
+              })
+              .at(-1);
+            if (!latestReview) {
+              core.info(`#${prNumber}: no current actionable review; nothing to reconcile`);
+              return;
+            }
+            const reviewState = latestReview.state.toLowerCase();
+            if (reviewState !== payloadReviewState) {
+              core.info(
+                `#${prNumber}: stale payload ${payloadReviewState}; reconciling latest ${reviewState}`,
+              );
+            }
 
             async function addLabel(label) {
-              if (!labels.includes(label)) {
-                await github.rest.issues.addLabels({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: prNumber,
-                  labels: [label],
-                });
-              }
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                labels: [label],
+              });
             }
             async function removeLabel(label) {
-              if (labels.includes(label)) {
-                await github.rest.issues.removeLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: prNumber,
-                  name: label,
-                }).catch(() => {});
-              }
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                name: label,
+              }).catch((error) => {
+                if (error.status !== 404) throw error;
+              });
             }
-
-            const hasBlocker = labels.includes('has-conflicts') || labels.includes('ci-failed');
 
             if (reviewState === 'changes_requested') {
               await addLabel(NEEDS);
@@ -102,10 +163,22 @@ jobs:
             } else {
               // approved
               await removeLabel(NEEDS);
+              // Re-read immediately before the blocker decision. Other label
+              // workflows may have added a conflict or CI failure since this
+              // applier started.
+              const { data: freshPr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+              const freshLabels = freshPr.labels.map(label => label.name);
+              const hasBlocker = freshLabels.includes('has-conflicts') ||
+                freshLabels.includes('ci-failed');
               if (!hasBlocker) {
                 await addLabel(READY);
                 core.info(`#${prNumber}: approved → -${NEEDS} +${READY}`);
               } else {
+                await removeLabel(READY);
                 core.info(`#${prNumber}: approved but has blockers, skipping ${READY}`);
               }
             }
