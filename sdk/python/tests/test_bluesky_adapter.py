@@ -378,7 +378,13 @@ def test_concurrent_token_reads_share_one_rotating_refresh(monkeypatch):
     a._access_jwt = "expired-access"
     a._refresh_jwt = "refresh-1"
     a._session_did = "did:plc:bot"
-    a._session_created_at = 0.0
+    # Age the session past the refresh threshold relative to the clock
+    # `_get_token` actually reads. A literal 0.0 only reads as expired
+    # once the host's monotonic clock has passed SESSION_LIFE_SECS, so
+    # it silently short-circuits to the "still fresh" branch on a
+    # freshly-booted CI runner.
+    a._session_created_at = (ba.time.monotonic()
+                             - ba.SESSION_LIFE_SECS)
     calls = 0
     calls_lock = threading.Lock()
 
