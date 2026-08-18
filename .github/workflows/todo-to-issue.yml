@@ -9,7 +9,9 @@ permissions:
   issues: write
 
 concurrency:
-  group: todo-to-issue-${{ github.ref }}
+  # Each push carries a distinct incremental diff. Shared concurrency groups
+  # retain only one pending run and can discard an intermediate commit scan.
+  group: todo-to-issue-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:

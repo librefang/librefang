@@ -144,8 +144,12 @@ def check_repository_automation() -> None:
         "issues": "write",
     }:
         raise SystemExit("TODO issue workflow permissions are not minimal and complete")
-    if todo_workflow.get("concurrency", {}).get("cancel-in-progress") is not False:
-        raise SystemExit("TODO issue workflow can cancel a partially completed scan")
+    todo_concurrency = todo_workflow.get("concurrency", {})
+    if todo_concurrency != {
+        "group": "todo-to-issue-${{ github.run_id }}",
+        "cancel-in-progress": False,
+    }:
+        raise SystemExit("TODO issue workflow can discard an incremental push scan")
     scan_job = todo_workflow.get("jobs", {}).get("scan", {})
     if scan_job.get("timeout-minutes") != 10:
         raise SystemExit("TODO issue workflow has no bounded runtime")
