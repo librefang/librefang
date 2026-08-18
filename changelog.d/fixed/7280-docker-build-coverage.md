@@ -1,1 +1,1 @@
-Run Docker CI for every build-context source change, share its amd64 cache with releases, fail immediately on container exit, and probe both liveness and readiness. (#7280) (@xiaomo)
+Run Docker CI for every build and smoke-test input, reuse its main-branch cache, fail immediately on container exit, and require bounded liveness and readiness probes. (#7280) (@xiaomo)
