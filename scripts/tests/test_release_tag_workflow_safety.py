@@ -144,6 +144,11 @@ def check_repository_automation() -> None:
     update_job = auto_update.get("jobs", {}).get("update-branches", {})
     if "permissions" in update_job:
         raise SystemExit("branch reconciliation grants the default token write access")
+    if (
+        update_job.get("if") != "github.event_name != 'pull_request'"
+        or update_job.get("needs") != "test-helper"
+    ):
+        raise SystemExit("branch reconciliation mutations are not gated behind tests")
     update_steps = update_job.get("steps", [])
     privileged_checkout = update_steps[0].get("with", {}) if update_steps else {}
     if (
@@ -164,6 +169,9 @@ def check_repository_automation() -> None:
         "${{ secrets.WEBSITE_REPO_TOKEN }}"
     ):
         raise SystemExit("branch reconciliation does not use its explicit PAT")
+    reconciliation_script = github_script.get("with", {}).get("script", "")
+    if "expected_head_sha: ref" not in reconciliation_script:
+        raise SystemExit("branch reconciliation has no head-movement guard")
 
 
 def main() -> None:
