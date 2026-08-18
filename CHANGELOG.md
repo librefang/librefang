@@ -9,7 +9,6 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Fixed
 
-- Cache the daily contributor generator, serialize its mutating runs, bound runtime, and retry transient auto-merge API failures under explicitly documented PAT scope. (@xiaomo)
 - Escape every TOML control character when the dashboard serializes agent manifest strings, preserving carriage returns, tabs, and other control bytes as valid round-trippable TOML instead of producing a manifest the daemon cannot parse. (@TechWizard9999)
 
 ## [2026.7.31] - 2026-07-31
