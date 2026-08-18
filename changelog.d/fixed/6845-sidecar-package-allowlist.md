@@ -1,1 +1,0 @@
-- Added an explicit crates.io package allowlist for the Rust sidecar SDK so unrelated local files cannot enter published archives. (@houko)

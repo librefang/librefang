@@ -1,1 +1,0 @@
-- Made the Rust SDK's reqwest TLS backend explicit and selectable: existing users retain default TLS, while downstream crates can choose rustls or disable TLS features. (@houko)
