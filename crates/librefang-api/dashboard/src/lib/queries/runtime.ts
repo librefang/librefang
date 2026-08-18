@@ -15,43 +15,50 @@ import {
 import { runtimeKeys, auditKeys, cronKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
+const POLL_INTERVAL_MS = {
+  fast: 15_000,
+  standard: 30_000,
+  slow: 60_000,
+  security: 120_000,
+} as const;
+
 export const systemStatusQueryOptions = () =>
   queryOptions({
     queryKey: runtimeKeys.status(),
     queryFn: getStatus,
-    staleTime: 30_000,
-    refetchInterval: 30_000,
+    staleTime: POLL_INTERVAL_MS.standard,
+    refetchInterval: POLL_INTERVAL_MS.standard,
     refetchIntervalInBackground: false, // #3393
   });
 
-export function useSystemStatus() {
-  return useQuery(systemStatusQueryOptions());
+export function useSystemStatus(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(systemStatusQueryOptions(), options));
 }
 
 export const queueStatusQueryOptions = () =>
   queryOptions({
     queryKey: runtimeKeys.queueStatus(),
     queryFn: getQueueStatus,
-    staleTime: 15_000,
-    refetchInterval: 15_000,
+    staleTime: POLL_INTERVAL_MS.fast,
+    refetchInterval: POLL_INTERVAL_MS.fast,
     refetchIntervalInBackground: false, // #3393
   });
 
-export function useQueueStatus() {
-  return useQuery(queueStatusQueryOptions());
+export function useQueueStatus(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(queueStatusQueryOptions(), options));
 }
 
 export const healthDetailQueryOptions = () =>
   queryOptions({
     queryKey: runtimeKeys.healthDetail(),
     queryFn: getHealthDetail,
-    staleTime: 30_000,
-    refetchInterval: 30_000,
+    staleTime: POLL_INTERVAL_MS.standard,
+    refetchInterval: POLL_INTERVAL_MS.standard,
     refetchIntervalInBackground: false, // #3393
   });
 
-export function useHealthDetail() {
-  return useQuery(healthDetailQueryOptions());
+export function useHealthDetail(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(healthDetailQueryOptions(), options));
 }
 
 /**
@@ -63,21 +70,21 @@ export const healthLivenessQueryOptions = () =>
   queryOptions({
     queryKey: runtimeKeys.healthLiveness(),
     queryFn: getHealth,
-    staleTime: 30_000,
-    refetchInterval: 30_000,
+    staleTime: POLL_INTERVAL_MS.standard,
+    refetchInterval: POLL_INTERVAL_MS.standard,
     refetchIntervalInBackground: false, // #3393
   });
 
-export function useHealthLiveness() {
-  return useQuery(healthLivenessQueryOptions());
+export function useHealthLiveness(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(healthLivenessQueryOptions(), options));
 }
 
 export const securityStatusQueryOptions = () =>
   queryOptions({
     queryKey: runtimeKeys.security(),
     queryFn: getSecurityStatus,
-    staleTime: 120_000,
-    refetchInterval: 120_000,
+    staleTime: POLL_INTERVAL_MS.security,
+    refetchInterval: POLL_INTERVAL_MS.security,
     refetchIntervalInBackground: false, // #3393
   });
 
@@ -89,8 +96,8 @@ export const auditRecentQueryOptions = (limit: number) =>
   queryOptions({
     queryKey: auditKeys.recent(limit),
     queryFn: () => listAuditRecent(limit),
-    staleTime: 30_000,
-    refetchInterval: 30_000,
+    staleTime: POLL_INTERVAL_MS.standard,
+    refetchInterval: POLL_INTERVAL_MS.standard,
     refetchIntervalInBackground: false, // #3393
   });
 
@@ -102,7 +109,7 @@ export const auditVerifyQueryOptions = () =>
   queryOptions({
     queryKey: auditKeys.verify(),
     queryFn: verifyAuditChain,
-    staleTime: 60_000,
+    staleTime: POLL_INTERVAL_MS.slow,
     // No refetchInterval — chain verification is expensive; fetch on mount/focus only.
   });
 
@@ -114,8 +121,8 @@ export const backupsQueryOptions = () =>
   queryOptions({
     queryKey: runtimeKeys.backups(),
     queryFn: listBackups,
-    staleTime: 60_000,
-    refetchInterval: 60_000,
+    staleTime: POLL_INTERVAL_MS.slow,
+    refetchInterval: POLL_INTERVAL_MS.slow,
     refetchIntervalInBackground: false, // #3393
   });
 
@@ -127,35 +134,34 @@ export const taskQueueStatusQueryOptions = () =>
   queryOptions({
     queryKey: runtimeKeys.taskStatus(),
     queryFn: getTaskQueueStatus,
-    staleTime: 15_000,
-    refetchInterval: 15_000,
+    staleTime: POLL_INTERVAL_MS.fast,
+    refetchInterval: POLL_INTERVAL_MS.fast,
     refetchIntervalInBackground: false, // #3393
   });
 
-export function useTaskQueueStatus() {
-  return useQuery(taskQueueStatusQueryOptions());
+export function useTaskQueueStatus(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(taskQueueStatusQueryOptions(), options));
 }
 
 export const taskQueueQueryOptions = (status?: string) =>
   queryOptions({
     queryKey: runtimeKeys.taskList(status),
     queryFn: () => listTaskQueue(status),
-    staleTime: 30_000,
-    refetchInterval: 30_000,
+    staleTime: POLL_INTERVAL_MS.standard,
+    refetchInterval: POLL_INTERVAL_MS.standard,
     refetchIntervalInBackground: false, // #3393
   });
 
-export function useTaskQueue(status?: string) {
-  return useQuery(taskQueueQueryOptions(status));
+export function useTaskQueue(status?: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(taskQueueQueryOptions(status), options));
 }
 
 export const cronJobsQueryOptions = (agentId?: string) =>
   queryOptions({
     queryKey: cronKeys.jobs(agentId),
     queryFn: () => listCronJobs(agentId),
-    enabled: !!agentId,
-    staleTime: 30_000,
-    refetchInterval: 30_000,
+    staleTime: POLL_INTERVAL_MS.standard,
+    refetchInterval: POLL_INTERVAL_MS.standard,
     refetchIntervalInBackground: false, // #3393
   });
 

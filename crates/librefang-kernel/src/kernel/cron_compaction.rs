@@ -4,6 +4,24 @@
 //! sessions`); the file contains the four helper fns the cron tick body
 //! and `kernel::tests` reference.
 
+/// Find the largest tail size up to `max_keep` that satisfies a monotonic
+/// size predicate. Keeping no messages is always considered valid.
+fn largest_fitting_tail(max_keep: usize, mut fits: impl FnMut(usize) -> bool) -> usize {
+    let mut low = 0;
+    let mut high = max_keep;
+
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        if fits(mid) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    low
+}
+
 /// Compute how many messages to keep in the cron session after applying both
 /// size caps, without mutating the slice.
 ///
@@ -27,18 +45,11 @@ pub(crate) fn cron_compute_keep_count(
 
     // Then apply token cap by trimming from the front.
     if let Some(max_tok) = max_tokens {
-        // Linear scan from the cap downward (O(n) iterations × O(n) token estimation = O(n²);
-        // acceptable for cron session sizes seen in practice).
-        let mut keep = after_msg_cap;
-        while keep > 0 {
+        largest_fitting_tail(after_msg_cap, |keep| {
             let start = n - keep;
             let est = estimate_token_count(&messages[start..], None, None);
-            if est <= max_tok as usize {
-                break;
-            }
-            keep -= 1;
-        }
-        keep
+            (est as u64) <= max_tok
+        })
     } else {
         after_msg_cap
     }
@@ -206,5 +217,31 @@ pub(super) async fn try_summarize_trim(
             Some(new_messages)
         }
         Ok(_) | Err(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::largest_fitting_tail;
+    use std::cell::Cell;
+
+    #[test]
+    fn largest_fitting_tail_uses_logarithmic_probes() {
+        let probes = Cell::new(0);
+
+        let keep = largest_fitting_tail(1024, |candidate| {
+            probes.set(probes.get() + 1);
+            candidate <= 713
+        });
+
+        assert_eq!(keep, 713);
+        assert!(probes.get() <= 11, "used {} probes", probes.get());
+    }
+
+    #[test]
+    fn largest_fitting_tail_handles_boundaries() {
+        assert_eq!(largest_fitting_tail(0, |_| false), 0);
+        assert_eq!(largest_fitting_tail(8, |_| true), 8);
+        assert_eq!(largest_fitting_tail(8, |_| false), 0);
     }
 }
