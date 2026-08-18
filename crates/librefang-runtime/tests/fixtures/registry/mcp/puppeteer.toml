@@ -13,15 +13,6 @@ tags = [
   "chrome",
 ]
 
-[transport]
-type = "stdio"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-puppeteer@latest"]
-
-[health_check]
-interval_secs = 60
-unhealthy_threshold = 3
-
 setup_instructions = """
 Requires Chrome or Chromium to be installed:
 - macOS: `brew install --cask google-chrome`
@@ -31,6 +22,14 @@ Requires Chrome or Chromium to be installed:
 No API key required.
 """
 
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-puppeteer@latest"]
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
 
 [i18n.zh]
 name = "Puppeteer"
