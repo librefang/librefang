@@ -174,6 +174,20 @@ def check_repository_automation() -> None:
         or upload_checkout.get("persist-credentials") is not False
     ):
         raise SystemExit("dashboard release upload executes an untrusted helper")
+    upload_step = next(
+        (
+            step
+            for step in upload_job.get("steps", [])
+            if step.get("name") == "Upload to release"
+        ),
+        {},
+    )
+    upload_script = upload_step.get("run", "")
+    if (
+        'gh release upload --repo "$REPOSITORY" --clobber --' not in upload_script
+        or '"$TAG" /tmp/dashboard-dist.tar.gz' not in upload_script
+    ):
+        raise SystemExit("dashboard release tag is not separated from gh options")
 
 
 def main() -> None:

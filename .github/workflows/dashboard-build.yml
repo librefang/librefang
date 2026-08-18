@@ -149,7 +149,8 @@ jobs:
           fi
           echo "Uploading dashboard-dist.tar.gz to $TAG"
           for attempt in $(seq 1 5); do
-            if gh release upload "$TAG" /tmp/dashboard-dist.tar.gz --clobber; then
+            if gh release upload --repo "$REPOSITORY" --clobber -- \
+              "$TAG" /tmp/dashboard-dist.tar.gz; then
               echo "✓ Upload succeeded (attempt $attempt)"
               exit 0
             fi
