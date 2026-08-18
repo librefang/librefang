@@ -202,10 +202,10 @@ def check_repository_automation() -> None:
         raise SystemExit("privileged issue-link job checks out untrusted code")
     github_script = link_job.get("steps", [])[1].get("with", {}).get("script", "")
     for contract_fragment in (
-        "hasOpenPeerLink",
-        "context.payload.changes?.body?.from",
+        "collectReconciliationState",
         "await github.rest.pulls.get",
         "github.paginate(github.rest.pulls.list",
+        "github.paginate(github.rest.issues.listForRepo",
     ):
         if contract_fragment not in github_script:
             raise SystemExit(

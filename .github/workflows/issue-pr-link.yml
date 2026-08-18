@@ -49,7 +49,7 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
-            const { extractIssueNumbers, getIssueOrNull, hasOpenPeerLink } = require(
+            const { collectReconciliationState, getIssueOrNull } = require(
               `${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-pr-links.js`,
             );
             const LABEL = 'has-pr';
@@ -62,30 +62,45 @@ jobs:
               repo: context.repo.repo,
               pull_number: eventPr.number,
             });
-            const currentNumbers = extractIssueNumbers(pr.body, context.repo);
-            const previousNumbers = extractIssueNumbers(
-              context.payload.changes?.body?.from,
-              context.repo,
-            );
-            const issueNumbers = new Set([...currentNumbers, ...previousNumbers]);
-
-            if (issueNumbers.size === 0) {
-              core.info('No linked issues found in PR body');
-              return;
-            }
-
-            // One paginated snapshot is the source of truth for every issue.
-            // Include the event PR explicitly while open in case list indexing
-            // trails the opened/reopened webhook by a moment.
+            // Reconcile the full repository state. GitHub concurrency keeps at
+            // most one pending run, so a later event can replace an intermediate
+            // edit even with cancel-in-progress disabled. Scanning every open PR
+            // and every currently labeled issue makes the latest run sufficient.
             const openPrs = await github.paginate(github.rest.pulls.list, {
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
               per_page: 100,
             });
+            const labeledItems = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: LABEL,
+              state: 'all',
+              per_page: 100,
+            });
+            const { issueNumbers, linkedIssueNumbers } = collectReconciliationState(
+              openPrs,
+              labeledItems,
+              context.repo,
+              pr,
+            );
+            const labeledIssues = new Map(
+              labeledItems
+                .filter(item => !item.pull_request)
+                .map(item => [item.number, item]),
+            );
+
+            if (issueNumbers.size === 0) {
+              core.info('No linked or labeled issues found');
+              return;
+            }
 
             for (const num of issueNumbers) {
-              const issue = await getIssueOrNull(github, context.repo, num);
+              // Reuse the labeled-issue snapshot. Only newly linked targets
+              // need an individual lookup, keeping steady-state API use small.
+              const issue = labeledIssues.get(num) ||
+                await getIssueOrNull(github, context.repo, num);
               if (!issue) {
                 core.info(`Issue #${num}: not found, skipping`);
                 continue;
@@ -96,17 +111,7 @@ jobs:
               }
               const labels = issue.labels.map(l => l.name);
               const hasLabel = labels.includes(LABEL);
-              const linkedByCurrent = pr.state === 'open' && currentNumbers.has(num);
-              // The list endpoint can lag a body-edit webhook. Exclude the
-              // event PR so its authoritative webhook body handles additions
-              // and removals while the snapshot represents peers only.
-              const linkedBySnapshot = hasOpenPeerLink(
-                openPrs,
-                num,
-                context.repo,
-                eventPr.number,
-              );
-              const shouldHaveLabel = issue.state === 'open' && (linkedByCurrent || linkedBySnapshot);
+              const shouldHaveLabel = issue.state === 'open' && linkedIssueNumbers.has(num);
 
               if (shouldHaveLabel && !hasLabel) {
                 await github.rest.issues.addLabels({

@@ -2,9 +2,9 @@
 
 const assert = require('node:assert/strict');
 const {
+  collectReconciliationState,
   extractIssueNumbers,
   getIssueOrNull,
-  hasOpenPeerLink,
 } = require('../issue-pr-links.js');
 
 const repo = { owner: 'librefang', repo: 'librefang' };
@@ -21,13 +21,28 @@ assert.deepEqual([...extractIssueNumbers('CLOSES #7 and fixes #7', repo)], [7]);
 assert.deepEqual([...extractIssueNumbers('', repo)], []);
 assert.deepEqual([...extractIssueNumbers('Fixes #0 and closes #99999999999999999999', repo)], []);
 
-const staleSnapshot = [
-  { number: 42, body: 'Closes #12' },
-  { number: 7, body: 'Fixes #34' },
-];
-assert.equal(hasOpenPeerLink(staleSnapshot, 12, repo, 42), false);
-assert.equal(hasOpenPeerLink(staleSnapshot, 34, repo, 42), true);
-assert.equal(hasOpenPeerLink([{ number: 42, body: null }], 12, repo, 42), false);
+const reconciliation = collectReconciliationState(
+  [
+    { number: 42, body: 'Closes #12' },
+    { number: 7, body: 'Fixes #34' },
+  ],
+  [
+    { number: 78 },
+    { number: 90, pull_request: {} },
+  ],
+  repo,
+  { number: 42, state: 'open', body: 'Resolves #56' },
+);
+assert.deepEqual([...reconciliation.linkedIssueNumbers], [56, 34]);
+assert.deepEqual([...reconciliation.issueNumbers], [56, 34, 78]);
+const closedReconciliation = collectReconciliationState(
+  [{ number: 42, body: 'Closes #12' }],
+  [{ number: 12 }],
+  repo,
+  { number: 42, state: 'closed', body: 'Closes #12' },
+);
+assert.deepEqual([...closedReconciliation.linkedIssueNumbers], []);
+assert.deepEqual([...closedReconciliation.issueNumbers], [12]);
 
 async function testIssueLookup() {
   const issue = { number: 12 };

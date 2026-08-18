@@ -42,11 +42,28 @@ async function getIssueOrNull(github, repo, number) {
   }
 }
 
-function hasOpenPeerLink(openPrs, issueNumber, repo, eventPrNumber) {
-  return openPrs.some(
-    candidate => candidate.number !== eventPrNumber &&
-      extractIssueNumbers(candidate.body, repo).has(issueNumber),
-  );
+function collectReconciliationState(openPrs, labeledItems, repo, eventPr) {
+  const linkedIssueNumbers = eventPr.state === 'open'
+    ? extractIssueNumbers(eventPr.body, repo)
+    : new Set();
+
+  for (const candidate of openPrs) {
+    if (candidate.number === eventPr.number) {
+      continue;
+    }
+    for (const number of extractIssueNumbers(candidate.body, repo)) {
+      linkedIssueNumbers.add(number);
+    }
+  }
+
+  const issueNumbers = new Set(linkedIssueNumbers);
+  for (const item of labeledItems) {
+    if (!item.pull_request && Number.isSafeInteger(item.number) && item.number > 0) {
+      issueNumbers.add(item.number);
+    }
+  }
+
+  return { issueNumbers, linkedIssueNumbers };
 }
 
-module.exports = { extractIssueNumbers, getIssueOrNull, hasOpenPeerLink };
+module.exports = { collectReconciliationState, extractIssueNumbers, getIssueOrNull };
