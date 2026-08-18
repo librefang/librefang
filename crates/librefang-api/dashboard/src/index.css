@@ -17,6 +17,10 @@
   --color-border-subtle: var(--border-color);
   --color-text-dim: var(--text-muted);
 
+  /* Shared compact-label typography. */
+  --text-label: 10.5px;
+  --tracking-label: 0.08em;
+
   /* Override Tailwind v4's `lg` breakpoint from 1024px → 1000px (refs #4873).
      iPad Pro 13" portrait is 1024px CSS-wide — exactly on the default `lg`
      boundary. iOS Safari can report the visual viewport a fraction below
@@ -207,11 +211,15 @@ body {
 .dark .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
 
 @media (prefers-reduced-motion: reduce) {
-  .animate-pulse-soft,
-  .animate-rise,
-  .card-glow {
-    animation: none !important;
-    transition: none !important;
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
   }
 }
 
@@ -243,4 +251,3 @@ input[type="number"] {
   -moz-appearance: textfield;
   appearance: textfield;
 }
-

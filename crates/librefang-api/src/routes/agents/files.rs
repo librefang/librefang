@@ -110,6 +110,55 @@ mod identity_file_list_tests {
         assert_eq!(soul["size_bytes"], 7);
         assert!(files.iter().any(|file| file["exists"] == false));
     }
+
+    /// Concurrent writers to the same identity file previously shared one
+    /// staging path (`.{filename}.tmp`), so each `fs::write` truncated whatever
+    /// the other had staged and the surviving file could hold interleaved
+    /// bytes from both payloads rather than either one intact.
+    ///
+    /// The payloads differ in length so a torn result is detectable: a
+    /// prefix-length match would still fail the whole-content comparison.
+    #[test]
+    fn concurrent_writes_leave_one_payload_intact() {
+        const WRITERS: usize = 8;
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().to_path_buf();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
+
+        let payloads: Vec<String> = (0..WRITERS)
+            .map(|index| format!("payload-{index}").repeat(index * 500 + 1))
+            .collect();
+
+        std::thread::scope(|scope| {
+            for payload in &payloads {
+                let workspace = workspace.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    write_identity_file(&workspace, "SOUL.md", payload)
+                        .expect("write must succeed");
+                });
+            }
+        });
+
+        let written = std::fs::read_to_string(workspace.join(".identity/SOUL.md")).unwrap();
+        assert!(
+            payloads.contains(&written),
+            "content must equal exactly one payload, not a mix; got {} bytes",
+            written.len()
+        );
+
+        let leftovers: Vec<_> = std::fs::read_dir(workspace.join(".identity"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name != "SOUL.md")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no staging file may survive a successful write; found {leftovers:?}"
+        );
+    }
 }
 
 /// GET /api/agents/{id}/files/{filename} — Read a workspace identity file.
@@ -275,15 +324,15 @@ fn write_identity_file(
         return Err(IdentityFileMutationError::Forbidden);
     }
 
-    let tmp_path = identity_dir.join(format!(".{filename}.tmp"));
-    std::fs::write(&tmp_path, content).map_err(IdentityFileMutationError::Io)?;
-    if let Err(error) = std::fs::rename(&tmp_path, &file_path) {
-        if let Err(cleanup_error) = std::fs::remove_file(&tmp_path) {
-            tracing::warn!(error = %cleanup_error, "Failed to remove temporary identity file");
-        }
-        return Err(IdentityFileMutationError::Io(error));
-    }
-    Ok(())
+    // Staging through `.{filename}.tmp` gave every writer of the same identity
+    // file the same staging path, so two concurrent `PUT`s truncated each
+    // other's staged bytes before either rename — the surviving content was
+    // whichever write happened to finish last, interleaved. The shared
+    // `atomic_write` derives its temp name from the process ID and a
+    // per-process counter, and additionally fsyncs the staged file before the
+    // rename and the parent directory after it, which the plain
+    // `fs::write` + `rename` here did neither of.
+    crate::atomic_write(&file_path, content.as_bytes()).map_err(IdentityFileMutationError::Io)
 }
 
 fn delete_identity_file(

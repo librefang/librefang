@@ -9,6 +9,9 @@ const navigateMock = vi.fn();
 const useTerminalHealthMock = vi.fn();
 const terminalTabsPropsMock = vi.fn();
 const useUIStoreMock = vi.fn();
+const addToastMock = vi.fn();
+const removeToastMock = vi.fn();
+let translationVersion = 1;
 
 type MockSocketHandler = ((event?: unknown) => void) | null;
 
@@ -49,14 +52,20 @@ vi.mock("react-i18next", async () => {
   const actual = await vi.importActual<typeof import("react-i18next")>("react-i18next");
   return {
     ...actual,
-    useTranslation: () => ({
-      t: (key: string, opts?: Record<string, unknown>) => {
-        if (key === "terminal.subtitle_error" && opts?.error) {
-          return `error: ${String(opts.error)}`;
-        }
-        return key;
-      },
-    }),
+    useTranslation: () => {
+      const currentTranslationVersion = translationVersion;
+      return {
+        t: (key: string, opts?: Record<string, unknown>) => {
+          if (key === "terminal.subtitle_error" && opts?.error) {
+            return `error: ${String(opts.error)}`;
+          }
+          if (key === "terminal.reconnected") {
+            return `${key}:${currentTranslationVersion}`;
+          }
+          return key;
+        },
+      };
+    },
   };
 });
 
@@ -125,6 +134,7 @@ vi.mock("../lib/store", () => {
   const useUIStore = (selector: (state: {
     terminalEnabled: boolean | null;
     addToast: (message: string, type?: "success" | "error" | "info") => void;
+    removeToast: (id: string) => void;
   }) => unknown) => useUIStoreMock(selector);
   // The reconnect path reads `useUIStore.getState().toasts` to grab the
   // most-recent toast id; expose a stub so the test that exercises a
@@ -165,15 +175,18 @@ describe("TerminalPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     MockWebSocket.instances = [];
+    translationVersion = 1;
     vi.stubGlobal("WebSocket", MockWebSocket);
     useUIStoreMock.mockImplementation(
       (selector: (state: {
         terminalEnabled: boolean | null;
         addToast: (message: string, type?: "success" | "error" | "info") => void;
+        removeToast: (id: string) => void;
       }) => unknown) =>
         selector({
           terminalEnabled: true,
-          addToast: vi.fn(),
+          addToast: addToastMock,
+          removeToast: removeToastMock,
         })
     );
     useTerminalHealthMock.mockReturnValue({
@@ -220,6 +233,69 @@ describe("TerminalPage", () => {
     });
     expect(invalidateQueries).not.toHaveBeenCalledWith({ queryKey: ["terminal"] });
     expect(invalidateQueries).not.toHaveBeenCalledWith({ queryKey: ["terminal", "health"] });
+  });
+
+  it("uses the latest callback when an auto-reconnect timer fires", async () => {
+    vi.useFakeTimers();
+    try {
+      renderPage();
+
+      const firstSocket = MockWebSocket.instances[0];
+      act(() => {
+        firstSocket.emitOpen();
+      });
+      addToastMock.mockClear();
+
+      act(() => {
+        firstSocket.readyState = MockWebSocket.CLOSED;
+        firstSocket.onclose?.({ code: 1006, reason: "" } as unknown as CloseEvent);
+      });
+
+      translationVersion = 2;
+      act(() => {
+        fireEvent.click(screen.getByRole("button", { name: "switch-window" }));
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      const secondSocket = MockWebSocket.instances[1];
+      act(() => {
+        secondSocket.emitOpen();
+      });
+
+      expect(addToastMock).toHaveBeenCalledWith("terminal.reconnected:2", "success");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not leak an intentional disconnect into a replacement socket", async () => {
+    vi.useFakeTimers();
+    try {
+      renderPage();
+
+      const firstSocket = MockWebSocket.instances[0];
+      act(() => {
+        firstSocket.emitOpen();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "terminal.disconnect" }));
+      fireEvent.click(screen.getByRole("button", { name: "terminal.connect" }));
+
+      const secondSocket = MockWebSocket.instances[1];
+      act(() => {
+        secondSocket.emitOpen();
+        secondSocket.readyState = MockWebSocket.CLOSED;
+        secondSocket.onclose?.({ code: 1006, reason: "" } as unknown as CloseEvent);
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(MockWebSocket.instances).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("stops auto-reconnect after consecutive fast-failed launches (#4675)", async () => {

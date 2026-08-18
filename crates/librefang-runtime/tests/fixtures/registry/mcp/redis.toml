@@ -5,6 +5,12 @@ category = "data"
 icon = "lucide:circle"
 tags = ["database", "cache", "key-value", "in-memory", "nosql"]
 
+setup_instructions = """
+1. Obtain your Redis connection URL from your Redis hosting provider or local instance (e.g., redis://localhost:6379/0).
+2. If authentication is required, include the password in the URL: redis://user:password@host:6379/0.
+3. Paste the full connection URL into the REDIS_URL field above.
+"""
+
 [transport]
 type = "stdio"
 command = "npx"
@@ -20,13 +26,6 @@ get_url = ""
 [health_check]
 interval_secs = 60
 unhealthy_threshold = 3
-
-setup_instructions = """
-1. Obtain your Redis connection URL from your Redis hosting provider or local instance (e.g., redis://localhost:6379/0).
-2. If authentication is required, include the password in the URL: redis://user:password@host:6379/0.
-3. Paste the full connection URL into the REDIS_URL field above.
-"""
-
 
 [i18n.zh]
 name = "Redis"
