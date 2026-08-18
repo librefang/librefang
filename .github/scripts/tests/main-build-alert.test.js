@@ -2,9 +2,12 @@
 
 const assert = require('node:assert/strict');
 const {
+  compareRunOrder,
   escapeInlineCode,
   escapeMarkdownText,
   isRedConclusion,
+  rustTestLaneSucceeded,
+  selectLatestConclusiveRun,
   selectOpenAlertIssues,
 } = require('../main-build-alert.js');
 
@@ -21,6 +24,28 @@ for (const conclusion of [
 for (const conclusion of ['success', 'neutral', 'skipped']) {
   assert.equal(isRedConclusion(conclusion), false, conclusion);
 }
+
+assert.equal(
+  compareRunOrder(
+    { run_number: 12, run_attempt: 1 },
+    { run_number: 11, run_attempt: 9 },
+  ) > 0,
+  true,
+);
+assert.equal(
+  compareRunOrder(
+    { run_number: 12, run_attempt: 2 },
+    { run_number: 12, run_attempt: 1 },
+  ) > 0,
+  true,
+);
+assert.equal(rustTestLaneSucceeded([
+  { name: 'Test / Ubuntu (shard 1/4)', conclusion: 'success' },
+]), true);
+assert.equal(rustTestLaneSucceeded([
+  { name: 'Quality', conclusion: 'success' },
+  { name: 'Test / Unit (lib+bin)', conclusion: 'skipped' },
+]), false);
 
 assert.deepEqual(
   selectOpenAlertIssues([
@@ -45,4 +70,33 @@ assert.equal(
   "step ''' @\u200bteam",
 );
 
-console.log('main-build-alert tests passed');
+async function testRunSelection() {
+  const jobsByRun = new Map([
+    [1, [{ name: 'Test / Unit (lib+bin)', conclusion: 'success' }]],
+    [2, []],
+    [3, [{ name: 'Quality', conclusion: 'success' }]],
+  ]);
+  const loadJobs = async run => jobsByRun.get(run.id) || [];
+  const docsThenRed = await selectLatestConclusiveRun([
+    { id: 2, run_number: 2, conclusion: 'failure' },
+    { id: 3, run_number: 3, conclusion: 'success' },
+    { id: 1, run_number: 1, conclusion: 'success' },
+  ], loadJobs);
+  assert.equal(docsThenRed.run.id, 2);
+  assert.equal(docsThenRed.state, 'red');
+
+  const greenThenRed = await selectLatestConclusiveRun([
+    { id: 1, run_number: 3, conclusion: 'success' },
+    { id: 2, run_number: 2, conclusion: 'failure' },
+  ], loadJobs);
+  assert.equal(greenThenRed.run.id, 1);
+  assert.equal(greenThenRed.state, 'green');
+
+  const inconclusive = await selectLatestConclusiveRun([
+    { id: 3, run_number: 4, conclusion: 'success' },
+    { id: 4, run_number: 3, conclusion: 'skipped' },
+  ], loadJobs);
+  assert.equal(inconclusive, null);
+}
+
+testRunSelection().then(() => console.log('main-build-alert tests passed'));

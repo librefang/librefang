@@ -59,40 +59,65 @@ jobs:
           persist-credentials: false
 
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
-        env:
-          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
-          RUN_URL: ${{ github.event.workflow_run.html_url }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         with:
           script: |
             const {
+              compareRunOrder,
               escapeInlineCode,
               escapeMarkdownText,
               isRedConclusion,
+              selectLatestConclusiveRun,
               selectOpenAlertIssues,
             } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/main-build-alert.js`);
-            const conclusion = process.env.CONCLUSION;
-            const runUrl = process.env.RUN_URL;
-            const headSha = process.env.HEAD_SHA;
-            const shortSha = headSha.slice(0, 7);
-            const runId = context.payload.workflow_run.id;
             const label = 'main-red';
+            const eventRun = context.payload.workflow_run;
 
-            // Job names of the lanes that actually compile and run Rust.
-            // The `changes` gate skips all of them on a docs- or dependency-only push, so a `success` conclusion from such a run proves nothing about the state of the Rust build.
-            const RUST_TEST_LANE = /^Test \/ (Windows|macOS|Ubuntu|Unit)/;
-
-            // Concurrency groups serialize jobs but do not promise FIFO ordering.
-            // Ignore an older completion after main has advanced so it cannot close or overwrite the alert for a newer commit.
-            const { data: currentBranch } = await github.rest.repos.getBranch({
+            // Notification jobs are serialized but are not guaranteed to run
+            // in completion order, and GitHub retains only one pending job in a
+            // concurrency group. Reconcile the newest conclusive run directly
+            // so a later docs-only event cannot discard a pending red alert.
+            const { data: recentRuns } = await github.rest.actions.listWorkflowRuns({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              branch: context.payload.repository.default_branch,
+              workflow_id: eventRun.workflow_id,
+              branch: eventRun.head_branch,
+              event: 'push',
+              status: 'completed',
+              per_page: 100,
             });
-            if (currentBranch.commit.sha !== headSha) {
-              core.info(`Ignoring stale CI completion for ${shortSha}; main is now ${currentBranch.commit.sha.slice(0, 7)}.`);
+            const candidateRuns = [
+              eventRun,
+              ...recentRuns.workflow_runs.filter(
+                run => compareRunOrder(run, eventRun) > 0,
+              ),
+            ];
+            const effective = await selectLatestConclusiveRun(
+              candidateRuns,
+              run => github.paginate(
+                github.rest.actions.listJobsForWorkflowRun,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  run_id: run.id,
+                  per_page: 100,
+                },
+              ),
+            );
+
+            if (!effective) {
+              core.info('No completed CI run established Rust build state.');
               return;
             }
+            const { run: effectiveRun, state: effectiveState } = effective;
+            if (effectiveRun.id !== eventRun.id) {
+              core.info(`Reconciling newer conclusive CI run ${effectiveRun.id} from event ${eventRun.id}.`);
+            }
+
+            const conclusion = effectiveRun.conclusion;
+            const runUrl = effectiveRun.html_url;
+            const headSha = effectiveRun.head_sha;
+            const shortSha = headSha.slice(0, 7);
+            const runId = effectiveRun.id;
 
             // Ensure the label exists; ignore "already_exists" 422.
             try {
@@ -118,35 +143,8 @@ jobs:
               },
             ));
 
-            if (conclusion === 'success') {
+            if (effectiveState === 'green') {
               if (open.length === 0) return;
-
-              // A green run only clears an open `main-red` issue if at least one Rust test lane actually ran on this commit.
-              // Docs- and dependency-only pushes skip every Rust lane and still report `success`, which is how the Windows breakage from #6711 was filed and falsely auto-closed three times (#6716, #6721, #6729) while main stayed red.
-              // Errors here mean we do not know, so we leave the issue open — a false close hides a real breakage, a false open costs one glance.
-              let rustLaneRan = false;
-              try {
-                const jobs = await github.paginate(
-                  github.rest.actions.listJobsForWorkflowRun,
-                  {
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    run_id: runId,
-                    per_page: 100,
-                  }
-                );
-                rustLaneRan = jobs.some(
-                  job => RUST_TEST_LANE.test(job.name) && job.conclusion === 'success'
-                );
-              } catch (e) {
-                core.warning(`Could not enumerate jobs for ${shortSha}: ${e.message} — not auto-closing.`);
-                return;
-              }
-
-              if (!rustLaneRan) {
-                core.info(`Main CI succeeded on ${shortSha} (${runUrl}) but no Rust test lane ran on that commit — leaving open.`);
-                return;
-              }
 
               // Auto-close any open red-main issue when CI goes green again.
               for (const issue of open) {
