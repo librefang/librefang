@@ -52,6 +52,13 @@ struct CachedFile {
     mtime: SystemTime,
 }
 
+enum CachedFileRead {
+    Loaded(CachedFile),
+    Missing,
+    Oversized,
+    Unavailable(std::io::Error),
+}
+
 /// Workspace context information gathered from the project root.
 #[derive(Debug)]
 pub struct WorkspaceContext {
@@ -88,7 +95,7 @@ impl WorkspaceContext {
             } else {
                 root.join(name)
             };
-            if let Some(cached) = read_cached_file(&file_path) {
+            if let CachedFileRead::Loaded(cached) = read_cached_file(&file_path) {
                 debug!(file = name, "Loaded workspace context file");
                 cache.insert(name.to_string(), cached);
             }
@@ -107,10 +114,17 @@ impl WorkspaceContext {
     pub fn get_file(&mut self, name: &str) -> Option<&str> {
         // Prefer .identity/ (current layout); fall back to workspace root (pre-migration)
         let identity_path = self.workspace_root.join(".identity").join(name);
-        let file_path = if identity_path.exists() {
-            identity_path
-        } else {
-            self.workspace_root.join(name)
+        let file_path = match identity_path.try_exists() {
+            Ok(true) => identity_path,
+            Ok(false) => self.workspace_root.join(name),
+            Err(error) => {
+                debug!(
+                    path = %identity_path.display(),
+                    %error,
+                    "Keeping cached workspace context after identity-path lookup failure"
+                );
+                return self.cache.get(name).map(|c| c.content.as_str());
+            }
         };
 
         // Check if we have a cached version
@@ -126,14 +140,24 @@ impl WorkspaceContext {
         }
 
         // Cache miss or mtime changed — re-read
-        if let Some(new_cached) = read_cached_file(&file_path) {
-            self.cache.insert(name.to_string(), new_cached);
-            return self.cache.get(name).map(|c| c.content.as_str());
+        match read_cached_file(&file_path) {
+            CachedFileRead::Loaded(new_cached) => {
+                self.cache.insert(name.to_string(), new_cached);
+                self.cache.get(name).map(|c| c.content.as_str())
+            }
+            CachedFileRead::Missing | CachedFileRead::Oversized => {
+                self.cache.remove(name);
+                None
+            }
+            CachedFileRead::Unavailable(error) => {
+                debug!(
+                    path = %file_path.display(),
+                    %error,
+                    "Keeping cached workspace context after refresh failure"
+                );
+                self.cache.get(name).map(|c| c.content.as_str())
+            }
         }
-
-        // File doesn't exist or is too large
-        self.cache.remove(name);
-        None
     }
 
     /// Build a prompt context section summarizing the workspace.
@@ -171,20 +195,35 @@ impl WorkspaceContext {
     }
 }
 
-/// Read a file into the cache if it exists and is under the size limit.
-fn read_cached_file(path: &Path) -> Option<CachedFile> {
-    let meta = std::fs::metadata(path).ok()?;
+/// Read a file into the cache and preserve why it could not be loaded.
+fn read_cached_file(path: &Path) -> CachedFileRead {
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return CachedFileRead::Missing;
+        }
+        Err(error) => return CachedFileRead::Unavailable(error),
+    };
     if meta.len() > MAX_FILE_SIZE {
         debug!(
             path = %path.display(),
             size = meta.len(),
             "Skipping oversized context file"
         );
-        return None;
+        return CachedFileRead::Oversized;
     }
-    let mtime = meta.modified().ok()?;
-    let content = std::fs::read_to_string(path).ok()?;
-    Some(CachedFile { content, mtime })
+    let mtime = match meta.modified() {
+        Ok(mtime) => mtime,
+        Err(error) => return CachedFileRead::Unavailable(error),
+    };
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return CachedFileRead::Missing;
+        }
+        Err(error) => return CachedFileRead::Unavailable(error),
+    };
+    CachedFileRead::Loaded(CachedFile { content, mtime })
 }
 
 /// Detect project type from marker files in the root.
@@ -352,6 +391,24 @@ mod tests {
         assert!(content1.unwrap().contains("helpful agent"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_get_file_keeps_last_good_content_after_refresh_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SOUL.md");
+        std::fs::write(&path, "last known good").unwrap();
+
+        let mut ctx = WorkspaceContext::detect(dir.path());
+        ctx.cache.get_mut("SOUL.md").unwrap().mtime = SystemTime::UNIX_EPOCH;
+        std::fs::write(&path, [0xff, 0xfe]).unwrap();
+
+        assert_eq!(ctx.get_file("SOUL.md"), Some("last known good"));
+        assert!(ctx.cache.contains_key("SOUL.md"));
+
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(ctx.get_file("SOUL.md"), None);
+        assert!(!ctx.cache.contains_key("SOUL.md"));
     }
 
     #[test]

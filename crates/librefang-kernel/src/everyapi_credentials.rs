@@ -56,6 +56,10 @@ pub enum CredentialError {
     Unavailable,
     #[error("EveryAPI executable was not found")]
     ExecutableNotFound,
+    #[error("EveryAPI credential command I/O failed: {0}")]
+    CommandIo(String),
+    #[error("EveryAPI credential command {stream} exceeded the {limit}-byte limit")]
+    OutputTooLarge { stream: &'static str, limit: u64 },
 }
 
 #[derive(Clone)]
@@ -109,20 +113,8 @@ impl CredentialCommand for SystemCredentialCommand {
 
         let stdout = child.stdout.take().ok_or(CredentialError::Unavailable)?;
         let stderr = child.stderr.take().ok_or(CredentialError::Unavailable)?;
-        let stdout_reader = std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            stdout
-                .take(MAX_COMMAND_OUTPUT_BYTES)
-                .read_to_end(&mut bytes)
-                .map(|_| bytes)
-        });
-        let stderr_reader = std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            stderr
-                .take(MAX_COMMAND_OUTPUT_BYTES)
-                .read_to_end(&mut bytes)
-                .map(|_| bytes)
-        });
+        let stdout_reader = spawn_output_reader(stdout, "stdout");
+        let stderr_reader = spawn_output_reader(stderr, "stderr");
 
         let deadline = Instant::now() + timeout;
         let success = loop {
@@ -134,30 +126,85 @@ impl CredentialCommand for SystemCredentialCommand {
                 Ok(None) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    // Do not block the timeout path on pipe-reader joins.
-                    // A misbehaving executable may have spawned descendants that inherited stdout/stderr; those descendants can keep the pipe open even after the direct child is dead.
-                    // Dropping the JoinHandles detaches the readers, which exit when the inherited descriptors finally close.
-                    drop(stdout_reader);
-                    drop(stderr_reader);
                     return Err(CredentialError::Timeout);
                 }
-                Err(_) => return Err(CredentialError::Unavailable),
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(CredentialError::CommandIo(format!(
+                        "failed to wait for child process: {error}"
+                    )));
+                }
             }
         };
 
-        let stdout = stdout_reader
-            .join()
-            .map_err(|_| CredentialError::Unavailable)?
-            .map_err(|_| CredentialError::Unavailable)?;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_| CredentialError::Unavailable)?
-            .map_err(|_| CredentialError::Unavailable)?;
+        let stdout = receive_output(&stdout_reader, "stdout", deadline)?;
+        let stderr = receive_output(&stderr_reader, "stderr", deadline)?;
         Ok(ProcessResult {
             success,
             stdout,
             stderr,
         })
+    }
+}
+
+fn spawn_output_reader<R>(
+    reader: R,
+    stream: &'static str,
+) -> std::sync::mpsc::Receiver<Result<Vec<u8>, CredentialError>>
+where
+    R: Read + Send + 'static,
+{
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = sender.send(read_command_output(reader, stream));
+    });
+    receiver
+}
+
+fn read_command_output<R>(reader: R, stream: &'static str) -> Result<Vec<u8>, CredentialError>
+where
+    R: Read,
+{
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_COMMAND_OUTPUT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| CredentialError::CommandIo(format!("failed to read {stream}: {error}")))?;
+    if bytes.len() as u64 > MAX_COMMAND_OUTPUT_BYTES {
+        return Err(CredentialError::OutputTooLarge {
+            stream,
+            limit: MAX_COMMAND_OUTPUT_BYTES,
+        });
+    }
+    Ok(bytes)
+}
+
+fn receive_output(
+    receiver: &std::sync::mpsc::Receiver<Result<Vec<u8>, CredentialError>>,
+    stream: &'static str,
+    deadline: Instant,
+) -> Result<Vec<u8>, CredentialError> {
+    match receiver.try_recv() {
+        Ok(result) => return result,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            return Err(CredentialError::CommandIo(format!(
+                "{stream} reader terminated unexpectedly"
+            )))
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+    }
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(CredentialError::Timeout);
+    }
+    match receiver.recv_timeout(remaining) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(CredentialError::Timeout),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(CredentialError::CommandIo(
+            format!("{stream} reader terminated unexpectedly"),
+        )),
     }
 }
 
@@ -381,7 +428,9 @@ fn resolve_legacy_cache(config_dir: &Path) -> Result<EveryApiCredential, Credent
         .then(|| DateTime::from_timestamp(credentials.relay_key_expires_at, 0))
         .flatten();
     if expires_at.is_some_and(|expiry| expiry <= Utc::now()) {
-        return Err(CredentialError::Unavailable);
+        return Err(CredentialError::InvalidCredentials(
+            "the cached relay key has expired; log in again".to_string(),
+        ));
     }
 
     let login_base = credentials.api_base.trim().trim_end_matches('/');
@@ -392,7 +441,7 @@ fn resolve_legacy_cache(config_dir: &Path) -> Result<EveryApiCredential, Credent
     let official =
         login_base.is_empty() || login_base == GLOBAL_API_BASE || login_base == CHINA_API_BASE;
     let origin = if !official {
-        login_base.to_string()
+        validate_custom_api_base(login_base)?
     } else if login_base == CHINA_API_BASE
         || matches!(
             settings.gateway_region.trim().to_ascii_lowercase().as_str(),
@@ -408,6 +457,25 @@ fn resolve_legacy_cache(config_dir: &Path) -> Result<EveryApiCredential, Credent
         api_key: credentials.relay_key,
         expires_at,
     })
+}
+
+fn validate_custom_api_base(value: &str) -> Result<String, CredentialError> {
+    let url = reqwest::Url::parse(value).map_err(|error| {
+        CredentialError::InvalidCredentials(format!("legacy api_base is not a valid URL: {error}"))
+    })?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(CredentialError::InvalidCredentials(
+            "legacy api_base must be an HTTPS URL without credentials, query, or fragment"
+                .to_string(),
+        ));
+    }
+    Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
 #[cfg(test)]
@@ -538,6 +606,52 @@ mod tests {
     }
 
     #[test]
+    fn legacy_custom_api_base_requires_safe_https_url() {
+        let root = tempfile::tempdir().unwrap();
+        for unsafe_base in [
+            "http://relay.example",
+            "https://user:secret@relay.example",
+            "https://relay.example?region=custom",
+            "https://relay.example#custom",
+        ] {
+            fs::write(
+                root.path().join("credentials.json"),
+                format!(r#"{{"api_base":"{unsafe_base}","relay_key":"cached"}}"#),
+            )
+            .unwrap();
+            let error = resolve_legacy_cache(root.path()).unwrap_err();
+            assert!(
+                matches!(error, CredentialError::InvalidCredentials(_)),
+                "unsafe base should be rejected: {unsafe_base}"
+            );
+        }
+
+        fs::write(
+            root.path().join("credentials.json"),
+            r#"{"api_base":"https://relay.example/custom/","relay_key":"cached"}"#,
+        )
+        .unwrap();
+        let credential = resolve_legacy_cache(root.path()).unwrap();
+        assert_eq!(credential.base_url, "https://relay.example/custom/v1");
+    }
+
+    #[test]
+    fn expired_legacy_key_reports_invalid_credentials() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("credentials.json"),
+            format!(
+                r#"{{"api_base":"https://api.everyapi.ai","relay_key":"expired","relay_key_expires_at":{}}}"#,
+                Utc::now().timestamp() - 60
+            ),
+        )
+        .unwrap();
+
+        let error = resolve_legacy_cache(root.path()).unwrap_err();
+        assert!(matches!(error, CredentialError::InvalidCredentials(_)));
+    }
+
+    #[test]
     fn machine_not_logged_in_does_not_reuse_a_stale_file() {
         let root = tempfile::tempdir().unwrap();
         fs::write(
@@ -570,6 +684,35 @@ mod tests {
                 Duration::from_millis(50),
             )
             .unwrap_err();
+        assert!(matches!(error, CredentialError::Timeout));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn oversized_command_output_is_reported_explicitly() {
+        let bytes = vec![b'x'; MAX_COMMAND_OUTPUT_BYTES as usize + 1];
+        let error = read_command_output(std::io::Cursor::new(bytes), "stdout").unwrap_err();
+        assert!(matches!(
+            error,
+            CredentialError::OutputTooLarge {
+                stream: "stdout",
+                limit: MAX_COMMAND_OUTPUT_BYTES
+            }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_child_cannot_extend_deadline_with_inherited_pipe() {
+        let started = std::time::Instant::now();
+        let error = SystemCredentialCommand
+            .run(
+                Path::new("/bin/sh"),
+                &["-c", "sleep 2 & exit 0"],
+                Duration::from_millis(100),
+            )
+            .unwrap_err();
+
         assert!(matches!(error, CredentialError::Timeout));
         assert!(started.elapsed() < Duration::from_secs(1));
     }

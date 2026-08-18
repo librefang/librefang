@@ -47,6 +47,7 @@ export const Button = memo(forwardRef<HTMLButtonElement, ButtonProps>(
       className = "",
       variant = "primary",
       size = "md",
+      type = "button",
       leftIcon,
       rightIcon,
       isLoading,
@@ -59,6 +60,7 @@ export const Button = memo(forwardRef<HTMLButtonElement, ButtonProps>(
     return (
       <button
         ref={ref}
+        type={type}
         disabled={disabled || isLoading}
         aria-busy={isLoading}
         className={`

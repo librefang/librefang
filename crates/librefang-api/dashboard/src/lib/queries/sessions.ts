@@ -1,9 +1,8 @@
-import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import {
   listSessions,
   getSessionDetails,
-  type ListSessionsResult,
 } from "../http/client";
 import { buildAuthenticatedWebSocket } from "../../api";
 import { sessionKeys } from "./keys";
@@ -16,7 +15,6 @@ export const sessionQueries = {
     queryOptions({
       queryKey: sessionKeys.lists(),
       queryFn: listSessions,
-      select: (data: ListSessionsResult) => data.items,
       staleTime: STALE_MS,
       refetchInterval: STALE_MS,
       refetchIntervalInBackground: false, // #3393
@@ -30,12 +28,11 @@ export const sessionQueries = {
 };
 
 export function useSessions(options: QueryOverrides = {}) {
-  const qc = useQueryClient();
   const query = useQuery(withOverrides(sessionQueries.list(), options));
-  const raw = qc.getQueryData<ListSessionsResult>(sessionKeys.lists());
   return {
     ...query,
-    truncated: raw?.truncated ?? false,
+    data: query.data?.items,
+    truncated: query.data?.truncated ?? false,
   };
 }
 
@@ -164,6 +161,7 @@ export function useSessionStream(
   // a non-auth code on the first attempt is almost certainly route-not-
   // deployed / no-active-turn — swallow it (parity with prior SSE).
   const receivedAnyRef = useRef(false);
+  const doneRef = useRef(false);
 
   useEffect(() => {
     // Reset state when ids change so stale events don't leak across sessions.
@@ -171,6 +169,7 @@ export function useSessionStream(
     setIsAttached(false);
     setLastError(null);
     receivedAnyRef.current = false;
+    doneRef.current = false;
 
     if (!agentId || !sessionId) return;
     const Ctor =
@@ -200,6 +199,7 @@ export function useSessionStream(
         return [...next, evt];
       });
       if (type === "done") {
+        doneRef.current = true;
         setIsAttached(false);
       }
     };
@@ -221,7 +221,9 @@ export function useSessionStream(
         // Unknown / missing type — surface as a chunk so we don't lose
         // the payload but don't poison the typed consumers.
         receivedAnyRef.current = true;
-        appendEvent("chunk", { ...envelope });
+        const { type: _drop, ...payload } = envelope;
+        void _drop;
+        appendEvent("chunk", payload);
         return;
       }
       receivedAnyRef.current = true;
@@ -270,6 +272,13 @@ export function useSessionStream(
       socket.onclose = (event: CloseEvent) => {
         if (cancelled) return;
         setIsAttached(false);
+
+        // A terminal payload completed the stream. Some servers close with
+        // 1001 during teardown, so the event is the authoritative terminal
+        // signal and must suppress reconnect/error handling for any code.
+        if (doneRef.current) {
+          return;
+        }
 
         // Auth failure — stop retrying, surface a clear message so the
         // dashboard can prompt the operator to refresh / re-auth.
@@ -328,7 +337,6 @@ export function useSessionStream(
         }
         ws = null;
       }
-      setIsAttached(false);
     };
     // buildPath / webSocketCtor / buildWebSocket are stable in
     // production; tests pass them once at mount. Excluding them keeps

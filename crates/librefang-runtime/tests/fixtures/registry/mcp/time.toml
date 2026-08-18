@@ -5,15 +5,6 @@ category = "productivity"
 icon = "🕐"
 tags = ["time", "timezone", "clock", "datetime", "conversion"]
 
-[transport]
-type = "stdio"
-command = "uvx"
-args = ["mcp-server-time", "--local-timezone", "UTC"]
-
-[health_check]
-interval_secs = 60
-unhealthy_threshold = 3
-
 setup_instructions = """
 No API key required. Requires `uv`:
 - macOS/Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
@@ -33,6 +24,14 @@ args = ["mcp-server-time", "--local-timezone", "Asia/Shanghai"]
 Supports all IANA timezone names (e.g. `America/New_York`, `Europe/London`, `Asia/Tokyo`).
 """
 
+[transport]
+type = "stdio"
+command = "uvx"
+args = ["mcp-server-time", "--local-timezone", "UTC"]
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
 
 [i18n.zh]
 name = "时间 & 时区"
