@@ -231,6 +231,109 @@ def main() -> None:
     ):
         raise SystemExit("release-cli workflow does not verify the exact release tag")
 
+    sign_job = release_cli_jobs.get("sign_release_artifacts", {})
+    sign_steps = sign_job.get("steps", [])
+    manifest_step = next(
+        (
+            step
+            for step in sign_steps
+            if step.get("name") == "Build SHA256SUMS manifest from release assets"
+        ),
+        None,
+    )
+    manifest_script = (
+        manifest_step.get("run") if isinstance(manifest_step, dict) else None
+    )
+    sign_env = sign_job.get("env", {})
+    expected_platforms = sign_env.get("EXPECTED_CHECKSUM_ASSETS")
+    allowed_symbols = sign_env.get("ALLOWED_SYMBOL_CHECKSUM_ASSETS")
+    if not all(
+        isinstance(value, str)
+        for value in (manifest_script, expected_platforms, allowed_symbols)
+    ):
+        raise SystemExit("release-cli manifest builder is missing its asset contract")
+
+    def run_manifest_builder(assets: list[str]) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            fake_bin = temp_root / "bin"
+            fake_bin.mkdir()
+            fake_gh = fake_bin / "gh"
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1 $2\" = \"release view\" ]; then\n"
+                "  printf '%s\\n' \"$FAKE_ASSETS\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [ \"$1 $2\" = \"release download\" ]; then\n"
+                "  while [ \"$#\" -gt 0 ]; do\n"
+                "    if [ \"$1\" = --pattern ]; then shift; name=$1; fi\n"
+                "    shift\n"
+                "  done\n"
+                "  printf 'deadbeef  %s\\n' \"${name%.sha256}\" > \"$name\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            fake_gh.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                    "FAKE_ASSETS": "\n".join(assets),
+                    "RELEASE_TAG": "v2026.8.19",
+                    "EXPECTED_CHECKSUM_ASSETS": expected_platforms,
+                    "ALLOWED_SYMBOL_CHECKSUM_ASSETS": allowed_symbols,
+                }
+            )
+            return subprocess.run(
+                ["bash", "-eu", "-o", "pipefail", "-c", manifest_script],
+                cwd=temp_root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    platform_assets = expected_platforms.splitlines()
+    symbol_assets = allowed_symbols.splitlines()
+    required_symbols = [
+        asset for asset in symbol_assets if "apple-darwin" in asset
+    ]
+    if run_manifest_builder(platform_assets + required_symbols).returncode != 0:
+        raise SystemExit("release-cli rejected the required platform and macOS symbol assets")
+    if run_manifest_builder(platform_assets + symbol_assets).returncode != 0:
+        raise SystemExit("release-cli rejected the complete known symbol asset set")
+    if run_manifest_builder(platform_assets + required_symbols[:1]).returncode == 0:
+        raise SystemExit("release-cli accepted a missing required macOS symbol asset")
+    unexpected_symbol = "librefang-unknown-debug-symbols.tar.gz.sha256"
+    if (
+        run_manifest_builder(platform_assets + required_symbols + [unexpected_symbol]).returncode
+        == 0
+    ):
+        raise SystemExit("release-cli accepted an unknown debug-symbol asset")
+
+    verify_signature_step = next(
+        (
+            step
+            for step in sign_steps
+            if step.get("name") == "Verify signature locally before upload"
+        ),
+        None,
+    )
+    verify_signature_script = (
+        verify_signature_step.get("run")
+        if isinstance(verify_signature_step, dict)
+        else None
+    )
+    if (
+        not isinstance(verify_signature_script, str)
+        or '--certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}"'
+        not in verify_signature_script
+    ):
+        raise SystemExit("release-cli does not verify the exact signing workflow identity")
+
     print("release and repository automation safety checks passed")
 
 
