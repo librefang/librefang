@@ -1,1 +1,0 @@
-- Keep the manual release-tag version input out of generated shell source by passing it through step environment variables, with a CI regression check covering every release-tag `run:` block. (@TechWizard9999)

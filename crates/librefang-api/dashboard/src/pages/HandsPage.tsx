@@ -745,7 +745,7 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery }: {
 
   // Fetch cron jobs for this hand's agent
   const agentId = instance?.agent_id;
-  const cronJobsQuery = useCronJobs(isActive ? agentId : undefined);
+  const cronJobsQuery = useCronJobs(agentId, { enabled: isActive && !!agentId });
   const cronJobs = cronJobsQuery.data ?? [];
 
   type Tab = "agents" | "agent_config" | "settings" | "requirements" | "tools" | "schedules";

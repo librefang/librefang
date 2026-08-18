@@ -49,6 +49,13 @@ fn boot() -> Harness {
     let state = test.state.clone();
     let app = Router::new()
         .route("/mcp", axum::routing::post(routes::mcp_http))
+        .layer(axum::Extension(
+            librefang_api::middleware::AuthenticatedApiUser {
+                name: "test".to_string(),
+                role: librefang_api::middleware::UserRole::User,
+                user_id: librefang_types::agent::UserId::from_name("test"),
+            },
+        ))
         .with_state(state.clone());
     Harness {
         app,
@@ -90,11 +97,20 @@ fn register_agent_with_filters(
     allowlist: &[&str],
     blocklist: &[&str],
 ) -> AgentId {
+    register_agent_with_filters_and_author(state, allowlist, blocklist, "test")
+}
+
+fn register_agent_with_filters_and_author(
+    state: &AppState,
+    allowlist: &[&str],
+    blocklist: &[&str],
+    author: &str,
+) -> AgentId {
     let id = AgentId::new();
     let manifest = AgentManifest {
         name: "mcp-test".to_string(),
         description: "agent for /mcp tools/list filter regression".to_string(),
-        author: "test".to_string(),
+        author: author.to_string(),
         module: "builtin:chat".to_string(),
         // Opt into every connected MCP server. Since #5855, `mcp_servers = []`
         // (the manifest default) means "no MCP servers", so the seeded MCP
@@ -256,11 +272,10 @@ async fn tools_list_falls_back_to_kernel_catalogue_when_no_header() {
     );
 }
 
-/// Unknown / unparseable agent header is treated identically to a
-/// missing header: the bridge falls back to the unfiltered catalogue
-/// rather than silently erroring or returning an empty list.
+/// An unknown agent header must fail closed rather than fall back to the
+/// unfiltered kernel catalogue.
 #[tokio::test(flavor = "multi_thread")]
-async fn tools_list_unknown_agent_header_falls_back_to_kernel_catalogue() {
+async fn tools_list_unknown_agent_header_is_rejected() {
     let h = boot();
     seed_mcp_tool(&h.state, SMALL_TOOL);
     seed_mcp_tool(&h.state, BIG_TOOL_DROP);
@@ -268,11 +283,24 @@ async fn tools_list_unknown_agent_header_falls_back_to_kernel_catalogue() {
     // Pass a syntactically-valid but unregistered agent id.
     let bogus = AgentId::new();
     let body = list_tools(&h, Some(bogus)).await;
-    let names = tool_names(&body);
+    assert_eq!(body["error"]["code"], -32001, "{body}");
+    assert!(body.get("result").is_none(), "{body}");
+}
 
+#[tokio::test(flavor = "multi_thread")]
+async fn tools_list_rejects_agent_context_owned_by_another_user() {
+    let h = boot();
+    seed_mcp_tool(&h.state, SMALL_TOOL);
+    let agent_id = register_agent_with_filters_and_author(&h.state, &[], &[], "mallory");
+
+    let body = list_tools(&h, Some(agent_id)).await;
+
+    assert_eq!(body["error"]["code"], -32001, "{body}");
     assert!(
-        names.iter().any(|n| n == SMALL_TOOL) && names.iter().any(|n| n == BIG_TOOL_DROP),
-        "unknown agent header must fall back to the unfiltered catalogue; got {names:?}"
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("may not use")),
+        "{body}"
     );
 }
 

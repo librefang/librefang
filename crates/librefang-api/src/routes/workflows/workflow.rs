@@ -497,7 +497,10 @@ pub struct RunWorkflowQuery {
 ///
 /// Shared by the `run_workflow` async path and `rerun_workflow_run` so both drive `execute_run` with identical agent-resolver and message-sender wiring.
 /// The caller creates the `Pending` run and returns its id immediately; this drives it to completion, observable via `GET /api/workflows/runs/{run_id}`.
-fn spawn_background_run(state: Arc<AppState>, run_id: WorkflowRunId) {
+fn spawn_background_run(
+    state: Arc<AppState>,
+    run_id: WorkflowRunId,
+) -> tokio::task::JoinHandle<Result<String, String>> {
     // Separate Arc clones for the resolver closure (Fn) and the sender closure (Fn) so neither moves out of the other.
     let state_for_resolver = state.clone();
     let state_for_sender = state.clone();
@@ -551,10 +554,60 @@ fn spawn_background_run(state: Arc<AppState>, run_id: WorkflowRunId) {
                 },
             )
             .await;
-        if let Err(e) = result {
+        if let Err(ref e) = result {
             tracing::warn!(run_id = %run_id, error = %e, "Background workflow run failed");
         }
-    });
+        result
+    })
+}
+
+fn workflow_running_response(run_id: WorkflowRunId) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "run_id": run_id.to_string(),
+            "status": "running",
+            "message": "workflow is still running; poll GET /api/workflows/runs/{run_id}",
+        })),
+    )
+}
+
+async fn workflow_completed_response(
+    state: &Arc<AppState>,
+    run_id: WorkflowRunId,
+    output: String,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let run = state.kernel.workflow_engine().get_run(run_id).await;
+    let step_results = run
+        .as_ref()
+        .map(|run| {
+            run.step_results
+                .iter()
+                .map(|step| {
+                    serde_json::json!({
+                        "step_name": step.step_name,
+                        "agent_name": step.agent_name,
+                        "prompt": step.prompt,
+                        "output": step.output,
+                        "input_tokens": step.input_tokens,
+                        "output_tokens": step.output_tokens,
+                        "duration_ms": step.duration_ms,
+                        "error": step.error,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "run_id": run_id.to_string(),
+            "output": output,
+            "status": "completed",
+            "step_results": step_results,
+        })),
+    )
 }
 
 /// POST /api/workflows/:id/run — Execute a workflow.
@@ -583,94 +636,67 @@ pub async fn run_workflow(
 
     let input = workflow_run_input_string(&req);
 
-    if query.wait {
-        // -- Synchronous path (backward-compatible) --
-        let run_fut = state.kernel.run_workflow_typed(workflow_id, input);
-        let result = if let Some(timeout_ms) = query.timeout_ms {
-            tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), run_fut)
-                .await
-                .ok() // None on timeout, Some(inner_result) on completion
-        } else {
-            Some(run_fut.await)
-        };
-
-        match result {
-            Some(Ok((run_id, output))) => {
-                let run = state.kernel.workflow_engine().get_run(run_id).await;
-                let step_results = run.as_ref().map(|r| {
-                    r.step_results
-                        .iter()
-                        .map(|s| {
-                            serde_json::json!({
-                                "step_name": s.step_name,
-                                "agent_name": s.agent_name,
-                                "prompt": s.prompt,
-                                "output": s.output,
-                                "input_tokens": s.input_tokens,
-                                "output_tokens": s.output_tokens,
-                                "duration_ms": s.duration_ms,
-                                "error": s.error,
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                });
-                (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "run_id": run_id.to_string(),
-                        "output": output,
-                        "status": "completed",
-                        "step_results": step_results.unwrap_or_default(),
-                    })),
-                )
-            }
-            Some(Err(e)) => {
+    if query.wait && query.timeout_ms.is_none() {
+        // Preserve the original fully synchronous kernel runner, including
+        // its global execution timeout and nested-agent depth accounting.
+        match state.kernel.run_workflow_typed(workflow_id, input).await {
+            Ok((run_id, output)) => workflow_completed_response(&state, run_id, output).await,
+            Err(e) => {
                 tracing::warn!("Workflow run failed for {id}: {e}");
-                let detail = e.to_string();
                 (
                     StatusCode::UNPROCESSABLE_ENTITY,
                     Json(serde_json::json!({
                         "error": "workflow_failed",
-                        "detail": detail,
-                    })),
-                )
-            }
-            None => {
-                // Timed out — run is still going in the background.
-                // We need a run_id to return, but run_workflow_typed already
-                // consumed the future and started the run inside the kernel.
-                // Surface a generic async response; the caller should poll.
-                (
-                    StatusCode::ACCEPTED,
-                    Json(serde_json::json!({
-                        "status": "running",
-                        "message": "workflow is still running; poll GET /api/workflows/runs/{run_id}",
+                        "detail": e.to_string(),
                     })),
                 )
             }
         }
     } else {
-        // -- Asynchronous path (default) --
-        // Create the run first so we have the run_id to return immediately,
-        // then spawn execute_run in the background.
+        // Timed waits and default-async requests need the id before execution
+        // finishes. The spawned task owns execution, so dropping the request
+        // or timing out its JoinHandle wait does not cancel the run.
         let engine = state.kernel.workflow_engine();
-        // Create the run synchronously so we can return its id in the 202, then drive it to completion in the background.
-        // Progress is observable via GET /api/workflows/runs/{run_id}.
-        let run_id = match engine.create_run(workflow_id, input.clone()).await {
-            Some(rid) => rid,
+        let run_id = match engine.create_run(workflow_id, input).await {
+            Some(run_id) => run_id,
             None => {
                 return ApiErrorResponse::not_found(format!("Workflow '{id}' not found"))
                     .into_json_tuple();
             }
         };
-        let run_id_str = run_id.to_string();
-        spawn_background_run(state.clone(), run_id);
-        (
-            StatusCode::ACCEPTED,
-            Json(serde_json::json!({
-                "run_id": run_id_str,
-            })),
-        )
+        let mut run_task = spawn_background_run(state.clone(), run_id);
+
+        if query.wait {
+            let timeout_ms = query.timeout_ms.unwrap_or_default();
+            match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), &mut run_task)
+                .await
+            {
+                Ok(Ok(Ok(output))) => workflow_completed_response(&state, run_id, output).await,
+                Ok(Ok(Err(e))) => {
+                    tracing::warn!("Workflow run failed for {id}: {e}");
+                    (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(serde_json::json!({
+                            "error": "workflow_failed",
+                            "detail": e,
+                        })),
+                    )
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(run_id = %run_id, error = %e, "Workflow execution task failed");
+                    ApiErrorResponse::internal_scrub(e).into_json_tuple()
+                }
+                Err(_) => workflow_running_response(run_id),
+            }
+        } else {
+            drop(run_task);
+            (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({
+                    "run_id": run_id.to_string(),
+                })),
+            )
+        }
     }
 }
 
@@ -825,11 +851,27 @@ pub async fn rerun_workflow_run(
         }
     };
     let new_run_id_str = new_run_id.to_string();
-    spawn_background_run(state.clone(), new_run_id);
+    drop(spawn_background_run(state.clone(), new_run_id));
     (
         StatusCode::ACCEPTED,
         Json(serde_json::json!({ "run_id": new_run_id_str })),
     )
+}
+
+#[cfg(test)]
+mod run_response_tests {
+    use super::*;
+
+    #[test]
+    fn timed_wait_response_includes_pollable_run_id() {
+        let run_id = WorkflowRunId(uuid::Uuid::new_v4());
+
+        let (status, Json(body)) = workflow_running_response(run_id);
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["run_id"], run_id.to_string());
+        assert_eq!(body["status"], "running");
+    }
 }
 
 /// POST /api/workflows/runs/:run_id/cancel — Cancel a workflow run.

@@ -1263,6 +1263,8 @@
     "token_limit": "Токени/Година",
     "alert_threshold": "Поріг попередження",
     "budget_saved": "Ліміти бюджету оновлено.",
+    "budget_no_changes": "Перед збереженням введіть принаймні одне дійсне значення бюджету.",
+    "budget_bad_input": "{{field}} має недійсне значення. Використайте скінченне невід’ємне число; ліміт токенів має бути цілим, а поріг сповіщення — у межах 0–1.",
     "total_cost": "Загальна вартість",
     "avg_latency": "Середня затримка",
     "usage_by_agent": "Використання за агентами",
@@ -1323,6 +1325,7 @@
     "add": "Додати",
     "filter_all": "Всі",
     "showing": "Відображено {{count}} / {{total}}",
+    "search_result_cap": "перші 50 збігів",
     "no_memories": "Поки що немає записів пам'яті",
     "created": "Створено",
     "config_title": "Конфігурація пам'яті",
@@ -1339,12 +1342,6 @@
     "embedding_section": "Ембеддінг",
     "provider": "Провайдер",
     "auto_detect": "Автовизначення",
-    "provider_openai": "OpenAI",
-    "provider_ollama": "Ollama",
-    "provider_vllm": "vLLM",
-    "provider_lmstudio": "LM Studio",
-    "provider_gemini": "Gemini",
-    "provider_minimax": "MiniMax",
     "model": "Модель",
     "api_key_env": "Змінна середовища API Key",
     "api_key_env_hint": "Локальні провайдери (Ollama / vLLM / LM Studio) зазвичай не потребують ключа — залиште порожнім.",
@@ -1438,7 +1435,7 @@
     "topology_description": "Координація високопродуктивної шини подій.",
     "total_channels": "Всього каналів",
     "connected": "Підключено",
-    "events_today": "Події за сьогодні",
+    "recent_events": "Останні події (макс. 50)",
     "uptime": "Час роботи",
     "events": "Події",
     "events_desc": "Події повідомлень у реальному часі.",
@@ -3670,7 +3667,6 @@
       "not_set": "Не встановлено"
     },
     "errors": {
-      "empty_entry": "{{field}} містить порожній запис",
       "duplicate_entry": "{{field}} містить дублікат запису '{{item}}'",
       "writable_not_subset": "memory_access.writable_namespaces['{{ns}}'] не входить до readable_namespaces (запис має бути підмножиною читання)"
     },
@@ -3884,6 +3880,7 @@
     "error_disabled_body": "Увімкніть пейринг у <a>Конфігурації → Безпека</a> (<code>pairing.enabled = true</code>).",
     "error_generic_title": "Не вдалося згенерувати код пейрингу",
     "qr_aria_label": "QR-код для пейрингу з мобільним пристроєм",
+    "qr_render_failed": "Не вдалося відобразити QR-код пейрингу. Оновіть сторінку, щоб повторити спробу.",
     "btn_try_again": "Спробувати знову"
   },
   "shortcuts_help": {
@@ -4003,6 +4000,9 @@
   },
   "errors": {
     "something_went_wrong": "Щось пішло не так",
+    "page_assets_updated": "Ресурси сторінки оновлено",
+    "react_state_reset": "Стан React скинуто — перезавантаження",
+    "new_version_available": "Доступна нова версія. Перезавантажте сторінку, щоб отримати її.",
     "unexpected": "Сталася неочікувана помилка.",
     "force_reload_title": "Скидає затримку автоперезавантаження і примусово завантажує заново",
     "force_reload": "Примусово перезавантажити",
