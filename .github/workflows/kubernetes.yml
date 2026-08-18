@@ -13,8 +13,8 @@ name: Kubernetes
 #   kind   — builds the image and actually boots it in a throwaway cluster with
 #            `pod-security.kubernetes.io/enforce=restricted`, then kills the pod
 #            and proves /data survived. ~40 min because of the Rust release
-#            build, so it follows docker-build.yml's precedent and runs on
-#            push-to-main plus manual dispatch rather than on every PR push.
+#            build, so it runs on push-to-main, manual dispatch, and only PRs
+#            that change the image runtime or this workflow.
 on:
   pull_request:
     paths:
@@ -133,7 +133,8 @@ jobs:
   kind:
     name: boot in kind (restricted PSS)
     # The Rust release build dominates runtime. Run it for every main/manual
-    # invocation and only for PRs that change Dockerfile or the entrypoint.
+    # invocation and only for PRs that change Dockerfile, the entrypoint, or
+    # this workflow's boot contract.
     needs: changes
     if: needs.changes.outputs.image_runtime == 'true'
     runs-on: ubuntu-latest
@@ -312,6 +313,9 @@ jobs:
 
           replacement_seen=false
           for _ in $(seq 1 600); do
+            # A dead watcher means observation already failed. Stop waiting so
+            # its concrete error is surfaced immediately below.
+            kill -0 "$watcher" 2>/dev/null || break
             current_uid="$(kubectl -n "$NS" get pod librefang-0 \
               --ignore-not-found -o jsonpath='{.metadata.uid}')"
             if [ -n "$current_uid" ] && [ "$current_uid" != "$before_uid" ]; then
