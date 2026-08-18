@@ -1,0 +1,1 @@
+Pass privileged welcome-workflow event metadata through environment variables instead of shell source, declare fail-fast Bash, and construct welcome bodies without a malformed quoted heredoc substitution. (#7283) (@xiaomo)
