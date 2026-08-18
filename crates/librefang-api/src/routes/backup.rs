@@ -10,7 +10,7 @@
 //! resolve through the glob re-export in `routes/mod.rs`.
 
 use super::AppState;
-use crate::middleware::RequestLanguage;
+use crate::middleware::{AuthenticatedApiUser, RequestLanguage};
 use crate::types::ApiErrorResponse;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -444,10 +444,11 @@ fn delete_backup_blocking(backups_dir: &std::path::Path, filename: &str) -> std:
 }
 
 /// DELETE /api/backups/{filename} — Delete a specific backup.
-#[utoipa::path(delete, path = "/api/backups/{filename}", tag = "system", params(("filename" = String, Path, description = "Backup filename")), responses((status = 200, description = "Backup deleted")))]
+#[utoipa::path(delete, path = "/api/backups/{filename}", tag = "system", params(("filename" = String, Path, description = "Backup filename")), responses((status = 204, description = "Backup deleted")))]
 pub async fn delete_backup(
     State(state): State<Arc<AppState>>,
     Path(filename): Path<String>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     // Sanitize filename to prevent path traversal
@@ -499,6 +500,15 @@ pub async fn delete_backup(
     }
 
     tracing::info!("Backup deleted: {filename}");
+    let user_id = api_user.as_ref().map(|user| user.0.user_id);
+    state.kernel.audit().record_with_context(
+        "system",
+        librefang_kernel::audit::AuditAction::ConfigChange,
+        format!("Backup deleted: {filename}"),
+        "completed",
+        user_id,
+        Some("api".to_string()),
+    );
     (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
 }
 
@@ -506,10 +516,97 @@ pub async fn delete_backup(
 /// the original handler's distinct ApiErrorResponse branches so the
 /// translated client-facing message stays identical after the
 /// spawn_blocking refactor.
+#[derive(Debug)]
 enum RestoreError {
+    NotFound,
     Open(String),
     InvalidArchive(String),
     MissingManifest,
+    ResourceLimit(String),
+}
+
+const MAX_RESTORE_ENTRIES: usize = 10_000;
+const MAX_RESTORE_ENTRY_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_RESTORE_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_RESTORE_COMPRESSION_RATIO: u64 = 100;
+const MAX_RESTORE_MANIFEST_BYTES: u64 = 1024 * 1024;
+
+fn prepare_restore_target(
+    canonical_home: &std::path::Path,
+    entry_name: &std::path::Path,
+) -> Result<std::path::PathBuf, RestoreError> {
+    let mut parent = canonical_home.to_path_buf();
+    if let Some(relative_parent) = entry_name.parent() {
+        for component in relative_parent.components() {
+            let std::path::Component::Normal(component) = component else {
+                return Err(RestoreError::InvalidArchive(
+                    "unsafe restore path component".to_string(),
+                ));
+            };
+            parent.push(component);
+            match std::fs::symlink_metadata(&parent) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(RestoreError::InvalidArchive(
+                        "restore path contains a symbolic link".to_string(),
+                    ));
+                }
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => {
+                    return Err(RestoreError::InvalidArchive(
+                        "restore path contains a non-directory component".to_string(),
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::create_dir(&parent).map_err(|error| {
+                        RestoreError::InvalidArchive(format!(
+                            "failed to create restore directory: {error}"
+                        ))
+                    })?;
+                }
+                Err(error) => {
+                    return Err(RestoreError::InvalidArchive(format!(
+                        "failed to inspect restore directory: {error}"
+                    )));
+                }
+            }
+            let canonical_parent = std::fs::canonicalize(&parent).map_err(|error| {
+                RestoreError::InvalidArchive(format!(
+                    "failed to resolve restore directory: {error}"
+                ))
+            })?;
+            if !canonical_parent.starts_with(canonical_home) {
+                return Err(RestoreError::InvalidArchive(
+                    "restore path escapes the home directory".to_string(),
+                ));
+            }
+        }
+    }
+
+    let target = canonical_home.join(entry_name);
+    if let Ok(metadata) = std::fs::symlink_metadata(&target) {
+        if metadata.file_type().is_symlink() {
+            return Err(RestoreError::InvalidArchive(
+                "restore target is a symbolic link".to_string(),
+            ));
+        }
+        if metadata.is_dir() {
+            return Err(RestoreError::InvalidArchive(
+                "restore target is a directory".to_string(),
+            ));
+        }
+    }
+    Ok(target)
+}
+
+fn open_restore_target(target: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(target)
 }
 
 /// Result of a successful restore extraction.
@@ -519,25 +616,83 @@ struct RestoreOutcome {
     manifest: Option<BackupManifest>,
 }
 
+fn restore_completion(errors: &[String]) -> (StatusCode, &'static str) {
+    if errors.is_empty() {
+        (StatusCode::OK, "completed")
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, "failed")
+    }
+}
+
 /// Sync, blocking implementation of `restore_backup`: opens the zip,
 /// validates the manifest, and extracts every entry into `home_dir`.
 /// Must be dispatched via `tokio::task::spawn_blocking` — the
 /// decompress-and-write loop otherwise stalls the axum/tokio worker for
-/// the full archive (each entry is buffered into a `Vec<u8>` then written),
-/// matching the `create_backup_blocking` contract above.
+/// the full archive, matching the `create_backup_blocking` contract above.
 fn restore_backup_blocking(
     backup_path: std::path::PathBuf,
     home_dir: std::path::PathBuf,
 ) -> Result<RestoreOutcome, RestoreError> {
+    let canonical_home = std::fs::canonicalize(&home_dir)
+        .map_err(|e| RestoreError::Open(format!("resolve restore directory: {e}")))?;
     let file = std::fs::File::open(&backup_path).map_err(|e| RestoreError::Open(e.to_string()))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| RestoreError::InvalidArchive(e.to_string()))?;
+    if archive.len() > MAX_RESTORE_ENTRIES {
+        return Err(RestoreError::ResourceLimit(format!(
+            "archive contains {} entries; maximum is {MAX_RESTORE_ENTRIES}",
+            archive.len()
+        )));
+    }
+    let mut declared_total = 0_u64;
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| RestoreError::InvalidArchive(e.to_string()))?;
+        let name = entry
+            .enclosed_name()
+            .ok_or_else(|| RestoreError::InvalidArchive("unsafe entry name".to_string()))?;
+        let declared_size = entry.size();
+        let compressed_size = entry.compressed_size();
+        if name.to_string_lossy() == "manifest.json" {
+            if declared_size > MAX_RESTORE_MANIFEST_BYTES {
+                return Err(RestoreError::ResourceLimit(
+                    "manifest exceeds the restore limit".to_string(),
+                ));
+            }
+            continue;
+        }
+        if declared_size > MAX_RESTORE_ENTRY_BYTES {
+            return Err(RestoreError::ResourceLimit(format!(
+                "entry {} exceeds the per-entry decompression limit",
+                name.display()
+            )));
+        }
+        if declared_size > 0
+            && (compressed_size == 0
+                || declared_size > compressed_size.saturating_mul(MAX_RESTORE_COMPRESSION_RATIO))
+        {
+            return Err(RestoreError::ResourceLimit(format!(
+                "entry {} exceeds the compression-ratio limit",
+                name.display()
+            )));
+        }
+        declared_total = declared_total.saturating_add(declared_size);
+        if declared_total > MAX_RESTORE_TOTAL_BYTES {
+            return Err(RestoreError::ResourceLimit(
+                "archive exceeds the total decompression limit".to_string(),
+            ));
+        }
+    }
 
     // Validate manifest before touching the filesystem.
     let manifest: Option<BackupManifest> = match archive.by_name("manifest.json") {
         Ok(mut entry) => {
             let mut buf = String::new();
-            if std::io::Read::read_to_string(&mut entry, &mut buf).is_ok() {
+            let mut limited = std::io::Read::take(&mut entry, MAX_RESTORE_MANIFEST_BYTES + 1);
+            if std::io::Read::read_to_string(&mut limited, &mut buf).is_ok()
+                && buf.len() as u64 <= MAX_RESTORE_MANIFEST_BYTES
+            {
                 serde_json::from_str(&buf).ok()
             } else {
                 None
@@ -551,6 +706,7 @@ fn restore_backup_blocking(
 
     let mut restored: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
+    let mut total_uncompressed = 0_u64;
 
     // Extract all files to home_dir, skipping manifest.json itself.
     for i in 0..archive.len() {
@@ -574,31 +730,42 @@ fn restore_backup_blocking(
             continue;
         }
 
-        let target = home_dir.join(&entry_name);
-
         if entry.is_dir() {
-            if let Err(e) = std::fs::create_dir_all(&target) {
-                errors.push(format!("mkdir {}: {e}", entry_name.display()));
-            }
+            prepare_restore_target(&canonical_home, &entry_name.join("placeholder"))?;
             continue;
         }
 
-        // Ensure parent directory exists
-        if let Some(parent) = target.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                errors.push(format!("mkdir parent for {}: {e}", entry_name.display()));
+        let target = prepare_restore_target(&canonical_home, &entry_name)?;
+
+        let mut output = match open_restore_target(&target) {
+            Ok(file) => file,
+            Err(e) => {
+                errors.push(format!("create {}: {e}", entry_name.display()));
                 continue;
             }
+        };
+        let mut limited = std::io::Read::take(&mut entry, MAX_RESTORE_ENTRY_BYTES + 1);
+        let written = match std::io::copy(&mut limited, &mut output) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                let _ = std::fs::remove_file(&target);
+                errors.push(format!("extract {}: {e}", entry_name.display()));
+                continue;
+            }
+        };
+        if written > MAX_RESTORE_ENTRY_BYTES {
+            let _ = std::fs::remove_file(&target);
+            return Err(RestoreError::ResourceLimit(format!(
+                "entry {} exceeded the per-entry decompression limit",
+                entry_name.display()
+            )));
         }
-
-        let mut data = Vec::new();
-        if let Err(e) = std::io::Read::read_to_end(&mut entry, &mut data) {
-            errors.push(format!("read {}: {e}", entry_name.display()));
-            continue;
-        }
-        if let Err(e) = std::fs::write(&target, &data) {
-            errors.push(format!("write {}: {e}", entry_name.display()));
-            continue;
+        total_uncompressed = total_uncompressed.saturating_add(written);
+        if total_uncompressed > MAX_RESTORE_TOTAL_BYTES {
+            let _ = std::fs::remove_file(&target);
+            return Err(RestoreError::ResourceLimit(
+                "archive exceeded the total decompression limit".to_string(),
+            ));
         }
         restored.push(entry_name.to_string_lossy().to_string());
     }
@@ -645,23 +812,7 @@ pub async fn restore_backup(
 
     let home_dir = state.kernel.home_dir().to_path_buf();
     let backups_dir = home_dir.join("backups");
-    let backup_path = match find_backup_path(&backups_dir, &filename) {
-        Ok(Some(path)) => path,
-        Ok(None) => {
-            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
-                .into_json_tuple();
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
-                .into_json_tuple();
-        }
-        Err(e) => {
-            return ApiErrorResponse::internal(
-                t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())]),
-            )
-            .into_json_tuple();
-        }
-    };
+    let filename_for_task = filename.clone();
 
     // Drop the `!Send` ErrorTranslator before the spawn_blocking `.await`
     // (the axum Handler bound rejects a non-Send future). Each error branch
@@ -671,11 +822,26 @@ pub async fn restore_backup(
     // Dispatch the blocking open + decompress + write loop onto a blocking
     // thread so it does not stall the axum/tokio worker (refs
     // blocking-fs-on-executor).
-    let result =
-        tokio::task::spawn_blocking(move || restore_backup_blocking(backup_path, home_dir)).await;
+    let result = tokio::task::spawn_blocking(move || {
+        let backup_path = match find_backup_path(&backups_dir, &filename_for_task) {
+            Ok(Some(path)) => path,
+            Ok(None) => return Err(RestoreError::NotFound),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(RestoreError::NotFound);
+            }
+            Err(error) => return Err(RestoreError::Open(error.to_string())),
+        };
+        restore_backup_blocking(backup_path, home_dir)
+    })
+    .await;
 
     let outcome = match result {
         Ok(Ok(o)) => o,
+        Ok(Err(RestoreError::NotFound)) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
+                .into_json_tuple();
+        }
         Ok(Err(RestoreError::Open(msg))) => {
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
             return ApiErrorResponse::internal(
@@ -695,6 +861,11 @@ pub async fn restore_backup(
             return ApiErrorResponse::bad_request(t.t("api-error-backup-missing-manifest"))
                 .into_json_tuple();
         }
+        Ok(Err(RestoreError::ResourceLimit(msg))) => {
+            tracing::warn!(filename, %msg, "Backup restore rejected by resource limits");
+            return ApiErrorResponse::bad_request("Backup archive exceeds restore resource limits")
+                .into_json_tuple();
+        }
         Err(join_err) => {
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
             return ApiErrorResponse::internal(t.t_args(
@@ -709,22 +880,44 @@ pub async fn restore_backup(
     let manifest = outcome.manifest;
 
     let total_restored = restored.len();
-    tracing::info!(
-        "Restore from {filename}: {total_restored} files restored, {} errors",
-        errors.len()
-    );
+    let error_count = errors.len();
+    let (response_status, audit_status) = restore_completion(&errors);
+    if errors.is_empty() {
+        tracing::info!("Restore from {filename}: {total_restored} files restored");
+    } else {
+        tracing::error!(
+            filename,
+            total_restored,
+            error_count,
+            errors = ?errors,
+            "Backup restore completed with partial filesystem failures"
+        );
+    }
     let user_id = api_user.as_ref().map(|u| u.0.user_id);
     state.kernel.audit().record_with_context(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
-        format!("Backup restored: {filename} ({total_restored} files)"),
-        "completed",
+        format!(
+            "Backup restore {audit_status}: {filename} ({total_restored} files, {error_count} errors)"
+        ),
+        audit_status,
         user_id,
         Some("api".to_string()),
     );
 
+    if response_status.is_server_error() {
+        return (
+            response_status,
+            Json(serde_json::json!({
+                "error": "Backup restore incomplete",
+                "restored_files": total_restored,
+                "error_count": error_count,
+            })),
+        );
+    }
+
     (
-        StatusCode::OK,
+        response_status,
         Json(serde_json::json!({
             "restored_files": total_restored,
             "errors": errors,
@@ -742,4 +935,126 @@ fn read_backup_manifest(path: &std::path::Path) -> Option<BackupManifest> {
     let mut buf = String::new();
     std::io::Read::read_to_string(&mut entry, &mut buf).ok()?;
     serde_json::from_str(&buf).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn partial_restore_is_a_failed_server_response() {
+        assert_eq!(restore_completion(&[]), (StatusCode::OK, "completed"));
+        assert_eq!(
+            restore_completion(&["disk full".to_string()]),
+            (StatusCode::INTERNAL_SERVER_ERROR, "failed")
+        );
+    }
+
+    #[test]
+    fn restore_rejects_high_compression_ratio_before_writing_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("bomb.zip");
+        let restore_dir = temp.path().join("restore");
+        std::fs::create_dir(&restore_dir).unwrap();
+
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("manifest.json", options).unwrap();
+        zip.write_all(br#"{"version":"test"}"#).unwrap();
+        zip.start_file("data/bomb.bin", options).unwrap();
+        zip.write_all(&vec![0_u8; 1024 * 1024]).unwrap();
+        zip.finish().unwrap();
+
+        let result = restore_backup_blocking(archive_path, restore_dir.clone());
+        assert!(matches!(result, Err(RestoreError::ResourceLimit(_))));
+        assert!(!restore_dir.join("data/bomb.bin").exists());
+    }
+
+    #[test]
+    fn restore_streams_normal_archive_within_limits() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("normal.zip");
+        let restore_dir = temp.path().join("restore");
+        std::fs::create_dir(&restore_dir).unwrap();
+
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("manifest.json", options).unwrap();
+        zip.write_all(
+            br#"{"version":1,"created_at":"now","hostname":"host","librefang_version":"test","components":["config"]}"#,
+        )
+        .unwrap();
+        zip.start_file("config.toml", options).unwrap();
+        zip.write_all(b"[kernel]\nname = \"test\"\n").unwrap();
+        zip.finish().unwrap();
+
+        let outcome = restore_backup_blocking(archive_path, restore_dir.clone()).unwrap();
+        assert_eq!(outcome.restored, vec!["config.toml"]);
+        assert!(outcome.errors.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(restore_dir.join("config.toml")).unwrap(),
+            "[kernel]\nname = \"test\"\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_rejects_parent_symlink_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("escape.zip");
+        let restore_dir = temp.path().join("restore");
+        let outside_dir = temp.path().join("outside");
+        std::fs::create_dir(&restore_dir).unwrap();
+        std::fs::create_dir(&outside_dir).unwrap();
+        std::os::unix::fs::symlink(&outside_dir, restore_dir.join("data")).unwrap();
+
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("manifest.json", options).unwrap();
+        zip.write_all(
+            br#"{"version":1,"created_at":"now","hostname":"host","librefang_version":"test","components":["data"]}"#,
+        )
+        .unwrap();
+        zip.start_file("data/escaped.txt", options).unwrap();
+        zip.write_all(b"escaped").unwrap();
+        zip.finish().unwrap();
+
+        let result = restore_backup_blocking(archive_path, restore_dir);
+        assert!(matches!(result, Err(RestoreError::InvalidArchive(_))));
+        assert!(!outside_dir.join("escaped.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_rejects_leaf_symlink_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("leaf-escape.zip");
+        let restore_dir = temp.path().join("restore");
+        let outside_file = temp.path().join("outside.txt");
+        std::fs::create_dir(&restore_dir).unwrap();
+        std::fs::write(&outside_file, b"keep me").unwrap();
+        std::os::unix::fs::symlink(&outside_file, restore_dir.join("config.toml")).unwrap();
+
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("manifest.json", options).unwrap();
+        zip.write_all(
+            br#"{"version":1,"created_at":"now","hostname":"host","librefang_version":"test","components":["config"]}"#,
+        )
+        .unwrap();
+        zip.start_file("config.toml", options).unwrap();
+        zip.write_all(b"replaced").unwrap();
+        zip.finish().unwrap();
+
+        let result = restore_backup_blocking(archive_path, restore_dir);
+        assert!(matches!(result, Err(RestoreError::InvalidArchive(_))));
+        assert_eq!(std::fs::read(&outside_file).unwrap(), b"keep me");
+    }
 }

@@ -375,6 +375,20 @@ async fn delete_backup_removes_existing_archive() {
     assert_eq!(body["total"].as_u64(), Some(0));
     let on_disk = h.state.kernel.home_dir().join("backups").join(&filename);
     assert!(!on_disk.exists(), "file should be gone: {on_disk:?}");
+
+    let audit_entry = h
+        .state
+        .kernel
+        .audit()
+        .recent(50)
+        .into_iter()
+        .find(|entry| entry.detail == format!("Backup deleted: {filename}"))
+        .expect("successful backup deletion must be audited");
+    assert!(matches!(
+        audit_entry.action,
+        librefang_kernel::audit::AuditAction::ConfigChange
+    ));
+    assert_eq!(audit_entry.outcome, "completed");
 }
 
 // ---------------------------------------------------------------------------
