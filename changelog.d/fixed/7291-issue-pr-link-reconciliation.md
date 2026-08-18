@@ -1,1 +1,0 @@
-Reconcile issue `has-pr` labels across every open peer PR on merge, close, reopen, and body edits, refreshing the event PR before writes, excluding stale list snapshots, and using one boundary-safe link parser. (#7291) (@houko)
