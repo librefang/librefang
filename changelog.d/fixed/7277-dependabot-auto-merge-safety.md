@@ -1,0 +1,1 @@
+Verify Dependabot PR authorship before automatic merges, remove body-controlled security soak bypasses, reconcile aged green updates hourly, and keep grouped updates on manual review. (#7277) (@xiaomo)
