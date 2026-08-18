@@ -39,7 +39,7 @@ run_announcement() {
   mode=$1
   payload="$TEST_ROOT/$mode.json"
   ANNOUNCE_MODE="$mode" \
-  CURL_PAYLOAD="$payload" \
+    CURL_PAYLOAD="$payload" \
     CURL_ARGS="$TEST_ROOT/$mode.curl-args" \
     GH_ARGS="$TEST_ROOT/$mode.gh-args" \
     DISCORD_WEBHOOK_URL='https://discord.test/webhook' \
