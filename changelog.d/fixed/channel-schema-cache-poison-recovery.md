@@ -1,1 +1,0 @@
-- Recover poisoned channel sidecar schema and schema-error caches so discovery and configuration remain available with preserved adapter metadata. (@xiaomo)

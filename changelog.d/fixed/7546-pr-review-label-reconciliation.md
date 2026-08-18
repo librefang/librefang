@@ -1,1 +1,0 @@
-Serialize review-label mutations on the exact PR number, reconcile queued jobs against the latest actionable review, preserve actionable collectors, and propagate unexpected label failures. (#7546) (@houko)

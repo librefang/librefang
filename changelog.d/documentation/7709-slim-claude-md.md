@@ -1,5 +1,0 @@
-Cut `CLAUDE.md` from 45k to 23k characters so it fits under Claude Code's 40k context budget again, moving the long-form detail into three new pages under `docs/development/` (`ai-safety-hooks.md`, `build-and-verify.md`, `github-collaboration.md`) plus `docs/architecture/session-mode-resolution.md` rather than deleting it.
-Every rule an agent has to obey stays inline; only the rationale and the incident write-ups behind each rule moved.
-Fixed three stale claims found while auditing: `CLAUDE.md` pointed `core.hooksPath` at a `.githooks/` directory that does not exist (it is `scripts/hooks/`), located session resolution in `kernel/mod.rs` instead of `kernel/agent_execution.rs`, and both agent files undercounted the workspace (24 and 15 crates against an actual 29).
-`docs/architecture/skill-workshop.md` documented `enabled` as defaulting to `true` in four places while `SkillWorkshopConfig::default()` has shipped `enabled: false` since #3328, which would have told an operator the workshop was already running for every agent.
-(#7709) (@houko)
