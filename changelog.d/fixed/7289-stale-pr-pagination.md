@@ -1,1 +1,1 @@
-Paginate every open PR in stale-label reconciliation, propagate label-removal API failures, and serialize superseded event runs. (#7289) (@xiaomo)
+Paginate and fully reconcile every open PR from each surviving scheduled or push-triggered run, prefer authoritative event data, propagate label-removal API failures, and serialize mutations. (#7289) (@xiaomo)

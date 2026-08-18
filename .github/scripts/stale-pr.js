@@ -11,6 +11,14 @@ async function listOpenPulls(github, repo) {
   });
 }
 
+function applyEventPull(prs, eventPull) {
+  if (!eventPull) {
+    return prs;
+  }
+  const peers = prs.filter(pr => pr.number !== eventPull.number);
+  return eventPull.state === 'open' ? [eventPull, ...peers] : peers;
+}
+
 async function removeLabel(github, repo, issueNumber, label, core) {
   try {
     await github.rest.issues.removeLabel({
@@ -29,4 +37,4 @@ async function removeLabel(github, repo, issueNumber, label, core) {
   }
 }
 
-module.exports = { listOpenPulls, removeLabel };
+module.exports = { applyEventPull, listOpenPulls, removeLabel };

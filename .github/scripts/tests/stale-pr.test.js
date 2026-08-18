@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const { listOpenPulls, removeLabel } = require('../stale-pr.js');
+const { applyEventPull, listOpenPulls, removeLabel } = require('../stale-pr.js');
 
 (async () => {
   const listEndpoint = Symbol('pulls.list');
@@ -25,6 +25,14 @@ const { listOpenPulls, removeLabel } = require('../stale-pr.js');
     { number: 1 },
     { number: 101 },
   ]);
+  assert.deepEqual(
+    applyEventPull(
+      [{ number: 1, updated_at: 'old' }, { number: 2 }],
+      { number: 1, state: 'open', updated_at: 'new' },
+    ),
+    [{ number: 1, state: 'open', updated_at: 'new' }, { number: 2 }],
+  );
+  assert.deepEqual(applyEventPull([{ number: 1 }], undefined), [{ number: 1 }]);
   assert.equal(await removeLabel(github, { owner: 'o', repo: 'r' }, 7, 'stale-pr', console), true);
   assert.equal(calls[0].issue_number, 7);
 

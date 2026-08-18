@@ -50,7 +50,7 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
-            const { listOpenPulls, removeLabel } = require(
+            const { applyEventPull, listOpenPulls, removeLabel } = require(
               `${process.env.GITHUB_WORKSPACE}/.github/scripts/stale-pr.js`,
             );
             const LABEL = 'stale-pr';
@@ -58,19 +58,14 @@ jobs:
             const now = Date.now();
             const cutoff = now - STALE_DAYS * 24 * 60 * 60 * 1000;
 
-            // On synchronize event: remove stale label from the pushed PR
-            if (context.eventName === 'pull_request_target') {
-              const pr = context.payload.pull_request;
-              const labels = pr.labels.map(l => l.name);
-              if (labels.includes(LABEL)) {
-                await removeLabel(github, context.repo, pr.number, LABEL, core);
-                core.info(`#${pr.number}: removed "${LABEL}" (new push)`);
-              }
-              return;
-            }
-
-            // On schedule/dispatch: scan all open PRs
-            const prs = await listOpenPulls(github, context.repo);
+            // Every surviving event performs a full reconciliation. GitHub
+            // concurrency retains only one pending run, so this keeps a newer
+            // synchronize event from discarding another PR's pending cleanup.
+            // Prefer the event PR over a potentially stale list snapshot.
+            const prs = applyEventPull(
+              await listOpenPulls(github, context.repo),
+              context.payload.pull_request,
+            );
 
             for (const pr of prs) {
               const updatedAt = new Date(pr.updated_at).getTime();
