@@ -2821,34 +2821,22 @@ fn extract_agent_name(message: &ChannelMessage) -> String {
 
 /// The `(channel, chat_id)` pair a channel conversation is session-scoped under.
 ///
-/// This is the single source of truth on the channels side, and it is
-/// load-bearing that it has exactly one implementation. The kernel turns the
-/// pair into a `SessionId` via `SessionId::for_sender_scope`, so every producer
-/// of the pair must agree byte-for-byte or they address different sessions:
-/// the inbound message path through [`build_sender_context`], and the
-/// `/new` / `/reboot` / `/compact` arms of [`handle_command`] that reset the
-/// session the inbound path created.
+/// This is the single source of truth on the channels side, and it is load-bearing that it has exactly one implementation.
+/// The kernel turns the pair into a `SessionId` via `SessionId::for_sender_scope`, so every producer of the pair must agree byte-for-byte or they address different sessions: the inbound message path through [`build_sender_context`], and the `/new` / `/reboot` / `/compact` arms of [`handle_command`] that reset the session the inbound path created.
 ///
-/// #7701 is what disagreement looks like. The command arms read
-/// `sender.platform_id` and passed `None` when it was empty, while
-/// `build_sender_context` fell back to the metadata-derived sender id — which
-/// is precisely the case the Telegram adapter hits, since it sets the sender id
-/// in metadata and may leave `platform_id` empty. Inbound messages landed in
-/// `for_channel(agent, "telegram:<user_id>")`; `/new` cleared
-/// `for_channel(agent, "telegram")`. The reset reported success on an empty
-/// session while the conversation the user could see kept every message.
+/// #7701 is what disagreement looks like.
+/// The command arms read `sender.platform_id` and passed `None` when it was empty, while `build_sender_context` fell back to the metadata-derived sender id — which is precisely the case the Telegram adapter hits, since it sets the sender id in metadata and may leave `platform_id` empty.
+/// Inbound messages landed in `for_channel(agent, "telegram:<user_id>")`; `/new` cleared `for_channel(agent, "telegram")`.
+/// The reset reported success on an empty session while the conversation the user could see kept every message.
 ///
-/// The channel half drifted too: the inbound path sanitizes the channel name so
-/// a `Custom("cron")` adapter cannot collide with the kernel's reserved system
-/// channels, and the command arms did not.
+/// The channel half drifted too: the inbound path sanitizes the channel name so a `Custom("cron")` adapter cannot collide with the kernel's reserved system channels, and the command arms did not.
 fn session_scope(
     channel: &crate::types::ChannelType,
     platform_id: &str,
     sender_user_id: &str,
 ) -> (String, Option<String>) {
-    // Adapters that don't populate platform_id (e.g. Telegram sets it on the
-    // sidecar message but the field might be stripped). Fall back to the
-    // sender id — for DMs they coincide.
+    // Adapters that don't populate platform_id (e.g. Telegram sets it on the sidecar message but the field might be stripped).
+    // Fall back to the sender id — for DMs they coincide.
     let chat_id = if platform_id.is_empty() {
         if sender_user_id.is_empty() {
             None
@@ -2858,9 +2846,7 @@ fn session_scope(
     } else {
         Some(platform_id.to_string())
     };
-    // sanitize_channel_name guards against ChannelType::Custom collisions with
-    // reserved kernel-internal channels — see its doc-comment + audit:
-    // cron-channel-name-not-reserved.
+    // sanitize_channel_name guards against ChannelType::Custom collisions with reserved kernel-internal channels — see its doc-comment + audit: cron-channel-name-not-reserved.
     (sanitize_channel_name(channel_type_str(channel)), chat_id)
 }
 
@@ -2888,9 +2874,7 @@ fn build_sender_context(
         ),
         None => (AutoRouteStrategy::Off, 0, 0, 0, 0),
     };
-    // Shared with the `/new` / `/reboot` / `/compact` command arms so the
-    // session they reset is the session this context resolves to — see
-    // `session_scope`.
+    // Shared with the `/new` / `/reboot` / `/compact` command arms so the session they reset is the session this context resolves to — see `session_scope`.
     let (channel, chat_id) = session_scope(
         &message.channel,
         &message.sender.platform_id,
@@ -6856,13 +6840,9 @@ async fn dispatch_with_blocks(
 /// not expose an `account_id` (single-bot deployments, channels with no
 /// account concept), pass `None`.
 ///
-/// `sender_user_id` is `message.metadata[SENDER_USER_ID_KEY]` (see
-/// [`sender_user_id`]), which the `/new` / `/reboot` / `/compact` arms need to
-/// reproduce the session scope `build_sender_context` derived for the inbound
-/// message. Passing `&sender.platform_id` here is wrong whenever the adapter
-/// carries the sender id in metadata and leaves `platform_id` empty — that is
-/// the #7701 drift. Callers hold the `ChannelMessage`, so they can always
-/// supply it.
+/// `sender_user_id` is `message.metadata[SENDER_USER_ID_KEY]` (see [`sender_user_id`]), which the `/new` / `/reboot` / `/compact` arms need to reproduce the session scope `build_sender_context` derived for the inbound message.
+/// Passing `&sender.platform_id` here is wrong whenever the adapter carries the sender id in metadata and leaves `platform_id` empty — that is the #7701 drift.
+/// Callers hold the `ChannelMessage`, so they can always supply it.
 #[allow(clippy::too_many_arguments)]
 async fn handle_command(
     name: &str,
@@ -7003,12 +6983,8 @@ async fn handle_command(
             }
         }
         "new" => {
-            // Resolve the user's current agent and the channel-derived sid
-            // so /new only resets THIS chat (#4868). The (channel, chat_id)
-            // pair must match `build_sender_context` exactly so the sid we
-            // delete here equals the sid the next inbound message will
-            // resolve via `SessionId::for_channel` — hence the shared
-            // `session_scope` rather than a re-inlined derivation (#7701).
+            // Resolve the user's current agent and the channel-derived sid so /new only resets THIS chat (#4868).
+            // The (channel, chat_id) pair must match `build_sender_context` exactly so the sid we delete here equals the sid the next inbound message will resolve via `SessionId::for_channel` — hence the shared `session_scope` rather than a re-inlined derivation (#7701).
             let agent_id = resolve_for_command();
             match agent_id {
                 Some(aid) => {
@@ -7584,17 +7560,10 @@ mod tests {
         Some(registry.decide(key, candidate, was_mentioned))
     }
 
-    /// #7701, the `/new` no-op: the inbound path and the reset command arms
-    /// must derive the same `(channel, chat_id)`, because the kernel turns that
-    /// pair into the `SessionId` both of them address
-    /// (`SessionId::for_sender_scope`).
+    /// #7701, the `/new` no-op: the inbound path and the reset command arms must derive the same `(channel, chat_id)`, because the kernel turns that pair into the `SessionId` both of them address (`SessionId::for_sender_scope`).
     ///
-    /// This is the exact Telegram shape that broke it — the sender id arrives in
-    /// `SENDER_USER_ID_KEY` metadata and `platform_id` is empty. Before the
-    /// shared `session_scope`, the command arms passed `None` for `chat_id`
-    /// here while `build_sender_context` fell back to the metadata id, so `/new`
-    /// cleared `for_channel(agent, "telegram")` while the conversation lived in
-    /// `for_channel(agent, "telegram:tg-user-42")`.
+    /// This is the exact Telegram shape that broke it — the sender id arrives in `SENDER_USER_ID_KEY` metadata and `platform_id` is empty.
+    /// Before the shared `session_scope`, the command arms passed `None` for `chat_id` here while `build_sender_context` fell back to the metadata id, so `/new` cleared `for_channel(agent, "telegram")` while the conversation lived in `for_channel(agent, "telegram:tg-user-42")`.
     #[test]
     fn session_scope_agrees_with_build_sender_context_when_platform_id_is_empty() {
         let mut metadata = std::collections::HashMap::new();
@@ -7637,11 +7606,8 @@ mod tests {
         );
     }
 
-    /// The channel half of the same invariant. `build_sender_context` sanitizes
-    /// a `Custom` channel whose name collides with a reserved kernel system
-    /// channel; the command arms used the raw name, so `/new` on a
-    /// `Custom("cron")` adapter addressed a different session than its own
-    /// inbound messages.
+    /// The channel half of the same invariant.
+    /// `build_sender_context` sanitizes a `Custom` channel whose name collides with a reserved kernel system channel; the command arms used the raw name, so `/new` on a `Custom("cron")` adapter addressed a different session than its own inbound messages.
     #[test]
     fn session_scope_sanitizes_reserved_custom_channel_names() {
         for reserved in ["cron", "autonomous", "webui"] {
