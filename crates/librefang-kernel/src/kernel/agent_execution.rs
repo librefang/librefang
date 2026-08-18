@@ -71,7 +71,7 @@ impl LibreFangKernel {
 
         info!(agent = %entry.name, path = %wasm_path.display(), "Executing WASM agent");
 
-        let wasm_bytes = std::fs::read(&wasm_path).map_err(|e| {
+        let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
             KernelError::LibreFang(LibreFangError::Internal(format!(
                 "Failed to read WASM module '{}': {e}",
                 wasm_path.display()
@@ -727,10 +727,14 @@ impl LibreFangKernel {
                 self.agents.registry.peer_agents_summary();
 
             // Use cached workspace metadata (identity files + workspace context)
-            let ws_meta = manifest
-                .workspace
-                .as_ref()
-                .map(|w| self.cached_workspace_metadata(w, manifest.autonomous.is_some()));
+            let ws_meta = if let Some(workspace) = manifest.workspace.as_ref() {
+                Some(
+                    self.cached_workspace_metadata_async(workspace, manifest.autonomous.is_some())
+                        .await,
+                )
+            } else {
+                None
+            };
 
             // Use cached skill metadata (summary + prompt context)
             let skill_meta = if manifest.skills_disabled {

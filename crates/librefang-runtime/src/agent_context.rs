@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::{fs, io};
 
 use tracing::{debug, warn};
@@ -40,6 +40,15 @@ pub const CONTEXT_FILENAME: &str = "context.md";
 fn cache() -> &'static Mutex<HashMap<PathBuf, String>> {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lock_cache() -> MutexGuard<'static, HashMap<PathBuf, String>> {
+    cache().lock().unwrap_or_else(|poisoned| {
+        warn!("Agent context cache lock poisoned; recovering cached context");
+        // `into_inner()` only unwraps this guard; it does not reset the mutex's poison flag, so without `clear_poison()` every future access re-enters this branch and re-logs forever.
+        cache().clear_poison();
+        poisoned.into_inner()
+    })
 }
 
 /// Resolve which `context.md` to read for the workspace.
@@ -185,16 +194,11 @@ async fn read_capped_async(path: &Path) -> io::Result<Option<String>> {
 }
 
 fn get_cached(path: &Path) -> Option<String> {
-    cache()
-        .lock()
-        .ok()
-        .and_then(|guard| guard.get(path).cloned())
+    lock_cache().get(path).cloned()
 }
 
 fn store_cached(path: &Path, content: &str) {
-    if let Ok(mut guard) = cache().lock() {
-        guard.insert(path.to_path_buf(), content.to_string());
-    }
+    lock_cache().insert(path.to_path_buf(), content.to_string());
 }
 
 #[cfg(any(windows, test))]
@@ -478,6 +482,27 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn poisoned_cache_lock_recovers_cached_context() {
+        let poison = std::thread::spawn(|| {
+            let _guard = cache().lock().unwrap();
+            panic!("poison agent context cache lock");
+        })
+        .join();
+        assert!(poison.is_err());
+        assert!(cache().is_poisoned());
+
+        let path = fresh_workspace("poison_recovery").join(CONTEXT_FILENAME);
+        store_cached(&path, "first cached value");
+        assert_eq!(get_cached(&path).as_deref(), Some("first cached value"));
+        // The first post-panic access must clear the poison flag, not just unwrap around it — otherwise every subsequent access re-triggers the recovery branch (and its `warn!`) for the rest of the process.
+        assert!(!cache().is_poisoned());
+
+        store_cached(&path, "updated cached value");
+        assert_eq!(get_cached(&path).as_deref(), Some("updated cached value"));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

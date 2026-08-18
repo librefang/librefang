@@ -1,0 +1,1 @@
+- Abort sidecar config and secrets.env read-modify-write operations when an existing file cannot be read instead of treating the failure as an empty file. (@xiaomo)

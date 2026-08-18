@@ -1263,6 +1263,8 @@
     "token_limit": "토큰/시간",
     "alert_threshold": "경고 임계값",
     "budget_saved": "예산 한도가 업데이트되었습니다.",
+    "budget_no_changes": "저장하기 전에 유효한 예산 값을 하나 이상 입력하세요.",
+    "budget_bad_input": "{{field}} 값이 잘못되었습니다. 유한한 음이 아닌 수를 입력하고, 토큰 한도는 정수, 알림 임계값은 0~1로 설정하세요.",
     "total_cost": "총 비용",
     "avg_latency": "평균 지연 시간",
     "usage_by_agent": "에이전트별 사용량",
@@ -1323,6 +1325,7 @@
     "add": "추가",
     "filter_all": "모두",
     "showing": "{{count}} / {{total}} 표시 중",
+    "search_result_cap": "첫 50개 일치 항목",
     "no_memories": "아직 메모리가 없습니다",
     "created": "생성됨",
     "config_title": "메모리 구성",
@@ -1339,12 +1342,6 @@
     "embedding_section": "임베딩",
     "provider": "공급자",
     "auto_detect": "자동 감지",
-    "provider_openai": "OpenAI",
-    "provider_ollama": "Ollama",
-    "provider_vllm": "vLLM",
-    "provider_lmstudio": "LM Studio",
-    "provider_gemini": "Gemini",
-    "provider_minimax": "미니맥스",
     "model": "모델",
     "api_key_env": "API 키 환경",
     "api_key_env_hint": "로컬 공급자(Ollama / vLLM / LM Studio)는 일반적으로 키가 필요하지 않으므로 비워 두세요.",
@@ -1438,7 +1435,7 @@
     "topology_description": "고성능 이벤트 버스 조정.",
     "total_channels": "총 채널",
     "connected": "연결됨",
-    "events_today": "오늘의 이벤트",
+    "recent_events": "최근 이벤트(최대 50개)",
     "uptime": "가동 시간",
     "events": "이벤트",
     "events_desc": "실시간 메시지 이벤트.",
@@ -3664,7 +3661,6 @@
       "not_set": "설정되지 않음"
     },
     "errors": {
-      "empty_entry": "{{field}}에 빈 항목이 포함되어 있습니다.",
       "duplicate_entry": "{{field}}에 '{{item}}' 중복 항목이 포함되어 있습니다.",
       "writable_not_subset": "memory_access.writable_namespaces['{{ns}}']는 readable_namespaces에 없습니다(쓰기 가능은 읽기 가능의 하위 집합이어야 함)."
     },
@@ -3878,6 +3874,7 @@
     "error_disabled_body": "<a>구성 → 보안</a>에서 페어링을 활성화합니다(<code>pairing.enabled = true</code>).",
     "error_generic_title": "페어링 코드를 생성하지 못했습니다.",
     "qr_aria_label": "모바일 장치와 페어링하기 위한 QR 코드",
+    "qr_render_failed": "페어링 QR 코드를 표시할 수 없습니다. 새로고침하여 다시 시도하세요.",
     "btn_try_again": "다시 시도"
   },
   "shortcuts_help": {
@@ -3995,6 +3992,9 @@
   },
   "errors": {
     "something_went_wrong": "문제가 발생했습니다.",
+    "page_assets_updated": "페이지 자산이 업데이트되었습니다.",
+    "react_state_reset": "React 상태 재설정 — 다시 불러오는 중",
+    "new_version_available": "새 버전이 있습니다. 최신 버전을 받으려면 다시 불러오세요.",
     "unexpected": "예상치 못한 오류가 발생했습니다.",
     "force_reload_title": "자동 새로고침 쿨타임을 지우고 새로 불러옵니다.",
     "force_reload": "강제 새로고침",

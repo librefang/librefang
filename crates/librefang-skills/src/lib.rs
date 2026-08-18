@@ -23,7 +23,22 @@ pub mod verify;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Resolve the directory that a same-directory atomic-write staging file should be anchored in for a write targeting `path`.
+///
+/// `Path::parent()` returns `Some("")` — not `None` — for a bare relative filename like `skill.toml`; `None` only happens for `/` or an empty path itself.
+/// Joining a staging-file name onto `""` happens to resolve against the process's current directory, which is the same directory the final `rename` targets — but only by accident.
+/// Mapping the empty-but-present case to `.` makes that same-directory invariant hold explicitly instead of by coincidence.
+///
+/// Shared by `skillhub::atomic_write_manifest` and `evolution::atomic_write`, the two same-crate call sites that stage a temp file beside their target.
+/// Mirrors the equivalent resolution in `librefang_kernel::kernel::cron_script::parent_dir_for_fsync` (which fsyncs the parent after rename rather than staging inside it) and in `librefang_api`'s atomic writer; keep all three in step if any changes.
+pub(crate) fn resolve_parent_or_cwd(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
 
 /// Errors from the skill system.
 #[derive(Debug, thiserror::Error)]
@@ -274,6 +289,33 @@ pub struct SkillToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_parent_or_cwd_maps_bare_filename_to_current_dir() {
+        // The premise this resolution exists for: a bare filename has an empty-but-present parent, so naively joining a staging name onto it (or `ok_or_else`-style rejection) either loses the same-directory guarantee or errors out unnecessarily.
+        assert_eq!(Path::new("skill.toml").parent(), Some(Path::new("")));
+
+        assert_eq!(
+            resolve_parent_or_cwd(Path::new("skill.toml")),
+            Path::new("."),
+            "a bare filename must resolve to the current directory, not \"\""
+        );
+        assert_eq!(
+            resolve_parent_or_cwd(Path::new("/")),
+            Path::new("."),
+            "a rootless path (parent() == None) must also fall back to \".\""
+        );
+        assert_eq!(
+            resolve_parent_or_cwd(Path::new("/srv/librefang/skill.toml")),
+            Path::new("/srv/librefang"),
+            "an absolute path must keep its real containing directory"
+        );
+        assert_eq!(
+            resolve_parent_or_cwd(Path::new("nested/skill.toml")),
+            Path::new("nested"),
+            "a relative path with a directory component must keep that directory"
+        );
+    }
 
     #[test]
     fn test_skill_manifest_parse() {

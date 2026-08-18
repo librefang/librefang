@@ -246,6 +246,18 @@ async fn list_backups_returns_empty_when_dir_missing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn list_backups_reports_unreadable_backup_path() {
+    let h = boot(true).await;
+    let backups_path = h.state.kernel.home_dir().join("backups");
+    std::fs::write(&backups_path, b"not a directory").expect("create invalid backup path");
+
+    let (status, body) = get(&h, "/api/backups").await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["message"].as_str(), Some("Internal server error"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn create_backup_writes_archive_and_list_returns_it() {
     let h = boot(true).await;
     let (status, body) = json_post(&h, "/api/backup", serde_json::json!({})).await;

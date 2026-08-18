@@ -1,0 +1,3 @@
+Recovered the checkpoint snapshot concurrency counter after mutex poisoning instead of panicking at snapshot entry or silently skipping the decrement in the cleanup guard.
+A panic while the counter lock was held used to either abort the current snapshot attempt outright or leave the permit accounting off by one forever, since the old cleanup path only decremented on `Ok`.
+The lock is now recovered via `into_inner()` and the poison flag cleared so the mutex stops re-poisoning every later lock attempt, and a regression test exercises the poison-then-recover-then-release sequence (#7030) (@houko)

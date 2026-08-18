@@ -56,7 +56,11 @@ pub fn upsert_secret(path: &Path, key: &str, value: &str) -> Result<(), String> 
         return Err(format!("invalid secret key `{key}`"));
     }
 
-    let original = fs::read_to_string(path).unwrap_or_default();
+    let original = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(format!("read {path:?}: {error}")),
+    };
     let mut out = String::with_capacity(original.len() + key.len() + value.len() + 2);
     let mut replaced = false;
     for line in original.lines() {
@@ -176,25 +180,21 @@ mod tests {
     }
 
     #[test]
-    fn rename_failure_cleans_up_staging_file() {
+    fn existing_secret_read_error_does_not_replace_target() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("secrets.env");
-        // Make the destination an existing directory so the final
-        // `fs::rename(tmp, path)` fails (ENOTDIR/EISDIR) without touching
-        // the write/fsync stage at all — this exercises the rename-failure
-        // cleanup path specifically, distinct from the write-failure path.
+        // A directory at the target path reliably produces a non-NotFound
+        // read error on every supported platform.
         fs::create_dir(&path).unwrap();
 
         let err = upsert_secret(&path, "OPENAI_API_KEY", "sk-123").unwrap_err();
-        assert!(err.contains("rename"), "got: {err}");
+        assert!(err.contains("read"), "got: {err}");
+        assert!(path.is_dir(), "the unreadable target must remain untouched");
 
-        // Only the pre-existing `secrets.env/` directory should remain;
-        // the `.secrets.env.tmp.*` staging file must not survive a failed
-        // rename.
         assert_eq!(
             fs::read_dir(dir.path()).unwrap().count(),
             1,
-            "leftover staging file after failed rename"
+            "a read failure must not create a secret-bearing staging file"
         );
     }
 }

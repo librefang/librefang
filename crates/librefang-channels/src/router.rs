@@ -6,7 +6,7 @@ use librefang_types::agent::AgentId;
 use librefang_types::config::{AgentBinding, BroadcastConfig, BroadcastStrategy};
 use smallvec::SmallVec;
 use std::borrow::Cow;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use tracing::warn;
 
 /// Context for evaluating binding match rules against incoming messages.
@@ -61,6 +61,20 @@ pub struct AgentRouter {
 }
 
 impl AgentRouter {
+    fn lock_bindings(&self) -> MutexGuard<'_, Vec<(AgentBinding, String)>> {
+        self.bindings.lock().unwrap_or_else(|poisoned| {
+            warn!("agent router bindings lock poisoned; recovering inner state");
+            poisoned.into_inner()
+        })
+    }
+
+    fn lock_broadcast(&self) -> MutexGuard<'_, BroadcastConfig> {
+        self.broadcast.lock().unwrap_or_else(|poisoned| {
+            warn!("agent router broadcast lock poisoned; recovering inner state");
+            poisoned.into_inner()
+        })
+    }
+
     /// Create a new router.
     pub fn new() -> Self {
         Self {
@@ -160,12 +174,12 @@ impl AgentRouter {
                 .specificity()
                 .cmp(&a.0.match_rule.specificity())
         });
-        *self.bindings.lock().unwrap_or_else(|e| e.into_inner()) = sorted;
+        *self.lock_bindings() = sorted;
     }
 
     /// Load broadcast configuration.
     pub fn load_broadcast(&self, broadcast: BroadcastConfig) {
-        *self.broadcast.lock().unwrap_or_else(|e| e.into_inner()) = broadcast;
+        *self.lock_broadcast() = broadcast;
     }
 
     /// Register an agent name -> ID mapping for binding resolution.
@@ -304,7 +318,7 @@ impl AgentRouter {
 
     /// Resolve broadcast: returns all agents that should receive a message for the given peer.
     pub fn resolve_broadcast(&self, peer_id: &str) -> Vec<(String, Option<AgentId>)> {
-        let bc = self.broadcast.lock().unwrap_or_else(|e| e.into_inner());
+        let bc = self.lock_broadcast();
         if let Some(agent_names) = bc.routes.get(peer_id) {
             agent_names
                 .iter()
@@ -320,26 +334,17 @@ impl AgentRouter {
 
     /// Get broadcast strategy.
     pub fn broadcast_strategy(&self) -> BroadcastStrategy {
-        self.broadcast
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .strategy
+        self.lock_broadcast().strategy
     }
 
     /// Check if a peer has broadcast routing configured.
     pub fn has_broadcast(&self, peer_id: &str) -> bool {
-        self.broadcast
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .routes
-            .contains_key(peer_id)
+        self.lock_broadcast().routes.contains_key(peer_id)
     }
 
     /// Get current bindings (read-only).
     pub fn bindings(&self) -> Vec<AgentBinding> {
-        self.bindings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        self.lock_bindings()
             .iter()
             .map(|(b, _)| b.clone())
             .collect()
@@ -348,7 +353,7 @@ impl AgentRouter {
     /// Add a single binding at runtime.
     pub fn add_binding(&self, binding: AgentBinding) {
         let name = binding.agent.clone();
-        let mut bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut bindings = self.lock_bindings();
         bindings.push((binding, name));
         // Re-sort by specificity
         bindings.sort_by(|a, b| {
@@ -360,7 +365,7 @@ impl AgentRouter {
 
     /// Remove a binding by index (original insertion order after sort).
     pub fn remove_binding(&self, index: usize) -> Option<AgentBinding> {
-        let mut bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut bindings = self.lock_bindings();
         if index < bindings.len() {
             Some(bindings.remove(index).0)
         } else {
@@ -412,7 +417,7 @@ impl AgentRouter {
         channel_str: &str,
         account_id: Option<&str>,
     ) -> Vec<String> {
-        let bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
+        let bindings = self.lock_bindings();
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for (binding, _agent_name) in bindings.iter() {
@@ -452,7 +457,7 @@ impl AgentRouter {
 
     /// Evaluate bindings against a context, returning the first matching agent ID.
     fn resolve_binding(&self, ctx: &BindingContext<'_>) -> Option<AgentId> {
-        let bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
+        let bindings = self.lock_bindings();
         for (binding, _agent_name) in bindings.iter() {
             if self.binding_matches(binding, ctx) {
                 // Look up agent by name in cache
@@ -483,7 +488,7 @@ impl AgentRouter {
     /// chain, below the instance default, preserving the #5671 precedence.
     /// Returns `None` when no peer-specific binding matches.
     pub fn resolve_specific_binding(&self, ctx: &BindingContext<'_>) -> Option<AgentId> {
-        let bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
+        let bindings = self.lock_bindings();
         for (binding, _agent_name) in bindings.iter() {
             if binding.match_rule.peer_id.is_none() {
                 continue;
@@ -558,6 +563,53 @@ impl Default for AgentRouter {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn test_recovers_routing_state_after_lock_poisoning() {
+        let router = AgentRouter::new();
+        let agent_id = AgentId::new();
+        router.register_agent("support".to_string(), agent_id);
+        router.load_bindings(&[AgentBinding {
+            agent: "support".to_string(),
+            match_rule: librefang_types::config::BindingMatchRule {
+                peer_id: Some("vip_user".to_string()),
+                ..Default::default()
+            },
+        }]);
+
+        let binding_poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _guard = router.bindings.lock().unwrap();
+                    panic!("poison agent router bindings lock");
+                })
+                .join()
+        });
+        assert!(binding_poison.is_err());
+        assert_eq!(
+            router.resolve(&ChannelType::Telegram, "vip_user", None),
+            Some(agent_id)
+        );
+        assert_eq!(router.bindings().len(), 1);
+
+        let mut routes = std::collections::HashMap::new();
+        routes.insert("vip_user".to_string(), vec!["support".to_string()]);
+        router.load_broadcast(BroadcastConfig {
+            strategy: BroadcastStrategy::Parallel,
+            routes,
+        });
+        let broadcast_poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _guard = router.broadcast.lock().unwrap();
+                    panic!("poison agent router broadcast lock");
+                })
+                .join()
+        });
+        assert!(broadcast_poison.is_err());
+        assert!(router.has_broadcast("vip_user"));
+        assert_eq!(router.resolve_broadcast("vip_user")[0].1, Some(agent_id));
+    }
 
     #[test]
     fn test_routing_priority() {

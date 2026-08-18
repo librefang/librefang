@@ -3,7 +3,7 @@
 use std::process::Output;
 use std::time::Duration;
 
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::task::JoinHandle;
 use tokio::time::{timeout_at, Instant};
@@ -154,12 +154,65 @@ pub(crate) async fn output_with_timeout(
     command: &mut Command,
     duration: Duration,
 ) -> Result<Output, OutputError> {
+    output_with_optional_input_timeout(command, None, duration).await
+}
+
+/// Run a command with private stdin input while draining output and enforcing
+/// the same hard deadline as [`output_with_timeout`].
+///
+/// The input is written after spawning and stdin is then closed so one-shot
+/// CLI programs see EOF. Keeping input out of argv prevents prompts from being
+/// exposed through process listings and avoids platform argument-size limits.
+pub(crate) async fn output_with_input_timeout(
+    command: &mut Command,
+    input: &[u8],
+    duration: Duration,
+) -> Result<Output, OutputError> {
+    command.stdin(std::process::Stdio::piped());
+    output_with_optional_input_timeout(command, Some(input), duration).await
+}
+
+async fn output_with_optional_input_timeout(
+    command: &mut Command,
+    input: Option<&[u8]>,
+    duration: Duration,
+) -> Result<Output, OutputError> {
     command.kill_on_drop(true);
     set_process_group(command);
     let mut child = command.spawn().map_err(OutputError::Spawn)?;
     let mut stdout_task = AbortOnDrop::new(tokio::spawn(read_pipe(child.stdout.take())));
     let mut stderr_task = AbortOnDrop::new(tokio::spawn(read_pipe(child.stderr.take())));
     let deadline = Instant::now() + duration;
+
+    if let Some(input) = input {
+        let write_result = timeout_at(deadline, async {
+            let mut stdin = child.stdin.take().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "subprocess stdin was not available",
+                )
+            })?;
+            stdin.write_all(input).await?;
+            stdin.shutdown().await
+        })
+        .await;
+
+        match write_result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                kill_on_timeout(&mut child).await;
+                stdout_task.abort();
+                stderr_task.abort();
+                return Err(OutputError::Io(error));
+            }
+            Err(_) => {
+                kill_on_timeout(&mut child).await;
+                stdout_task.abort();
+                stderr_task.abort();
+                return Err(OutputError::TimedOut);
+            }
+        }
+    }
 
     let status = match timeout_at(deadline, child.wait()).await {
         Ok(result) => result.map_err(OutputError::Io)?,
@@ -212,6 +265,26 @@ mod tests {
 
         assert!(matches!(result, Err(OutputError::TimedOut)));
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn input_helper_writes_stdin_and_closes_it() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "input=$(cat); printf '%s' \"$input\""])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        let result =
+            output_with_input_timeout(&mut command, b"private prompt", Duration::from_secs(2))
+                .await;
+        let output = match result {
+            Ok(output) => output,
+            Err(_) => panic!("stdin subprocess helper failed"),
+        };
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"private prompt");
     }
 
     /// A process that received SIGKILL but has not yet been reaped by its

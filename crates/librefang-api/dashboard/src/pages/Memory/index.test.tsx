@@ -32,8 +32,10 @@ import {
   useSetAutoDreamEnabled,
   useSetAutoDreamGlobalEnabled,
 } from "../../lib/mutations/autoDream";
+import { CUSTOM_OPTION } from "./constants";
 
 vi.mock("../../lib/queries/memory", () => ({
+  MEMORY_PAGE_SIZE: 50,
   useMemoryStats: vi.fn(),
   useMemoryConfig: vi.fn(),
   useMemoryHealth: vi.fn(),
@@ -175,7 +177,7 @@ const useAbortAutoDreamMock = useAbortAutoDream as unknown as ReturnType<typeof 
 const useSetAutoDreamEnabledMock = useSetAutoDreamEnabled as unknown as ReturnType<typeof vi.fn>;
 const useSetAutoDreamGlobalEnabledMock = useSetAutoDreamGlobalEnabled as unknown as ReturnType<typeof vi.fn>;
 
-const STATS = { total: 7, user_count: 2, session_count: 3, agent_count: 2 };
+const STATS = { total: 7, by_agent: {}, user_count: 2, session_count: 3, agent_count: 2 };
 const CONFIG = {
   embedding_provider: "openai",
   embedding_model: "text-embedding-3-small",
@@ -280,10 +282,8 @@ describe("MemoryPage (redesigned)", () => {
 
   it("renders scope summary with totals from useMemoryStats", () => {
     renderPage();
-    // STATS.total = 7 — rendered as the headline number in ScopeSummary
-    // (uniquely "7"; user/session/agent counts of 2/3/2 share digits with
-    // each other so assert on the unique total).
-    expect(screen.getByText("7")).toBeInTheDocument();
+    // STATS.total = 7 — rendered in the summary and records tab badge.
+    expect(screen.getAllByText("7")).toHaveLength(2);
     // session_count=3 is also unique among the breakdown chips.
     expect(screen.getByText("3")).toBeInTheDocument();
   });
@@ -293,6 +293,71 @@ describe("MemoryPage (redesigned)", () => {
     expect(screen.getByText("mem-aaaaaaaa")).toBeInTheDocument();
     expect(screen.getByText("mem-bbbbbbbb")).toBeInTheDocument();
     expect(screen.getByText("remember to water the plants")).toBeInTheDocument();
+  });
+
+  it("pages record-list requests through the server contract", () => {
+    useMemorySearchOrListMock.mockReturnValue({
+      data: { memories: MEMORIES, total: 120, proactive_enabled: true },
+      isLoading: false,
+      isError: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+    renderPage();
+
+    expect(useMemorySearchOrListMock).toHaveBeenLastCalledWith({
+      search: "",
+      agentId: undefined,
+      level: undefined,
+      offset: 0,
+      limit: 50,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "common.next" }));
+    expect(useMemorySearchOrListMock).toHaveBeenLastCalledWith({
+      search: "",
+      agentId: undefined,
+      level: undefined,
+      offset: 50,
+      limit: 50,
+    });
+  });
+
+  it("returns to the last valid page when a refreshed total shrinks", async () => {
+    useMemorySearchOrListMock.mockImplementation((params: { offset: number }) => ({
+      data:
+        params.offset === 0
+          ? { memories: MEMORIES, total: 120, proactive_enabled: true }
+          : { memories: [], total: 50, proactive_enabled: true },
+      isLoading: false,
+      isError: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    }));
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: "common.next" }));
+    expect(useMemorySearchOrListMock).toHaveBeenCalledWith(
+      expect.objectContaining({ offset: 50 }),
+    );
+    await waitFor(() =>
+      expect(useMemorySearchOrListMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ offset: 0 }),
+      ),
+    );
+  });
+
+  it("sends level filters through the paginated list query", () => {
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: "user" }));
+
+    expect(useMemorySearchOrListMock).toHaveBeenLastCalledWith({
+      search: "",
+      agentId: undefined,
+      level: "user",
+      offset: 0,
+      limit: 50,
+    });
   });
 
   it("switches to KV tab when the KV tab button is clicked", () => {
@@ -330,6 +395,86 @@ describe("MemoryPage (redesigned)", () => {
     // i18n mock returns the defaultValue, so the drawer title renders as
     // "Memory Configuration".
     expect(screen.getByText("Memory Configuration")).toBeInTheDocument();
+  });
+
+  it("keeps the custom embedding-model input open while a new value is entered", async () => {
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /Settings/i }));
+
+    const embeddingModelSelect = screen.getAllByRole("combobox")[1];
+    fireEvent.change(embeddingModelSelect, { target: { value: CUSTOM_OPTION } });
+
+    const customModelInput = screen.getByPlaceholderText("text-embedding-3-small");
+    fireEvent.change(customModelInput, { target: { value: "custom/embed-v1" } });
+    expect(embeddingModelSelect).toHaveValue(CUSTOM_OPTION);
+    expect(customModelInput).toHaveValue("custom/embed-v1");
+
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+    await waitFor(() => expect(configMutateAsync).toHaveBeenCalledTimes(1));
+    expect(configMutateAsync.mock.calls[0][0].embedding_model).toBe("custom/embed-v1");
+  });
+
+  it("selects a valid model for the newly selected embedding provider", async () => {
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /Settings/i }));
+
+    const [providerSelect, embeddingModelSelect] = screen.getAllByRole("combobox");
+    expect(embeddingModelSelect).toHaveValue("text-embedding-3-small");
+    fireEvent.change(providerSelect, { target: { value: "cohere" } });
+    expect(embeddingModelSelect).toHaveValue("embed-multilingual-v3.0");
+
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+    await waitFor(() => expect(configMutateAsync).toHaveBeenCalledTimes(1));
+    expect(configMutateAsync.mock.calls[0][0]).toMatchObject({
+      embedding_provider: "cohere",
+      embedding_model: "embed-multilingual-v3.0",
+      embedding_api_key_env: "COHERE_API_KEY",
+    });
+  });
+
+  it("replaces empty models and stale custom key variables when the provider changes", async () => {
+    useMemoryConfigMock.mockReturnValue({
+      data: {
+        ...CONFIG,
+        embedding_model: "",
+        embedding_api_key_env: "CUSTOM_OPENAI_KEY",
+      },
+      isLoading: false,
+      isError: false,
+    });
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /Settings/i }));
+
+    const [providerSelect, embeddingModelSelect] = screen.getAllByRole("combobox");
+    fireEvent.change(providerSelect, { target: { value: "cohere" } });
+
+    expect(embeddingModelSelect).toHaveValue("embed-multilingual-v3.0");
+    expect(screen.getByPlaceholderText("OPENAI_API_KEY")).toHaveValue("COHERE_API_KEY");
+
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+    await waitFor(() => expect(configMutateAsync).toHaveBeenCalledTimes(1));
+    expect(configMutateAsync.mock.calls[0][0]).toMatchObject({
+      embedding_provider: "cohere",
+      embedding_model: "embed-multilingual-v3.0",
+      embedding_api_key_env: "COHERE_API_KEY",
+    });
+  });
+
+  it("persists auto-detected embedding defaults as explicit clears", async () => {
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /Settings/i }));
+
+    const [providerSelect, embeddingModelSelect] = screen.getAllByRole("combobox");
+    fireEvent.change(providerSelect, { target: { value: "" } });
+
+    expect(embeddingModelSelect).toHaveValue("");
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+    await waitFor(() => expect(configMutateAsync).toHaveBeenCalledTimes(1));
+    expect(configMutateAsync.mock.calls[0][0]).toMatchObject({
+      embedding_provider: null,
+      embedding_model: null,
+      embedding_api_key_env: null,
+    });
   });
 
   it("shows the proactive-disabled notice on the Records tab when proactive memory is off", () => {

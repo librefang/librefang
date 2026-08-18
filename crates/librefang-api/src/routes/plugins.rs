@@ -2471,11 +2471,12 @@ pub async fn get_trace_by_id(Path(trace_id): Path<String>) -> impl IntoResponse 
     }
     match librefang_kernel::plugin_manager::open_trace_store() {
         Ok(store) => match store.query_by_trace_id(&trace_id) {
-            Some(trace) => axum::Json(trace).into_response(),
-            None => ApiErrorResponse::not_found(format!("No trace found with id '{trace_id}'"))
+            Ok(Some(trace)) => axum::Json(trace).into_response(),
+            Ok(None) => ApiErrorResponse::not_found(format!("No trace found with id '{trace_id}'"))
                 .into_response(),
+            Err(error) => ApiErrorResponse::internal_scrub(error).into_response(),
         },
-        Err(e) => ApiErrorResponse::internal(e).into_response(),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_response(),
     }
 }
 

@@ -28,6 +28,14 @@ use tracing::{debug, info, warn};
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+async fn run_chromium_discovery_job<F, T>(job: F) -> Result<T, tokio::task::JoinError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(job).await
+}
+
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const CDP_CONNECT_TIMEOUT_SECS: u64 = 15;
@@ -364,7 +372,10 @@ struct BrowserSession {
 impl BrowserSession {
     /// Launch Chromium and establish a CDP connection.
     async fn launch(config: &BrowserConfig) -> Result<Self, String> {
-        let chrome_path = find_chromium(config)?;
+        let discovery_config = config.clone();
+        let chrome_path = run_chromium_discovery_job(move || find_chromium(&discovery_config))
+            .await
+            .map_err(|error| format!("Chromium discovery task failed: {error}"))??;
         debug!(path = %chrome_path.display(), "Launching Chromium");
 
         let user_data_dir = tempfile::Builder::new()
@@ -1545,9 +1556,13 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
         }
         return kept;
     }
-    // What the table costs once rendered, matching how the tool layer prints an entry.
+    // What the table costs once rendered, matching how the tool layer prints it.
+    // The line that opens the table reaches the model with the entries, so it is part of the cost: counting entries alone put the payload over the operator's ceiling by the length of that line, 93 characters on a page served from a typical origin.
+    // Mirrors `render_page_body` — change one and the other has to follow.
     function tableCost(kept) {
-        let n = 0;
+        if (!kept.length) return 0;
+        let n = '\n\nLinks (click with browser_click, e.g. ⟨1⟩)\n'.length;
+        if (origin) n += ('; paths are relative to ' + origin).length;
         for (const e of kept) n += ('⟨' + e.id + '⟩ ' + e.url + '\n').length;
         return n;
     }
@@ -1677,6 +1692,24 @@ fn render_page_body_inner(data: &serde_json::Value, content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chromium_discovery_job_does_not_block_the_async_worker() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let job = tokio::spawn(run_chromium_discovery_job(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+
+        tokio::time::timeout(Duration::from_secs(1), started_rx)
+            .await
+            .expect("Chromium discovery job did not start")
+            .expect("Chromium discovery job dropped its start signal");
+        release_tx.send(()).unwrap();
+        job.await.unwrap().unwrap();
+    }
 
     #[test]
     fn test_browser_config_defaults() {
@@ -1892,6 +1925,13 @@ mod tests {
     /// Ported from the JS the script runs, because the traversal itself needs a live DOM.
     #[test]
     fn test_nested_lists_keep_their_own_bullets() {
+        // The port models the script; this checks the script still does what is modelled.
+        // Reverting the fold to the two-filter form would leave the port validating itself and passing.
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("emit((opened ? '  ' : '- ') + own, true)"),
+            "the item's own text must be emitted in runs, so a sub-list keeps its place between them"
+        );
+
         /// A list item as the page writes it: runs of its own text and sub-lists, in source order.
         enum Part {
             Text(&'static str),
@@ -2001,6 +2041,16 @@ mod tests {
     /// Anchoring on the first article's ancestors instead of searching the tree misses a grid that sits beside a featured card rather than under it.
     #[test]
     fn test_root_selection_finds_a_container_of_repeated_cards() {
+        // As above: the port is only evidence while it and the script agree on the rule.
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("candidates.push({ node, carriers })"),
+            "selection must collect every qualifying node, not stop at the first branch that has one"
+        );
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("c.node.contains(o.node)"),
+            "a candidate containing another must lose to it, which is what keeps selection off the whole page"
+        );
+
         struct Node {
             tag: &'static str,
             name: &'static str,
@@ -2477,8 +2527,22 @@ mod tests {
     ///
     /// Ported from the JS the script runs, because the extraction itself needs a live browser — same shape as `test_truncation_marker_fits_inside_the_cap`.
     /// The subtract-the-overflow form this replaces stayed under the cap but landed at 34k against 50k on a Wikipedia-shaped page, because cutting prose drops markers and so drops table entries faster than the prose itself shrank.
+    ///
+    /// The ceiling is asserted against what `render_page_body` actually produces rather than against the ported cost function.
+    /// Re-deriving the cost on both sides is self-consistent by construction, so it cannot see the budget and the renderer disagreeing — which is exactly what happened: the budget counted entries and the renderer also emitted a line introducing them, putting the payload 93 characters past the operator's number.
     #[test]
     fn test_budget_search_fills_the_cap_without_exceeding_it() {
+        // The port below models the script; this checks the script still does what is modelled.
+        // A port is only evidence about the script while the two agree, and nothing else here would notice if the header cost were dropped from the template — the port would go on validating a corrected budget against `render_page_body` and pass.
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("Links (click with browser_click"),
+            "the script's own table cost must include the line that opens the table, or this test measures something the browser never runs"
+        );
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("paths are relative to"),
+            "that line carries the origin, whose length varies per page and so must be measured rather than assumed"
+        );
+
         /// One `⟨n⟩` marker per line, so a cut drops markers the way a real page does.
         fn page(n_links: usize, prose_len: usize, url_len: usize) -> (String, Vec<String>) {
             let links: Vec<String> = (0..n_links)
@@ -2500,34 +2564,58 @@ mod tests {
             let keep = budget.saturating_sub(marker.chars().count());
             format!("{}{marker}", text.chars().take(keep).collect::<String>())
         }
-        fn table_cost(text: &str, links: &[String]) -> usize {
-            (0..links.len())
+        /// The extraction's own view of what the table costs, header included.
+        fn table_cost(text: &str, links: &[String], origin: &str) -> usize {
+            let entries: usize = (0..links.len())
                 .filter(|i| text.contains(&format!("\u{27e8}{}\u{27e9}", i + 1)))
                 .map(|i| {
                     format!("\u{27e8}{}\u{27e9} {}\n", i + 1, links[i])
                         .chars()
                         .count()
                 })
-                .sum()
+                .sum();
+            if entries == 0 {
+                return 0;
+            }
+            let mut header = "\n\nLinks (click with browser_click, e.g. \u{27e8}1\u{27e9})\n"
+                .chars()
+                .count();
+            if !origin.is_empty() {
+                header += format!("; paths are relative to {origin}").chars().count();
+            }
+            entries + header
         }
-        /// `(total, was_truncated)` — a page that fits outright is not expected to fill the cap.
-        fn budgeted(content: &str, links: &[String], cap: usize) -> (usize, bool) {
+        /// The extraction's response for a given prose cut, as `render_page_body` receives it.
+        fn response(content: &str, links: &[String], origin: &str) -> serde_json::Value {
+            let kept: Vec<serde_json::Value> = (0..links.len())
+                .filter(|i| content.contains(&format!("\u{27e8}{}\u{27e9}", i + 1)))
+                .map(|i| serde_json::json!({"id": i + 1, "url": links[i]}))
+                .collect();
+            serde_json::json!({"content": content, "links": kept, "links_base": origin})
+        }
+        /// `(rendered length, was_truncated)` — a page that fits outright is not expected to fill the cap.
+        fn budgeted(content: &str, links: &[String], cap: usize, origin: &str) -> (usize, bool) {
+            let rendered = |budget: usize| {
+                let out = cut(content, budget);
+                render_page_body(&response(&out, links, origin))
+                    .chars()
+                    .count()
+            };
             let total = |budget: usize| {
                 let out = cut(content, budget);
-                out.chars().count() + table_cost(&out, links)
+                out.chars().count() + table_cost(&out, links, origin)
             };
             if total(cap) <= cap {
-                return (total(cap), false);
+                return (rendered(cap), false);
             }
-            let (mut lo, mut hi, mut best) = (0usize, cap, total(0));
+            let (mut lo, mut hi, mut best) = (0usize, cap, rendered(0));
             for _ in 0..24 {
                 if lo >= hi {
                     break;
                 }
                 let mid = (lo + hi).div_ceil(2);
-                let t = total(mid);
-                if t <= cap {
-                    best = t;
+                if total(mid) <= cap {
+                    best = rendered(mid);
                     lo = mid;
                 } else {
                     hi = mid - 1;
@@ -2544,10 +2632,11 @@ mod tests {
             (2000, 200_000, 1_000, 80),
         ] {
             let (content, links) = page(n_links, prose_len, url_len);
-            let (total, truncated) = budgeted(&content, &links, cap);
+            // A real origin, since the table's opening line carries it and so its length counts against the cap.
+            let (total, truncated) = budgeted(&content, &links, cap, "https://en.wikipedia.org");
             assert!(
                 total <= cap,
-                "cap {cap}: prose plus table is {total} chars, past the ceiling the operator set"
+                "cap {cap}: the rendered page is {total} chars, past the ceiling the operator set"
             );
             // Only where the page actually overflows: the HN-shaped row above fits whole at 23,904 and must not be padded out to the cap to satisfy this.
             if truncated {
@@ -2594,6 +2683,12 @@ mod tests {
     /// Ported from the JS the script runs, because the extraction itself needs a live browser: an operator sizing `max_content_chars` to a context window gets a real ceiling, and the marker reports the pre-truncation length so the model can tell how much it is missing rather than only that something was lost (#6624).
     #[test]
     fn test_truncation_marker_fits_inside_the_cap() {
+        // As above: this port predates the others and had nothing tying it to the script either.
+        assert!(
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("... (truncated, ' + total + ' chars total)"),
+            "the marker must report the pre-truncation length, which is what makes it worth its own characters"
+        );
+
         fn truncate(content: &str, cap: usize) -> String {
             if content.chars().count() <= cap {
                 return content.to_string();

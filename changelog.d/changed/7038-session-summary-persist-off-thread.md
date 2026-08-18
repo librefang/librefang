@@ -1,0 +1,3 @@
+Session-summary persistence (the SQLite `kv_store` write and the workspace `memory/session-*.md` mirror written when a session resets) ran synchronously inside the fire-and-forget background task that generates the summary, still occupying a Tokio worker thread for the duration of the disk I/O.
+  That write now runs on Tokio's blocking pool via `tokio::task::spawn_blocking`, keeping the existing generate-then-persist ordering and the no-runtime synchronous fallback unchanged.
+  A join failure on the blocking task is now logged as a WARN instead of propagating as an unhandled panic (#7038) (@houko)

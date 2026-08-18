@@ -385,12 +385,15 @@ impl MeteringEngine {
     }
 
     /// Get budget status — current spend vs limits for all time windows.
-    pub fn budget_status(&self, budget: &librefang_types::config::BudgetConfig) -> BudgetStatus {
-        let hourly = self.store.query_global_hourly().unwrap_or(0.0);
-        let daily = self.store.query_today_cost().unwrap_or(0.0);
-        let monthly = self.store.query_global_monthly().unwrap_or(0.0);
+    pub fn budget_status(
+        &self,
+        budget: &librefang_types::config::BudgetConfig,
+    ) -> LibreFangResult<BudgetStatus> {
+        let hourly = self.store.query_global_hourly()?;
+        let daily = self.store.query_today_cost()?;
+        let monthly = self.store.query_global_monthly()?;
 
-        BudgetStatus {
+        Ok(BudgetStatus {
             hourly_spend: hourly,
             hourly_limit: budget.max_hourly_usd,
             hourly_pct: if budget.max_hourly_usd > 0.0 {
@@ -414,7 +417,7 @@ impl MeteringEngine {
             },
             alert_threshold: budget.alert_threshold,
             default_max_llm_tokens_per_hour: budget.default_max_llm_tokens_per_hour,
-        }
+        })
     }
 
     /// Get a usage summary, optionally filtered by agent.
@@ -808,6 +811,21 @@ mod tests {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let store = Arc::new(UsageStore::new(substrate.pool()));
         MeteringEngine::new(store)
+    }
+
+    #[test]
+    fn budget_status_surfaces_usage_query_errors() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let pool = substrate.pool();
+        let engine = MeteringEngine::new(Arc::new(UsageStore::new(pool.clone())));
+        pool.get()
+            .unwrap()
+            .execute("DROP TABLE usage_events", [])
+            .unwrap();
+
+        assert!(engine
+            .budget_status(&librefang_types::config::BudgetConfig::default())
+            .is_err());
     }
 
     fn test_catalog() -> librefang_runtime::model_catalog::ModelCatalog {

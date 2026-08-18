@@ -33,9 +33,7 @@ fn atomic_write_manifest(path: &Path, contents: &[u8]) -> Result<(), SkillError>
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let parent = path.parent().ok_or_else(|| {
-        SkillError::InvalidManifest("Skillhub: skill.toml has no parent directory".to_string())
-    })?;
+    let parent = crate::resolve_parent_or_cwd(path);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(".skill.toml.tmp.{}.{}", std::process::id(), seq));
 

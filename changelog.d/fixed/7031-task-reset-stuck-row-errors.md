@@ -1,0 +1,2 @@
+The stuck-task reset sweep silently dropped any `task_queue` row it could not decode from SQLite, so a single corrupt row (e.g. a non-numeric `retry_count`) caused the rest of that sweep's stuck tasks to be skipped with no error surfaced to the caller.
+`task_reset_stuck` now decodes the full candidate set before applying any reset update, so a row decode failure fails the sweep closed instead of silently reducing its coverage (#7031) (@houko)

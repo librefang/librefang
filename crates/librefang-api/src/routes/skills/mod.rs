@@ -4,7 +4,6 @@ pub(crate) use super::agents;
 pub(crate) use super::resolve_lang;
 // `super::channels::FieldType` import removed alongside
 // the channel-config write helpers that consumed it.
-use super::config::json_to_toml_value;
 use super::AppState;
 use super::RequestLanguage;
 use crate::mcp_oauth::KernelOAuthProvider;
@@ -565,8 +564,14 @@ async fn activate_hand_inner(
         }
     };
 
-    match state.kernel.activate_hand(&hand_id, config) {
-        Ok(instance) => {
+    let kernel = Arc::clone(&state.kernel);
+    let activation_hand_id = hand_id.clone();
+    let activation =
+        hands::run_hand_lifecycle_job(move || kernel.activate_hand(&activation_hand_id, config))
+            .await;
+
+    match activation {
+        Ok(Ok(instance)) => {
             // If the hand agent has a non-reactive schedule (autonomous hands),
             // start its background loop so it begins running immediately.
             if let Some(agent_id) = instance.agent_id() {
@@ -593,10 +598,22 @@ async fn activate_hand_inner(
                 .unwrap_or_else(|_| b"{}".to_vec());
             (StatusCode::OK, body)
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             let payload = serde_json::json!({"error": format!("{e}"), "code": "activate_hand_failed", "type": "activate_hand_failed"});
             (
                 StatusCode::BAD_REQUEST,
+                serde_json::to_vec(&payload).unwrap_or_default(),
+            )
+        }
+        Err(e) => {
+            tracing::error!(hand = %hand_id, error = %e, "hand activation task failed");
+            let payload = serde_json::json!({
+                "error": "Hand activation task failed",
+                "code": "activate_hand_failed",
+                "type": "activate_hand_failed"
+            });
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
                 serde_json::to_vec(&payload).unwrap_or_default(),
             )
         }
@@ -765,9 +782,14 @@ fn upsert_mcp_server_config(
         toml::value::Table::new()
     };
 
-    // Serialize the entry to a TOML value via JSON round-trip
-    let entry_json = serde_json::to_value(entry).map_err(|e| e.to_string())?;
-    let entry_toml = json_to_toml_value(&entry_json);
+    // Serialize directly through TOML's serde implementation. It omits
+    // `Option::None` map fields even without a per-field skip annotation.
+    // Going through `serde_json::Value` first would erase that distinction:
+    // both an absent Option and an operator-authored JSON null become `Null`.
+    // The generic JSON bridge then has to corrupt one of them by either
+    // dropping it or converting it to an empty string.
+    let entry_toml = toml::Value::try_from(entry)
+        .map_err(|e| format!("MCP server config is not representable as TOML: {e}"))?;
 
     let servers = table
         .entry("mcp_servers".to_string())
@@ -1258,31 +1280,6 @@ fn status_str_for_catalog(
     }
 }
 
-/// Recursively copy a directory tree.
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        // `std::fs::copy` dereferences links, so a symlink planted in the registry checkout would write the target's real contents into the installed skill.
-        // Mirrors `librefang_skills::marketplace::copy_dir_recursive`.
-        if ty.is_symlink() {
-            tracing::warn!(
-                path = %entry.path().display(),
-                "skipping symlink while installing skill"
-            );
-            continue;
-        }
-        let dest_path = dst.join(entry.file_name());
-        if ty.is_dir() {
-            copy_dir_recursive(&entry.path(), &dest_path)?;
-        } else {
-            std::fs::copy(entry.path(), &dest_path)?;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1308,7 +1305,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside_dir, src.join("link_dir")).unwrap();
 
         let dest = tmp.path().join("dest");
-        copy_dir_recursive(&src, &dest).unwrap();
+        librefang_skills::evolution::install_local_skill(&src, &dest).unwrap();
 
         assert!(dest.join("SKILL.md").exists());
         assert!(dest.join("nested/file.txt").exists());
@@ -1324,10 +1321,8 @@ mod tests {
 
     /// Regression for #2319: adding an MCP server through the UI wrote each
     /// entry as a JSON-stringified blob inside `mcp_servers = ['{"name":...}']`
-    /// instead of a `[[mcp_servers]]` TOML table, because the top-level object
-    /// hit the catch-all in `json_to_toml_value` and got stringified. After
-    /// the fix, the on-disk file must round-trip back into a real
-    /// `McpServerConfigEntry` via `toml::from_str`.
+    /// instead of a `[[mcp_servers]]` TOML table. The on-disk file must
+    /// round-trip back into a real `McpServerConfigEntry` via `toml::from_str`.
     #[test]
     fn upsert_mcp_server_writes_inline_table_not_stringified_json() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1383,6 +1378,43 @@ mod tests {
             }
             other => panic!("expected stdio transport, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn upsert_mcp_server_omits_none_without_skip_annotation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        std::fs::write(&config_path, "").unwrap();
+
+        let entry = McpServerConfigEntry {
+            name: "disabled".to_string(),
+            template_id: None,
+            // Unlike the other optional fields, `transport` intentionally has
+            // no `skip_serializing_if` annotation. This pins the TOML
+            // serializer's structural omission of `Option::None`.
+            transport: None,
+            timeout_secs: 30,
+            env: vec![],
+            headers: vec![],
+            oauth: None,
+            taint_scanning: true,
+            taint_policy: None,
+        };
+
+        upsert_mcp_server_config(&config_path, &entry).expect("upsert should succeed");
+
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !raw.contains("transport"),
+            "an absent Option without a skip annotation must be omitted:\n{raw}"
+        );
+
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            mcp_servers: Vec<McpServerConfigEntry>,
+        }
+        let parsed: Wrapper = toml::from_str(&raw).expect("written config must reload");
+        assert!(parsed.mcp_servers[0].transport.is_none());
     }
 
     /// A second upsert for the same name must replace the entry in-place,
@@ -1442,11 +1474,13 @@ mod tests {
         }
     }
 
-    /// #6612 — the `File` store round-trips an entry through `serde_json` → `json_to_toml_value` → `toml` → disk → serde, and TOML has no null.
-    /// `json_to_toml_value` maps `Null` to an *empty string* (`routes/config/mod.rs:942`) rather than dropping the key, which is why `McpServerConfigEntry::template_id` and `oauth` both carry `skip_serializing_if = "Option::is_none"` with comments calling it load-bearing.
+    /// #6612 — TOML has no null, but direct TOML serialization distinguishes
+    /// an absent `Option` from free-form data before crossing that boundary.
     ///
-    /// `HttpCompatHeaderConfig` has two `Option<String>` fields under exactly that path and neither is skipped, so an env-sourced header would be written as `value = ""` and reload as `Some("")`.
-    /// That is not cosmetic: `apply_http_compat_headers` tests `value` *before* `value_env` (`librefang-runtime-mcp/src/lib.rs:3363`), so an empty-string `value` wins and the transport sends an empty header instead of resolving the variable — a silent credential failure, the same class of bug the guard on these structs exists to prevent.
+    /// `HttpCompatHeaderConfig` has two `Option<String>` fields under exactly
+    /// that path. The TOML serializer omits absent map fields structurally,
+    /// independent of every future field repeating a skip annotation.
+    /// That is not cosmetic: `apply_http_compat_headers` tests `value` *before* `value_env`, so an empty-string `value` wins and the transport sends an empty header instead of resolving the variable — a silent credential failure.
     #[test]
     fn upsert_mcp_server_preserves_an_env_sourced_http_compat_header_6612() {
         use librefang_types::config::{HttpCompatHeaderConfig, HttpCompatToolConfig};
@@ -1541,6 +1575,54 @@ mod tests {
             }
             other => panic!("expected http_compat transport, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn upsert_mcp_server_rejects_json_null_without_mutating_config() {
+        use librefang_types::config::HttpCompatToolConfig;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let original = "listen_addr = \"127.0.0.1:4545\"\n";
+        std::fs::write(&config_path, original).unwrap();
+
+        let entry = McpServerConfigEntry {
+            name: "compat".to_string(),
+            template_id: None,
+            transport: Some(McpTransportEntry::HttpCompat {
+                base_url: "https://example.invalid".to_string(),
+                headers: vec![],
+                tools: vec![HttpCompatToolConfig {
+                    name: "lookup".to_string(),
+                    path: "/lookup".to_string(),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string", "default": null}
+                        }
+                    }),
+                    ..Default::default()
+                }],
+            }),
+            timeout_secs: 30,
+            env: vec![],
+            headers: vec![],
+            oauth: None,
+            taint_scanning: true,
+            taint_policy: None,
+        };
+
+        let error = upsert_mcp_server_config(&config_path, &entry)
+            .expect_err("JSON null cannot be represented faithfully in TOML");
+        assert!(
+            error.contains("not representable as TOML"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            original,
+            "a rejected schema must not partially rewrite config.toml"
+        );
     }
 
     /// Regression for #5799: patching taint_scanning=false on one server must

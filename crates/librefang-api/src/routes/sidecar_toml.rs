@@ -9,6 +9,14 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
 
+fn read_existing_or_empty(path: &Path) -> Result<String, String> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(format!("read {path:?}: {error}")),
+    }
+}
+
 pub fn upsert_sidecar_block(
     path: &Path,
     name: &str,
@@ -18,7 +26,7 @@ pub fn upsert_sidecar_block(
     env: &BTreeMap<String, String>,
     managed_env_keys: &[&str],
 ) -> Result<(), String> {
-    let original = fs::read_to_string(path).unwrap_or_default();
+    let original = read_existing_or_empty(path)?;
     let mut doc: DocumentMut = original
         .parse()
         .map_err(|e| format!("parse {path:?}: {e}"))?;
@@ -181,6 +189,26 @@ fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub(super) fn restore_sidecar_file(path: &Path, contents: Option<&str>) -> Result<(), String> {
+    match contents {
+        Some(contents) => atomic_write(path, contents),
+        None => match fs::remove_file(path) {
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    let parent = path.parent().ok_or("config path has no parent")?;
+                    fs::File::open(parent)
+                        .and_then(|dir| dir.sync_all())
+                        .map_err(|e| format!("sync parent directory {parent:?}: {e}"))?;
+                }
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("remove {path:?}: {error}")),
+        },
+    }
+}
+
 /// Next tempfile name from the shared sequence.
 /// Split out so a test can assert successive names differ without writing to the filesystem.
 fn next_tmp_name() -> String {
@@ -190,7 +218,7 @@ fn next_tmp_name() -> String {
 
 /// Remove the `[[sidecar_channels]]` block identified by `name`; returns whether one was removed.
 pub fn remove_sidecar_block(path: &Path, name: &str) -> Result<bool, String> {
-    let original = fs::read_to_string(path).unwrap_or_default();
+    let original = read_existing_or_empty(path)?;
     let mut doc: DocumentMut = original
         .parse()
         .map_err(|e| format!("parse {path:?}: {e}"))?;
@@ -245,6 +273,22 @@ mod tests {
             fs::read_dir(dir.path()).unwrap().count(),
             1,
             "successful writes must not leave staging files"
+        );
+    }
+
+    #[test]
+    fn remove_propagates_existing_config_read_error() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::create_dir(&path).unwrap();
+
+        let error = remove_sidecar_block(&path, "telegram").unwrap_err();
+
+        assert!(error.contains("read"), "got: {error}");
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "a read failure must not create a staging file"
         );
     }
 

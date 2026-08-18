@@ -1,0 +1,1 @@
+- Make the sidecar configuration include check asynchronous and fail closed when the root or included configuration cannot be read or parsed, instead of continuing with a potentially shadowing write. (@xiaomo)

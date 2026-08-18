@@ -38,7 +38,7 @@ use librefang_types::memory::{
     CHAT_SCOPE_METADATA_KEY,
 };
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tracing::Instrument;
 
 /// Scope names for multi-level memory.
@@ -158,6 +158,38 @@ impl Clone for ProactiveMemoryStore {
 }
 
 impl ProactiveMemoryStore {
+    fn read_config(&self) -> RwLockReadGuard<'_, ProactiveMemoryConfig> {
+        self.config.read().unwrap_or_else(|poisoned| {
+            tracing::warn!("proactive memory config read lock poisoned; recovering inner state");
+            let guard = poisoned.into_inner();
+            // `into_inner()` only unwraps the guard; it leaves the lock's poison flag set.
+            // Without this, every later call through this helper would keep re-entering this branch and re-emitting the warning above for the rest of the process, even though the state has already been recovered.
+            self.config.clear_poison();
+            guard
+        })
+    }
+
+    fn write_config(&self) -> RwLockWriteGuard<'_, ProactiveMemoryConfig> {
+        self.config.write().unwrap_or_else(|poisoned| {
+            tracing::warn!("proactive memory config write lock poisoned; recovering inner state");
+            let guard = poisoned.into_inner();
+            self.config.clear_poison();
+            guard
+        })
+    }
+
+    fn lock_recover<'a, T>(lock: &'a Mutex<T>, name: &'static str) -> MutexGuard<'a, T> {
+        lock.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!(
+                lock = name,
+                "proactive memory lock poisoned; recovering inner state"
+            );
+            let guard = poisoned.into_inner();
+            lock.clear_poison();
+            guard
+        })
+    }
+
     /// Create a new proactive memory store with default extractor.
     pub fn new(substrate: Arc<MemorySubstrate>, config: ProactiveMemoryConfig) -> Self {
         let pool = substrate.pool();
@@ -216,15 +248,12 @@ impl ProactiveMemoryStore {
 
     /// Get a snapshot of the current config.
     pub fn config(&self) -> ProactiveMemoryConfig {
-        self.config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.read_config().clone()
     }
 
     /// Hot-swap the runtime config (called on config reload).
     pub fn update_config(&self, new_config: ProactiveMemoryConfig) {
-        let mut guard = self.config.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.write_config();
         *guard = new_config;
     }
 
@@ -247,11 +276,7 @@ impl ProactiveMemoryStore {
     /// maintenance scheduler (see `run_periodic_maintenance`), so a direct
     /// call (e.g. a manual `/decay` endpoint or a test) decays right away.
     pub fn decay_confidence(&self) -> LibreFangResult<()> {
-        let decay_rate = self
-            .config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .confidence_decay_rate;
+        let decay_rate = self.read_config().confidence_decay_rate;
         if decay_rate <= 0.0 {
             return Ok(());
         }
@@ -346,10 +371,7 @@ impl ProactiveMemoryStore {
     fn maybe_decay_confidence(&self) {
         let now = Utc::now();
         // Hold the lock for the entire check-and-update to avoid TOCTOU race
-        let mut guard = self
-            .last_decay_run
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut guard = Self::lock_recover(&self.last_decay_run, "last_decay_run");
 
         let should_run = match *guard {
             Some(last) => (now - last) >= chrono::Duration::hours(1),
@@ -376,11 +398,7 @@ impl ProactiveMemoryStore {
     ///
     /// This is the global variant of `cleanup_expired_sessions` (which is per-agent).
     pub fn cleanup_expired(&self) -> LibreFangResult<u64> {
-        let ttl_hours = self
-            .config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .session_ttl_hours;
+        let ttl_hours = self.read_config().session_ttl_hours;
         if ttl_hours == 0 {
             return Ok(0);
         }
@@ -410,10 +428,7 @@ impl ProactiveMemoryStore {
     fn maybe_cleanup_expired(&self) {
         let now = Utc::now();
         // Hold the lock for the entire check-and-update to avoid TOCTOU race
-        let mut guard = self
-            .last_cleanup_run
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut guard = Self::lock_recover(&self.last_cleanup_run, "last_cleanup_run");
 
         let should_run = match *guard {
             Some(last) => (now - last) >= chrono::Duration::hours(1),
@@ -457,10 +472,7 @@ impl ProactiveMemoryStore {
     /// (review-followup #3).
     fn maybe_prune_counters(&self) {
         let now = Utc::now();
-        let mut guard = self
-            .last_counter_prune
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut guard = Self::lock_recover(&self.last_counter_prune, "last_counter_prune");
 
         let should_run = match *guard {
             Some(last) => (now - last) >= chrono::Duration::hours(1),
@@ -497,7 +509,9 @@ impl ProactiveMemoryStore {
         // an active slot, however slow, is preserved as long as it's
         // been touched within the window; a truly idle slot is
         // reclaimed within ~2 hours of going quiet.
-        if let Ok(mut counters) = self.consolidation_counters.lock() {
+        {
+            let mut counters =
+                Self::lock_recover(&self.consolidation_counters, "consolidation_counters");
             let cutoff = now - chrono::Duration::hours(STALE_COUNTER_IDLE_WINDOW_HOURS);
             let before = counters.len();
             counters.retain(|_, entry| entry.last_touched >= cutoff);
@@ -883,7 +897,7 @@ impl ProactiveMemoryStore {
             "callers must not pre-populate `_update_threshold_cross_cat` — it is private to add_with_decision"
         );
         let (same_cat_thresh, cross_cat_thresh) = {
-            let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
+            let cfg = self.read_config();
             (
                 cfg.update_threshold_same_category,
                 cfg.update_threshold_cross_category,
@@ -1035,11 +1049,7 @@ impl ProactiveMemoryStore {
     ///
     /// Does nothing when the cap is 0 (disabled) or when there is still room.
     fn evict_if_over_cap(&self, agent_id: AgentId, new_count: usize) -> LibreFangResult<()> {
-        let max = self
-            .config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .max_memories_per_agent;
+        let max = self.read_config().max_memories_per_agent;
         if max == 0 {
             return Ok(()); // cap disabled
         }
@@ -1252,11 +1262,7 @@ impl ProactiveMemoryStore {
     /// names appear in the memory content. Honors the configured
     /// `format_context_max_chars` (H4 review-followup #8).
     pub fn format_context_with_query(&self, memories: &[MemoryItem], query: &str) -> String {
-        let max_chars = self
-            .config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .format_context_max_chars;
+        let max_chars = self.read_config().format_context_max_chars;
         let mut context = librefang_types::memory::format_memories_with_budget(memories, max_chars);
 
         // Append knowledge graph context if relevant
@@ -1270,11 +1276,7 @@ impl ProactiveMemoryStore {
 
     /// Format retrieved memories into a context string for prompt injection.
     pub fn format_context(&self, memories: &[MemoryItem]) -> String {
-        let max_chars = self
-            .config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .format_context_max_chars;
+        let max_chars = self.read_config().format_context_max_chars;
         librefang_types::memory::format_memories_with_budget(memories, max_chars)
     }
 
@@ -1293,7 +1295,7 @@ impl ProactiveMemoryStore {
         // Use SQL GROUP BY to count categories without loading all items into memory
         let categories = self.semantic.count_by_category(Some(agent_id))?;
 
-        let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
+        let cfg = self.read_config();
         Ok(MemoryStats {
             total,
             user_count,
@@ -1321,7 +1323,7 @@ impl ProactiveMemoryStore {
         // Use SQL GROUP BY to count categories without loading all items into memory
         let categories = self.semantic.count_by_category(None)?;
 
-        let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
+        let cfg = self.read_config();
         Ok(MemoryStats {
             total,
             user_count,
@@ -1333,6 +1335,32 @@ impl ProactiveMemoryStore {
             auto_retrieve_enabled: cfg.auto_retrieve,
             llm_extraction: cfg.extraction_model.is_some(),
         })
+    }
+
+    /// Count memories for every agent in one grouped SQL query.
+    pub fn count_by_agent(&self) -> LibreFangResult<HashMap<String, usize>> {
+        self.semantic.count_by_agent()
+    }
+
+    /// List one filtered dashboard page without a hidden candidate cap.
+    pub fn list_page(
+        &self,
+        agent_id: Option<&str>,
+        category: Option<&str>,
+        level: Option<MemoryLevel>,
+        offset: usize,
+        limit: usize,
+    ) -> LibreFangResult<(Vec<MemoryItem>, usize)> {
+        let agent_id = agent_id.map(Self::parse_agent_id).transpose()?;
+        let scope = level.map(|value| value.scope_str());
+        let (fragments, total) = self
+            .semantic
+            .list_page(agent_id, category, scope, offset, limit)?;
+        let items = fragments
+            .into_iter()
+            .map(MemoryItem::from_fragment)
+            .collect();
+        Ok((items, total))
     }
 
     /// List memories across ALL agents, optionally filtered by category.
@@ -1382,6 +1410,74 @@ impl ProactiveMemoryStore {
             .take(limit)
             .collect();
 
+        Ok(items)
+    }
+
+    /// Search the dashboard memory corpus with optional agent and level filters.
+    ///
+    /// Filters are passed into semantic recall before its result limit is
+    /// applied. This prevents a level-scoped search from losing valid matches
+    /// merely because another level occupied the first `limit` candidates.
+    pub async fn search_dashboard_with_guard(
+        &self,
+        query: &str,
+        agent_id: Option<&str>,
+        level: Option<MemoryLevel>,
+        limit: usize,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> LibreFangResult<Vec<MemoryItem>> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_read("proactive") {
+            return Err(LibreFangError::AuthDenied(reason));
+        }
+
+        // Match the pre-existing maintenance behavior: agent-scoped search
+        // invokes it, while cross-agent dashboard search does not.
+        if agent_id.is_some() {
+            self.maybe_run_maintenance();
+        }
+        let parsed_agent_id = agent_id.map(Self::parse_agent_id).transpose()?;
+        let filter = if parsed_agent_id.is_some() || level.is_some() {
+            Some(MemoryFilter {
+                agent_id: parsed_agent_id,
+                scope: level.map(|value| value.scope_str().to_string()),
+                ..Default::default()
+            })
+        } else {
+            None
+        };
+
+        let results = if let Some(ref embedding) = self.embedding {
+            if let Ok(query_embedding) = embedding.embed_one(query).await {
+                self.semantic
+                    .recall_with_embedding(query, limit, filter, Some(&query_embedding))?
+            } else {
+                self.semantic.recall(query, limit, filter)?
+            }
+        } else {
+            self.semantic.recall(query, limit, filter)?
+        };
+
+        let mut items: Vec<MemoryItem> = results
+            .into_iter()
+            .map(MemoryItem::from_fragment)
+            .take(limit)
+            .collect();
+
+        // Preserve the existing agent-scoped graph enrichment, but never add
+        // an Agent-level synthetic item to a User/Session-filtered result set.
+        if parsed_agent_id.is_some()
+            && level.is_none_or(|value| value == MemoryLevel::Agent)
+            && items.len() < limit
+        {
+            if let Some(graph_context) = self.graph_context(query) {
+                items.push(
+                    MemoryItem::new(graph_context, MemoryLevel::Agent)
+                        .with_category("knowledge_graph"),
+                );
+            }
+        }
+
+        guard.redact_all(&mut items);
         Ok(items)
     }
 
@@ -1608,11 +1704,7 @@ impl ProactiveMemoryStore {
             );
         }
 
-        let threshold = self
-            .config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .duplicate_threshold;
+        let threshold = self.read_config().duplicate_threshold;
 
         let mut used = vec![false; all_items.len()];
         let mut groups: Vec<Vec<MemoryItem>> = Vec::new();
@@ -1762,6 +1854,29 @@ impl ProactiveMemoryStore {
         let mut items = self.list_all(category).await?;
         guard.redact_all(&mut items);
         Ok(items)
+    }
+
+    /// Paginated dashboard listing wrapper.
+    ///
+    /// Applies namespace authorization before reading and PII redaction after
+    /// the SQL page is materialized, matching the existing list wrappers.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn list_page_with_guard(
+        &self,
+        agent_id: Option<&str>,
+        category: Option<&str>,
+        level: Option<librefang_types::memory::MemoryLevel>,
+        offset: usize,
+        limit: usize,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<(Vec<librefang_types::memory::MemoryItem>, usize)>
+    {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_read("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        let (mut items, total) = self.list_page(agent_id, category, level, offset, limit)?;
+        guard.redact_all(&mut items);
+        Ok((items, total))
     }
 
     /// Per-user list wrapper used by `/memory/user/{user_id}` and the
@@ -1967,12 +2082,7 @@ impl ProactiveMemory for ProactiveMemoryStore {
 
         let agent_id = Self::parse_agent_id(user_id)?;
 
-        let categories = self
-            .config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .extract_categories
-            .clone();
+        let categories = self.read_config().extract_categories.clone();
 
         // Step 1: Extract structured memories
         let extraction = self
@@ -2471,11 +2581,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         peer_id: Option<&str>,
         chat_scope: Option<&str>,
     ) -> LibreFangResult<ExtractionResult> {
-        let cfg = self
-            .config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let cfg = self.read_config().clone();
         if !cfg.enabled || !cfg.auto_memorize || conversation.is_empty() {
             return Ok(ExtractionResult {
                 memories: Vec::new(),
@@ -2586,10 +2692,8 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         // auto_memorize calls per agent. Detached to a background task
         // by H6 so this branch never blocks the agent's hot path.
         let should_consolidate = {
-            let mut counters = self
-                .consolidation_counters
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut counters =
+                Self::lock_recover(&self.consolidation_counters, "consolidation_counters");
             let now = Utc::now();
             let entry = counters.entry(user_id.to_string()).or_insert(CounterEntry {
                 count: 0,
@@ -2670,11 +2774,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         peer_id: Option<&str>,
         chat_scope: Option<&str>,
     ) -> LibreFangResult<Vec<MemoryItem>> {
-        let cfg = self
-            .config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let cfg = self.read_config().clone();
         if !cfg.enabled || !cfg.auto_retrieve {
             return Ok(Vec::new());
         }
@@ -2757,6 +2857,39 @@ fn memory_chat_scope_allows(memory: &MemoryItem, current: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_recovers_config_and_maintenance_locks_after_poisoning() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+
+        let config_poisoner = store.clone();
+        assert!(std::thread::spawn(move || {
+            let mut config = config_poisoner.config.write().unwrap();
+            config.enabled = false;
+            panic!("poison proactive memory config lock");
+        })
+        .join()
+        .is_err());
+        assert!(!store.config().enabled);
+
+        let mut replacement = store.config();
+        replacement.enabled = true;
+        store.update_config(replacement);
+        assert!(store.config().enabled);
+
+        let maintenance_poisoner = store.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = maintenance_poisoner.last_decay_run.lock().unwrap();
+            panic!("poison proactive memory maintenance lock");
+        })
+        .join()
+        .is_err());
+        let mut recovered =
+            ProactiveMemoryStore::lock_recover(&store.last_decay_run, "last_decay_run");
+        *recovered = Some(Utc::now());
+        assert!(recovered.is_some());
+    }
 
     #[tokio::test]
     async fn test_proactive_memory_search() {
@@ -4320,6 +4453,14 @@ mod tests {
             Err(librefang_types::error::LibreFangError::AuthDenied(_))
         ));
 
+        let err = store
+            .search_dashboard_with_guard("topsecret", None, None, 10, &guard)
+            .await;
+        assert!(matches!(
+            err,
+            Err(librefang_types::error::LibreFangError::AuthDenied(_))
+        ));
+
         let err = store.list_all_with_guard(None, &guard).await;
         assert!(matches!(
             err,
@@ -4336,6 +4477,72 @@ mod tests {
             .await
             .unwrap();
         assert!(!ok.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dashboard_search_filters_agent_and_level_before_limit() {
+        use crate::namespace_acl::MemoryNamespaceGuard;
+        use librefang_types::user_policy::UserMemoryAccess;
+
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent_a = AgentId::new().to_string();
+        let agent_b = AgentId::new().to_string();
+
+        store
+            .add_with_level(
+                &[serde_json::json!({"role": "user", "content": "needle user A"})],
+                &agent_a,
+                MemoryLevel::User,
+            )
+            .await
+            .unwrap();
+        for index in 0..60 {
+            store
+                .add_with_level(
+                    &[serde_json::json!({
+                        "role": "user",
+                        "content": format!("needle session {index}")
+                    })],
+                    &agent_a,
+                    MemoryLevel::Session,
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .add_with_level(
+                &[serde_json::json!({"role": "user", "content": "needle user B"})],
+                &agent_b,
+                MemoryLevel::User,
+            )
+            .await
+            .unwrap();
+
+        let guard = MemoryNamespaceGuard::new(UserMemoryAccess {
+            readable_namespaces: vec!["proactive".into()],
+            ..Default::default()
+        });
+        let scoped = store
+            .search_dashboard_with_guard(
+                "needle",
+                Some(&agent_a),
+                Some(MemoryLevel::User),
+                50,
+                &guard,
+            )
+            .await
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].content, "needle user A");
+        assert_eq!(scoped[0].level, MemoryLevel::User);
+
+        let global = store
+            .search_dashboard_with_guard("needle", None, Some(MemoryLevel::User), 50, &guard)
+            .await
+            .unwrap();
+        assert_eq!(global.len(), 2);
+        assert!(global.iter().all(|item| item.level == MemoryLevel::User));
     }
 
     /// PII redaction MUST replace fields when the guard's `pii_access=false`.
@@ -4367,7 +4574,7 @@ mod tests {
             ..Default::default()
         });
         let items = store
-            .search_all_with_guard("alice", 10, &guard)
+            .search_dashboard_with_guard("alice", None, None, 10, &guard)
             .await
             .unwrap();
         for item in items {

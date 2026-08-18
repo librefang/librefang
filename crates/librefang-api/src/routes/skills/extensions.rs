@@ -154,12 +154,7 @@ pub async fn install_extension(
         Ok(r) => r,
         Err(e) => {
             let err_str = e.to_string();
-            let status = match e {
-                librefang_types::integration::IntegrationError::NotFound(_) => {
-                    StatusCode::NOT_FOUND
-                }
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
+            let status = extension_install_error_status(&e);
             // 404 echoes the "not found" message (caller-useful); the
             // 500 catch-all scrubs (audit: rusqlite-errors-leak) and
             // logs the full error for operators.
@@ -188,11 +183,14 @@ pub async fn install_extension(
     // [[mcp_servers]] entry is invisible and the endpoint reports "installed"
     // without actually connecting anything.
     if let Err(e) = state.kernel.reload_config().await {
-        tracing::warn!("Failed to reload config after extension install: {e}");
+        return extension_reload_error("install", "config", e);
     }
 
     state.kernel.mcp_health().register(&result.server.name);
-    let connected = state.kernel.clone().reload_mcp_servers().await.unwrap_or(0);
+    let connected = match state.kernel.clone().reload_mcp_servers().await {
+        Ok(connected) => connected,
+        Err(e) => return extension_reload_error("install", "MCP servers", e),
+    };
 
     (
         StatusCode::OK,
@@ -250,13 +248,13 @@ pub async fn uninstall_extension(
     // removed entry and `reload_mcp_servers` happily reconnects the server
     // we just deleted.
     if let Err(e) = state.kernel.reload_config().await {
-        tracing::warn!("Failed to reload config after extension uninstall: {e}");
+        return extension_reload_error("uninstall", "config", e);
     }
 
     state.kernel.mcp_health().unregister(&server_name);
     state.kernel.disconnect_mcp_server(&server_name).await;
     if let Err(e) = state.kernel.clone().reload_mcp_servers().await {
-        tracing::warn!("Failed to reload MCP servers after uninstall: {e}");
+        return extension_reload_error("uninstall", "MCP servers", e);
     }
 
     (
@@ -266,4 +264,69 @@ pub async fn uninstall_extension(
             "name": name,
         })),
     )
+}
+
+fn extension_install_error_status(
+    error: &librefang_types::integration::IntegrationError,
+) -> StatusCode {
+    match error {
+        librefang_types::integration::IntegrationError::NotFound(_)
+        | librefang_types::integration::IntegrationError::NotInstalled(_)
+        | librefang_types::integration::IntegrationError::CredentialNotFound(_) => {
+            StatusCode::NOT_FOUND
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn extension_reload_error(
+    action: &str,
+    target: &str,
+    error: impl std::fmt::Display,
+) -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::internal_scrub(format!(
+        "failed to reload {target} after extension {action}: {error}"
+    ))
+    .into_json_tuple()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_extension_resources_return_not_found() {
+        use librefang_types::integration::IntegrationError;
+
+        let errors = [
+            IntegrationError::NotFound("github".to_string()),
+            IntegrationError::NotInstalled("github".to_string()),
+            IntegrationError::CredentialNotFound("GITHUB_TOKEN".to_string()),
+        ];
+
+        for error in errors {
+            assert_eq!(
+                extension_install_error_status(&error),
+                StatusCode::NOT_FOUND
+            );
+        }
+
+        assert_eq!(
+            extension_install_error_status(&IntegrationError::Vault("locked".to_string())),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn extension_reload_errors_return_scrubbed_server_error() {
+        let (status, Json(body)) = extension_reload_error(
+            "install",
+            "config",
+            "invalid TOML at /srv/private/config.toml",
+        );
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["message"], "Internal server error");
+        assert!(!body.to_string().contains("/srv/private"));
+    }
 }
