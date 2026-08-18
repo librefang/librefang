@@ -309,6 +309,10 @@ impl BackgroundExecutor {
                 let stopped = Arc::new(AtomicBool::new(false));
                 let stopped_loop = stopped.clone();
                 let stopped_cleanup = stopped.clone();
+                // Do not let the task reach self-cleanup before its ownership
+                // token is present in the map. `tokio::spawn` may run on a
+                // different worker before `install_task` returns.
+                let (installed_tx, installed_rx) = tokio::sync::oneshot::channel();
                 // Self-cleanup: when this outer loop exits (cap, shutdown, or
                 // any other break path), drop the DashMap entry so a stale
                 // `AgentTaskEntry` does not keep `active_count()` inflated and
@@ -317,6 +321,9 @@ impl BackgroundExecutor {
                 let tasks_for_cleanup = self.tasks.clone();
 
                 let handle = tokio::spawn(async move {
+                    if installed_rx.await.is_err() {
+                        return;
+                    }
                     // Stagger first tick: random jitter (0..interval) so agents
                     // don't all load sessions into memory simultaneously at boot.
                     let jitter_secs = rand::random::<u64>() % check_interval.max(1);
@@ -446,6 +453,7 @@ impl BackgroundExecutor {
                         stopped,
                     },
                 );
+                let _ = installed_tx.send(());
             }
             ScheduleMode::Periodic { cron } => {
                 let interval_secs = parse_cron_to_secs(cron);
@@ -480,11 +488,17 @@ impl BackgroundExecutor {
                 let stopped = Arc::new(AtomicBool::new(false));
                 let stopped_loop = stopped.clone();
                 let stopped_cleanup = stopped.clone();
+                // See the continuous loop above. Registration must happen
+                // before this task can take its self-cleanup path.
+                let (installed_tx, installed_rx) = tokio::sync::oneshot::channel();
                 // Self-cleanup on outer-task exit — see the continuous loop
                 // for the rationale (issue #5174 review).
                 let tasks_for_cleanup = self.tasks.clone();
 
                 let handle = tokio::spawn(async move {
+                    if installed_rx.await.is_err() {
+                        return;
+                    }
                     // Stagger first tick: random jitter so agents don't spike memory together.
                     let jitter_secs = rand::random::<u64>() % interval_secs.max(1);
                     let jitter = std::time::Duration::from_secs(jitter_secs);
@@ -599,6 +613,7 @@ impl BackgroundExecutor {
                         stopped,
                     },
                 );
+                let _ = installed_tx.send(());
             }
             ScheduleMode::Proactive { .. } => {
                 // Proactive agents rely on triggers, not a dedicated loop.
@@ -1271,6 +1286,31 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
         assert_eq!(new_ticks.load(Ordering::SeqCst), stopped_at);
         assert_eq!(executor.active_count(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn loop_that_exits_immediately_cleans_up_after_registration() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        drop(shutdown_tx);
+        let executor = BackgroundExecutor::new(shutdown_rx);
+        let agent_id = AgentId::new();
+
+        executor.start_agent(
+            agent_id,
+            "closed-shutdown",
+            &ScheduleMode::Continuous {
+                check_interval_secs: 1,
+            },
+            |_id, _message| tokio::spawn(async { TickOutcome::Ok }),
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while executor.active_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("an immediately exiting loop must remove its installed entry");
     }
 
     /// The cap MUST be configurable. With
