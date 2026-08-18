@@ -1,1 +1,0 @@
-- Reject malformed and non-base64 image data URIs in OpenAI-compatible chat requests instead of forwarding corrupt vision blocks. (#7148) (@houko)

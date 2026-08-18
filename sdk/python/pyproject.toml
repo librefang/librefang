@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "librefang-sdk"
-version = "0.5.2"
+version = "2026.8.19"
 description = "Official Python client and SDK for the LibreFang Agent OS"
 readme = "README.md"
 license = "MIT"

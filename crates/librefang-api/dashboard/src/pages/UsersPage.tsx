@@ -898,6 +898,7 @@ function UserFormModal({
               {bindings.map(([k, v], i) => (
                 <li key={i} className="flex gap-2 items-center">
                   <Select
+                    aria-label={t("users.wizard_step_platform", "Platform")}
                     value={k}
                     options={PLATFORM_TILES.map(p => ({
                       value: p.key,

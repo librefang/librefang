@@ -8,7 +8,10 @@ import uk from "../locales/uk.json";
 import ko from "../locales/ko.json";
 import pl from "../locales/pl.json";
 
-i18n
+export const normalizeDetectedLanguage = (language: string): string =>
+  language.split(/[-_]/, 1)[0].toLowerCase();
+
+export const i18nReady = i18n
   .use(LanguageDetector)
   .use(initReactI18next)
   .init({
@@ -19,7 +22,12 @@ i18n
       ko: { translation: ko },
       pl: { translation: pl },
     },
+    load: "languageOnly",
+    supportedLngs: ["en", "zh", "uk", "ko", "pl"],
     fallbackLng: "en",
+    detection: {
+      convertDetectedLanguage: normalizeDetectedLanguage,
+    },
     interpolation: {
       // Keep i18next's default escaping (escapeValue: true). Translator-supplied
       // strings must never be rendered as live DOM — any HTML structure in a
@@ -35,6 +43,10 @@ i18n
         console.warn(`[i18n] missing key: ${ns}:${key}`);
       },
     }),
+  })
+  .catch((error: unknown) => {
+    console.error("[i18n] initialization failed", error);
+    throw error;
   });
 
 export default i18n;
