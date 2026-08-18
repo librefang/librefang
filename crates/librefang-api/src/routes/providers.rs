@@ -1055,13 +1055,13 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
         // Attach cached manual test result if no probe already set it.
         // TTL: 10 minutes — stale results are ignored.
         if let Some(ref_entry) = state.provider_test_cache.get(&p.id) {
-            let (tested_at, ms, tested_rfc3339, reachable) = ref_entry.value();
-            if tested_at.elapsed() < std::time::Duration::from_secs(600) {
+            let result = ref_entry.value();
+            if result.is_fresh() {
                 if entry.get("latency_ms").is_none() || entry["latency_ms"].is_null() {
-                    entry["latency_ms"] = serde_json::json!(ms);
+                    entry["latency_ms"] = serde_json::json!(result.latency_ms);
                 }
-                entry["last_tested"] = serde_json::json!(tested_rfc3339);
-                entry["reachable"] = serde_json::json!(reachable);
+                entry["last_tested"] = serde_json::json!(result.tested_rfc3339);
+                entry["reachable"] = serde_json::json!(result.reachable);
             }
         }
 
@@ -2106,12 +2106,7 @@ pub async fn test_provider(
         let cli_latency = cli_start.elapsed().as_millis();
         state.provider_test_cache.insert(
             name.clone(),
-            (
-                Instant::now(),
-                cli_latency,
-                chrono::Utc::now().to_rfc3339(),
-                cli_ok,
-            ),
+            super::ProviderTestResult::new(cli_latency, cli_ok),
         );
         return if cli_ok {
             (
@@ -2153,12 +2148,7 @@ pub async fn test_provider(
         let latency = result.latency_ms as u128;
         state.provider_test_cache.insert(
             name.clone(),
-            (
-                Instant::now(),
-                latency,
-                chrono::Utc::now().to_rfc3339(),
-                result.reachable,
-            ),
+            super::ProviderTestResult::new(latency, result.reachable),
         );
         return if result.reachable {
             (
@@ -2231,12 +2221,7 @@ pub async fn test_provider(
         });
         state.provider_test_cache.insert(
             name.clone(),
-            (
-                Instant::now(),
-                latency_ms,
-                chrono::Utc::now().to_rfc3339(),
-                key_valid.is_some() || model_list_fetched,
-            ),
+            super::ProviderTestResult::new(latency_ms, key_valid.is_some() || model_list_fetched),
         );
 
         return match key_valid {
@@ -2282,10 +2267,9 @@ pub async fn test_provider(
 
     // ── Bedrock: AWS Signature auth — can't test with simple HTTP ──
     if name == "bedrock" || name == "aws-bedrock" {
-        state.provider_test_cache.insert(
-            name.clone(),
-            (Instant::now(), 0, chrono::Utc::now().to_rfc3339(), true),
-        );
+        state
+            .provider_test_cache
+            .insert(name.clone(), super::ProviderTestResult::new(0, true));
         return (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -2390,12 +2374,7 @@ pub async fn test_provider(
     // Cache test result so GET /api/providers can show latency for all providers.
     state.provider_test_cache.insert(
         name.clone(),
-        (
-            Instant::now(),
-            latency_ms,
-            chrono::Utc::now().to_rfc3339(),
-            true,
-        ),
+        super::ProviderTestResult::new(latency_ms, true),
     );
 
     // For Anthropic-protocol providers, 401/403/404 on /v1/models is a

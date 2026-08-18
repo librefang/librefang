@@ -662,6 +662,7 @@ function SidecarForm({
             </label>
             {f.type === "select" && f.options && f.options.length > 0 ? (
               <Select
+                aria-label={f.label || f.key}
                 options={f.options.map((o) => ({ value: o, label: o }))}
                 value={values[f.key] ?? ""}
                 placeholder={f.placeholder ?? undefined}

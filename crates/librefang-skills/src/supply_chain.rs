@@ -22,8 +22,17 @@
 //! it in production deployments.
 
 use crate::verify::{SkillVerifier, WarningSeverity};
+use std::io::Read;
 use std::path::Path;
 use tracing::{info, warn};
+
+/// Maximum text file size accepted by the prompt-content scanner.
+const MAX_SCANNED_TEXT_BYTES: u64 = 10 * 1024 * 1024;
+
+enum ScannableText {
+    Content(String),
+    TooLarge,
+}
 
 /// A violation found during the supply-chain audit.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,8 +126,19 @@ pub fn scan(skill_dir: &Path) -> Result<(), Vec<Violation>> {
             .unwrap_or("")
             .to_ascii_lowercase();
         if matches!(ext.as_str(), "md" | "toml" | "prompt") {
-            let content = match std::fs::read_to_string(&path) {
-                Ok(c) => c,
+            let content = match read_scannable_text(&path, MAX_SCANNED_TEXT_BYTES) {
+                Ok(ScannableText::Content(content)) => content,
+                Ok(ScannableText::TooLarge) => {
+                    violations.push(Violation {
+                        file: relative_display(&path, skill_dir),
+                        rule: "prompt-file-too-large".to_string(),
+                        message: format!(
+                            "prompt-bearing file exceeds the {} MiB supply-chain scan limit",
+                            MAX_SCANNED_TEXT_BYTES / (1024 * 1024)
+                        ),
+                    });
+                    continue;
+                }
                 Err(e) => {
                     // Non-fatal: log and skip the file rather than failing the whole scan.
                     warn!("supply-chain-audit: could not read {}: {e}", path.display());
@@ -155,6 +175,36 @@ pub fn scan(skill_dir: &Path) -> Result<(), Vec<Violation>> {
     } else {
         Err(violations)
     }
+}
+
+/// Read at most `max_bytes + 1` bytes so a file that grows after its metadata
+/// check still cannot force an unbounded allocation.
+fn read_scannable_text(path: &Path, max_bytes: u64) -> std::io::Result<ScannableText> {
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    read_scannable_text_from(file, metadata.len(), max_bytes)
+}
+
+fn read_scannable_text_from(
+    reader: impl Read,
+    initial_len: u64,
+    max_bytes: u64,
+) -> std::io::Result<ScannableText> {
+    if initial_len > max_bytes {
+        return Ok(ScannableText::TooLarge);
+    }
+
+    let mut bytes = Vec::with_capacity(initial_len.min(max_bytes) as usize);
+    reader
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Ok(ScannableText::TooLarge);
+    }
+
+    String::from_utf8(bytes)
+        .map(ScannableText::Content)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
 /// Collect all files under `root`, skipping the `.git` and `target` subtrees.
@@ -329,5 +379,29 @@ mod tests {
         let result = scan(tmp.path());
         std::env::remove_var("LIBREFANG_SKIP_SUPPLY_CHAIN_AUDIT");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn oversized_prompt_file_blocks_without_reading_the_payload() {
+        let tmp = make_dir();
+        let path = tmp.path().join("SKILL.md");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_SCANNED_TEXT_BYTES + 1).unwrap();
+
+        let violations = scan(tmp.path()).unwrap_err();
+
+        assert!(violations.iter().any(|violation| {
+            violation.file == "SKILL.md" && violation.rule == "prompt-file-too-large"
+        }));
+    }
+
+    #[test]
+    #[serial]
+    fn bounded_reader_rejects_content_beyond_the_requested_limit() {
+        assert!(matches!(
+            read_scannable_text_from(std::io::Cursor::new(b"12345"), 4, 4).unwrap(),
+            ScannableText::TooLarge
+        ));
     }
 }

@@ -189,6 +189,26 @@ fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub(super) fn restore_sidecar_file(path: &Path, contents: Option<&str>) -> Result<(), String> {
+    match contents {
+        Some(contents) => atomic_write(path, contents),
+        None => match fs::remove_file(path) {
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    let parent = path.parent().ok_or("config path has no parent")?;
+                    fs::File::open(parent)
+                        .and_then(|dir| dir.sync_all())
+                        .map_err(|e| format!("sync parent directory {parent:?}: {e}"))?;
+                }
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("remove {path:?}: {error}")),
+        },
+    }
+}
+
 /// Next tempfile name from the shared sequence.
 /// Split out so a test can assert successive names differ without writing to the filesystem.
 fn next_tmp_name() -> String {

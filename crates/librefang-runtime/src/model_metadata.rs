@@ -295,10 +295,13 @@ fn synthesize_entry(
     }
 }
 
-/// Whether this provider name is anthropic-shaped — used to pick the
-/// 200K vs 32K final default. Matches the bare `"anthropic"` provider
-/// plus claude-routed providers like `bedrock` and `vertexai` whose
-/// catalog entries are also Claude models with 200K minimum windows.
+/// Whether the final provider-level default is Anthropic-shaped.
+///
+/// This deliberately matches only providers dedicated to Claude. Claude
+/// model IDs on multi-model hosts such as Bedrock already match the
+/// hardcoded `"claude"` substring before resolution reaches this fallback;
+/// treating the whole host as Anthropic would also assign 200K to its
+/// non-Claude models.
 fn is_anthropic_host(provider: &str, model_id: &str) -> bool {
     let p = provider.to_ascii_lowercase();
     if p == "anthropic" || p == "claude-code" {
@@ -888,6 +891,27 @@ mod tests {
             resolve_model_metadata(&cat, home, &req("anthropic", "totally-unknown-model")).await;
         assert_eq!(r.source, MetadataSource::Default200kAnthropic);
         assert_eq!(r.entry.context_window, 200_000);
+    }
+
+    #[tokio::test]
+    async fn layer_5_bedrock_claude_uses_model_fallback_not_provider_default() {
+        let _home = fresh_home();
+        let home = _home.path();
+        let cat = catalog_with(vec![]);
+
+        let claude = resolve_model_metadata(
+            &cat,
+            home,
+            &req("bedrock", "us.anthropic.claude-unknown-v1:0"),
+        )
+        .await;
+        assert_eq!(claude.source, MetadataSource::HardcodedFallback);
+        assert_eq!(claude.entry.context_window, 200_000);
+
+        let titan =
+            resolve_model_metadata(&cat, home, &req("bedrock", "amazon.titan-unknown-v1")).await;
+        assert_eq!(titan.source, MetadataSource::Default32k);
+        assert_eq!(titan.entry.context_window, 32_768);
     }
 
     #[tokio::test]
