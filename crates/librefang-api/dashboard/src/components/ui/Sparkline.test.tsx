@@ -8,4 +8,10 @@ describe("Sparkline", () => {
 
     expect(container.querySelector("svg")).toBeNull();
   });
+
+  it("renders data sets larger than the JavaScript argument limit", () => {
+    const data = Array.from({ length: 150_000 }, (_, index) => index % 100);
+
+    expect(() => render(<Sparkline data={data} />)).not.toThrow();
+  });
 });

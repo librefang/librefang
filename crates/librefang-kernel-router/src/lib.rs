@@ -178,6 +178,7 @@ static HAND_ROUTE_HOME_DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 fn lock_router_state<'a, T>(mutex: &'a Mutex<T>, state: &'static str) -> MutexGuard<'a, T> {
     mutex.lock().unwrap_or_else(|poisoned| {
         tracing::warn!(state, "router state lock poisoned; recovering inner state");
+        mutex.clear_poison();
         poisoned.into_inner()
     })
 }
@@ -922,18 +923,22 @@ impl RegexCache {
 /// manifest pattern would otherwise live in the cache forever).
 static REGEX_CACHE: OnceLock<Mutex<RegexCache>> = OnceLock::new();
 
+fn cached_regex(cache: &Mutex<RegexCache>, pattern: &str) -> Option<Regex> {
+    let mut guard = lock_router_state(cache, "regex_cache");
+    guard.get_or_compile(pattern).cloned()
+}
+
 fn regex_matches(message: &str, pattern: &str) -> bool {
     let cache = REGEX_CACHE.get_or_init(|| Mutex::new(RegexCache::new()));
-    let mut guard = lock_router_state(cache, "regex_cache");
     // None == compile error → never matches. Mirrors the historical
     // "never-match sentinel" branch but without the panic-risk of
     // the previous `Regex::new("(?!x)x").unwrap()` (regex_lite
     // doesn't support look-around, so the sentinel would have
     // panicked the first time any invalid pattern reached this
-    // path).
-    guard
-        .get_or_compile(pattern)
-        .map(|r| r.is_match(message))
+    // path). Clone the compiled regex out of the cache so matching
+    // does not serialize every routing request on the global mutex.
+    cached_regex(cache, pattern)
+        .map(|regex| regex.is_match(message))
         .unwrap_or(false)
 }
 
@@ -1181,10 +1186,14 @@ mod tests {
         });
 
         assert!(poison.is_err());
+        assert!(state.is_poisoned());
         let mut recovered = lock_router_state(&state, "test_cache");
+        assert!(!state.is_poisoned());
         assert_eq!(&*recovered, &["cached", "stale"]);
         recovered.clear();
         assert!(recovered.is_empty());
+        drop(recovered);
+        assert!(state.lock().unwrap().is_empty());
     }
 
     fn ensure_registry() {
@@ -1740,6 +1749,20 @@ system_prompt = "override"
             1,
             "exactly one entry for a single distinct pattern"
         );
+    }
+
+    #[test]
+    fn cached_regex_releases_lock_before_matching() {
+        let cache = Mutex::new(RegexCache::new());
+        let regex = cached_regex(&cache, "hello").expect("valid pattern compiles");
+
+        let guard = cache
+            .try_lock()
+            .expect("cache lock must be released after cloning the regex");
+        assert_eq!(guard.entries.len(), 1);
+        drop(guard);
+
+        assert!(regex.is_match("hello world"));
     }
 
     #[test]

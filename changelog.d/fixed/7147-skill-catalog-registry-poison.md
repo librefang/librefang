@@ -1,0 +1,1 @@
+- Recover poisoned skill-catalog registry reads so installed skill lists and details remain available. (#7147) (@houko)

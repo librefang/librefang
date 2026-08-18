@@ -12,6 +12,19 @@ pub struct TemplateListParams {
     pub category: Option<String>,
 }
 
+fn serialize_workflow_template<T: serde::Serialize + ?Sized>(
+    template: &T,
+) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::to_value(template)
+}
+
+fn workflow_template_serialization_error(
+    error: serde_json::Error,
+) -> (StatusCode, Json<serde_json::Value>) {
+    tracing::error!(%error, "Failed to serialize workflow template");
+    ApiErrorResponse::internal("Failed to serialize workflow template").into_json_tuple()
+}
+
 /// GET /api/workflow-templates — List all workflow templates with optional search/filter.
 #[utoipa::path(
     get,
@@ -22,7 +35,8 @@ pub struct TemplateListParams {
         ("category" = Option<String>, Query, description = "Filter by category"),
     ),
     responses(
-        (status = 200, description = "List of workflow templates", body = Vec<serde_json::Value>)
+        (status = 200, description = "List of workflow templates", body = Vec<serde_json::Value>),
+        (status = 500, description = "Template serialization failed")
     )
 )]
 pub async fn list_workflow_templates(
@@ -58,12 +72,19 @@ pub async fn list_workflow_templates(
         })
         .collect();
 
-    let list: Vec<serde_json::Value> = filtered
+    let list: Vec<serde_json::Value> = match filtered
         .iter()
-        .filter_map(|t| serde_json::to_value(t).ok())
-        .collect();
+        .map(serialize_workflow_template)
+        .collect::<Result<_, _>>()
+    {
+        Ok(list) => list,
+        Err(error) => return workflow_template_serialization_error(error),
+    };
 
-    Json(serde_json::json!({ "templates": list }))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "templates": list })),
+    )
 }
 
 /// GET /api/workflow-templates/:id — Get full template details.
@@ -74,7 +95,8 @@ pub async fn list_workflow_templates(
     params(("id" = String, Path, description = "Template ID")),
     responses(
         (status = 200, description = "Template details", body = crate::types::JsonObject),
-        (status = 404, description = "Template not found")
+        (status = 404, description = "Template not found"),
+        (status = 500, description = "Template serialization failed")
     )
 )]
 pub async fn get_workflow_template(
@@ -82,10 +104,10 @@ pub async fn get_workflow_template(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.templates().get(&id).await {
-        Some(t) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(&t).unwrap_or_default()),
-        ),
+        Some(t) => match serialize_workflow_template(&t) {
+            Ok(value) => (StatusCode::OK, Json(value)),
+            Err(error) => workflow_template_serialization_error(error),
+        },
         None => {
             ApiErrorResponse::not_found(format!("Template '{}' not found", id)).into_json_tuple()
         }
@@ -151,4 +173,33 @@ pub async fn instantiate_template(
             "status": "instantiated",
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FailingSerialize;
+
+    impl serde::Serialize for FailingSerialize {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom("sensitive serialization detail"))
+        }
+    }
+
+    #[test]
+    fn template_serialization_failure_is_a_scrubbed_internal_error() {
+        let error = serialize_workflow_template(&FailingSerialize).unwrap_err();
+        let (status, Json(body)) = workflow_template_serialization_error(error);
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            body["error"]["message"],
+            "Failed to serialize workflow template"
+        );
+        assert!(!body.to_string().contains("sensitive serialization detail"));
+    }
 }
