@@ -289,7 +289,7 @@ fn redact_url_credentials(url: &str) -> String {
     if let Some(scheme_end) = url.find("://") {
         let after_scheme = &url[scheme_end + 3..];
         let authority_end = after_scheme
-            .find(|character: char| matches!(character, '/' | '?' | '#'))
+            .find(['/', '?', '#'])
             .unwrap_or(after_scheme.len());
         let authority = &after_scheme[..authority_end];
         if let Some(at_pos) = authority.rfind('@') {
