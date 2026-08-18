@@ -68,6 +68,7 @@ impl McpHealth {
         self.status = McpStatus::Error(error.clone());
         self.last_error = Some(error);
         self.consecutive_failures += 1;
+        self.reconnecting = false;
         self.connected_since = None;
     }
 
@@ -268,6 +269,22 @@ mod tests {
             monitor.mark_reconnecting("test");
         }
         assert!(!monitor.should_reconnect("test"));
+    }
+
+    #[test]
+    fn reconnect_failure_clears_in_progress_state_without_resetting_attempts() {
+        let monitor = HealthMonitor::new(HealthMonitorConfig::default());
+        monitor.register("test");
+        monitor.report_error("test", "initial failure".to_string());
+        monitor.mark_reconnecting("test");
+
+        monitor.report_error("test", "reconnect failed".to_string());
+
+        let health = monitor.get_health("test").unwrap();
+        assert!(!health.reconnecting);
+        assert_eq!(health.reconnect_attempts, 1);
+        assert_eq!(health.consecutive_failures, 2);
+        assert!(matches!(health.status, McpStatus::Error(_)));
     }
 
     #[test]

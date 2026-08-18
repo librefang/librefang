@@ -229,6 +229,24 @@ async fn authz_check_anonymous_caller_is_forbidden() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+    let denial = h
+        ._state
+        .kernel
+        .audit()
+        .recent(10)
+        .into_iter()
+        .rev()
+        .find(|entry| {
+            matches!(
+                entry.action,
+                librefang_kernel::audit::AuditAction::PermissionDenied
+            )
+        })
+        .expect("anonymous authz denial must be audited");
+    assert_eq!(
+        denial.detail, "authz/check endpoint denied for anonymous caller",
+        "anonymous audit attribution must identify the endpoint that was probed"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -244,6 +262,24 @@ async fn authz_check_viewer_role_is_forbidden() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+    let denial = h
+        ._state
+        .kernel
+        .audit()
+        .recent(10)
+        .into_iter()
+        .rev()
+        .find(|entry| {
+            matches!(
+                entry.action,
+                librefang_kernel::audit::AuditAction::PermissionDenied
+            )
+        })
+        .expect("authz denial must be audited");
+    assert_eq!(
+        denial.detail, "authz/check endpoint denied for role viewer",
+        "audit attribution must identify the endpoint that was probed"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
