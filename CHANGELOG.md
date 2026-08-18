@@ -9,7 +9,6 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Fixed
 
-- Prevent the resolved-issue reconciler from treating negated closing keywords as fixes, validate its lookback, serialize runs, and make live retries idempotent without blocking promotion from dry-run. (@xiaomo)
 - Escape every TOML control character when the dashboard serializes agent manifest strings, preserving carriage returns, tabs, and other control bytes as valid round-trippable TOML instead of producing a manifest the daemon cannot parse. (@TechWizard9999)
 
 ## [2026.7.31] - 2026-07-31
