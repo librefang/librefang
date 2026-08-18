@@ -162,6 +162,28 @@ describe("useSessionStream", () => {
     expect(
       result.current.events[result.current.events.length - 1]?.type,
     ).toBe("done");
+
+    act(() => ws.emitClose(1001));
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(result.current.lastError).toBeNull();
+  });
+
+  it("strips type from unknown envelopes before using the chunk fallback", () => {
+    const { result } = renderHook(() =>
+      useSessionStream("agent-1", "sess-1", {
+        webSocketCtor: FakeWebSocket as unknown as typeof WebSocket,
+        buildWebSocket: stubAuth,
+      }),
+    );
+    const ws = FakeWebSocket.instances[0];
+
+    act(() => ws.emitMessage(JSON.stringify({ type: "future_event", content: "kept" })));
+    expect(result.current.events[0]).toMatchObject({
+      type: "chunk",
+      data: { content: "kept" },
+    });
+    expect(result.current.events[0].data).not.toHaveProperty("type");
   });
 
   it("treats first-attempt close-without-data as a silent no-op (route not deployed)", () => {
