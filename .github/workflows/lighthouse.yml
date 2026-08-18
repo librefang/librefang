@@ -53,7 +53,9 @@ jobs:
 
       - name: Report Lighthouse annotation mode
         env:
-          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+          # PR-controlled install/build scripts run earlier in this job.
+          # Expose the annotation credential only on trusted manual runs.
+          LHCI_GITHUB_APP_TOKEN: ${{ github.event_name == 'workflow_dispatch' && secrets.LHCI_GITHUB_APP_TOKEN || '' }}
         run: |
           if [ -z "$LHCI_GITHUB_APP_TOKEN" ]; then
             echo "::warning::LHCI_GITHUB_APP_TOKEN is unavailable; running assertions without GitHub annotations"
@@ -66,4 +68,4 @@ jobs:
           cd web
           pnpm exec lhci autorun --config=lighthouserc.json
         env:
-          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+          LHCI_GITHUB_APP_TOKEN: ${{ github.event_name == 'workflow_dispatch' && secrets.LHCI_GITHUB_APP_TOKEN || '' }}

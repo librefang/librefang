@@ -1,1 +1,1 @@
-Lock Lighthouse CI in the Web dependency graph, remove unused PR write permission, and report explicitly when fork runs lack annotation credentials. (#7287) (@houko)
+Lock Lighthouse CI in the Web dependency graph, remove unused PR write permission, keep annotation credentials out of PR-controlled execution, and report explicitly when annotations are unavailable. (#7287) (@xiaomo)
