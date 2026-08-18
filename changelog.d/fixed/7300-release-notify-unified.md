@@ -1,1 +1,1 @@
-Restore consolidated release notifications against the unified Release workflow, with per-channel idempotency, verified external responses, and current job-status aggregation. (#7300) (@xiaomo)
+Restore consolidated release notifications against the unified Release workflow, with paginated per-channel idempotency, verified and redacted external failures, exact Discord bounds, and fail-closed job aggregation. (#7300) (@xiaomo)
