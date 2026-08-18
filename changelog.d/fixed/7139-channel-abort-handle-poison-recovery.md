@@ -1,0 +1,1 @@
+- Recover poisoned channel-bridge abort-handle state so tracked tasks still stop during shutdown and hot reload. (#7139) (@houko)

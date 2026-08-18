@@ -132,7 +132,8 @@ export function MultiSelectCmdk({
       ) {
         e.preventDefault();
         const cleaned = search.trim();
-        if (!value.includes(cleaned)) {
+        const normalized = cleaned.toLowerCase();
+        if (!value.some((item) => item.toLowerCase() === normalized)) {
           select(cleaned);
         } else {
           setSearch("");
@@ -224,7 +225,6 @@ export function MultiSelectCmdk({
                     key={option}
                     value={option}
                     role="option"
-                    aria-selected={false}
                     onSelect={select}
                     className="flex cursor-pointer flex-col items-start gap-0.5 px-3 py-2 text-xs text-text-dim transition-colors hover:bg-brand/5 data-[selected=true]:bg-brand/10 data-[selected=true]:text-brand"
                   >

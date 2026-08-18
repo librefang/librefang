@@ -4523,6 +4523,7 @@ dependencies = [
  "chrono",
  "criterion",
  "dashmap",
+ "fs2",
  "futures",
  "image",
  "include_dir",

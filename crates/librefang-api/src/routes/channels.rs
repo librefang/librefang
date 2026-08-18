@@ -950,6 +950,97 @@ enum ConfigureSidecarWriteError {
     Write(String),
 }
 
+fn read_file_snapshot(
+    path: &std::path::Path,
+) -> Result<Option<String>, ConfigureSidecarWriteError> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(ConfigureSidecarWriteError::Write(format!(
+            "failed to snapshot {} before sidecar configuration: {error}",
+            path.display()
+        ))),
+    }
+}
+
+#[cfg(unix)]
+fn sync_rollback_parent(path: &std::path::Path) -> Result<(), String> {
+    let parent = path.parent().ok_or("rollback path has no parent")?;
+    std::fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|error| format!("sync parent directory {}: {error}", parent.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_rollback_parent(_path: &std::path::Path) -> Result<(), String> {
+    Ok(())
+}
+
+fn restore_secret_snapshot(path: &std::path::Path, contents: Option<&str>) -> Result<(), String> {
+    let Some(contents) = contents else {
+        return match std::fs::remove_file(path) {
+            Ok(()) => sync_rollback_parent(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("remove {}: {error}", path.display())),
+        };
+    };
+
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let parent = path.parent().ok_or("secrets path has no parent")?;
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let staging = parent.join(format!(
+        ".secrets.env.rollback.{}.{seq}",
+        std::process::id()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&staging)
+        .map_err(|error| format!("create {}: {error}", staging.display()))?;
+    let write_result = file
+        .write_all(contents.as_bytes())
+        .and_then(|()| file.sync_all());
+    if let Err(error) = write_result {
+        drop(file);
+        let _ = std::fs::remove_file(&staging);
+        return Err(format!("write {}: {error}", staging.display()));
+    }
+    drop(file);
+    if let Err(error) = std::fs::rename(&staging, path) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(format!(
+            "rename {} to {}: {error}",
+            staging.display(),
+            path.display()
+        ));
+    }
+    sync_rollback_parent(path)
+}
+
+fn rollback_sidecar_configuration(
+    config_path: &std::path::Path,
+    original_config: Option<&str>,
+    secrets_path: &std::path::Path,
+    original_secrets: Option<&str>,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if let Err(error) = super::sidecar_toml::restore_sidecar_file(config_path, original_config) {
+        errors.push(format!("config.toml: {error}"));
+    }
+    if let Err(error) = restore_secret_snapshot(secrets_path, original_secrets) {
+        errors.push(format!("secrets.env: {error}"));
+    }
+    errors
+}
+
 fn write_sidecar_configuration(
     config_path: &std::path::Path,
     secrets_path: &std::path::Path,
@@ -963,28 +1054,21 @@ fn write_sidecar_configuration(
         return Err(ConfigureSidecarWriteError::IncludedSidecars(shadowing));
     }
 
-    // This is key-only extraction for membership tests.
-    // It mirrors `librefang_channels::sidecar::parse_secrets_env` without parsing values because dotenv quotes cannot occur in keys; if this code later compares values, use the channels helper so quote handling stays aligned with sidecar spawning.
-    let secrets_env_keys: std::collections::HashSet<String> = std::fs::read_to_string(secrets_path)
-        .ok()
-        .map(|s| {
-            s.lines()
-                .filter_map(|line| {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with('#') {
-                        return None;
-                    }
-                    let eq = line.find('=')?;
-                    let key = line[..eq].trim();
-                    if key.is_empty() {
-                        None
-                    } else {
-                        Some(key.to_string())
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    // Snapshot both files before the first mutation. A sidecar form spans
+    // config.toml and secrets.env, while each helper can only atomically
+    // replace one file. Keeping these snapshots under config_write_lock lets
+    // us compensate if any later secret or config write fails without
+    // overwriting another in-process writer.
+    let original_config = read_file_snapshot(config_path)?;
+    let original_secrets = read_file_snapshot(secrets_path)?;
+
+    let secrets_env_keys: std::collections::HashSet<String> =
+        librefang_channels::sidecar::parse_secrets_env_contents(
+            original_secrets.as_deref().unwrap_or_default(),
+        )
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
     let mut shadowed_secrets: Vec<String> = schema
         .fields
         .iter()
@@ -999,39 +1083,53 @@ fn write_sidecar_configuration(
         .collect();
     shadowed_secrets.sort();
 
-    let mut nonsecret_env = std::collections::BTreeMap::new();
-    for field in &schema.fields {
-        let Some(raw) = values.get(&field.key) else {
-            continue;
-        };
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            continue;
+    let write_result = (|| -> Result<(), String> {
+        let mut nonsecret_env = std::collections::BTreeMap::new();
+        for field in &schema.fields {
+            let Some(raw) = values.get(&field.key) else {
+                continue;
+            };
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if field.field_type == "secret" {
+                super::secrets_env::upsert_secret(secrets_path, &field.key, trimmed)?;
+            } else {
+                nonsecret_env.insert(field.key.clone(), trimmed.to_string());
+            }
         }
-        if field.field_type == "secret" {
-            super::secrets_env::upsert_secret(secrets_path, &field.key, trimmed)
-                .map_err(ConfigureSidecarWriteError::Write)?;
-        } else {
-            nonsecret_env.insert(field.key.clone(), trimmed.to_string());
-        }
-    }
 
-    let managed_env_keys: Vec<&str> = schema
-        .fields
-        .iter()
-        .filter(|field| field.field_type != "secret")
-        .map(|field| field.key.as_str())
-        .collect();
-    super::sidecar_toml::upsert_sidecar_block(
-        config_path,
-        entry.name,
-        entry.name,
-        entry.command,
-        entry.args,
-        &nonsecret_env,
-        &managed_env_keys,
-    )
-    .map_err(ConfigureSidecarWriteError::Write)?;
+        let managed_env_keys: Vec<&str> = schema
+            .fields
+            .iter()
+            .filter(|field| field.field_type != "secret")
+            .map(|field| field.key.as_str())
+            .collect();
+        super::sidecar_toml::upsert_sidecar_block(
+            config_path,
+            entry.name,
+            entry.name,
+            entry.command,
+            entry.args,
+            &nonsecret_env,
+            &managed_env_keys,
+        )
+    })();
+    if let Err(error) = write_result {
+        let rollback_errors = rollback_sidecar_configuration(
+            config_path,
+            original_config.as_deref(),
+            secrets_path,
+            original_secrets.as_deref(),
+        );
+        let error = if rollback_errors.is_empty() {
+            error
+        } else {
+            format!("{error}; rollback failed: {}", rollback_errors.join("; "))
+        };
+        return Err(ConfigureSidecarWriteError::Write(error));
+    }
 
     Ok(shadowed_secrets)
 }
@@ -1530,7 +1628,7 @@ pub async fn get_channel_qr(
 pub async fn list_channel_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let channels_dir = state.kernel.home_dir().join("channels");
     let metadata = librefang_kernel::channel_registry::load_channel_metadata(&channels_dir);
-    Json(serde_json::to_value(&metadata).unwrap_or_default())
+    Json(metadata)
 }
 
 // `test_channel_status_tests` + `instance_helper_tests` modules
@@ -1864,5 +1962,72 @@ mod sidecar_configuration_write_tests {
             std::fs::read_to_string(config_path).unwrap(),
             "include = [\"channels.toml\"]\n"
         );
+    }
+
+    #[test]
+    fn config_write_failure_restores_existing_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let secrets_path = dir.path().join("secrets.env");
+        let original_config = "sidecar_channels = \"not-an-array\"\n";
+        let original_secrets = "TEST_TOKEN=old-value\nKEEP_ME=unchanged\n";
+        std::fs::write(&config_path, original_config).unwrap();
+        std::fs::write(&secrets_path, original_secrets).unwrap();
+        let values = HashMap::from([("TEST_TOKEN".to_string(), "new-value".to_string())]);
+
+        let result = write_sidecar_configuration(
+            &config_path,
+            &secrets_path,
+            &TEST_ENTRY,
+            &schema(),
+            &values,
+        );
+
+        assert!(matches!(result, Err(ConfigureSidecarWriteError::Write(_))));
+        assert_eq!(
+            std::fs::read_to_string(config_path).unwrap(),
+            original_config
+        );
+        assert_eq!(
+            std::fs::read_to_string(secrets_path).unwrap(),
+            original_secrets
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(dir.path().join("secrets.env"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn config_write_failure_removes_new_secrets_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let secrets_path = dir.path().join("secrets.env");
+        let original_config = "sidecar_channels = \"not-an-array\"\n";
+        std::fs::write(&config_path, original_config).unwrap();
+        let values = HashMap::from([("TEST_TOKEN".to_string(), "new-value".to_string())]);
+
+        let result = write_sidecar_configuration(
+            &config_path,
+            &secrets_path,
+            &TEST_ENTRY,
+            &schema(),
+            &values,
+        );
+
+        assert!(matches!(result, Err(ConfigureSidecarWriteError::Write(_))));
+        assert_eq!(
+            std::fs::read_to_string(config_path).unwrap(),
+            original_config
+        );
+        assert!(!secrets_path.exists());
     }
 }

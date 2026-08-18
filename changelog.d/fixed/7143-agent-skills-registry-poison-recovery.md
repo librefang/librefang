@@ -1,0 +1,1 @@
+- Recover poisoned agent skill-assignment registry reads so available skills remain visible without repeated recovery. (#7143) (@houko)
