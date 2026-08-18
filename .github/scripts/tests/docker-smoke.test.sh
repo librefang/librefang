@@ -40,6 +40,7 @@ run_smoke() {
     SMOKE_LOG="$log" \
     DOCKER_SMOKE_ATTEMPTS=2 \
     DOCKER_SMOKE_INTERVAL_SECONDS=0 \
+    DOCKER_SMOKE_CURL_TIMEOUT_SECONDS=3 \
     sh "$SCRIPT"
 }
 
@@ -48,6 +49,8 @@ grep -q 'curl .*\/api/health' "$TEST_ROOT/healthy.log" \
   || { echo 'FAIL: health endpoint was not probed' >&2; exit 1; }
 grep -q 'curl .*\/api/ready' "$TEST_ROOT/healthy.log" \
   || { echo 'FAIL: readiness endpoint was not probed' >&2; exit 1; }
+[ "$(grep -c '^curl --max-time 3 ' "$TEST_ROOT/healthy.log")" -eq 2 ] \
+  || { echo 'FAIL: both HTTP probes should use the configured timeout' >&2; exit 1; }
 
 if run_smoke crashed >/dev/null 2>&1; then
   echo 'FAIL: exited container should fail the smoke test' >&2

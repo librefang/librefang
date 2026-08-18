@@ -5,6 +5,7 @@ container="${DOCKER_SMOKE_CONTAINER:-librefang-ci}"
 image="${DOCKER_SMOKE_IMAGE:-librefang:ci}"
 attempts="${DOCKER_SMOKE_ATTEMPTS:-30}"
 interval="${DOCKER_SMOKE_INTERVAL_SECONDS:-2}"
+curl_timeout="${DOCKER_SMOKE_CURL_TIMEOUT_SECONDS:-2}"
 base_url="${DOCKER_SMOKE_BASE_URL:-http://127.0.0.1:4545}"
 
 docker run -d --name "$container" -p 4545:4545 "$image"
@@ -18,8 +19,8 @@ while [ "$attempt" -le "$attempts" ]; do
     exit 1
   fi
 
-  if curl -fsS "$base_url/api/health" >/dev/null \
-    && curl -fsS "$base_url/api/ready" >/dev/null; then
+  if curl --max-time "$curl_timeout" -fsS "$base_url/api/health" >/dev/null \
+    && curl --max-time "$curl_timeout" -fsS "$base_url/api/ready" >/dev/null; then
     echo "✓ /api/health and /api/ready responded on attempt $attempt"
     exit 0
   fi
