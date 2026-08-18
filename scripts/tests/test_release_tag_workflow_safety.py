@@ -226,6 +226,7 @@ def main() -> None:
             "CHECKED_OUT_SHA=$(git rev-parse HEAD)",
             "CURRENT_MAIN_SHA=$(git rev-parse FETCH_HEAD)",
             'if [ "$CHECKED_OUT_SHA" != "$CURRENT_MAIN_SHA" ]',
+            'git push --atomic origin "HEAD:refs/heads/main" "refs/tags/$VERSION"',
         )
     ):
         raise SystemExit("release-tag workflow can tag a stale main checkout")
