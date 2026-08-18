@@ -1,6 +1,53 @@
 use super::*;
 
 #[test]
+fn state_file_lock_registry_preserves_entries_and_clears_poison() {
+    let locks = StateFileLocks::default();
+    let preserved = StateFileLock::default();
+    let poison = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut map = locks.lock().unwrap();
+                map.insert("preserved".to_string(), std::sync::Arc::clone(&preserved));
+                panic!("poison plugin state-file lock registry");
+            })
+            .join()
+    });
+
+    assert!(poison.is_err());
+    assert!(locks.is_poisoned());
+    let mut recovered = lock_state_file_registry(&locks);
+    assert!(std::sync::Arc::ptr_eq(&recovered["preserved"], &preserved));
+    recovered.insert("new".to_string(), StateFileLock::default());
+    drop(recovered);
+
+    assert!(!locks.is_poisoned());
+    assert_eq!(lock_state_file_registry(&locks).len(), 2);
+}
+
+#[tokio::test]
+async fn process_pool_preserves_slots_and_clears_poison() {
+    let pool = HookProcessPool::new();
+    let preserved = HookProcessSlot::default();
+    let poison = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut processes = pool.procs.lock().unwrap();
+                processes.insert("preserved".to_string(), std::sync::Arc::clone(&preserved));
+                panic!("poison persistent plugin process registry");
+            })
+            .join()
+    });
+
+    assert!(poison.is_err());
+    assert!(pool.procs.is_poisoned());
+    assert!(pool.health_check().await.is_empty());
+    assert!(!pool.procs.is_poisoned());
+    let processes = pool.lock_processes();
+    assert!(std::sync::Arc::ptr_eq(&processes["preserved"], &preserved));
+}
+
+#[test]
 fn version_args_are_runtime_specific() {
     // Go and Lua have their own conventions.
     assert_eq!(PluginRuntime::Go.version_args(), &["version"]);

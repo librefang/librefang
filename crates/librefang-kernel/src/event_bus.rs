@@ -59,6 +59,14 @@ fn payload_kind(payload: &EventPayload) -> &'static str {
 }
 
 impl EventBus {
+    fn lock_drop_warning_timestamp(&self) -> std::sync::MutexGuard<'_, std::time::Instant> {
+        self.last_drop_warn.lock().unwrap_or_else(|poisoned| {
+            warn!("Event bus drop-warning lock poisoned; recovering rate-limit state");
+            self.last_drop_warn.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+
     /// Create a new event bus.
     pub fn new() -> Self {
         // 4 096-event capacity for the global broadcast channel (up from 1 024).
@@ -120,17 +128,16 @@ impl EventBus {
                 if let Some(sender) = self.agent_channels.get(agent_id) {
                     if sender.send(Arc::clone(&event)).is_err() {
                         let total = self.dropped_count.fetch_add(1, Ordering::Relaxed) + 1;
-                        if let Ok(mut last) = self.last_drop_warn.lock() {
-                            if last.elapsed() >= std::time::Duration::from_secs(10) {
-                                warn!(
-                                    agent_id = %agent_id,
-                                    event_id = %event.id,
-                                    event_kind = payload_kind(&event.payload),
-                                    total_dropped = total,
-                                    "Event bus: agent has no active receiver, event dropped — check agent health",
-                                );
-                                *last = std::time::Instant::now();
-                            }
+                        let mut last = self.lock_drop_warning_timestamp();
+                        if last.elapsed() >= std::time::Duration::from_secs(10) {
+                            warn!(
+                                agent_id = %agent_id,
+                                event_id = %event.id,
+                                event_kind = payload_kind(&event.payload),
+                                total_dropped = total,
+                                "Event bus: agent has no active receiver, event dropped — check agent health",
+                            );
+                            *last = std::time::Instant::now();
                         }
                     }
                 }
@@ -152,16 +159,15 @@ impl EventBus {
                 if agent_drops > 0 {
                     let total =
                         self.dropped_count.fetch_add(agent_drops, Ordering::Relaxed) + agent_drops;
-                    if let Ok(mut last) = self.last_drop_warn.lock() {
-                        if last.elapsed() >= std::time::Duration::from_secs(10) {
-                            warn!(
-                                dropped = agent_drops,
-                                total_dropped = total,
-                                event_kind = payload_kind(&event.payload),
-                                "Event bus: broadcast reached agents with no active receivers, events dropped",
-                            );
-                            *last = std::time::Instant::now();
-                        }
+                    let mut last = self.lock_drop_warning_timestamp();
+                    if last.elapsed() >= std::time::Duration::from_secs(10) {
+                        warn!(
+                            dropped = agent_drops,
+                            total_dropped = total,
+                            event_kind = payload_kind(&event.payload),
+                            "Event bus: broadcast reached agents with no active receivers, events dropped",
+                        );
+                        *last = std::time::Instant::now();
                     }
                 }
             }
@@ -239,17 +245,16 @@ impl EventBus {
     /// otherwise hide missed triggers (issue #3630).
     pub fn record_consumer_lag(&self, n: u64, context: &'static str) {
         let total = self.dropped_count.fetch_add(n, Ordering::Relaxed) + n;
-        if let Ok(mut last) = self.last_drop_warn.lock() {
-            if last.elapsed() >= std::time::Duration::from_secs(10) {
-                error!(
-                    lagged = n,
-                    total_dropped = total,
-                    context = context,
-                    "Event bus: consumer lagged behind broadcast queue, events dropped — \
-                     receiver should be drained faster or buffer increased",
-                );
-                *last = std::time::Instant::now();
-            }
+        let mut last = self.lock_drop_warning_timestamp();
+        if last.elapsed() >= std::time::Duration::from_secs(10) {
+            error!(
+                lagged = n,
+                total_dropped = total,
+                context = context,
+                "Event bus: consumer lagged behind broadcast queue, events dropped — \
+                 receiver should be drained faster or buffer increased",
+            );
+            *last = std::time::Instant::now();
         }
     }
 
@@ -346,6 +351,23 @@ mod tests {
             after > before,
             "first lag burst must advance last_drop_warn — warmup regression"
         );
+    }
+
+    #[tokio::test]
+    async fn drop_warning_lock_recovers_after_held_lock_panic() {
+        let bus = EventBus::new();
+        let before = *bus.last_drop_warn.lock().unwrap();
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = bus.last_drop_warn.lock().unwrap();
+            panic!("poison event bus drop-warning lock");
+        });
+        assert!(bus.last_drop_warn.is_poisoned());
+
+        bus.record_consumer_lag(2, "poison_recovery_test");
+
+        assert_eq!(bus.dropped_count(), 2);
+        assert!(!bus.last_drop_warn.is_poisoned());
+        assert!(*bus.last_drop_warn.lock().unwrap() > before);
     }
 
     #[tokio::test]

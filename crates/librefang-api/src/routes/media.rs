@@ -29,13 +29,15 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 
 // ── Known media providers (mirrors MEDIA_PROVIDER_ORDER in runtime) ─────
 
-/// Known media provider names, in preference order.
+/// Built-in media provider names, in preference order, for
+/// `GET /media/providers` to report configuration status against.
+///
+/// This is a **display list, not an allowlist**: `create_media_driver` also
+/// serves user-defined providers that have `provider_urls.<name>` configured,
+/// via the generic OpenAI-compatible driver. Gating a route on membership here
+/// would reject those.
 /// Keep in sync with `librefang_kernel::media::MEDIA_PROVIDER_ORDER`.
 const KNOWN_MEDIA_PROVIDERS: &[&str] = &["openai", "gemini", "elevenlabs", "minimax", "google_tts"];
-
-fn is_known_media_provider(provider: &str) -> bool {
-    KNOWN_MEDIA_PROVIDERS.contains(&provider)
-}
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -328,9 +330,6 @@ pub async fn poll_video_task(
                 .into_response();
         }
     };
-    if !is_known_media_provider(&provider) {
-        return ApiErrorResponse::bad_request("Unknown media provider").into_response();
-    }
 
     let driver = match state.media_drivers.get_or_create(&provider, None) {
         Ok(d) => d,
@@ -364,12 +363,29 @@ pub async fn poll_video_task(
         }
     }
 
-    // Return current status for non-completed tasks
-    Json(serde_json::json!({
-        "status": status,
-        "task_id": task_id,
-    }))
-    .into_response()
+    // Keep the HTTP contract flat and stable. `MediaTaskStatus` itself is a
+    // tagged enum (`{"state":"failed","error":"..."}`), but dashboard
+    // consumers expect a string status plus an optional sibling error.
+    Json(video_task_status_json(status, &task_id)).into_response()
+}
+
+fn video_task_status_json(
+    status: librefang_types::media::MediaTaskStatus,
+    task_id: &str,
+) -> serde_json::Value {
+    match status {
+        librefang_types::media::MediaTaskStatus::Failed { error } => {
+            serde_json::json!({
+                "status": "failed",
+                "task_id": task_id,
+                "error": error,
+            })
+        }
+        status => serde_json::json!({
+            "status": status.to_string(),
+            "task_id": task_id,
+        }),
+    }
 }
 
 // ── POST /media/music ───────────────────────────────────────────────────
@@ -605,15 +621,45 @@ mod audit_tests {
     }
 
     #[test]
-    fn video_polling_only_accepts_known_media_providers() {
-        assert!(is_known_media_provider("minimax"));
-        assert!(!is_known_media_provider("../../custom"));
+    fn unknown_video_poll_provider_keeps_the_invalid_request_code() {
+        let err = media_error_response(MediaError::InvalidRequest(
+            "Unknown media provider 'definitely_not_a_provider' and no base_url configured."
+                .to_string(),
+        ));
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code.as_deref(), Some("invalid_request"));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use librefang_types::media::MediaTaskStatus;
+
+    #[test]
+    fn video_task_status_json_flattens_active_status() {
+        assert_eq!(
+            video_task_status_json(MediaTaskStatus::Processing, "task-1"),
+            serde_json::json!({"status": "processing", "task_id": "task-1"}),
+        );
+    }
+
+    #[test]
+    fn video_task_status_json_flattens_failure_error() {
+        assert_eq!(
+            video_task_status_json(
+                MediaTaskStatus::Failed {
+                    error: "provider failed".to_string(),
+                },
+                "task-2",
+            ),
+            serde_json::json!({
+                "status": "failed",
+                "task_id": "task-2",
+                "error": "provider failed",
+            }),
+        );
+    }
 
     #[test]
     fn internal_media_errors_are_scrubbed_but_client_errors_are_preserved() {

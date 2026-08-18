@@ -1,0 +1,1 @@
+- Recover poisoned memory-wiki write serialization so page, compile-state, index, and backlink updates continue without disabling hand-edit conflict protection. (@xiaomo)

@@ -504,7 +504,6 @@ function VideoPanel({
     taskId && taskProvider ? { taskId, provider: taskProvider } : null,
     {
       enabled: Boolean(taskId && taskProvider), // Only poll after a submission creates a task.
-      refetchInterval: 5_000,
     },
   );
 

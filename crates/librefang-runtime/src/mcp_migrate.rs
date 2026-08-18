@@ -21,7 +21,9 @@
 
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use tracing::{debug, info, warn};
 
@@ -380,8 +382,103 @@ fn upsert_mcp_server_from_template(
     }
 
     let toml_string = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
-    std::fs::write(config_path, toml_string).map_err(|e| e.to_string())?;
+    durable_atomic_write(config_path, toml_string.as_bytes()).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn durable_atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "target path has no filename",
+        )
+    })?;
+    let mut staging_name = file_name.to_os_string();
+    staging_name.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let staging = parent.join(staging_name);
+
+    let publish_result = (|| -> std::io::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+            let mode = std::fs::metadata(path)
+                .ok()
+                .map(|metadata| metadata.permissions().mode())
+                .unwrap_or(0o600);
+            options.mode(mode);
+            mode
+        };
+        let mut file = options.open(&staging)?;
+        // `OpenOptionsExt::mode` is masked by the process umask on creation, so a umask that clears bits present in `mode` would silently produce a file more restrictive than the permissions we are meant to preserve.
+        // Force the exact bits explicitly, bypassing the umask.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            file.set_permissions(std::fs::Permissions::from_mode(mode & 0o7777))?;
+        }
+        file.write_all(content)?;
+        file.sync_all()?;
+        replace_file(&staging, path)
+    })();
+
+    if publish_result.is_err() {
+        let _ = std::fs::remove_file(&staging);
+        return publish_result;
+    }
+
+    // The rename has already published the complete file at this point.
+    // A parent-directory fsync failure weakens crash durability, but reporting the whole write as failed makes migration bookkeeping claim the server was skipped even though the new config is live and the legacy source is about to be archived.
+    #[cfg(unix)]
+    if let Err(error) = std::fs::File::open(parent).and_then(|directory| directory.sync_all()) {
+        warn!(
+            path = %path.display(),
+            %error,
+            "MCP config was published but its parent directory could not be synced"
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file(staging: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::rename(staging, target)
+}
+
+#[cfg(windows)]
+fn replace_file(staging: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let staging: Vec<u16> = staging.as_os_str().encode_wide().chain(Some(0)).collect();
+    let target: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: Both pointers reference live, NUL-terminated UTF-16 buffers.
+    let replaced = unsafe {
+        MoveFileExW(
+            staging.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
@@ -415,6 +512,85 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let result = migrate_if_needed(tmp.path()).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn durable_atomic_write_replaces_config_without_staging_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        write(&path, "old = true\n");
+
+        durable_atomic_write(&path, b"new = true\n").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new = true\n");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    /// A crash or a rename failure between the staging write and the publish step must not leave debris behind, and it must not touch the target at all — the whole point of staging-then-renaming is that a caller interrupted mid-migration can retry against an untouched original.
+    /// Forces the rename/`MoveFileExW` step to fail by making the target path an existing directory (renaming a regular file onto a directory always fails), mirroring `librefang_api::routes::sidecar_toml::atomic_write_removes_staging_file_when_rename_fails`.
+    #[test]
+    fn durable_atomic_write_removes_staging_file_when_rename_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target_dir = tmp.path().join("config.toml");
+        std::fs::create_dir(&target_dir).unwrap();
+
+        durable_atomic_write(&target_dir, b"new = true\n").unwrap_err();
+
+        assert!(
+            target_dir.is_dir(),
+            "a failed publish must leave the original target untouched"
+        );
+        assert_eq!(
+            std::fs::read_dir(tmp.path()).unwrap().count(),
+            1,
+            "a failed rename must not leave a staging file behind"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_atomic_write_preserves_config_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        write(&path, "old = true\n");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        durable_atomic_write(&path, b"new = true\n").unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+
+        let new_path = tmp.path().join("new-config.toml");
+        durable_atomic_write(&new_path, b"secret = true\n").unwrap();
+        assert_eq!(
+            std::fs::metadata(&new_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    /// `OpenOptionsExt::mode` is masked by the process umask on creation, so preserving the existing mode only by passing it to `.mode()` silently drops any bit the umask also covers (e.g. group/other write under the common 0o022 umask).
+    /// This pins that the helper forces the exact existing bits via an explicit `set_permissions` afterward, rather than only working by coincidence when the existing mode happens not to overlap the umask.
+    #[cfg(unix)]
+    #[test]
+    fn durable_atomic_write_preserves_bits_that_conflict_with_process_umask() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        write(&path, "old = true\n");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+        durable_atomic_write(&path, b"new = true\n").unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o666,
+            "existing permissions must survive the process umask"
+        );
     }
 
     #[test]

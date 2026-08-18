@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { X, Trash2, Sparkles, ChevronDown, ChevronUp } from "lucide-react";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useUIStore } from "../../lib/store";
 
 export function SkillOutputPanel() {
@@ -11,6 +11,8 @@ export function SkillOutputPanel() {
   const isSidebarCollapsed = useUIStore((s) => s.isSidebarCollapsed);
   const isMobileMenuOpen = useUIStore((s) => s.isMobileMenuOpen);
   const [collapsed, setCollapsed] = useState(false);
+  const contentId = useId();
+  const clearLabel = t("common.clear", { defaultValue: "Clear" });
 
   if (skillOutputs.length === 0) return null;
 
@@ -22,6 +24,8 @@ export function SkillOutputPanel() {
           <div className="flex items-center justify-between px-3 sm:px-4 py-2 border-b border-border-subtle/50">
             <button
               onClick={() => setCollapsed(c => !c)}
+              aria-expanded={!collapsed}
+              aria-controls={contentId}
               className="flex items-center gap-2 text-xs font-bold text-brand"
             >
               <Sparkles className="w-3.5 h-3.5" />
@@ -33,8 +37,9 @@ export function SkillOutputPanel() {
             </button>
             <button
               onClick={clearSkillOutputs}
+              aria-label={clearLabel}
               className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 transition-colors"
-              title={t("common.clear", { defaultValue: "Clear" })}
+              title={clearLabel}
             >
               <Trash2 className="w-3.5 h-3.5" />
             </button>
@@ -42,7 +47,7 @@ export function SkillOutputPanel() {
 
           {/* Content */}
           {!collapsed && (
-            <div className="max-h-48 sm:max-h-64 overflow-y-auto p-2 sm:p-3 space-y-2">
+            <div id={contentId} className="max-h-48 sm:max-h-64 overflow-y-auto p-2 sm:p-3 space-y-2">
               {skillOutputs.map((output) => (
                 <div
                   key={output.id}
@@ -68,6 +73,7 @@ export function SkillOutputPanel() {
                   </div>
                   <button
                     onClick={() => dismissSkillOutput(output.id)}
+                    aria-label={`${t("common.remove", { defaultValue: "Remove" })} ${output.skillName}`}
                     className="p-1 rounded text-text-dim/20 hover:text-text-dim opacity-100 sm:pointer-fine:opacity-0 sm:pointer-fine:group-hover:opacity-100 transition-[colors,opacity] shrink-0"
                   >
                     <X className="w-3 h-3" />
