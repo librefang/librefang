@@ -1844,14 +1844,9 @@ mod tests {
 
     #[test]
     fn flow_vault_cleanup_removes_all_per_flow_keys_on_drop() {
-        // Vault crypto needs a 32-byte key. Pin it through the crate's single
-        // owner rather than setting the variable here: `server.rs`'s
-        // TOTP-lockout tests pin one too, and under `cargo test` (one process,
-        // tests as threads) two different keys race — whoever writes last wins
-        // and the loser's freshly written vault no longer decrypts, which is
-        // how this test came to fail with `Decryption failed: aead::Error`
-        // while passing in isolation. nextest hides it by giving every test its
-        // own process, so CI never saw it.
+        // Vault crypto needs a 32-byte key.
+        // Pin it through the crate's single owner rather than setting the variable here: `server.rs`'s TOTP-lockout tests pin one too, and under `cargo test` (one process, tests as threads) two different keys race — whoever writes last wins and the loser's freshly written vault no longer decrypts, which is how this test came to fail with `Decryption failed: aead::Error` while passing in isolation.
+        // nextest hides it by giving every test its own process, so CI never saw it.
         crate::test_vault::pin_vault_key();
         let home = std::env::temp_dir().join(format!("lf-vault-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
