@@ -7,7 +7,7 @@
 # four are being unified onto `ApiErrorResponse` (`{"error": "<string>"}`,
 # defined in `crates/librefang-api/src/types.rs`).
 #
-# This script grep-rejects new occurrences of the two ad-hoc shapes from
+# This script rejects new occurrences of the two ad-hoc shapes from
 # coming back into route handlers. It enforces the rule on already-clean
 # files. Files that still carry legacy shapes are listed in
 # LEGACY_FILES below with their cleanup tracking issue, and are exempt
@@ -80,14 +80,15 @@ import sys
 
 root, shape = sys.argv[1:]
 patterns = {
-    "detail": re.compile(r'json!\(\{\s*"detail"\s*:', re.DOTALL),
+    "detail": re.compile(r'json\s*!\s*\(\s*\{\s*"detail"\s*:', re.DOTALL),
     "status_error": re.compile(
-        r'json!\(\{\s*"status"\s*:\s*"error"', re.DOTALL
+        r'json\s*!\s*\(\s*\{\s*"status"\s*:\s*"error"', re.DOTALL
     ),
 }
-pattern = patterns[shape]
 try:
-    for directory, _, filenames in os.walk(root, followlinks=False):
+    pattern = patterns[shape]
+    for directory, directories, filenames in os.walk(root, followlinks=False):
+        directories.sort()
         for filename in sorted(filenames):
             if not filename.endswith(".rs"):
                 continue

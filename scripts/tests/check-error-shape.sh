@@ -9,8 +9,8 @@ trap 'rm -rf "$WORK"' EXIT
 git -C "$WORK" init -q
 mkdir -p "$WORK/crates/librefang-api/src/routes"
 
-# Run once with the normal toolchain and once without rg to prove the scanner
-# does not depend on platform-specific multiline grep behavior.
+# Run once with the normal toolchain and once with only the declared runtime
+# dependencies available.
 NO_RG_BIN="$WORK/no-rg-bin"
 mkdir -p "$NO_RG_BIN"
 for utility in git grep python3; do
@@ -34,11 +34,25 @@ grep -Fq 'OK: no new forbidden error shapes' <<<"$default_output"
 fallback_output=$(run_check "$NO_RG_BIN")
 grep -Fq 'OK: no new forbidden error shapes' <<<"$fallback_output"
 
+NO_PYTHON_BIN="$WORK/no-python-bin"
+mkdir -p "$NO_PYTHON_BIN"
+for utility in git grep; do
+  ln -s "$(command -v "$utility")" "$NO_PYTHON_BIN/$utility"
+done
+set +e
+missing_python=$(run_check "$NO_PYTHON_BIN" 2>&1)
+missing_python_status=$?
+set -e
+if [[ "$missing_python_status" != 2 || "$missing_python" != *'python3 is required'* ]]; then
+  echo "FAIL: a missing scanner dependency did not produce exit code 2" >&2
+  exit 1
+fi
+
 cat >"$WORK/crates/librefang-api/src/routes/new.rs" <<'RS'
 let response = json!({
     "detail": reason,
 });
-let other = json!({
+let other = json ! ({
     "status": "error",
     "message": reason,
 });
