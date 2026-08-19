@@ -30,6 +30,13 @@ const TEMPLATE_STALE_MS = 300_000;
 const OPERATOR_PENDING_STALE_MS = 5_000;
 const OPERATOR_PENDING_REFETCH_MS = 15_000;
 
+function requireId(id: string, options: QueryOverrides): QueryOverrides {
+  return {
+    ...options,
+    enabled: !!id && options.enabled !== false,
+  };
+}
+
 export const workflowQueries = {
   list: () =>
     queryOptions({
@@ -78,9 +85,9 @@ export const workflowQueries = {
       refetchInterval: OPERATOR_PENDING_REFETCH_MS,
       refetchIntervalInBackground: false, // #3393
     }),
-  // Single-run operator-pause inspector. The 409 ("not_operator_pause")
-  // response is a legitimate not-pending state — the consumer reads it
-  // by branching on `ApiError.status === 409` rather than retrying.
+  // Single-run operator-pause inspector. A 404 or 409
+  // ("not_operator_pause") is a legitimate not-pending state — the consumer
+  // branches on ApiError.status rather than retrying.
   operatorPause: (runId: string) =>
     queryOptions({
       queryKey: workflowKeys.operatorPause(runId),
@@ -103,15 +110,15 @@ export function useWorkflows(options: QueryOverrides = {}) {
 }
 
 export function useWorkflowDetail(workflowId: string, options: QueryOverrides = {}) {
-  return useQuery(withOverrides(workflowQueries.detail(workflowId), options));
+  return useQuery(withOverrides(workflowQueries.detail(workflowId), requireId(workflowId, options)));
 }
 
 export function useWorkflowRuns(workflowId: string, options: QueryOverrides = {}) {
-  return useQuery(withOverrides(workflowQueries.runs(workflowId), options));
+  return useQuery(withOverrides(workflowQueries.runs(workflowId), requireId(workflowId, options)));
 }
 
 export function useWorkflowRunDetail(runId: string, options: QueryOverrides = {}) {
-  return useQuery(withOverrides(workflowQueries.runDetail(runId), options));
+  return useQuery(withOverrides(workflowQueries.runDetail(runId), requireId(runId, options)));
 }
 
 export function useWorkflowTemplates(q?: string, category?: string, options: QueryOverrides = {}) {
@@ -130,5 +137,5 @@ export function usePendingOperatorRuns(options: QueryOverrides = {}) {
  *  409 (`error.status` from `ApiError`) to render "this run isn't
  *  paused at an operator step" instead of the action bar. */
 export function useWorkflowOperatorPause(runId: string, options: QueryOverrides = {}) {
-  return useQuery(withOverrides(workflowQueries.operatorPause(runId), options));
+  return useQuery(withOverrides(workflowQueries.operatorPause(runId), requireId(runId, options)));
 }

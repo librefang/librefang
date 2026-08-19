@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useId, memo, type ReactNode } from 
 import { X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
+import { APPLE_EASE, fadeInScale, slideInRight } from "../../lib/motion";
 import { useFocusTrap } from "../../lib/useFocusTrap";
 
 interface ModalProps {
@@ -63,10 +64,6 @@ const SIZE_CLASSES: Record<NonNullable<ModalProps["size"]>, string> = {
   "6xl": "sm:max-w-6xl",
   "7xl": "sm:max-w-7xl",
 };
-
-// Apple-style easing, mirrors --apple-ease in index.css so motion-driven
-// transitions match the existing CSS keyframes for non-Modal animations.
-const APPLE_EASE: [number, number, number, number] = [0.25, 0.1, 0.25, 1];
 
 /// Shared modal shell. Handles the cross-cutting concerns every page
 /// modal needs:
@@ -212,19 +209,7 @@ export const Modal = memo(function Modal({
     ? `${isDrawer ? "pointer-events-auto " : ""}relative w-full ${SIZE_CLASSES[size]} h-full sm:rounded-l-2xl sm:border-l border-border-subtle bg-surface shadow-2xl ${overflowVisible ? "overflow-visible" : "overflow-hidden"} flex flex-col`
     : `relative w-full ${SIZE_CLASSES[size]} rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl max-h-[90vh] ${overflowVisible ? "overflow-visible" : "overflow-hidden"} flex flex-col`;
 
-  const dialogMotion = isRightDocked
-    ? {
-        initial: { x: "100%" as const, opacity: 0.6 },
-        animate: { x: 0, opacity: 1 },
-        exit: { x: "100%" as const, opacity: 0.6 },
-        transition: { duration: 0.28, ease: APPLE_EASE },
-      }
-    : {
-        initial: { opacity: 0, scale: 0.92, filter: "blur(8px)" },
-        animate: { opacity: 1, scale: 1, filter: "blur(0px)" },
-        exit: { opacity: 0, scale: 0.96, filter: "blur(6px)" },
-        transition: { duration: 0.22, ease: APPLE_EASE },
-      };
+  const dialogVariants = isRightDocked ? slideInRight : fadeInScale;
 
   return (
     <AnimatePresence>
@@ -249,7 +234,10 @@ export const Modal = memo(function Modal({
             {...(title ? { "aria-labelledby": titleId } : {})}
             className={dialogClass}
             onClick={(e) => e.stopPropagation()}
-            {...dialogMotion}
+            variants={dialogVariants}
+            initial="initial"
+            animate="animate"
+            exit="exit"
           >
             {(title || !hideCloseButton) && (
               <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle shrink-0">

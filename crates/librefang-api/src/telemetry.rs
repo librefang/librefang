@@ -14,10 +14,25 @@ static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 /// Type-erased layer that can be swapped into the OTel reload slot.
 pub type OtelBoxedLayer = Box<dyn tracing_subscriber::Layer<Registry> + Send + Sync + 'static>;
 
+type OtelReloadHandle = reload::Handle<Option<OtelBoxedLayer>, Registry>;
+
 /// Handle used by `init_otel_tracing` to swap the real OTel layer into the
 /// pre-registered reload slot. Set once, at CLI tracing init time.
-static OTEL_RELOAD_HANDLE: OnceLock<reload::Handle<Option<OtelBoxedLayer>, Registry>> =
-    OnceLock::new();
+static OTEL_RELOAD_HANDLE: OnceLock<OtelReloadHandle> = OnceLock::new();
+
+fn store_otel_reload_handle(slot: &OnceLock<OtelReloadHandle>, handle: OtelReloadHandle) {
+    if slot.set(handle).is_err() {
+        panic!("install_otel_reload_layer must be called at most once");
+    }
+}
+
+fn require_otel_reload_handle<T>(handle: Option<T>) -> std::io::Result<T> {
+    handle.ok_or_else(|| {
+        std::io::Error::other(
+            "OTel reload slot is not registered; call install_otel_reload_layer before tracing subscriber initialization",
+        )
+    })
+}
 
 /// Install a no-op reload slot for the OTel layer in the tracing subscriber.
 ///
@@ -25,6 +40,11 @@ static OTEL_RELOAD_HANDLE: OnceLock<reload::Handle<Option<OtelBoxedLayer>, Regis
 /// global `tracing_subscriber::registry()` **before** `.init()`. Later,
 /// `init_otel_tracing` swaps a real OTel layer into this slot via the stored
 /// reload handle.
+///
+/// # Panics
+///
+/// Panics if called more than once. A second layer cannot share the handle
+/// stored for the first layer and would silently discard exported spans.
 ///
 /// Why this dance: `init_otel_tracing` needs the Tokio runtime to build the
 /// batch span exporter, but by the time we reach `run_daemon` the global
@@ -34,25 +54,7 @@ static OTEL_RELOAD_HANDLE: OnceLock<reload::Handle<Option<OtelBoxedLayer>, Regis
 /// to install it.
 pub fn install_otel_reload_layer() -> reload::Layer<Option<OtelBoxedLayer>, Registry> {
     let (layer, handle) = reload::Layer::new(None);
-    if OTEL_RELOAD_HANDLE.set(handle).is_err() {
-        // A second call creates a fresh `(layer, handle)` pair, but the
-        // `OnceLock` already holds the *first* handle — meaning
-        // `init_otel_tracing` will `modify` the first layer, not this one.
-        // If the caller registers this second layer as the active subscriber
-        // layer, OTel spans would silently never reach it.
-        //
-        // NOTE: `tracing::warn!` is intentionally NOT used here.  This
-        // function is called during subscriber construction — the global
-        // tracing dispatcher is not yet installed, so any `tracing!` macro
-        // invocation would be a no-op and the warning would be silently
-        // dropped.  `eprintln!` is the only channel guaranteed to reach
-        // the operator at this point in the startup sequence.
-        eprintln!(
-            "warning: install_otel_reload_layer called more than once; the \
-             second layer is NOT wired to the OTel reload handle and will \
-             not receive spans. Only the first call's layer is live."
-        );
-    }
+    store_otel_reload_handle(&OTEL_RELOAD_HANDLE, handle);
     layer
 }
 
@@ -109,7 +111,8 @@ pub fn prometheus_handle() -> Option<&'static PrometheusHandle> {
 /// # Errors
 ///
 /// Returns an error if the OTLP exporter or tracer pipeline cannot be
-/// initialized (e.g. invalid endpoint, missing Tokio runtime).
+/// initialized (e.g. missing reload slot, invalid endpoint, missing Tokio
+/// runtime).
 pub fn init_otel_tracing(
     endpoint: &str,
     service_name: &str,
@@ -118,6 +121,11 @@ pub fn init_otel_tracing(
     use opentelemetry::trace::TracerProvider;
     use opentelemetry_otlp::{SpanExporter, WithExportConfig};
     use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
+
+    // Fail before constructing a provider/exporter that cannot be attached to
+    // the active subscriber. Returning success here would report OTLP as live
+    // while silently dropping every span.
+    let reload_handle = require_otel_reload_handle(OTEL_RELOAD_HANDLE.get())?;
 
     // Build the OTLP gRPC span exporter pointing at the configured collector.
     let exporter = SpanExporter::builder()
@@ -161,25 +169,15 @@ pub fn init_otel_tracing(
     // would silently fail because the global dispatcher is already set.
     let otel_layer: OtelBoxedLayer = Box::new(tracing_opentelemetry::layer().with_tracer(tracer));
 
-    match OTEL_RELOAD_HANDLE.get() {
-        Some(handle) => {
-            handle
-                .modify(|slot| *slot = Some(otel_layer))
-                .map_err(|e| format!("failed to install OTel layer via reload handle: {e}"))?;
-            tracing::info!(
-                endpoint = endpoint,
-                service_name = service_name,
-                sample_rate = sample_rate,
-                "OpenTelemetry OTLP tracing initialized"
-            );
-        }
-        None => {
-            tracing::warn!(
-                "OTel reload slot not registered; OTLP tracing will be inactive. \
-                 The CLI must call `install_otel_reload_layer()` during tracing init."
-            );
-        }
-    }
+    reload_handle
+        .modify(|slot| *slot = Some(otel_layer))
+        .map_err(|e| format!("failed to install OTel layer via reload handle: {e}"))?;
+    tracing::info!(
+        endpoint = endpoint,
+        service_name = service_name,
+        sample_rate = sample_rate,
+        "OpenTelemetry OTLP tracing initialized"
+    );
 
     Ok(())
 }
@@ -187,3 +185,27 @@ pub fn init_otel_tracing(
 // NOTE: HTTP metrics recording is handled by `request_logging` in middleware.rs
 // which calls `librefang_telemetry::metrics::record_http_request()`.
 // A separate middleware layer is not needed here.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_reload_handle_is_an_error() {
+        let error = require_otel_reload_handle::<()>(None).expect_err("missing slot must fail");
+        assert!(error
+            .to_string()
+            .contains("OTel reload slot is not registered"));
+    }
+
+    #[test]
+    #[should_panic(expected = "install_otel_reload_layer must be called at most once")]
+    fn duplicate_reload_handle_install_panics() {
+        let slot: OnceLock<OtelReloadHandle> = OnceLock::new();
+        let (_, first_handle) = reload::Layer::new(None);
+        store_otel_reload_handle(&slot, first_handle);
+
+        let (_, second_handle) = reload::Layer::new(None);
+        store_otel_reload_handle(&slot, second_handle);
+    }
+}
