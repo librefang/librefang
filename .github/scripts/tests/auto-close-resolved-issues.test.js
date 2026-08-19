@@ -33,8 +33,8 @@ const negations = [
   'not resolved #17',
 ];
 const sha = '0123456789abcdef0123456789abcdef01234567';
-const log = `${sha}\0subject with ---COMMIT-END---\0${negations.join('\n')}\nFixes #21\nCloses #22\n\0`;
-assert.deepEqual([...collectRefs(log).keys()], [21, 22]);
+const log = `${sha}\0Fixes #20 with ---COMMIT-END---\0${negations.join('\n')}\nFixes #21\nCloses #22\n\0`;
+assert.deepEqual([...collectRefs(log).keys()], [20, 21, 22]);
 assert.deepEqual(
   collectRefs(`${sha}\0subject\0Fixes #999999999999999999999999\0`).size,
   0,

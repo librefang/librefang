@@ -25,6 +25,11 @@ name: Auto-close Resolved Issues
 on:
   schedule:
     - cron: '15 7 * * *'  # Daily at 07:15 UTC
+  pull_request:
+    paths:
+      - '.github/scripts/auto-close-resolved-issues.js'
+      - '.github/scripts/tests/auto-close-resolved-issues.test.js'
+      - '.github/workflows/auto-close-resolved-issues.yml'
   workflow_dispatch:
     inputs:
       lookback_days:
@@ -38,16 +43,32 @@ on:
 
 permissions:
   contents: read
-  issues: write
 
 concurrency:
-  group: auto-close-resolved-issues
-  cancel-in-progress: false
+  group: auto-close-resolved-issues-${{ github.event_name == 'pull_request' && github.ref || 'reconcile' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  test-helper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Parse resolved-issue helper and corpus
+        run: |
+          node --check .github/scripts/auto-close-resolved-issues.js
+          node --check .github/scripts/tests/auto-close-resolved-issues.test.js
+      - name: Run resolved-issue helper corpus
+        run: node .github/scripts/tests/auto-close-resolved-issues.test.js
+
   reconcile:
+    needs: test-helper
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

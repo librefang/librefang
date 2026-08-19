@@ -28,7 +28,7 @@ function collectRefs(log) {
     if (!/^[0-9a-f]{40,64}$/i.test(sha)) {
       throw new Error(`git log returned an invalid commit id: ${JSON.stringify(sha)}`);
     }
-    for (const match of body.matchAll(REF_REGEX)) {
+    for (const match of `${subject}\n${body}`.matchAll(REF_REGEX)) {
       const issueNumber = Number.parseInt(match[2], 10);
       if (Number.isSafeInteger(issueNumber) && issueNumber > 0 && !refs.has(issueNumber)) {
         refs.set(issueNumber, { sha: sha.slice(0, 7), subject });

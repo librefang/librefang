@@ -140,6 +140,14 @@ def check_repository_automation() -> None:
         )
     )
     reconcile = auto_close.get("jobs", {}).get("reconcile", {})
+    if (
+        auto_close.get("permissions") != {"contents": "read"}
+        or reconcile.get("needs") != "test-helper"
+        or reconcile.get("if") != "github.event_name != 'pull_request'"
+        or reconcile.get("permissions")
+        != {"contents": "read", "issues": "write"}
+    ):
+        raise SystemExit("resolved-issue mutations are not isolated behind tests")
     reconcile_steps = reconcile.get("steps", [])
     checkout = reconcile_steps[0].get("with", {}) if reconcile_steps else {}
     if (
