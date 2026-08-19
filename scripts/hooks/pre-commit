@@ -68,6 +68,12 @@ if [ -s "$STAGED_RUST" ]; then
             staged_root=$1
             rustfmt_config=$2
             file=$3
+            metadata=$(git ls-files -s -- "$file")
+            tab=$(printf "\t")
+            case "$metadata" in
+                100644\ *\ 0"$tab"*|100755\ *\ 0"$tab"*) ;;
+                *) exit 0 ;;
+            esac
             staged_file=$staged_root/$file
             mkdir -p "$(dirname "$staged_file")"
             git show ":$file" >"$staged_file"

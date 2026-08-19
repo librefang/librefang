@@ -48,6 +48,8 @@ fn main(   ) {println!("hi"  );}
 EOF
 
 git add -- "$FILE"
+ln -s 'target.rs' 'zz staged link.rs'
+git add -- 'zz staged link.rs'
 cat > "$FILE" <<'EOF'
 fn main() { println!("unstaged"); }
 EOF
@@ -83,6 +85,12 @@ if ! grep -Fq 'fn main(   )' "$RUSTFMT_INPUT" \
     || grep -Fq 'unstaged' "$RUSTFMT_INPUT"; then
     echo "FAIL: rustfmt did not receive the exact staged Rust blob." >&2
     cat "$RUSTFMT_INPUT" >&2
+    exit 1
+fi
+
+if grep -Fq 'zz staged link.rs' "$RUSTFMT_ARGS" \
+    || grep -Fq 'target.rs' "$RUSTFMT_INPUT"; then
+    echo "FAIL: rustfmt consumed a staged Rust-named symlink." >&2
     exit 1
 fi
 
