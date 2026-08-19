@@ -18,7 +18,7 @@ import { Badge } from "./ui/Badge";
 import { useWorkflowOperatorPause } from "../lib/queries/workflows";
 import { useResolveOperatorStep } from "../lib/mutations/workflows";
 import { ApiError } from "../lib/http/client";
-import type { OperatorActionDescriptor, OperatorActionVerb } from "../api";
+import type { OperatorActionVerb } from "../api";
 
 interface Props {
   runId: string;
@@ -29,8 +29,8 @@ interface Props {
  *  here so the action list, button labels, and resolve POST stay in
  *  lockstep — adding a verb in `OperatorAction` (Rust) requires updating
  *  exactly this function on the dashboard. */
-function describeAction(
-  action: OperatorActionDescriptor,
+export function describeAction(
+  action: unknown,
   t: (key: string, fallback: string, options?: Record<string, unknown>) => string,
 ): {
   verb: OperatorActionVerb;
@@ -39,7 +39,7 @@ function describeAction(
   field?: string;
   variant: "primary" | "secondary" | "danger" | "ghost";
   icon: React.ComponentType<{ className?: string }>;
-} {
+} | null {
   if (typeof action === "string") {
     switch (action) {
       case "approve":
@@ -51,8 +51,20 @@ function describeAction(
       case "freeform_input":
         return { verb: "freeform_input", label: t("workflows.operator.freeform_input", "Freeform input"), needsPayload: true, variant: "secondary", icon: MessageSquare };
     }
+    return null;
   }
   // ProvideInput carries a `field` name — labelled on the button.
+  if (
+    typeof action !== "object" ||
+    action === null ||
+    !("provide_input" in action) ||
+    typeof action.provide_input !== "object" ||
+    action.provide_input === null ||
+    !("field" in action.provide_input) ||
+    typeof action.provide_input.field !== "string"
+  ) {
+    return null;
+  }
   return {
     verb: "provide_input",
     label: t("workflows.operator.provide_field", "Provide '{{field}}'", { field: action.provide_input.field }),
@@ -141,6 +153,7 @@ export function OperatorActionBar({ runId }: Props) {
       <div className="flex flex-wrap gap-1.5">
         {pause.actions.map((action, idx) => {
           const desc = describeAction(action, t);
+          if (!desc) return null;
           const key = `${desc.verb}:${desc.field ?? ""}`;
           const Icon = desc.icon;
           const isOpen = openVerb === key;

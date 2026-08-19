@@ -587,7 +587,7 @@ pub async fn get_agent_session_context(
 }
 
 /// GET /api/agents/{id}/sessions/{session_id}/stream — attach to a session's
-/// in-flight stream events (SSE).
+/// in-flight stream events (SSE or WebSocket).
 ///
 /// Any client can subscribe to the events emitted by an active turn on this
 /// session: the originating client (CLI, Tauri desktop, web) plus any number
@@ -605,19 +605,25 @@ pub async fn get_agent_session_context(
     ),
     responses(
         (status = 200, description = "Server-sent events stream of session events"),
+        (status = 101, description = "WebSocket session event stream"),
         (status = 400, description = "Invalid agent or session ID"),
         (status = 404, description = "Agent or session not found")
     )
 )]
 pub async fn attach_session_stream(
+    ws: Result<
+        axum::extract::ws::WebSocketUpgrade,
+        axum::extract::ws::rejection::WebSocketUpgradeRejection,
+    >,
     State(state): State<Arc<AppState>>,
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    connect_info: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     Path((id, session_id_str)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> axum::response::Response {
     use axum::response::sse::{Event, Sse};
     use futures::stream;
-    use librefang_kernel::llm_driver::StreamEvent;
     use tokio::sync::broadcast::error::RecvError;
 
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
@@ -688,65 +694,125 @@ pub async fn attach_session_stream(
     }
 
     let receiver = state.kernel.session_stream_hub().subscribe(session_id);
+    let lifecycle = state.kernel.session_lifecycle_bus().subscribe();
+
+    if let Ok(ws) = ws {
+        let cfg = state.kernel.config_ref();
+        let listen_port = cfg
+            .api_listen
+            .parse::<std::net::SocketAddr>()
+            .ok()
+            .map(|address| address.port());
+        let allow_remote = std::env::var("LIBREFANG_ALLOW_NO_AUTH")
+            .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false);
+        if crate::ws::validate_ws_origin(&headers, listen_port, &cfg.cors_origin, allow_remote)
+            .is_err()
+        {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+
+        let Some(axum::Extension(axum::extract::ConnectInfo(peer))) = connect_info else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        let client_ip = crate::client_ip::resolve_real_client_ip(
+            peer.ip(),
+            &headers,
+            &state.trusted_proxies,
+            state.trust_forwarded_for,
+        );
+        let Some(connection_guard) = crate::ws::try_acquire_ws_slot(
+            client_ip,
+            state.kernel.config_ref().rate_limit.max_ws_per_ip,
+        ) else {
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        };
+
+        let upgrade = match crate::ws::ws_bearer_protocol(&headers) {
+            Some(protocol) => ws.protocols([protocol]),
+            None => ws,
+        };
+        return crate::extensions::with_session_id(
+            session_id,
+            crate::extensions::with_agent_id(
+                agent_id,
+                upgrade.on_upgrade(move |socket| {
+                    session_stream_websocket(
+                        socket,
+                        receiver,
+                        lifecycle,
+                        agent_id,
+                        session_id,
+                        connection_guard,
+                    )
+                }),
+            ),
+        );
+    }
 
     // Bridge broadcast::Receiver into an SSE stream. Skip Lagged events with
     // a debug log (intentionally lossy semantics — see SessionStreamHub
     // docs) and end the stream when the channel closes.
     let sse_stream = stream::unfold(
-        (receiver, StreamDedup::new()),
-        |(mut rx, mut dedup)| async move {
+        (receiver, lifecycle, SessionStreamState::new(), false),
+        move |(mut rx, mut lifecycle, mut stream_state, finished)| async move {
+            if finished {
+                return None;
+            }
             loop {
-                let event = match rx.recv().await {
-                    Ok(ev) => ev,
-                    Err(RecvError::Lagged(n)) => {
-                        tracing::debug!(skipped = n, "session attach stream lagged, skipping");
-                        continue;
-                    }
-                    Err(RecvError::Closed) => return None,
-                };
-                let sse_event: Result<Event, std::convert::Infallible> = Ok(match event {
-                    StreamEvent::TextDelta { text } => {
-                        if dedup.is_duplicate(&text) {
-                            continue;
-                        }
-                        dedup.record_sent(&text);
-                        Event::default()
-                            .event("chunk")
-                            .json_data(serde_json::json!({"content": text, "done": false}))
-                            .unwrap_or_else(|_| Event::default().data("error"))
-                    }
-                    StreamEvent::ToolUseStart { name, .. } => Event::default()
-                        .event("tool_use")
-                        .json_data(serde_json::json!({"tool": name}))
-                        .unwrap_or_else(|_| Event::default().data("error")),
-                    StreamEvent::ToolUseEnd { name, input, .. } => Event::default()
-                        .event("tool_result")
-                        .json_data(serde_json::json!({"tool": name, "input": input}))
-                        .unwrap_or_else(|_| Event::default().data("error")),
-                    StreamEvent::ContentComplete { usage, .. } => Event::default()
-                        .event("done")
-                        .json_data(serde_json::json!({
-                            "done": true,
-                            "usage": {
-                                "input_tokens": usage.input_tokens,
-                                "output_tokens": usage.output_tokens,
+                tokio::select! {
+                    received = rx.recv() => {
+                        let event = match received {
+                            Ok(event) => event,
+                            Err(RecvError::Lagged(n)) => {
+                                tracing::debug!(skipped = n, "session attach stream lagged, skipping");
+                                continue;
                             }
-                        }))
-                        .unwrap_or_else(|_| Event::default().data("error")),
-                    StreamEvent::PhaseChange { phase, detail } => Event::default()
-                        .event("phase")
-                        .json_data(serde_json::json!({
-                            "phase": phase,
-                            "detail": detail,
-                        }))
-                        .unwrap_or_else(|_| Event::default().data("error")),
-                    StreamEvent::OwnerNotice { text } => Event::default()
-                        .event("owner_notice")
-                        .json_data(serde_json::json!({ "text": text }))
-                        .unwrap_or_else(|_| Event::default().data("error")),
-                    _ => Event::default().comment("skip"),
-                });
-                return Some((sse_event, (rx, dedup)));
+                            Err(RecvError::Closed) => return None,
+                        };
+                        let Some((event_type, payload, terminal)) =
+                            session_stream_payload(event, &mut stream_state)
+                        else {
+                            continue;
+                        };
+                        let sse_event: Result<Event, std::convert::Infallible> =
+                            Ok(Event::default()
+                                .event(event_type)
+                                .json_data(payload)
+                                .unwrap_or_else(|_| Event::default().data("error")));
+                        return Some((
+                            sse_event,
+                            (rx, lifecycle, stream_state, terminal),
+                        ));
+                    }
+                    received = lifecycle.recv() => {
+                        let event = match received {
+                            Ok(event) => event,
+                            Err(RecvError::Lagged(n)) => {
+                                tracing::debug!(skipped = n, "session lifecycle stream lagged, skipping");
+                                continue;
+                            }
+                            Err(RecvError::Closed) => return None,
+                        };
+                        let Some((event_type, payload)) = session_lifecycle_payload(
+                            event,
+                            agent_id,
+                            session_id,
+                            &stream_state,
+                        ) else {
+                            continue;
+                        };
+                        let sse_event: Result<Event, std::convert::Infallible> =
+                            Ok(Event::default()
+                                .event(event_type)
+                                .json_data(payload)
+                                .unwrap_or_else(|_| Event::default().data("error")));
+                        return Some((
+                            sse_event,
+                            (rx, lifecycle, stream_state, true),
+                        ));
+                    }
+                }
             }
         },
     );
@@ -764,6 +830,205 @@ pub async fn attach_session_stream(
             ),
         ),
     )
+}
+
+async fn session_stream_websocket(
+    mut socket: axum::extract::ws::WebSocket,
+    mut receiver: tokio::sync::broadcast::Receiver<librefang_kernel::llm_driver::StreamEvent>,
+    mut lifecycle: tokio::sync::broadcast::Receiver<
+        librefang_kernel::session_lifecycle::SessionLifecycleEvent,
+    >,
+    agent_id: AgentId,
+    session_id: librefang_types::agent::SessionId,
+    _connection_guard: crate::ws::WsConnectionGuard,
+) {
+    use axum::extract::ws::Message;
+    use futures::SinkExt as _;
+    use tokio::sync::broadcast::error::RecvError;
+
+    let mut stream_state = SessionStreamState::new();
+    loop {
+        tokio::select! {
+            received = receiver.recv() => {
+                let event = match received {
+                    Ok(event) => event,
+                    Err(RecvError::Lagged(skipped)) => {
+                        tracing::debug!(skipped, "session attach WebSocket lagged, skipping");
+                        continue;
+                    }
+                    Err(RecvError::Closed) => break,
+                };
+                let Some((event_type, payload, terminal)) =
+                    session_stream_payload(event, &mut stream_state)
+                else {
+                    continue;
+                };
+                if send_session_stream_message(&mut socket, event_type, payload)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                if terminal {
+                    let _ = socket.close().await;
+                    break;
+                }
+            }
+            received = lifecycle.recv() => {
+                let event = match received {
+                    Ok(event) => event,
+                    Err(RecvError::Lagged(skipped)) => {
+                        tracing::debug!(skipped, "session lifecycle WebSocket lagged, skipping");
+                        continue;
+                    }
+                    Err(RecvError::Closed) => break,
+                };
+                let Some((event_type, payload)) = session_lifecycle_payload(
+                    event,
+                    agent_id,
+                    session_id,
+                    &stream_state,
+                ) else {
+                    continue;
+                };
+                let _ = send_session_stream_message(&mut socket, event_type, payload).await;
+                let _ = socket.close().await;
+                break;
+            }
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Ping(data))) => {
+                        if socket.send(Message::Pong(data)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    Some(Ok(_)) => {}
+                }
+            }
+        }
+    }
+}
+
+async fn send_session_stream_message(
+    socket: &mut axum::extract::ws::WebSocket,
+    event_type: &str,
+    payload: serde_json::Value,
+) -> Result<(), axum::Error> {
+    use axum::extract::ws::Message;
+
+    let mut envelope = match payload {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    envelope.insert(
+        "type".to_string(),
+        serde_json::Value::String(event_type.to_string()),
+    );
+    socket
+        .send(Message::Text(
+            serde_json::Value::Object(envelope).to_string().into(),
+        ))
+        .await
+}
+
+struct SessionStreamState {
+    dedup: StreamDedup,
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+impl SessionStreamState {
+    fn new() -> Self {
+        Self {
+            dedup: StreamDedup::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+        }
+    }
+}
+
+fn session_stream_payload(
+    event: librefang_kernel::llm_driver::StreamEvent,
+    state: &mut SessionStreamState,
+) -> Option<(&'static str, serde_json::Value, bool)> {
+    use librefang_kernel::llm_driver::{StreamEvent, PHASE_RESPONSE_COMPLETE};
+
+    match event {
+        StreamEvent::TextDelta { text } => {
+            if state.dedup.is_duplicate(&text) {
+                return None;
+            }
+            state.dedup.record_sent(&text);
+            Some((
+                "chunk",
+                serde_json::json!({"content": text, "done": false}),
+                false,
+            ))
+        }
+        StreamEvent::ToolUseStart { name, .. } => {
+            Some(("tool_use", serde_json::json!({"tool": name}), false))
+        }
+        StreamEvent::ToolUseEnd { name, input, .. } => Some((
+            "tool_result",
+            serde_json::json!({"tool": name, "input": input}),
+            false,
+        )),
+        StreamEvent::ContentComplete { usage, .. } => {
+            state.input_tokens = state.input_tokens.saturating_add(usage.input_tokens);
+            state.output_tokens = state.output_tokens.saturating_add(usage.output_tokens);
+            None
+        }
+        StreamEvent::PhaseChange { phase, .. } if phase == PHASE_RESPONSE_COMPLETE => Some((
+            "done",
+            serde_json::json!({
+                "done": true,
+                "usage": {
+                    "input_tokens": state.input_tokens,
+                    "output_tokens": state.output_tokens,
+                }
+            }),
+            true,
+        )),
+        StreamEvent::PhaseChange { phase, detail } => Some((
+            "phase",
+            serde_json::json!({"phase": phase, "detail": detail}),
+            false,
+        )),
+        StreamEvent::OwnerNotice { text } => {
+            Some(("owner_notice", serde_json::json!({"text": text}), false))
+        }
+        _ => None,
+    }
+}
+
+fn session_lifecycle_payload(
+    event: librefang_kernel::session_lifecycle::SessionLifecycleEvent,
+    expected_agent_id: AgentId,
+    expected_session_id: librefang_types::agent::SessionId,
+    _state: &SessionStreamState,
+) -> Option<(&'static str, serde_json::Value)> {
+    use librefang_kernel::session_lifecycle::SessionLifecycleEvent;
+
+    match event {
+        SessionLifecycleEvent::TurnFailed {
+            agent_id,
+            session_id,
+            ..
+        } if agent_id == expected_agent_id && session_id == expected_session_id => Some((
+            "phase",
+            serde_json::json!({"phase": "error", "detail": null}),
+        )),
+        SessionLifecycleEvent::AgentTerminated { agent_id, .. }
+            if agent_id == expected_agent_id =>
+        {
+            Some((
+                "phase",
+                serde_json::json!({"phase": "error", "detail": null}),
+            ))
+        }
+        _ => None,
+    }
 }
 
 #[utoipa::path(

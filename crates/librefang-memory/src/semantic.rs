@@ -1054,6 +1054,110 @@ impl SemanticStore {
         Ok(count as u64)
     }
 
+    /// List one stable page of non-deleted memories and return the full filtered count.
+    ///
+    /// Count and page reads share one SQLite snapshot so callers never pair a
+    /// page from one database state with a total from another. Filters are
+    /// applied in SQL before `LIMIT` and `OFFSET`; this is the authoritative
+    /// dashboard listing path and intentionally has no hidden candidate cap.
+    pub fn list_page(
+        &self,
+        agent_id: Option<AgentId>,
+        category: Option<&str>,
+        scope: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> LibreFangResult<(Vec<MemoryFragment>, usize)> {
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let tx = conn.transaction().map_err(LibreFangError::memory)?;
+        let agent_id = agent_id.map(|id| id.to_string());
+        let offset = i64::try_from(offset).unwrap_or(i64::MAX);
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+
+        let total: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM memories
+                 WHERE deleted = 0
+                   AND CASE
+                         WHEN json_valid(metadata) THEN json_type(metadata) = 'object'
+                         ELSE 0
+                       END
+                   AND (?1 IS NULL OR agent_id = ?1)
+                   AND (?2 IS NULL OR json_extract(
+                         CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                         '$.category'
+                       ) = ?2)
+                   AND (?3 IS NULL OR scope = ?3)",
+                rusqlite::params![agent_id.as_deref(), category, scope],
+                |row| row.get(0),
+            )
+            .map_err(LibreFangError::memory)?;
+
+        let fragments = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id, agent_id, content, source, scope, confidence, metadata,
+                            created_at, accessed_at, access_count, embedding, image_url,
+                            image_embedding, modality
+                     FROM memories
+                     WHERE deleted = 0
+                       AND CASE
+                             WHEN json_valid(metadata) THEN json_type(metadata) = 'object'
+                             ELSE 0
+                           END
+                       AND (?1 IS NULL OR agent_id = ?1)
+                       AND (?2 IS NULL OR json_extract(
+                             CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                             '$.category'
+                           ) = ?2)
+                       AND (?3 IS NULL OR scope = ?3)
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT ?4 OFFSET ?5",
+                )
+                .map_err(LibreFangError::memory)?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![agent_id.as_deref(), category, scope, limit, offset],
+                    decode_memory_row,
+                )
+                .map_err(LibreFangError::memory)?;
+            let mut fragments = Vec::new();
+            for row in rows {
+                fragments.push(row.map_err(LibreFangError::memory)?);
+            }
+            fragments
+        };
+        tx.commit().map_err(LibreFangError::memory)?;
+
+        let total = usize::try_from(total).map_err(LibreFangError::memory)?;
+        Ok((fragments, total))
+    }
+
+    /// Count non-deleted memories grouped by agent ID.
+    pub fn count_by_agent(&self) -> LibreFangResult<HashMap<String, usize>> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT agent_id, COUNT(*) FROM memories \
+                 WHERE deleted = 0 GROUP BY agent_id",
+            )
+            .map_err(LibreFangError::memory)?;
+        let rows = stmt
+            .query_map([], |row| {
+                let agent_id: String = row.get(0)?;
+                let count: i64 = row.get(1)?;
+                Ok((agent_id, count as usize))
+            })
+            .map_err(LibreFangError::memory)?;
+
+        let mut counts = HashMap::new();
+        for row in rows {
+            let (agent_id, count) = row.map_err(LibreFangError::memory)?;
+            counts.insert(agent_id, count);
+        }
+        Ok(counts)
+    }
+
     /// Count non-deleted memories grouped by category (from JSON metadata).
     ///
     /// For a specific agent, pass `Some(agent_id)`. For global stats, pass `None`.
@@ -2370,6 +2474,144 @@ mod tests {
         assert_eq!(store.count(agent_id, Some("session_memory")).unwrap(), 1);
         assert_eq!(store.count(agent_id, Some("user_memory")).unwrap(), 1);
         assert_eq!(store.count(agent_id, Some("agent_memory")).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_count_by_agent_uses_one_grouped_snapshot() {
+        let store = setup();
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+
+        for content in ["A1", "A2"] {
+            store
+                .remember(
+                    agent_a,
+                    content,
+                    MemorySource::Conversation,
+                    "session_memory",
+                    HashMap::new(),
+                )
+                .unwrap();
+        }
+        store
+            .remember(
+                agent_b,
+                "B1",
+                MemorySource::Conversation,
+                "user_memory",
+                HashMap::new(),
+            )
+            .unwrap();
+
+        let counts = store.count_by_agent().unwrap();
+        assert_eq!(counts.get(&agent_a.to_string()), Some(&2));
+        assert_eq!(counts.get(&agent_b.to_string()), Some(&1));
+
+        store.forget_by_agent(agent_a).unwrap();
+        let counts = store.count_by_agent().unwrap();
+        assert!(!counts.contains_key(&agent_a.to_string()));
+        assert_eq!(counts.get(&agent_b.to_string()), Some(&1));
+    }
+
+    #[test]
+    fn test_list_page_filters_before_count_and_pagination() {
+        let store = setup();
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+
+        for (agent, scope, category, content) in [
+            (agent_a, "user_memory", "keep", "A1"),
+            (agent_a, "user_memory", "keep", "A2"),
+            (agent_a, "user_memory", "other", "A3"),
+            (agent_a, "session_memory", "keep", "A4"),
+            (agent_b, "user_memory", "keep", "B1"),
+        ] {
+            store
+                .remember(
+                    agent,
+                    content,
+                    MemorySource::Conversation,
+                    scope,
+                    HashMap::from([(
+                        "category".to_string(),
+                        serde_json::Value::String(category.to_string()),
+                    )]),
+                )
+                .unwrap();
+        }
+
+        let (first, total) = store
+            .list_page(Some(agent_a), Some("keep"), Some("user_memory"), 0, 1)
+            .unwrap();
+        let (second, second_total) = store
+            .list_page(Some(agent_a), Some("keep"), Some("user_memory"), 1, 1)
+            .unwrap();
+
+        assert_eq!(total, 2);
+        assert_eq!(second_total, 2);
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_ne!(first[0].id, second[0].id);
+        for fragment in first.iter().chain(&second) {
+            assert_eq!(fragment.agent_id, agent_a);
+            assert_eq!(fragment.scope, "user_memory");
+            assert_eq!(
+                fragment
+                    .metadata
+                    .get("category")
+                    .and_then(|value| value.as_str()),
+                Some("keep")
+            );
+        }
+    }
+
+    #[test]
+    fn test_list_page_skips_corrupt_metadata_without_inflating_total() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        store
+            .remember(
+                agent_id,
+                "healthy memory",
+                MemorySource::Conversation,
+                "user_memory",
+                HashMap::from([(
+                    "category".to_string(),
+                    serde_json::Value::String("keep".to_string()),
+                )]),
+            )
+            .unwrap();
+        let corrupt_id = store
+            .remember(
+                agent_id,
+                "corrupt memory",
+                MemorySource::Conversation,
+                "user_memory",
+                HashMap::new(),
+            )
+            .unwrap();
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute(
+                "UPDATE memories SET metadata = ?1 WHERE id = ?2",
+                rusqlite::params!["not-json", corrupt_id.0.to_string()],
+            )
+            .unwrap();
+        }
+
+        let (unfiltered, total) = store
+            .list_page(Some(agent_id), None, Some("user_memory"), 0, 10)
+            .unwrap();
+        let (filtered, filtered_total) = store
+            .list_page(Some(agent_id), Some("keep"), Some("user_memory"), 0, 10)
+            .unwrap();
+
+        assert_eq!(total, 1);
+        assert_eq!(filtered_total, 1);
+        assert_eq!(unfiltered.len(), 1);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(unfiltered[0].content, "healthy memory");
+        assert_eq!(filtered[0].content, "healthy memory");
     }
 
     /// Regression for the audit item `json-text-silent-parse-fallback`.

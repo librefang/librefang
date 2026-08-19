@@ -1,1 +1,0 @@
-- Keep empty and incomplete number-map edits as local drafts until they become valid numbers, and restore the last committed value when an invalid draft loses focus. (@TechWizard9999)

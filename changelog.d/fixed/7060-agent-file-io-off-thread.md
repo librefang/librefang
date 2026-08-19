@@ -1,1 +1,0 @@
-- Move agent identity-file writes, renames, canonicalization, and deletes off Tokio worker threads while preserving containment checks and atomic replacement. (@xiaomo)
