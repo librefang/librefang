@@ -3448,6 +3448,7 @@ impl ProactiveMemoryResource {
     pub async fn memory_list(
         &self,
         category: Option<&str>,
+        level: Option<&str>,
         offset: Option<&str>,
         limit: Option<&str>,
     ) -> Result<Value> {
@@ -3457,7 +3458,12 @@ impl ProactiveMemoryResource {
             reqwest::Method::GET,
             &["api", "memory"],
             None,
-            &[("category", category), ("offset", offset), ("limit", limit)],
+            &[
+                ("category", category),
+                ("level", level),
+                ("offset", offset),
+                ("limit", limit),
+            ],
         )
         .await
     }
@@ -3478,6 +3484,7 @@ impl ProactiveMemoryResource {
         &self,
         id: &str,
         category: Option<&str>,
+        level: Option<&str>,
         offset: Option<&str>,
         limit: Option<&str>,
     ) -> Result<Value> {
@@ -3487,7 +3494,12 @@ impl ProactiveMemoryResource {
             reqwest::Method::GET,
             &["api", "memory", "agents", id],
             None,
-            &[("category", category), ("offset", offset), ("limit", limit)],
+            &[
+                ("category", category),
+                ("level", level),
+                ("offset", offset),
+                ("limit", limit),
+            ],
         )
         .await
     }
@@ -3614,6 +3626,7 @@ impl ProactiveMemoryResource {
         &self,
         id: &str,
         q: Option<&str>,
+        level: Option<&str>,
         limit: Option<&str>,
     ) -> Result<Value> {
         do_req(
@@ -3622,7 +3635,7 @@ impl ProactiveMemoryResource {
             reqwest::Method::GET,
             &["api", "memory", "agents", id, "search"],
             None,
-            &[("q", q), ("limit", limit)],
+            &[("q", q), ("level", level), ("limit", limit)],
         )
         .await
     }
@@ -3711,14 +3724,19 @@ impl ProactiveMemoryResource {
         .await
     }
 
-    pub async fn memory_search(&self, q: Option<&str>, limit: Option<&str>) -> Result<Value> {
+    pub async fn memory_search(
+        &self,
+        q: Option<&str>,
+        level: Option<&str>,
+        limit: Option<&str>,
+    ) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
             &["api", "memory", "search"],
             None,
-            &[("q", q), ("limit", limit)],
+            &[("q", q), ("level", level), ("limit", limit)],
         )
         .await
     }
