@@ -22,7 +22,9 @@ o_maj="${o_maj:-0}"; o_min="${o_min:-0}"; o_pat="${o_pat:-0}"
 n_maj="${n_maj:-0}"; n_min="${n_min:-0}"; n_pat="${n_pat:-0}"
 
 for value in "$o_maj" "$o_min" "$o_pat" "$n_maj" "$n_min" "$n_pat"; do
-  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+  # Bash arithmetic is signed and fixed-width. Reject unusually large
+  # components instead of allowing an overflow to change the bump class.
+  if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "${#value}" -gt 9 ]; then
     printf 'unknown\t%s\n' "$dep_name"
     exit 0
   fi

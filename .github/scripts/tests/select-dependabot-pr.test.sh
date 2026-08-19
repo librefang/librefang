@@ -30,8 +30,12 @@ if [ "$1 $2" = 'pr list' ]; then
   exit 0
 fi
 if [ "$1" = api ] && printf '%s' "$*" | grep -q '/actions/workflows/ci.yml/runs'; then
-  [ "${GH_AUTHOR_MODE:-}" != failed ] || exit 0
-  printf '99\n'
+  printf '%s\n' "$*" >> "${GH_API_LOG:?}"
+  case "${GH_AUTHOR_MODE:-}" in
+    failed) printf 'failure\n' ;;
+    pending) printf '\n' ;;
+    *) printf 'success\n' ;;
+  esac
   exit 0
 fi
 if [ "$1 $2" = 'pr view' ]; then
@@ -66,8 +70,11 @@ run_selector() {
   event=$1
   mode=$2
   output="$TEST_ROOT/$event-$mode.json"
+  api_log="$TEST_ROOT/$event-$mode-api.log"
+  : > "$api_log"
   PATH="$FAKE_BIN:$PATH" \
     GH_AUTHOR_MODE="$mode" \
+    GH_API_LOG="$api_log" \
     EVENT_NAME="$event" \
     REPO='librefang/librefang' \
     HEAD_SHA='abc123' \
@@ -85,6 +92,16 @@ run_selector() {
   || { echo 'FAIL: schedule must not select a PR inside the soak window' >&2; exit 1; }
 [ -z "$(run_selector schedule failed)" ] \
   || { echo 'FAIL: schedule must not select a PR without successful latest CI' >&2; exit 1; }
+[ -z "$(run_selector schedule pending)" ] \
+  || { echo 'FAIL: schedule must not select while the latest CI is incomplete' >&2; exit 1; }
+[ -z "$(run_selector workflow_run pending)" ] \
+  || { echo 'FAIL: workflow_run must recheck that CI is still latest and successful' >&2; exit 1; }
+if grep -q 'status=completed' "$TEST_ROOT/schedule-dependabot-api.log"; then
+  echo 'FAIL: CI lookup must not hide newer incomplete runs' >&2
+  exit 1
+fi
+grep -q 'per_page=1' "$TEST_ROOT/schedule-dependabot-api.log" \
+  || { echo 'FAIL: CI lookup did not request only the latest run' >&2; exit 1; }
 if run_selector workflow_run impostor >/dev/null 2>&1; then
   echo 'FAIL: lookalike PR author must be rejected' >&2
   exit 1

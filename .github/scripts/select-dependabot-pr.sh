@@ -7,11 +7,26 @@ set -euo pipefail
 
 pr_number=""
 selected_sha=""
+
+latest_ci_succeeded() {
+  local sha=$1 conclusion
+  conclusion=$(gh api --method GET \
+    "repos/${REPO}/actions/workflows/ci.yml/runs" \
+    -f head_sha="$sha" \
+    -f event='pull_request' \
+    -f per_page='1' \
+    --jq '.workflow_runs[0].conclusion // empty')
+  [ "$conclusion" = "success" ]
+}
+
 if [ "$EVENT_NAME" = "workflow_run" ]; then
   : "${HEAD_SHA:?HEAD_SHA is required for workflow_run}"
   selected_sha="$HEAD_SHA"
   pr_number=$(gh api "/repos/${REPO}/commits/${HEAD_SHA}/pulls" \
     --jq '[.[] | select(.state == "open" and .user.login == "dependabot[bot]")][0].number // empty')
+  if [ -n "$pr_number" ] && ! latest_ci_succeeded "$selected_sha"; then
+    pr_number=""
+  fi
 elif [ "$EVENT_NAME" = "schedule" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
   now=$(date -u +%s)
   while IFS=$'\t' read -r candidate sha created_at; do
@@ -19,14 +34,7 @@ elif [ "$EVENT_NAME" = "schedule" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; 
     created_epoch=$(date -u -d "$created_at" +%s)
     [ $((now - created_epoch)) -ge 86400 ] || continue
 
-    successful_run=$(gh api --method GET \
-      "repos/${REPO}/actions/workflows/ci.yml/runs" \
-      -f head_sha="$sha" \
-      -f event='pull_request' \
-      -f status='completed' \
-      -f per_page='1' \
-      --jq '.workflow_runs | first | select(.conclusion == "success") | .id // empty')
-    if [ -n "$successful_run" ]; then
+    if latest_ci_succeeded "$sha"; then
       pr_number="$candidate"
       selected_sha="$sha"
       break

@@ -26,6 +26,7 @@ assert_classification 'Bump crate from 2.0.0 to 1.9.0' unknown crate
 assert_classification 'Bump crate from 1.2.3 to 1.2.3' unknown crate
 assert_classification 'Bump crate from 1.2.3.4 to 1.2.3.5' unknown crate
 assert_classification 'Bump crate from 1.2.3-beta.1 to 1.2.3' unknown crate
+assert_classification 'Bump crate from 1.2.3 to 999999999999999999999.0.0' unknown crate
 assert_classification 'Bump the rust-minor-patch group with 4 updates' \
   unknown rust-minor-patch
 assert_classification 'Unrecognized Dependabot title' unknown unknown

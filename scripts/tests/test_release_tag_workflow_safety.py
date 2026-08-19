@@ -143,6 +143,8 @@ def check_repository_automation() -> None:
         raise SystemExit("Dependabot auto-merge does not default to read-only")
     dependabot_jobs = dependabot.get("jobs", {})
     merge_job = dependabot_jobs.get("auto-merge", {})
+    if merge_job.get("needs") != "test-selector":
+        raise SystemExit("Dependabot auto-merge does not require its helper tests")
     if merge_job.get("permissions") != {
         "actions": "read",
         "contents": "read",
@@ -167,6 +169,16 @@ def check_repository_automation() -> None:
     )
     if "classify-dependabot-title.sh" not in classify_step.get("run", ""):
         raise SystemExit("Dependabot auto-merge bypasses its tested classifier")
+    merge_step = next(
+        (
+            step
+            for step in merge_steps
+            if step.get("name") == "Enable auto-merge for safe Dependabot bumps"
+        ),
+        {},
+    )
+    if "--match-head-commit \"$expected_head\"" not in merge_step.get("run", ""):
+        raise SystemExit("Dependabot auto-merge has no final head guard")
 
 
 def main() -> None:
