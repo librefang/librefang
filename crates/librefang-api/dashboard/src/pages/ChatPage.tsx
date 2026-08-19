@@ -3336,12 +3336,13 @@ export function ChatPage() {
     agent: AgentItem,
     role?: string,
     isCoordinator?: boolean,
+    membershipKey?: string,
   ) => {
     const displayName =
       role ?? t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name });
     return (
     <button
-      key={agent.id}
+      key={membershipKey ?? agent.id}
       onClick={() => selectAgent(agent.id)}
       className={`w-full flex items-center gap-3 p-3 rounded-xl transition-colors text-left group ${
         selectedAgentId === agent.id
@@ -3464,7 +3465,7 @@ export function ChatPage() {
                       <span>{group.hand_name}</span>
                     </h4>
                     {group.agents.map((agent) =>
-                      renderAgentButton(agent, agent.role, agent.isCoordinator),
+                      renderAgentButton(agent, agent.role, agent.isCoordinator, agent.membershipKey),
                     )}
                   </div>
                 ))}
@@ -3544,7 +3545,7 @@ export function ChatPage() {
                             <span>{group.hand_name}</span>
                           </h4>
                           {group.agents.map((agent) =>
-                            renderAgentButton(agent, agent.role, agent.isCoordinator),
+                            renderAgentButton(agent, agent.role, agent.isCoordinator, agent.membershipKey),
                           )}
                         </div>
                       ))}

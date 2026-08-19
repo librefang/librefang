@@ -285,6 +285,25 @@ describe("ProvidersPage", () => {
     expect(screen.queryByText("Groq")).not.toBeInTheDocument();
   });
 
+  it("keeps provider actions outside implicit card button semantics", () => {
+    useProvidersMock.mockReturnValue({
+      data: PROVIDERS,
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    const provider = screen.getByRole("group", { name: "OpenAI" });
+    expect(provider).not.toHaveAttribute("tabindex");
+    expect(
+      within(provider).getByRole("button", {
+        name: "providers.details: OpenAI",
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("opens the Add picker drawer and lists only unconfigured providers", async () => {
     useProvidersMock.mockReturnValue({
       data: PROVIDERS,

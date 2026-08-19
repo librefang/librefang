@@ -9,6 +9,48 @@
 
 import type { ManifestExtras, ManifestFormState } from "./agentManifest";
 
+const escapeTableCell = (value: string): string =>
+  value
+    .replace(/\\/g, "\\\\")
+    .replace(/`/g, "\\`")
+    .replace(/\|/g, "\\|")
+    .replace(/\r\n|\r|\n/g, " ");
+
+const longestBacktickRun = (content: string): number => {
+  let longestRun = 0;
+  for (const match of content.matchAll(/`+/g)) {
+    longestRun = Math.max(longestRun, match[0].length);
+  }
+  return longestRun;
+};
+
+const markdownCodeSpan = (content: string): string => {
+  const longestRun = longestBacktickRun(content);
+  const fence = "`".repeat(longestRun + 1);
+  const hasBoundarySpaces = content.startsWith(" ") && content.endsWith(" ");
+  const needsPadding =
+    content.startsWith("`") ||
+    content.endsWith("`") ||
+    (hasBoundarySpaces && content.trim() !== "");
+  const padding = needsPadding ? " " : "";
+  return `${fence}${padding}${content}${padding}${fence}`;
+};
+
+const pushFencedBlock = (lines: string[], content: string, language = ""): void => {
+  const longestRun = longestBacktickRun(content);
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  lines.push(`${fence}${language}`, content, fence);
+};
+
+const compactBlankLineElements = (lines: string[]): string[] => {
+  const compacted: string[] = [];
+  for (const line of lines) {
+    if (line === "" && compacted[compacted.length - 1] === "") continue;
+    compacted.push(line);
+  }
+  return compacted;
+};
+
 export const generateManifestMarkdown = (
   form: ManifestFormState,
   extras: ManifestExtras = {
@@ -31,9 +73,9 @@ export const generateManifestMarkdown = (
 
   const meta: string[] = [];
   if (form.author.trim()) meta.push(`**Author**: ${form.author.trim()}`);
-  if (form.module.trim()) meta.push(`**Module**: \`${form.module.trim()}\``);
+  if (form.module.trim()) meta.push(`**Module**: ${markdownCodeSpan(form.module.trim())}`);
   if (form.tags.length) {
-    meta.push(`**Tags**: ${form.tags.map((t) => `\`${t}\``).join(" ")}`);
+    meta.push(`**Tags**: ${form.tags.map(markdownCodeSpan).join(" ")}`);
   }
   meta.push(`**Enabled**: ${form.enabled ? "✓" : "✗"}`);
   if (meta.length) {
@@ -52,9 +94,7 @@ export const generateManifestMarkdown = (
     lines.push("");
     lines.push("### System Prompt");
     lines.push("");
-    lines.push("```");
-    lines.push(form.model.system_prompt.trim());
-    lines.push("```");
+    pushFencedBlock(lines, form.model.system_prompt.trim());
   }
   lines.push("");
 
@@ -71,7 +111,7 @@ export const generateManifestMarkdown = (
     lines.push("| Limit | Value |");
     lines.push("|-------|-------|");
     for (const [k, v] of resourceRows) {
-      lines.push(`| ${k} | ${v} |`);
+      lines.push(`| ${escapeTableCell(k)} | ${escapeTableCell(v)} |`);
     }
     lines.push("");
   }
@@ -117,7 +157,7 @@ export const generateManifestMarkdown = (
     lines.push("");
   }
 
-  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+  return compactBlankLineElements(lines).join("\n").trimEnd() + "\n";
 };
 
 // Render the advanced first-class form fields when populated. Keeping
@@ -128,15 +168,17 @@ const pushAdvancedFormSections = (lines: string[], form: ManifestFormState): voi
   if (form.schedule.mode !== "reactive") {
     lines.push("## Schedule");
     lines.push("");
-    lines.push(`- **Mode**: \`${form.schedule.mode}\``);
+    lines.push(`- **Mode**: ${markdownCodeSpan(form.schedule.mode)}`);
     if (form.schedule.mode === "periodic") {
-      lines.push(`- **Cron**: \`${form.schedule.cron}\``);
+      lines.push(`- **Cron**: ${markdownCodeSpan(form.schedule.cron)}`);
     } else if (form.schedule.mode === "proactive") {
       if (form.schedule.conditions.length) {
-        lines.push(`- **Conditions**: ${form.schedule.conditions.map((c) => `\`${c}\``).join(", ")}`);
+        lines.push(`- **Conditions**: ${form.schedule.conditions.map(markdownCodeSpan).join(", ")}`);
       }
     } else if (form.schedule.mode === "continuous") {
-      lines.push(`- **Check interval**: \`${form.schedule.check_interval_secs}s\``);
+      lines.push(`- **Check interval**: ${markdownCodeSpan(`${form.schedule.check_interval_secs}s`)}`);
+    } else {
+      lines.push("- _Details for this schedule mode are not available._");
     }
     lines.push("");
   }
@@ -147,7 +189,7 @@ const pushAdvancedFormSections = (lines: string[], form: ManifestFormState): voi
     lines.push("| # | Provider | Model |");
     lines.push("|---|----------|-------|");
     form.fallback_models.forEach((fb, i) => {
-      lines.push(`| ${i + 1} | ${fb.provider || "_(empty)_"} | ${fb.model || "_(empty)_"} |`);
+      lines.push(`| ${i + 1} | ${escapeTableCell(fb.provider || "_(empty)_")} | ${escapeTableCell(fb.model || "_(empty)_")} |`);
     });
     lines.push("");
   }
@@ -189,11 +231,9 @@ const pushAdvancedFormSections = (lines: string[], form: ManifestFormState): voi
     lines.push("");
     form.context_injection.forEach((ci, i) => {
       lines.push(`**${i + 1}. ${ci.name || "(unnamed)"}** _(${ci.position})_`);
-      if (ci.condition) lines.push(`- **Condition**: \`${ci.condition}\``);
+      if (ci.condition) lines.push(`- **Condition**: ${markdownCodeSpan(ci.condition)}`);
       lines.push("");
-      lines.push("```");
-      lines.push(ci.content);
-      lines.push("```");
+      pushFencedBlock(lines, ci.content);
       lines.push("");
     });
   }
@@ -207,9 +247,7 @@ const pushAdvancedFormSections = (lines: string[], form: ManifestFormState): voi
       lines.push(`- **Strict**: ${form.response_format.strict ? "✓" : "✗"}`);
       if (form.response_format.schema.trim()) {
         lines.push("");
-        lines.push("```json");
-        lines.push(form.response_format.schema);
-        lines.push("```");
+        pushFencedBlock(lines, form.response_format.schema, "json");
       }
     }
     lines.push("");
@@ -221,25 +259,25 @@ const pushAdvancedFormSections = (lines: string[], form: ManifestFormState): voi
 const pushLifecycleOverrides = (lines: string[], form: ManifestFormState): void => {
   const items: string[] = [];
   if (form.priority !== "Normal") {
-    items.push(`- **Priority**: \`${form.priority}\``);
+    items.push(`- **Priority**: ${markdownCodeSpan(form.priority)}`);
   }
   if (form.session_mode !== "persistent") {
-    items.push(`- **session_mode**: \`${form.session_mode}\``);
+    items.push(`- **session_mode**: ${markdownCodeSpan(form.session_mode)}`);
   }
   if (form.web_search_augmentation !== "auto") {
-    items.push(`- **web_search_augmentation**: \`${form.web_search_augmentation}\``);
+    items.push(`- **web_search_augmentation**: ${markdownCodeSpan(form.web_search_augmentation)}`);
   }
   if (form.exec_policy_shorthand) {
-    items.push(`- **exec_policy**: \`${form.exec_policy_shorthand}\``);
+    items.push(`- **exec_policy**: ${markdownCodeSpan(form.exec_policy_shorthand)}`);
   }
   if (form.pinned_model.trim()) {
-    items.push(`- **Pinned model**: \`${form.pinned_model.trim()}\``);
+    items.push(`- **Pinned model**: ${markdownCodeSpan(form.pinned_model.trim())}`);
   }
   if (form.workspace.trim()) {
-    items.push(`- **Workspace**: \`${form.workspace.trim()}\``);
+    items.push(`- **Workspace**: ${markdownCodeSpan(form.workspace.trim())}`);
   }
   if (form.allowed_plugins.length) {
-    items.push(`- **Allowed plugins**: ${form.allowed_plugins.map((p) => `\`${p}\``).join(", ")}`);
+    items.push(`- **Allowed plugins**: ${form.allowed_plugins.map(markdownCodeSpan).join(", ")}`);
   }
   if (form.skills_disabled) items.push("- ⚠️ **Skills disabled**");
   if (form.tools_disabled) items.push("- ⚠️ **Tools disabled**");
@@ -273,6 +311,7 @@ const pushList = (lines: string[], heading: string, items: string[]): void => {
 const formatCost = (raw: string): string => {
   const trimmed = raw.trim();
   if (!trimmed) return "";
+  if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(trimmed)) return trimmed;
   const n = Number(trimmed);
   if (!Number.isFinite(n)) return trimmed;
   return `$${n.toFixed(2)}`;
@@ -286,7 +325,7 @@ const renderExtras = (extras: ManifestExtras): string[] => {
     lines.push(`### ${label}`);
     lines.push("");
     for (const [key, value] of entries) {
-      lines.push(`- \`${key}\` = ${stringifyExtraValue(value)}`);
+      lines.push(`- ${markdownCodeSpan(key)} = ${stringifyExtraValue(value)}`);
     }
     lines.push("");
   };
@@ -304,18 +343,18 @@ const renderExtras = (extras: ManifestExtras): string[] => {
   renderTable("`[capabilities]` extras", extras.capabilities);
   for (const [key, value] of Object.entries(topNested)) {
     if (isArrayOfObjects(value)) {
-      lines.push(`### \`[[${key}]]\``);
+      lines.push(`### ${markdownCodeSpan(`[[${key}]]`)}`);
       lines.push("");
       const arr = value as Record<string, unknown>[];
       for (let i = 0; i < arr.length; i++) {
         lines.push(`**[${i}]**`);
         for (const [k, v] of Object.entries(arr[i])) {
-          lines.push(`- \`${k}\` = ${stringifyExtraValue(v)}`);
+          lines.push(`- ${markdownCodeSpan(k)} = ${stringifyExtraValue(v)}`);
         }
         lines.push("");
       }
     } else if (isPlainObject(value)) {
-      renderTable(`\`[${key}]\``, value as Record<string, unknown>);
+      renderTable(markdownCodeSpan(`[${key}]`), value as Record<string, unknown>);
     }
   }
   return lines;
@@ -329,12 +368,13 @@ const isArrayOfObjects = (v: unknown): boolean =>
 
 const stringifyExtraValue = (value: unknown): string => {
   if (value === null || value === undefined) return "_(empty)_";
-  if (typeof value === "string") return `\`"${value}"\``;
+  if (typeof value === "string") return markdownCodeSpan(`"${value}"`);
   if (typeof value === "boolean" || typeof value === "number" || typeof value === "bigint") {
-    return `\`${String(value)}\``;
+    return markdownCodeSpan(String(value));
   }
   try {
-    return `\`${JSON.stringify(value)}\``;
+    const serialized = JSON.stringify(value);
+    return serialized === undefined ? "_(unrenderable)_" : markdownCodeSpan(serialized);
   } catch {
     return "_(unrenderable)_";
   }

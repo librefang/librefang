@@ -34,8 +34,37 @@ export type SkillHub = {
   cli: (slug: string) => string;
 };
 
-export const SKILL_HUBS: readonly SkillHub[] = [
-  {
+const normalizeRegistryUrl = (raw: string | undefined): string | undefined => {
+  if (!raw?.trim()) return undefined;
+  try {
+    const url = new URL(raw.trim());
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    if (url.username || url.password || url.search || url.hash) return undefined;
+    return url.href.replace(/\/+$/, "");
+  } catch {
+    return undefined;
+  }
+};
+
+const shellQuote = (value: string): string =>
+  `'${value.replace(/'/g, `'"'"'`)}'`;
+
+const skillHubRegistryUrl = normalizeRegistryUrl(
+  import.meta.env.VITE_SKILLHUB_REGISTRY_URL,
+);
+const skillHubDomain = skillHubRegistryUrl
+  ? new URL(skillHubRegistryUrl).host
+  : "deployment configured";
+const skillHubCliRegistry = skillHubRegistryUrl
+  ? shellQuote(skillHubRegistryUrl)
+  : '"$SKILLHUB_REGISTRY_URL"';
+
+type SkillHubIndex = {
+  readonly [K in SkillHubId]: SkillHub & { readonly id: K };
+};
+
+const HUB_INDEX = {
+  fanghub: {
     id: "fanghub",
     name: "FangHub",
     glyph: "🪝",
@@ -43,20 +72,20 @@ export const SKILL_HUBS: readonly SkillHub[] = [
     domain: "fanghub.librefang.ai",
     desc:
       "Official LibreFang registry — curated hands, agents, MCP, providers, plugins.",
-    cli: (slug) => `librefang skill install ${slug}`,
+    cli: (slug) => `librefang skill install ${shellQuote(slug)}`,
   },
-  {
+  skillhub: {
     id: "skillhub",
     name: "SkillHub",
     glyph: "🛡",
     color: "#a78bfa",
-    domain: "skillhub.your-co.com",
+    domain: skillHubDomain,
     desc:
       "Self-hosted enterprise skill registry — private namespaces behind your firewall.",
     cli: (slug) =>
-      `CLAWHUB_REGISTRY=https://skillhub.your-co.com clawhub install ${slug}`,
+      `CLAWHUB_REGISTRY=${skillHubCliRegistry} clawhub install ${shellQuote(slug)}`,
   },
-  {
+  clawhub: {
     id: "clawhub",
     name: "ClawHub",
     glyph: "🦞",
@@ -64,9 +93,9 @@ export const SKILL_HUBS: readonly SkillHub[] = [
     domain: "clawhub.ai",
     desc:
       "OpenClaw public registry — thousands of community skills, vector search.",
-    cli: (slug) => `clawhub install ${slug}`,
+    cli: (slug) => `clawhub install ${shellQuote(slug)}`,
   },
-  {
+  "clawhub-cn": {
     id: "clawhub-cn",
     name: "ClawHub-CN",
     glyph: "🇨🇳",
@@ -75,14 +104,15 @@ export const SKILL_HUBS: readonly SkillHub[] = [
     desc:
       "ClawHub China mirror — accelerated access, CN-native skills.",
     cli: (slug) =>
-      `CLAWHUB_REGISTRY=https://clawhub.cn clawhub install ${slug}`,
+      `CLAWHUB_REGISTRY=https://clawhub.cn clawhub install ${shellQuote(slug)}`,
   },
-] as const;
+} as const satisfies SkillHubIndex;
 
-const HUB_INDEX: Readonly<Record<SkillHubId, SkillHub>> = Object.fromEntries(
-  SKILL_HUBS.map((h) => [h.id, h]),
-) as Record<SkillHubId, SkillHub>;
+export const SKILL_HUBS: readonly SkillHub[] = Object.values(HUB_INDEX);
+const HUB_LOOKUP: ReadonlyMap<string, SkillHub> = new Map(
+  SKILL_HUBS.map((hub) => [hub.id, hub]),
+);
 
-export function getSkillHub(id: SkillHubId): SkillHub {
-  return HUB_INDEX[id];
+export function getSkillHub(id: string): SkillHub | undefined {
+  return HUB_LOOKUP.get(id);
 }
