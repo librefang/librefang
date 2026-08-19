@@ -92,36 +92,53 @@ done <"$STAGED_PATHS"
 
 if [ "${#FILES[@]}" -gt 0 ]; then
     if command -v rustfmt >/dev/null 2>&1; then
+        FORMAT_FILES=()
         FORMATTED=()
+        MODES=()
         INDEX_INFO="$WORK_TMP/index-info"
         RUSTFMT_CONFIG="$WORK_TMP/rustfmt.toml"
         : >"$INDEX_INFO"
-        if ! git show :rustfmt.toml >"$RUSTFMT_CONFIG"; then
-            echo "scripts/commit.sh: failed to read staged rustfmt.toml" >&2
-            exit 5
-        fi
         for file in "${FILES[@]}"; do
+            if ! entry=$(git ls-files -s -- "$file") || [ -z "$entry" ] || \
+                [[ "$entry" == *$'\n'* ]]; then
+                echo "scripts/commit.sh: failed to read index metadata: $file" >&2
+                exit 5
+            fi
+            metadata=${entry%%$'\t'*}
+            read -r mode _ stage extra <<<"$metadata"
+            if [ -n "${extra:-}" ] || [ "$stage" != 0 ]; then
+                echo "scripts/commit.sh: invalid index metadata: $file" >&2
+                exit 5
+            fi
+            case "$mode" in
+                100644|100755) ;;
+                *) continue ;;
+            esac
             staged_copy="$WORK_TMP/tree/$file"
             mkdir -p "$(dirname "$staged_copy")"
             if ! git show ":$file" >"$staged_copy"; then
                 echo "scripts/commit.sh: failed to read staged blob: $file" >&2
                 exit 5
             fi
+            FORMAT_FILES+=("$file")
             FORMATTED+=("$staged_copy")
+            MODES+=("$mode")
         done
-        if ! rustfmt --edition 2021 --config-path "$RUSTFMT_CONFIG" \
-            "${FORMATTED[@]}"; then
+        if [ "${#FORMATTED[@]}" -gt 0 ] && \
+            ! git show :rustfmt.toml >"$RUSTFMT_CONFIG"; then
+            echo "scripts/commit.sh: failed to read staged rustfmt.toml" >&2
+            exit 5
+        fi
+        if [ "${#FORMATTED[@]}" -gt 0 ] && \
+            ! rustfmt --edition 2021 --config-path "$RUSTFMT_CONFIG" \
+                "${FORMATTED[@]}"; then
             echo "scripts/commit.sh: rustfmt failed; staged set unchanged" >&2
             exit 3
         fi
-        for index in "${!FILES[@]}"; do
-            file=${FILES[$index]}
+        for index in "${!FORMAT_FILES[@]}"; do
+            file=${FORMAT_FILES[$index]}
             staged_copy=${FORMATTED[$index]}
-            if ! entry=$(git ls-files -s -- "$file") || [ -z "$entry" ]; then
-                echo "scripts/commit.sh: failed to read index metadata: $file" >&2
-                exit 5
-            fi
-            mode=${entry%% *}
+            mode=${MODES[$index]}
             if ! blob=$(git hash-object -w "$staged_copy"); then
                 echo "scripts/commit.sh: failed to write formatted blob: $file" >&2
                 exit 5
