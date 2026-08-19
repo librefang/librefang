@@ -5,6 +5,12 @@ category = "devtools"
 icon = "🌐"
 tags = ["web", "fetch", "scraping", "markdown", "http"]
 
+setup_instructions = """
+No API key required. Fetches any publicly accessible URL and returns the content as Markdown.
+
+For JavaScript-rendered pages (SPAs), use the Puppeteer integration instead.
+"""
+
 [transport]
 type = "stdio"
 command = "npx"
@@ -13,13 +19,6 @@ args = ["-y", "@modelcontextprotocol/server-fetch@latest"]
 [health_check]
 interval_secs = 60
 unhealthy_threshold = 3
-
-setup_instructions = """
-No API key required. Fetches any publicly accessible URL and returns the content as Markdown.
-
-For JavaScript-rendered pages (SPAs), use the Puppeteer integration instead.
-"""
-
 
 [i18n.zh]
 name = "Web Fetch"

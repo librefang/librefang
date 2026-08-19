@@ -154,12 +154,7 @@ pub async fn install_extension(
         Ok(r) => r,
         Err(e) => {
             let err_str = e.to_string();
-            let status = match e {
-                librefang_types::integration::IntegrationError::NotFound(_) => {
-                    StatusCode::NOT_FOUND
-                }
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
+            let status = extension_install_error_status(&e);
             // 404 echoes the "not found" message (caller-useful); the
             // 500 catch-all scrubs (audit: rusqlite-errors-leak) and
             // logs the full error for operators.
@@ -271,6 +266,19 @@ pub async fn uninstall_extension(
     )
 }
 
+fn extension_install_error_status(
+    error: &librefang_types::integration::IntegrationError,
+) -> StatusCode {
+    match error {
+        librefang_types::integration::IntegrationError::NotFound(_)
+        | librefang_types::integration::IntegrationError::NotInstalled(_)
+        | librefang_types::integration::IntegrationError::CredentialNotFound(_) => {
+            StatusCode::NOT_FOUND
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
 fn extension_reload_error(
     action: &str,
     target: &str,
@@ -285,6 +293,29 @@ fn extension_reload_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_extension_resources_return_not_found() {
+        use librefang_types::integration::IntegrationError;
+
+        let errors = [
+            IntegrationError::NotFound("github".to_string()),
+            IntegrationError::NotInstalled("github".to_string()),
+            IntegrationError::CredentialNotFound("GITHUB_TOKEN".to_string()),
+        ];
+
+        for error in errors {
+            assert_eq!(
+                extension_install_error_status(&error),
+                StatusCode::NOT_FOUND
+            );
+        }
+
+        assert_eq!(
+            extension_install_error_status(&IntegrationError::Vault("locked".to_string())),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
 
     #[test]
     fn extension_reload_errors_return_scrubbed_server_error() {

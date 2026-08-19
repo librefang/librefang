@@ -547,10 +547,12 @@ impl LibreFangKernel {
         let transport_entry = match &server_config.transport {
             Some(t) => t,
             None => {
-                return Err(format!(
+                let error = format!(
                     "MCP server '{}' has no transport configured",
                     server_config.name
-                ));
+                );
+                self.mcp.mcp_health.report_error(id, error.clone());
+                return Err(error);
             }
         };
         let transport = match transport_entry {

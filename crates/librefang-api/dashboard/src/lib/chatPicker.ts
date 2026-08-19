@@ -3,6 +3,7 @@ import type { AgentItem, HandInstanceItem } from "../api";
 export type HandGroupAgent = AgentItem & {
   role: string;
   isCoordinator: boolean;
+  membershipKey: string;
 };
 
 export interface HandGroup {
@@ -25,10 +26,14 @@ export interface GroupedPicker {
 export function isUsableHandInstance(h: HandInstanceItem): boolean {
   return (
     (h.status ?? "") === "Active" &&
+    typeof h.instance_id === "string" &&
+    h.instance_id.trim().length > 0 &&
     !!h.agent_ids &&
     Object.keys(h.agent_ids).length > 0 &&
-    h.hand_id !== undefined &&
-    h.hand_name !== undefined
+    typeof h.hand_id === "string" &&
+    h.hand_id.trim().length > 0 &&
+    typeof h.hand_name === "string" &&
+    h.hand_name.trim().length > 0
   );
 }
 
@@ -62,18 +67,31 @@ export function groupedPicker(
     hand_icon?: string;
     role: string;
     isCoordinator: boolean;
+    membershipKey: string;
   };
-  const lookup = new Map<string, Membership>();
+  const lookup = new Map<string, Membership[]>();
   for (const h of activeHands) {
     const ids = h.agent_ids ?? {};
     for (const [role, agentId] of Object.entries(ids)) {
-      lookup.set(agentId, {
-        hand_id: h.hand_id!,
-        hand_name: h.hand_name!,
+      if (typeof agentId !== "string") continue;
+      const normalizedAgentId = agentId.trim();
+      const normalizedRole = role.trim();
+      if (!normalizedAgentId || !normalizedRole) continue;
+      const membership = {
+        hand_id: h.hand_id!.trim(),
+        hand_name: h.hand_name!.trim(),
         hand_icon: h.hand_icon,
-        role,
-        isCoordinator: h.coordinator_role === role,
-      });
+        role: normalizedRole,
+        isCoordinator: h.coordinator_role?.trim() === normalizedRole,
+        membershipKey: JSON.stringify([
+          h.instance_id.trim(),
+          normalizedRole,
+          normalizedAgentId,
+        ]),
+      };
+      const memberships = lookup.get(normalizedAgentId);
+      if (memberships) memberships.push(membership);
+      else lookup.set(normalizedAgentId, [membership]);
     }
   }
 
@@ -81,8 +99,8 @@ export function groupedPicker(
   const standalone: AgentItem[] = [];
   const groupsByHandId = new Map<string, HandGroup>();
   for (const agent of agents) {
-    const membership = lookup.get(agent.id);
-    if (!membership) {
+    const memberships = lookup.get(agent.id);
+    if (!memberships) {
       if (!agent.is_hand) {
         standalone.push(agent);
       }
@@ -90,21 +108,24 @@ export function groupedPicker(
       // entirely (Q1 / Paused-hand test case in chatPicker.test.ts).
       continue;
     }
-    let group = groupsByHandId.get(membership.hand_id);
-    if (!group) {
-      group = {
-        hand_id: membership.hand_id,
-        hand_name: membership.hand_name,
-        hand_icon: membership.hand_icon,
-        agents: [],
-      };
-      groupsByHandId.set(membership.hand_id, group);
+    for (const membership of memberships) {
+      let group = groupsByHandId.get(membership.hand_id);
+      if (!group) {
+        group = {
+          hand_id: membership.hand_id,
+          hand_name: membership.hand_name,
+          hand_icon: membership.hand_icon,
+          agents: [],
+        };
+        groupsByHandId.set(membership.hand_id, group);
+      }
+      group.agents.push({
+        ...agent,
+        role: membership.role,
+        isCoordinator: membership.isCoordinator,
+        membershipKey: membership.membershipKey,
+      });
     }
-    group.agents.push({
-      ...agent,
-      role: membership.role,
-      isCoordinator: membership.isCoordinator,
-    });
   }
 
   // Sort within each group: coordinator first, then alphabetical by role.

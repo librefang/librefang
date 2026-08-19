@@ -18,6 +18,10 @@ use librefang_types::agent::AgentId;
 
 use super::*;
 
+fn goal_progress_for_prompt(goal: &serde_json::Value) -> u8 {
+    goal["progress"].as_u64().unwrap_or(0).min(100) as u8
+}
+
 impl LibreFangKernel {
     /// Get cached workspace metadata (workspace context + identity files) for
     /// an agent's workspace, rebuilding if the cache entry has expired.
@@ -151,7 +155,7 @@ impl LibreFangKernel {
             .map(|g| {
                 let title = g["title"].as_str().unwrap_or("").to_string();
                 let status = g["status"].as_str().unwrap_or("pending").to_string();
-                let progress = g["progress"].as_u64().unwrap_or(0) as u8;
+                let progress = goal_progress_for_prompt(&g);
                 (title, status, progress)
             })
             .collect()
@@ -434,8 +438,21 @@ fn empty_workspace_metadata() -> CachedWorkspaceMetadata {
 
 #[cfg(test)]
 mod workspace_metadata_tests {
-    use super::run_workspace_metadata_job;
+    use super::{goal_progress_for_prompt, run_workspace_metadata_job};
     use std::time::Duration;
+
+    #[test]
+    fn goal_progress_is_bounded_before_narrowing() {
+        assert_eq!(
+            goal_progress_for_prompt(&serde_json::json!({"progress": 42})),
+            42
+        );
+        assert_eq!(
+            goal_progress_for_prompt(&serde_json::json!({"progress": 300})),
+            100
+        );
+        assert_eq!(goal_progress_for_prompt(&serde_json::json!({})), 0);
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn workspace_metadata_job_does_not_block_async_worker() {
