@@ -62,11 +62,29 @@ env -u HOME \
     /bin/bash "$SCRIPT" release --dry-run 'arg with space' "single'quote" '$dollar'
 
 grep -F 'export PATH="$CARGO_HOME/bin:$PATH"' "$FIXTURE/docker.args" >/dev/null
+grep -Fq 'mkdir -p "$HOME" "$HOME/.config"' "$FIXTURE/docker.args"
+grep -Fxq 'HOME=/tmp/librefang-home' "$FIXTURE/docker.args"
 grep -F "'$FIXTURE/repo:/work'" "$FIXTURE/docker.args" >/dev/null 2>&1 || \
     grep -F "$FIXTURE/repo:/work" "$FIXTURE/docker.args" >/dev/null
 grep -Fq "'arg with space'" "$FIXTURE/docker.args"
 grep -Fq "'single'\\''quote'" "$FIXTURE/docker.args"
 grep -Fq "'\$dollar'" "$FIXTURE/docker.args"
+
+mkdir -p "$FIXTURE/home/.ssh" "$FIXTURE/home/.config/gh"
+: >"$FIXTURE/home/.gitconfig"
+HOME="$FIXTURE/home" \
+    PATH="$FIXTURE/bin:/usr/bin:/bin" \
+    DOCKER_ARGS_LOG="$FIXTURE/docker.args" \
+    LIBREFANG_RUST_FORCE_DOCKER=1 \
+    /bin/bash "$SCRIPT" release
+grep -Fxq "$FIXTURE/home/.ssh:/tmp/librefang-host-ssh:ro" \
+    "$FIXTURE/docker.args"
+grep -Fxq "$FIXTURE/home/.config/gh:/tmp/librefang-host-gh:ro" \
+    "$FIXTURE/docker.args"
+grep -Fq 'ln -s /tmp/librefang-host-ssh "$HOME/.ssh"' \
+    "$FIXTURE/docker.args"
+grep -Fq 'ln -s /tmp/librefang-host-gh "$HOME/.config/gh"' \
+    "$FIXTURE/docker.args"
 
 rm "$FIXTURE/docker.args"
 env -u HOME \
@@ -82,6 +100,7 @@ grep -Fq 'chown -R "$1:$2" /cargo /target && touch "$3" "$4"' \
     echo "FAIL: Linux ownership command was not passed literally" >&2
     exit 1
 }
+grep -Fq 'test -f "$1" && test -f "$2"' "$FIXTURE/docker.args"
 grep -Fxq '1234' "$FIXTURE/docker.args"
 grep -Fxq '5678' "$FIXTURE/docker.args"
 grep -Fxq '/cargo/.owned-by-1234-5678' "$FIXTURE/docker.args"
