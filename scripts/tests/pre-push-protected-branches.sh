@@ -52,6 +52,17 @@ run_hook 'release stable' "refs/heads/main $SHA1 refs/heads/main $ZERO40"
 # Cargo.toml exists in the repository and would be produced by expanding `*`.
 run_hook '*' "refs/heads/Cargo.toml $SHA1 refs/heads/Cargo.toml $ZERO40"
 
+run_hook 'release/2026' \
+    "refs/heads/topic $SHA1 refs/tags/release/2026 $ZERO40"
+if run_hook 'release/2026' \
+    "refs/heads/topic $SHA1 refs/heads/release/2026 $ZERO40" >/dev/null 2>&1; then
+    echo "FAIL: exact protected branch with a slash was accepted" >&2
+    exit 1
+fi
+
+printf '%s\n' "refs/heads/main $SHA1 refs/heads/main $ZERO40" \
+    | LIBREFANG_PREPUSH_SKIP=1 LIBREFANG_PROTECTED_BRANCHES='main' "$HOOK"
+
 if run_config_hook "refs/heads/develop $SHA1 refs/heads/develop $ZERO40" >/dev/null 2>&1; then
     echo "FAIL: git-config protected branch was accepted" >&2
     exit 1
