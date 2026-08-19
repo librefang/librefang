@@ -1,1 +1,0 @@
-- Reduced the Rust SDK's Tokio feature set to the runtime, synchronization, and macro capabilities it actually uses, avoiding unnecessary downstream feature unification. (@houko)

@@ -5,6 +5,13 @@ category = "ai"
 icon = "🔗"
 tags = ["reasoning", "thinking", "chain-of-thought", "planning", "logic"]
 
+setup_instructions = """
+No API key required.
+
+Useful for complex reasoning tasks: multi-step math, logic puzzles, planning, debugging.
+The agent can revise earlier steps as it learns more during the thought chain.
+"""
+
 [transport]
 type = "stdio"
 command = "npx"
@@ -13,14 +20,6 @@ args = ["-y", "@modelcontextprotocol/server-sequential-thinking@latest"]
 [health_check]
 interval_secs = 60
 unhealthy_threshold = 3
-
-setup_instructions = """
-No API key required.
-
-Useful for complex reasoning tasks: multi-step math, logic puzzles, planning, debugging.
-The agent can revise earlier steps as it learns more during the thought chain.
-"""
-
 
 [i18n.zh]
 name = "Sequential Thinking"
