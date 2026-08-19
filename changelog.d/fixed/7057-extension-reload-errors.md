@@ -1,1 +1,0 @@
-- Return a scrubbed server error when an extension install or uninstall cannot apply its on-disk MCP configuration, instead of reporting success against stale runtime state. (@xiaomo)

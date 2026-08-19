@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   emptyManifestExtras,
   emptyManifestForm,
+  type ManifestFormState,
 } from "./agentManifest";
 import { generateManifestMarkdown } from "./agentManifestMarkdown";
 
@@ -207,5 +208,145 @@ describe("generateManifestMarkdown", () => {
     const form = emptyManifestForm();
     const md = generateManifestMarkdown(form);
     expect(md).toContain("# (unnamed agent)");
+  });
+
+  it("escapes table delimiters and normalizes cell newlines", () => {
+    const form = emptyManifestForm();
+    form.resources.max_tool_calls_per_minute = "30|40\n50";
+    form.fallback_models = [{
+      _uid: "fallback-1",
+      provider: "open|`router",
+      model: "line-one\nline-two",
+      api_key_env: "",
+      base_url: "",
+      extras: {},
+    }];
+
+    const md = generateManifestMarkdown(form);
+
+    expect(md).toContain("| Tool calls / minute | 30\\|40 50 |");
+    expect(md).toContain("| 1 | open\\|\\`router | line-one line-two |");
+  });
+
+  it("chooses code fences longer than embedded backtick runs", () => {
+    const form = emptyManifestForm();
+    form.model.system_prompt = "before\n```\nafter";
+    form.context_injection = [{
+      _uid: "context-1",
+      name: "code",
+      content: "inner ```` fence",
+      position: "before_user",
+      condition: "",
+    }];
+    form.response_format = {
+      mode: "json_schema",
+      name: "schema",
+      strict: true,
+      schema: '{"example":"```"}',
+    };
+
+    const md = generateManifestMarkdown(form);
+
+    expect(md).toContain("````\nbefore\n```\nafter\n````");
+    expect(md).toContain("`````\ninner ```` fence\n`````");
+    expect(md).toContain("````json\n{\"example\":\"```\"}\n````");
+  });
+
+  it("preserves repeated blank lines inside fenced content", () => {
+    const form = emptyManifestForm();
+    form.model.system_prompt = "before\n\n\nafter";
+    form.context_injection = [{
+      _uid: "context-1",
+      name: "spacing",
+      content: "first\n\n\n\nsecond",
+      position: "before_user",
+      condition: "",
+    }];
+
+    const md = generateManifestMarkdown(form);
+
+    expect(md).toContain("```\nbefore\n\n\nafter\n```");
+    expect(md).toContain("```\nfirst\n\n\n\nsecond\n```");
+  });
+
+  it("uses collision-resistant code spans for extras containing backticks", () => {
+    const form = emptyManifestForm();
+    const extras = emptyManifestExtras();
+    extras.topLevel.note = "before `code` after";
+
+    expect(generateManifestMarkdown(form, extras)).toContain(
+      '- `note` = ``"before `code` after"``',
+    );
+  });
+
+  it("uses collision-resistant code spans for first-class inline values and extra keys", () => {
+    const form = emptyManifestForm();
+    const extras = emptyManifestExtras();
+    form.module = "builtin:`chat`";
+    form.schedule = { mode: "periodic", cron: "`*/5 * * * *`" };
+    extras.topLevel["tick`rate"] = 5;
+
+    const md = generateManifestMarkdown(form, extras);
+
+    expect(md).toContain("**Module**: `` builtin:`chat` ``");
+    expect(md).toContain("**Cron**: `` `*/5 * * * *` ``");
+    expect(md).toContain("- ``tick`rate`` = `5`");
+  });
+
+  it("pads code spans so CommonMark preserves boundary spaces", () => {
+    const form = emptyManifestForm();
+    const extras = emptyManifestExtras();
+    form.tags = [" padded "];
+    extras.topLevel[" spaced "] = true;
+
+    const md = generateManifestMarkdown(form, extras);
+
+    expect(md).toContain("**Tags**: `  padded  `");
+    expect(md).toContain("- `  spaced  ` = `true`");
+  });
+
+  it("handles many separate backtick runs without expanding them as function arguments", () => {
+    const form = emptyManifestForm();
+    form.model.system_prompt = "x`".repeat(150_000);
+
+    expect(() => generateManifestMarkdown(form)).not.toThrow();
+  });
+
+  it("renders unsupported extra values as unrenderable", () => {
+    const form = emptyManifestForm();
+    const extras = emptyManifestExtras();
+    (extras.topLevel as Record<string, unknown>).unsupported = Symbol("unsupported");
+
+    expect(generateManifestMarkdown(form, extras)).toContain(
+      "- `unsupported` = _(unrenderable)_",
+    );
+  });
+
+  it("formats decimal costs only", () => {
+    const form = emptyManifestForm();
+    form.resources.max_cost_per_hour_usd = ".5";
+    form.resources.max_cost_per_day_usd = "1.";
+
+    const decimalMd = generateManifestMarkdown(form);
+
+    expect(decimalMd).toContain("| Max cost / hour | $0.50 |");
+    expect(decimalMd).toContain("| Max cost / day | $1.00 |");
+
+    form.resources.max_cost_per_hour_usd = "1e2";
+    form.resources.max_cost_per_day_usd = "0x10";
+
+    const nonDecimalMd = generateManifestMarkdown(form);
+
+    expect(nonDecimalMd).toContain("| Max cost / hour | 1e2 |");
+    expect(nonDecimalMd).toContain("| Max cost / day | 0x10 |");
+  });
+
+  it("records that an unknown schedule mode has no known details", () => {
+    const form = emptyManifestForm();
+    form.schedule = { mode: "future" } as unknown as ManifestFormState["schedule"];
+
+    expect(generateManifestMarkdown(form)).toContain(
+      "Details for this schedule mode are not available.",
+    );
   });
 });
