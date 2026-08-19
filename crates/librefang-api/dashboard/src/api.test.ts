@@ -7,6 +7,7 @@ import {
   patchAgentConfig,
   patchHandAgentRuntimeConfig,
   resetAgentSession,
+  searchMemories,
   setApiKey,
   updateAgentTools,
   verifyStoredAuth,
@@ -85,6 +86,29 @@ describe("dashboard auth helpers", () => {
     const { url, protocols } = buildAuthenticatedWebSocket("/api/agents/abc/ws");
     expect(url).toBe("ws://127.0.0.1:4545/api/agents/abc/ws");
     expect(protocols).toEqual([]);
+  });
+
+  it("sends memory level filters to the agent-scoped search endpoint", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ memories: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await expect(
+      searchMemories({
+        query: "needle",
+        agentId: "agent/one",
+        level: "user",
+        limit: 50,
+      }),
+    ).resolves.toEqual([]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/memory/agents/agent%2Fone/search?q=needle&limit=50&level=user",
+    );
   });
 
   it("stores the token in sessionStorage, not localStorage", () => {

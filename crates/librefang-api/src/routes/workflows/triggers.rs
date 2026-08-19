@@ -3,6 +3,32 @@ use super::*;
 // ---------------------------------------------------------------------------
 // Trigger routes
 // ---------------------------------------------------------------------------
+fn trigger_registration_error_response(
+    error: crate::error::KernelError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use crate::error::KernelError;
+    use librefang_types::error::LibreFangError;
+
+    match error {
+        KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id)) => {
+            tracing::warn!(%agent_id, "Trigger registration agent was not found");
+            ApiErrorResponse::not_found(format!("Agent not found: {agent_id}")).into_json_tuple()
+        }
+        KernelError::LibreFang(LibreFangError::InvalidInput(message)) => {
+            tracing::warn!(%message, "Trigger registration input was rejected");
+            ApiErrorResponse::bad_request(message).into_json_tuple()
+        }
+        KernelError::Backpressure(message) => {
+            tracing::warn!(%message, "Trigger registration rejected by backpressure");
+            ApiErrorResponse::internal("Trigger registration temporarily unavailable")
+                .with_status(StatusCode::SERVICE_UNAVAILABLE)
+                .with_code("service_unavailable")
+                .into_json_tuple()
+        }
+        other => ApiErrorResponse::internal_scrub(other).into_json_tuple(),
+    }
+}
+
 /// POST /api/triggers — Register a new event trigger.
 #[utoipa::path(
     post,
@@ -10,8 +36,11 @@ use super::*;
     tag = "workflows",
     request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Trigger created", body = crate::types::JsonObject),
-        (status = 400, description = "Invalid trigger definition")
+        (status = 201, description = "Trigger created", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid trigger definition"),
+        (status = 404, description = "Owner or target agent not found"),
+        (status = 500, description = "Unexpected kernel failure"),
+        (status = 503, description = "Trigger registration temporarily unavailable")
     )
 )]
 pub async fn create_trigger(
@@ -138,25 +167,58 @@ pub async fn create_trigger(
             }
             (StatusCode::CREATED, Json(resp))
         }
-        Err(e) => {
-            tracing::warn!("Trigger registration failed: {e}");
+        Err(error) => {
             // The per-agent cap (audit: trigger-engine-no-per-agent-cap)
             // and other client-side rejections surface as `InvalidInput`
             // — those are 400, not "agent not found". Only a genuine
             // missing-owner/target maps to 404. Mirrors the parallel
             // branch in `update_schedule` above.
-            use crate::error::KernelError;
-            use librefang_types::error::LibreFangError;
-            match e {
-                KernelError::LibreFang(LibreFangError::InvalidInput(msg)) => {
-                    ApiErrorResponse::bad_request(msg).into_json_tuple()
-                }
-                other => {
-                    ApiErrorResponse::not_found(format!("Trigger registration failed: {other}"))
-                        .into_json_tuple()
-                }
-            }
+            trigger_registration_error_response(error)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::KernelError;
+    use librefang_types::error::LibreFangError;
+
+    fn message(body: &serde_json::Value) -> &str {
+        body["error"]["message"].as_str().expect("error message")
+    }
+
+    #[test]
+    fn trigger_registration_errors_keep_their_http_class() {
+        let (status, Json(body)) = trigger_registration_error_response(KernelError::LibreFang(
+            LibreFangError::AgentNotFound("missing-agent".to_string()),
+        ));
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(message(&body).contains("missing-agent"));
+
+        let (status, Json(body)) = trigger_registration_error_response(KernelError::LibreFang(
+            LibreFangError::InvalidInput("too many triggers".to_string()),
+        ));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(message(&body), "too many triggers");
+
+        let (status, Json(body)) = trigger_registration_error_response(KernelError::Backpressure(
+            "queue detail".to_string(),
+        ));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "service_unavailable");
+        assert!(!body.to_string().contains("queue detail"));
+    }
+
+    #[test]
+    fn unexpected_trigger_registration_error_is_a_scrubbed_500() {
+        let (status, Json(body)) = trigger_registration_error_response(KernelError::LibreFang(
+            LibreFangError::Internal("sensitive kernel detail".to_string()),
+        ));
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(message(&body), "Internal server error");
+        assert!(!body.to_string().contains("sensitive kernel detail"));
     }
 }
 

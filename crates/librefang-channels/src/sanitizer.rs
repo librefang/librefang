@@ -30,6 +30,20 @@ struct CompiledPattern {
     label: &'static str,
 }
 
+const BUILT_IN_PATTERNS: &[(&str, &str)] = &[
+    (r"(?im)^(System|Assistant|Human):\s", "role_impersonation"),
+    (
+        r"(?i)ignore\s+(all\s+)?(previous|above|prior)\s+instructions",
+        "instruction_override",
+    ),
+    (r"(^|\n)---\s*\n[\s\S]*?\n---($|\n)", "delimiter_injection"),
+    (r"(^|\n)###\s*\n", "delimiter_injection"),
+    (
+        r"(?i)(you are now|from now on you|act as|pretend to be)\s",
+        "role_reassignment",
+    ),
+];
+
 /// Result of running the sanitizer on a message.
 #[derive(Debug)]
 pub enum SanitizeResult {
@@ -47,48 +61,18 @@ impl InputSanitizer {
     pub fn from_config(config: &SanitizeConfig) -> Self {
         let mut patterns = Vec::new();
 
-        // Built-in patterns -------------------------------------------------
-
-        // Role impersonation: lines starting with "System:", "Assistant:", "Human:"
-        if let Ok(re) = Regex::new(r"(?im)^(System|Assistant|Human):\s") {
-            patterns.push(CompiledPattern {
-                regex: re,
-                label: "role_impersonation",
+        // Built-in patterns are developer-authored invariants. A compile
+        // failure must stop startup instead of silently removing a security
+        // rule while leaving the sanitizer apparently enabled.
+        for &(pattern, label) in BUILT_IN_PATTERNS {
+            let regex = Regex::new(pattern).unwrap_or_else(|error| {
+                panic!("built-in sanitizer regex '{label}' must compile: {error}")
             });
-        }
-
-        // Instruction override: "ignore all previous instructions" and variants
-        if let Ok(re) = Regex::new(r"(?i)ignore\s+(all\s+)?(previous|above|prior)\s+instructions") {
-            patterns.push(CompiledPattern {
-                regex: re,
-                label: "instruction_override",
-            });
-        }
-
-        // Delimiter injection: triple-dash or triple-hash fences
-        if let Ok(re) = Regex::new(r"(^|\n)---\s*\n[\s\S]*?\n---($|\n)") {
-            patterns.push(CompiledPattern {
-                regex: re,
-                label: "delimiter_injection",
-            });
-        }
-        if let Ok(re) = Regex::new(r"(^|\n)###\s*\n") {
-            patterns.push(CompiledPattern {
-                regex: re,
-                label: "delimiter_injection",
-            });
+            patterns.push(CompiledPattern { regex, label });
         }
 
         // Excessive repetition is checked directly in `check()` because
         // regex_lite does not support backreferences like `(.)\1{99,}`.
-
-        // "You are now" / "Act as" role reassignment
-        if let Ok(re) = Regex::new(r"(?i)(you are now|from now on you|act as|pretend to be)\s") {
-            patterns.push(CompiledPattern {
-                regex: re,
-                label: "role_reassignment",
-            });
-        }
 
         // Custom block patterns from config ----------------------------------
         for pat_str in &config.custom_block_patterns {
@@ -241,6 +225,24 @@ mod tests {
             san.check("Human: do something"),
             SanitizeResult::Blocked(_)
         ));
+    }
+
+    #[test]
+    fn installs_every_built_in_pattern() {
+        let sanitizer = InputSanitizer::from_config(&config_block());
+        let installed = sanitizer
+            .patterns
+            .iter()
+            .map(|pattern| pattern.label)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            installed,
+            BUILT_IN_PATTERNS
+                .iter()
+                .map(|(_, label)| *label)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

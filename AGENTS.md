@@ -15,23 +15,37 @@ See `CLAUDE.md` for the full agent contract (worktree rules, hooks, integration 
 
 ## Layout
 
-15 crates under `crates/` plus `xtask/`.
+29 crates under `crates/` plus `xtask/`.
 
 | Crate | Purpose |
 |---|---|
 | `librefang-types` | Core types, traits, shared data models |
-| `librefang-kernel` | Agent registry, scheduling, orchestration, event bus, metering |
-| `librefang-runtime` | Agent loop, LLM drivers, tools, MCP client, context engine, A2A |
+| `librefang-http` | Shared HTTP client plumbing |
+| `librefang-kernel` | Agent registry, scheduling, orchestration, event bus |
+| `librefang-kernel-handle` | `KernelHandle` trait — lets runtime call kernel without a circular dep |
+| `librefang-kernel-router` | Model / provider routing |
+| `librefang-kernel-metering` | Token accounting and budget metering |
+| `librefang-runtime` | Agent loop, tools, plugins, OAuth, WASM sandbox, context engine, A2A |
+| `librefang-runtime-mcp` | MCP client |
+| `librefang-runtime-audit` | Runtime audit trail |
+| `librefang-runtime-media` | Media handling |
+| `librefang-runtime-sandbox-docker` | Docker-backed tool sandbox |
+| `librefang-llm-driver` | LLM driver trait + error types (interface only) |
+| `librefang-llm-drivers` | Concrete provider impls: anthropic, openai, gemini, … |
 | `librefang-api` | HTTP/WebSocket server, routes, middleware, dashboard |
 | `librefang-channels` | Channel-bridge infra: sidecar trampoline + shared bridge types (per-channel adapters live as Python sidecars under `sdk/python/librefang/sidecar/adapters/`) |
+| `librefang-subprocess` | Persistent JSON-over-stdio transport shared by the sidecar bridges |
 | `librefang-memory` | History, vector search, knowledge storage |
+| `librefang-memory-wiki` | Durable markdown knowledge vault (provenance frontmatter, Obsidian export) |
 | `librefang-wire` | OFP — agent-to-agent P2P |
 | `librefang-skills` | Skill registry, loader, marketplace, WASM sandbox |
 | `librefang-hands` | Curated autonomous capability packages |
 | `librefang-extensions` | MCP server setup, credential vault, OAuth2 PKCE |
 | `librefang-cli` | CLI binary (ratatui TUI) |
 | `librefang-desktop` | Native desktop app (Tauri 2.0) |
+| `librefang-acp` | Agent Client Protocol adapter — embeds agents in Zed / VSCode / JetBrains over stdio JSON-RPC |
 | `librefang-import` | Import from other agent frameworks |
+| `librefang-rl-export` | Long-horizon RL rollout trajectory exporter |
 | `librefang-telemetry` | OpenTelemetry + Prometheus |
 | `librefang-testing` | Mock kernel, mock LLM, route test utilities |
 | `xtask` | Dev task runner |
