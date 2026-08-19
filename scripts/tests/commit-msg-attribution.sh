@@ -88,6 +88,9 @@ REJECT_CORPUS=(
   $'fix(api): real change\n\nHelped-by: Anthropic <human@example.com>'
   $'fix(api): real change\n\nGenerated-by: Claude Code <human@example.com>'
   $'fix(api): real change\n\nCo-Authored-By: Build Bot <claude+automation@anthropic.com>'
+  $'fix(api): real change\n\nReviewed-by: Claude Code <human@example.com>'
+  $'fix(api): real change\n\nAssisted-by : Anthropic <human@example.com>'
+  $'fix(api): real change\n\nAI-Generated-By: Build Bot <noreply+automation@anthropic.com>'
 )
 
 for bad in "${REJECT_CORPUS[@]}"; do
@@ -105,6 +108,7 @@ ACCEPT_CORPUS=(
   "feat: add foo"
   "refactor(kernel): tidy code paths"
   "docs: mention Anthropic API as one option"
+  "docs: explain Reviewed-by behavior for the Anthropic provider"
   # The footer alternative is matched by shape — link text plus host — so a real
   # link to a claude.ai artifact, which has different link text and a
   # /code/artifact/… path, must still be allowed through.
