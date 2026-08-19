@@ -668,6 +668,29 @@ async fn trigger_create_rejects_invalid_agent_id() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn trigger_create_returns_404_for_unknown_agent() {
+    let h = boot().await;
+    let unknown_agent = uuid::Uuid::new_v4().to_string();
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/triggers",
+        Some(serde_json::json!({
+            "agent_id": unknown_agent,
+            "pattern": "task_posted"
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+    let message = body["error"]
+        .as_str()
+        .or_else(|| body["error"]["message"].as_str())
+        .unwrap_or("");
+    assert!(message.contains(&unknown_agent), "{body:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn trigger_create_rejects_missing_pattern() {
     let h = boot().await;
     let (status, body) = json_request(

@@ -39,6 +39,50 @@ interface BudgetForm {
   alert?: string;
 }
 
+const GLOBAL_BUDGET_FIELDS: readonly {
+  formKey: keyof BudgetForm;
+  payloadKey: string;
+  labelKey: string;
+  integer?: boolean;
+  max?: number;
+}[] = [
+  { formKey: "hourly", payloadKey: "max_hourly_usd", labelKey: "analytics.hourly_limit" },
+  { formKey: "daily", payloadKey: "max_daily_usd", labelKey: "analytics.daily_limit" },
+  { formKey: "monthly", payloadKey: "max_monthly_usd", labelKey: "analytics.monthly_limit" },
+  {
+    formKey: "tokens",
+    payloadKey: "default_max_llm_tokens_per_hour",
+    labelKey: "analytics.token_limit",
+    integer: true,
+  },
+  {
+    formKey: "alert",
+    payloadKey: "alert_threshold",
+    labelKey: "analytics.alert_threshold",
+    max: 1,
+  },
+];
+
+function providerCapTone(pct: number, alertThreshold: number): string {
+  if (pct >= alertThreshold) return "bg-error shadow-[0_0_6px_rgba(239,68,68,0.45)]";
+  if (pct >= alertThreshold * 0.6) return "bg-warning";
+  return "bg-brand";
+}
+
+function parseNonNegative(raw: string, integer = false): number | null {
+  if (raw.trim() === "") return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0 || (integer && !Number.isSafeInteger(value))) return null;
+  return value;
+}
+
+export function escapeCsvField(value: unknown): string {
+  if (value == null) return "";
+  const raw = String(value);
+  const safe = /^[=+\-@\t\r\n]/.test(raw) ? `'${raw}` : raw;
+  return /[",\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+}
+
 // Render a single percent / progress-bar pair with green/yellow/red coloring
 // driven by the global `alert_threshold` echoed on `/api/budget/providers`.
 // 0-cap means "unlimited" — the bar collapses to a single em-dash so the
@@ -57,11 +101,7 @@ function ProviderCapBar({
   }
   const pct = Math.min(1, spend / cap);
   const breached = pct >= alertThreshold;
-  const tone = breached
-    ? "bg-error shadow-[0_0_6px_rgba(239,68,68,0.45)]"
-    : pct >= alertThreshold * 0.6
-    ? "bg-warning"
-    : "bg-brand";
+  const tone = providerCapTone(pct, alertThreshold);
   return (
     <div className="flex items-center gap-1.5 min-w-[80px]">
       <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-main/60">
@@ -119,23 +159,24 @@ function ProviderBudgetsCard({
   };
 
   const submitEdit = (providerId: string) => {
-    const payload = {
-      max_cost_per_hour_usd: parseFloat(editForm.max_cost_per_hour_usd) || 0,
-      max_cost_per_day_usd: parseFloat(editForm.max_cost_per_day_usd) || 0,
-      max_cost_per_month_usd: parseFloat(editForm.max_cost_per_month_usd) || 0,
-      max_tokens_per_hour: parseInt(editForm.max_tokens_per_hour, 10) || 0,
+    const parsed = {
+      max_cost_per_hour_usd: parseNonNegative(editForm.max_cost_per_hour_usd),
+      max_cost_per_day_usd: parseNonNegative(editForm.max_cost_per_day_usd),
+      max_cost_per_month_usd: parseNonNegative(editForm.max_cost_per_month_usd),
+      max_tokens_per_hour: parseNonNegative(editForm.max_tokens_per_hour, true),
     };
-    for (const [k, v] of Object.entries(payload)) {
-      if (!Number.isFinite(v) || v < 0) {
+    for (const [field, value] of Object.entries(parsed)) {
+      if (value === null) {
         addToast(
           t("analytics.provider_budgets.bad_input", "{{field}} must be a non-negative number", {
-            field: k,
+            field,
           }),
           "error",
         );
         return;
       }
     }
+    const payload = parsed as Record<keyof typeof parsed, number>;
     mutation.mutate(
       { providerId, payload },
       {
@@ -372,19 +413,14 @@ export function AnalyticsPage() {
   // Download combined per-agent + per-model usage as a CSV so operators
   // can hand it to their finance/FinOps pipeline without screenshotting.
   const handleExportCsv = () => {
-    const escape = (v: unknown) => {
-      if (v == null) return "";
-      const s = String(v);
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
     const lines: string[] = [];
     lines.push("scope,name,identifier,total_cost_usd,total_tokens,calls");
     for (const a of usageByAgent) {
       lines.push(
         [
           "agent",
-          escape(a.name ?? ""),
-          escape(a.agent_id ?? ""),
+          escapeCsvField(a.name ?? ""),
+          escapeCsvField(a.agent_id ?? ""),
           (a.cost ?? a.total_cost_usd ?? 0).toString(),
           (a.total_tokens ?? 0).toString(),
           (a.call_count ?? a.calls ?? 0).toString(),
@@ -395,8 +431,8 @@ export function AnalyticsPage() {
       lines.push(
         [
           "model",
-          escape(m.model ?? ""),
-          escape(m.provider ?? ""),
+          escapeCsvField(m.model ?? ""),
+          escapeCsvField(m.provider ?? ""),
           (m.total_cost_usd ?? 0).toString(),
           (m.total_tokens ?? 0).toString(),
           (m.call_count ?? 0).toString(),
@@ -440,10 +476,10 @@ export function AnalyticsPage() {
     const avgLatency = totalCalls > 0 ? weightedLatency / totalCalls : 0;
     const avgCostPerCall = totalCalls > 0 ? totalCost / totalCalls : 0;
     return [
-      { icon: Activity, label: t("analytics.avg_latency") || "Avg Latency", value: `${avgLatency.toFixed(0)}ms`, color: "text-blue-500", bg: "bg-blue-500/10" },
-      { icon: Gauge, label: t("analytics.fastest_model") || "Fastest Model", value: fastest?.model?.slice(0, 12) ?? "-", color: "text-success", bg: "bg-success/10" },
-      { icon: Target, label: t("analytics.avg_cost_per_call") || "Avg Cost/Call", value: `$${avgCostPerCall.toFixed(4)}`, color: "text-purple-500", bg: "bg-purple-500/10" },
-      { icon: Clock, label: t("analytics.total_calls") || "Total Calls", value: totalCalls.toString(), color: "text-warning", bg: "bg-warning/10" },
+      { icon: Activity, label: t("analytics.avg_latency", { defaultValue: "Avg Latency" }), value: `${avgLatency.toFixed(0)}ms`, color: "text-blue-500", bg: "bg-blue-500/10" },
+      { icon: Gauge, label: t("analytics.fastest_model", { defaultValue: "Fastest Model" }), value: fastest?.model?.slice(0, 12) ?? "-", color: "text-success", bg: "bg-success/10" },
+      { icon: Target, label: t("analytics.avg_cost_per_call", { defaultValue: "Avg Cost/Call" }), value: `$${avgCostPerCall.toFixed(4)}`, color: "text-purple-500", bg: "bg-purple-500/10" },
+      { icon: Clock, label: t("analytics.total_calls", { defaultValue: "Total Calls" }), value: totalCalls.toString(), color: "text-warning", bg: "bg-warning/10" },
     ];
   }, [modelPerformance, t]);
 
@@ -455,12 +491,13 @@ export function AnalyticsPage() {
       dailyQuery.refetch(),
       modelPerformanceQuery.refetch(),
       budgetQuery.refetch(),
+      providerBudgetsQuery.refetch(),
     ]).catch((e) => {
       // Match NetworkPage's pattern (#4718 review L1) — surface refresh
       // failures as a toast rather than silently swallowing them.
       addToast(toastErr(e, t("common.error")), "error");
     });
-  }, [usageQuery, usageByAgentQuery, usageByModelQuery, dailyQuery, modelPerformanceQuery, budgetQuery, addToast, t]);
+  }, [usageQuery, usageByAgentQuery, usageByModelQuery, dailyQuery, modelPerformanceQuery, budgetQuery, providerBudgetsQuery, addToast, t]);
 
   return (
     <div className="flex flex-col gap-4 sm:gap-6 transition-colors duration-300">
@@ -640,19 +677,19 @@ export function AnalyticsPage() {
               {/* Model Performance Table */}
               <Card padding="lg" hover>
                 <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
-                  <Cpu className="w-4 h-4 text-brand" /> {t("analytics.model_performance_table") || "Model Performance Details"}
+                  <Cpu className="w-4 h-4 text-brand" /> {t("analytics.model_performance_table", { defaultValue: "Model Performance Details" })}
                 </h2>
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="border-b border-border-subtle">
-                        <th className="text-left py-2 px-3 font-bold text-text-dim/60">{t("analytics.model") || "Model"}</th>
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.calls") || "Calls"}</th>
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.total_cost") || "Total Cost"}</th>
+                        <th className="text-left py-2 px-3 font-bold text-text-dim/60">{t("analytics.model", { defaultValue: "Model" })}</th>
+                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.calls", { defaultValue: "Calls" })}</th>
+                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.total_cost", { defaultValue: "Total Cost" })}</th>
                         <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.cost_call", { defaultValue: "Cost/Call" })}</th>
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.avg_latency") || "Avg Latency"}</th>
+                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.avg_latency", { defaultValue: "Avg Latency" })}</th>
                         <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.min_max", { defaultValue: "Min/Max" })}</th>
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.tokens") || "Tokens"}</th>
+                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.tokens", { defaultValue: "Tokens" })}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -683,25 +720,29 @@ export function AnalyticsPage() {
               <Button variant="primary" size="sm"
                 onClick={() => {
                   const payload: Record<string, number> = {};
-                  if (budgetForm.hourly) {
-                    const parsed = parseFloat(budgetForm.hourly);
-                    if (!isNaN(parsed) && parsed >= 0) payload.max_hourly_usd = parsed;
+                  for (const field of GLOBAL_BUDGET_FIELDS) {
+                    const raw = budgetForm[field.formKey];
+                    if (raw === undefined || raw.trim() === "") continue;
+                    const parsed = parseNonNegative(raw, field.integer ?? false);
+                    if (parsed === null || (field.max !== undefined && parsed > field.max)) {
+                      addToast(
+                        t(
+                          "analytics.budget_bad_input",
+                          "{{field}} has an invalid value. Use a finite non-negative number; token caps must be integers and alert threshold must be 0–1.",
+                          { field: t(field.labelKey) },
+                        ),
+                        "error",
+                      );
+                      return;
+                    }
+                    payload[field.payloadKey] = parsed;
                   }
-                  if (budgetForm.daily) {
-                    const parsed = parseFloat(budgetForm.daily);
-                    if (!isNaN(parsed) && parsed >= 0) payload.max_daily_usd = parsed;
-                  }
-                  if (budgetForm.monthly) {
-                    const parsed = parseFloat(budgetForm.monthly);
-                    if (!isNaN(parsed) && parsed >= 0) payload.max_monthly_usd = parsed;
-                  }
-                  if (budgetForm.tokens) {
-                    const parsed = parseInt(budgetForm.tokens);
-                    if (!isNaN(parsed) && parsed >= 0) payload.default_max_llm_tokens_per_hour = parsed;
-                  }
-                  if (budgetForm.alert) {
-                    const parsed = parseFloat(budgetForm.alert);
-                    if (!isNaN(parsed) && parsed >= 0) payload.alert_threshold = parsed;
+                  if (Object.keys(payload).length === 0) {
+                    addToast(
+                      t("analytics.budget_no_changes", "Enter at least one valid budget value before saving."),
+                      "info",
+                    );
+                    return;
                   }
                   budgetMutation.mutate(payload, {
                     onSuccess: () => {

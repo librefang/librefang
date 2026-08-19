@@ -3,21 +3,22 @@ import { getTerminalHealth, listTerminalWindows } from "../http/client";
 import { terminalKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
-const REFRESH_MS = 10_000;
+const HEALTH_STALE_MS = 60_000;
+const WINDOW_REFRESH_MS = 10_000;
 
 export const terminalQueries = {
   health: () =>
     queryOptions({
       queryKey: terminalKeys.health(),
       queryFn: getTerminalHealth,
-      staleTime: 60_000,
+      staleTime: HEALTH_STALE_MS,
     }),
   windows: () =>
     queryOptions({
       queryKey: terminalKeys.windows(),
       queryFn: listTerminalWindows,
-      staleTime: REFRESH_MS,
-      refetchInterval: REFRESH_MS,
+      staleTime: WINDOW_REFRESH_MS,
+      refetchInterval: WINDOW_REFRESH_MS,
       refetchIntervalInBackground: false, // #3393
     }),
 };
