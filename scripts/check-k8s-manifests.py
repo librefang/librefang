@@ -16,7 +16,8 @@ Usage:
     kubectl kustomize deploy/kubernetes/base | scripts/check-k8s-manifests.py
     scripts/check-k8s-manifests.py rendered.yaml
 
-Exits 0 when every check passes, 1 with one line per failure otherwise.
+Exits 0 when every check passes, 1 for manifest policy failures, and 2 for
+usage or unreadable/invalid input.
 """
 
 from __future__ import annotations
@@ -279,7 +280,13 @@ def check_probes(container: dict[str, Any], failures: Failures) -> None:
         if probe is None:
             failures.fail(f"{probe_name} is missing.")
             continue
+        if not isinstance(probe, dict):
+            failures.fail(f"{probe_name} must be a mapping, got {probe!r}.")
+            continue
         http_get = probe.get("httpGet", {})
+        if not isinstance(http_get, dict):
+            failures.fail(f"{probe_name}.httpGet must be a mapping, got {http_get!r}.")
+            continue
         actual = http_get.get("path")
         if probe_name == "livenessProbe" and actual == "/api/ready":
             failures.fail(
@@ -300,8 +307,21 @@ def check_probes(container: dict[str, Any], failures: Failures) -> None:
         )
 
     startup = container.get("startupProbe", {})
+    if not isinstance(startup, dict):
+        return
     period = startup.get("periodSeconds", 10)
     threshold = startup.get("failureThreshold", 3)
+    if (
+        not isinstance(period, int)
+        or isinstance(period, bool)
+        or not isinstance(threshold, int)
+        or isinstance(threshold, bool)
+    ):
+        failures.fail(
+            "startupProbe periodSeconds and failureThreshold must be integers, "
+            f"got {period!r} and {threshold!r}."
+        )
+        return
     failures.check(
         period * threshold >= 60,
         f"startupProbe budget is only {period * threshold}s "
@@ -328,7 +348,7 @@ def check_services(
     failures.check(
         governing in by_name,
         f"StatefulSet.spec.serviceName {governing!r} does not name a Service in "
-        f"this kustomization (have {sorted(by_name)!r}).",
+        f"this kustomization (have {sorted(by_name, key=repr)!r}).",
     )
     if governing in by_name:
         failures.check(
@@ -377,31 +397,44 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"usage: {argv[0]} [rendered.yaml]\n")
         return 2
 
+    input_label = repr(argv[1]) if len(argv) == 2 else "from stdin"
     try:
-        source = Path(argv[1]).read_text() if len(argv) == 2 else sys.stdin.read()
-    except OSError as error:
-        sys.stderr.write(f"error: cannot read manifest input {argv[1]!r}: {error}\n")
+        source = (
+            Path(argv[1]).read_text(encoding="utf-8")
+            if len(argv) == 2
+            else sys.stdin.read()
+        )
+    except (OSError, UnicodeError) as error:
+        sys.stderr.write(f"error: cannot read manifest input {input_label}: {error}\n")
         return 2
     if not source.strip():
         sys.stderr.write("error: no manifest input (stdin was empty)\n")
         return 2
 
-    docs = load_documents(source)
+    try:
+        docs = load_documents(source)
+    except yaml.YAMLError as error:
+        sys.stderr.write(f"error: invalid YAML manifest input: {error}\n")
+        return 2
     failures = Failures()
 
-    statefulsets = [doc for doc in docs if doc.get("kind") == "StatefulSet"]
-    sts = statefulsets[0] if len(statefulsets) == 1 else None
-    if len(statefulsets) != 1:
-        kinds = sorted({d.get("kind") for d in docs})
-        failures.fail(
-            f"expected exactly one StatefulSet, found {len(statefulsets)}; "
-            f"rendered kinds: {kinds!r}"
-        )
-    else:
-        check_statefulset(sts, failures)
+    try:
+        statefulsets = [doc for doc in docs if doc.get("kind") == "StatefulSet"]
+        sts = statefulsets[0] if len(statefulsets) == 1 else None
+        if len(statefulsets) != 1:
+            kinds = sorted({d.get("kind") for d in docs}, key=repr)
+            failures.fail(
+                f"expected exactly one StatefulSet, found {len(statefulsets)}; "
+                f"rendered kinds: {kinds!r}"
+            )
+        else:
+            check_statefulset(sts, failures)
 
-    check_services(docs, sts, failures)
-    check_no_inline_secrets(docs, failures)
+        check_services(docs, sts, failures)
+        check_no_inline_secrets(docs, failures)
+    except (AttributeError, TypeError) as error:
+        sys.stderr.write(f"error: invalid Kubernetes manifest structure: {error}\n")
+        return 2
 
     if failures.items:
         sys.stderr.write(

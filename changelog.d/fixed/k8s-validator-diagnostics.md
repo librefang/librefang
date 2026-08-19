@@ -1,1 +1,1 @@
-Report Kubernetes manifest validator usage, input, cardinality, and explicit probe-value errors accurately. (@xiaomo)
+Report Kubernetes manifest validator usage, input, cardinality, malformed structure, and explicit probe-value errors accurately. (@xiaomo)
