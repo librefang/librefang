@@ -73,6 +73,21 @@ const BASE_DELAY_MS: u64 = 1_500;
 /// Maximum delay cap in milliseconds.
 const MAX_DELAY_MS: u64 = 30_000;
 
+fn retry_delay_ms(attempt: u32, retry_after_secs: Option<u64>) -> u64 {
+    if let Some(seconds) = retry_after_secs {
+        return seconds.saturating_mul(1_000).min(MAX_DELAY_MS);
+    }
+
+    let base = BASE_DELAY_MS.saturating_mul(1u64 << attempt.min(5));
+    let delay_ms = base.min(MAX_DELAY_MS);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let frac = (nanos.wrapping_mul(2654435761) as f64) / (u32::MAX as f64);
+    delay_ms + (delay_ms as f64 * frac * 0.25) as u64
+}
+
 /// Hard cap on a downloaded bundle (bytes). A hand bundle is two text files;
 /// anything larger is almost certainly hostile or misconfigured. The download
 /// is streamed and aborted the moment the running total exceeds this cap, so
@@ -235,23 +250,16 @@ impl HandsHubClient {
         context: &str,
     ) -> Result<reqwest::Response, HandError> {
         let mut last_status: Option<u16> = None;
+        let mut retry_after_secs: Option<u64> = None;
 
         for attempt in 0..MAX_RETRIES {
             if attempt > 0 {
-                let base = BASE_DELAY_MS.saturating_mul(1u64 << attempt.min(5));
-                let delay_ms = base.min(MAX_DELAY_MS);
-                let jitter = {
-                    let nanos = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .subsec_nanos();
-                    let frac = (nanos.wrapping_mul(2654435761) as f64) / (u32::MAX as f64);
-                    (delay_ms as f64 * frac * 0.25) as u64
-                };
-                let total = delay_ms + jitter;
+                let retry_after = retry_after_secs.take();
+                let total = retry_delay_ms(attempt, retry_after);
                 debug!(
                     attempt,
                     delay_ms = total,
+                    retry_after_secs = ?retry_after,
                     context,
                     "retrying HandsHub request after rate limit / server error"
                 );
@@ -283,22 +291,16 @@ impl HandsHubClient {
 
                     if status.as_u16() == 429 || status.is_server_error() {
                         last_status = Some(status.as_u16());
-                        if let Some(ra) = resp
-                            .headers()
-                            .get("retry-after")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|v| v.parse::<u64>().ok())
-                        {
-                            let capped = (ra * 1000).min(MAX_DELAY_MS);
-                            if attempt + 1 < MAX_RETRIES {
-                                tokio::time::sleep(std::time::Duration::from_millis(capped)).await;
-                            }
-                        }
                         if attempt + 1 >= MAX_RETRIES {
                             return Err(HandError::Config(format!(
                                 "{context} returned {status} after {MAX_RETRIES} attempts"
                             )));
                         }
+                        retry_after_secs = resp
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.parse::<u64>().ok());
                         continue;
                     }
 
@@ -532,6 +534,13 @@ mod tests {
     fn client_trims_trailing_slash() {
         let c = HandsHubClient::with_url("https://example.com/api/v1/");
         assert_eq!(c.base_url, "https://example.com/api/v1");
+    }
+
+    #[test]
+    fn retry_after_replaces_exponential_backoff() {
+        assert_eq!(retry_delay_ms(1, Some(3)), 3_000);
+        assert_eq!(retry_delay_ms(4, Some(3)), 3_000);
+        assert_eq!(retry_delay_ms(4, Some(u64::MAX)), MAX_DELAY_MS);
     }
 
     #[test]

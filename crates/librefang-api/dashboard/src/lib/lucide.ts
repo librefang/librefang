@@ -1,4 +1,6 @@
 // Curated Lucide entrypoint. Keep production builds tree-shakeable.
+// These internal paths are version-coupled, so package.json intentionally
+// pins lucide-react exactly and lucide.test.ts imports every mapping.
 export { default as Activity } from "lucide-react/dist/esm/icons/activity.mjs";
 export { default as AlertCircle } from "lucide-react/dist/esm/icons/circle-alert.mjs";
 export { default as AlertTriangle } from "lucide-react/dist/esm/icons/triangle-alert.mjs";
