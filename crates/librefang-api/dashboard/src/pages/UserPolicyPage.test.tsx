@@ -71,15 +71,17 @@ const HAPPY_POLICY = {
   },
 };
 
-function renderPage(): void {
+function renderPage() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: 0 } },
   });
-  render(
+  const ui = () => (
     <QueryClientProvider client={queryClient}>
       <UserPolicyPage />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const result = render(ui());
+  return { ...result, rerenderPage: () => result.rerender(ui()) };
 }
 
 describe("UserPolicyPage", () => {
@@ -274,6 +276,28 @@ describe("UserPolicyPage", () => {
     expect(updateMutateAsync).not.toHaveBeenCalled();
   });
 
+  it("normalizes server channel keys before checking new slots", () => {
+    usePermissionPolicyMock.mockReturnValue({
+      data: {
+        ...HAPPY_POLICY,
+        channel_tool_rules: {
+          Matrix: { allowed_tools: ["chat_*"], denied_tools: [] },
+        },
+      },
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+
+    renderPage();
+
+    const input = screen.getByPlaceholderText(/wechat, matrix/);
+    fireEvent.change(input, { target: { value: "matrix" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Add$/ }));
+
+    expect(screen.getByText("Channel 'matrix' already has a rule slot.")).toBeInTheDocument();
+  });
+
   it("disables Save in the sticky bar when the form has no changes", () => {
     usePermissionPolicyMock.mockReturnValue({
       data: HAPPY_POLICY,
@@ -288,6 +312,51 @@ describe("UserPolicyPage", () => {
     expect(screen.getByText("No unsaved changes")).toBeInTheDocument();
     const discardBtn = screen.getByRole("button", { name: /Discard changes/ });
     expect(discardBtn).toBeDisabled();
+    expect(screen.getAllByRole("button", { name: /Save/ }).every(button => button.hasAttribute("disabled"))).toBe(true);
+  });
+
+  it("preserves unsaved edits across a background policy refetch", () => {
+    let policy = HAPPY_POLICY;
+    usePermissionPolicyMock.mockImplementation(() => ({
+      data: policy,
+      isLoading: false,
+      isError: false,
+      error: null,
+    }));
+
+    const page = renderPage();
+    const allowed = screen.getByDisplayValue("read_*") as HTMLTextAreaElement;
+    fireEvent.change(allowed, { target: { value: "read_*\nlist_*" } });
+
+    policy = {
+      ...HAPPY_POLICY,
+      tool_policy: { allowed_tools: ["server_refresh"], denied_tools: ["server_denied"] },
+    };
+    page.rerenderPage();
+
+    expect(allowed.value).toBe("read_*\nlist_*");
+    expect(screen.getByDisplayValue("server_denied")).toBeInTheDocument();
+  });
+
+  it("refreshes a clean form when the server policy changes", async () => {
+    let policy = HAPPY_POLICY;
+    usePermissionPolicyMock.mockImplementation(() => ({
+      data: policy,
+      isLoading: false,
+      isError: false,
+      error: null,
+    }));
+
+    const page = renderPage();
+    policy = {
+      ...HAPPY_POLICY,
+      tool_policy: { allowed_tools: ["server_refresh"], denied_tools: ["delete_*"] },
+    };
+    page.rerenderPage();
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("server_refresh")).toBeInTheDocument();
+    });
   });
 
   it("shows the saved confirmation card after a successful submit", async () => {
@@ -308,6 +377,10 @@ describe("UserPolicyPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Policy saved.")).toBeInTheDocument();
     });
+    expect(screen.getByText("No unsaved changes")).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("button", { name: /Save/ }).every(button => button.hasAttribute("disabled")),
+    ).toBe(true);
   });
 
   it("surfaces a submit error when the mutation rejects", async () => {

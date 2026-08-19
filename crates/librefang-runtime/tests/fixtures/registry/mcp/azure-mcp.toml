@@ -5,6 +5,12 @@ category = "cloud"
 icon = "lucide:diamond"
 tags = ["cloud", "microsoft", "infrastructure", "azure", "devops", "enterprise"]
 
+setup_instructions = """
+1. In the Azure Portal, register an application under Azure Active Directory > App registrations and note the Client ID and Tenant ID.
+2. Create a client secret under Certificates & Secrets for the registered application.
+3. Assign the appropriate RBAC roles to the application on your subscription, then paste all four values into the fields above.
+"""
+
 [transport]
 type = "stdio"
 command = "npx"
@@ -41,13 +47,6 @@ get_url = "https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/Applicat
 [health_check]
 interval_secs = 60
 unhealthy_threshold = 3
-
-setup_instructions = """
-1. In the Azure Portal, register an application under Azure Active Directory > App registrations and note the Client ID and Tenant ID.
-2. Create a client secret under Certificates & Secrets for the registered application.
-3. Assign the appropriate RBAC roles to the application on your subscription, then paste all four values into the fields above.
-"""
-
 
 [i18n.zh]
 name = "Microsoft Azure"
