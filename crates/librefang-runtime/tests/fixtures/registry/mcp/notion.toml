@@ -5,6 +5,12 @@ category = "productivity"
 icon = "lucide:file-text"
 tags = ["notes", "wiki", "knowledge-base", "documentation", "databases"]
 
+setup_instructions = """
+1. Go to https://www.notion.so/my-integrations and click 'New integration'.
+2. Give it a name, select your workspace, and grant the required capabilities (Read/Update/Insert content).
+3. Copy the Internal Integration Token and paste it into the NOTION_API_KEY field above. Then share relevant pages with the integration in Notion.
+"""
+
 [transport]
 type = "stdio"
 command = "npx"
@@ -20,13 +26,6 @@ get_url = "https://www.notion.so/my-integrations"
 [health_check]
 interval_secs = 60
 unhealthy_threshold = 3
-
-setup_instructions = """
-1. Go to https://www.notion.so/my-integrations and click 'New integration'.
-2. Give it a name, select your workspace, and grant the required capabilities (Read/Update/Insert content).
-3. Copy the Internal Integration Token and paste it into the NOTION_API_KEY field above. Then share relevant pages with the integration in Notion.
-"""
-
 
 [i18n.zh]
 name = "Notion"

@@ -7,7 +7,7 @@
       "name": "MIT",
       "url": "https://opensource.org/licenses/MIT"
     },
-    "version": "2026.7.31"
+    "version": "2026.8.19"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -173,13 +173,13 @@
         "tags": [
           "a2a"
         ],
-        "summary": "GET /api/a2a/agents/{id} — Get a specific external A2A agent by index, URL, or name.",
+        "summary": "GET /api/a2a/agents/{id} — Get a specific external A2A agent by URL or name.",
         "operationId": "a2a_get_external_agent",
         "parameters": [
           {
             "name": "id",
             "in": "path",
-            "description": "Id",
+            "description": "Canonical URL or agent name",
             "required": true,
             "schema": {
               "type": "string"
@@ -196,6 +196,9 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "No external A2A agent found for the given identity"
           }
         }
       }
@@ -229,6 +232,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "The pending-agent identity is not a valid HTTP(S) URL"
           },
           "404": {
             "description": "No pending agent found for the given URL"
@@ -2445,7 +2451,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "GET /api/agents/{id}/sessions/{session_id}/stream — attach to a session's\nin-flight stream events (SSE).",
+        "summary": "GET /api/agents/{id}/sessions/{session_id}/stream — attach to a session's\nin-flight stream events (SSE or WebSocket).",
         "description": "Any client can subscribe to the events emitted by an active turn on this\nsession: the originating client (CLI, Tauri desktop, web) plus any number\nof additional clients. Late attachers begin receiving events from the\nmoment they subscribe — partial-turn snapshots are not replayed.\n\nReturns 404 if the session does not exist or belongs to a different agent.",
         "operationId": "attach_session_stream",
         "parameters": [
@@ -2469,6 +2475,9 @@
           }
         ],
         "responses": {
+          "101": {
+            "description": "WebSocket session event stream"
+          },
           "200": {
             "description": "Server-sent events stream of session events"
           },
@@ -5548,6 +5557,16 @@
                 }
               }
             }
+          },
+          "429": {
+            "description": "The process-wide communication stream limit is exhausted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -7689,6 +7708,15 @@
             }
           },
           {
+            "name": "level",
+            "in": "query",
+            "description": "Optional memory level filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "offset",
             "in": "query",
             "description": "Pagination offset (default 0)",
@@ -7719,6 +7747,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid memory level filter"
           }
         }
       },
@@ -7779,6 +7810,15 @@
             }
           },
           {
+            "name": "level",
+            "in": "query",
+            "description": "Optional memory level filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "offset",
             "in": "query",
             "description": "Pagination offset (default 0)",
@@ -7809,6 +7849,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid memory level filter"
           }
         }
       },
@@ -8345,6 +8388,15 @@
             }
           },
           {
+            "name": "level",
+            "in": "query",
+            "description": "Optional memory level filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "Max results (default 10)",
@@ -8365,6 +8417,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid memory level filter"
           }
         }
       }
@@ -8646,6 +8701,15 @@
             }
           },
           {
+            "name": "level",
+            "in": "query",
+            "description": "Optional memory level filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "Max results (default 10)",
@@ -8666,6 +8730,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid memory level filter"
           }
         }
       }
@@ -11959,7 +12026,7 @@
           "required": true
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Trigger created",
             "content": {
               "application/json": {
@@ -11971,6 +12038,15 @@
           },
           "400": {
             "description": "Invalid trigger definition"
+          },
+          "404": {
+            "description": "Owner or target agent not found"
+          },
+          "500": {
+            "description": "Unexpected kernel failure"
+          },
+          "503": {
+            "description": "Trigger registration temporarily unavailable"
           }
         }
       }
@@ -12737,6 +12813,9 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Template serialization failed"
           }
         }
       }
@@ -12772,6 +12851,9 @@
           },
           "404": {
             "description": "Template not found"
+          },
+          "500": {
+            "description": "Template serialization failed"
           }
         }
       }

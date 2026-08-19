@@ -78,6 +78,41 @@ fn hex_val(b: u8) -> Option<u8> {
 /// The file is `sync_all`-ed before the rename.
 /// On Unix, the parent directory is synced after the rename so the new directory entry is durable.
 pub(crate) fn atomic_write(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    atomic_write_detailed(path, content).map_err(AtomicWriteError::into_io_error)
+}
+
+#[derive(Debug)]
+pub(crate) enum AtomicWriteError {
+    BeforeCommit(std::io::Error),
+    AfterCommit(std::io::Error),
+}
+
+impl AtomicWriteError {
+    fn into_io_error(self) -> std::io::Error {
+        match self {
+            Self::BeforeCommit(error) | Self::AfterCommit(error) => error,
+        }
+    }
+}
+
+pub(crate) fn atomic_write_detailed(
+    path: &std::path::Path,
+    content: &[u8],
+) -> Result<(), AtomicWriteError> {
+    atomic_write_detailed_with_parent_sync(path, content, |parent| {
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        #[cfg(not(unix))]
+        let _ = parent;
+        Ok(())
+    })
+}
+
+fn atomic_write_detailed_with_parent_sync(
+    path: &std::path::Path,
+    content: &[u8],
+    sync_parent: impl FnOnce(&std::path::Path) -> std::io::Result<()>,
+) -> Result<(), AtomicWriteError> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -86,7 +121,8 @@ pub(crate) fn atomic_write(path: &std::path::Path, content: &[u8]) -> std::io::R
     let mut tmp = path.to_path_buf();
     let file_name = path
         .file_name()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing filename"))?
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing filename"))
+        .map_err(AtomicWriteError::BeforeCommit)?
         .to_os_string();
     let mut tmp_name = file_name;
     tmp_name.push(format!(".{}.{seq}.tmp", std::process::id()));
@@ -101,35 +137,32 @@ pub(crate) fn atomic_write(path: &std::path::Path, content: &[u8]) -> std::io::R
 
     if let Err(e) = write_result {
         let _ = std::fs::remove_file(&tmp);
-        return Err(e);
+        return Err(AtomicWriteError::BeforeCommit(e));
     }
 
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(e);
+        return Err(AtomicWriteError::BeforeCommit(e));
     }
 
-    #[cfg(unix)]
-    {
-        // `Path::parent()` returns `Some("")` (not `None`) for a bare
-        // relative filename like `config.toml` — `None` only happens for
-        // `/` or an empty path itself. Map that empty-but-present case to
-        // `.` so we still fsync the actual containing directory instead of
-        // failing `File::open("")` with ENOENT after the rename already
-        // succeeded.
-        let parent = match path.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p,
-            _ => std::path::Path::new("."),
-        };
-        std::fs::File::open(parent)?.sync_all()?;
-    }
+    // `Path::parent()` returns `Some("")` (not `None`) for a bare
+    // relative filename like `config.toml` — `None` only happens for
+    // `/` or an empty path itself. Map that empty-but-present case to
+    // `.` so we still fsync the actual containing directory instead of
+    // failing `File::open("")` with ENOENT after the rename already
+    // succeeded.
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("."),
+    };
+    sync_parent(parent).map_err(AtomicWriteError::AfterCommit)?;
 
     Ok(())
 }
 
 #[cfg(test)]
 mod atomic_write_tests {
-    use super::atomic_write;
+    use super::{atomic_write, atomic_write_detailed_with_parent_sync, AtomicWriteError};
 
     #[test]
     fn replaces_existing_content_and_leaves_no_staging_file() {
@@ -145,6 +178,56 @@ mod atomic_write_tests {
             .map(|entry| entry.expect("directory entry").file_name())
             .collect();
         assert_eq!(entries, vec![std::ffi::OsString::from("config.toml")]);
+    }
+
+    #[test]
+    fn distinguishes_parent_sync_failure_after_replacement() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, b"old").expect("seed file");
+
+        let error = atomic_write_detailed_with_parent_sync(&path, b"new", |_| {
+            Err(std::io::Error::other("injected parent sync failure"))
+        })
+        .expect_err("parent sync should fail");
+
+        assert!(matches!(error, AtomicWriteError::AfterCommit(_)));
+        assert_eq!(std::fs::read(&path).expect("read result"), b"new");
+    }
+}
+
+/// One owner for the process-global `LIBREFANG_VAULT_KEY` that this crate's tests pin.
+///
+/// The vault master key is resolved from an environment variable, so it is process-global state that every test in the binary shares.
+/// `cargo test` runs the whole crate's tests as threads in one process, so two tests that pin *different* keys race: whichever writes last wins, and the vault the loser already wrote can no longer be decrypted — surfacing as `Crypto("Decryption failed: aead::Error")` in whichever test happens to lose.
+///
+/// That is not hypothetical. `server.rs`'s TOTP-lockout tests pinned one key while `routes/mcp_auth.rs`'s flow-cleanup test pinned 32 zero bytes, each under its own `Once` and each believing it was the only writer.
+/// Under `cargo test -p librefang-api --lib` the pair failed roughly one run in two, and CI never caught it because nextest gives every test its own process.
+///
+/// So the key lives here, exactly once, and both call [`pin_vault_key`].
+/// Anything else in this crate that needs a usable vault must do the same rather than setting the variable itself.
+#[cfg(test)]
+pub(crate) mod test_vault {
+    /// Syntactically-valid master key: base64 of exactly 32 bytes, so it decodes to the `[u8; 32]` the vault expects rather than failing key resolution.
+    /// (32 ASCII characters would *not* work — see the `LIBREFANG_VAULT_KEY` note in CLAUDE.md.)
+    pub(crate) const TEST_VAULT_KEY: &str = "dGVzdC12YXVsdC1rZXktZm9yLXRvdHAtbG9ja291dHM=";
+
+    /// Pin the vault master key for this process, idempotently.
+    ///
+    /// `resolve_master_key` (`crates/librefang-extensions/src/vault.rs`) reads `LIBREFANG_VAULT_KEY` first and otherwise falls back to a store shared beyond any single test's tempdir, so leaving it unset lets `init()` and a later resolution settle on different keys.
+    /// Setting it takes the documented env-first branch, making the two agree by construction.
+    ///
+    /// Set once and never removed: unsetting it on drop would reopen the race for whichever test is still running.
+    pub(crate) fn pin_vault_key() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            // SAFETY: the `Once` makes this the only writer in the process —
+            // which now holds, because this function is the crate's only
+            // writer of this variable.
+            unsafe {
+                std::env::set_var("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY);
+            }
+        });
     }
 }
 

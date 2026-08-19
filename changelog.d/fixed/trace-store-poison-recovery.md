@@ -1,1 +1,0 @@
-- Recover poisoned trace-store SQLite connection state so telemetry insertion, trace queries, and circuit-breaker persistence continue after a panicking lock holder. (@xiaomo)

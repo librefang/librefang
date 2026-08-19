@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { OverviewPage } from "./OverviewPage";
+import { OverviewPage, RangeSelector, RelativeTime, signFor } from "./OverviewPage";
 import { useDashboardSnapshot, useVersionInfo } from "../lib/queries/overview";
 import { useQuickInit } from "../lib/mutations/overview";
 import { useApprovalCount } from "../lib/queries/approvals";
@@ -63,7 +63,6 @@ vi.mock("react-i18next", async () => {
     useTranslation: () => ({ t: (key: string) => key }),
   };
 });
-
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => vi.fn(),
 }));
@@ -334,5 +333,40 @@ describe("OverviewPage", () => {
     const live2 = columnDegraded.closest('[aria-live="polite"]');
     expect(live2).not.toBeNull();
     expect(live2?.getAttribute("aria-atomic")).toBe("true");
+  });
+});
+
+
+describe("OverviewPage helper contracts", () => {
+  it("renders one shared range selector contract", () => {
+    const onChange = vi.fn();
+    render(<RangeSelector range="30d" onChange={onChange} variant="desktop" />);
+
+    expect(screen.getAllByRole("button")).toHaveLength(3);
+    fireEvent.click(screen.getByRole("button", { name: "90d" }));
+    expect(onChange).toHaveBeenCalledWith("90d");
+  });
+
+  it("formats delta signs without a negative zero", () => {
+    expect(signFor(1)).toBe("+");
+    expect(signFor(-1)).toBe("−");
+    expect(signFor(0)).toBe("");
+  });
+
+  it("accepts the date shapes supported by the formatter", () => {
+    const { rerender } = render(<RelativeTime date="2026-01-01T00:00:00Z" />);
+    expect(screen.queryByText("-")).not.toBeInTheDocument();
+
+    rerender(<RelativeTime date={new Date("2026-01-01T00:00:00Z")} />);
+    expect(screen.queryByText("-")).not.toBeInTheDocument();
+  });
+
+  it("does not update a distant future timestamp every second", () => {
+    const setInterval = vi.spyOn(window, "setInterval");
+    const { unmount } = render(<RelativeTime date={Date.now() + 120_000} />);
+
+    expect(setInterval).toHaveBeenLastCalledWith(expect.any(Function), 30_000);
+    unmount();
+    setInterval.mockRestore();
   });
 });

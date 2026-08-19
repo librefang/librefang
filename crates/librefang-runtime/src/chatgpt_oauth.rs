@@ -57,6 +57,9 @@ const DEVICE_AUTH_TIMEOUT_SECS: u64 = 15 * 60;
 /// Default server poll interval when the response omits a usable value.
 const DEFAULT_DEVICE_AUTH_POLL_INTERVAL_SECS: u64 = 5;
 
+type OAuthCallbackResult = Result<String, String>;
+type OAuthCallbackSender = Arc<tokio::sync::Mutex<Option<oneshot::Sender<OAuthCallbackResult>>>>;
+
 /// Result of a successful OAuth flow.
 pub struct ChatGptAuthResult {
     /// The bearer access token.
@@ -281,15 +284,27 @@ pub async fn poll_device_auth_flow(prompt: &DeviceAuthPrompt) -> Result<ChatGptA
 /// parameter, and returns the authorization code. A success HTML page is
 /// served to the browser.
 pub async fn run_oauth_callback_server(port: u16, expected_state: &str) -> Result<String, String> {
-    let (tx, rx) = oneshot::channel::<String>();
-    let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
-    let expected_state = expected_state.to_string();
-
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
         .await
         .map_err(|e| format!("Failed to bind async listener on port {port}: {e}"))?;
 
     debug!("OAuth callback server listening on port {port}");
+    wait_for_oauth_callback(
+        listener,
+        expected_state,
+        std::time::Duration::from_secs(AUTH_TIMEOUT_SECS),
+    )
+    .await
+}
+
+async fn wait_for_oauth_callback(
+    listener: tokio::net::TcpListener,
+    expected_state: &str,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    let (tx, rx) = oneshot::channel::<OAuthCallbackResult>();
+    let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
+    let expected_state = expected_state.to_string();
 
     let server_handle = tokio::spawn({
         let tx = tx.clone();
@@ -315,15 +330,18 @@ pub async fn run_oauth_callback_server(port: u16, expected_state: &str) -> Resul
         }
     });
 
-    let code = tokio::time::timeout(std::time::Duration::from_secs(AUTH_TIMEOUT_SECS), rx)
-        .await
-        .map_err(|_| {
-            "Authentication timed out -- no callback received within 5 minutes".to_string()
-        })?
-        .map_err(|_| "Auth channel closed unexpectedly".to_string())?;
+    let callback_result = match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err("Auth channel closed unexpectedly".to_string()),
+        Err(_) => {
+            Err("Authentication timed out -- no callback received within 5 minutes".to_string())
+        }
+    };
 
     server_handle.abort();
+    let _ = server_handle.await;
 
+    let code = callback_result?;
     if code.is_empty() {
         return Err("Received empty authorization code".to_string());
     }
@@ -586,7 +604,7 @@ fn parse_poll_interval_secs(value: Option<&serde_json::Value>) -> u64 {
 /// Handle a single HTTP connection on the OAuth callback server.
 async fn handle_oauth_callback(
     mut stream: tokio::net::TcpStream,
-    tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
+    tx: OAuthCallbackSender,
     expected_state: &str,
 ) -> Result<(), String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -614,6 +632,8 @@ async fn handle_oauth_callback(
 
         if let Some(err) = error {
             let desc = params.get("error_description").cloned().unwrap_or_default();
+            let callback_error = format!("OAuth error: {err}: {desc}");
+            send_oauth_callback_result(&tx, Err(callback_error.clone())).await;
             let error_html = error_html(&err, &desc);
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -624,11 +644,12 @@ async fn handle_oauth_callback(
                 .write_all(response.as_bytes())
                 .await
                 .map_err(|e| format!("Write error: {e}"))?;
-            return Err(format!("OAuth error: {err}: {desc}"));
+            return Err(callback_error);
         }
 
         if state != expected_state {
             let msg = "State parameter mismatch -- possible CSRF attack";
+            send_oauth_callback_result(&tx, Err(msg.to_string())).await;
             let response = format!(
                 "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 msg.len(),
@@ -643,6 +664,7 @@ async fn handle_oauth_callback(
 
         if code.is_empty() {
             let msg = "Missing authorization code in callback";
+            send_oauth_callback_result(&tx, Err(msg.to_string())).await;
             let response = format!(
                 "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 msg.len(),
@@ -656,10 +678,7 @@ async fn handle_oauth_callback(
         }
 
         // Send the code to the waiting channel.
-        let mut guard = tx.lock().await;
-        if let Some(sender) = guard.take() {
-            let _ = sender.send(code);
-        }
+        send_oauth_callback_result(&tx, Ok(code)).await;
 
         let html = success_html();
         let response = format!(
@@ -685,6 +704,13 @@ async fn handle_oauth_callback(
     }
 
     Ok(())
+}
+
+async fn send_oauth_callback_result(tx: &OAuthCallbackSender, result: OAuthCallbackResult) {
+    let mut guard = tx.lock().await;
+    if let Some(sender) = guard.take() {
+        let _ = sender.send(result);
+    }
 }
 
 /// Parse query parameters from a URL path (e.g. `/auth/callback?code=abc&state=xyz`).
@@ -946,6 +972,101 @@ mod tests {
         let params = parse_query_params("/cb?key=hello%20world&b=a+b");
         assert_eq!(params.get("key"), Some(&"hello world".to_string()));
         assert_eq!(params.get("b"), Some(&"a b".to_string()));
+    }
+
+    async fn send_test_callback(path: &str) -> OAuthCallbackResult {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            wait_for_oauth_callback(
+                listener,
+                "expected-state",
+                std::time::Duration::from_secs(5),
+            )
+            .await
+        });
+
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), server)
+            .await
+            .expect("callback result should not wait for the authentication timeout")
+            .unwrap();
+        drop(stream);
+
+        let rebound = tokio::net::TcpListener::bind(address)
+            .await
+            .expect("callback listener should be released after a terminal result");
+        drop(rebound);
+        result
+    }
+
+    #[tokio::test]
+    async fn test_callback_server_returns_provider_error_immediately() {
+        let result = send_test_callback(
+            "/auth/callback?error=access_denied&error_description=user+cancelled&state=expected-state",
+        )
+        .await;
+
+        assert_eq!(
+            result,
+            Err("OAuth error: access_denied: user cancelled".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_callback_server_returns_state_mismatch_immediately() {
+        let result = send_test_callback("/auth/callback?code=code-123&state=wrong-state").await;
+
+        assert_eq!(
+            result,
+            Err("State parameter mismatch -- possible CSRF attack".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_callback_server_returns_missing_code_immediately() {
+        let result = send_test_callback("/auth/callback?state=expected-state").await;
+
+        assert_eq!(
+            result,
+            Err("Missing authorization code in callback".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_callback_server_still_returns_valid_code() {
+        let result = send_test_callback("/auth/callback?code=code-123&state=expected-state").await;
+
+        assert_eq!(result, Ok("code-123".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_callback_server_releases_listener_after_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let result = wait_for_oauth_callback(
+            listener,
+            "expected-state",
+            std::time::Duration::from_millis(10),
+        )
+        .await;
+
+        assert_eq!(
+            result,
+            Err("Authentication timed out -- no callback received within 5 minutes".to_string())
+        );
+        let rebound = tokio::net::TcpListener::bind(address)
+            .await
+            .expect("callback listener should be released after timeout");
+        drop(rebound);
     }
 
     #[test]
