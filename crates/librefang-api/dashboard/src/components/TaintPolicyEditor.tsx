@@ -365,6 +365,7 @@ function ToolPolicyRow({
           className="font-mono text-xs"
         />
         <Select
+          aria-label={t("common.actions", "Actions")}
           value={policy.default ?? "scan"}
           onChange={(e) => onChangeDefault(e.target.value as McpTaintToolAction)}
           options={[

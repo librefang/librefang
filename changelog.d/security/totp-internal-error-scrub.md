@@ -1,1 +1,0 @@
-- Scrub TOTP setup, confirmation, approval, and revocation 500 responses so vault, replay-store, and QR-generation details remain server-side. (@xiaomo)

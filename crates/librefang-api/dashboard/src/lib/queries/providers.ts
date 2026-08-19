@@ -17,11 +17,11 @@ export function useProviders() {
 
 // ── Credential pools (#4965) ────────────────────────────────────────────────
 
-/// `GET /api/credential-pools` — per-provider redacted snapshot of the
-/// multi-key rotation pool (key hints, priority, request counts, cooldown).
-/// `staleTime` matches `useProviders` so dashboard refreshes don't hammer
-/// the kernel, but `refetchInterval` is short so cooldown countdowns
-/// visibly tick when a key is exhausted.
+// `GET /api/credential-pools` — per-provider redacted snapshot of the
+// multi-key rotation pool (key hints, priority, request counts, cooldown).
+// Its 15-second freshness window is deliberately shorter than the provider
+// list's 60 seconds. The modest 30-second foreground poll keeps cooldown
+// state moving without hammering the kernel.
 export const credentialPoolsQueryOptions = () =>
   queryOptions({
     queryKey: credentialPoolKeys.lists(),

@@ -509,6 +509,40 @@ async fn audit_query_clamps_zero_limit_up_to_one() {
         entries.len(),
         limit
     );
+    assert!(
+        body["total"].as_u64().expect("total number") > entries.len() as u64,
+        "total must describe every matching row before result limiting"
+    );
+    assert_eq!(body["history_truncated"], serde_json::json!(false));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn audit_query_discloses_history_outside_the_memory_window() {
+    let h = build_admin_audit_harness();
+    let audit = h.state.kernel.audit();
+    audit.set_max_in_memory_entries(1);
+    for index in 0..5 {
+        audit.record(
+            "agent-history",
+            AuditAction::ToolInvoke,
+            format!("history event {index}"),
+            "ok",
+        );
+    }
+    assert!(
+        audit.persisted_len() > audit.len(),
+        "fixture must evict an in-memory prefix while retaining SQLite rows"
+    );
+
+    let (status, bytes) = send_get(
+        h.app.clone(),
+        "/api/audit/query?action=ToolInvoke",
+        Some(AUDIT_ADMIN_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&bytes);
+    assert_eq!(body["history_truncated"], serde_json::json!(true));
 }
 
 // ---------------------------------------------------------------------------
@@ -769,7 +803,7 @@ async fn audit_verify_omits_warning_when_chain_has_entries() {
 #[tokio::test(flavor = "multi_thread")]
 async fn audit_verify_surfaces_anchor_status_field() {
     // #3339 Tier-1: the verify response must surface anchor_status so the
-    // dashboard can show "anchor: ok / diverged / none" alongside the
+    // dashboard can show "anchor: ok / error / none" alongside the
     // chain-validity badge. The audit harness wires an anchored AuditLog
     // by default (audit.anchor next to the temp DB), so on a clean chain
     // we expect anchor_enabled: true and anchor_status: "ok". We pin the
@@ -794,4 +828,24 @@ async fn audit_verify_surfaces_anchor_status_field() {
         body["anchor_path"].is_string(),
         "anchor_path must surface for the UI; body={body}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn audit_verify_does_not_misclassify_an_undifferentiated_failure_as_divergence() {
+    let h = build_admin_audit_harness();
+    seed_audit_entries(&h.state);
+    let anchor_path = h
+        .state
+        .kernel
+        .audit()
+        .anchor_path()
+        .expect("harness configures an anchor")
+        .to_path_buf();
+    std::fs::remove_file(anchor_path).expect("remove anchor to force verification failure");
+
+    let (status, bytes) = send_get(h.app.clone(), "/api/audit/verify", Some(AUDIT_ADMIN_KEY)).await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&bytes);
+    assert_eq!(body["valid"], serde_json::json!(false));
+    assert_eq!(body["anchor_status"], serde_json::json!("error"));
 }

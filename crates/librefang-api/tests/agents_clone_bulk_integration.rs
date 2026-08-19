@@ -1,4 +1,4 @@
-//! Integration tests for the `/api/agents` clone/reload/push + bulk-ops
+//! Integration tests for the `/api/agents` clone/reload/inject/push + bulk-ops
 //! route clusters.
 //!
 //! Refs the "agents-mutation-routes-untested" umbrella (Critical) — final
@@ -9,8 +9,9 @@
 //!   POST   /api/agents/{id}/clone   (201 + read-back; 409 on duplicate name;
 //!                                     404 on unknown source; 400 invalid id)
 //!   POST   /api/agents/{id}/reload  (200 + read-back side effect; negative)
+//!   POST   /api/agents/{id}/inject  (404 unknown agent without error leakage)
 //!   POST   /api/agents/{id}/push    (400 validation; 404 unknown agent;
-//!                                     502 when no channel adapter is wired)
+//!                                     scrubbed 502 when no channel adapter is wired)
 //!   POST   /api/agents/bulk         (multi-create + read-back)
 //!   DELETE /api/agents/bulk         (multi-delete + read-back 404)
 //!   POST   /api/agents/bulk/start   (set Full mode + read-back)
@@ -392,6 +393,29 @@ async fn test_reload_unknown_agent_is_rejected() {
 }
 
 // ===========================================================================
+// INJECT — POST /api/agents/{id}/inject
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_inject_unknown_agent_scrubs_kernel_error() {
+    let h = boot(TEST_TOKEN).await;
+    let missing_id = unknown_agent_id();
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{missing_id}/inject"),
+            serde_json::json!({"message": "interrupt"}),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+    assert_eq!(body["error"]["message"], "agent not found");
+    assert_eq!(body["error"]["code"], "agent_not_found");
+    assert!(!body.to_string().contains(&missing_id.to_string()));
+}
+
+// ===========================================================================
 // PUSH — POST /api/agents/{id}/push
 //
 // The push happy path delivers through a live channel adapter (Telegram,
@@ -478,6 +502,8 @@ async fn test_push_no_channel_adapter_returns_502() {
     assert_eq!(status, StatusCode::BAD_GATEWAY, "body: {body}");
     assert_eq!(body["success"], false);
     assert_eq!(body["agent_id"], id.to_string());
+    assert_eq!(body["detail"], "Channel adapter rejected the message");
+    assert!(!body.to_string().contains("telegram"));
 }
 
 // ===========================================================================
