@@ -65,6 +65,8 @@ for (const [name, asset, missingMessage] of [
   for (const payload of [
     { assets: [] },
     { assets: [{ name: "different-asset", browser_download_url: "https://github.com/file" }] },
+    { assets: [{ name: `prefix-${asset}`, browser_download_url: `https://github.com/librefang/librefang/releases/download/v1/prefix-${asset}` }] },
+    { assets: [{ name: `${asset}.sha256`, browser_download_url: `https://github.com/librefang/librefang/releases/download/v1/${asset}.sha256` }] },
   ]) {
     const response = await withFetch(
       async () => new Response(JSON.stringify(payload)),
@@ -78,6 +80,9 @@ for (const [name, asset, missingMessage] of [
     undefined,
     "javascript:alert(1)",
     "https://attacker.example/file",
+    `https://github.com:444/librefang/librefang/releases/download/v1/${asset}`,
+    `https://github.com/attacker/repository/releases/download/v1/${asset}`,
+    `https://github.com/librefang/librefang/releases/download/v1/${asset}?download=1`,
   ]) {
     const response = await withFetch(
       async () => new Response(JSON.stringify({

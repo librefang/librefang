@@ -1,19 +1,31 @@
 // Cloudflare Pages Function for install.ps1 redirect.
 const RELEASE_URL = "https://api.github.com/repos/librefang/librefang/releases/latest";
-const WINDOWS_ASSET = "x86_64-pc-windows-msvc.zip";
+const WINDOWS_ASSET = "librefang-x86_64-pc-windows-msvc.zip";
 
 function releaseAssetUrl(data, assetName) {
   const asset = data.assets.find((candidate) =>
     candidate !== null &&
     typeof candidate === "object" &&
     typeof candidate.name === "string" &&
-    candidate.name.includes(assetName)
+    candidate.name === assetName
   );
   if (!asset) return undefined;
   if (typeof asset.browser_download_url !== "string") return null;
   try {
     const url = new URL(asset.browser_download_url);
-    return url.protocol === "https:" && url.hostname === "github.com" ? url.href : null;
+    const path = url.pathname.split("/");
+    return url.origin === "https://github.com" &&
+      path.length === 7 &&
+      path[1] === "librefang" &&
+      path[2] === "librefang" &&
+      path[3] === "releases" &&
+      path[4] === "download" &&
+      path[5] !== "" &&
+      path[6] === assetName &&
+      url.search === "" &&
+      url.hash === ""
+      ? url.href
+      : null;
   } catch {
     return null;
   }
