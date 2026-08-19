@@ -95,11 +95,11 @@ add_label_if_match 'translat|i18n|chinese|japanese|korean' 'no-rust-required'
 # If the title looks like a bug report, flag an empty or very short body so maintainers can ask for details.
 is_bug=0
 case "$title_lower" in
-  fix:*|'fix('*)
+  fix:*|'fix('*|fix!:*)
     is_bug=1 ;;
 esac
 if ! printf '%s' "$title_lower" \
-  | grep -qE '^(add|improve|enhance|feature|support|document|refactor)([^[:alnum:]_]|$)'; then
+  | grep -qE '^(add|improve|enhance|feature|feat|perf|support|document|docs?|refactor|chore|test)([^[:alnum:]_]|$)'; then
   if printf '%s' "$title_lower" \
     | grep -qE '(^|[^[:alnum:]_])(bugs?|broken|crash(es|ed|ing)?|errors?|fail(s|ed|ing|ure|ures)?|wrong)([^[:alnum:]_]|$)'; then
     is_bug=1
