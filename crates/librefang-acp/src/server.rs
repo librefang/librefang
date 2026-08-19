@@ -173,20 +173,17 @@ where
             agent_client_protocol::on_receive_request!(),
         )
         // session/resume ------------------------------------------------
-        // Identical to load in Phase 1 — both create-or-replace the
-        // mapping. The protocol distinction (resume MUST NOT replay
-        // history) is moot until we have history to replay.
+        // Resume creates or replaces the session mapping without replaying history.
+        // The client already has the conversation.
         .on_receive_request(
-            async move |req: ResumeSessionRequest, responder, cx: agent_client_protocol::ConnectionTo<Client>| {
+            async move |req: ResumeSessionRequest, responder, _cx| {
                 let state = SessionState::for_acp_id(&req.session_id, req.cwd);
                 let lf_id = state.librefang_session_id;
                 debug!(session_id = %req.session_id.0, librefang_id = %lf_id.0,
                        "ACP session/resume");
-                let acp_id = req.session_id.clone();
                 sessions_for_resume.insert(req.session_id, state);
                 kernel_for_resume.register_session_fs(lf_id);
                 kernel_for_resume.register_session_terminal(lf_id);
-                replay_session_history(&kernel_for_resume, &cx, &acp_id, lf_id).await;
                 responder.respond(ResumeSessionResponse::default())
             },
             agent_client_protocol::on_receive_request!(),
@@ -312,22 +309,14 @@ fn next_session_id() -> agent_client_protocol::schema::v1::SessionId {
     agent_client_protocol::schema::v1::SessionId::new(uuid.to_string())
 }
 
-/// Maximum number of history turns we replay back to the editor on
-/// `session/load` / `session/resume`. A long-running session can
-/// accumulate thousands of messages, and dumping all of them as a
-/// flood of `session/update` notifications would (a) delay the
-/// load response, (b) drown the editor's UI thread, (c) potentially
-/// exceed the JSON-RPC peer's incoming buffer. Cap at the most
-/// recent 50 turns — enough for the user to recall context, not
-/// enough to flood. A future settings knob can lift this if a
-/// deployment needs a longer rehydration window.
+/// Maximum number of history turns we replay back to the editor on `session/load`.
+/// A long-running session can accumulate thousands of messages, and dumping all of them as a flood of `session/update` notifications would delay the load response, drown the editor's UI thread, and potentially exceed the JSON-RPC peer's incoming buffer.
+/// Cap at the most recent 50 turns so the user can recall context without flooding the client.
+/// A future settings knob can lift this if a deployment needs a longer rehydration window.
 const MAX_REPLAY_TURNS: usize = 50;
 
-/// Pull the session's persisted message history from the kernel and
-/// emit it back to the editor as a sequence of `session/update`
-/// notifications, so the editor's chat panel rehydrates on
-/// `session/load` / `session/resume` (#3313). Empty history (new
-/// session, missing kernel side, etc.) is a no-op.
+/// Pull the session's persisted message history from the kernel and emit it back to the editor as a sequence of `session/update` notifications so the editor's chat panel rehydrates on `session/load` (#3313).
+/// Empty history from a new or missing kernel session is a no-op.
 ///
 /// Capped at the most recent [`MAX_REPLAY_TURNS`] entries so a long
 /// session doesn't flood the editor's incoming buffer or block the

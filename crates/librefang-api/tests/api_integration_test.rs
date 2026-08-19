@@ -84,6 +84,19 @@ async fn start_test_server_with_provider(
     let (state, _tmp, _) = test.into_parts();
     state.kernel.clone().set_self_handle();
 
+    // Exercise the same identity attribution as the production router.
+    // With no auth configured, loopback requests receive the synthetic Owner principal that authorizes the daemon's own MCP bridge headers.
+    let auth_state = middleware::AuthState {
+        api_key_lock: state.api_key_lock.clone(),
+        master_key: state.master_key.clone(),
+        active_sessions: state.active_sessions.clone(),
+        dashboard_auth_enabled: false,
+        user_api_keys: state.user_api_keys.clone(),
+        require_auth_for_reads: false,
+        allow_no_auth: false,
+        audit_log: None,
+    };
+
     let app = Router::new()
         .route("/api/health", axum::routing::get(routes::health))
         .route("/api/status", axum::routing::get(routes::status))
@@ -152,6 +165,10 @@ async fn start_test_server_with_provider(
         .route("/api/tools/{name}", axum::routing::get(routes::get_tool))
         .route("/mcp", axum::routing::post(routes::mcp_http))
         .route("/api/shutdown", axum::routing::post(routes::shutdown))
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            middleware::auth,
+        ))
         .layer(axum::middleware::from_fn(middleware::request_logging))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
@@ -2929,30 +2946,22 @@ async fn test_mcp_http_channel_send_cross_account_guard_uses_account_header() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_mcp_http_invalid_agent_header_falls_back_to_unauthenticated() {
-    // An unparseable or unknown agent ID must degrade gracefully to
-    // the unauthenticated path (same behaviour as no header) rather
-    // than 500-ing. Keeps external MCP clients working even if a
-    // misconfigured bridge stuffs a garbage ID into the header.
+async fn test_mcp_http_invalid_agent_header_is_rejected() {
+    // A client-supplied agent identity must never degrade to the header-less path.
+    // Otherwise a forged or stale identity could silently bypass the agent-scoped authorization contract.
     let server = start_test_server().await;
 
     let (status, body) = call_mcp_cron_list(&server, Some("not-a-uuid")).await;
     assert_eq!(status, 200);
-    let is_error = body["result"]["isError"].as_bool().unwrap_or(false);
-    assert!(
-        is_error,
-        "invalid header must still yield the unauthenticated error path"
-    );
+    assert_eq!(body["error"]["code"], -32001, "{body}");
+    assert!(body.get("result").is_none(), "{body}");
 
-    // Well-formed UUID but not a registered agent — same deal.
+    // A well-formed but unknown UUID must fail closed too.
     let (status, body) =
         call_mcp_cron_list(&server, Some("00000000-0000-0000-0000-000000000000")).await;
     assert_eq!(status, 200);
-    let is_error = body["result"]["isError"].as_bool().unwrap_or(false);
-    assert!(
-        is_error,
-        "unknown agent ID must still yield the unauthenticated error path"
-    );
+    assert_eq!(body["error"]["code"], -32001, "{body}");
+    assert!(body.get("result").is_none(), "{body}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3172,6 +3181,149 @@ async fn test_attach_session_stream_fans_out_to_multiple_clients() {
         body_b.contains("hello-multiattach"),
         "client B body should contain published event: {body_b}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_attach_session_stream_accepts_websocket_upgrade() {
+    use futures::StreamExt as _;
+    use librefang_kernel::llm_driver::{StreamEvent, PHASE_RESPONSE_COMPLETE};
+    use librefang_types::message::{StopReason, TokenUsage};
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({ "manifest_toml": TEST_MANIFEST }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let body: serde_json::Value = response.json().await.unwrap();
+    let agent_id_text = body["agent_id"].as_str().unwrap();
+    let agent_id = agent_id_text.parse().unwrap();
+    let session_id = server
+        .state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .unwrap()
+        .session_id;
+    let url = format!(
+        "{}/api/agents/{agent_id_text}/sessions/{session_id}/stream",
+        server.base_url.replacen("http://", "ws://", 1)
+    );
+
+    let mut request = url.into_client_request().unwrap();
+    request.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        "bearer.test-token".parse().unwrap(),
+    );
+    let (mut socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::SWITCHING_PROTOCOLS);
+    assert_eq!(
+        response
+            .headers()
+            .get("Sec-WebSocket-Protocol")
+            .and_then(|value| value.to_str().ok()),
+        Some("bearer.test-token")
+    );
+
+    let sender = server.state.kernel.session_stream_hub().sender(session_id);
+    sender
+        .send(StreamEvent::TextDelta {
+            text: "hello-websocket-attach".to_string(),
+        })
+        .expect("WebSocket subscriber should be attached");
+
+    let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .expect("WebSocket event should arrive")
+        .expect("WebSocket should remain open")
+        .expect("WebSocket frame should be valid");
+    let Message::Text(text) = message else {
+        panic!("expected a text frame, got {message:?}");
+    };
+    let envelope: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(envelope["type"], "chunk");
+    assert_eq!(envelope["content"], "hello-websocket-attach");
+    assert_eq!(envelope["done"], false);
+
+    sender
+        .send(StreamEvent::ContentComplete {
+            stop_reason: StopReason::ToolUse,
+            usage: TokenUsage {
+                input_tokens: 3,
+                output_tokens: 2,
+                ..TokenUsage::default()
+            },
+        })
+        .expect("intermediate completion should reach the subscriber");
+    sender
+        .send(StreamEvent::TextDelta {
+            text: "after-tool".to_string(),
+        })
+        .expect("stream should remain attached after an intermediate completion");
+
+    let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .expect("post-tool event should arrive")
+        .expect("WebSocket should remain open")
+        .expect("WebSocket frame should be valid");
+    let Message::Text(text) = message else {
+        panic!("expected a text frame, got {message:?}");
+    };
+    let envelope: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(envelope["type"], "chunk");
+    assert_eq!(envelope["content"], "after-tool");
+
+    sender
+        .send(StreamEvent::ContentComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage {
+                input_tokens: 4,
+                output_tokens: 6,
+                ..TokenUsage::default()
+            },
+        })
+        .expect("final completion usage should reach the subscriber");
+    sender
+        .send(StreamEvent::PhaseChange {
+            phase: PHASE_RESPONSE_COMPLETE.to_string(),
+            detail: None,
+        })
+        .expect("response completion should reach the subscriber");
+    let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .expect("terminal event should arrive")
+        .expect("WebSocket should deliver the terminal frame")
+        .expect("WebSocket terminal frame should be valid");
+    let Message::Text(text) = message else {
+        panic!("expected a terminal text frame, got {message:?}");
+    };
+    let envelope: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(envelope["type"], "done");
+    assert_eq!(envelope["done"], true);
+    assert_eq!(envelope["usage"]["input_tokens"], 7);
+    assert_eq!(envelope["usage"]["output_tokens"], 8);
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(message) = socket.next().await {
+            if matches!(message, Ok(Message::Close(_))) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("server should close the completed session stream");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while sender.receiver_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("client close should release the session stream subscription");
 }
 
 // ---------------------------------------------------------------------------

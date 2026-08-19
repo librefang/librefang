@@ -5,6 +5,12 @@ category = "devtools"
 icon = "lucide:clipboard-list"
 tags = ["project-management", "issues", "agile", "atlassian", "tracking"]
 
+setup_instructions = """
+1. Go to https://id.atlassian.com/manage-profile/security/api-tokens and create a new API token.
+2. Enter your Jira Cloud instance URL (e.g., https://yourcompany.atlassian.net) and the email linked to your Atlassian account.
+3. Paste the API token into the JIRA_API_TOKEN field above.
+"""
+
 [transport]
 type = "stdio"
 command = "npx"
@@ -34,13 +40,6 @@ get_url = ""
 [health_check]
 interval_secs = 60
 unhealthy_threshold = 3
-
-setup_instructions = """
-1. Go to https://id.atlassian.com/manage-profile/security/api-tokens and create a new API token.
-2. Enter your Jira Cloud instance URL (e.g., https://yourcompany.atlassian.net) and the email linked to your Atlassian account.
-3. Paste the API token into the JIRA_API_TOKEN field above.
-"""
-
 
 [i18n.zh]
 name = "Jira"

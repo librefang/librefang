@@ -29,7 +29,7 @@
 //! ```
 
 use async_trait::async_trait;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use thiserror::Error;
 use tracing::warn;
 
@@ -145,6 +145,26 @@ pub struct MemoryManager {
     external: RwLock<Option<Arc<dyn MemoryProvider>>>,
 }
 
+fn read_external_recover(
+    external: &RwLock<Option<Arc<dyn MemoryProvider>>>,
+) -> RwLockReadGuard<'_, Option<Arc<dyn MemoryProvider>>> {
+    external.read().unwrap_or_else(|poisoned| {
+        warn!("MemoryManager external provider lock poisoned; recovering preserved state");
+        external.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
+fn write_external_recover(
+    external: &RwLock<Option<Arc<dyn MemoryProvider>>>,
+) -> RwLockWriteGuard<'_, Option<Arc<dyn MemoryProvider>>> {
+    external.write().unwrap_or_else(|poisoned| {
+        warn!("MemoryManager external provider lock poisoned; recovering preserved state");
+        external.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
 impl MemoryManager {
     /// Create a new manager with the given built-in provider.
     ///
@@ -177,10 +197,7 @@ impl MemoryManager {
                 name: provider.name().to_owned(),
             });
         }
-        let mut slot = self
-            .external
-            .write()
-            .expect("MemoryManager external lock poisoned");
+        let mut slot = write_external_recover(&self.external);
         if let Some(existing) = slot.as_ref() {
             return Err(MemoryError::ExternalProviderAlreadyRegistered {
                 existing: existing.name().to_owned(),
@@ -197,18 +214,12 @@ impl MemoryManager {
     ///
     /// This method takes `&self` so it can be called through `Arc<MemoryManager>`.
     pub fn remove_external(&self) -> Option<Arc<dyn MemoryProvider>> {
-        self.external
-            .write()
-            .expect("MemoryManager external lock poisoned")
-            .take()
+        write_external_recover(&self.external).take()
     }
 
     /// Returns a clone of the external provider `Arc`, if one is registered.
     pub fn external(&self) -> Option<Arc<dyn MemoryProvider>> {
-        self.external
-            .read()
-            .expect("MemoryManager external lock poisoned")
-            .clone()
+        read_external_recover(&self.external).clone()
     }
 
     // -- Multi-provider helpers ---------------------------------------------
@@ -452,6 +463,40 @@ mod tests {
         let removed = mgr.remove_external();
         assert!(removed.is_some());
         mgr.register_external(null_external("ext2")).unwrap();
+    }
+
+    #[test]
+    fn external_provider_lock_recovers_preserved_state_after_poisoning() {
+        let mgr = Arc::new(MemoryManager::new(null_builtin()));
+        mgr.register_external(null_external("ext1")).unwrap();
+
+        let poisoned_mgr = Arc::clone(&mgr);
+        let poison = std::thread::spawn(move || {
+            let _guard = poisoned_mgr.external.write().unwrap();
+            panic!("poison external provider lock");
+        })
+        .join();
+        assert!(poison.is_err());
+        assert!(mgr.external.is_poisoned());
+
+        assert_eq!(mgr.external().unwrap().name(), "ext1");
+        assert!(!mgr.external.is_poisoned());
+        assert_eq!(mgr.remove_external().unwrap().name(), "ext1");
+        mgr.register_external(null_external("ext2")).unwrap();
+
+        let poisoned_mgr = Arc::clone(&mgr);
+        let poison = std::thread::spawn(move || {
+            let _guard = poisoned_mgr.external.write().unwrap();
+            panic!("poison external provider lock again");
+        })
+        .join();
+        assert!(poison.is_err());
+        assert!(mgr.external.is_poisoned());
+
+        assert_eq!(mgr.remove_external().unwrap().name(), "ext2");
+        assert!(!mgr.external.is_poisoned());
+        mgr.register_external(null_external("ext3")).unwrap();
+        assert_eq!(mgr.external().unwrap().name(), "ext3");
     }
 
     #[tokio::test]
