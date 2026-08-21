@@ -345,7 +345,7 @@ mod platform_tray {
     }
 
     pub(super) fn rgba_to_argb(mut rgba: Vec<u8>) -> Vec<u8> {
-        for pixel in rgba.chunks_exact_mut(4) {
+        for pixel in rgba.as_chunks_mut::<4>().0 {
             pixel.rotate_right(1); // convert RGBA to ARGB
         }
         rgba

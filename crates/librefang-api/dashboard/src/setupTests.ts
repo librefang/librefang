@@ -48,6 +48,15 @@ global.ResizeObserver = class ResizeObserver {
   disconnect() {}
 };
 
+// jsdom implements no layout, so Element.prototype.scrollIntoView is absent.
+// Handlers that scroll a section into view after acting on it (the workflow
+// re-run button, for one) then throw an uncaught TypeError, which vitest
+// reports as an unhandled error and exits non-zero even when every assertion
+// passed. Stub it as the no-op it effectively is without a layout engine.
+if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = function scrollIntoView() {};
+}
+
 // jsdom does not implement matchMedia; PushDrawer.useIsMobile and a few
 // pages call it during mount and crash the test render without a stub.
 if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {
