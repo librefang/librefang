@@ -143,6 +143,22 @@ impl LibreFangKernel {
         blocks: Vec<librefang_types::message::ContentBlock>,
         sender: &SenderContext,
     ) -> KernelResult<AgentLoopResult> {
+        self.send_message_with_blocks_and_sender_thinking(agent_id, message, blocks, sender, None)
+            .await
+    }
+
+    /// Same as [`Self::send_message_with_blocks_and_sender`] but applies a
+    /// per-turn extended-thinking override. `None` keeps the agent's
+    /// configured default. Used by the channel bridge to honour the
+    /// `/think` command preference.
+    pub async fn send_message_with_blocks_and_sender_thinking(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        blocks: Vec<librefang_types::message::ContentBlock>,
+        sender: &SenderContext,
+        thinking_override: Option<bool>,
+    ) -> KernelResult<AgentLoopResult> {
         self.send_message_full(
             agent_id,
             message,
@@ -150,7 +166,7 @@ impl LibreFangKernel {
             Some(blocks),
             Some(sender),
             None,
-            None,
+            thinking_override,
             None,
         )
         .await

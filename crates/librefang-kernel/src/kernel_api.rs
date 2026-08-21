@@ -717,6 +717,19 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         blocks: Vec<librefang_types::message::ContentBlock>,
         sender: librefang_channels::types::SenderContext,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
+    /// Like [`Self::send_message_with_blocks_and_sender`] with a per-turn
+    /// extended-thinking override. Default implementation ignores the
+    /// override and delegates to the base method.
+    async fn send_message_with_blocks_and_sender_thinking(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        blocks: Vec<librefang_types::message::ContentBlock>,
+        sender: librefang_channels::types::SenderContext,
+        _thinking_override: Option<bool>,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
+        Self::send_message_with_blocks_and_sender(self, agent_id, message, blocks, sender).await
+    }
     async fn send_message_streaming_with_sender_context_and_routing(
         self: Arc<Self>,
         agent_id: AgentId,
@@ -1654,6 +1667,24 @@ impl KernelApi for LibreFangKernel {
         sender: librefang_channels::types::SenderContext,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
         Self::send_message_with_blocks_and_sender(self, agent_id, message, blocks, &sender).await
+    }
+    async fn send_message_with_blocks_and_sender_thinking(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        blocks: Vec<librefang_types::message::ContentBlock>,
+        sender: librefang_channels::types::SenderContext,
+        thinking_override: Option<bool>,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
+        Self::send_message_with_blocks_and_sender_thinking(
+            self,
+            agent_id,
+            message,
+            blocks,
+            &sender,
+            thinking_override,
+        )
+        .await
     }
     async fn send_message_streaming_with_sender_context_and_routing(
         self: Arc<Self>,

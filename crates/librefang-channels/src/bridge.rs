@@ -315,6 +315,23 @@ pub trait ChannelBridgeHandle: Send + Sync {
         None
     }
 
+    /// Persist an explicit per-conversation `/agent` override for a `(channel instance, conversation)` pair (#5671 Model A, upper binding level).
+    ///
+    /// Written by the `/agent` command so the next inbound message resolves the new agent through [`resolve_conversation_override`](Self::resolve_conversation_override) — the router user-default alone cannot stick, because the sticky holder, per-peer binding, and instance default all outrank the router store in the dispatch chain.
+    /// `conversation_id` is `message.sender.platform_id` at the call site (chat id for groups, peer id for DMs); `agent` is the agent *name* (the store resolves names to live `AgentId`s at dispatch, same as the config-seeded path).
+    /// `bound_by` records who set it for the audit trail.
+    ///
+    /// Default is a no-op so test doubles keep working unchanged; the kernel adapter overrides it with the DB-backed write, guarded by an injection-site test.
+    async fn set_conversation_binding(
+        &self,
+        _instance: &str,
+        _conversation_id: &str,
+        _agent: &str,
+        _bound_by: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Resolve the instance default agent for a channel instance (#5671 Model A) — seeded from `[[sidecar_channels]] agent`, the lower of the two binding levels.
     /// Returns `None` when the instance has no default configured, in which case the bridge falls through to its legacy resolver chain.
     ///
@@ -4184,6 +4201,7 @@ async fn dispatch_message(
                 message.metadata.get("account_id").and_then(|v| v.as_str()),
                 overrides.as_ref(),
                 sender_user_id(message),
+                thread_ownership,
             )
             .await;
             if !suppress_button_command_ack(&message.content, name) {
@@ -4602,6 +4620,7 @@ async fn dispatch_message(
                     message.metadata.get("account_id").and_then(|v| v.as_str()),
                     overrides.as_ref(),
                     sender_user_id(message),
+                    thread_ownership,
                 )
                 .await;
                 if !suppress_button_command_ack(&message.content, cmd) {
@@ -6854,15 +6873,55 @@ async fn handle_command(
     account_id: Option<&str>,
     overrides: Option<&ChannelOverrides>,
     sender_user_id: &str,
+    thread_ownership: &Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
 ) -> String {
-    // Helper closure: build a `BindingContext` for the command and resolve
-    // the target agent via the context-aware resolver. This is what the
-    // regular message dispatch path uses (`resolve_or_fallback` →
-    // `resolve_with_context`) — the #5672 regression was that command arms
-    // called the context-less `resolve()` and lost the `account_id` along
-    // the way, so every bot's command would collapse to the first-registered
-    // channel default.
-    let resolve_for_command = || {
+    // Helper closure: resolve the target agent mirroring the regular
+    // message dispatch path (`resolve_or_fallback`) layer for layer — the
+    // #5672 regression was that command arms called the context-less
+    // `resolve()` and lost the `account_id`, and the follow-up (#7140)
+    // found the command path still skipped the conversation override,
+    // sticky holder, per-peer binding, and instance default that the chat
+    // path consults — so `/new` could reset a different agent than the
+    // one holding the conversation.
+    let resolve_for_command = || async {
+        // Explicit per-conversation `/agent` override (#5671 upper level).
+        if let Some(instance) = account_id.filter(|s| !s.is_empty()) {
+            let conversation_id = sender.platform_id.as_str();
+            if !conversation_id.is_empty() {
+                if let Some(id) = handle
+                    .resolve_conversation_override(instance, conversation_id)
+                    .await
+                {
+                    return Some(id);
+                }
+            }
+        }
+        // Sticky continuation (#5323): the live conversation-ownership
+        // claim wins over the standing default. Commands carry no
+        // thread_id; key by the chat id the way `build_thread_key`
+        // falls back for non-topic messages.
+        let thread_key = crate::thread_ownership::ThreadKey::new(
+            crate::router::channel_type_to_str(channel_type),
+            sender.platform_id.as_str(),
+        )
+        .map(|k| {
+            k.with_account_id(account_id)
+                .with_chat_id(Some(sender.platform_id.as_str()))
+        });
+        if let Some(key) = thread_key {
+            if let Some(holder) = thread_ownership.current_holder(&key) {
+                if agent_allows_channel(
+                    handle,
+                    holder,
+                    crate::router::channel_type_to_str(channel_type),
+                )
+                .await
+                {
+                    return Some(holder);
+                }
+            }
+        }
+        // Explicit per-peer binding (`[[bindings]]` match_rule on peer_id).
         let ctx = crate::router::BindingContext {
             channel: std::borrow::Cow::Borrowed(crate::router::channel_type_to_str(channel_type)),
             account_id: account_id.map(std::borrow::Cow::Borrowed),
@@ -6870,12 +6929,40 @@ async fn handle_command(
             guild_id: None,
             roles: smallvec::SmallVec::new(),
         };
-        router.resolve_with_context(
+        if let Some(id) = router.resolve_specific_binding(&ctx) {
+            if agent_allows_channel(handle, id, crate::router::channel_type_to_str(channel_type))
+                .await
+            {
+                return Some(id);
+            }
+        }
+        // Instance default (#5671 lower level) seeded from
+        // `[[sidecar_channels]] agent`.
+        if let Some(instance) = account_id.filter(|s| !s.is_empty()) {
+            if let Some(id) = handle.resolve_instance_default(instance).await {
+                return Some(id);
+            }
+        }
+        // Router chain fallback.
+        let id = router.resolve_with_context(
             channel_type,
             &sender.platform_id,
             sender.librefang_user.as_deref(),
             &ctx,
-        )
+        );
+        match id {
+            Some(id)
+                if agent_allows_channel(
+                    handle,
+                    id,
+                    crate::router::channel_type_to_str(channel_type),
+                )
+                .await =>
+            {
+                Some(id)
+            }
+            _ => None,
+        }
     };
 
     // Channel-account key used to scope user-default writes (e.g. `/agent`)
@@ -6938,9 +7025,39 @@ async fn handle_command(
                 ),
                 None => router.set_user_default(sender.platform_id.clone(), agent_id),
             };
+            // #5671 Model A upper level: also persist the selection as the
+            // per-conversation binding. `resolve_for_command` /
+            // `resolve_or_fallback` consult the conversation override BEFORE
+            // the sticky holder, per-peer binding, and instance default — so
+            // an `/agent` that only wrote the router user-default never
+            // stuck (the ack claimed the new agent while dispatch kept the
+            // old one). Keyed by (account, platform_id), the same pair the
+            // override lookup reads, so the binding never leaks across bots
+            // (#5672). Skipped for single-bot channels (no account): those
+            // keep the legacy router-only path, matching `resolve_for_command`.
+            let persist_conversation_binding = async {
+                if let Some(instance) = account_id.filter(|s| !s.is_empty()) {
+                    let conversation_id = sender.platform_id.as_str();
+                    if !conversation_id.is_empty() {
+                        if let Err(e) = handle
+                            .set_conversation_binding(instance, conversation_id, agent_name, "user")
+                            .await
+                        {
+                            warn!(
+                                %instance,
+                                %conversation_id,
+                                agent = %agent_name,
+                                error = %e,
+                                "failed to persist /agent conversation binding"
+                            );
+                        }
+                    }
+                }
+            };
             match handle.find_agent_by_name(agent_name).await {
                 Ok(Some(agent_id)) => {
                     store_user_default(agent_id);
+                    persist_conversation_binding.await;
                     format!("Now talking to agent: {agent_name}")
                 }
                 Ok(None) => {
@@ -6948,6 +7065,7 @@ async fn handle_command(
                     match handle.spawn_agent_by_name(agent_name).await {
                         Ok(agent_id) => {
                             store_user_default(agent_id);
+                            persist_conversation_binding.await;
                             format!("Spawned and connected to agent: {agent_name}")
                         }
                         Err(e) => {
@@ -6963,7 +7081,7 @@ async fn handle_command(
                 return "Usage: /btw <question> — ask a side question without affecting session history".to_string();
             }
             let question = args.join(" ");
-            let agent_id = resolve_for_command();
+            let agent_id = resolve_for_command().await;
             // Build a minimal SenderContext so the kernel can apply the
             // same peer-scoped memory lookup that the regular message path
             // uses (#4923) — otherwise the agent re-asks the user's name
@@ -6985,7 +7103,7 @@ async fn handle_command(
         "new" => {
             // Resolve the user's current agent and the channel-derived sid so /new only resets THIS chat (#4868).
             // The (channel, chat_id) pair must match `build_sender_context` exactly so the sid we delete here equals the sid the next inbound message will resolve via `SessionId::for_channel` — hence the shared `session_scope` rather than a re-inlined derivation (#7701).
-            let agent_id = resolve_for_command();
+            let agent_id = resolve_for_command().await;
             match agent_id {
                 Some(aid) => {
                     let (ch, chat) =
@@ -6999,7 +7117,7 @@ async fn handle_command(
             }
         }
         "reboot" => {
-            let agent_id = resolve_for_command();
+            let agent_id = resolve_for_command().await;
             match agent_id {
                 Some(aid) => {
                     let (ch, chat) =
@@ -7013,7 +7131,7 @@ async fn handle_command(
             }
         }
         "compact" => {
-            let agent_id = resolve_for_command();
+            let agent_id = resolve_for_command().await;
             match agent_id {
                 Some(aid) => {
                     let (ch, chat) =
@@ -7027,7 +7145,7 @@ async fn handle_command(
             }
         }
         "model" => {
-            let agent_id = resolve_for_command();
+            let agent_id = resolve_for_command().await;
             match agent_id {
                 Some(aid) => {
                     if args.is_empty() {
@@ -7047,7 +7165,7 @@ async fn handle_command(
             }
         }
         "stop" => {
-            let agent_id = resolve_for_command();
+            let agent_id = resolve_for_command().await;
             match agent_id {
                 Some(aid) => handle
                     .stop_run(aid)
@@ -7057,7 +7175,7 @@ async fn handle_command(
             }
         }
         "usage" => {
-            let agent_id = resolve_for_command();
+            let agent_id = resolve_for_command().await;
             match agent_id {
                 Some(aid) => handle
                     .session_usage(aid)
@@ -7067,7 +7185,7 @@ async fn handle_command(
             }
         }
         "think" => {
-            let agent_id = resolve_for_command();
+            let agent_id = resolve_for_command().await;
             match agent_id {
                 Some(aid) => {
                     let on = args.first().map(|a| a == "on").unwrap_or(true);
@@ -7791,6 +7909,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_command_agents() {
+        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let agent_id = AgentId::new();
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
             agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
@@ -7812,6 +7931,7 @@ mod tests {
             None,
             None,
             &sender.platform_id,
+            &thread_ownership,
         )
         .await;
         assert!(result.contains("coder"));
@@ -7826,6 +7946,7 @@ mod tests {
             None,
             None,
             &sender.platform_id,
+            &thread_ownership,
         )
         .await;
         assert!(result.contains("/agents"));
@@ -7833,6 +7954,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_command_agent_select() {
+        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let agent_id = AgentId::new();
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
             agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
@@ -7855,6 +7977,7 @@ mod tests {
             None,
             None,
             &sender.platform_id,
+            &thread_ownership,
         )
         .await;
         assert!(result.contains("Now talking to agent: coder"));
@@ -8162,10 +8285,25 @@ mod tests {
 
     /// MockHandle that records which `agent_id` `/model` was dispatched to,
     /// so we can assert command-routing isolation between multi-bot
-    /// deployments (#5672).
+    /// deployments (#5672). Also records `/agent` conversation bindings and
+    /// `/think` toggles so command side-effects are assertable, not just the
+    /// ack text.
     struct RecordingHandle {
         agents: Mutex<Vec<(AgentId, String)>>,
         set_model_calls: Mutex<Vec<AgentId>>,
+        bindings: Mutex<Vec<(String, String, String, String)>>,
+        set_thinking_calls: Mutex<Vec<(AgentId, bool)>>,
+    }
+
+    impl RecordingHandle {
+        fn new(agents: Vec<(AgentId, String)>) -> Self {
+            Self {
+                agents: Mutex::new(agents),
+                set_model_calls: Mutex::new(Vec::new()),
+                bindings: Mutex::new(Vec::new()),
+                set_thinking_calls: Mutex::new(Vec::new()),
+            }
+        }
     }
 
     #[async_trait]
@@ -8187,6 +8325,44 @@ mod tests {
             self.set_model_calls.lock().unwrap().push(agent_id);
             Ok("ok".to_string())
         }
+        async fn set_conversation_binding(
+            &self,
+            instance: &str,
+            conversation_id: &str,
+            agent: &str,
+            bound_by: &str,
+        ) -> Result<(), String> {
+            self.bindings.lock().unwrap().push((
+                instance.to_string(),
+                conversation_id.to_string(),
+                agent.to_string(),
+                bound_by.to_string(),
+            ));
+            Ok(())
+        }
+        async fn resolve_conversation_override(
+            &self,
+            instance: &str,
+            conversation_id: &str,
+        ) -> Option<AgentId> {
+            let name = {
+                let bindings = self.bindings.lock().unwrap();
+                bindings
+                    .iter()
+                    .find(|(i, c, _, _)| i == instance && c == conversation_id)
+                    .map(|(_, _, a, _)| a.clone())
+            }?;
+            self.agents
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(_, n)| n == &name)
+                .map(|(id, _)| *id)
+        }
+        async fn set_thinking(&self, agent_id: AgentId, on: bool) -> Result<String, String> {
+            self.set_thinking_calls.lock().unwrap().push((agent_id, on));
+            Ok("Extended thinking enabled for this chat.".to_string())
+        }
         fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}
     }
 
@@ -8195,18 +8371,16 @@ mod tests {
     /// not to the first-registered channel default for the channel type.
     #[tokio::test]
     async fn command_resolution_respects_account_id() {
+        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let agent_a = AgentId::new();
         let agent_b = AgentId::new();
         let agent_c = AgentId::new();
 
-        let recording = Arc::new(RecordingHandle {
-            agents: Mutex::new(vec![
-                (agent_a, "agent-A".to_string()),
-                (agent_b, "agent-B".to_string()),
-                (agent_c, "agent-C".to_string()),
-            ]),
-            set_model_calls: Mutex::new(Vec::new()),
-        });
+        let recording = Arc::new(RecordingHandle::new(vec![
+            (agent_a, "agent-A".to_string()),
+            (agent_b, "agent-B".to_string()),
+            (agent_c, "agent-C".to_string()),
+        ]));
         let handle: Arc<dyn ChannelBridgeHandle> = recording.clone();
         let router = Arc::new(AgentRouter::new());
 
@@ -8235,6 +8409,7 @@ mod tests {
             Some("bot-b"),
             None,
             &sender.platform_id,
+            &thread_ownership,
         )
         .await;
         // `/model` issued in bot-c must dispatch to agent-C.
@@ -8248,6 +8423,7 @@ mod tests {
             Some("bot-c"),
             None,
             &sender.platform_id,
+            &thread_ownership,
         )
         .await;
 
@@ -8260,10 +8436,126 @@ mod tests {
         );
     }
 
+    /// Regression test for the `/agent` stickiness fix (H7): the command must
+    /// persist the selection as the per-conversation binding — the upper
+    /// #5671 dispatch level — so the next inbound message resolves the new
+    /// agent through `resolve_conversation_override`. The router user-default
+    /// alone cannot stick because the sticky holder, per-peer binding, and
+    /// instance default all outrank the router store.
+    #[tokio::test]
+    async fn agent_command_persists_conversation_binding() {
+        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+
+        let recording = Arc::new(RecordingHandle::new(vec![
+            (agent_a, "agent-A".to_string()),
+            (agent_b, "agent-B".to_string()),
+        ]));
+        let handle: Arc<dyn ChannelBridgeHandle> = recording.clone();
+        let router = Arc::new(AgentRouter::new());
+        router.set_channel_default("telegram:bot-a".to_string(), agent_a);
+
+        let sender = ChannelUser {
+            platform_id: "shared-user".to_string(),
+            display_name: "Test".to_string(),
+            librefang_user: None,
+        };
+
+        // User runs `/agent agent-B` in bot-a.
+        let result = handle_command(
+            "agent",
+            &["agent-B".to_string()],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::Telegram,
+            Some("bot-a"),
+            None,
+            &sender.platform_id,
+            &thread_ownership,
+        )
+        .await;
+        assert!(result.contains("Now talking to agent: agent-B"));
+
+        // The side effect, not just the ack: the binding is recorded for the
+        // (account, conversation) pair the dispatch chain reads.
+        let bindings = recording.bindings.lock().unwrap().clone();
+        assert_eq!(
+            bindings,
+            vec![(
+                "bot-a".to_string(),
+                "shared-user".to_string(),
+                "agent-B".to_string(),
+                "user".to_string(),
+            )],
+            "/agent must persist the conversation binding",
+        );
+
+        // And the override layer resolves it back to the live AgentId.
+        let resolved = handle
+            .resolve_conversation_override("bot-a", "shared-user")
+            .await;
+        assert_eq!(resolved, Some(agent_b));
+    }
+
+    /// Regression test for the `/think` fix on the streaming path: the toggle
+    /// must dispatch to the agent resolved for this (account, conversation) —
+    /// not a global default — and record through the handle so the streaming
+    /// send can apply it per turn.
+    #[tokio::test]
+    async fn think_command_records_set_thinking_on_resolved_agent() {
+        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+
+        let recording = Arc::new(RecordingHandle::new(vec![
+            (agent_a, "agent-A".to_string()),
+            (agent_b, "agent-B".to_string()),
+        ]));
+        let handle: Arc<dyn ChannelBridgeHandle> = recording.clone();
+        let router = Arc::new(AgentRouter::new());
+        router.set_channel_default("telegram:bot-b".to_string(), agent_b);
+
+        let sender = ChannelUser {
+            platform_id: "shared-user".to_string(),
+            display_name: "Test".to_string(),
+            librefang_user: None,
+        };
+
+        // `/think on` issued in bot-b must hit agent-B (the account-scoped
+        // default), not agent-A.
+        let result = handle_command(
+            "think",
+            &["on".to_string()],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::Telegram,
+            Some("bot-b"),
+            None,
+            &sender.platform_id,
+            &thread_ownership,
+        )
+        .await;
+        assert!(
+            result.contains("Extended thinking enabled"),
+            "unexpected ack: {result}",
+        );
+
+        let calls = recording.set_thinking_calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![(agent_b, true)],
+            "/think must dispatch to the account-scoped agent",
+        );
+    }
+
     /// Regression test for #5672 Layer B: `/agent` in bot-a must NOT
     /// override which agent handles bot-b's traffic for the same user.
     #[tokio::test]
     async fn agent_command_does_not_leak_across_bots() {
+        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let agent_a = AgentId::new();
         let agent_b = AgentId::new();
         let agent_c = AgentId::new();
@@ -8296,6 +8588,7 @@ mod tests {
             Some("bot-a"),
             None,
             &sender.platform_id,
+            &thread_ownership,
         )
         .await;
         assert!(result.contains("Now talking to agent: agent-C"));
@@ -9231,6 +9524,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_command_btw_no_args() {
+        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
             agents: Mutex::new(vec![]),
         });
@@ -9251,6 +9545,7 @@ mod tests {
             None,
             None,
             &sender.platform_id,
+            &thread_ownership,
         )
         .await;
         assert!(result.contains("Usage:"));
@@ -9258,6 +9553,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_command_btw_no_agent_selected() {
+        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let agent_id = AgentId::new();
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
             agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
@@ -9280,6 +9576,7 @@ mod tests {
             None,
             None,
             &sender.platform_id,
+            &thread_ownership,
         )
         .await;
         assert!(result.contains("No agent selected"));
@@ -9287,6 +9584,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_help_includes_btw_command() {
+        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
             agents: Mutex::new(vec![]),
         });
@@ -9307,6 +9605,7 @@ mod tests {
             None,
             None,
             &sender.platform_id,
+            &thread_ownership,
         )
         .await;
         assert!(result.contains("/btw"));

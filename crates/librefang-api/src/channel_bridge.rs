@@ -621,6 +621,10 @@ where
 pub struct KernelBridgeAdapter {
     kernel: Arc<dyn KernelApi>,
     started_at: Instant,
+    /// Per-agent extended-thinking preference, keyed by agent id.
+    /// `/think` toggles it; the chat send path applies it as the
+    /// per-turn thinking override.
+    thinking_prefs: std::sync::Mutex<std::collections::HashMap<String, bool>>,
 }
 
 /// Compose the message returned to a channel user when `/approve <id>`
@@ -702,6 +706,37 @@ impl KernelBridgeAdapter {
                 None
             }
         }
+    }
+
+    /// Key under which an agent's `/think` preference is stored.
+    ///
+    /// Single-sourced so the write (`set_thinking`) and every read
+    /// (the send paths) cannot drift onto different keys — a drift that
+    /// makes `/think` silently inert while every surrounding assertion
+    /// still passes.
+    fn thinking_pref_key(agent_id: AgentId) -> String {
+        agent_id.0.to_string()
+    }
+
+    /// Record the `/think` preference for `agent_id`.
+    fn store_thinking_pref(&self, agent_id: AgentId, on: bool) -> Result<(), String> {
+        self.thinking_prefs
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(Self::thinking_pref_key(agent_id), on);
+        Ok(())
+    }
+
+    /// The per-turn extended-thinking override to apply to `agent_id`'s next
+    /// turn, or `None` when `/think` was never used for it (keep the agent's
+    /// configured default).
+    fn thinking_override_for(&self, agent_id: AgentId) -> Result<Option<bool>, String> {
+        Ok(self
+            .thinking_prefs
+            .lock()
+            .map_err(|e| e.to_string())?
+            .get(&Self::thinking_pref_key(agent_id))
+            .copied())
     }
 }
 
@@ -839,14 +874,19 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .map(|e| e.manifest.show_progress)
             .unwrap_or(true);
         let language = self.kernel.config_snapshot().language.clone();
+        // Apply the per-agent /think preference as the per-turn override on
+        // the streaming path too — same as the non-streaming send above.
+        let thinking = self.thinking_override_for(agent_id)?;
         let (event_rx, kernel_handle) = self
             .kernel
             .clone()
-            .send_message_streaming_with_sender_context_and_routing(
+            .send_message_streaming_with_sender_context_routing_thinking_and_session(
                 agent_id,
                 message,
                 None,
                 sender.clone(),
+                thinking,
+                None,
             )
             .await
             .map_err(|e| format!("{e}"))?;
@@ -896,9 +936,17 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         } else {
             text
         };
+        // Apply the per-agent /think preference as the per-turn override.
+        let thinking = self.thinking_override_for(agent_id)?;
         let result = self
             .kernel
-            .send_message_with_blocks_and_sender(agent_id, &text, blocks, sender.clone())
+            .send_message_with_blocks_and_sender_thinking(
+                agent_id,
+                &text,
+                blocks,
+                sender.clone(),
+                thinking,
+            )
             .await
             .map_err(|e| format!("{e}"))?;
         if result.silent {
@@ -1918,12 +1966,12 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok(msg)
     }
 
-    async fn set_thinking(&self, _agent_id: AgentId, on: bool) -> Result<String, String> {
-        // Future-ready: stores preference but doesn't affect model behavior yet
+    async fn set_thinking(&self, agent_id: AgentId, on: bool) -> Result<String, String> {
+        // Store the per-agent preference and apply it as the per-turn
+        // thinking override on the next chat message.
+        self.store_thinking_pref(agent_id, on)?;
         let state = if on { "enabled" } else { "disabled" };
-        Ok(format!(
-            "Extended thinking {state}. (This will take effect when supported by the model.)"
-        ))
+        Ok(format!("Extended thinking {state} for this chat."))
     }
 
     async fn classify_reply_intent(
@@ -2092,6 +2140,25 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .channel_bindings()
             .instance_default(instance);
         self.resolve_binding_lookup(lookup, instance, None)
+    }
+
+    async fn set_conversation_binding(
+        &self,
+        instance: &str,
+        conversation_id: &str,
+        agent: &str,
+        bound_by: &str,
+    ) -> Result<(), String> {
+        // Written by the `/agent` command so the next inbound message
+        // resolves the new agent through `resolve_conversation_override` —
+        // the router user-default alone cannot stick, because the sticky
+        // holder, per-peer binding, and instance default all outrank the
+        // router store in the dispatch chain.
+        self.kernel
+            .memory_substrate()
+            .channel_bindings()
+            .set_conversation_binding(instance, conversation_id, agent, bound_by)
+            .map_err(|e| e.to_string())
     }
 
     async fn authorize_channel_user(
@@ -2701,6 +2768,7 @@ pub async fn start_channel_bridge_with_config(
     let handle = KernelBridgeAdapter {
         kernel: kernel.clone(),
         started_at: Instant::now(),
+        thinking_prefs: std::sync::Mutex::new(std::collections::HashMap::new()),
     };
 
     // (adapter, default_agent_name, account_id) — `account_id` is the
@@ -2854,6 +2922,7 @@ pub async fn start_channel_bridge_with_config(
     let bridge_handle: Arc<dyn ChannelBridgeHandle> = Arc::new(KernelBridgeAdapter {
         kernel: kernel.clone(),
         started_at: Instant::now(),
+        thinking_prefs: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
     let router = Arc::new(router);
     // Create message journal for crash recovery
@@ -3325,6 +3394,7 @@ mod tests {
         let adapter = KernelBridgeAdapter {
             kernel: kernel.clone(),
             started_at: Instant::now(),
+            thinking_prefs: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
         let first_message = adapter
             .resolve_approval_text(&first_id.to_string(), true, Some(&code), "channel-user")
@@ -3372,6 +3442,7 @@ mod tests {
         let adapter = KernelBridgeAdapter {
             kernel: kernel.clone(),
             started_at: Instant::now(),
+            thinking_prefs: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
 
         // No binding of either level yet -> both fall through (None).
@@ -3431,6 +3502,126 @@ mod tests {
             .seed_instance_default("ghost-bot", "does-not-exist")
             .unwrap();
         assert_eq!(adapter.resolve_instance_default("ghost-bot").await, None);
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn adapter_set_conversation_binding_writes_through_to_substrate() {
+        // Write-side injection guard for the H7 fix: the real
+        // `KernelBridgeAdapter` must persist `/agent` selections through
+        // `set_conversation_binding` so the next inbound message resolves
+        // them via `resolve_conversation_override`. The trait default is a
+        // no-op, so a missing override would silently drop the sticky write
+        // while the bridge's unit tests (whose mock handle records the call)
+        // stay green — the default-no-op-disables-feature trap again.
+        use librefang_testing::MockKernelBuilder;
+
+        let (kernel, _tmp) = MockKernelBuilder::new().build();
+        // A fresh boot auto-spawns a default `assistant` agent.
+        let assistant = kernel
+            .agent_registry()
+            .find_by_name("assistant")
+            .expect("default assistant agent should exist after boot")
+            .id;
+
+        let adapter = KernelBridgeAdapter {
+            kernel: kernel.clone(),
+            started_at: Instant::now(),
+            thinking_prefs: std::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+
+        adapter
+            .set_conversation_binding("tg-bot", "peer-1", "assistant", "user")
+            .await
+            .expect("adapter write must succeed");
+
+        // The write must be visible to the upper dispatch level, resolved to
+        // the live AgentId.
+        assert_eq!(
+            adapter
+                .resolve_conversation_override("tg-bot", "peer-1")
+                .await,
+            Some(assistant),
+            "the adapter's set_conversation_binding must feed resolve_conversation_override",
+        );
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn streaming_send_applies_thinking_pref_set_by_think_command() {
+        // Plumbing guard for the /think streaming-path fix: after `/think
+        // on`, the streaming send must read the per-agent pref and reach the
+        // thinking-aware kernel entry instead of hardcoding no override. The
+        // boolean's propagation into the driver call is pinned by the kernel's
+        // `apply_thinking_override` unit tests; here we pin the adapter side:
+        // the pref is stored, the pref read does not fail the send, and the
+        // streaming call returns a live stream.
+        use librefang_testing::MockKernelBuilder;
+
+        let (kernel, _tmp) = MockKernelBuilder::new().build();
+        let assistant = kernel
+            .agent_registry()
+            .find_by_name("assistant")
+            .expect("default assistant agent should exist after boot")
+            .id;
+
+        let adapter = KernelBridgeAdapter {
+            kernel: kernel.clone(),
+            started_at: Instant::now(),
+            thinking_prefs: std::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+
+        let ack = adapter
+            .set_thinking(assistant, true)
+            .await
+            .expect("toggle must succeed");
+        assert!(ack.contains("enabled"), "unexpected ack: {ack}");
+
+        let sender = librefang_channels::types::SenderContext {
+            channel: "telegram".to_string(),
+            user_id: "peer-1".to_string(),
+            chat_id: Some("peer-1".to_string()),
+            display_name: "Test".to_string(),
+            ..Default::default()
+        };
+        let (mut rx, status_rx) = adapter
+            .send_message_streaming_with_sender_status(assistant, "hello", &sender)
+            .await
+            .expect("streaming send must start");
+
+        // Drain the text channel concurrently — the status oneshot is only
+        // sent after the text stream fully drains.
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let _status = tokio::time::timeout(std::time::Duration::from_secs(30), status_rx)
+            .await
+            .expect("status must resolve within 30s")
+            .expect("status channel must not be dropped");
+        let _ = drain.await;
+        // Deliberately no assertion on the loop's terminal status.
+        // Whether the provider-less test kernel completes the turn or fails it at the driver boundary is a property of whichever driver the mock harness seeds, not of the code under test.
+        // Asserting on it pinned the harness rather than the adapter, and broke as soon as the harness began resolving the loop successfully.
+        //
+        // The adapter-side contract gets pinned instead: the stream started and the status resolved rather than hanging or being dropped (both asserted above), and `/think` produced the override the send path will hand to the kernel.
+        // That last one is the actual regression this PR fixes — a `set_thinking` write the send path's read cannot see is what makes `/think` silently inert, and a status assertion cannot see it.
+        // The assertion deliberately calls `thinking_override_for`, the very accessor `send_message_streaming_with_sender_status` uses, rather than re-deriving the map key here: a test that restates the key would keep passing if the send path started reading a different one.
+        assert_eq!(
+            adapter
+                .thinking_override_for(assistant)
+                .expect("pref read must not fail"),
+            Some(true),
+            "/think must yield Some(true) through the accessor the send path reads",
+        );
+        // And the untouched agent must stay on its configured default rather
+        // than inheriting another agent's toggle.
+        assert_eq!(
+            adapter
+                .thinking_override_for(AgentId(uuid::Uuid::new_v4()))
+                .expect("pref read must not fail"),
+            None,
+            "an agent that never used /think must get no override",
+        );
 
         kernel.shutdown();
     }
