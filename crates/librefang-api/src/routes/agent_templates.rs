@@ -110,17 +110,11 @@ pub async fn get_profile(
 /// cannot escape the base directory through `..`, absolute paths, or platform
 /// separators (`/`, `\`). Rejects empty names and anything longer than 64
 /// chars to cap log noise.
+///
+/// Delegates to `librefang_types::naming`, which is also what the `workflow_create` tool and the kernel's `create_workflow` handle call, so the rule cannot drift between the three surfaces that enforce it (#6943 review).
+/// The single opaque error string is kept deliberately: this name arrives from a URL path, and echoing back which of the two rules it broke tells a prober more about the filesystem layout than it tells a legitimate caller.
 fn validate_template_name(name: &str) -> Result<(), &'static str> {
-    if name.is_empty() || name.len() > 64 {
-        return Err("invalid template name");
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err("invalid template name");
-    }
-    Ok(())
+    librefang_types::naming::validate_resource_name(name).map_err(|_| "invalid template name")
 }
 
 #[cfg(test)]

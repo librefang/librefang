@@ -506,6 +506,72 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
                 }
             })
     }
+
+    async fn create_workflow(
+        &self,
+        workflow_json: &str,
+        caller_agent_id: Option<&str>,
+    ) -> Result<String, kernel_handle::KernelOpError> {
+        use crate::workflow::Workflow;
+        use kernel_handle::KernelOpError;
+
+        // Parse and validate
+        let wf: Workflow = serde_json::from_str(workflow_json)
+            .map_err(|e| KernelOpError::Internal(format!("Invalid workflow JSON: {e}")))?;
+
+        // The runtime tool checks this too, but `create_workflow` is a trait method any caller can reach, so the persistence surface validates independently. Both sides call the same canonical rule (#6943 review — the check used to be copy-pasted here).
+        librefang_types::naming::validate_resource_name(&wf.name)
+            .map_err(|e| KernelOpError::Internal(format!("Workflow name {e}")))?;
+
+        // Run semantic validation (same as HTTP API)
+        let validation_errors = wf.validate();
+        if !validation_errors.is_empty() {
+            let reasons: Vec<String> = validation_errors
+                .into_iter()
+                .map(|(step, reason)| format!("{step}: {reason}"))
+                .collect();
+            return Err(KernelOpError::Internal(format!(
+                "Workflow validation failed: {}",
+                reasons.join("; ")
+            )));
+        }
+
+        // Name-collision check against the live registry. The engine is
+        // the single persistence surface (`register` writes
+        // `<id>.workflow.json`); writing an extra `.workflow.toml` here
+        // would orphan a second file that survives `DELETE
+        // /api/workflows/{id}` and resurrects the workflow at boot
+        // (#6943 review).
+        let name_lower = wf.name.to_lowercase();
+        let exists = self
+            .workflows
+            .engine
+            .list_workflows()
+            .await
+            .iter()
+            .any(|w| w.name.to_lowercase() == name_lower);
+        if exists {
+            return Err(KernelOpError::Internal(format!(
+                "Workflow '{}' already exists",
+                wf.name
+            )));
+        }
+
+        // Register in engine (hot-reload). `register` persists the
+        // canonical JSON copy and returns the canonical id.
+        let registered_id = self.workflows.engine.register(wf).await;
+        // #6943 review: `workflow_create` sits in `ALWAYS_NATIVE_TOOLS`, so every agent has it unconditionally, and its sibling `workflow_run` (also always-native) can immediately execute whatever `steps[].agent` the new workflow names — including a more privileged agent than the caller, a confused-deputy path a prompt injection could ride.
+        // There is no ownership/quota model on `Workflow` today to gate that, and adding one is a maintainer design decision rather than this fix's job, but dropping `caller_agent_id` on the floor left this call with no audit trail at all.
+        // Log the caller so a security investigation can at least trace which agent turn synthesized which workflow.
+        tracing::info!(
+            workflow = %name_lower,
+            registered_id = %registered_id.0,
+            caller = ?caller_agent_id,
+            "Workflow created via tool"
+        );
+
+        Ok(name_lower)
+    }
 }
 
 #[cfg(test)]
@@ -518,6 +584,67 @@ mod tests {
     /// the PR explicitly locks in. If you need to change the format,
     /// announce it in the changelog under a breaking-change bullet and
     /// update this assertion.
+    fn valid_workflow_json(name: &str) -> String {
+        serde_json::json!({
+            "name": name,
+            "description": "review-driven test workflow",
+            "steps": [{
+                "name": "only-step",
+                "agent": "assistant",
+                "prompt_template": "{{input}}"
+            }]
+        })
+        .to_string()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_workflow_success_and_rejections() {
+        let dir = tempfile::tempdir().expect("tempdir for create_workflow test");
+        let home = dir.path().to_path_buf();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            ..librefang_types::config::KernelConfig::default()
+        };
+        let kernel = crate::LibreFangKernel::boot_with_config(config)
+            .expect("kernel must boot for create_workflow test");
+        std::mem::forget(dir);
+        let kernel = std::sync::Arc::new(kernel);
+        let runner: &dyn kernel_handle::WorkflowRunner = kernel.as_ref();
+
+        // Success: a valid payload registers the workflow.
+        let ok = runner
+            .create_workflow(&valid_workflow_json("qa-probe"), None)
+            .await
+            .expect("valid workflow must be created");
+        assert_eq!(
+            ok, "qa-probe",
+            "create_workflow returns the normalized workflow name"
+        );
+
+        // Rejection: invalid name charset.
+        let err = runner
+            .create_workflow(&valid_workflow_json("bad name!"), None)
+            .await
+            .expect_err("name with spaces must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("1-64") || msg.contains("A-Za-z0-9"),
+            "the rejection must name the charset/length rule: {msg}"
+        );
+
+        // Rejection: name collision with the just-created workflow.
+        let err = runner
+            .create_workflow(&valid_workflow_json("qa-probe"), None)
+            .await
+            .expect_err("duplicate name must be rejected");
+        assert!(
+            err.to_string().contains("exists"),
+            "the collision must surface as an exists error: {err}"
+        );
+    }
+
     #[test]
     fn workflow_timeout_text_format_is_stable() {
         assert_eq!(

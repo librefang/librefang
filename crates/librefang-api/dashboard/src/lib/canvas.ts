@@ -297,3 +297,75 @@ export function removeEdgeById<E extends Edge>(edges: E[], edgeId: string): E[] 
   const nextEdges = edges.filter((edge) => edge.id !== edgeId);
   return nextEdges.length === edges.length ? edges : nextEdges;
 }
+
+/**
+ * Minimal shape of a `workflow_create`-style step as embedded in an assistant chat message JSON payload.
+ *
+ * Looser than the canonical `WorkflowStep` API type because it comes straight from `JSON.parse` on LLM output, not from a validated API response.
+ */
+export type WorkflowCreateStepInput = {
+  name?: string;
+  prompt_template?: string;
+  agent?: string | { id?: string; name?: string; type?: string; fresh?: boolean };
+  depends_on?: string[];
+  [key: string]: unknown;
+};
+
+/**
+ * Turn `workflow_create`-shaped steps into canvas nodes and edges for the "Save as Workflow" chat action (#6943).
+ *
+ * Mirrors the linear-chain-with-DAG-override layout `CanvasPage.loadWorkflowIntoCanvas` uses for a workflow that has no saved `layout`: steps lay out left to right at a fixed spacing, and when any step declares `depends_on`, dashed "depends" edges replace the plain linear chain.
+ * Kept here as a pure, independently testable function rather than inline in `ChatPage.tsx` so the hand-off can be asserted against `parseCanvasImport` — the same structural validator the canvas page's own import path runs.
+ */
+export function workflowStepsToCanvasState(
+  steps: WorkflowCreateStepInput[],
+): { nodes: CanvasNode[]; edges: Edge[] } {
+  const nodes: CanvasNode[] = steps.map((step, idx) => {
+    const agent = typeof step.agent === "object" && step.agent !== null ? step.agent : undefined;
+    const agentName = typeof step.agent === "string" ? step.agent : agent?.name;
+    return {
+      id: `node-${idx}`,
+      type: "custom",
+      position: { x: 80 + idx * 260, y: 100 },
+      data: {
+        label: step.name || `Step ${idx + 1}`,
+        prompt: step.prompt_template || "",
+        nodeType: "agent",
+        agentId: agent?.id,
+        agentName,
+        agentType: agent?.type,
+        fresh: agent?.fresh,
+      },
+    };
+  });
+
+  const hasDag = steps.some((step) => Array.isArray(step.depends_on) && step.depends_on.length > 0);
+  if (!hasDag) {
+    const edges = nodes.slice(0, -1).map((_, i) => ({ id: `e-${i}`, source: `node-${i}`, target: `node-${i + 1}` }));
+    return { nodes, edges };
+  }
+
+  const nameToId: Record<string, string> = {};
+  steps.forEach((step, idx) => {
+    if (step.name) nameToId[step.name] = `node-${idx}`;
+  });
+  const edges: Edge[] = [];
+  steps.forEach((step, idx) => {
+    (step.depends_on || []).forEach((dep, depIdx) => {
+      const sourceId = nameToId[dep];
+      // A step may name a dependency that does not exist; drop the edge rather than emit one with a dangling endpoint, which `parseCanvasImport` would reject outright.
+      if (sourceId && sourceId !== `node-${idx}`) {
+        edges.push({
+          id: `dep-${idx}-${depIdx}`,
+          source: sourceId,
+          target: `node-${idx}`,
+          style: { strokeDasharray: "6 3" },
+          label: "depends",
+          labelStyle: { fontSize: 9, fill: "#6b7280" },
+        });
+      }
+    });
+  });
+
+  return { nodes, edges };
+}

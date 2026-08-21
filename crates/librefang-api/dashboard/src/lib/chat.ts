@@ -201,6 +201,52 @@ export interface TerminalFrame {
 }
 
 /**
+ * Pull the workflow JSON out of an assistant chat message for the "Save as Workflow" action (#6943).
+ *
+ * A fenced code block wins when present, since that is how an assistant normally offers structured output.
+ * Otherwise the message is scanned from its first `{` with a brace counter that skips over string literals and their escapes, returning the *smallest* enclosing object rather than a regex match.
+ * The previous fallback, `/(\{[\s\S]*"steps"[\s\S]*\})/`, was greedy on both sides and therefore matched from the first `{` in the message to the last `}` anywhere after it, so any trailing prose containing a brace — an emoji in braces, a second code block, a `{{template}}` placeholder — swallowed the real object and broke `JSON.parse` even though valid JSON was right there (#6943 review).
+ *
+ * Returns the raw JSON text, or `null` when the message holds no `"steps"`-shaped object.
+ */
+export function extractWorkflowJson(content: string): string | null {
+  const fenced = content.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+  if (fenced) return fenced[1];
+
+  const start = content.indexOf("{");
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < content.length; i++) {
+    const ch = content[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        const candidate = content.slice(start, i + 1);
+        return candidate.includes('"steps"') ? candidate : null;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Apply a *foreign* terminal frame — one whose `message_id` identifies a previous turn's bubble, not the current turn's — to the message list (#6390).
  *
  * This is the routing effect that prevents the original misbind: a late `response` from turn A, delivered to turn B's socket listener after B replaced it, patches A's own bubble and leaves every other bubble (B's in-flight one) untouched.

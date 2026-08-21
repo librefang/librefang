@@ -107,14 +107,19 @@ type WorkflowStepBuild = {
   [key: string]: unknown;
 };
 
-type CanvasDraft = {
+/**
+ * The sessionStorage hand-off shape this page reads on mount.
+ *
+ * Exported so `ChatPage`'s "Save as Workflow" action writes the graph shape the canvas actually understands instead of guessing at it (#6943 review: it wrote the raw `workflow_create` JSON under a different key, so `readCanvasDraft` never found it and the canvas opened empty).
+ */
+export type CanvasDraft = {
   nodes: CanvasNode[];
   edges: Edge[];
   workflowName: string;
   workflowDescription: string;
 };
 
-const CANVAS_DRAFT_KEY = "canvasDraft";
+export const CANVAS_DRAFT_KEY = "canvasDraft";
 
 function readCanvasDraft(): CanvasDraft | null {
   if (typeof window === "undefined") return null;

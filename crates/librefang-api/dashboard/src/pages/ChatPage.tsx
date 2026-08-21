@@ -18,7 +18,9 @@ import { useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
-import { applyForeignTerminalFrame, isTerminalFrameType, normalizeToolOutput, terminalFrameOwner } from "../lib/chat";
+import { applyForeignTerminalFrame, extractWorkflowJson, isTerminalFrameType, normalizeToolOutput, terminalFrameOwner } from "../lib/chat";
+import { workflowStepsToCanvasState, type WorkflowCreateStepInput } from "../lib/canvas";
+import { CANVAS_DRAFT_KEY, type CanvasDraft } from "./CanvasPage";
 import {
   deriveDropdownActiveSessionId,
   pickSessionDropdownLabel,
@@ -31,7 +33,7 @@ import {
   setCachedChatMessages,
 } from "../lib/chatSessionCache";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu } from "lucide-react";
+import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu, GitBranch } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
@@ -1295,9 +1297,10 @@ interface MessageBubbleProps {
   isSpeaking?: boolean;
   ttsStatus?: "idle" | "loading" | "playing" | "paused";
   ttsAvailable?: boolean;
+  onSaveWorkflow?: (content: string) => void;
 }
 
-const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
+const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable, onSaveWorkflow }: MessageBubbleProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
@@ -1517,6 +1520,15 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
                 ) : (
                   <Volume2 size={12} />
                 )}
+              </button>
+            )}
+            {!message.isStreaming && !message.error && message.role === "assistant" && onSaveWorkflow && (
+              <button
+                onClick={() => onSaveWorkflow(message.content)}
+                className="h-6 w-6 rounded-md flex items-center justify-center text-text-dim/60 hover:text-brand hover:bg-surface-hover transition-colors"
+                title={t("workflows.save_from_chat")}
+              >
+                <GitBranch size={12} />
               </button>
             )}
             {!message.error && onCopy && (
@@ -2973,6 +2985,39 @@ export function ChatPage() {
     [mediaProvidersQuery.data],
   );
 
+  const handleSaveWorkflow = useCallback((content: string) => {
+    const jsonText = extractWorkflowJson(content);
+    if (jsonText === null) {
+      addToast(t("workflows.no_json_found"), "error");
+      return;
+    }
+    try {
+      const parsed = JSON.parse(jsonText) as {
+        name?: string;
+        description?: string;
+        steps?: WorkflowCreateStepInput[];
+      };
+      if (!Array.isArray(parsed.steps)) {
+        addToast(t("workflows.invalid_json"), "error");
+        return;
+      }
+      // The canvas reads a `CanvasDraft` (`{nodes, edges, workflowName, workflowDescription}`), not the raw `workflow_create` shape, so the steps become nodes and edges before the draft is persisted.
+      // Storing the raw JSON under a mismatched key is what made this button a no-op: `readCanvasDraft()` never found the payload, and would have defaulted `nodes`/`edges` to `[]` even if it had (#6943 review).
+      const { nodes, edges } = workflowStepsToCanvasState(parsed.steps);
+      const draft: CanvasDraft = {
+        nodes,
+        edges,
+        workflowName: parsed.name ?? "",
+        workflowDescription: parsed.description ?? "",
+      };
+      sessionStorage.setItem(CANVAS_DRAFT_KEY, JSON.stringify(draft));
+      addToast(t("workflows.saved_to_canvas"), "success");
+      navigate({ to: "/canvas" });
+    } catch {
+      addToast(t("workflows.invalid_json"), "error");
+    }
+  }, [addToast, navigate, t]);
+
   const handleCopy = useCallback(async (messageId: string, content: string) => {
     if (await copyToClipboard(content)) {
       setCopiedMessageId(messageId);
@@ -3648,6 +3693,7 @@ export function ChatPage() {
                     usageFooter={usageFooter}
                     onCopy={handleCopy}
                     copied={copiedMessageId === msg.id}
+                    onSaveWorkflow={handleSaveWorkflow}
                     onSpeak={ttsAvailable ? tts.toggle : undefined}
                     isSpeaking={tts.speakingMessageId === msg.id}
                     ttsStatus={tts.speakingMessageId === msg.id ? tts.status : "idle"}

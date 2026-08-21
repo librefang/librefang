@@ -29,6 +29,10 @@ struct WorkflowWriteStubKernel {
     /// run_id returned by start_workflow_async (None → simulate resolution error)
     start_run_id: Option<String>,
     cancel_result: StubCancelResult,
+    /// Every `(workflow_json, caller_agent_id)` pair `create_workflow` was handed,
+    /// so a test can assert on the payload the tool built rather than only on the
+    /// tool's own return value (#6943).
+    created: std::sync::Mutex<Vec<(String, Option<String>)>>,
 }
 
 impl WorkflowWriteStubKernel {
@@ -36,6 +40,7 @@ impl WorkflowWriteStubKernel {
         Self {
             start_run_id: Some(run_id.to_string()),
             cancel_result: StubCancelResult::Ok,
+            created: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -43,6 +48,7 @@ impl WorkflowWriteStubKernel {
         Self {
             start_run_id: None,
             cancel_result: StubCancelResult::Ok,
+            created: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -50,6 +56,7 @@ impl WorkflowWriteStubKernel {
         Self {
             start_run_id: Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string()),
             cancel_result,
+            created: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -274,6 +281,23 @@ impl WorkflowRunner for WorkflowWriteStubKernel {
                 )))
             }
         }
+    }
+
+    async fn create_workflow(
+        &self,
+        workflow_json: &str,
+        caller_agent_id: Option<&str>,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+        self.created
+            .lock()
+            .expect("create_workflow capture mutex must not be poisoned")
+            .push((
+                workflow_json.to_string(),
+                caller_agent_id.map(str::to_string),
+            ));
+        let parsed: serde_json::Value =
+            serde_json::from_str(workflow_json).expect("tool must emit valid JSON");
+        Ok(parsed["name"].as_str().unwrap_or_default().to_lowercase())
     }
 }
 
@@ -551,5 +575,424 @@ async fn workflow_cancel_missing_run_id_returns_error() {
         result.content.contains("run_id"),
         "error should mention run_id: {}",
         result.content
+    );
+}
+
+// ---------------------------------------------------------------------------
+// workflow_create tests (#6943)
+// ---------------------------------------------------------------------------
+
+/// Build a stub plus the `Arc<dyn KernelHandle>` view of it, so a test can both
+/// drive `execute_tool_raw` and inspect what reached `create_workflow`.
+fn create_stub() -> (Arc<WorkflowWriteStubKernel>, Arc<dyn KernelHandle>) {
+    let stub = Arc::new(WorkflowWriteStubKernel::with_start("unused-run-id"));
+    let kernel: Arc<dyn KernelHandle> = stub.clone();
+    (stub, kernel)
+}
+
+fn one_step() -> serde_json::Value {
+    json!([{ "name": "only-step", "agent": "assistant", "prompt_template": "{{input}}" }])
+}
+
+/// The single `(workflow_json, caller)` pair the stub captured, parsed.
+fn sole_capture(stub: &WorkflowWriteStubKernel) -> (serde_json::Value, Option<String>) {
+    let captured = stub.created.lock().expect("capture mutex");
+    assert_eq!(
+        captured.len(),
+        1,
+        "expected exactly one create_workflow call"
+    );
+    let (payload, caller) = &captured[0];
+    (
+        serde_json::from_str(payload).expect("captured payload must be valid JSON"),
+        caller.clone(),
+    )
+}
+
+#[test]
+fn workflow_create_appears_in_builtin_definitions() {
+    let defs = builtin_tool_definitions();
+    assert!(
+        defs.iter().any(|d| d.name == "workflow_create"),
+        "workflow_create missing from builtin_tool_definitions"
+    );
+}
+
+#[test]
+fn workflow_create_definition_schema_declares_required_fields_and_caps() {
+    let defs = builtin_tool_definitions();
+    let def = defs
+        .iter()
+        .find(|d| d.name == "workflow_create")
+        .expect("workflow_create definition");
+    let schema = &def.input_schema;
+
+    assert_eq!(schema["type"], "object");
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .expect("required array")
+        .iter()
+        .map(|v| v.as_str().expect("required entries are strings"))
+        .collect();
+    assert_eq!(required, vec!["name", "steps"]);
+
+    // The advertised caps must match what the handler enforces, otherwise the
+    // model is told one ceiling and rejected at another.
+    assert_eq!(schema["properties"]["steps"]["maxItems"], 50);
+    assert_eq!(
+        schema["properties"]["steps"]["items"]["properties"]["timeout_secs"]["maximum"],
+        3600
+    );
+    assert_eq!(schema["properties"]["total_timeout_secs"]["maximum"], 86400);
+
+    // input_schema entries are keyed on `param_type` — the spelling
+    // workflow_describe reports — so a described workflow round-trips.
+    let param = &schema["properties"]["input_schema"]["items"];
+    assert!(
+        param["properties"]["param_type"].is_object(),
+        "input_schema items must declare param_type"
+    );
+    assert!(
+        param["properties"]["type"].is_null(),
+        "the bare `type` key must no longer be advertised"
+    );
+    let param_required: Vec<&str> = param["required"]
+        .as_array()
+        .expect("required array")
+        .iter()
+        .map(|v| v.as_str().expect("required entries are strings"))
+        .collect();
+    assert_eq!(param_required, vec!["name", "param_type"]);
+}
+
+#[tokio::test]
+async fn workflow_create_forwards_the_workflow_and_the_calling_agent() {
+    let (stub, kernel) = create_stub();
+    let ctx = make_ctx(&kernel);
+
+    let result = execute_tool_raw(
+        "t1",
+        "workflow_create",
+        &json!({ "name": "bug-triage", "description": "Triage bugs", "steps": one_step() }),
+        &ctx,
+    )
+    .await;
+
+    assert!(
+        !result.is_error,
+        "workflow_create failed: {}",
+        result.content
+    );
+    assert_eq!(result.content, "bug-triage");
+
+    let (payload, caller) = sole_capture(&stub);
+    assert_eq!(payload["name"], "bug-triage");
+    assert_eq!(payload["description"], "Triage bugs");
+    assert_eq!(payload["steps"], one_step());
+    // The caller must survive the tool -> KernelHandle hop; the kernel impl logs
+    // it as the workflow's only audit trail (#6943 review).
+    assert_eq!(caller.as_deref(), Some("test-agent"));
+}
+
+#[tokio::test]
+async fn workflow_create_missing_name_returns_error() {
+    let (_stub, kernel) = create_stub();
+    let ctx = make_ctx(&kernel);
+
+    let result = execute_tool_raw(
+        "t1",
+        "workflow_create",
+        &json!({ "steps": one_step() }),
+        &ctx,
+    )
+    .await;
+    assert!(result.is_error, "expected error for missing name");
+    assert!(
+        result.content.contains("name"),
+        "error should mention name: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn workflow_create_rejects_names_outside_the_shared_charset() {
+    for bad in ["bad name", "../escape", "a/b", ""] {
+        let (stub, kernel) = create_stub();
+        let ctx = make_ctx(&kernel);
+
+        let result = execute_tool_raw(
+            "t1",
+            "workflow_create",
+            &json!({ "name": bad, "steps": one_step() }),
+            &ctx,
+        )
+        .await;
+        assert!(result.is_error, "{bad:?} must be rejected");
+        assert!(
+            result.content.contains("1-64") || result.content.contains("A-Za-z0-9"),
+            "the rejection must name the shared length/charset rule: {}",
+            result.content
+        );
+        assert!(
+            stub.created.lock().expect("capture mutex").is_empty(),
+            "a rejected name must never reach the kernel"
+        );
+    }
+}
+
+#[tokio::test]
+async fn workflow_create_rejects_a_missing_or_empty_step_list() {
+    for steps in [json!([]), json!("not-an-array")] {
+        let (stub, kernel) = create_stub();
+        let ctx = make_ctx(&kernel);
+
+        let result = execute_tool_raw(
+            "t1",
+            "workflow_create",
+            &json!({ "name": "wf", "steps": steps }),
+            &ctx,
+        )
+        .await;
+        assert!(result.is_error, "expected error for steps={steps}");
+        assert!(
+            result.content.contains("step"),
+            "error should mention steps: {}",
+            result.content
+        );
+        assert!(stub.created.lock().expect("capture mutex").is_empty());
+    }
+}
+
+#[tokio::test]
+async fn workflow_create_enforces_the_step_count_ceiling() {
+    let (stub, kernel) = create_stub();
+    let ctx = make_ctx(&kernel);
+
+    let steps: Vec<serde_json::Value> = (0..51)
+        .map(|i| json!({ "name": format!("s{i}"), "agent": "assistant", "prompt_template": "go" }))
+        .collect();
+    let result = execute_tool_raw(
+        "t1",
+        "workflow_create",
+        &json!({ "name": "too-many", "steps": steps }),
+        &ctx,
+    )
+    .await;
+
+    assert!(result.is_error, "51 steps must be rejected");
+    assert!(
+        result.content.contains("at most 50"),
+        "error should name the ceiling: {}",
+        result.content
+    );
+    assert!(
+        stub.created.lock().expect("capture mutex").is_empty(),
+        "an over-cap workflow must never be persisted"
+    );
+}
+
+#[tokio::test]
+async fn workflow_create_accepts_a_workflow_exactly_at_the_step_ceiling() {
+    let (_stub, kernel) = create_stub();
+    let ctx = make_ctx(&kernel);
+
+    let steps: Vec<serde_json::Value> = (0..50)
+        .map(|i| json!({ "name": format!("s{i}"), "agent": "assistant", "prompt_template": "go" }))
+        .collect();
+    let result = execute_tool_raw(
+        "t1",
+        "workflow_create",
+        &json!({ "name": "exactly-fifty", "steps": steps }),
+        &ctx,
+    )
+    .await;
+
+    assert!(
+        !result.is_error,
+        "the cap must be inclusive: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn workflow_create_enforces_the_step_and_total_timeout_ceilings() {
+    let cases = [
+        (
+            json!({
+                "name": "slow-step",
+                "steps": [{ "name": "s", "agent": "a", "prompt_template": "p", "timeout_secs": 3601 }],
+            }),
+            "3600",
+        ),
+        (
+            json!({ "name": "slow-total", "steps": one_step(), "total_timeout_secs": 86_401 }),
+            "86400",
+        ),
+    ];
+
+    for (payload, ceiling) in cases {
+        let (stub, kernel) = create_stub();
+        let ctx = make_ctx(&kernel);
+
+        let result = execute_tool_raw("t1", "workflow_create", &payload, &ctx).await;
+        assert!(result.is_error, "expected rejection for {payload}");
+        assert!(
+            result.content.contains(ceiling),
+            "error should name the {ceiling}s ceiling: {}",
+            result.content
+        );
+        assert!(stub.created.lock().expect("capture mutex").is_empty());
+    }
+}
+
+#[tokio::test]
+async fn workflow_create_preserves_declared_input_parameter_types() {
+    let (stub, kernel) = create_stub();
+    let ctx = make_ctx(&kernel);
+
+    // `param_type` is canonical; `type` is the alias the schema used to
+    // advertise. Both must survive, because before this fix neither did:
+    // WorkflowInputParam deserializes `param_type` only, so an entry keyed on
+    // `type` fell back to the "string" default and the declared type was
+    // silently lost (#6943 review).
+    let result = execute_tool_raw(
+        "t1",
+        "workflow_create",
+        &json!({
+            "name": "typed",
+            "steps": one_step(),
+            "input_schema": [
+                { "name": "canonical", "param_type": "number", "required": true },
+                { "name": "aliased", "type": "image", "description": "a picture" },
+            ],
+        }),
+        &ctx,
+    )
+    .await;
+
+    assert!(
+        !result.is_error,
+        "workflow_create failed: {}",
+        result.content
+    );
+
+    let (payload, _) = sole_capture(&stub);
+    let schema = payload["input_schema"]
+        .as_array()
+        .expect("input_schema must be forwarded as an array");
+    assert_eq!(schema[0]["param_type"], "number");
+    assert_eq!(schema[0]["required"], true);
+    assert_eq!(schema[1]["param_type"], "image");
+    assert_eq!(schema[1]["description"], "a picture");
+    // The alias must be consumed, not forwarded alongside its replacement.
+    assert!(
+        schema.iter().all(|p| p.get("type").is_none()),
+        "the `type` alias must be rewritten, not duplicated: {payload}"
+    );
+}
+
+#[tokio::test]
+async fn workflow_create_prefers_param_type_when_both_spellings_are_present() {
+    let (stub, kernel) = create_stub();
+    let ctx = make_ctx(&kernel);
+
+    let result = execute_tool_raw(
+        "t1",
+        "workflow_create",
+        &json!({
+            "name": "both",
+            "steps": one_step(),
+            "input_schema": [{ "name": "p", "param_type": "boolean", "type": "number" }],
+        }),
+        &ctx,
+    )
+    .await;
+
+    assert!(
+        !result.is_error,
+        "workflow_create failed: {}",
+        result.content
+    );
+    let (payload, _) = sole_capture(&stub);
+    assert_eq!(payload["input_schema"][0]["param_type"], "boolean");
+}
+
+#[tokio::test]
+async fn workflow_create_rejects_an_unknown_input_parameter_type() {
+    let (stub, kernel) = create_stub();
+    let ctx = make_ctx(&kernel);
+
+    let result = execute_tool_raw(
+        "t1",
+        "workflow_create",
+        &json!({
+            "name": "bad-type",
+            "steps": one_step(),
+            "input_schema": [{ "name": "p", "param_type": "integer" }],
+        }),
+        &ctx,
+    )
+    .await;
+
+    assert!(result.is_error, "an unknown param_type must be rejected");
+    assert!(
+        result.content.contains("integer") && result.content.contains("agent_id"),
+        "error should name the offending value and the accepted set: {}",
+        result.content
+    );
+    assert!(stub.created.lock().expect("capture mutex").is_empty());
+}
+
+#[tokio::test]
+async fn workflow_create_rejects_a_malformed_input_schema() {
+    for schema in [json!("nope"), json!(["nope"])] {
+        let (stub, kernel) = create_stub();
+        let ctx = make_ctx(&kernel);
+
+        let result = execute_tool_raw(
+            "t1",
+            "workflow_create",
+            &json!({ "name": "wf", "steps": one_step(), "input_schema": schema }),
+            &ctx,
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "expected rejection for input_schema={schema}"
+        );
+        assert!(
+            result.content.contains("input_schema"),
+            "error should mention input_schema: {}",
+            result.content
+        );
+        assert!(stub.created.lock().expect("capture mutex").is_empty());
+    }
+}
+
+#[tokio::test]
+async fn workflow_create_omits_input_schema_when_none_was_declared() {
+    let (stub, kernel) = create_stub();
+    let ctx = make_ctx(&kernel);
+
+    let result = execute_tool_raw(
+        "t1",
+        "workflow_create",
+        &json!({ "name": "no-params", "steps": one_step() }),
+        &ctx,
+    )
+    .await;
+
+    assert!(
+        !result.is_error,
+        "workflow_create failed: {}",
+        result.content
+    );
+    let (payload, _) = sole_capture(&stub);
+    // Null rather than an empty array: `Workflow::input_schema` is an Option, and
+    // an empty Vec would claim the workflow declares zero parameters instead of
+    // leaving auto-detection from {{var}} placeholders enabled.
+    assert!(
+        payload["input_schema"].is_null(),
+        "absent input_schema must stay absent: {payload}"
     );
 }

@@ -298,4 +298,22 @@ pub trait WorkflowRunner: Send + Sync {
         let _ = run_id;
         Err(KernelOpError::unavailable("Workflow engine"))
     }
+
+    /// Create a new workflow from a JSON definition and register it in the engine, which persists it and makes it immediately runnable via `workflow_run` / `workflow_start`.
+    /// Returns the created workflow's name, lowercased, on success.
+    ///
+    /// `workflow_json` is the serialized `Workflow` struct itself — `steps[].prompt_template`, `steps[].agent` (a bare string or a `{id|name|type}` object), `input_schema[].param_type` — **not** the `POST /api/workflows` request body (#6943 review).
+    /// The HTTP route in `crates/librefang-api/src/routes/workflows/workflow.rs` builds a `Workflow` from its own looser wire shape (`agent_id` / `agent_name`, `prompt`, tolerant `unwrap_or` defaults) before handing it to the same engine, so the two are independent parsers over different field names that happen to overlap wherever `StepAgent`'s custom deserializer accepts a bare string.
+    /// A payload built for the HTTP route will fail here with a `missing field` error; keep the two in sync deliberately rather than assuming they are interchangeable.
+    ///
+    /// `caller_agent_id` identifies the agent whose turn requested the creation.
+    /// It carries no authorization today — implementations are expected to record it so a created workflow can be traced back to its author.
+    async fn create_workflow(
+        &self,
+        workflow_json: &str,
+        caller_agent_id: Option<&str>,
+    ) -> Result<String, KernelOpError> {
+        let _ = (workflow_json, caller_agent_id);
+        Err(KernelOpError::unavailable("Workflow engine"))
+    }
 }

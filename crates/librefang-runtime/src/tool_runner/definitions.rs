@@ -96,6 +96,7 @@ pub(crate) mod tool_name {
     pub const WORKFLOW_STATUS: &str = "workflow_status";
     pub const WORKFLOW_START: &str = "workflow_start";
     pub const WORKFLOW_CANCEL: &str = "workflow_cancel";
+    pub const WORKFLOW_CREATE: &str = "workflow_create";
     pub const SYSTEM_TIME: &str = "system_time";
     pub const CANVAS_PRESENT: &str = "canvas_present";
     pub const READ_ARTIFACT: &str = "read_artifact";
@@ -138,6 +139,7 @@ pub const ALWAYS_NATIVE_TOOLS: &[&str] = &[
     tool_name::FILE_LIST,
     tool_name::CODE_SEARCH,
     tool_name::AGENT_SEND,
+    tool_name::WORKFLOW_CREATE,
     tool_name::AGENT_LIST,
     tool_name::CHANNEL_SEND,
     tool_name::NOTIFY_OWNER,
@@ -1204,6 +1206,63 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                         "run_id": { "type": "string", "description": "The workflow run UUID to cancel" }
                     },
                     "required": ["run_id"]
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::WORKFLOW_CREATE.to_string(),
+                description: "Create a new workflow and save it. The workflow appears in the dashboard and is available for workflow_run, workflow_start, and workflow_list. Use agent_find first to discover available agents for each step.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Unique workflow name. Only [A-Za-z0-9_-] allowed, max 64 chars. Used as the filename."
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "What this workflow does and when to use it."
+                        },
+                        "steps": {
+                            "type": "array",
+                            "description": "The workflow steps in execution order. At most 50.",
+                            "maxItems": super::workflow::MAX_WORKFLOW_STEPS,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string", "description": "Step name for display and variable referencing." },
+                                    "agent": { "type": "string", "description": "Agent name or UUID that executes this step. Use agent_find to discover available agents." },
+                                    "prompt_template": { "type": "string", "description": "The prompt sent to the agent. Use {{input}} for the previous step's output, {{var_name}} for named variables, and {{param}} for workflow input parameters." },
+                                    "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Names of steps this step depends on. When set, steps execute in DAG order instead of sequentially." },
+                                    "output_var": { "type": "string", "description": "When set, this step's output is stored as a named variable accessible in later steps via {{name}}." },
+                                    "mode": { "type": "string", "enum": ["sequential", "fan_out", "collect"], "description": "Execution mode. Default: sequential. (conditional / loop / wait / approval require workflow-toml authoring until the object-form schema lands.)" },
+                                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": super::workflow::MAX_STEP_TIMEOUT_SECS, "description": "Max seconds for this step. Default: 120, ceiling: 3600." },
+                                    "error_mode": { "type": "string", "enum": ["fail", "skip"], "description": "What to do on failure. Default: fail. (retry requires workflow-toml authoring until the object-form schema lands.)" }
+                                },
+                                "required": ["name", "agent", "prompt_template"]
+                            }
+                        },
+                        "input_schema": {
+                            "type": "array",
+                            "description": "Declared input parameters so callers know what to pass in workflow_run.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string" },
+                                    "description": { "type": "string" },
+                                    "param_type": { "type": "string", "enum": super::workflow::WORKFLOW_INPUT_PARAM_TYPES, "description": "Same spelling workflow_describe reports, so a described workflow can be round-tripped back through this tool. 'type' is accepted as an alias." },
+                                    "required": { "type": "boolean" }
+                                },
+                                "required": ["name", "param_type"]
+                            }
+                        },
+                        "total_timeout_secs": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": super::workflow::MAX_TOTAL_TIMEOUT_SECS,
+                            "description": "Max wall-clock seconds for the entire workflow run. Ceiling: 86400."
+                        }
+                    },
+                    "required": ["name", "steps"]
                 }),
             },
             ToolDefinition {

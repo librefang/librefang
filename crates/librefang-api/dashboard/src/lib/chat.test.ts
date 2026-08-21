@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyForeignTerminalFrame,
   asText,
+  extractWorkflowJson,
   extractAssistantHistoryParts,
   formatMeta,
   isTerminalFrameType,
@@ -334,5 +335,55 @@ describe("applyForeignTerminalFrame (#6390)", () => {
     const next = applyForeignTerminalFrame([bubbleA, bubbleB], { type: "response", message_id: "bot-missing", content: "x" });
     expect(next[0]).toBe(bubbleA);
     expect(next[1]).toBe(bubbleB);
+  });
+});
+
+// #6943 review: the old `/\{[\s\S]*"steps"[\s\S]*\}/` fallback regex was greedy on both sides and matched from the first `{` to the LAST `}` in the whole message, so any trailing prose containing a brace broke `JSON.parse` even when the message held valid JSON.
+describe("extractWorkflowJson", () => {
+  const workflow = {
+    name: "demo",
+    description: "d",
+    steps: [{ name: "s1", agent: "a", prompt_template: "{{input}}" }],
+  };
+
+  it("extracts JSON from a fenced code block", () => {
+    const content = `Here you go:\n\`\`\`json\n${JSON.stringify(workflow)}\n\`\`\`\nLet me know!`;
+    expect(JSON.parse(extractWorkflowJson(content)!)).toEqual(workflow);
+  });
+
+  it("extracts a raw JSON object with steps and ignores trailing prose that contains braces", () => {
+    const content = `${JSON.stringify(workflow)}\n\nLet me know if you'd like changes {here}`;
+    expect(JSON.parse(extractWorkflowJson(content)!)).toEqual(workflow);
+  });
+
+  it("extracts a raw JSON object embedded after leading prose", () => {
+    const content = `Sure, here's the workflow: ${JSON.stringify(workflow)}`;
+    expect(JSON.parse(extractWorkflowJson(content)!)).toEqual(workflow);
+  });
+
+  it("is not confused by a brace inside a string literal", () => {
+    const braced = { ...workflow, description: "closes } early" };
+    expect(JSON.parse(extractWorkflowJson(JSON.stringify(braced))!)).toEqual(braced);
+  });
+
+  it("is not confused by an escaped quote inside a string literal", () => {
+    const quoted = { ...workflow, description: 'say \\"hi\\" }' };
+    expect(JSON.parse(extractWorkflowJson(JSON.stringify(quoted))!)).toEqual(quoted);
+  });
+
+  it("returns null when the first balanced object has no steps key", () => {
+    expect(extractWorkflowJson('{"name":"x"} and later {"steps":[]}')).toBeNull();
+  });
+
+  it("returns null when no steps-shaped JSON object is present", () => {
+    expect(extractWorkflowJson("just some prose with { a brace } in it")).toBeNull();
+  });
+
+  it("returns null for an empty message", () => {
+    expect(extractWorkflowJson("")).toBeNull();
+  });
+
+  it("returns null for an unterminated object", () => {
+    expect(extractWorkflowJson('{"steps": [')).toBeNull();
   });
 });

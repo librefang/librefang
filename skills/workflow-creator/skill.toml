@@ -1,0 +1,10 @@
+[skill]
+name = "workflow-creator"
+version = "1.0.0"
+description = "Teach agents how to design, create, and iterate on multi-step workflows"
+author = "LibreFang"
+tags = ["workflow", "automation", "orchestration", "productivity"]
+license = "MIT"
+
+[runtime]
+type = "promptonly"

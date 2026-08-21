@@ -491,17 +491,9 @@ export function WorkflowsPage() {
     workflowDetailQuery.isLoading,
   ]);
 
-  // First-time visitors with no workflows configured land on the
-  // marketplace tab — instantiating a template is the obvious next
-  // step. Fires once per mount; if the user manually flips back to
-  // "My Workflows", we don't override on the next refetch.
-  const autoSwitchedRef = useRef(false);
-  useEffect(() => {
-    if (autoSwitchedRef.current) return;
-    if (!workflowsQuery.isSuccess) return;
-    autoSwitchedRef.current = true;
-    if ((workflowsQuery.data ?? []).length === 0) setActiveTab("templates");
-  }, [workflowsQuery.isSuccess, workflowsQuery.data]);
+  // A first visit stays on "My Workflows" so the empty state can offer "Create your first workflow" and "Ask an agent" before nudging anyone toward templates.
+  // The mount-once effect that used to flip `activeTab` to "templates" on an empty list is gone: an agent can now author a workflow mid-conversation (#6943), and a user with zero workflows was the only one the auto-jump navigated away from that framing.
+  // The template library is still one tab click away.
 
   useEffect(() => {
     if (!workflowsQuery.isSuccess) return;

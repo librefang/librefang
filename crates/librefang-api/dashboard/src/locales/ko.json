@@ -1686,7 +1686,11 @@
       "pending_review_one": "운영자 검토를 기다리는 워크플로 실행 1개",
       "pending_review_other": "운영자 검토를 기다리는 워크플로 실행 {{count}}개",
       "empty_artifact": "(빈 인공물)"
-    }
+    },
+    "save_from_chat": "워크플로로 저장",
+    "saved_to_canvas": "캔버스에서 워크플로를 열었습니다",
+    "invalid_json": "해당 JSON 블록은 올바른 워크플로 JSON이 아닙니다",
+    "no_json_found": "이 메시지에는 저장할 JSON 블록이 없습니다"
   },
   "scheduler": {
     "title": "스케줄러",

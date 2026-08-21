@@ -348,7 +348,17 @@ impl<'de> Deserialize<'de> for StepAgent {
         // all feed through serde's data model and produce a `Value` here.
         let v = serde_json::Value::deserialize(deserializer)?;
         match v {
-            serde_json::Value::String(s) => Ok(StepAgent::ByName { name: s }),
+            serde_json::Value::String(s) => {
+                // A UUID-shaped string is an explicit instance reference —
+                // route it to ById so "name or UUID" in the tool schema is
+                // actually honoured (#6943 review: ByName never matched a
+                // UUID and the step failed at execution time).
+                if uuid::Uuid::parse_str(&s).is_ok() {
+                    Ok(StepAgent::ById { id: s })
+                } else {
+                    Ok(StepAgent::ByName { name: s })
+                }
+            }
             serde_json::Value::Object(map) => {
                 let id = map.get("id").and_then(|x| x.as_str());
                 let name = map.get("name").and_then(|x| x.as_str());

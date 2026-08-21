@@ -1686,7 +1686,11 @@
       "pending_review_one": "1 个工作流运行正在等待操作员审查",
       "pending_review_other": "{{count}} 个工作流运行正在等待操作员审查",
       "empty_artifact": "（空产物）"
-    }
+    },
+    "save_from_chat": "保存为工作流",
+    "saved_to_canvas": "工作流已在画布中打开",
+    "invalid_json": "该 JSON 代码块不是有效的工作流 JSON",
+    "no_json_found": "此消息中没有可保存的 JSON 代码块"
   },
   "scheduler": {
     "title": "调度器",

@@ -1,0 +1,1 @@
+Add the `workflow-creator` skill, a promptonly skill that teaches agents when and how to design a multi-step workflow, covering step structure, execution modes, error handling, and worked examples. (#6943) (@DaBlitzStein)

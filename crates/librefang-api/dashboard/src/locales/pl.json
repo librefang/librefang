@@ -1688,7 +1688,11 @@
       "pending_review_many": "{{count}} uruchomień przepływu pracy oczekuje na weryfikację operatora",
       "pending_review_other": "{{count}} uruchomień przepływu pracy oczekujących na weryfikację operatora",
       "empty_artifact": "(pusty artefakt)"
-    }
+    },
+    "save_from_chat": "Zapisz jako przepływ pracy",
+    "saved_to_canvas": "Przepływ pracy otwarty w Kanwie",
+    "invalid_json": "Ten blok JSON nie jest prawidłowym JSON-em przepływu pracy",
+    "no_json_found": "W tej wiadomości nie ma bloku JSON do zapisania"
   },
   "scheduler": {
     "title": "Harmonogram",
