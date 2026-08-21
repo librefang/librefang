@@ -1645,6 +1645,7 @@ fn parse_clawhub_results(body: &serde_json::Value) -> Vec<ClawHubResult> {
 
     items
         .map(|arr| {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             arr.iter()
                 .map(|r| ClawHubResult {
                     name: r["name"].as_str().unwrap_or("").to_string(),
@@ -1653,6 +1654,12 @@ fn parse_clawhub_results(body: &serde_json::Value) -> Vec<ClawHubResult> {
                     downloads: r["downloads"].as_u64().unwrap_or(0),
                     runtime: r["runtime"].as_str().unwrap_or("").to_string(),
                 })
+                // The ClawHub index contains duplicate entries for the same
+                // slug under different display casings (e.g. "Prd" and
+                // "prd"). Dedupe by lowercase slug so the marketplace list
+                // never shows the same skill twice and one install press
+                // never appears to install several entries.
+                .filter(|entry| seen.insert(entry.slug.to_lowercase()))
                 .collect()
         })
         .unwrap_or_default()
@@ -1671,10 +1678,31 @@ pub fn spawn_install_skill(backend: BackendRef, slug: String, tx: mpsc::Sender<A
                 Ok(resp) if resp.status().is_success() => {
                     let _ = tx.send(AppEvent::SkillInstalled(slug));
                 }
-                _ => {
+                Ok(resp) => {
+                    // Surface the daemon's actual error (e.g. "YAML parse
+                    // error ...") instead of a generic failure line, so a
+                    // 4xx from a broken marketplace skill is actionable
+                    // rather than reading like an internal server error.
+                    let http_status = resp.status();
+                    let detail = resp
+                        .json::<serde_json::Value>()
+                        .ok()
+                        .and_then(|b| b.get("error").and_then(|v| v.as_str()).map(String::from))
+                        .unwrap_or_else(|| {
+                            crate::i18n::t_args(
+                                "tui-event-skill-install-http-fallback",
+                                &[("status", http_status.as_str())],
+                            )
+                        });
                     let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-skill-install-failed",
-                        &[("slug", &slug)],
+                        "tui-event-skill-install-failed-detail",
+                        &[("slug", &slug), ("detail", &detail)],
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-skill-install-failed-detail",
+                        &[("slug", &slug), ("detail", &e.to_string())],
                     )));
                 }
             }

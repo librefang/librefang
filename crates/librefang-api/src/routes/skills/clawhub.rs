@@ -128,9 +128,13 @@ pub async fn clawhub_search(
 
     match client.search(&query, limit).await {
         Ok(results) => {
-            let items: Vec<serde_json::Value> = results
-                .results
-                .iter()
+            // The ClawHub index contains duplicate entries for the same
+            // slug under different display casings (e.g. "Prd" and
+            // "prd"). Dedupe by lowercase slug so the UI never shows
+            // the same skill twice and one Install press never spans
+            // several look-alike rows.
+            let items: Vec<serde_json::Value> = dedupe_by_slug(&results.results, |e| &e.slug)
+                .into_iter()
                 .map(|e| {
                     serde_json::json!({
                         "slug": e.slug,
@@ -216,9 +220,11 @@ pub async fn clawhub_browse(
 
     match client.browse(sort, limit, cursor).await {
         Ok(results) => {
-            let items: Vec<serde_json::Value> = results
-                .items
-                .iter()
+            // Same slug-dedupe as search — the index repeats slugs
+            // under different casings and the UI renders each as a
+            // separate card.
+            let items: Vec<serde_json::Value> = dedupe_by_slug(&results.items, |e| &e.slug)
+                .into_iter()
                 .map(clawhub_browse_entry_to_json)
                 .collect();
             let resp = serde_json::json!({
@@ -487,14 +493,17 @@ pub async fn clawhub_install(
         }
         Err(e) => {
             let msg = format!("{e}");
-            let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
-                StatusCode::FORBIDDEN
-            } else if is_clawhub_rate_limit(&e) {
-                StatusCode::TOO_MANY_REQUESTS
-            } else if matches!(e, librefang_skills::SkillError::Network(_)) {
-                StatusCode::BAD_GATEWAY
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
+            let status = match &e {
+                librefang_skills::SkillError::NotFound(_) => StatusCode::NOT_FOUND,
+                librefang_skills::SkillError::AlreadyInstalled(_) => StatusCode::CONFLICT,
+                librefang_skills::SkillError::SecurityBlocked(_) => StatusCode::FORBIDDEN,
+                librefang_skills::SkillError::InvalidManifest(_)
+                | librefang_skills::SkillError::TomlParse(_)
+                | librefang_skills::SkillError::YamlParse(_)
+                | librefang_skills::SkillError::RuntimeNotAvailable(_) => StatusCode::BAD_REQUEST,
+                _ if is_clawhub_rate_limit(&e) => StatusCode::TOO_MANY_REQUESTS,
+                librefang_skills::SkillError::Network(_) => StatusCode::BAD_GATEWAY,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
             tracing::warn!("ClawHub install failed: {msg}");
             // 4xx / 502 echo the actionable SkillError (security
@@ -541,9 +550,13 @@ pub async fn clawhub_cn_search(
 
     match client.search(&query, limit).await {
         Ok(results) => {
-            let items: Vec<serde_json::Value> = results
-                .results
-                .iter()
+            // The ClawHub index contains duplicate entries for the same
+            // slug under different display casings (e.g. "Prd" and
+            // "prd"). Dedupe by lowercase slug so the UI never shows
+            // the same skill twice and one Install press never spans
+            // several look-alike rows.
+            let items: Vec<serde_json::Value> = dedupe_by_slug(&results.results, |e| &e.slug)
+                .into_iter()
                 .map(|e| {
                     serde_json::json!({
                         "slug": e.slug,
@@ -609,9 +622,11 @@ pub async fn clawhub_cn_browse(
 
     match client.browse(sort, limit, cursor).await {
         Ok(results) => {
-            let items: Vec<serde_json::Value> = results
-                .items
-                .iter()
+            // Same slug-dedupe as search — the index repeats slugs
+            // under different casings and the UI renders each as a
+            // separate card.
+            let items: Vec<serde_json::Value> = dedupe_by_slug(&results.items, |e| &e.slug)
+                .into_iter()
                 .map(clawhub_browse_entry_to_json)
                 .collect();
             let resp = serde_json::json!({
@@ -835,14 +850,17 @@ pub async fn clawhub_cn_install(
         }
         Err(e) => {
             let msg = format!("{e}");
-            let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
-                StatusCode::FORBIDDEN
-            } else if is_clawhub_rate_limit(&e) {
-                StatusCode::TOO_MANY_REQUESTS
-            } else if matches!(e, librefang_skills::SkillError::Network(_)) {
-                StatusCode::BAD_GATEWAY
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
+            let status = match &e {
+                librefang_skills::SkillError::NotFound(_) => StatusCode::NOT_FOUND,
+                librefang_skills::SkillError::AlreadyInstalled(_) => StatusCode::CONFLICT,
+                librefang_skills::SkillError::SecurityBlocked(_) => StatusCode::FORBIDDEN,
+                librefang_skills::SkillError::InvalidManifest(_)
+                | librefang_skills::SkillError::TomlParse(_)
+                | librefang_skills::SkillError::YamlParse(_)
+                | librefang_skills::SkillError::RuntimeNotAvailable(_) => StatusCode::BAD_REQUEST,
+                _ if is_clawhub_rate_limit(&e) => StatusCode::TOO_MANY_REQUESTS,
+                librefang_skills::SkillError::Network(_) => StatusCode::BAD_GATEWAY,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
             tracing::warn!("ClawHub CN install failed: {msg}");
             // See ClawHub install above: 500 catch-all scrubbed
@@ -855,5 +873,44 @@ pub async fn clawhub_cn_install(
             };
             (status, Json(serde_json::json!({"error": body})))
         }
+    }
+}
+
+/// Dedupe marketplace entries by lowercase slug. The ClawHub index
+/// repeats the same slug under different display casings ("Prd" vs
+/// "prd"); without this the UI renders duplicate cards and one
+/// Install press appears to install several skills.
+fn dedupe_by_slug<F>(entries: &[F], slug_of: impl Fn(&F) -> &str) -> Vec<&F> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    entries
+        .iter()
+        .filter(|e| seen.insert(slug_of(e).to_lowercase()))
+        .collect()
+}
+
+#[cfg(test)]
+mod dedupe_tests {
+    use super::dedupe_by_slug;
+
+    #[test]
+    fn dedupes_case_variants_of_the_same_slug() {
+        let entries = vec![
+            ("prd", "Prd"),
+            ("prd", "prd"),
+            ("prd", "PRD"),
+            ("other", "other"),
+        ];
+        let kept = dedupe_by_slug(&entries, |e| e.0);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].1, "Prd");
+        assert_eq!(kept[1].1, "other");
+    }
+
+    #[test]
+    fn keeps_first_of_identical_slugs() {
+        let entries = vec![("a", "A"), ("A", "A"), ("a", "a")];
+        let kept = dedupe_by_slug(&entries, |e| e.0);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].1, "A");
     }
 }

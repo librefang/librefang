@@ -291,14 +291,17 @@ pub async fn skillhub_install(
         }
         Err(e) => {
             let msg = format!("{e}");
-            let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
-                StatusCode::FORBIDDEN
-            } else if is_clawhub_rate_limit(&e) {
-                StatusCode::TOO_MANY_REQUESTS
-            } else if matches!(e, librefang_skills::SkillError::Network(_)) {
-                StatusCode::BAD_GATEWAY
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
+            let status = match &e {
+                librefang_skills::SkillError::NotFound(_) => StatusCode::NOT_FOUND,
+                librefang_skills::SkillError::AlreadyInstalled(_) => StatusCode::CONFLICT,
+                librefang_skills::SkillError::SecurityBlocked(_) => StatusCode::FORBIDDEN,
+                librefang_skills::SkillError::InvalidManifest(_)
+                | librefang_skills::SkillError::TomlParse(_)
+                | librefang_skills::SkillError::YamlParse(_)
+                | librefang_skills::SkillError::RuntimeNotAvailable(_) => StatusCode::BAD_REQUEST,
+                librefang_skills::SkillError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
+                librefang_skills::SkillError::Network(_) => StatusCode::BAD_GATEWAY,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
             tracing::warn!("Skillhub install failed: {msg}");
             // See ClawHub install above: 500 catch-all scrubbed
