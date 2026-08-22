@@ -607,6 +607,61 @@ impl LibreFangKernel {
         Ok(())
     }
 
+    /// Update an agent's model selection mode and per-agent router override
+    /// (profile allowlist + cost budget).
+    ///
+    /// Names in `allowed_profiles` are not cross-checked against the live
+    /// profile catalog: `model_router::match_profile` treats an unknown name
+    /// as one that simply never matches, so a stale entry costs the agent a
+    /// candidate rather than breaking the turn. Rejecting it here would also
+    /// make the call order-dependent — an operator could not name a profile
+    /// before adding it to `model_profiles.toml`.
+    ///
+    /// Mirrors [`Self::set_agent_channels`]: snapshot-then-rollback if the DB
+    /// write fails, then mirror the result to `agent.toml` on disk.
+    pub fn set_agent_model_routing(
+        &self,
+        agent_id: AgentId,
+        mode: librefang_types::agent::ModelMode,
+        router_override: Option<librefang_types::model_profile::AgentRouterOverride>,
+    ) -> KernelResult<()> {
+        let prev_state = self.agents.registry.get(agent_id).map(|e| {
+            (
+                e.manifest.model.mode,
+                e.manifest.model.router_override.clone(),
+            )
+        });
+
+        self.agents
+            .registry
+            .update_model_routing(agent_id, mode, router_override.clone())
+            .map_err(KernelError::LibreFang)?;
+
+        if let Some(entry) = self.agents.registry.get(agent_id) {
+            if let Err(e) = self.memory.substrate.save_agent(&entry) {
+                if let Some((p_mode, p_override)) = prev_state {
+                    let _ = self
+                        .agents
+                        .registry
+                        .update_model_routing(agent_id, p_mode, p_override);
+                }
+                return Err(KernelError::LibreFang(e));
+            }
+        }
+
+        // Persist to agent.toml so the change survives a daemon restart —
+        // same reasoning as set_agent_channels above.
+        self.persist_manifest_to_disk(agent_id);
+
+        info!(
+            agent_id = %agent_id,
+            mode = ?mode,
+            router_override = ?router_override,
+            "Agent model routing updated"
+        );
+        Ok(())
+    }
+
     /// Update an agent's schedule mode and restart its background loop so
     /// the change takes effect immediately, without a daemon restart.
     ///

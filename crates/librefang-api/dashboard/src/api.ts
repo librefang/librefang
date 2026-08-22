@@ -1783,6 +1783,54 @@ export interface ModelItem {
   source?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Model router (profile-based routing)
+// ---------------------------------------------------------------------------
+
+export type CostTier = "cheap" | "medium" | "expensive";
+
+export interface ModelProfile {
+  name: string;
+  tags: string[];
+  provider: string;
+  model: string;
+  context_window?: number;
+  cost_tier: CostTier;
+  priority: number;
+  max_complexity: number;
+  description?: string;
+}
+
+export interface ModelRouterProfiles {
+  enabled: boolean;
+  default_profile?: string | null;
+  profiles: ModelProfile[];
+}
+
+/// The resolved profile catalog: the builtin asset with
+/// `~/.librefang/model_profiles.toml` merged over it.
+export async function listModelRouterProfiles(): Promise<ModelRouterProfiles> {
+  return get<ModelRouterProfiles>("/api/model-router/profiles");
+}
+
+export interface AgentModelRouting {
+  mode: "fixed" | "flexible";
+  allowed_profiles: string[];
+  cost_budget?: CostTier | null;
+  default_profile?: string | null;
+}
+
+export async function getAgentModelRouting(agentId: string): Promise<AgentModelRouting> {
+  return get<AgentModelRouting>(`/api/agents/${encodeURIComponent(agentId)}/model_routing`);
+}
+
+export async function updateAgentModelRouting(
+  agentId: string,
+  routing: AgentModelRouting,
+): Promise<AgentModelRouting> {
+  return put<AgentModelRouting>(`/api/agents/${encodeURIComponent(agentId)}/model_routing`, routing);
+}
+
 export async function listModels(params?: { provider?: string; tier?: string; available?: boolean }): Promise<{ models: ModelItem[]; total: number; available: number }> {
   const query = new URLSearchParams();
   if (params?.provider) query.set("provider", params.provider);

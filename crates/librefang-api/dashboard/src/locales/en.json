@@ -838,7 +838,8 @@
       "skills": "Skills",
       "tools": "Tools",
       "schedule": "Schedule",
-      "logs": "Logs"
+      "logs": "Logs",
+      "routing": "Routing"
     },
     "configure": "Configure",
     "select_an_agent": "Select an agent",
@@ -848,7 +849,28 @@
     "tools_declared_desc": "Tools this agent can use. Leave empty for unrestricted access to all tools.",
     "providers_error_loading": "Error loading",
     "no_providers": "No providers",
-    "select_provider_first": "Select provider first"
+    "select_provider_first": "Select provider first",
+    "routing": {
+      "title": "Model routing",
+      "description": "Choose whether this agent always uses its own model, or lets the router pick one per task based on the work's complexity.",
+      "disabledKernelWide": "Router off in config.toml",
+      "mode": "Mode",
+      "modeFixed": "Fixed model",
+      "modeFlexible": "Router chooses",
+      "modeFixedHint": "This agent always uses the provider and model in its own manifest.",
+      "modeFlexibleHint": "The router scores each turn and picks a matching profile. Constrain the choice below.",
+      "allowedProfiles": "Allowed profiles",
+      "noProfiles": "No model profiles configured",
+      "noProfilesHint": "Add profiles to ~/.librefang/model_profiles.toml to make them selectable here.",
+      "anyProfile": "None selected — the router may pick any profile.",
+      "someProfiles": "The router may only pick from the selected profiles.",
+      "costBudget": "Cost budget",
+      "costBudgetHint": "The router will never pick a profile above this tier, even if the task matches one.",
+      "noCap": "No cap",
+      "saved": "Model routing saved",
+      "saveFailed": "Could not save model routing",
+      "loadFailed": "Could not load model routing"
+    }
   },
   "providers": {
     "title": "Providers",

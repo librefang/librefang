@@ -429,6 +429,21 @@ fn main() {
                 field,
                 value,
             } => cmd_agent_set(&agent_id, &field, &value),
+            AgentCommands::Routing { agent_id, json } => cmd_agent_routing_show(&agent_id, json),
+            AgentCommands::RoutingSet {
+                agent_id,
+                mode,
+                profiles,
+                budget,
+                default_profile,
+            } => cmd_agent_routing_set(
+                &agent_id,
+                &mode,
+                profiles.as_deref(),
+                budget.as_deref(),
+                default_profile.as_deref(),
+            ),
+            AgentCommands::RoutingProfiles { json } => cmd_agent_routing_profiles(json),
         },
         Some(Commands::Workflow(sub)) => match sub {
             WorkflowCommands::List => cmd_workflow_list(),

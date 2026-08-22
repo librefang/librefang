@@ -2194,3 +2194,34 @@ status-mb = { $mb } MB
 status-summary-down = librefang down home={ $home } default={ $provider }/{ $model }
 status-uptime-format = { $hours }h { $mins }m
 # --- Brand/proper names ---
+
+# Model routing editor (profile-based routing)
+tui-agents-title-model-routing = 模型路由
+tui-agents-label-routing-fixed = 固定 — 始终使用该智能体自己的模型
+tui-agents-label-routing-flexible = 灵活 — 由路由器按任务选择
+tui-agents-hint-routing-mode = [Tab] 切换模式
+tui-agents-label-routing-fixed-explainer = 该智能体始终使用其清单中的模型。按 Tab 让路由器按任务选择。
+tui-agents-label-no-router-profiles = 没有可用的模型配置。请添加到 ~/.librefang/model_profiles.toml。
+tui-agents-label-routing-any-profile = 全部
+tui-agents-hints-model-routing = [Tab] 模式  [↑↓] 导航  [Space] 切换配置  [+/-] 费用预算  [Enter] 保存  [Esc] 取消
+tui-event-model-routing-fetch-failed = 获取模型路由失败
+tui-event-model-routing-update-failed = 更新模型路由失败
+tui-mod-agent-model-routing-updated = 已更新智能体 { $id } 的模型路由。
+
+# Model routing CLI commands
+agent-routing-label-mode = 模式
+agent-routing-label-allowed = 允许的配置
+agent-routing-label-budget = 费用预算
+agent-routing-label-default = 默认配置
+agent-routing-any-profile = 全部
+agent-routing-no-cap = 无上限
+agent-routing-fixed-explainer = 该智能体始终使用其清单中的模型。
+agent-routing-updated = 智能体 { $id } 的模型路由已设置为 { $mode }。
+agent-routing-failed = 更新模型路由失败: { $error }
+agent-routing-profiles-header = 模型路由配置 (路由器: { $enabled }):
+tui-agents-line-routing-mode =   模式: { $mode }
+tui-agents-line-routing-summary =   费用预算: { $budget }    允许的配置: { $allowed }
+tui-agents-label-routing-no-cap = 无上限
+tui-agents-label-routing-cheap = 低价
+tui-agents-label-routing-medium = 中等
+tui-agents-label-routing-expensive = 高价

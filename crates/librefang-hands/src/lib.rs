@@ -408,6 +408,10 @@ impl From<LegacyHandAgentConfig> for AgentManifest {
             description: legacy.description,
             module: legacy.module,
             model: ModelConfig {
+                // A legacy hand manifest predates model routing, so it stays
+                // on its own model — the router is opt-in per agent.
+                mode: librefang_types::agent::ModelMode::Fixed,
+                router_override: None,
                 provider: legacy.provider,
                 model: legacy.model,
                 max_tokens: legacy.max_tokens,

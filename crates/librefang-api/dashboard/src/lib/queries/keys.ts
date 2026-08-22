@@ -95,6 +95,18 @@ export const modelKeys = {
     [...modelKeys.all, "overrides", modelKey] as const,
 };
 
+// Profile-based model routing. `profiles()` is the kernel-wide catalog
+// (builtin asset + `~/.librefang/model_profiles.toml`); `agent(id)` is one
+// agent's mode + router override. Both hang off `all` so a mutation can
+// invalidate the whole domain in a single call.
+export const modelRouterKeys = {
+  all: ["modelRouter"] as const,
+  lists: () => [...modelRouterKeys.all, "list"] as const,
+  profiles: () => [...modelRouterKeys.lists(), "profiles"] as const,
+  details: () => [...modelRouterKeys.all, "detail"] as const,
+  agent: (agentId: string) => [...modelRouterKeys.details(), agentId] as const,
+};
+
 export const providerKeys = {
   all: ["providers"] as const,
   lists: () => [...providerKeys.all, "list"] as const,

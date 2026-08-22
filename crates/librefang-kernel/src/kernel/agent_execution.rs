@@ -51,6 +51,62 @@ pub(crate) fn strip_silent_cron_marker(message: &str, is_internal_cron: bool) ->
     }
 }
 
+/// Which of the mutually exclusive model-selection paths a turn takes.
+///
+/// LibreFang has two routers that both rewrite `manifest.model`, so exactly
+/// one may run per turn. This enum names the outcome so the precedence rule
+/// is a testable value rather than the shape of an if/else chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelSelectionPath {
+    /// Stable mode. `pinned_model` is applied when set, and **no** router runs
+    /// either way — Stable exists precisely to freeze model choice, so a
+    /// router silently overriding it would defeat the mode.
+    Stable,
+    /// The profile router (`[model_router]` plus `mode = "flexible"`).
+    Profile,
+    /// The tier router (`[routing]` / `[default_routing]`).
+    Tier,
+    /// Neither router applies; the agent keeps the model in its own manifest.
+    ManifestModel,
+}
+
+/// Resolve the model-selection path, in precedence order.
+///
+/// Precedence, highest first:
+///
+/// 1. **Stable mode** — an operator who pinned the deployment outranks both
+///    routers.
+/// 2. **Profile router** — opt-in per agent via `mode = "flexible"`, so an
+///    agent that asked for it has made the more specific choice than a
+///    kernel-wide `[default_routing]` block.
+/// 3. **Tier router** — the pre-existing `simple` / `medium` / `complex`
+///    router, which applies to any agent with a `[routing]` block or when
+///    `[default_routing]` is set kernel-wide.
+/// 4. **Manifest model** — nothing applies.
+///
+/// The two routers are complementary rather than redundant: the tier router
+/// scores the assembled `CompletionRequest` (token count, tool count, code
+/// markers, conversation depth) and maps it onto three fixed model slots,
+/// while the profile router matches the task's *tags* against named profiles
+/// that also carry a cost tier and a complexity ceiling. The tier router asks
+/// "how hard is this?"; the profile router also asks "what kind of work is
+/// this, and what may this agent afford?".
+pub(crate) fn model_selection_path(
+    is_stable: bool,
+    profile_router_applies: bool,
+    tier_router_applies: bool,
+) -> ModelSelectionPath {
+    if is_stable {
+        ModelSelectionPath::Stable
+    } else if profile_router_applies {
+        ModelSelectionPath::Profile
+    } else if tier_router_applies {
+        ModelSelectionPath::Tier
+    } else {
+        ModelSelectionPath::ManifestModel
+    }
+}
+
 impl LibreFangKernel {
     // -----------------------------------------------------------------------
     // Module dispatch: WASM / Python / LLM
@@ -317,6 +373,87 @@ impl LibreFangKernel {
         exhausted
             && resolve_effective_fallbacks(&manifest.fallback_models, &cfg.fallback_providers)
                 .is_empty()
+    }
+
+    /// Pick a [`ModelProfile`](librefang_types::model_profile::ModelProfile)
+    /// for this turn, or `None` to leave the agent's own model in place.
+    ///
+    /// Returns `None` — meaning "not routed" — whenever any of these hold:
+    ///
+    /// - `[model_router] enabled = false` in `config.toml` (the default).
+    /// - The agent's manifest is not `mode = "flexible"` (the default).
+    /// - No permitted profile matched and no permitted fallback existed.
+    /// - The selected profile's provider has no API key configured.
+    ///
+    /// The last guard mirrors the tier router a few lines below: routing an
+    /// agent onto a provider the operator never configured would turn a
+    /// cost optimisation into a hard failure on every turn.
+    fn route_to_profile(
+        &self,
+        manifest: &librefang_types::agent::AgentManifest,
+        message: &str,
+        cfg: &librefang_types::config::KernelConfig,
+    ) -> Option<librefang_types::model_profile::ModelProfile> {
+        use librefang_types::agent::ModelMode;
+
+        if !cfg.model_router.enabled || manifest.model.mode != ModelMode::Flexible {
+            return None;
+        }
+
+        let complexity = crate::model_router::evaluate_complexity_heuristic(message);
+        let catalog = crate::model_router::ProfileCatalog::load_cached(
+            cfg.home_dir.as_path(),
+            &cfg.model_router,
+        );
+        let (matched, decision) = crate::model_router::match_profile(
+            message,
+            &complexity,
+            catalog.profiles(),
+            &cfg.model_router,
+            manifest.model.router_override.as_ref(),
+        );
+
+        let Some(profile) = matched else {
+            debug!(
+                agent = %manifest.name,
+                ?decision,
+                complexity = complexity.score,
+                "Profile routing declined — keeping the agent's own model"
+            );
+            return None;
+        };
+
+        // Resolve catalog aliases ("sonnet" -> "claude-sonnet-4-…") so the
+        // builtin profiles do not pin dated model snapshots.
+        let mut profile = profile.clone();
+        let model_catalog = self.llm.model_catalog.load();
+        if let Some(resolved) = model_catalog.resolve_alias(&profile.model) {
+            profile.model = resolved.to_string();
+        }
+
+        if profile.provider != manifest.model.provider {
+            let key_env = cfg.resolve_api_key_env(&profile.provider);
+            if std::env::var(&key_env).is_err() {
+                warn!(
+                    agent = %manifest.name,
+                    profile = %profile.name,
+                    provider = %profile.provider,
+                    "Profile routing skipped — provider API key not configured, using the agent's own model"
+                );
+                return None;
+            }
+        }
+
+        info!(
+            agent = %manifest.name,
+            profile = %profile.name,
+            provider = %profile.provider,
+            model = %profile.model,
+            complexity = complexity.score,
+            ?decision,
+            "Profile routing applied"
+        );
+        Some(profile)
     }
 
     /// Execute the default LLM-based agent loop.
@@ -896,7 +1033,34 @@ impl LibreFangKernel {
 
         let is_stable = cfg.mode == librefang_types::config::KernelMode::Stable;
 
-        if is_stable {
+        // Resolve both routers' candidates before choosing between them, so
+        // the precedence decision is a single explicit call rather than the
+        // shape of an if/else chain. Neither resolution makes an LLM call:
+        // the profile router scores heuristically against a cached catalog,
+        // and the tier config is a plain struct clone.
+        let routed_profile = if is_stable {
+            None
+        } else {
+            self.route_to_profile(&manifest, message, &cfg)
+        };
+        // Cloned rather than borrowed because the branches below mutate
+        // `manifest`, which `manifest.routing.as_ref()` would keep borrowed.
+        let tier_routing_config = if is_stable {
+            None
+        } else {
+            manifest
+                .routing
+                .clone()
+                .or_else(|| cfg.default_routing.clone())
+        };
+
+        let selection_path = model_selection_path(
+            is_stable,
+            routed_profile.is_some(),
+            tier_routing_config.is_some(),
+        );
+
+        if selection_path == ModelSelectionPath::Stable {
             // In Stable mode: use pinned_model if set, otherwise default model
             if let Some(ref pinned) = manifest.pinned_model {
                 info!(
@@ -906,8 +1070,16 @@ impl LibreFangKernel {
                 );
                 manifest.model.model = pinned.clone();
             }
-        } else if let Some(routing_config) =
-            manifest.routing.as_ref().or(cfg.default_routing.as_ref())
+        } else if let (ModelSelectionPath::Profile, Some(profile)) =
+            (selection_path, routed_profile)
+        {
+            manifest.model.provider = profile.provider;
+            manifest.model.model = profile.model;
+            if profile.context_window.is_some() {
+                manifest.model.context_window = profile.context_window;
+            }
+        } else if let (ModelSelectionPath::Tier, Some(routing_config)) =
+            (selection_path, tier_routing_config)
         {
             let mut router = ModelRouter::new(routing_config.clone());
             // Resolve aliases (e.g. "sonnet" -> "claude-sonnet-4-20250514") before scoring
@@ -1543,6 +1715,87 @@ impl LibreFangKernel {
         self.spawn_session_label_generation(agent_id, effective_session_id);
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod model_selection_precedence_tests {
+    use super::{model_selection_path, ModelSelectionPath};
+
+    /// Stable mode outranks both routers, even when both would otherwise
+    /// apply. An operator who pinned the deployment gets what they pinned.
+    #[test]
+    fn stable_mode_outranks_both_routers() {
+        for profile in [false, true] {
+            for tier in [false, true] {
+                assert_eq!(
+                    model_selection_path(true, profile, tier),
+                    ModelSelectionPath::Stable,
+                    "stable must win (profile={profile}, tier={tier})"
+                );
+            }
+        }
+    }
+
+    /// The headline precedence rule: when both routers apply to the same
+    /// turn, the profile router wins, because it is opt-in per agent and the
+    /// tier router can be a kernel-wide default the agent never asked for.
+    #[test]
+    fn profile_router_wins_over_the_tier_router() {
+        assert_eq!(
+            model_selection_path(false, true, true),
+            ModelSelectionPath::Profile
+        );
+    }
+
+    /// With the profile router off (disabled kernel-wide, `mode = "fixed"`,
+    /// or no permitted profile matched), the tier router keeps working
+    /// exactly as it did before the profile layer existed.
+    #[test]
+    fn tier_router_still_runs_when_no_profile_applies() {
+        assert_eq!(
+            model_selection_path(false, false, true),
+            ModelSelectionPath::Tier
+        );
+    }
+
+    /// The profile router does not require a tier config to be present.
+    #[test]
+    fn profile_router_runs_without_any_tier_config() {
+        assert_eq!(
+            model_selection_path(false, true, false),
+            ModelSelectionPath::Profile
+        );
+    }
+
+    /// Nothing configured is the untouched-deployment case: the agent keeps
+    /// the model in its own manifest.
+    #[test]
+    fn no_router_leaves_the_manifest_model_alone() {
+        assert_eq!(
+            model_selection_path(false, false, false),
+            ModelSelectionPath::ManifestModel
+        );
+    }
+
+    /// Exhaustive: every input combination maps to exactly one path, and the
+    /// mapping is total. Guards against a future edit that adds a branch and
+    /// accidentally leaves a combination unhandled.
+    #[test]
+    fn every_combination_resolves_to_exactly_one_path() {
+        let mut seen = Vec::new();
+        for stable in [false, true] {
+            for profile in [false, true] {
+                for tier in [false, true] {
+                    seen.push(model_selection_path(stable, profile, tier));
+                }
+            }
+        }
+        assert_eq!(seen.len(), 8);
+        assert!(seen.contains(&ModelSelectionPath::Stable));
+        assert!(seen.contains(&ModelSelectionPath::Profile));
+        assert!(seen.contains(&ModelSelectionPath::Tier));
+        assert!(seen.contains(&ModelSelectionPath::ManifestModel));
     }
 }
 

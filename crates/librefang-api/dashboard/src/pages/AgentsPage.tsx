@@ -35,7 +35,7 @@ import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, Route } from "lucide-react";
 import { buildModelConfigPatch, MODEL_MAX_TOKENS_DEFAULT, MODEL_TEMPERATURE_DEFAULT } from "../lib/agentModelPatch";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
@@ -52,6 +52,7 @@ import { useSkills } from "../lib/queries/skills";
 import { useMcpServers } from "../lib/queries/mcp";
 import { AgentManifestForm } from "../components/AgentManifestForm";
 import { AgentSchedulePanel } from "../components/AgentSchedulePanel";
+import { AgentModelRoutingPanel } from "../components/AgentModelRoutingPanel";
 import { AgentSkillItem } from "../components/AgentSkillItem";
 import {
   emptyManifestExtras,
@@ -358,7 +359,7 @@ export function AgentsPage() {
   // the PUT — leaving the tab discards the draft (the "change your mind" path).
   const [skillsDraft, setSkillsDraft] = useState<string[] | null>(null);
   const [agentTab, setAgentTab] = useState<
-    "conversation" | "memory" | "skills" | "tools" | "schedule" | "logs"
+    "conversation" | "memory" | "skills" | "tools" | "routing" | "schedule" | "logs"
   >("conversation");
   // Whether the deep-edit drawer is open. Decoupled from `detailAgent` so
   // selecting an agent in the list shows the inline detail panel without
@@ -1045,6 +1046,7 @@ export function AgentsPage() {
       { id: "memory",       label: t("agents.tab.memory",       { defaultValue: "Memory" }),       Icon: Database },
       { id: "skills",       label: t("agents.tab.skills",       { defaultValue: "Skills" }),       Icon: Sparkles },
       { id: "tools",        label: t("agents.tab.tools",        { defaultValue: "Tools" }),        Icon: Wrench },
+      { id: "routing",      label: t("agents.tab.routing",      { defaultValue: "Routing" }),      Icon: Route },
       { id: "schedule",     label: t("agents.tab.schedule",     { defaultValue: "Schedule" }),     Icon: Clock },
       { id: "logs",         label: t("agents.tab.logs",         { defaultValue: "Logs" }),         Icon: FileText },
     ];
@@ -1293,6 +1295,7 @@ export function AgentsPage() {
       case "memory":            return renderMemoryTab(agent);
       case "skills":            return renderSkillsTab(agent);
       case "tools":             return renderToolsTab(agent);
+      case "routing":           return renderRoutingTab(agent);
       case "schedule":          return renderScheduleTab(agent);
       case "logs":              return renderLogsTab(agent);
     }
@@ -2178,6 +2181,14 @@ export function AgentsPage() {
   // (no real per-fire telemetry endpoint yet) and was dropped in favour of
   // real editing affordances — restore it once a per-agent run-history feed
   // exists.
+  // ---------- Routing tab — per-agent model routing (fixed vs router-chosen,
+  // profile allowlist, cost budget). Owned by AgentModelRoutingPanel, which
+  // talks to GET/PUT /api/agents/{id}/model_routing and
+  // GET /api/model-router/profiles.
+  const renderRoutingTab = (agent: AgentDetail) => (
+    <AgentModelRoutingPanel agent={agent} />
+  );
+
   const renderScheduleTab = (agent: AgentDetail) => (
     <AgentSchedulePanel agent={agent} />
   );

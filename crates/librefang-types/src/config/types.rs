@@ -3365,6 +3365,13 @@ pub struct KernelConfig {
     /// `routing` always wins when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_routing: Option<crate::agent::ModelRoutingConfig>,
+    /// Profile router settings. Complements `default_routing` above: the tier
+    /// router maps a scored request onto three fixed model slots, while the
+    /// profile router matches the task against named profiles that also carry
+    /// a cost tier and a complexity ceiling. Off by default; an agent opts in
+    /// with `mode = "flexible"` in its manifest `[model]` block.
+    #[serde(default)]
+    pub model_router: crate::model_profile::ModelRouterConfig,
     /// Default LLM provider configuration.
     pub default_model: DefaultModelConfig,
     /// Memory substrate configuration.
@@ -6518,6 +6525,7 @@ impl Default for KernelConfig {
             agent_max_iterations: None,
             max_history_messages: None,
             default_routing: None,
+            model_router: crate::model_profile::ModelRouterConfig::default(),
             default_model: DefaultModelConfig::default(),
             memory: MemoryConfig::default(),
             memory_wiki: MemoryWikiConfig::default(),

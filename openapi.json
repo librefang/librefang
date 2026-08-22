@@ -1880,6 +1880,90 @@
         }
       }
     },
+    "/api/agents/{id}/model_routing": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/model_routing — Read an agent's model routing settings.",
+        "operationId": "get_agent_model_routing",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "An agent's model routing mode and router override",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PUT /api/agents/{id}/model_routing — Update an agent's model routing settings.",
+        "description": "`mode` is `\"fixed\"` or `\"flexible\"`. In `\"fixed\"` mode no override is\nstored: the remaining fields describe constraints on a routing decision\nthat will not happen, and persisting them would let a later flip back to\n`\"flexible\"` silently resurrect stale constraints the operator has\nforgotten about.\n\n`cost_budget` accepts `\"cheap\"`, `\"medium\"`, `\"expensive\"`, or `null` for\nno cap; any other string is rejected rather than silently treated as \"no\ncap\", because a typo that removed a spending cap would be invisible.",
+        "operationId": "set_agent_model_routing",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Mode, allowed profiles, cost budget and default profile",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated model routing settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id, mode or cost budget",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/agents/{id}/push": {
       "post": {
         "tags": [
@@ -8884,6 +8968,28 @@
         "responses": {
           "200": {
             "description": "Scan directory for migratable workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/model-router/profiles": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "GET /api/model-router/profiles — List the resolved model-router profiles.",
+        "description": "The catalog is the builtin asset with `~/.librefang/model_profiles.toml`\nmerged over it, so this is what the router will actually match against —\nnot just the compiled-in defaults. Profiles come back ordered by name.\n\n`enabled` reports whether `[model_router]` is switched on kernel-wide; the\nprofile list is returned either way so an operator can review the catalog\nbefore flipping the switch.",
+        "operationId": "list_model_router_profiles",
+        "responses": {
+          "200": {
+            "description": "List resolved model-router profiles",
             "content": {
               "application/json": {
                 "schema": {

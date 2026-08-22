@@ -838,7 +838,8 @@
       "skills": "기술",
       "tools": "도구",
       "schedule": "일정",
-      "logs": "로그"
+      "logs": "로그",
+      "routing": "라우팅"
     },
     "configure": "구성",
     "select_an_agent": "에이전트를 선택하세요",
@@ -848,7 +849,28 @@
     "tools_declared_desc": "이 에이전트가 사용할 수 있는 도구입니다. 모든 도구에 제한 없이 액세스하려면 비워 두세요.",
     "providers_error_loading": "로드 중 오류 발생",
     "no_providers": "제공업체 없음",
-    "select_provider_first": "먼저 제공업체를 선택하세요."
+    "select_provider_first": "먼저 제공업체를 선택하세요.",
+    "routing": {
+      "title": "모델 라우팅",
+      "description": "이 에이전트가 항상 자체 모델을 사용할지, 아니면 작업 복잡도에 따라 라우터가 작업별로 모델을 선택할지 결정합니다.",
+      "disabledKernelWide": "config.toml에서 라우터 비활성화됨",
+      "mode": "모드",
+      "modeFixed": "고정 모델",
+      "modeFlexible": "라우터가 선택",
+      "modeFixedHint": "이 에이전트는 항상 자체 매니페스트의 제공자와 모델을 사용합니다.",
+      "modeFlexibleHint": "라우터가 각 턴을 평가하여 일치하는 프로필을 선택합니다. 아래에서 선택 범위를 제한하세요.",
+      "allowedProfiles": "허용된 프로필",
+      "noProfiles": "구성된 모델 프로필이 없습니다",
+      "noProfilesHint": "여기에서 선택할 수 있도록 ~/.librefang/model_profiles.toml에 프로필을 추가하세요.",
+      "anyProfile": "선택 없음 — 라우터가 모든 프로필을 선택할 수 있습니다.",
+      "someProfiles": "라우터는 선택된 프로필 중에서만 고를 수 있습니다.",
+      "costBudget": "비용 예산",
+      "costBudgetHint": "작업이 일치하더라도 라우터는 이 등급을 초과하는 프로필을 선택하지 않습니다.",
+      "noCap": "제한 없음",
+      "saved": "모델 라우팅이 저장되었습니다",
+      "saveFailed": "모델 라우팅을 저장하지 못했습니다",
+      "loadFailed": "모델 라우팅을 불러오지 못했습니다"
+    }
   },
   "providers": {
     "title": "공급자",
