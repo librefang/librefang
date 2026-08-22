@@ -631,6 +631,45 @@ fn test_manifest_to_capabilities_profile_overridden_by_explicit_tools() {
 }
 
 #[test]
+fn poisoned_config_override_locks_recover_and_remain_usable() {
+    let default_model = std::sync::RwLock::new(vec!["loaded"]);
+    let poison = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut state = default_model.write().unwrap();
+                state.push("preserved");
+                panic!("poison default model override before read recovery");
+            })
+            .join()
+    });
+    assert!(poison.is_err());
+    assert!(default_model.is_poisoned());
+    assert_eq!(
+        &*read_config_override(&default_model, "default_model_override"),
+        &["loaded", "preserved"]
+    );
+    assert!(!default_model.is_poisoned());
+
+    let tool_policy = std::sync::RwLock::new(vec!["old"]);
+    let poison = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let _state = tool_policy.write().unwrap();
+                panic!("poison tool policy override before write recovery");
+            })
+            .join()
+    });
+    assert!(poison.is_err());
+    assert!(tool_policy.is_poisoned());
+    write_config_override(&tool_policy, "tool_policy_override").push("new");
+    assert!(!tool_policy.is_poisoned());
+    assert_eq!(
+        &*read_config_override(&tool_policy, "tool_policy_override"),
+        &["old", "new"]
+    );
+}
+
+#[test]
 fn test_spawn_agent_applies_local_default_model_override() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-local-model-test");
