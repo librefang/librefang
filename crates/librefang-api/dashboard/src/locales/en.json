@@ -2778,7 +2778,15 @@
     "run_active": "Running · iteration {{iteration}}/{{max}}",
     "help": "Goals is the strategic-planning surface — a tree of objectives the agent (or you) is working towards, with progress, status, and parent / child relationships. Templates seed common goal shapes; the tree view shows hierarchy and roll-up progress.\n\nHow to use this page:\n\n1. Create. \"Create goal\" opens a form for title, description, parent goal, and status. Or \"Pick template\" to apply a pre-built goal tree (e.g. \"ship a feature\", \"research a topic\").\n\n2. Track. Each node shows pending / in-progress / completed. Parent progress aggregates from children. Edit a node inline to flip its state or refine its description.\n\n3. Prune. \"Clear all\" wipes the tree (with a confirm) — useful when starting a new initiative.\n\nWhen to use it (vs. Scheduler / Workflows):\n\n  · Goals — what we want. Long-lived intentions, often agent-readable.\n  · Scheduler / Workflows — how it gets done. Concrete fires and steps.\n\nTypical scenarios:\n\n  · Giving an agent a long-term direction it can refer back to during planning.\n  · Tracking a multi-week project as a tree the human and the agent both see.\n\nThings to know:\n\n  · Templates are starting points — feel free to edit the tree after applying.\n  · Deleting a parent deletes its children. Confirm before \"Clear all\".",
     "progress": "Progress",
-    "status": "Status"
+    "status": "Status",
+    "loop_engineering": "Loop engineering",
+    "loop_engineering_hint": "A verifier agent judges each iteration before it counts, and an evaluator model decides when the goal is met.",
+    "assigned_agent": "Assigned agent",
+    "no_agent_selected": "No agent selected",
+    "verifier_agent": "Verifier agent",
+    "no_verifier_selected": "No verifier (run ungated)",
+    "evaluator_model": "Evaluator model",
+    "evaluator_model_placeholder": "Evaluator model (optional)"
   },
   "sessions": {
     "title": "Sessions",

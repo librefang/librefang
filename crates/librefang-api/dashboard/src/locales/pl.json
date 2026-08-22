@@ -2780,7 +2780,15 @@
     "run_active": "Działa · iteracja {{iteration}}/{{max}}",
     "help": "Cele to obszar planowania strategicznego — drzewo celów, do których dąży agent (lub Ty), zawierające informacje o postępie, statusie oraz relacjach nadrzędny/podrzędny. Szablony umożliwiają szybkie tworzenie typowych struktur celów, a widok drzewa przedstawia hierarchię i zbiorczy postęp.\n\nJak korzystać z tej strony:\n\n1. Utwórz. Formularz \"Utwórz cel\" otwiera okno tytułu, opisu, celu nadrzędnego i statusu. Lub \"Wybierz szablon\", aby zastosować gotowe drzewo celów (np. \"wdrożenie funkcji\", \"badanie tematu\").\n\n2. Śledź. Każdy węzeł pokazuje status oczekujący / w toku / zakończony. Postęp celu nadrzędnego jest sumowany na podstawie celów podrzędnych. Edytuj węzeł bezpośrednio na liście, aby zmienić jego stan lub doprecyzować opis.\n\n3. Oczyść. \"Wyczyść wszystko\" usuwa całe drzewo (wymaga potwierdzenia) — przydatne przy rozpoczynaniu nowej inicjatywy.\n\nKiedy używać (w porównaniu do Harmonogramu / Przepływów pracy):\n\n  · Cele — to, co chcemy osiągnąć. Długoterminowe intencje, często czytelne dla agenta.\n  · Harmonogram / Przepływy pracy — jak to zrobić. Konkretne zdarzenia i kroki.\n\nTypowe scenariusze:\n\n  · Nadawanie agentowi długoterminowego kierunku, do którego może się odwoływać podczas planowania.\n  · Śledzenie wielotygodniowego projektu w formie drzewa widocznego zarówno dla człowieka, jak i dla agenta.\n\nWarto wiedzieć:\n\n  · Szablony to punkty wyjścia — po ich zastosowaniu możesz dowolnie edytować drzewo.\n  · Usunięcie elementu nadrzędnego usuwa również jego elementy podrzędne. Potwierdź przed kliknięciem \"Wyczyść wszystko\".",
     "progress": "Postęp",
-    "status": "Status"
+    "status": "Status",
+    "loop_engineering": "Inżynieria pętli",
+    "loop_engineering_hint": "Agent weryfikujący ocenia każdą iterację, zanim zostanie ona zaliczona, a model oceniający decyduje, kiedy cel jest osiągnięty.",
+    "assigned_agent": "Przypisany agent",
+    "no_agent_selected": "Nie wybrano agenta",
+    "verifier_agent": "Agent weryfikujący",
+    "no_verifier_selected": "Bez weryfikatora (bez kontroli)",
+    "evaluator_model": "Model oceniający",
+    "evaluator_model_placeholder": "Model oceniający (opcjonalnie)"
   },
   "sessions": {
     "title": "Sesje",
