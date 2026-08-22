@@ -62,6 +62,8 @@ pub async fn skillhub_search(
             tracing::warn!("Skillhub search failed: {msg}");
             let status = if is_clawhub_rate_limit(&e) {
                 StatusCode::TOO_MANY_REQUESTS
+            } else if is_marketplace_unavailable(&e) {
+                StatusCode::SERVICE_UNAVAILABLE
             } else {
                 StatusCode::BAD_GATEWAY
             };
@@ -124,10 +126,12 @@ pub async fn skillhub_browse(
         Err(e) => {
             let msg = format!("{e}");
             tracing::warn!("Skillhub browse failed: {msg}");
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"items": [], "error": msg})),
-            )
+            let status = if is_marketplace_unavailable(&e) {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            (status, Json(serde_json::json!({"items": [], "error": msg})))
         }
     }
 }
@@ -195,6 +199,8 @@ pub async fn skillhub_skill_detail(
         Err(e) => {
             let status = if is_clawhub_rate_limit(&e) {
                 StatusCode::TOO_MANY_REQUESTS
+            } else if is_marketplace_unavailable(&e) {
+                StatusCode::SERVICE_UNAVAILABLE
             } else {
                 StatusCode::NOT_FOUND
             };
@@ -295,6 +301,8 @@ pub async fn skillhub_install(
                 StatusCode::FORBIDDEN
             } else if is_clawhub_rate_limit(&e) {
                 StatusCode::TOO_MANY_REQUESTS
+            } else if is_marketplace_unavailable(&e) {
+                StatusCode::SERVICE_UNAVAILABLE
             } else if matches!(e, librefang_skills::SkillError::Network(_)) {
                 StatusCode::BAD_GATEWAY
             } else {

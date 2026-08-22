@@ -65,6 +65,27 @@ pub enum SkillError {
     YamlParse(String),
     #[error("Security blocked: {0}")]
     SecurityBlocked(String),
+    #[error("Marketplace unavailable: {0}")]
+    MarketplaceUnavailable(String),
+}
+
+/// Returns true when `bytes` looks like an HTML (or other markup) document
+/// rather than JSON.
+///
+/// A marketplace endpoint that has gone dark commonly keeps answering `200
+/// OK` while quietly serving its SPA shell (or a proxy's HTML error page)
+/// instead of the JSON contract callers expect — see #7387, where
+/// `skillhub.tencent.com` redirects every API path to the `skillhub.cn`
+/// single-page app. Handing that body straight to `serde_json` produces the
+/// cryptic `expected value at line 1 column 1` failure reported there. Valid
+/// JSON never starts with `<` once leading whitespace is skipped, so this
+/// check lets callers short-circuit into a clear, actionable
+/// [`SkillError::MarketplaceUnavailable`] instead.
+pub fn looks_like_markup(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .find(|b| !b.is_ascii_whitespace())
+        .is_some_and(|b| *b == b'<')
 }
 
 /// The runtime type for a skill.
@@ -528,5 +549,43 @@ custom_key = "custom_value"
             reparsed.config.get("custom_key").and_then(|v| v.as_str()),
             Some("custom_value")
         );
+    }
+
+    // -- #7387: markup-vs-JSON detection ------------------------------------
+
+    #[test]
+    fn looks_like_markup_detects_html_document() {
+        assert!(looks_like_markup(
+            b"<!DOCTYPE html><html><body>hi</body></html>"
+        ));
+    }
+
+    #[test]
+    fn looks_like_markup_detects_html_with_leading_whitespace() {
+        assert!(looks_like_markup(b"\n\n  <html><head></head></html>"));
+    }
+
+    #[test]
+    fn looks_like_markup_rejects_valid_json_object() {
+        assert!(!looks_like_markup(br#"{"results": []}"#));
+    }
+
+    #[test]
+    fn looks_like_markup_rejects_valid_json_array() {
+        assert!(!looks_like_markup(b"[1, 2, 3]"));
+    }
+
+    #[test]
+    fn looks_like_markup_rejects_whitespace_padded_json() {
+        assert!(!looks_like_markup(b"   \n{\"ok\": true}"));
+    }
+
+    #[test]
+    fn looks_like_markup_treats_empty_body_as_non_markup() {
+        // An empty or whitespace-only body isn't markup — it's a plain
+        // parse failure, which should fall through to the normal
+        // `SkillError::Network` path rather than the marketplace-specific one.
+        assert!(!looks_like_markup(b""));
+        assert!(!looks_like_markup(b"   \n\t"));
     }
 }

@@ -435,6 +435,14 @@ fn is_clawhub_rate_limit(err: &librefang_skills::SkillError) -> bool {
     matches!(err, librefang_skills::SkillError::RateLimited(_))
 }
 
+/// Check whether a SkillError represents a marketplace that is known to be
+/// down (e.g. answering with HTML instead of JSON — see #7387), as opposed
+/// to a generic network hiccup. Maps to `503 Service Unavailable` at the
+/// route layer instead of the generic `502 Bad Gateway`.
+fn is_marketplace_unavailable(err: &librefang_skills::SkillError) -> bool {
+    matches!(err, librefang_skills::SkillError::MarketplaceUnavailable(_))
+}
+
 /// Convert a browse entry (nested stats/tags) to a flat JSON object for the frontend.
 fn clawhub_browse_entry_to_json(
     entry: &librefang_skills::clawhub::ClawHubBrowseEntry,

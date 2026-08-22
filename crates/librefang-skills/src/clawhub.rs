@@ -391,6 +391,35 @@ impl ClawHubClient {
         )))
     }
 
+    /// Parse a marketplace JSON response, degrading gracefully when the
+    /// upstream sends back markup instead of JSON (see #7387).
+    ///
+    /// A `200 OK` full of HTML means the marketplace's *transport* is fine
+    /// but its *API contract* is gone — a distinct, actionable failure mode
+    /// from a genuine JSON shape mismatch, so it gets its own error variant
+    /// rather than falling through to a `serde_json` parse error whose
+    /// message ("expected value at line 1 column 1") gives the operator no
+    /// clue what actually happened.
+    fn parse_marketplace_json<T: serde::de::DeserializeOwned>(
+        &self,
+        bytes: &[u8],
+        context: &str,
+    ) -> Result<T, SkillError> {
+        if crate::looks_like_markup(bytes) {
+            return Err(SkillError::MarketplaceUnavailable(format!(
+                "{context}: {} returned a webpage instead of JSON — the marketplace API \
+                 endpoint is unreachable or has changed. Search, browse, and skill detail \
+                 lookups are unavailable until this is fixed; installing local skills is \
+                 unaffected. If you have a working mirror, point at it instead of the built-in \
+                 default.",
+                self.base_url
+            )));
+        }
+
+        serde_json::from_slice(bytes)
+            .map_err(|e| SkillError::Network(format!("Failed to parse {context} response: {e}")))
+    }
+
     // -----------------------------------------------------------------------
     // Public API methods — all use get_with_retry
     // -----------------------------------------------------------------------
@@ -412,13 +441,12 @@ impl ClawHubClient {
         );
 
         let response = self.get_with_retry(&url, "ClawHub search").await?;
-
-        let results: ClawHubSearchResponse = response
-            .json()
+        let bytes = response
+            .bytes()
             .await
-            .map_err(|e| SkillError::Network(format!("Failed to parse ClawHub response: {e}")))?;
+            .map_err(|e| SkillError::Network(format!("Failed to read ClawHub response: {e}")))?;
 
-        Ok(results)
+        self.parse_marketplace_json(&bytes, "ClawHub search")
     }
 
     /// Browse skills by sort order (trending, downloads, stars, etc.).
@@ -442,13 +470,12 @@ impl ClawHubClient {
         }
 
         let response = self.get_with_retry(&url, "ClawHub browse").await?;
-
-        let results: ClawHubBrowseResponse = response
-            .json()
+        let bytes = response
+            .bytes()
             .await
-            .map_err(|e| SkillError::Network(format!("Failed to parse ClawHub browse: {e}")))?;
+            .map_err(|e| SkillError::Network(format!("Failed to read ClawHub browse: {e}")))?;
 
-        Ok(results)
+        self.parse_marketplace_json(&bytes, "ClawHub browse")
     }
 
     /// Get detailed info about a specific skill.
@@ -460,13 +487,12 @@ impl ClawHubClient {
         let url = format!("{}/skills/{}", self.base_url, urlencoded(slug));
 
         let response = self.get_with_retry(&url, "ClawHub skill detail").await?;
-
-        let detail: ClawHubSkillDetail = response
-            .json()
+        let bytes = response
+            .bytes()
             .await
-            .map_err(|e| SkillError::Network(format!("Failed to parse ClawHub detail: {e}")))?;
+            .map_err(|e| SkillError::Network(format!("Failed to read ClawHub detail: {e}")))?;
 
-        Ok(detail)
+        self.parse_marketplace_json(&bytes, "ClawHub skill detail")
     }
 
     /// Helper: extract the version string from a browse entry.
@@ -1304,6 +1330,83 @@ mod tests {
             .expect_err("detail failure must stop before an unverified download");
 
         assert!(matches!(error, SkillError::Network(_)));
+        assert!(std::fs::read_dir(target.path()).unwrap().next().is_none());
+        server.await.unwrap();
+    }
+
+    // -- #7387: marketplace-answers-with-HTML degrades gracefully -------------
+
+    #[tokio::test]
+    async fn search_degrades_gracefully_when_marketplace_returns_html() {
+        // Reproduces #7387: a marketplace whose API has gone dark but still
+        // answers 200 OK with its SPA shell instead of JSON. Before this fix
+        // this surfaced as a cryptic `SkillError::Network("... expected value
+        // at line 1 column 1")`; it must now be a clearly labeled
+        // `SkillError::MarketplaceUnavailable`.
+        let html_body = "<!DOCTYPE html><html><body>Not an API</body></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html_body}",
+            html_body.len()
+        );
+        let (base_url, server) = scripted_http_server(vec![response]).await;
+        let client = ClawHubClient::with_url(&base_url, PathBuf::new());
+
+        let error = client
+            .search("test", 5)
+            .await
+            .expect_err("HTML body must not be silently accepted as JSON");
+
+        match error {
+            SkillError::MarketplaceUnavailable(msg) => {
+                assert!(
+                    msg.contains(&base_url),
+                    "message should name the dead endpoint: {msg}"
+                );
+            }
+            other => panic!("expected MarketplaceUnavailable, got {other:?}"),
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_skill_degrades_gracefully_when_marketplace_returns_html() {
+        let html_body = "<!DOCTYPE html><html><body>Not an API</body></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html_body}",
+            html_body.len()
+        );
+        let (base_url, server) = scripted_http_server(vec![response]).await;
+        let client = ClawHubClient::with_url(&base_url, PathBuf::new());
+
+        let error = client
+            .get_skill("some-skill")
+            .await
+            .expect_err("HTML body must not be silently accepted as JSON");
+
+        assert!(matches!(error, SkillError::MarketplaceUnavailable(_)));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn install_fails_closed_when_marketplace_returns_html_instead_of_detail_json() {
+        // install() fetches skill detail (step 0) before ever downloading —
+        // an HTML response there must abort with MarketplaceUnavailable and
+        // leave no partial install behind, same as the existing 404 case above.
+        let html_body = "<!DOCTYPE html><html><body>Not an API</body></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html_body}",
+            html_body.len()
+        );
+        let (base_url, server) = scripted_http_server(vec![response]).await;
+        let client = ClawHubClient::with_url(&base_url, PathBuf::new());
+        let target = tempfile::tempdir().unwrap();
+
+        let error = client
+            .install("missing-skill", target.path())
+            .await
+            .expect_err("HTML detail response must stop before an unverified download");
+
+        assert!(matches!(error, SkillError::MarketplaceUnavailable(_)));
         assert!(std::fs::read_dir(target.path()).unwrap().next().is_none());
         server.await.unwrap();
     }
