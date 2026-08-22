@@ -143,6 +143,7 @@ common `[[sidecar_channels]]` fields documented under
    - Copy the token (`xapp-...`).
 3. Go to **OAuth & Permissions** and add Bot Token Scopes:
    - `chat:write`
+   - `files:write` (required for `File` / `FileData` attachments sent by agents)
    - `app_mentions:read`
    - `im:history`
    - `im:read`
@@ -181,7 +182,7 @@ SLACK_BOT_TOKEN = "xoxb-..."
 
 ### How It Works
 
-The Slack adapter uses Socket Mode, which establishes a WebSocket connection to Slack's servers. This avoids the need for a public webhook URL. The adapter receives events (app mentions, direct messages) and routes them to the configured agent. Responses are posted via the `chat.postMessage` Web API. When `threading = true`, replies are sent to the message's thread via `thread_ts`.
+The Slack adapter uses Socket Mode, which establishes a WebSocket connection to Slack's servers. This avoids the need for a public webhook URL. The adapter receives events (app mentions, direct messages) and routes them to the configured agent. Text responses are posted via the `chat.postMessage` Web API. `File` and `FileData` responses use Slack's external upload flow and retain the same thread context. URL-backed files are downloaded only from public HTTP(S) targets and both URL-backed and inline files are capped at 10 MiB. When `threading = true`, replies are sent to the message's thread via `thread_ts`.
 
 ### Processing-State Reactions
 

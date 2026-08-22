@@ -5,11 +5,14 @@ replaced with a fake. Asserts the sidecar preserves the in-process
 Rust ``librefang-channels::slack`` adapter's behaviour.
 """
 
+import http.client
 import io
 import json
 import os
+import socket
 import urllib.error
 import urllib.parse
+import urllib.request
 
 import pytest
 
@@ -654,6 +657,378 @@ def test_post_message_blocks_payload(monkeypatch):
     assert body["blocks"] == blocks
 
 
+def test_upload_file_bytes_uses_external_upload_flow(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, {
+            "ok": True,
+            "upload_url": "https://files.slack.com/upload/v1/TICKET",
+            "file_id": "F123",
+        }),
+        (200, {"ok": True, "files": [{"id": "F123"}]}),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    uploads = []
+    monkeypatch.setattr(
+        sa,
+        "_public_http_request",
+        lambda url, **kwargs: uploads.append((url, kwargs)) or (200, b""),
+    )
+    a = _adapter()
+
+    assert a._upload_file_bytes(
+        "C01", b"report-bytes", "report.xlsx", thread_ts="1700000000.0",
+    ) is True
+
+    assert [call["url"] for call in fake.calls] == [
+        "https://slack.com/api/files.getUploadURLExternal",
+        "https://slack.com/api/files.completeUploadExternal",
+    ]
+    assert fake.calls[0]["body"] == {
+        "filename": "report.xlsx",
+        "length": len(b"report-bytes"),
+    }
+    assert uploads == [(
+        "https://files.slack.com/upload/v1/TICKET",
+        {
+            "method": "POST",
+            "body": b"report-bytes",
+            "headers": {"Content-Type": "application/octet-stream"},
+            "max_bytes": 200,
+            "require_https": True,
+        },
+    )]
+    assert fake.calls[1]["body"] == {
+        "files": [{"id": "F123", "title": "report.xlsx"}],
+        "channel_id": "C01",
+        "thread_ts": "1700000000.0",
+    }
+
+
+def test_upload_file_bytes_stops_when_ticket_is_rejected(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, {"ok": False, "error": "missing_scope"}),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+
+    assert a._upload_file_bytes("C01", b"x", "x.txt") is False
+    assert len(fake.calls) == 1
+
+
+def test_upload_file_bytes_stops_when_byte_upload_fails(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, {
+            "ok": True,
+            "upload_url": "https://files.slack.com/upload/v1/TICKET",
+            "file_id": "F123",
+        }),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(sa, "_public_http_request", lambda *_args, **_kwargs: (500, b"upload_failed"))
+    a = _adapter()
+
+    assert a._upload_file_bytes("C01", b"x", "x.txt") is False
+    assert len(fake.calls) == 1
+
+
+def test_upload_file_bytes_surfaces_completion_rejection(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, {
+            "ok": True,
+            "upload_url": "https://files.slack.com/upload/v1/TICKET",
+            "file_id": "F123",
+        }),
+        (200, {"ok": False, "error": "not_in_channel"}),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(sa, "_public_http_request", lambda *_args, **_kwargs: (200, b""))
+    a = _adapter()
+
+    assert a._upload_file_bytes("C01", b"x", "x.txt") is False
+    assert len(fake.calls) == 2
+
+
+def test_upload_file_bytes_rejects_oversize_before_network(monkeypatch):
+    fake = _FakeUrlopen([])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    a.MAX_UPLOAD_BYTES = 3
+
+    assert a._upload_file_bytes("C01", b"four", "x.txt") is False
+    assert fake.calls == []
+
+
+def test_validate_file_url_rejects_local_and_non_http_targets(monkeypatch):
+    def _addresses(host, port, **_kwargs):
+        address = "127.0.0.1" if host in {"127.0.0.1", "127.1", "localtest.me"} else "93.184.216.34"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))]
+
+    monkeypatch.setattr(sa.socket, "getaddrinfo", _addresses)
+    assert sa._validate_file_url("https://example.com/report.pdf") is None
+    assert sa._validate_file_url("https://deadbeef/report.pdf") is None
+    assert sa._validate_file_url("file:///etc/passwd") is not None
+    assert sa._validate_file_url("http://127.0.0.1/private") is not None
+    assert sa._validate_file_url("http://127.1/private") is not None
+    assert sa._validate_file_url("http://localtest.me/private") is not None
+    assert sa._validate_file_url("http://metadata.google.internal/latest") is not None
+
+
+def test_validate_file_url_rejects_mixed_public_private_dns(monkeypatch):
+    monkeypatch.setattr(
+        sa.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 443)),
+        ],
+    )
+
+    assert sa._validate_file_url("https://mixed.example/file") is not None
+
+
+def test_public_http_request_pins_validated_address(monkeypatch):
+    monkeypatch.setattr(
+        sa.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        ],
+    )
+    opened = []
+    monkeypatch.setattr(
+        sa,
+        "_request_pinned_once",
+        lambda parsed, hostname, target, **kwargs: opened.append(
+            (parsed.hostname, hostname, target, kwargs),
+        ) or (200, b"file", None),
+    )
+
+    assert sa._public_http_request(
+        "https://files.example/report.pdf", method="GET", max_bytes=10,
+    ) == (200, b"file")
+    assert opened[0][2][1][0] == "93.184.216.34"
+
+
+def test_request_pinned_once_classifies_connect_failure_as_pre_send(monkeypatch):
+    request_calls = []
+
+    class _Connection:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def connect(self):
+            raise OSError("no route")
+
+        def request(self, *_args, **_kwargs):
+            request_calls.append(True)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sa.http.client, "HTTPConnection", _Connection)
+
+    with pytest.raises(sa._PreSendConnectionError, match="no route"):
+        sa._request_pinned_once(
+            urllib.parse.urlsplit("http://files.example/upload"),
+            "files.example",
+            (socket.AF_INET, ("93.184.216.34", 80)),
+            method="POST",
+            body=b"payload",
+            headers=None,
+            max_bytes=200,
+        )
+    assert request_calls == []
+
+
+def test_request_pinned_once_preserves_failure_after_request_started(monkeypatch):
+    class _Connection:
+        def __init__(self, *_args, **_kwargs):
+            self.requested = False
+
+        def connect(self):
+            pass
+
+        def request(self, *_args, **_kwargs):
+            self.requested = True
+
+        def getresponse(self):
+            assert self.requested
+            raise http.client.BadStatusLine("response reset")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sa.http.client, "HTTPConnection", _Connection)
+
+    with pytest.raises(http.client.BadStatusLine, match="response reset"):
+        sa._request_pinned_once(
+            urllib.parse.urlsplit("http://files.example/upload"),
+            "files.example",
+            (socket.AF_INET, ("93.184.216.34", 80)),
+            method="POST",
+            body=b"payload",
+            headers=None,
+            max_bytes=200,
+        )
+
+
+def test_public_http_request_post_failover_only_before_send(monkeypatch):
+    monkeypatch.setattr(
+        sa.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.35", 443)),
+        ],
+    )
+    opened = []
+
+    def _request(_parsed, _hostname, target, **_kwargs):
+        opened.append(target)
+        if len(opened) == 1:
+            raise sa._PreSendConnectionError("connect failed")
+        return (200, b"uploaded", None)
+
+    monkeypatch.setattr(sa, "_request_pinned_once", _request)
+
+    assert sa._public_http_request(
+        "https://files.slack.com/upload/v1/TICKET",
+        method="POST",
+        body=b"payload",
+        max_bytes=200,
+        require_https=True,
+    ) == (200, b"uploaded")
+    assert len(opened) == 2
+
+
+def test_public_http_request_does_not_replay_post_after_uncertain_failure(monkeypatch):
+    monkeypatch.setattr(
+        sa.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.35", 443)),
+        ],
+    )
+    opened = []
+
+    def _request(_parsed, _hostname, target, **_kwargs):
+        opened.append(target)
+        raise http.client.BadStatusLine("response reset")
+
+    monkeypatch.setattr(sa, "_request_pinned_once", _request)
+
+    with pytest.raises(RuntimeError, match="refusing to retry POST"):
+        sa._public_http_request(
+            "https://files.slack.com/upload/v1/TICKET",
+            method="POST",
+            body=b"payload",
+            max_bytes=200,
+            require_https=True,
+        )
+    assert len(opened) == 1
+
+
+def test_public_http_request_get_can_failover_after_response_failure(monkeypatch):
+    monkeypatch.setattr(
+        sa.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.35", 443)),
+        ],
+    )
+    opened = []
+
+    def _request(_parsed, _hostname, target, **_kwargs):
+        opened.append(target)
+        if len(opened) == 1:
+            raise http.client.BadStatusLine("response reset")
+        return (200, b"file", None)
+
+    monkeypatch.setattr(sa, "_request_pinned_once", _request)
+
+    assert sa._public_http_request(
+        "https://files.example/report.pdf",
+        method="GET",
+        max_bytes=200,
+    ) == (200, b"file")
+    assert len(opened) == 2
+
+
+def test_public_http_request_rejects_upload_redirect_downgrade(monkeypatch):
+    monkeypatch.setattr(
+        sa.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        ],
+    )
+    monkeypatch.setattr(
+        sa,
+        "_request_pinned_once",
+        lambda *_args, **_kwargs: (307, b"", "http://example.com/upload-next"),
+    )
+
+    with pytest.raises(RuntimeError, match="HTTPS"):
+        sa._public_http_request(
+            "https://files.slack.com/upload/v1/TICKET",
+            method="POST",
+            body=b"payload",
+            max_bytes=200,
+            require_https=True,
+        )
+
+
+def test_public_http_request_normalizes_malformed_redirect(monkeypatch):
+    monkeypatch.setattr(
+        sa.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        ],
+    )
+    monkeypatch.setattr(
+        sa,
+        "_request_pinned_once",
+        lambda *_args, **_kwargs: (307, b"", "https://["),
+    )
+
+    with pytest.raises(RuntimeError, match="invalid URL"):
+        sa._public_http_request(
+            "https://files.slack.com/upload/v1/TICKET",
+            method="POST",
+            body=b"payload",
+            max_bytes=200,
+            require_https=True,
+        )
+
+
+def test_public_http_request_revalidates_redirect_dns(monkeypatch):
+    def _addresses(host, port, **_kwargs):
+        address = "169.254.169.254" if host == "redirected.example" else "93.184.216.34"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))]
+
+    monkeypatch.setattr(sa.socket, "getaddrinfo", _addresses)
+    monkeypatch.setattr(
+        sa,
+        "_request_pinned_once",
+        lambda *_args, **_kwargs: (302, b"", "https://redirected.example/private"),
+    )
+
+    with pytest.raises(RuntimeError, match="non-public IP"):
+        sa._public_http_request(
+            "https://public.example/file",
+            method="GET",
+            max_bytes=200,
+        )
+
+
+def test_fetch_file_url_enforces_streamed_size_cap(monkeypatch):
+    with pytest.raises(RuntimeError, match="upload cap"):
+        sa._read_bounded_response(_FakeResp(200, b"four", _HdrShim({})), 3)
+
+
 # ---- _build_block_kit ----------------------------------------------
 
 
@@ -1044,6 +1419,106 @@ async def test_on_send_interactive_uses_blocks(monkeypatch):
     body = json.loads(fake.calls[0]["body_raw"])
     assert body["text"] == "Pick one"
     assert any(b["type"] == "actions" for b in body["blocks"])
+
+
+@pytest.mark.asyncio
+async def test_on_send_file_data_uploads_to_requested_thread(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, {
+            "ok": True,
+            "upload_url": "https://files.slack.com/upload/v1/TICKET",
+            "file_id": "F123",
+        }),
+        (200, {"ok": True, "files": [{"id": "F123"}]}),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    uploads = []
+    monkeypatch.setattr(
+        sa,
+        "_public_http_request",
+        lambda url, **kwargs: uploads.append((url, kwargs)) or (200, b""),
+    )
+    a = _adapter()
+
+    class _Cmd:
+        channel_id = "C01"
+        text = ""
+        content = {
+            "FileData": {
+                "data": [0x50, 0x4B, 0x03, 0x04],
+                "filename": "report.xlsx",
+                "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            },
+        }
+        thread_id = "1700000000.0"
+        user = {}
+
+    await a.on_send(_Cmd())
+
+    assert uploads[0][1]["body"] == b"PK\x03\x04"
+    complete = fake.calls[1]["body"]
+    assert complete["channel_id"] == "C01"
+    assert complete["thread_ts"] == "1700000000.0"
+
+
+@pytest.mark.asyncio
+async def test_on_send_file_url_fetches_then_uploads(monkeypatch):
+    a = _adapter()
+    fetched = []
+    uploaded = []
+    monkeypatch.setattr(
+        a,
+        "_fetch_file_url",
+        lambda url: fetched.append(url) or b"downloaded",
+    )
+    monkeypatch.setattr(
+        a,
+        "_upload_file_bytes",
+        lambda channel, data, filename, *, thread_ts=None: uploaded.append(
+            (channel, data, filename, thread_ts)
+        ) or True,
+    )
+
+    class _Cmd:
+        channel_id = "C01"
+        text = ""
+        content = {
+            "File": {
+                "url": "https://example.com/generated/report.docx",
+                "filename": "report.docx",
+            },
+        }
+        thread_id = None
+        user = {}
+
+    await a.on_send(_Cmd())
+
+    assert fetched == ["https://example.com/generated/report.docx"]
+    assert uploaded == [("C01", b"downloaded", "report.docx", None)]
+
+
+@pytest.mark.asyncio
+async def test_on_send_invalid_file_data_does_not_call_slack(monkeypatch):
+    fake = _FakeUrlopen([])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+
+    class _Cmd:
+        channel_id = "C01"
+        text = ""
+        content = {
+            "FileData": {
+                "data": [0, 256],
+                "filename": "broken.bin",
+                "mime_type": "application/octet-stream",
+            },
+        }
+        thread_id = None
+        user = {}
+
+    await a.on_send(_Cmd())
+
+    assert fake.calls == []
 
 
 @pytest.mark.asyncio
