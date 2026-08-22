@@ -112,6 +112,14 @@ pub enum AuditAction {
     /// carries the URL and agent name. Subsequent `/api/a2a/send` and
     /// `/api/a2a/tasks/.../status` calls to that URL are now permitted.
     A2aTrusted,
+    /// #7702: an operator ran `librefang security audit-reanchor --confirm`
+    /// to recover from a detected hash-chain break. Detail carries the
+    /// break's seq, the expected vs. found hash that triggered it, and the
+    /// operator-supplied note. This entry is the resumption point of the
+    /// chain — everything before it verified cleanly and was preserved;
+    /// only the broken entry and anything after it (which could not be
+    /// trusted regardless) was truncated.
+    ChainReanchored,
 }
 
 impl AuditAction {
@@ -147,6 +155,7 @@ impl AuditAction {
             AuditAction::RetentionTrim => "RetentionTrim",
             AuditAction::A2aDiscovered => "A2aDiscovered",
             AuditAction::A2aTrusted => "A2aTrusted",
+            AuditAction::ChainReanchored => "ChainReanchored",
         }
     }
 }
@@ -196,6 +205,7 @@ impl std::str::FromStr for AuditAction {
             "RetentionTrim" => AuditAction::RetentionTrim,
             "A2aDiscovered" => AuditAction::A2aDiscovered,
             "A2aTrusted" => AuditAction::A2aTrusted,
+            "ChainReanchored" => AuditAction::ChainReanchored,
             other => return Err(UnknownAuditAction(other.to_string())),
         })
     }
@@ -1527,6 +1537,289 @@ impl Default for AuditLog {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Offline chain diagnosis and recovery (#7702)
+// ---------------------------------------------------------------------------
+//
+// `AuditLog::verify_integrity` (above) already detects a broken chain on
+// boot, reports the exact seq, and lets the daemon keep starting — see the
+// WARN log in `AuditLog::with_db`. What was missing (per #7702's "Requested"
+// section) is a way to *recover* without nuking the entire trail: the only
+// existing tool, `librefang security audit-reset`, does an unconditional
+// `DELETE FROM audit_entries`, which destroys every entry — including the
+// ones before the break that verified cleanly and were never compromised.
+//
+// The functions below let the CLI diagnose a break against a raw
+// connection (no live `AuditLog` needed — the daemon must be stopped
+// anyway, same requirement `audit-reset` already enforces) and, once an
+// operator confirms, truncate only the entry at the break point and
+// everything after it, then resume the chain with a synthetic
+// [`AuditAction::ChainReanchored`] marker. Every entry before the break
+// stays exactly as it was.
+
+/// Which invariant a [`ChainBreak`] violates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChainBreakKind {
+    /// This entry's `prev_hash` does not match the hash of the entry
+    /// immediately before it (or, for the first surviving row after a
+    /// retention trim, the recovered chain anchor).
+    LinkMismatch,
+    /// This entry's own stored `hash` does not match one recomputed from
+    /// its content — the row was altered without updating `hash`, so
+    /// every entry chained after it links to a hash the tamperer never
+    /// updated to match.
+    HashMismatch,
+}
+
+/// The first inconsistency found while walking `audit_entries` in seq
+/// order, as returned by [`diagnose_chain`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainBreak {
+    /// The seq at which the break was detected.
+    pub seq: u64,
+    /// Which check failed.
+    pub kind: ChainBreakKind,
+    /// The value the check expected (recomputed hash, or the previous
+    /// entry's stored hash).
+    pub expected: String,
+    /// The value actually stored in `audit_entries` at `seq`.
+    pub found: String,
+}
+
+impl std::fmt::Display for ChainBreak {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = match self.kind {
+            ChainBreakKind::LinkMismatch => "prev_hash",
+            ChainBreakKind::HashMismatch => "hash",
+        };
+        write!(
+            f,
+            "chain break at seq {}: expected {what} {} but found {}",
+            self.seq, self.expected, self.found
+        )
+    }
+}
+
+/// Walk every row in `audit_entries` (via a raw connection, independent of
+/// any in-memory `AuditLog`) in seq order and return the first
+/// [`ChainBreak`] found, or `None` if the chain verifies cleanly.
+///
+/// Mirrors [`AuditLog::verify_integrity`]'s link- and hash-checks (reusing
+/// the same [`compute_entry_hash`] / [`compute_entry_hash_legacy`]
+/// functions so the two paths can never disagree on what counts as a
+/// break), but reads directly from SQLite so it works without a live
+/// daemon — the intended caller is the offline `librefang security
+/// audit-reanchor` CLI command, which (like `audit-reset`) requires the
+/// daemon to be stopped first.
+///
+/// Like `AuditLog::with_db`'s anchor recovery, the first row's `prev_hash`
+/// is accepted as given (it may legitimately be non-genesis after a prior
+/// retention trim) rather than compared against the genesis sentinel.
+pub fn diagnose_chain(conn: &rusqlite::Connection) -> Result<Option<ChainBreak>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT seq, timestamp, agent_id, action, detail, outcome, user_id, channel, \
+             prev_hash, hash FROM audit_entries ORDER BY seq ASC",
+        )
+        .map_err(|e| format!("prepare audit read: {e}"))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let action_str: String = row.get(3)?;
+            let action = action_str.parse::<AuditAction>().map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    3,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            let seq_raw: i64 = row.get(0)?;
+            let seq = u64::try_from(seq_raw)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, seq_raw))?;
+            let user_id_str: Option<String> = row.get(6)?;
+            let user_id = user_id_str.as_deref().and_then(|s| s.parse().ok());
+            let channel: Option<String> = row.get(7)?;
+            Ok(AuditEntry {
+                seq,
+                timestamp: row.get(1)?,
+                agent_id: row.get(2)?,
+                action,
+                detail: row.get(4)?,
+                outcome: row.get(5)?,
+                user_id,
+                channel,
+                prev_hash: row.get(8)?,
+                hash: row.get(9)?,
+            })
+        })
+        .map_err(|e| format!("query audit rows: {e}"))?;
+
+    let mut expected_prev: Option<String> = None;
+    for row in rows {
+        let entry = row.map_err(|e| format!("decode audit row: {e}"))?;
+
+        let baseline = expected_prev
+            .clone()
+            .unwrap_or_else(|| entry.prev_hash.clone());
+        if entry.prev_hash != baseline {
+            return Ok(Some(ChainBreak {
+                seq: entry.seq,
+                kind: ChainBreakKind::LinkMismatch,
+                expected: baseline,
+                found: entry.prev_hash,
+            }));
+        }
+
+        let recomputed = compute_entry_hash(
+            entry.seq,
+            &entry.timestamp,
+            &entry.agent_id,
+            &entry.action,
+            &entry.detail,
+            &entry.outcome,
+            entry.user_id.as_ref(),
+            entry.channel.as_deref(),
+            &entry.prev_hash,
+        );
+        let matches = recomputed == entry.hash
+            || compute_entry_hash_legacy(
+                entry.seq,
+                &entry.timestamp,
+                &entry.agent_id,
+                &entry.action,
+                &entry.detail,
+                &entry.outcome,
+                entry.user_id.as_ref(),
+                entry.channel.as_deref(),
+                &entry.prev_hash,
+            ) == entry.hash;
+
+        if !matches {
+            return Ok(Some(ChainBreak {
+                seq: entry.seq,
+                kind: ChainBreakKind::HashMismatch,
+                expected: recomputed,
+                found: entry.hash,
+            }));
+        }
+
+        expected_prev = Some(entry.hash);
+    }
+
+    Ok(None)
+}
+
+/// The result of a successful [`reanchor_after_break`] call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReanchorOutcome {
+    /// How many rows were deleted: the broken entry at `break_point.seq`
+    /// and everything after it (nothing before it is touched).
+    pub rows_deleted: u64,
+    /// The seq the synthetic [`AuditAction::ChainReanchored`] marker was
+    /// written at — always `break_point.seq`, reusing the slot the broken
+    /// entry occupied.
+    pub marker_seq: u64,
+    /// Hash of the marker entry. This is the new chain tip; callers that
+    /// maintain an external anchor file should rewrite it to
+    /// `marker_seq + 1 : new_tip` (the anchor's `seq` column tracks
+    /// persisted row count, not a raw seq number — see
+    /// `AuditLog::write_anchor`).
+    pub new_tip: String,
+}
+
+/// Recover from a diagnosed [`ChainBreak`] by truncating the chain at the
+/// break point and resuming it with a synthetic
+/// [`AuditAction::ChainReanchored`] marker entry.
+///
+/// Every entry with `seq < break_point.seq` is left untouched — this is
+/// the difference from `librefang security audit-reset`, which wipes the
+/// entire table. Only the entry that failed to verify, and anything
+/// chained after it (which cannot be trusted either, since it links
+/// forward from a hash that no longer matches what's on disk), is
+/// discarded.
+///
+/// Runs the delete + insert in one transaction so a crash mid-recovery
+/// cannot leave the table in a state worse than what `diagnose_chain`
+/// already found. Callers are responsible for ensuring no live daemon
+/// holds the database open first (same requirement `audit-reset` already
+/// enforces via `find_daemon_in_home`).
+pub fn reanchor_after_break(
+    conn: &mut rusqlite::Connection,
+    break_point: &ChainBreak,
+    operator_note: &str,
+) -> Result<ReanchorOutcome, String> {
+    use rusqlite::OptionalExtension;
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("begin reanchor transaction: {e}"))?;
+
+    let rows_deleted = tx
+        .execute(
+            "DELETE FROM audit_entries WHERE seq >= ?1",
+            rusqlite::params![break_point.seq as i64],
+        )
+        .map_err(|e| format!("delete broken tail: {e}"))? as u64;
+
+    // The row immediately before the break (if any survives) chains the
+    // marker; an empty table (break at seq 0) falls back to genesis.
+    let prev_hash: String = tx
+        .query_row(
+            "SELECT hash FROM audit_entries ORDER BY seq DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("read surviving tip: {e}"))?
+        .unwrap_or_else(|| "0".repeat(64));
+
+    let timestamp = Utc::now().to_rfc3339();
+    let detail = format!(
+        "{break_point}; operator note: {}",
+        if operator_note.trim().is_empty() {
+            "(none)"
+        } else {
+            operator_note.trim()
+        }
+    );
+    let hash = compute_entry_hash(
+        break_point.seq,
+        &timestamp,
+        "system",
+        &AuditAction::ChainReanchored,
+        &detail,
+        "reanchored",
+        None,
+        None,
+        &prev_hash,
+    );
+
+    tx.execute(
+        "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, prev_hash, hash) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            break_point.seq as i64,
+            &timestamp,
+            "system",
+            AuditAction::ChainReanchored.to_string(),
+            &detail,
+            "reanchored",
+            &prev_hash,
+            &hash,
+        ],
+    )
+    .map_err(|e| format!("insert reanchor marker: {e}"))?;
+
+    tx.commit()
+        .map_err(|e| format!("commit reanchor transaction: {e}"))?;
+
+    Ok(ReanchorOutcome {
+        rows_deleted,
+        marker_seq: break_point.seq,
+        new_tip: hash,
+    })
 }
 
 #[cfg(test)]

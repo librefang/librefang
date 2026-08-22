@@ -41,6 +41,7 @@ path = "src/main.rs"
 [dependencies]
 librefang-types = { path = "../librefang-types" }
 librefang-kernel = { path = "../librefang-kernel" }
+librefang-runtime-audit = { path = "../librefang-runtime-audit" }
 librefang-api = { path = "../librefang-api", default-features = false }
 librefang-channels = { path = "../librefang-channels", default-features = false }
 librefang-import = { path = "../librefang-import" }

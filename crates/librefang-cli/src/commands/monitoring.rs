@@ -265,6 +265,154 @@ pub(crate) fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
     ui::hint(&i18n::t("monitoring-audit-reset-seed-fresh"));
 }
 
+/// Recover from a diagnosed chain break without discarding history that
+/// verified cleanly (#7702).
+///
+/// Unlike `cmd_audit_reset`, this deletes only the broken entry and
+/// anything after it, then resumes the chain with a `ChainReanchored`
+/// marker. Same guards as `audit-reset`: refuses to run while the daemon
+/// holds the database, and without `--confirm` only reports the diagnosis.
+pub(crate) fn cmd_audit_reanchor(config: Option<PathBuf>, confirm: bool, note: &str) {
+    let daemon = daemon_config_context(config.as_deref());
+    let kernel_config = match load_config(config.as_deref()) {
+        Ok(cfg) => cfg,
+        Err(_) => std::process::exit(1),
+    };
+
+    let db_path = kernel_config
+        .memory
+        .sqlite_path
+        .clone()
+        .unwrap_or_else(|| kernel_config.data_dir.join("librefang.db"));
+
+    let anchor_path = match kernel_config.audit.anchor_path.as_ref() {
+        Some(p) if p.is_absolute() => p.clone(),
+        Some(p) => kernel_config.data_dir.join(p),
+        None => kernel_config.data_dir.join("audit.anchor"),
+    };
+
+    // Refuse if daemon is running — SQLite writer lock would block or corrupt.
+    if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
+        ui::error_with_fix(
+            &i18n::t_args("monitoring-daemon-running-error", &[("url", &base)]),
+            &i18n::t("monitoring-daemon-running-error-fix"),
+        );
+        std::process::exit(1);
+    }
+
+    if !db_path.exists() {
+        ui::error(&i18n::t_args(
+            "monitoring-db-not-found",
+            &[("path", &db_path.display().to_string())],
+        ));
+        std::process::exit(1);
+    }
+
+    let mut conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            ui::error(&i18n::t_args(
+                "monitoring-db-open-failed",
+                &[
+                    ("path", &db_path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ));
+            std::process::exit(1);
+        }
+    };
+
+    let break_point = match librefang_runtime_audit::diagnose_chain(&conn) {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            ui::success(&i18n::t("monitoring-audit-reanchor-chain-intact"));
+            return;
+        }
+        Err(e) => {
+            ui::error(&i18n::t_args(
+                "monitoring-audit-reanchor-diagnose-failed",
+                &[("error", &e)],
+            ));
+            std::process::exit(1);
+        }
+    };
+
+    ui::section(&i18n::t("monitoring-audit-reanchor-break-found-header"));
+    ui::kv_warn(&i18n::t("label-seq"), &break_point.seq.to_string());
+    ui::kv(
+        &i18n::t("monitoring-audit-reanchor-expected"),
+        &break_point.expected,
+    );
+    ui::kv(
+        &i18n::t("monitoring-audit-reanchor-found"),
+        &break_point.found,
+    );
+
+    if !confirm {
+        ui::blank();
+        println!("{}", i18n::t("monitoring-audit-reanchor-would-header"));
+        println!(
+            "{}",
+            i18n::t_args(
+                "monitoring-audit-reanchor-would-delete",
+                &[
+                    ("seq", &break_point.seq.to_string()),
+                    ("path", &db_path.display().to_string())
+                ]
+            )
+        );
+        println!("{}", i18n::t("monitoring-audit-reanchor-would-marker"));
+        ui::hint(&i18n::t("monitoring-audit-reanchor-preserves-history"));
+        std::process::exit(1);
+    }
+
+    let outcome = match librefang_runtime_audit::reanchor_after_break(&mut conn, &break_point, note)
+    {
+        Ok(o) => o,
+        Err(e) => {
+            ui::error(&i18n::t_args(
+                "monitoring-audit-reanchor-failed",
+                &[("error", &e)],
+            ));
+            std::process::exit(1);
+        }
+    };
+    drop(conn);
+
+    // Refresh the external anchor so the next boot's `verify_integrity`
+    // agrees with the just-written marker instead of raising a fresh
+    // "audit anchor mismatch" on top of the break we just fixed. `seq`
+    // tracks persisted row count (mirrors `AuditLog::write_anchor`), which
+    // after a reanchor is exactly `marker_seq + 1`.
+    if anchor_path.exists() || anchor_path.parent().is_some_and(|p| p.exists()) {
+        let anchor_line = format!("{}:{}", outcome.marker_seq + 1, outcome.new_tip);
+        if let Some(parent) = anchor_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&anchor_path, anchor_line) {
+            ui::warn_with_fix(
+                &i18n::t_args(
+                    "monitoring-audit-reanchor-anchor-refresh-failed",
+                    &[
+                        ("path", &anchor_path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
+                &i18n::t("monitoring-audit-reanchor-anchor-refresh-fix"),
+            );
+        }
+    }
+
+    ui::success(&i18n::t_args(
+        "monitoring-audit-reanchor-success",
+        &[
+            ("rows_deleted", &outcome.rows_deleted.to_string()),
+            ("marker_seq", &outcome.marker_seq.to_string()),
+        ],
+    ));
+    ui::hint(&i18n::t("monitoring-audit-reanchor-history-preserved"));
+}
+
 pub(crate) fn cmd_memory_list(agent: &str, json: bool) {
     let base = require_daemon("memory list");
     let agent = resolve_agent_id(&base, agent);

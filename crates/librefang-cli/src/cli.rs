@@ -1558,6 +1558,26 @@ pub(crate) enum SecurityCommands {
         #[arg(long)]
         confirm: bool,
     },
+    /// Recover from a chain break by truncating only the broken entry
+    /// onward and resuming the chain with a re-anchor marker.
+    ///
+    /// Unlike `audit-reset`, this preserves every entry before the break —
+    /// use it when `librefang security verify` reports a chain break you
+    /// have confirmed is legitimate (not tampering) and you want to keep
+    /// the pre-break forensic history instead of wiping the whole trail.
+    /// Requires `--confirm` and refuses to run while a daemon holds the
+    /// database.
+    #[command(
+        long_about = "Recover from a hash-chain break WITHOUT losing pre-break history.\n\nDiagnoses `audit_entries` for the first chain break (a `prev_hash` or `hash` mismatch), reports the exact seq and the expected-vs-found values, then — with `--confirm` — deletes only the broken entry and anything after it and writes a `ChainReanchored` marker entry so the chain resumes cleanly. Everything before the break is untouched.\n\nRefuses to run if the daemon is still holding the database. Requires `--confirm`.\n\nExamples:\n  librefang security audit-reanchor\n  librefang security audit-reanchor --confirm --note \"confirmed benign after incident review\""
+    )]
+    AuditReanchor {
+        /// Required. Without this flag the command reports the diagnosed break (if any) and exits non-zero.
+        #[arg(long)]
+        confirm: bool,
+        /// Optional operator note recorded in the reanchor marker's detail field.
+        #[arg(long, default_value = "")]
+        note: String,
+    },
 }
 
 #[derive(Subcommand)]

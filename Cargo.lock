@@ -4571,6 +4571,7 @@ dependencies = [
  "librefang-kernel",
  "librefang-memory",
  "librefang-runtime",
+ "librefang-runtime-audit",
  "librefang-skills",
  "librefang-types",
  "open",

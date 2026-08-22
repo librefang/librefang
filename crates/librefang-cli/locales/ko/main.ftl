@@ -702,6 +702,21 @@ monitoring-audit-reset-would-remove-anchor =     2. 앵커 파일 { $path } 제�
 monitoring-audit-reset-would-restart =   Merkle 체인은 다음 감사 이벤트부터 다시 시작됩니다.
 monitoring-daemon-running-error = 데몬이 { $url }에서 실행 중입니다. 감사 데이터베이스를 건드리지 않습니다
 monitoring-daemon-running-error-fix = 먼저 데몬을 중지하십시오: `librefang stop`
+label-seq = seq
+monitoring-audit-reanchor-chain-intact = 감사 체인이 온전합니다 — 재고정할 항목이 없습니다
+monitoring-audit-reanchor-diagnose-failed = audit_entries를 읽지 못했습니다: { $error }
+monitoring-audit-reanchor-break-found-header = 체인 손상 발견
+monitoring-audit-reanchor-expected = 예상값
+monitoring-audit-reanchor-found = 실제값
+monitoring-audit-reanchor-would-header =   수행 예정:
+monitoring-audit-reanchor-would-delete =     1. { $path }의 `audit_entries`에서 seq >= { $seq } 인 행을 DELETE
+monitoring-audit-reanchor-would-marker =     2. 비워진 seq에 ChainReanchored 마커를 삽입하고 마지막 잔존 항목에 체인 연결
+monitoring-audit-reanchor-preserves-history = 손상 지점 이전 항목은 절대 변경되지 않습니다 — 적용하려면 `--confirm`으로 다시 실행하십시오.
+monitoring-audit-reanchor-failed = 체인을 재고정하지 못했습니다: { $error }
+monitoring-audit-reanchor-anchor-refresh-failed = 앵커 { $path }을(를) 갱신하지 못했습니다: { $error }
+monitoring-audit-reanchor-anchor-refresh-fix = 데몬을 시작한 뒤 `librefang security verify`를 실행하여 앵커 일관성을 확인하십시오
+monitoring-audit-reanchor-success = 감사 추적이 재고정되었습니다: 손상 지점 이후 { $rows_deleted }개 행을 제거하고 seq { $marker_seq }에서 재개했습니다.
+monitoring-audit-reanchor-history-preserved = 손상 지점 이전의 모든 항목이 보존되었습니다. 다음 데몬 부팅 시 정상적으로 검증됩니다.
 monitoring-anchor-remove-failed = 앵커 { $path } 제거에 실패했습니다: { $error }
 monitoring-audit-reset-seed-fresh = 다음 데몬 부팅 시 현재 끝점에서 새 Merkle 체인이 시드됩니다.
 # skill.rs

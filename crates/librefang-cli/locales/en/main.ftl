@@ -702,6 +702,21 @@ monitoring-audit-reset-would-remove-anchor =     2. Remove anchor file { $path }
 monitoring-audit-reset-would-restart =   The Merkle chain will restart from the next audit event.
 monitoring-daemon-running-error = daemon is running at { $url }; refusing to touch the audit database
 monitoring-daemon-running-error-fix = stop the daemon first: `librefang stop`
+label-seq = seq
+monitoring-audit-reanchor-chain-intact = audit chain is intact — nothing to reanchor
+monitoring-audit-reanchor-diagnose-failed = failed to read audit_entries: { $error }
+monitoring-audit-reanchor-break-found-header = Chain break found
+monitoring-audit-reanchor-expected = expected
+monitoring-audit-reanchor-found = found
+monitoring-audit-reanchor-would-header =   Would:
+monitoring-audit-reanchor-would-delete =     1. DELETE rows with seq >= { $seq } from `audit_entries` in { $path }
+monitoring-audit-reanchor-would-marker =     2. Insert a ChainReanchored marker at the freed seq, chained from the last surviving entry
+monitoring-audit-reanchor-preserves-history = Entries before the break are never touched — re-run with `--confirm` to apply.
+monitoring-audit-reanchor-failed = failed to reanchor the chain: { $error }
+monitoring-audit-reanchor-anchor-refresh-failed = failed to refresh anchor { $path }: { $error }
+monitoring-audit-reanchor-anchor-refresh-fix = run `librefang security verify` after starting the daemon to confirm the anchor is consistent
+monitoring-audit-reanchor-success = Audit trail reanchored: removed { $rows_deleted } row(s) from the break onward, resumed at seq { $marker_seq }.
+monitoring-audit-reanchor-history-preserved = Every entry before the break was preserved. The next daemon boot will verify cleanly.
 monitoring-anchor-remove-failed = failed to remove anchor { $path }: { $error }
 monitoring-audit-reset-seed-fresh = The next daemon boot will seed a fresh Merkle chain from the current tip.
 # skill.rs

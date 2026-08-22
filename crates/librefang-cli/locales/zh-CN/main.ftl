@@ -1658,6 +1658,21 @@ monitoring-audit-reset-would-remove-anchor =     2. 移除 anchor 文件 { $path
 monitoring-audit-reset-would-restart =   Merkle 链将在下一条审计事件处重新开始。
 monitoring-daemon-running-error = 守护进程正在 { $url } 运行；拒绝修改审计数据库
 monitoring-daemon-running-error-fix = 请先停止守护进程：`librefang stop`
+label-seq = seq
+monitoring-audit-reanchor-chain-intact = 审计链完整 — 无需重新锚定
+monitoring-audit-reanchor-diagnose-failed = 读取 audit_entries 失败：{ $error }
+monitoring-audit-reanchor-break-found-header = 发现链断裂
+monitoring-audit-reanchor-expected = 期望
+monitoring-audit-reanchor-found = 实际
+monitoring-audit-reanchor-would-header =   将会：
+monitoring-audit-reanchor-would-delete =     1. 从 { $path } 的 `audit_entries` 中 DELETE seq >= { $seq } 的行
+monitoring-audit-reanchor-would-marker =     2. 在空出的 seq 处插入 ChainReanchored 标记，并链接到最后一条保留的条目
+monitoring-audit-reanchor-preserves-history = 断裂点之前的条目绝不会被改动 — 使用 `--confirm` 重新运行以执行。
+monitoring-audit-reanchor-failed = 重新锚定链失败：{ $error }
+monitoring-audit-reanchor-anchor-refresh-failed = 刷新锚点 { $path } 失败：{ $error }
+monitoring-audit-reanchor-anchor-refresh-fix = 启动守护进程后运行 `librefang security verify` 以确认锚点一致
+monitoring-audit-reanchor-success = 审计轨迹已重新锚定：从断裂点起移除了 { $rows_deleted } 行，已在 seq { $marker_seq } 处恢复。
+monitoring-audit-reanchor-history-preserved = 断裂点之前的每一条条目都已保留。下次守护进程启动将干净通过校验。
 monitoring-anchor-remove-failed = 移除 anchor { $path } 失败：{ $error }
 monitoring-audit-reset-seed-fresh = 下次守护进程启动时会从当前 tip 初始化新的 Merkle 链。
 # skill.rs

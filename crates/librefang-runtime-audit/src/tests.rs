@@ -2101,3 +2101,362 @@ fn verify_integrity_accepts_legacy_hashed_entries() {
         "legacy-hashed entries must verify via the v1 fallback"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #7702: chain-break detection, boot recovery, and offline re-anchor
+// ---------------------------------------------------------------------------
+
+fn audit_schema_pool() -> Pool<SqliteConnectionManager> {
+    let pool = Pool::builder()
+        .max_size(1)
+        .build(SqliteConnectionManager::memory())
+        .unwrap();
+    pool.get()
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+    pool
+}
+
+/// Directly corrupts the `prev_hash` of the row at `seq`, reproducing the
+/// exact symptom from #7702 ("chain break at seq 204: expected prev_hash
+/// ... but found ...") without needing to reverse-engineer whatever
+/// produced it live on proteo.
+fn corrupt_prev_hash(pool: &Pool<SqliteConnectionManager>, seq: u64, bogus_prev_hash: &str) {
+    pool.get()
+        .unwrap()
+        .execute(
+            "UPDATE audit_entries SET prev_hash = ?1 WHERE seq = ?2",
+            rusqlite::params![bogus_prev_hash, seq as i64],
+        )
+        .unwrap();
+}
+
+#[test]
+fn boot_detects_chain_break_reports_exact_seq_and_does_not_prevent_startup() {
+    let pool = audit_schema_pool();
+
+    // Build a healthy 5-entry chain the normal way.
+    {
+        let log = AuditLog::with_db(pool.clone());
+        for i in 0..5 {
+            log.record(
+                "agent-1",
+                AuditAction::ToolInvoke,
+                format!("action {i}"),
+                "ok",
+            );
+        }
+    }
+
+    // Corrupt seq=3's prev_hash — the exact failure mode reported in #7702.
+    let bogus = "f".repeat(64);
+    corrupt_prev_hash(&pool, 3, &bogus);
+
+    // Boot must not panic or abort — AuditLog::with_db always returns a
+    // usable log, per the existing "log at WARN, keep booting" contract.
+    let log = AuditLog::with_db(pool.clone());
+    assert_eq!(log.len(), 5, "all rows must still load into memory");
+
+    let error = log
+        .verify_integrity()
+        .expect_err("a corrupted prev_hash must fail verification");
+    assert!(
+        error.contains("chain break at seq 3"),
+        "error must name the exact seq: {error}"
+    );
+    assert!(
+        error.contains(&bogus),
+        "error must include the actually-found prev_hash: {error}"
+    );
+
+    // The daemon must still be able to use the log after a failed boot
+    // verification — appends keep working, they just extend a chain
+    // whose pre-break integrity is now flagged as compromised.
+    log.record(
+        "agent-1",
+        AuditAction::ToolInvoke,
+        "post-break append",
+        "ok",
+    );
+    assert_eq!(log.len(), 6);
+}
+
+#[test]
+fn diagnose_chain_finds_the_same_break_boot_verification_reports() {
+    let pool = audit_schema_pool();
+    {
+        let log = AuditLog::with_db(pool.clone());
+        for i in 0..5 {
+            log.record(
+                "agent-1",
+                AuditAction::ToolInvoke,
+                format!("action {i}"),
+                "ok",
+            );
+        }
+    }
+    let bogus = "e".repeat(64);
+    corrupt_prev_hash(&pool, 3, &bogus);
+
+    let conn = pool.get().unwrap();
+    let break_point = diagnose_chain(&conn)
+        .unwrap()
+        .expect("diagnose_chain must detect the corrupted row");
+
+    assert_eq!(break_point.seq, 3);
+    assert_eq!(break_point.kind, ChainBreakKind::LinkMismatch);
+    assert_eq!(break_point.found, bogus);
+    assert_eq!(
+        break_point.to_string(),
+        format!(
+            "chain break at seq 3: expected prev_hash {} but found {bogus}",
+            break_point.expected
+        )
+    );
+}
+
+#[test]
+fn diagnose_chain_returns_none_for_a_healthy_chain() {
+    let pool = audit_schema_pool();
+    {
+        let log = AuditLog::with_db(pool.clone());
+        for i in 0..5 {
+            log.record(
+                "agent-1",
+                AuditAction::ToolInvoke,
+                format!("action {i}"),
+                "ok",
+            );
+        }
+    }
+    let conn = pool.get().unwrap();
+    assert_eq!(diagnose_chain(&conn).unwrap(), None);
+}
+
+#[test]
+fn diagnose_chain_detects_hash_mismatch_distinct_from_link_mismatch() {
+    let pool = audit_schema_pool();
+    {
+        let log = AuditLog::with_db(pool.clone());
+        for i in 0..3 {
+            log.record(
+                "agent-1",
+                AuditAction::ToolInvoke,
+                format!("action {i}"),
+                "ok",
+            );
+        }
+    }
+    // Tamper with content but leave prev_hash untouched — this must be
+    // caught as a HashMismatch, not a LinkMismatch: the chain *link* into
+    // this row is fine, but the row's own recorded hash no longer matches
+    // its (now-altered) content.
+    pool.get()
+        .unwrap()
+        .execute(
+            "UPDATE audit_entries SET detail = 'tampered' WHERE seq = 1",
+            [],
+        )
+        .unwrap();
+
+    let conn = pool.get().unwrap();
+    let break_point = diagnose_chain(&conn).unwrap().unwrap();
+    assert_eq!(break_point.seq, 1);
+    assert_eq!(break_point.kind, ChainBreakKind::HashMismatch);
+}
+
+#[test]
+fn reanchor_after_break_preserves_pre_break_history_and_resumes_a_verifiable_chain() {
+    let pool = audit_schema_pool();
+    {
+        let log = AuditLog::with_db(pool.clone());
+        for i in 0..5 {
+            log.record(
+                "agent-1",
+                AuditAction::ToolInvoke,
+                format!("action {i}"),
+                "ok",
+            );
+        }
+    }
+    let bogus = "d".repeat(64);
+    corrupt_prev_hash(&pool, 3, &bogus);
+
+    let break_point = {
+        let conn = pool.get().unwrap();
+        diagnose_chain(&conn).unwrap().unwrap()
+    };
+    assert_eq!(break_point.seq, 3);
+
+    let outcome = {
+        let mut conn = pool.get().unwrap();
+        reanchor_after_break(
+            &mut conn,
+            &break_point,
+            "operator confirmed via #7702 runbook",
+        )
+        .unwrap()
+    };
+    // seq 3 and 4 (2 rows) are deleted; a single marker is written back at seq 3.
+    assert_eq!(outcome.rows_deleted, 2);
+    assert_eq!(outcome.marker_seq, 3);
+
+    // Rows 0-2 (pre-break) must be untouched.
+    let conn = pool.get().unwrap();
+    let survivors: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM audit_entries WHERE seq < 3",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(survivors, 3, "pre-break history must be fully preserved");
+
+    let marker_action: String = conn
+        .query_row("SELECT action FROM audit_entries WHERE seq = 3", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(marker_action, "ChainReanchored");
+
+    // The DB is now internally consistent again — both the raw diagnostic
+    // and a full AuditLog reload must agree the chain is clean.
+    assert_eq!(diagnose_chain(&conn).unwrap(), None);
+    drop(conn);
+
+    let log = AuditLog::with_db(pool.clone());
+    assert_eq!(log.len(), 4, "3 survivors + 1 reanchor marker");
+    assert!(
+        log.verify_integrity().is_ok(),
+        "the reanchored chain must verify cleanly on a fresh boot"
+    );
+
+    // The chain keeps working going forward.
+    log.record(
+        "agent-1",
+        AuditAction::ToolInvoke,
+        "post-reanchor append",
+        "ok",
+    );
+    assert_eq!(log.len(), 5);
+    assert!(log.verify_integrity().is_ok());
+}
+
+#[test]
+fn reanchor_after_break_at_seq_zero_falls_back_to_genesis() {
+    // Degenerate case: the very first row is already broken, so nothing
+    // survives before it. The marker must chain from genesis, not panic
+    // on an empty "surviving tip" query.
+    let pool = audit_schema_pool();
+    let genesis = "0".repeat(64);
+    let bogus_first_prev = "c".repeat(64);
+    let hash0 = compute_entry_hash(
+        0,
+        "2026-01-01T00:00:00+00:00",
+        "agent-1",
+        &AuditAction::AgentSpawn,
+        "boot",
+        "ok",
+        None,
+        None,
+        &bogus_first_prev,
+    );
+    pool.get()
+        .unwrap()
+        .execute(
+            "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, prev_hash, hash) \
+             VALUES (0, '2026-01-01T00:00:00+00:00', 'agent-1', 'AgentSpawn', 'boot', 'ok', ?1, ?2)",
+            rusqlite::params![bogus_first_prev, hash0],
+        )
+        .unwrap();
+
+    // seq=0's prev_hash is accepted as the anchor by `diagnose_chain`
+    // (mirrors `AuditLog::with_db`'s anchor recovery), so a lone row never
+    // reports a break on its own. Force the degenerate case directly by
+    // constructing the break by hand instead.
+    let break_point = ChainBreak {
+        seq: 0,
+        kind: ChainBreakKind::LinkMismatch,
+        expected: genesis.clone(),
+        found: bogus_first_prev,
+    };
+
+    let outcome = {
+        let mut conn = pool.get().unwrap();
+        reanchor_after_break(&mut conn, &break_point, "").unwrap()
+    };
+    assert_eq!(outcome.rows_deleted, 1);
+
+    let conn = pool.get().unwrap();
+    let prev_hash: String = conn
+        .query_row(
+            "SELECT prev_hash FROM audit_entries WHERE seq = 0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        prev_hash, genesis,
+        "marker must chain from the genesis sentinel"
+    );
+    assert_eq!(diagnose_chain(&conn).unwrap(), None);
+}
+
+#[test]
+fn reanchor_after_break_records_seq_and_note_in_marker_detail() {
+    let pool = audit_schema_pool();
+    {
+        let log = AuditLog::with_db(pool.clone());
+        for i in 0..2 {
+            log.record(
+                "agent-1",
+                AuditAction::ToolInvoke,
+                format!("action {i}"),
+                "ok",
+            );
+        }
+    }
+    let bogus = "b".repeat(64);
+    corrupt_prev_hash(&pool, 1, &bogus);
+
+    let break_point = {
+        let conn = pool.get().unwrap();
+        diagnose_chain(&conn).unwrap().unwrap()
+    };
+    {
+        let mut conn = pool.get().unwrap();
+        reanchor_after_break(
+            &mut conn,
+            &break_point,
+            "confirmed benign after proteo incident review",
+        )
+        .unwrap();
+    }
+
+    let conn = pool.get().unwrap();
+    let detail: String = conn
+        .query_row("SELECT detail FROM audit_entries WHERE seq = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(detail.contains("seq 1"), "{detail}");
+    assert!(detail.contains(&bogus), "{detail}");
+    assert!(
+        detail.contains("confirmed benign after proteo incident review"),
+        "{detail}"
+    );
+}

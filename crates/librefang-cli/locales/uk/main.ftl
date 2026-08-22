@@ -714,6 +714,21 @@ monitoring-audit-reset-would-remove-anchor =     2. Вилучено якірн�
 monitoring-audit-reset-would-restart =   Ланцюг Меркла розпочнеться заново з наступної події аудиту.
 monitoring-daemon-running-error = демон запущений за адресою { $url }; відмовлено у зміні бази даних аудиту
 monitoring-daemon-running-error-fix = спочатку зупиніть демона: `librefang stop`
+label-seq = seq
+monitoring-audit-reanchor-chain-intact = ланцюг аудиту цілий — немає чого переприв'язувати
+monitoring-audit-reanchor-diagnose-failed = не вдалося прочитати audit_entries: { $error }
+monitoring-audit-reanchor-break-found-header = Знайдено розрив ланцюга
+monitoring-audit-reanchor-expected = очікувалося
+monitoring-audit-reanchor-found = знайдено
+monitoring-audit-reanchor-would-header =   Буде виконано:
+monitoring-audit-reanchor-would-delete =     1. DELETE рядків із seq >= { $seq } з `audit_entries` у { $path }
+monitoring-audit-reanchor-would-marker =     2. Вставку маркера ChainReanchored на звільненому seq, зчепленого з останнім уцілілим записом
+monitoring-audit-reanchor-preserves-history = Записи до розриву ніколи не змінюються — запустіть повторно з `--confirm`, щоб застосувати.
+monitoring-audit-reanchor-failed = не вдалося переприв'язати ланцюг: { $error }
+monitoring-audit-reanchor-anchor-refresh-failed = не вдалося оновити якір { $path }: { $error }
+monitoring-audit-reanchor-anchor-refresh-fix = запустіть `librefang security verify` після старту демона, щоб підтвердити узгодженість якоря
+monitoring-audit-reanchor-success = Журнал аудиту переприв'язано: видалено { $rows_deleted } рядк(ів) від розриву далі, відновлено на seq { $marker_seq }.
+monitoring-audit-reanchor-history-preserved = Кожен запис до розриву збережено. Наступне завантаження демона пройде перевірку чисто.
 monitoring-anchor-remove-failed = не вдалося вилучити якір { $path }: { $error }
 monitoring-audit-reset-seed-fresh = Наступний запуск демона створить свіжий ланцюг Меркла з поточного кінця.
 
