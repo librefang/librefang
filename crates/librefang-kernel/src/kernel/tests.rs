@@ -3546,6 +3546,504 @@ fn test_set_agent_mcp_servers_persists_allowlist_to_agent_toml() {
 }
 
 #[test]
+fn concurrent_full_and_mcp_manifest_persists_keep_both_registry_updates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let toml_path = tmp.path().join("agent.toml");
+    let kernel = Arc::new(
+        LibreFangKernel::boot_with_config(KernelConfig {
+            home_dir: tmp.path().to_path_buf(),
+            data_dir: tmp.path().join("data"),
+            ..KernelConfig::default()
+        })
+        .expect("boot"),
+    );
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "concurrent-manifest-writers".to_string(),
+                ..Default::default()
+            },
+            None,
+            Some(toml_path.clone()),
+            None,
+        )
+        .expect("spawn");
+    kernel.persist_manifest_to_disk(agent_id);
+    register_mcp_server(&kernel, "concurrent-server");
+    kernel
+        .tools_ref()
+        .lock()
+        .unwrap()
+        .push(librefang_types::tool::ToolDefinition {
+            name: "mcp_concurrent_server_dummy".to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        });
+
+    let write_lock = Arc::new(std::sync::Mutex::new(()));
+    kernel
+        .agents
+        .manifest_write_locks
+        .insert(toml_path.clone(), Arc::clone(&write_lock));
+    let write_guard = write_lock.lock().unwrap();
+    let mcp_writer = {
+        let kernel = Arc::clone(&kernel);
+        std::thread::spawn(move || {
+            kernel
+                .set_agent_mcp_servers(agent_id, vec!["concurrent-server".to_string()])
+                .expect("MCP persist");
+        })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .unwrap()
+        .manifest
+        .mcp_servers
+        .is_empty()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "MCP registry update timed out"
+        );
+        std::thread::yield_now();
+    }
+    kernel
+        .agents
+        .registry
+        .update_model(agent_id, "concurrent-model".to_string())
+        .expect("model registry update");
+    let full_writer = {
+        let kernel = Arc::clone(&kernel);
+        std::thread::spawn(move || kernel.persist_manifest_to_disk(agent_id))
+    };
+    drop(write_guard);
+    mcp_writer.join().unwrap();
+    full_writer.join().unwrap();
+
+    let persisted: AgentManifest =
+        toml::from_str(&std::fs::read_to_string(toml_path).unwrap()).unwrap();
+    assert_eq!(persisted.model.model, "concurrent-model");
+    assert_eq!(persisted.mcp_servers, vec!["concurrent-server"]);
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_mcp_connect_paths_register_one_connection_per_server() {
+    use librefang_types::config::{HttpCompatToolConfig, McpServerConfigEntry, McpTransportEntry};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let backend = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(100)))
+        .mount(&backend)
+        .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        ..KernelConfig::default()
+    };
+    config.mcp_servers.push(McpServerConfigEntry {
+        name: "concurrent-http-compat".to_string(),
+        template_id: None,
+        transport: Some(McpTransportEntry::HttpCompat {
+            base_url: backend.uri(),
+            headers: Vec::new(),
+            tools: vec![HttpCompatToolConfig {
+                name: "probe".to_string(),
+                path: "/probe".to_string(),
+                ..Default::default()
+            }],
+        }),
+        timeout_secs: 5,
+        env: Vec::new(),
+        headers: Vec::new(),
+        oauth: None,
+        taint_scanning: true,
+        taint_policy: None,
+    });
+
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("boot"));
+    let ((), reloaded) = tokio::join!(kernel.connect_mcp_servers(), kernel.reload_mcp_servers());
+    reloaded.expect("reload");
+
+    let connections = kernel.mcp.mcp_connections.lock().await;
+    assert_eq!(
+        connections.len(),
+        1,
+        "concurrent connection paths must not both publish the same server"
+    );
+    drop(connections);
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn disconnect_waits_for_inflight_mcp_connection_before_removing_it() {
+    use librefang_types::config::{HttpCompatToolConfig, McpServerConfigEntry, McpTransportEntry};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let backend = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(500)))
+        .mount(&backend)
+        .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        ..KernelConfig::default()
+    };
+    config.mcp_servers.push(McpServerConfigEntry {
+        name: "disconnect-inflight".to_string(),
+        template_id: None,
+        transport: Some(McpTransportEntry::HttpCompat {
+            base_url: backend.uri(),
+            headers: Vec::new(),
+            tools: vec![HttpCompatToolConfig {
+                name: "probe".to_string(),
+                path: "/probe".to_string(),
+                ..Default::default()
+            }],
+        }),
+        timeout_secs: 5,
+        env: Vec::new(),
+        headers: Vec::new(),
+        oauth: None,
+        taint_scanning: true,
+        taint_policy: None,
+    });
+
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("boot"));
+    let connector = {
+        let kernel = Arc::clone(&kernel);
+        tokio::spawn(async move { kernel.connect_mcp_servers().await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if !backend
+                .received_requests()
+                .await
+                .expect("recorded requests")
+                .is_empty()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("connection probe should reach backend");
+
+    assert!(kernel.disconnect_mcp_server("disconnect-inflight").await);
+    connector.await.expect("connector task");
+    assert!(kernel.mcp.mcp_connections.lock().await.is_empty());
+    assert!(kernel.mcp.mcp_tools.lock().unwrap().is_empty());
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_connection_paths_do_not_reconnect_after_auth_is_revoked() {
+    use librefang_runtime::mcp_oauth::McpAuthState;
+    use librefang_types::config::{HttpCompatToolConfig, McpServerConfigEntry, McpTransportEntry};
+    use wiremock::MockServer;
+
+    let backend = MockServer::start().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        ..KernelConfig::default()
+    };
+    config.mcp_servers.push(McpServerConfigEntry {
+        name: "revoked-server".to_string(),
+        template_id: None,
+        transport: Some(McpTransportEntry::HttpCompat {
+            base_url: backend.uri(),
+            headers: Vec::new(),
+            tools: vec![HttpCompatToolConfig {
+                name: "probe".to_string(),
+                path: "/probe".to_string(),
+                ..Default::default()
+            }],
+        }),
+        timeout_secs: 5,
+        env: Vec::new(),
+        headers: Vec::new(),
+        oauth: None,
+        taint_scanning: true,
+        taint_policy: None,
+    });
+
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("boot"));
+    kernel
+        .mcp
+        .mcp_auth_states
+        .lock()
+        .await
+        .insert("revoked-server".to_string(), McpAuthState::NeedsAuth);
+    kernel.connect_mcp_servers().await;
+    assert_eq!(kernel.reload_mcp_servers().await.unwrap(), 0);
+    assert!(kernel.reconnect_mcp_server("revoked-server").await.is_err());
+    kernel.retry_mcp_connection("revoked-server").await;
+
+    assert!(kernel.mcp.mcp_connections.lock().await.is_empty());
+    assert!(backend
+        .received_requests()
+        .await
+        .expect("recorded requests")
+        .is_empty());
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_config_change_clears_stale_needs_auth_before_reconnect() {
+    use librefang_runtime::mcp_oauth::McpAuthState;
+    use librefang_types::config::{HttpCompatToolConfig, McpServerConfigEntry, McpTransportEntry};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let old_backend = MockServer::start().await;
+    let new_backend = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&new_backend)
+        .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        ..KernelConfig::default()
+    };
+    config.mcp_servers.push(McpServerConfigEntry {
+        name: "changed-auth-server".to_string(),
+        template_id: None,
+        transport: Some(McpTransportEntry::HttpCompat {
+            base_url: old_backend.uri(),
+            headers: Vec::new(),
+            tools: vec![HttpCompatToolConfig {
+                name: "probe".to_string(),
+                path: "/probe".to_string(),
+                ..Default::default()
+            }],
+        }),
+        timeout_secs: 5,
+        env: Vec::new(),
+        headers: Vec::new(),
+        oauth: None,
+        taint_scanning: true,
+        taint_policy: None,
+    });
+
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("boot"));
+    kernel
+        .mcp
+        .mcp_auth_states
+        .lock()
+        .await
+        .insert("changed-auth-server".to_string(), McpAuthState::NeedsAuth);
+    let mut changed_config = (*kernel.config.load_full()).clone();
+    changed_config.mcp_servers[0].transport = Some(McpTransportEntry::HttpCompat {
+        base_url: new_backend.uri(),
+        headers: Vec::new(),
+        tools: vec![HttpCompatToolConfig {
+            name: "probe".to_string(),
+            path: "/probe".to_string(),
+            ..Default::default()
+        }],
+    });
+    kernel.config.store(Arc::new(changed_config));
+
+    assert_eq!(kernel.reload_mcp_servers().await.unwrap(), 1);
+    assert!(kernel
+        .mcp
+        .mcp_auth_states
+        .lock()
+        .await
+        .get("changed-auth-server")
+        .is_none());
+    assert_eq!(kernel.mcp.mcp_connections.lock().await.len(), 1);
+    assert!(old_backend
+        .received_requests()
+        .await
+        .expect("old requests")
+        .is_empty());
+    assert_eq!(
+        new_backend
+            .received_requests()
+            .await
+            .expect("new requests")
+            .len(),
+        1
+    );
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn config_hot_reload_waits_for_inflight_mcp_auth_result_before_resetting_state() {
+    use librefang_runtime::mcp_oauth::McpAuthState;
+    use librefang_types::config::{HttpCompatToolConfig, McpServerConfigEntry, McpTransportEntry};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let old_backend = MockServer::start().await;
+    let new_backend = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&new_backend)
+        .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        default_model: DefaultModelConfig {
+            provider: "anthropic".to_string(),
+            model: "user-picked-model".to_string(),
+            api_key_env: "ANTHROPIC_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::BTreeMap::new(),
+            cli_profile_dirs: Vec::new(),
+        },
+        ..KernelConfig::default()
+    };
+    config.mcp_servers.push(McpServerConfigEntry {
+        name: "hot-reload-auth-server".to_string(),
+        template_id: None,
+        transport: Some(McpTransportEntry::HttpCompat {
+            base_url: old_backend.uri(),
+            headers: Vec::new(),
+            tools: vec![HttpCompatToolConfig {
+                name: "probe".to_string(),
+                path: "/probe".to_string(),
+                ..Default::default()
+            }],
+        }),
+        timeout_secs: 5,
+        env: Vec::new(),
+        headers: Vec::new(),
+        oauth: None,
+        taint_scanning: true,
+        taint_policy: None,
+    });
+
+    let mut file_config = config.clone();
+    file_config.mcp_servers.clear();
+    let baseline_toml = toml::to_string_pretty(&file_config).expect("serialize baseline config");
+    let changed_toml = format!(
+        "{baseline_toml}\n[[mcp_servers]]\nname = \"hot-reload-auth-server\"\ntimeout_secs = 5\ntaint_scanning = true\n\n[mcp_servers.transport]\ntype = \"http_compat\"\nbase_url = \"{}\"\n\n[[mcp_servers.transport.tools]]\nname = \"probe\"\npath = \"/probe\"\nmethod = \"get\"\n",
+        new_backend.uri()
+    );
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("boot"));
+    kernel.set_self_handle();
+    std::fs::write(tmp.path().join("config.toml"), changed_toml).expect("write changed config");
+
+    let connection_op = kernel.mcp.mcp_connection_ops.lock().await;
+    let mut reload_task = {
+        let kernel = Arc::clone(&kernel);
+        tokio::spawn(async move { kernel.reload_config().await })
+    };
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(250), &mut reload_task)
+            .await
+            .is_err(),
+        "config hot reload must wait for the in-flight connection operation"
+    );
+    kernel.mcp.mcp_auth_states.lock().await.insert(
+        "hot-reload-auth-server".to_string(),
+        McpAuthState::NeedsAuth,
+    );
+    drop(connection_op);
+    reload_task
+        .await
+        .expect("reload task")
+        .expect("reload config");
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if kernel.mcp.mcp_connections.lock().await.len() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("new config should reconnect after the stale auth state is reset");
+    assert!(kernel
+        .mcp
+        .mcp_auth_states
+        .lock()
+        .await
+        .get("hot-reload-auth-server")
+        .is_none());
+    assert_eq!(kernel.mcp.mcp_connections.lock().await.len(), 1);
+    assert_eq!(
+        new_backend
+            .received_requests()
+            .await
+            .expect("new backend requests")
+            .len(),
+        1
+    );
+    assert!(old_backend
+        .received_requests()
+        .await
+        .expect("old backend requests")
+        .is_empty());
+    kernel.shutdown();
+}
+
+#[test]
+fn hand_agent_mcp_update_is_rejected_without_touching_shared_manifest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source_path = tmp.path().join("hand.toml");
+    let original = "# shared hand manifest\nid = \"test-hand\"\n";
+    std::fs::write(&source_path, original).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("boot");
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "test-hand:worker".to_string(),
+                tags: vec!["hand:test-hand".to_string()],
+                ..Default::default()
+            },
+            None,
+            Some(source_path.clone()),
+            None,
+        )
+        .expect("spawn hand-derived agent");
+
+    let error = kernel
+        .set_agent_mcp_servers(agent_id, Vec::new())
+        .expect_err("hand-derived allowlist must be controlled by the Hand definition");
+    assert!(matches!(
+        error,
+        KernelError::LibreFang(LibreFangError::InvalidInput(_))
+    ));
+    assert_eq!(std::fs::read_to_string(source_path).unwrap(), original);
+    assert!(kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .unwrap()
+        .manifest
+        .mcp_servers
+        .is_empty());
+    kernel.shutdown();
+}
+
+#[test]
 fn test_reload_skills_preserves_disabled_and_extra_dirs() {
     // Hot-reload used to instantiate a fresh `SkillRegistry` without
     // re-applying policy, so the disabled list and extra_dirs overlay

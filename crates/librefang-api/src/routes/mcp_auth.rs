@@ -1181,10 +1181,13 @@ pub async fn auth_revoke(
         let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
         auth_states.insert(name.clone(), McpAuthState::NeedsAuth);
     }
-    {
-        let mut conns = state.kernel.mcp_connections_ref().lock().await;
-        conns.retain(|c| c.name() != name);
-    }
+    state.kernel.disconnect_mcp_server(&name).await;
+    state
+        .kernel
+        .mcp_auth_states_ref()
+        .lock()
+        .await
+        .insert(name.clone(), McpAuthState::NeedsAuth);
 
     let provider = state.kernel.oauth_provider_ref();
     if let Err(e) = provider.clear_tokens(&server_url).await {

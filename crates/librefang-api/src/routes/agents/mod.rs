@@ -560,6 +560,27 @@ fn patch_agent_mcp_servers(body: &serde_json::Value) -> Result<Option<Vec<String
     Ok(Some(servers))
 }
 
+fn patch_agent_only_updates_mcp_servers(body: &serde_json::Value) -> bool {
+    if patch_agent_mcp_servers(body).ok().flatten().is_none() {
+        return false;
+    }
+    let Some(fields) = body.as_object() else {
+        return false;
+    };
+    if fields.len() != 1 {
+        return false;
+    }
+    if fields.contains_key("mcp_servers") {
+        return true;
+    }
+    fields
+        .get("capabilities")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|capabilities| {
+            capabilities.len() == 1 && capabilities.contains_key("mcp_servers")
+        })
+}
+
 /// Translate a kernel error into the right HTTP status code for the
 /// generic CRUD-style /api/agents/* error paths (audit:
 /// agent-not-found-returns-500). The handler then renders the error
