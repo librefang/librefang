@@ -291,15 +291,7 @@ pub async fn skillhub_install(
         }
         Err(e) => {
             let msg = format!("{e}");
-            let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
-                StatusCode::FORBIDDEN
-            } else if is_clawhub_rate_limit(&e) {
-                StatusCode::TOO_MANY_REQUESTS
-            } else if matches!(e, librefang_skills::SkillError::Network(_)) {
-                StatusCode::BAD_GATEWAY
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
+            let status = install_error_status(&e);
             tracing::warn!("Skillhub install failed: {msg}");
             // See ClawHub install above: 500 catch-all scrubbed
             // (audit: rusqlite-errors-leak), actionable 4xx / 502

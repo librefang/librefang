@@ -1,0 +1,3 @@
+Installing a marketplace skill whose published `SKILL.md` has malformed YAML frontmatter now answers `400` with the parse error instead of `500` with the body scrubbed to "Internal server error".
+Nothing on the server is wrong in that case and a retry re-downloads the same broken file, so the old status described a fault the caller could never clear and withheld the one detail that would have explained it.
+The ClawHub, ClawHub-CN and SkillHub install handlers each carried their own copy of the error-to-status chain and now share one, so the same failure cannot report a different status per hub (#7753) (@DaBlitzStein)

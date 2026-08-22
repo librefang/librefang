@@ -435,6 +435,25 @@ fn is_clawhub_rate_limit(err: &librefang_skills::SkillError) -> bool {
     matches!(err, librefang_skills::SkillError::RateLimited(_))
 }
 
+/// HTTP status for a failed marketplace install.
+///
+/// Shared by the ClawHub, ClawHub-CN and SkillHub install handlers so the
+/// three cannot drift: a caller that gets a 500 from one hub and a 400 from
+/// another for the same failure has no way to tell whether to retry.
+///
+/// `YamlParse` is the published skill's own `SKILL.md` frontmatter failing to
+/// parse. Nothing on this server is broken and retrying installs the same
+/// broken file again, so it is a 400 and not a 500.
+fn install_error_status(err: &librefang_skills::SkillError) -> StatusCode {
+    match err {
+        librefang_skills::SkillError::SecurityBlocked(_) => StatusCode::FORBIDDEN,
+        librefang_skills::SkillError::YamlParse(_) => StatusCode::BAD_REQUEST,
+        librefang_skills::SkillError::Network(_) => StatusCode::BAD_GATEWAY,
+        e if is_clawhub_rate_limit(e) => StatusCode::TOO_MANY_REQUESTS,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
 /// Convert a browse entry (nested stats/tags) to a flat JSON object for the frontend.
 fn clawhub_browse_entry_to_json(
     entry: &librefang_skills::clawhub::ClawHubBrowseEntry,
@@ -1284,6 +1303,45 @@ fn status_str_for_catalog(
 mod tests {
     use super::*;
     use librefang_types::config::{McpServerConfigEntry, McpTransportEntry};
+
+    /// A skill whose own `SKILL.md` frontmatter is malformed is a bad request,
+    /// not a server fault: the daemon is healthy and retrying re-downloads the
+    /// same broken file. It used to fall through to the 500 catch-all, which
+    /// also scrubbed the parse error out of the body, so the caller was told
+    /// "Internal server error" about a file they could go and fix.
+    #[test]
+    fn malformed_skill_frontmatter_is_a_400() {
+        assert_eq!(
+            install_error_status(&librefang_skills::SkillError::YamlParse(
+                "Invalid YAML frontmatter: mapping values are not allowed".to_string()
+            )),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn install_error_status_keeps_the_other_arms() {
+        for (err, want) in [
+            (
+                librefang_skills::SkillError::SecurityBlocked("prompt injection".to_string()),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                librefang_skills::SkillError::RateLimited("slow down".to_string()),
+                StatusCode::TOO_MANY_REQUESTS,
+            ),
+            (
+                librefang_skills::SkillError::Network("connection reset".to_string()),
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                librefang_skills::SkillError::NotFound("no such skill".to_string()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ] {
+            assert_eq!(install_error_status(&err), want, "{err:?}");
+        }
+    }
 
     /// #6581 hardened `librefang_skills::marketplace::copy_dir_recursive` against symlinks but left this installer — which copies out of the same registry checkout — dereferencing them, so a link planted in a skill directory still exfiltrated the target's contents into the install.
     #[test]

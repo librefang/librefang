@@ -487,18 +487,11 @@ pub async fn clawhub_install(
         }
         Err(e) => {
             let msg = format!("{e}");
-            let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
-                StatusCode::FORBIDDEN
-            } else if is_clawhub_rate_limit(&e) {
-                StatusCode::TOO_MANY_REQUESTS
-            } else if matches!(e, librefang_skills::SkillError::Network(_)) {
-                StatusCode::BAD_GATEWAY
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
+            let status = install_error_status(&e);
             tracing::warn!("ClawHub install failed: {msg}");
             // 4xx / 502 echo the actionable SkillError (security
-            // block, rate limit, network); the 500 catch-all scrubs to
+            // block, malformed skill frontmatter, rate limit,
+            // network); the 500 catch-all scrubs to
             // a generic body (audit: rusqlite-errors-leak). Full error
             // already logged above.
             let body = if status == StatusCode::INTERNAL_SERVER_ERROR {
@@ -835,15 +828,7 @@ pub async fn clawhub_cn_install(
         }
         Err(e) => {
             let msg = format!("{e}");
-            let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
-                StatusCode::FORBIDDEN
-            } else if is_clawhub_rate_limit(&e) {
-                StatusCode::TOO_MANY_REQUESTS
-            } else if matches!(e, librefang_skills::SkillError::Network(_)) {
-                StatusCode::BAD_GATEWAY
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
+            let status = install_error_status(&e);
             tracing::warn!("ClawHub CN install failed: {msg}");
             // See ClawHub install above: 500 catch-all scrubbed
             // (audit: rusqlite-errors-leak), actionable 4xx / 502
