@@ -507,7 +507,8 @@ pub async fn get_agent_mcp_servers(
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetAgentMcpServersRequest {
-    /// MCP server names assigned to the agent. An empty list disables MCP servers for the agent; `["*"]` enables all connected servers.
+    /// MCP server names assigned to the agent.
+    /// An empty list disables MCP servers for the agent; `["*"]` enables all connected servers.
     pub mcp_servers: Vec<String>,
 }
 
