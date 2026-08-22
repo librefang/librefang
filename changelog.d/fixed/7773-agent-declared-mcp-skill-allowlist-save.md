@@ -1,0 +1,5 @@
+Saving an agent's MCP-server or skill allowlist no longer fails on a declaration this instance has not installed.
+Editing any agent that inherited `fetch` from a registry agent type returned `400 Internal error: Unknown MCP server: fetch`, because the validation built its set of acceptable names from the MCP tools connected at that instant — a strict subset of what is configured, never mind what is installed — and the dashboard resends the whole array, so one inherited name took the entire save down with it.
+A name is now accepted when it is configured in `config.toml`, connected or not, or present in the locally cached MCP catalog; skills are accepted against on-disk-but-unloaded directories, a deliberately narrower criterion because skill content is not part of the registry sync's copy set and so has no catalog to check against.
+Accepting a pending declaration persists the name and nothing else — it does not install, connect, or modify `config.toml`.
+Both rejections are now `InvalidInput` rather than `Internal`, and a poisoned MCP tool lock no longer skips validation altogether (#7773) (@DaBlitzStein)

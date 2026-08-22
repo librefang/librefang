@@ -3545,6 +3545,346 @@ fn test_set_agent_mcp_servers_persists_allowlist_to_agent_toml() {
     kernel.shutdown();
 }
 
+/// Write a minimal valid MCP catalog entry TOML at
+/// `<home_dir>/mcp/catalog/<id>.toml`, loaded automatically at boot by
+/// `McpCatalog::load` (mirrors `install_test_skill`'s role for skills).
+fn write_test_mcp_catalog_entry(home_dir: &std::path::Path, id: &str) {
+    let dir = home_dir.join("mcp").join("catalog");
+    std::fs::create_dir_all(&dir).unwrap();
+    let toml = format!(
+        "id = \"{id}\"\n\
+         name = \"{id}\"\n\
+         description = \"test catalog entry\"\n\
+         category = \"devtools\"\n\
+         \n\
+         [transport]\n\
+         type = \"stdio\"\n\
+         command = \"true\"\n"
+    );
+    std::fs::write(dir.join(format!("{id}.toml")), toml).unwrap();
+}
+
+#[test]
+fn test_set_agent_mcp_servers_accepts_catalog_only_pending_name() {
+    // A name that exists only in the locally cached MCP catalog (not
+    // configured in config.toml, never connected) is a legitimate pending
+    // declaration, and `spawn` does not reject it either. Saving it
+    // through `set_agent_mcp_servers` must succeed, must persist the name,
+    // and must NOT install, connect,
+    // or otherwise mutate `effective_mcp_servers` / config.toml as a side
+    // effect.
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    write_test_mcp_catalog_entry(&home_dir, "catalog-only-server");
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    let before_servers = kernel.mcp.effective_mcp_servers.read().unwrap().clone();
+
+    let toml_path = home_dir
+        .join("agent-manifests")
+        .join("catalog-only-agent")
+        .join("agent.toml");
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "catalog-only-agent".to_string(),
+                description: "catalog-only MCP acceptance regression".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            Some(toml_path.clone()),
+            None,
+        )
+        .expect("spawn");
+
+    kernel
+        .set_agent_mcp_servers(agent_id, vec!["catalog-only-server".to_string()])
+        .expect("a catalog-only server name must be accepted as a pending declaration");
+
+    let entry = kernel.agents.registry.get(agent_id).expect("agent exists");
+    assert_eq!(
+        entry.manifest.mcp_servers,
+        vec!["catalog-only-server".to_string()],
+        "the pending declaration must be persisted on the manifest"
+    );
+
+    let after_servers = kernel.mcp.effective_mcp_servers.read().unwrap().clone();
+    assert_eq!(
+        before_servers.len(),
+        after_servers.len(),
+        "accepting a catalog-only declaration must not install/configure an MCP server \
+         as a side effect"
+    );
+    assert!(
+        !after_servers
+            .iter()
+            .any(|s| s.name == "catalog-only-server"),
+        "catalog-only-server must NOT have been added to effective_mcp_servers"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_set_agent_mcp_servers_rejects_name_unknown_everywhere() {
+    // A name that is neither configured, nor connected, nor present in the
+    // MCP catalog is genuinely unknown and must still be rejected — with a
+    // 400-shaped `InvalidInput`, not the old `Internal` variant (which
+    // rendered as a misleading "Internal error" at the API boundary).
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "unknown-mcp-agent".to_string(),
+                description: "unknown MCP name regression".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("spawn");
+
+    let err = kernel
+        .set_agent_mcp_servers(agent_id, vec!["totally-made-up-server".to_string()])
+        .expect_err("a name absent from config, catalog, and connections must be rejected");
+    match err {
+        KernelError::LibreFang(LibreFangError::InvalidInput(ref msg)) => {
+            assert!(
+                msg.contains("totally-made-up-server"),
+                "error message must name the rejected server, got: {msg}"
+            );
+        }
+        other => panic!("expected InvalidInput, got: {other:?}"),
+    }
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_set_agent_mcp_servers_real_world_regression_pending_plus_new_configured_entries() {
+    // Reproduces the real bug report exactly: an agent already carries
+    // `fetch` as a catalog-only pending declaration (never installed,
+    // inherited from an agent-type template) alongside `memory`, which is
+    // configured. Saving a list that keeps `fetch` and adds two more
+    // *configured* names (`camoufox`, `sequential-thinking`) must succeed as
+    // a whole — the old code rejected the entire PUT the moment it hit the
+    // first unrecognized name (`fetch`), blocking the user from adding the
+    // new servers they actually wanted.
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    write_test_mcp_catalog_entry(&home_dir, "fetch");
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+    register_mcp_server(&kernel, "memory");
+    register_mcp_server(&kernel, "camoufox");
+    register_mcp_server(&kernel, "sequential-thinking");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "real-world-regression-agent".to_string(),
+                description: "fetch pending + memory configured".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                mcp_servers: vec!["memory".to_string(), "fetch".to_string()],
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("spawn");
+
+    kernel
+        .set_agent_mcp_servers(
+            agent_id,
+            vec![
+                "memory".to_string(),
+                "fetch".to_string(),
+                "camoufox".to_string(),
+                "sequential-thinking".to_string(),
+            ],
+        )
+        .expect("adding new configured names alongside an existing pending one must succeed");
+
+    let entry = kernel.agents.registry.get(agent_id).expect("agent exists");
+    assert_eq!(
+        entry.manifest.mcp_servers,
+        vec![
+            "memory".to_string(),
+            "fetch".to_string(),
+            "camoufox".to_string(),
+            "sequential-thinking".to_string(),
+        ]
+    );
+
+    // `fetch` was never configured, so accepting the save must not have
+    // installed or connected it as a side effect.
+    let configured: Vec<String> = kernel
+        .mcp
+        .effective_mcp_servers
+        .read()
+        .unwrap()
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
+    assert!(
+        !configured.iter().any(|n| n == "fetch"),
+        "saving a catalog-only name must not add it to the effective server list, got: {configured:?}"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_set_agent_skills_accepts_on_disk_unloaded_pending_name() {
+    // Mirrors the MCP catalog-acceptance fix: a skill directory that exists
+    // on disk (has a skill.toml) but has not been loaded into the running
+    // registry is a legitimate pending declaration, not an error —
+    // `SkillRegistry::unloaded_on_disk_dirs` is the skills-side equivalent
+    // of "present but not active" (already used by the Stable-mode
+    // freeze-safe reload path). Accepting it must not load/activate it.
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("skills")).unwrap();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    // Installed AFTER boot so it is on disk but not in the loaded registry.
+    install_test_skill(&home_dir.join("skills"), "unloaded-pending-skill", &[]);
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "unloaded-skill-agent".to_string(),
+                description: "on-disk-unloaded skill acceptance regression".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("spawn");
+
+    {
+        let registry = kernel.skills.skill_registry.read().unwrap();
+        assert!(
+            !registry
+                .skill_names()
+                .iter()
+                .any(|n| n == "unloaded-pending-skill"),
+            "precondition: the skill must not be loaded yet"
+        );
+    }
+
+    kernel
+        .set_agent_skills(agent_id, vec!["unloaded-pending-skill".to_string()])
+        .expect("an on-disk-but-unloaded skill name must be accepted as a pending declaration");
+
+    let entry = kernel.agents.registry.get(agent_id).expect("agent exists");
+    assert_eq!(
+        entry.manifest.skills,
+        vec!["unloaded-pending-skill".to_string()]
+    );
+
+    {
+        let registry = kernel.skills.skill_registry.read().unwrap();
+        assert!(
+            !registry
+                .skill_names()
+                .iter()
+                .any(|n| n == "unloaded-pending-skill"),
+            "accepting the pending declaration must not have loaded the skill as a side effect"
+        );
+    }
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_set_agent_skills_rejects_name_unknown_everywhere() {
+    // A skill name that is neither loaded nor present on disk is genuinely
+    // unknown and must still be rejected — with `InvalidInput`, not
+    // `Internal`.
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("skills")).unwrap();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "unknown-skill-agent".to_string(),
+                description: "unknown skill name regression".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("spawn");
+
+    let err = kernel
+        .set_agent_skills(agent_id, vec!["totally-made-up-skill".to_string()])
+        .expect_err("a skill name absent from both the loaded registry and disk must be rejected");
+    match err {
+        KernelError::LibreFang(LibreFangError::InvalidInput(ref msg)) => {
+            assert!(
+                msg.contains("totally-made-up-skill"),
+                "error message must name the rejected skill, got: {msg}"
+            );
+        }
+        other => panic!("expected InvalidInput, got: {other:?}"),
+    }
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_reload_skills_preserves_disabled_and_extra_dirs() {
     // Hot-reload used to instantiate a fresh `SkillRegistry` without
