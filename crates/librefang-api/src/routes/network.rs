@@ -600,11 +600,7 @@ pub async fn a2a_cancel_task(
     )
 )]
 pub async fn a2a_list_external_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let agents = state
-        .kernel
-        .a2a_agents()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let agents = crate::lock_a2a_agents(state.kernel.a2a_agents());
     let mut items: Vec<serde_json::Value> = agents
         .iter()
         .map(|(_, card)| {
@@ -853,11 +849,7 @@ pub async fn a2a_get_external_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let agents = state
-        .kernel
-        .a2a_agents()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let agents = crate::lock_a2a_agents(state.kernel.a2a_agents());
 
     let make_response = |(_, card): &(String, librefang_kernel::a2a::AgentCard)| {
         serde_json::json!({
@@ -946,11 +938,7 @@ pub async fn a2a_discover_external(
 
             // SECURITY (Bug #3786): Check for name collision with already-trusted agents.
             {
-                let agents = state
-                    .kernel
-                    .a2a_agents()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
+                let agents = crate::lock_a2a_agents(state.kernel.a2a_agents());
                 // A different URL claiming the same name as an existing trusted agent is a
                 // potential impersonation attempt. Reject it to prevent confusion.
                 if let Some((existing_url, _)) = agents
@@ -1141,11 +1129,7 @@ async fn a2a_send_external_inner(state: Arc<AppState>, body_bytes: &[u8]) -> (St
     // URLs that have been explicitly approved (via /api/a2a/agents/{id}/approve
     // or seeded via static config) may receive tasks.
     {
-        let trusted = state
-            .kernel
-            .a2a_agents()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let trusted = crate::lock_a2a_agents(state.kernel.a2a_agents());
         if !trusted.iter().any(|(u, _)| u == &url) {
             return json_error_tuple(
                 StatusCode::BAD_REQUEST,
@@ -1234,11 +1218,7 @@ pub async fn a2a_external_task_status(
     // operator-approved A2A agents. Otherwise this endpoint doubles as an
     // SSRF probe surface against any URL the global SSRF allowlist accepts.
     {
-        let trusted = state
-            .kernel
-            .a2a_agents()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let trusted = crate::lock_a2a_agents(state.kernel.a2a_agents());
         if !trusted.iter().any(|(u, _)| u == &url) {
             return ApiErrorResponse::bad_request(
                 "Target URL is not a trusted A2A agent. \
@@ -1327,11 +1307,7 @@ pub async fn a2a_approve_external(
             let card_name = card.name.clone();
             // Promote to kernel's trusted list.
             {
-                let mut agents = state
-                    .kernel
-                    .a2a_agents()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
+                let mut agents = crate::lock_a2a_agents(state.kernel.a2a_agents());
                 // Update existing entry (same URL) or append.
                 if let Some(existing) = agents.iter_mut().find(|(u, _)| u == &url) {
                     existing.1 = card;
@@ -1362,11 +1338,7 @@ pub async fn a2a_approve_external(
         }
         None => {
             // Also check if it's already trusted (idempotent re-approval).
-            let agents = state
-                .kernel
-                .a2a_agents()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let agents = crate::lock_a2a_agents(state.kernel.a2a_agents());
             if agents.iter().any(|(u, _)| u == &url) {
                 return (
                     StatusCode::OK,
