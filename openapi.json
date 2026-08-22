@@ -1554,7 +1554,6 @@
         "tags": [
           "agents"
         ],
-        "summary": "PUT /api/agents/{id}/mcp_servers — Update an agent's MCP server allowlist.",
         "operationId": "set_agent_mcp_servers",
         "parameters": [
           {
@@ -1568,11 +1567,11 @@
           }
         ],
         "requestBody": {
-          "description": "Array of MCP server names",
+          "description": "Object containing the MCP server allowlist",
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/JsonArray"
+                "$ref": "#/components/schemas/SetAgentMcpServersRequest"
               }
             }
           },
@@ -1581,6 +1580,16 @@
         "responses": {
           "200": {
             "description": "Update an agent's MCP server allowlist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request body",
             "content": {
               "application/json": {
                 "schema": {
@@ -14702,6 +14711,23 @@
         "properties": {
           "content": {
             "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SetAgentMcpServersRequest": {
+        "type": "object",
+        "description": "PUT /api/agents/{id}/mcp_servers — Update an agent's MCP server allowlist.",
+        "required": [
+          "mcp_servers"
+        ],
+        "properties": {
+          "mcp_servers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "MCP server names assigned to the agent.\nAn empty list disables MCP servers for the agent; `[\"*\"]` enables all connected servers."
           }
         },
         "additionalProperties": false

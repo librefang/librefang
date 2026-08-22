@@ -1203,6 +1203,8 @@ pub async fn patch_agent(
         );
     }
 
+    let mcp_only_patch = patch_agent_only_updates_mcp_servers(&body);
+
     // Full-manifest replacement path (folded in from the now-removed
     // PUT /agents/{id}/update endpoint, #3748). When the caller supplies
     // `manifest_toml`, parse it and run the kernel's `update_manifest`
@@ -1390,7 +1392,9 @@ pub async fn patch_agent(
 
             // Write updated manifest to agent.toml on disk so disk doesn't override
             // dashboard changes on next boot (#996, #1018).
-            state.kernel.persist_manifest_to_disk(agent_id);
+            if !mcp_only_patch {
+                state.kernel.persist_manifest_to_disk(agent_id);
+            }
         }
 
         (

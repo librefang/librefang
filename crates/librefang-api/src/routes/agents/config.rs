@@ -504,23 +504,41 @@ pub async fn get_agent_mcp_servers(
 }
 
 /// PUT /api/agents/{id}/mcp_servers — Update an agent's MCP server allowlist.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetAgentMcpServersRequest {
+    /// MCP server names assigned to the agent.
+    /// An empty list disables MCP servers for the agent; `["*"]` enables all connected servers.
+    pub mcp_servers: Vec<String>,
+}
+
 #[utoipa::path(
     put,
     path = "/api/agents/{id}/mcp_servers",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = crate::types::JsonArray, description = "Array of MCP server names"),
+    request_body(content = SetAgentMcpServersRequest, description = "Object containing the MCP server allowlist"),
     responses(
-        (status = 200, description = "Update an agent's MCP server allowlist", body = crate::types::JsonObject)
+        (status = 200, description = "Update an agent's MCP server allowlist", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed request body", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_mcp_servers(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Json(body): Json<serde_json::Value>,
+    body: Result<Json<SetAgentMcpServersRequest>, axum::extract::rejection::JsonRejection>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error.body_text()})),
+            )
+        }
+    };
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -530,14 +548,7 @@ pub async fn set_agent_mcp_servers(
             )
         }
     };
-    let servers: Vec<String> = body["mcp_servers"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    let servers = body.mcp_servers;
     match state
         .kernel
         .set_agent_mcp_servers(agent_id, servers.clone())

@@ -88,8 +88,18 @@ impl LibreFangKernel {
         // `noop_changes` are present. In Off / Restart modes the user expects
         // no runtime change until a full restart.
         if should_store_config(old_cfg.reload.mode, &plan) {
+            // Serialize MCP config replacement with every connection creator before taking the config write lock.
+            // An in-flight connection may still publish `NeedsAuth`; waiting here ensures the hot action clears that result only after the old operation has finished, without holding `config_reload_lock` across the potentially long connection wait.
+            let _mcp_connection_op = if plan
+                .hot_actions
+                .contains(&crate::config_reload::HotAction::ReloadMcpServers)
+            {
+                Some(self.mcp.mcp_connection_ops.lock().await)
+            } else {
+                None
+            };
             let _write_guard = self.config_reload_lock.write().await;
-            self.apply_hot_actions_inner(&plan, &new_config);
+            self.apply_hot_actions_inner(&plan, &new_config).await;
             // Push the new `[[taint_rules]]` registry into the shared swap
             // BEFORE swapping `self.config`. Connected MCP servers read from
             // this swap on every scan; updating it now means the next tool
@@ -149,7 +159,7 @@ impl LibreFangKernel {
     ///
     /// **Caller must hold `config_reload_lock` write guard** so that the
     /// config swap and side effects are atomic with respect to message handlers.
-    fn apply_hot_actions_inner(
+    async fn apply_hot_actions_inner(
         &self,
         plan: &crate::config_reload::ReloadPlan,
         new_config: &librefang_types::config::KernelConfig,
@@ -346,12 +356,15 @@ impl LibreFangKernel {
                     let new_by_name: std::collections::HashMap<&str, _> =
                         new_mcp.iter().map(|s| (s.name.as_str(), s)).collect();
                     let mut to_reconnect: Vec<String> = Vec::new();
+                    let mut auth_state_resets: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
                     for old_entry in &old_mcp {
                         match new_by_name.get(old_entry.name.as_str()) {
                             None => {
                                 // Removed: stale connection still alive in
                                 // `mcp_connections` until we evict it.
                                 to_reconnect.push(old_entry.name.clone());
+                                auth_state_resets.insert(old_entry.name.clone());
                             }
                             Some(new_entry) => {
                                 // Modified: serialize-compare is robust
@@ -364,34 +377,41 @@ impl LibreFangKernel {
                                     serde_json::to_string(*new_entry).unwrap_or_default();
                                 if old_json != new_json {
                                     to_reconnect.push(old_entry.name.clone());
+                                    auth_state_resets.insert(old_entry.name.clone());
                                 }
                             }
                         }
                     }
 
-                    let mut effective = self
-                        .mcp
-                        .effective_mcp_servers
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner());
-                    // Diff the health registry against the new server set so
-                    // removed servers stop being tracked and newly added ones
-                    // enter the map immediately — otherwise `report_ok` /
-                    // `report_error` are silent no-ops for those IDs and
-                    // `/api/mcp/health` under-reports until a full restart.
-                    let old_names: std::collections::HashSet<String> =
-                        effective.iter().map(|s| s.name.clone()).collect();
-                    let new_names: std::collections::HashSet<String> =
-                        new_mcp.iter().map(|s| s.name.clone()).collect();
-                    for name in old_names.difference(&new_names) {
-                        self.mcp.mcp_health.unregister(name);
+                    let count = {
+                        let mut effective = self
+                            .mcp
+                            .effective_mcp_servers
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner());
+                        // Diff the health registry against the new server set so removed servers stop being tracked and newly added ones enter the map immediately — otherwise `report_ok` / `report_error` are silent no-ops for those IDs and `/api/mcp/health` under-reports until a full restart.
+                        let old_names: std::collections::HashSet<String> =
+                            effective.iter().map(|s| s.name.clone()).collect();
+                        let new_names: std::collections::HashSet<String> =
+                            new_mcp.iter().map(|s| s.name.clone()).collect();
+                        for name in old_names.difference(&new_names) {
+                            self.mcp.mcp_health.unregister(name);
+                        }
+                        for name in new_names.difference(&old_names) {
+                            self.mcp.mcp_health.register(name);
+                            auth_state_resets.insert(name.clone());
+                        }
+                        let count = new_mcp.len();
+                        *effective = new_mcp;
+                        count
+                    };
+
+                    if !auth_state_resets.is_empty() {
+                        let mut auth_states = self.mcp.mcp_auth_states.lock().await;
+                        for name in &auth_state_resets {
+                            auth_states.remove(name);
+                        }
                     }
-                    for name in new_names.difference(&old_names) {
-                        self.mcp.mcp_health.register(name);
-                    }
-                    let count = new_mcp.len();
-                    *effective = new_mcp;
-                    drop(effective);
 
                     // Bump MCP generation so tool list caches are invalidated
                     self.mcp

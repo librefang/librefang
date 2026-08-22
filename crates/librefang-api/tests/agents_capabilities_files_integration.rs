@@ -174,6 +174,16 @@ fn put_json(path: &str, body: serde_json::Value) -> Request<Body> {
         .unwrap()
 }
 
+fn patch_json(path: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method(Method::PATCH)
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
 fn delete(path: &str) -> Request<Body> {
     Request::builder()
         .method(Method::DELETE)
@@ -677,6 +687,140 @@ async fn test_mcp_servers_set_empty_then_read_round_trip() {
         body["mode"], "none",
         "empty allowlist means no MCP servers (#5855): {body:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_mcp_servers_rejects_documented_wrong_and_malformed_body_shapes() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "mcp-invalid-body");
+    h.state
+        .kernel
+        .agent_registry()
+        .update_mcp_servers(id, vec!["keep-server".to_string()])
+        .expect("seed assignment");
+
+    for body in [
+        serde_json::json!(["replacement"]),
+        serde_json::json!({"mcp_servers": [1]}),
+        serde_json::json!({"servers": []}),
+    ] {
+        let (status, _) = send(
+            h.app.clone(),
+            put_json(&format!("/api/agents/{id}/mcp_servers"), body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    assert_eq!(
+        h.state
+            .kernel
+            .agent_registry()
+            .get(id)
+            .unwrap()
+            .manifest
+            .mcp_servers,
+        vec!["keep-server"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_mcp_servers_update_preserves_manifest_comments_and_omitted_defaults() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "mcp-format-preserve");
+    h.state.kernel.persist_manifest_to_disk(id);
+
+    let entry = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(id)
+        .expect("spawned agent");
+    let manifest_path = entry
+        .manifest
+        .workspace
+        .as_ref()
+        .expect("spawned agent workspace")
+        .join("agent.toml");
+    let generated = std::fs::read_to_string(&manifest_path).expect("generated agent.toml");
+    let customized = generated
+        .replace(
+            "mcp_servers = []",
+            "mcp_servers = [\n    \"old-server\",\n] # keep assignment note",
+        )
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("full_mode_skips_approval ="))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(
+        &manifest_path,
+        format!("# operator decision: keep this note\n{customized}\n"),
+    )
+    .expect("customize agent.toml");
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/mcp_servers"),
+            serde_json::json!({ "mcp_servers": [] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update failed: {body:?}");
+
+    let updated = std::fs::read_to_string(&manifest_path).expect("updated agent.toml");
+    assert!(
+        updated.contains("# operator decision: keep this note"),
+        "the field update must preserve operator comments:\n{updated}"
+    );
+    assert!(
+        !updated.contains("full_mode_skips_approval ="),
+        "the field update must not inject an omitted default:\n{updated}"
+    );
+    assert!(updated.contains("mcp_servers = [] # keep assignment note"));
+    assert!(!updated.contains("old-server"));
+
+    let generic_source = updated.replace(
+        "mcp_servers = [] # keep assignment note",
+        "mcp_servers = [\n    \"generic-old\",\n] # keep generic note",
+    );
+    std::fs::write(&manifest_path, &generic_source).expect("prepare generic PATCH manifest");
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}"),
+            serde_json::json!({ "mcp_servers": [] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "generic PATCH failed: {body:?}");
+
+    let generic_updated = std::fs::read_to_string(&manifest_path).expect("generic PATCH output");
+    assert!(generic_updated.contains("# operator decision: keep this note"));
+    assert!(generic_updated.contains("mcp_servers = [] # keep generic note"));
+    assert!(!generic_updated.contains("generic-old"));
+    assert!(!generic_updated.contains("full_mode_skips_approval ="));
+
+    let nested_source = generic_updated.replace(
+        "mcp_servers = [] # keep generic note",
+        "mcp_servers = [\n    \"nested-old\",\n] # keep nested note",
+    );
+    std::fs::write(&manifest_path, &nested_source).expect("prepare nested PATCH manifest");
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}"),
+            serde_json::json!({ "capabilities": { "mcp_servers": [] } }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "nested PATCH failed: {body:?}");
+
+    let nested_updated = std::fs::read_to_string(&manifest_path).expect("nested PATCH output");
+    assert!(nested_updated.contains("# operator decision: keep this note"));
+    assert!(nested_updated.contains("mcp_servers = [] # keep nested note"));
+    assert!(!nested_updated.contains("nested-old"));
+    assert!(!nested_updated.contains("full_mode_skips_approval ="));
 }
 
 /// Capabilities GET on an unknown agent → 404, not 500 (tools/skills/mcp all

@@ -26,6 +26,13 @@ fn oauth_provider_clone(
 }
 
 impl LibreFangKernel {
+    async fn mcp_connection_requires_auth(&self, server_name: &str) -> bool {
+        matches!(
+            self.mcp.mcp_auth_states.lock().await.get(server_name),
+            Some(librefang_runtime::mcp_oauth::McpAuthState::NeedsAuth)
+        )
+    }
+
     /// Connect to all configured MCP servers and cache their tool definitions.
     ///
     /// Idempotent: servers that already have a live connection are skipped.
@@ -34,6 +41,7 @@ impl LibreFangKernel {
         use librefang_runtime::mcp::{McpConnection, McpServerConfig, McpTransport};
         use librefang_types::config::McpTransportEntry;
 
+        let _connection_op = self.mcp.mcp_connection_ops.lock().await;
         let servers = self
             .mcp
             .effective_mcp_servers
@@ -42,6 +50,9 @@ impl LibreFangKernel {
             .unwrap_or_default();
 
         for server_config in &servers {
+            if self.mcp_connection_requires_auth(&server_config.name).await {
+                continue;
+            }
             // Skip servers that already have a live connection (idempotent).
             {
                 let conns = self.mcp.mcp_connections.lock().await;
@@ -154,6 +165,7 @@ impl LibreFangKernel {
     /// The dropped `McpConnection` will shut down the underlying transport.
     /// Returns `true` if a connection was found and removed.
     pub async fn disconnect_mcp_server(&self, name: &str) -> bool {
+        let _connection_op = self.mcp.mcp_connection_ops.lock().await;
         // Extract the matching connection(s) so we can close them explicitly
         // rather than relying on the implicit Drop path.  Explicit close ensures
         // the underlying stdio child process is reaped before we return, which
@@ -209,6 +221,21 @@ impl LibreFangKernel {
     pub async fn retry_mcp_connection(self: &Arc<Self>, server_name: &str) {
         use librefang_runtime::mcp::{McpConnection, McpServerConfig, McpTransport};
         use librefang_types::config::McpTransportEntry;
+
+        let _connection_op = self.mcp.mcp_connection_ops.lock().await;
+        if self.mcp_connection_requires_auth(server_name).await {
+            return;
+        }
+        if self
+            .mcp
+            .mcp_connections
+            .lock()
+            .await
+            .iter()
+            .any(|connection| connection.name() == server_name)
+        {
+            return;
+        }
 
         let server_config = {
             let servers = self
@@ -322,10 +349,11 @@ impl LibreFangKernel {
     ///
     /// Returns the number of *newly connected* servers (not the total count).
     pub async fn reload_mcp_servers(self: &Arc<Self>) -> Result<usize, String> {
-        let cfg = self.config.load_full();
         use librefang_runtime::mcp::{McpConnection, McpServerConfig, McpTransport};
         use librefang_types::config::McpTransportEntry;
 
+        let _connection_op = self.mcp.mcp_connection_ops.lock().await;
+        let cfg = self.config.load_full();
         // 1. Reload the MCP catalog from disk (new templates may have landed
         //    after `registry_sync`). Atomic swap — readers never blocked.
         let catalog_count = self.mcp_catalog_reload(&cfg.home_dir);
@@ -347,6 +375,44 @@ impl LibreFangKernel {
                 }
             }
         };
+
+        let old_configs = self
+            .mcp
+            .effective_mcp_servers
+            .read()
+            .map(|servers| servers.clone())
+            .unwrap_or_default();
+        let old_by_name: std::collections::HashMap<&str, _> = old_configs
+            .iter()
+            .map(|server| (server.name.as_str(), server))
+            .collect();
+        let new_by_name: std::collections::HashMap<&str, _> = new_configs
+            .iter()
+            .map(|server| (server.name.as_str(), server))
+            .collect();
+        let mut auth_state_resets = std::collections::HashSet::new();
+        for old in &old_configs {
+            match new_by_name.get(old.name.as_str()) {
+                None => {
+                    auth_state_resets.insert(old.name.clone());
+                }
+                Some(new) if serde_json::to_value(old).ok() != serde_json::to_value(new).ok() => {
+                    auth_state_resets.insert(old.name.clone());
+                }
+                Some(_) => {}
+            }
+        }
+        for new in &new_configs {
+            if !old_by_name.contains_key(new.name.as_str()) {
+                auth_state_resets.insert(new.name.clone());
+            }
+        }
+        if !auth_state_resets.is_empty() {
+            let mut auth_states = self.mcp.mcp_auth_states.lock().await;
+            for name in &auth_state_resets {
+                auth_states.remove(name);
+            }
+        }
 
         // 3. Find servers that aren't already connected
         let already_connected: Vec<String> = self
@@ -375,6 +441,9 @@ impl LibreFangKernel {
         // 5. Connect new servers
         let mut connected_count = 0;
         for server_config in &new_servers {
+            if self.mcp_connection_requires_auth(&server_config.name).await {
+                continue;
+            }
             let transport_entry = match &server_config.transport {
                 Some(t) => t,
                 None => {
@@ -510,6 +579,7 @@ impl LibreFangKernel {
         use librefang_runtime::mcp::{McpConnection, McpServerConfig, McpTransport};
         use librefang_types::config::McpTransportEntry;
 
+        let _connection_op = self.mcp.mcp_connection_ops.lock().await;
         // Find the config for this server
         let server_config = {
             let effective = self
@@ -522,6 +592,11 @@ impl LibreFangKernel {
 
         let server_config =
             server_config.ok_or_else(|| format!("No MCP config found for server '{id}'"))?;
+        if self.mcp_connection_requires_auth(id).await {
+            return Err(format!(
+                "MCP server '{id}' requires OAuth authorization before reconnecting"
+            ));
+        }
 
         // Disconnect existing connection if any
         {

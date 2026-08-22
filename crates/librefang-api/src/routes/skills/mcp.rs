@@ -838,12 +838,7 @@ pub async fn delete_mcp_server(
         .lock()
         .await
         .remove(&name);
-    state
-        .kernel
-        .mcp_connections_ref()
-        .lock()
-        .await
-        .retain(|c| c.name() != name);
+    state.kernel.disconnect_mcp_server(&name).await;
 
     let user_id = api_user.as_ref().map(|u| u.0.user_id);
     state.kernel.audit().record_with_context(
