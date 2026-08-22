@@ -1,30 +1,31 @@
 // Patch-builder for the agent "model" inline edit form on AgentsPage.
 //
-// AgentModelDetail.max_tokens / .temperature are optional: the backend omits
-// them when unset. startModelEdit seeds the draft with the same compiled
-// defaults the kernel uses (4096 / 0.7), so the persisted side MUST apply the
-// identical nullish defaults before comparing — otherwise a provider/model-only
-// edit would see the seeded default as a change and silently PATCH 4096 / 0.7
-// into an agent the user never touched. This module is the single source of
-// truth for that comparison baseline, shared by saveModelEdit and modelDirty's
-// regression test so the two cannot drift apart (the original #5917 defect).
-
-// Compiled kernel defaults surfaced in the edit form when the backend omits
-// the optional field. Keep in sync with the `?? 4096` / `?? 0.7` fallbacks in
-// AgentsPage's startModelEdit and modelDirty derivation.
-export const MODEL_MAX_TOKENS_DEFAULT = 4096;
-export const MODEL_TEMPERATURE_DEFAULT = 0.7;
+// `max_tokens` / `temperature` are tri-state, and the empty string is the third state: it means
+// "this agent has no opinion", so the per-model override supplies the value and, failing that, the
+// system default.
+// The form seeds an empty field from a `null` on the wire and sends `null` back to clear one.
+//
+// This used to seed the draft with the compiled kernel defaults (4096 / 0.7) and compare against
+// the same baseline, so a provider-only edit would not silently PATCH those numbers into an agent
+// the user never touched (#5917).
+// That was a workaround for a type with no inherit state: every agent carried a concrete number, so
+// "unset" had to be simulated by matching against the default.
+// With the field genuinely nullable the workaround is gone — an untouched field stays empty, and
+// an emptied field is a deliberate "hand this back to the model's setting" that reaches the
+// backend as `null` instead of being silently indistinguishable from no edit at all.
 
 export interface PersistedModel {
   provider?: string;
   model?: string;
-  max_tokens?: number;
-  temperature?: number;
+  /** `null` / absent means the agent inherits rather than pinning a number. */
+  max_tokens?: number | null;
+  temperature?: number | null;
 }
 
 export interface ModelDraft {
   provider: string;
   model: string;
+  /** `""` is the inherit state, not zero. */
   max_tokens: string;
   temperature: string;
 }
@@ -32,8 +33,9 @@ export interface ModelDraft {
 export interface ModelConfigPatch {
   provider?: string;
   model?: string;
-  max_tokens?: number;
-  temperature?: number;
+  /** `null` clears the agent's own value. */
+  max_tokens?: number | null;
+  temperature?: number | null;
 }
 
 export interface BuildModelConfigPatchResult {
@@ -41,24 +43,38 @@ export interface BuildModelConfigPatchResult {
   patch: ModelConfigPatch | null;
 }
 
+/**
+ * Parse a tri-state numeric draft field.
+ *
+ * Returns `null` for the inherit state, a number for a pinned value, and
+ * `undefined` when the text is not a number this field accepts — which the
+ * caller treats as an invalid draft.
+ */
+function parseTriState(
+  raw: string,
+  parse: (s: string) => number,
+  valid: (n: number) => boolean,
+): number | null | undefined {
+  const trimmed = raw.trim();
+  if (trimmed === "") return null;
+  const parsed = parse(trimmed);
+  return Number.isNaN(parsed) || !valid(parsed) ? undefined : parsed;
+}
+
 // Build the PATCH payload from the draft, including a field only when the user
-// actually changed it from its persisted (nullish-defaulted) value. Returns
-// `{ patch: null }` when the draft is invalid so the caller can bail without
-// re-implementing the validation.
+// actually changed it. Returns `{ patch: null }` when the draft is invalid so
+// the caller can bail without re-implementing the validation.
 export function buildModelConfigPatch(
   draft: ModelDraft,
   persisted: PersistedModel | undefined,
 ): BuildModelConfigPatchResult {
   const trimmedProvider = draft.provider.trim();
   const trimmedModel = draft.model.trim();
-  const parsedMaxTokens = parseInt(draft.max_tokens, 10);
-  const parsedTemperature = parseFloat(draft.temperature);
-
   if (!trimmedProvider || !trimmedModel) return { patch: null };
-  if (isNaN(parsedMaxTokens) || parsedMaxTokens <= 0) return { patch: null };
-  if (isNaN(parsedTemperature) || parsedTemperature < 0 || parsedTemperature > 2) {
-    return { patch: null };
-  }
+
+  const maxTokens = parseTriState(draft.max_tokens, (s) => parseInt(s, 10), (n) => n > 0);
+  const temperature = parseTriState(draft.temperature, parseFloat, (n) => n >= 0 && n <= 2);
+  if (maxTokens === undefined || temperature === undefined) return { patch: null };
 
   const patch: ModelConfigPatch = {};
 
@@ -69,12 +85,13 @@ export function buildModelConfigPatch(
     patch.provider = trimmedProvider;
   }
 
-  // Same nullish-defaulted baseline as the modelDirty gate — see module doc.
-  if (parsedMaxTokens !== (persisted?.max_tokens ?? MODEL_MAX_TOKENS_DEFAULT)) {
-    patch.max_tokens = parsedMaxTokens;
+  // `?? null` rather than `|| null`: a persisted explicit `0` is a real value,
+  // not an absent one.
+  if (maxTokens !== (persisted?.max_tokens ?? null)) {
+    patch.max_tokens = maxTokens;
   }
-  if (parsedTemperature !== (persisted?.temperature ?? MODEL_TEMPERATURE_DEFAULT)) {
-    patch.temperature = parsedTemperature;
+  if (temperature !== (persisted?.temperature ?? null)) {
+    patch.temperature = temperature;
   }
 
   return { patch };

@@ -819,3 +819,98 @@ params = { region = "us" }
     expect(reparsed.extras).toEqual(parsed.extras);
   });
 });
+
+describe("agentManifest — inference parameters (#7781)", () => {
+  it("round-trips every preference knob and both endpoint limits", () => {
+    const form = emptyManifestForm();
+    form.name = "academic-writer";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.temperature = "0.1";
+    form.model.top_p = "0.85";
+    form.model.frequency_penalty = "0.4";
+    form.model.presence_penalty = "-0.3";
+    form.model.max_tokens = "8192";
+    form.model.context_window = "200000";
+    form.model.max_output_tokens = "16384";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("temperature = 0.1");
+    expect(toml).toContain("top_p = 0.85");
+    expect(toml).toContain("frequency_penalty = 0.4");
+    expect(toml).toContain("presence_penalty = -0.3");
+    expect(toml).toContain("max_tokens = 8192");
+    expect(toml).toContain("context_window = 200000");
+    expect(toml).toContain("max_output_tokens = 16384");
+
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.temperature).toBe("0.1");
+    expect(parsed.form.model.top_p).toBe("0.85");
+    expect(parsed.form.model.frequency_penalty).toBe("0.4");
+    expect(parsed.form.model.presence_penalty).toBe("-0.3");
+    expect(parsed.form.model.max_tokens).toBe("8192");
+    expect(parsed.form.model.context_window).toBe("200000");
+    expect(parsed.form.model.max_output_tokens).toBe("16384");
+  });
+
+  /**
+   * The inherit state has to survive the round trip as an *absent key*.
+   * Writing `top_p = 0` instead would pin a number the operator never chose and
+   * make the per-model override unreachable for that field — the exact failure
+   * the tri-state was introduced to remove.
+   */
+  it("omits a knob left on inherit rather than writing a zero", () => {
+    const form = emptyManifestForm();
+    form.name = "inheriting";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.temperature = "0.1";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("temperature = 0.1");
+    expect(toml).not.toContain("top_p");
+    expect(toml).not.toContain("frequency_penalty");
+    expect(toml).not.toContain("presence_penalty");
+    expect(toml).not.toContain("max_tokens");
+    expect(toml).not.toContain("context_window");
+    expect(toml).not.toContain("max_output_tokens");
+
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.top_p).toBe("");
+    expect(parsed.form.model.max_tokens).toBe("");
+    expect(parsed.form.model.context_window).toBe("");
+  });
+
+  /**
+   * The migration guarantee for the 25 already-deployed agents: a manifest that
+   * carries a number keeps it as an explicit value. Nothing starts inheriting
+   * behind the operator's back on upgrade.
+   */
+  it("keeps an existing explicit value explicit", () => {
+    const parsed = parseManifestToml(
+      [
+        'name = "deployed"',
+        'module = "builtin:chat"',
+        "",
+        "[model]",
+        'provider = "openai"',
+        'model = "gpt-4o"',
+        "temperature = 0.7",
+        "max_tokens = 4096",
+      ].join("\n"),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.temperature).toBe("0.7");
+    expect(parsed.form.model.max_tokens).toBe("4096");
+
+    // …and comes back out unchanged.
+    const toml = serializeManifestForm(parsed.form);
+    expect(toml).toContain("temperature = 0.7");
+    expect(toml).toContain("max_tokens = 4096");
+  });
+});
