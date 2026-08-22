@@ -22,9 +22,19 @@ export function WorkflowStepImageGallery({ refs, label }: Props) {
         <p className="text-[9px] font-bold text-text-dim/50">{label}</p>
       )}
       <div className="flex flex-wrap gap-2">
-        {refs.map((ref) => (
+        {refs.map((ref, index) => ref.kind === "data-uri" ? (
+          <img
+            key={`${ref.src}-${index}`}
+            src={ref.src}
+            alt={ref.alt || t("workflows.generated_image_alt", {
+              defaultValue: "generated image",
+            })}
+            loading="lazy"
+            className="block max-h-[200px] max-w-[200px] w-auto rounded-lg border border-border-subtle object-contain bg-main/30"
+          />
+        ) : (
           <a
-            key={ref.src}
+            key={`${ref.src}-${index}`}
             href={ref.src}
             target="_blank"
             rel="noopener noreferrer"
