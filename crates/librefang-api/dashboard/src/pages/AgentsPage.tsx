@@ -933,28 +933,12 @@ export function AgentsPage() {
   const activeConfigMutation = detailAgent?.is_hand
     ? patchHandAgentRuntimeConfigMutation
     : patchAgentConfigMutation;
-  // Save enables when the draft is both valid AND differs from the persisted
-  // model in any field — Provider, Model, Max tokens, or Temperature. Earlier
-  // this gate checked validity only; combined with the provider-switch model
-  // reset that produced the #5917 symptom where Max-token / Temperature edits
-  // never lit Save. draftMaxTokens / draftTemperature mirror saveModelEdit's
-  // coercion so the dirty comparison matches what would actually be PATCHed.
-  const draftMaxTokens = parseInt(modelDraft.max_tokens, 10);
-  const draftTemperature = parseFloat(modelDraft.temperature);
-  const modelValid =
-    !!modelDraft.provider.trim()
-    && !!modelDraft.model.trim()
-    && !isNaN(draftMaxTokens)
-    && draftMaxTokens > 0
-    && !isNaN(draftTemperature)
-    && draftTemperature >= 0
-    && draftTemperature <= 2;
+  // Derive both validity and dirty state from the same strict builder used by
+  // Save. This keeps trailing garbage from enabling a button that then no-ops.
   const currentModel = detailAgent?.model;
-  const modelDirty =
-    modelDraft.provider.trim() !== (currentModel?.provider ?? "")
-    || modelDraft.model.trim() !== (currentModel?.model ?? "")
-    || draftMaxTokens !== (currentModel?.max_tokens ?? MODEL_MAX_TOKENS_DEFAULT)
-    || draftTemperature !== (currentModel?.temperature ?? MODEL_TEMPERATURE_DEFAULT);
+  const modelPatchPreview = buildModelConfigPatch(modelDraft, currentModel).patch;
+  const modelValid = modelPatchPreview !== null;
+  const modelDirty = modelPatchPreview !== null && Object.keys(modelPatchPreview).length > 0;
   const saveModelDisabled =
     activeConfigMutation.isPending || !modelValid || !modelDirty;
 
