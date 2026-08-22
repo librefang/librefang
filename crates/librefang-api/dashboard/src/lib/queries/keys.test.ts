@@ -481,6 +481,23 @@ describe("query key factories", () => {
       ]);
       // Empty filters still produces a stable key.
       expect(auditKeys.query()).toEqual(["audit", "query", {}]);
+      expect(
+        auditKeys.query({
+          agent: "agent-1",
+          channel: "slack",
+          from: "2026-08-01T00:00:00Z",
+          to: "2026-08-02T00:00:00Z",
+        }),
+      ).toEqual([
+        "audit",
+        "query",
+        {
+          agent: "agent-1",
+          channel: "slack",
+          from: "2026-08-01T00:00:00Z",
+          to: "2026-08-02T00:00:00Z",
+        },
+      ]);
     });
   });
 
