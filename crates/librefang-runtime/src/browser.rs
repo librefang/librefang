@@ -1419,7 +1419,8 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
     const clone = body.cloneNode(true);
     const remove = ['script','style','nav','aside','iframe','noscript','svg','canvas'];
     remove.forEach(tag => clone.querySelectorAll(tag).forEach(el => el.remove()));
-    // A header/footer is a page landmark only when it is not scoped to sectioning content. Removing every descendant drops card titles, bylines, and links from article/feed layouts.
+    // A header/footer is a page landmark only when it is not scoped to sectioning content.
+    // Removing every descendant drops card titles, bylines, and links from article/feed layouts.
     clone.querySelectorAll('header,footer').forEach(el => {
         if (!el.closest('article,main,section,[role="main"]')) el.remove();
     });
