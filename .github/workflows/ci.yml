@@ -485,6 +485,8 @@ jobs:
       # Self-skips when sha256sum is absent, so it is safe anywhere.
       - name: pre-commit sha256sum fallback
         run: bash scripts/tests/pre-commit-sha-fallback.sh
+      - name: pre-push protected branch policy
+        run: bash scripts/tests/pre-push-protected-branches.sh
 
   # ── Container vulnerability gate self-test ─────────────────────────────────────
   # `scripts/check-image-vulns.py` decides whether a release digest is allowed to be promoted to the :latest / :VERSION tags (#6694).
