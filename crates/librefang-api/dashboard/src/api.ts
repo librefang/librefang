@@ -1179,6 +1179,23 @@ async function get<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+const AUTHENTICATED_IMAGE_PATH_RE = /^\/api\/(?:uploads|media\/artifacts)\/[A-Za-z0-9_-]+$/;
+
+export function isAuthenticatedImagePath(path: string): boolean {
+  return AUTHENTICATED_IMAGE_PATH_RE.test(path);
+}
+
+export async function fetchAuthenticatedImage(path: string, signal?: AbortSignal): Promise<Blob> {
+  if (!isAuthenticatedImagePath(path)) {
+    throw new Error("Authenticated image path is not allowed");
+  }
+  const response = await fetch(path, { headers: buildHeaders(), signal });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return response.blob();
+}
+
 async function post<T>(
   path: string,
   body: unknown,
