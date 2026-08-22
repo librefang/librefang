@@ -1,0 +1,1 @@
+Add an `agent_type_create` tool so an agent can author a new agent type (template) from a conversation, mirroring the `POST /api/templates` validation; `/api/agent-types` is now an alias for the template routes and the TUI template screen is labeled "Agent types", because agent templates ARE agent types. (@DaBlitzStein)

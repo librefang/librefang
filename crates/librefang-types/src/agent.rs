@@ -603,6 +603,19 @@ pub enum SessionMode {
     New,
 }
 
+/// Model selection mode for an agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelMode {
+    /// Always use the hardcoded model in [`ModelConfig::model`].
+    /// Default — 100% backward compatible.
+    #[default]
+    Fixed,
+    /// Let the ModelRouter pick the best model for each task.
+    /// Only honoured when `[model_router] enabled = true` in config.toml.
+    Flexible,
+}
+
 /// Web search augmentation mode.
 ///
 /// Controls whether the agent loop automatically searches the web using the
@@ -875,6 +888,14 @@ impl ToolProfile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
+    /// Model selection mode. "fixed" (default) = always use the provider/model
+    /// listed below. "flexible" = let the ModelRouter pick based on task tags
+    /// and complexity. Only honoured when `[model_router] enabled = true`.
+    #[serde(default)]
+    pub mode: ModelMode,
+    /// Per-agent router overrides when mode is "flexible". Ignored for "fixed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_override: Option<crate::model_profile::AgentRouterOverride>,
     /// LLM provider name.
     pub provider: String,
     /// Model identifier.
@@ -928,6 +949,8 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
+            mode: ModelMode::default(),
+            router_override: None,
             provider: "default".to_string(),
             model: "default".to_string(),
             max_tokens: 4096,
@@ -957,6 +980,101 @@ pub struct FallbackModel {
     /// deterministic for prompt-cache stability (#3298).
     #[serde(default, flatten)]
     pub extra_params: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// Convert the flat "agent type" JSON shape used by the API and the
+/// agent-facing `agent_type_create` tool into a template TOML document.
+///
+/// Single source of truth for both surfaces (#7722): the API route and the
+/// kernel-side tool writer share this so their accepted shapes can never
+/// drift apart.
+pub fn agent_type_json_to_toml(v: &serde_json::Value) -> String {
+    let name = v["name"].as_str().unwrap_or("unnamed");
+    let desc = v["description"].as_str().unwrap_or("");
+    let prompt = v["system_prompt"]
+        .as_str()
+        .unwrap_or("You are a helpful AI agent.");
+    let provider = v["provider"].as_str().unwrap_or("default");
+    let model_name = v["model"].as_str().unwrap_or("default");
+    let tools: Vec<String> = v["tools"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let skills: Vec<String> = v["skills"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let manifest = AgentManifest {
+        name: name.to_string(),
+        description: desc.to_string(),
+        skills,
+        model: ModelConfig {
+            provider: provider.to_string(),
+            model: model_name.to_string(),
+            system_prompt: prompt.to_string(),
+            ..Default::default()
+        },
+        capabilities: ManifestCapabilities {
+            tools,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    toml::to_string_pretty(&manifest).unwrap_or_else(|_| {
+        "[capabilities]\ntools = []\n\n[model]\nmodel = \"default\"\nprovider = \"default\"\nsystem_prompt = \"\"\n"
+            .to_string()
+    })
+}
+
+/// Request to spawn an ephemeral (no-workspace, no-DB) agent worker.
+/// The caller controls everything; nothing is inherited from the parent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EphemeralSpawnRequest {
+    /// Inline system prompt — the worker's mission. Required if no `agent_type`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    /// Named agent type from `~/.librefang/templates/`. Provides defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    /// Model override (provider/model/max_tokens).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelConfig>,
+    /// Tool names to enable. `None` = no tools (pure LLM).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+    /// Skill names to enable. `None` = no skills.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
+    /// The task message to execute.
+    pub message: String,
+    /// Max LLM iterations before forced return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<u32>,
+}
+
+/// Result of an ephemeral worker run, carrying the metering the API surface
+/// reports back to callers. The plain `spawn_ephemeral` handle returns only
+/// `response`; this struct is returned by the detailed handle so cost and
+/// iteration counts survive the trait boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EphemeralSpawnResult {
+    /// The worker's final text response.
+    pub response: String,
+    /// Estimated cost in USD, when the kernel could compute it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// Number of agent-loop iterations the worker ran.
+    pub iterations: u32,
 }
 
 /// Tool configuration within an agent manifest.
@@ -3135,6 +3253,7 @@ model = "llama-3.3-70b-versatile"
             context_window: None,
             max_output_tokens: None,
             extra_params: extra,
+            ..Default::default()
         };
 
         // Serialize to TOML

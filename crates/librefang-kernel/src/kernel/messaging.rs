@@ -142,6 +142,22 @@ impl LibreFangKernel {
         blocks: Vec<librefang_types::message::ContentBlock>,
         sender: &SenderContext,
     ) -> KernelResult<AgentLoopResult> {
+        self.send_message_with_blocks_and_sender_thinking(agent_id, message, blocks, sender, None)
+            .await
+    }
+
+    /// Same as [`Self::send_message_with_blocks_and_sender`] but applies a
+    /// per-turn extended-thinking override. `None` keeps the agent's
+    /// configured default. Used by the channel bridge to honour the
+    /// `/think` command preference.
+    pub async fn send_message_with_blocks_and_sender_thinking(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        blocks: Vec<librefang_types::message::ContentBlock>,
+        sender: &SenderContext,
+        thinking_override: Option<bool>,
+    ) -> KernelResult<AgentLoopResult> {
         self.send_message_full(
             agent_id,
             message,
@@ -149,7 +165,7 @@ impl LibreFangKernel {
             Some(blocks),
             Some(sender),
             None,
-            None,
+            thinking_override,
             None,
         )
         .await
@@ -870,6 +886,338 @@ impl LibreFangKernel {
         result.latency_ms = latency_ms;
 
         Ok(result)
+    }
+
+    /// Spawn an ephemeral worker: build manifest from request, run agent loop,
+    /// return result. No workspace, no DB, no registry entry.
+    pub async fn spawn_ephemeral_worker(
+        &self,
+        request: librefang_types::agent::EphemeralSpawnRequest,
+        parent: Option<AgentId>,
+    ) -> KernelResult<AgentLoopResult> {
+        let mut manifest = self.resolve_ephemeral_manifest(&request)?;
+
+        let agent_id = AgentId::new();
+
+        // #7723: agent-type-based ephemeral missions get a uid display name
+        // and a transient workspace dir that is created now and removed when
+        // the run ends (success and failure alike).
+        let mission_dir = if request.agent_type.is_some() {
+            let tag: String = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+            let base = manifest.name.clone();
+            manifest.name = format!("{base}-{tag}");
+            let dir = self.home_dir_boot.join("transient").join(&manifest.name);
+            if let Err(e) = ensure_workspace(&dir) {
+                warn!(dir = %dir.display(), error = %e,
+                    "failed to create ephemeral mission dir");
+            }
+            manifest.workspace = Some(dir.clone());
+            Some(dir)
+        } else {
+            None
+        };
+        struct _MissionCleanup(Option<std::path::PathBuf>);
+        impl Drop for _MissionCleanup {
+            fn drop(&mut self) {
+                if let Some(dir) = &self.0 {
+                    if let Err(e) = std::fs::remove_dir_all(dir) {
+                        tracing::warn!(dir = %dir.display(), error = %e,
+                            "failed to clean up ephemeral mission dir");
+                    }
+                }
+            }
+        }
+        let _cleanup = _MissionCleanup(mission_dir);
+
+        let agent_name = manifest.name.clone();
+        tracing::info!(
+            agent_id = %agent_id,
+            agent_type = request.agent_type.as_deref().unwrap_or("inline"),
+            name = %agent_name,
+            "Spawning ephemeral worker"
+        );
+
+        // Resolve tools by name from builtin definitions
+        let all_builtins = builtin_tool_definitions();
+        let tools: Vec<librefang_types::tool::ToolDefinition> = match &request.tools {
+            Some(names) if !names.is_empty() => all_builtins
+                .into_iter()
+                .filter(|t| names.iter().any(|n| n == &t.name))
+                .collect(),
+            _ => vec![],
+        };
+
+        // Budget gate
+        let provider = manifest.model.provider.clone();
+        let exhausted = self.flag_provider_budget_if_exhausted(&provider);
+        if self.provider_exhausted_blocks_call(exhausted, &manifest, &self.config.load_full()) {
+            return Err(KernelError::LibreFang(LibreFangError::QuotaExceeded(
+                format!("Provider {provider} budget exhausted"),
+            )));
+        }
+
+        let driver = self.resolve_driver(&manifest)?;
+
+        let ctx_window = super::manifest_helpers::resolve_context_window(
+            &self.llm.model_catalog.load(),
+            &manifest.model,
+            None,
+        );
+
+        // Inject model_supports_tools metadata (same pattern as send_message_ephemeral)
+        if let Some(supports) = Some(self.llm.model_catalog.load()).and_then(|cat| {
+            cat.find_model_for_manifest(&manifest.model.provider, &manifest.model.model)
+                .map(|m| cat.effective_capabilities(m).supports_tools)
+        }) {
+            manifest.metadata.insert(
+                "model_supports_tools".to_string(),
+                serde_json::Value::Bool(supports),
+            );
+        }
+
+        // Empty in-memory session
+        let mut session = librefang_memory::session::Session {
+            id: SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: Some(format!("ephemeral:{agent_name}")),
+            model_override: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        };
+
+        let cfg = self.config.load();
+        // #6930 review: an untrusted caller (HTTP body, LLM tool input) can
+        // request max_iterations = u32::MAX. Clamp any explicit request to
+        // the configured global cap, or to the goal-run default when no
+        // global cap is set. Request = None keeps the historical unbounded
+        // behaviour (config-driven).
+        let max_iter = request
+            .max_iterations
+            .map(|m| {
+                m.min(
+                    cfg.agent_max_iterations
+                        .unwrap_or(librefang_types::goal::DEFAULT_GOAL_MAX_ITERATIONS),
+                )
+            })
+            .or(cfg.agent_max_iterations);
+        let start_time = std::time::Instant::now();
+
+        // Recursion depth guard (same check as agent_send + run_workflow).
+        // #6659: an inlined run_agent_loop pushes ~56 KB of future per nesting
+        // level — with no cap a caller can stack-overflow the tokio worker.
+        let max_depth = cfg.max_agent_call_depth;
+        let current_depth = librefang_runtime::tool_runner::current_agent_depth();
+        if current_depth >= max_depth {
+            return Err(KernelError::LibreFang(LibreFangError::CapabilityDenied(
+                format!(
+                    "Inter-agent call depth exceeded (max {max_depth}). \
+                     An ephemeral worker inside another worker is too deep. \
+                     Use a permanent agent or the task queue instead."
+                ),
+            )));
+        }
+
+        if request.skills.as_ref().is_some_and(|s| !s.is_empty()) {
+            tracing::warn!(
+                requested = ?request.skills,
+                "Ephemeral spawn: `skills` is accepted but not applied yet — the selection is dropped (skill registry is not built for ephemerals)"
+            );
+        }
+        let result = librefang_runtime::tool_runner::with_agent_call_depth(run_agent_loop(
+            &manifest,
+            &request.message,
+            &mut session,
+            &self.memory.substrate,
+            driver,
+            &tools,
+            None, // no kernel handle
+            None, // no skills (skill registry not built for ephemerals yet)
+            None, // no MCP
+            None, // no web
+            None, // no browser
+            None, // no embeddings
+            manifest.workspace.as_deref(),
+            None, // no phase callback
+            None, // no media engine
+            None, // no media drivers
+            None, // no TTS
+            None, // no docker
+            None, // no hooks
+            ctx_window,
+            None, // no process manager
+            None, // no checkpoint manager
+            None, // no process registry
+            None, // no content blocks
+            None, // no proactive memory
+            None, // no context engine
+            None, // no pending messages
+            &librefang_runtime::agent_loop::LoopOptions {
+                is_fork: false,
+                incognito: false,
+                allowed_tools: None,
+                interrupt: Some(librefang_runtime::interrupt::SessionInterrupt::new()),
+                max_iterations: max_iter,
+                max_history_messages: cfg.max_history_messages,
+                aux_client: Some(self.llm.aux_client.load_full()),
+                parent_session_id: None,
+                tool_results_config: None,
+                compaction_config: None,
+                gateway_compression: None,
+                parallel_tools_config: Some(cfg.parallel_tools.clone()),
+                canvas_config: Some(cfg.canvas.clone()),
+                system_call: false,
+            },
+        ))
+        .await
+        .map_err(KernelError::LibreFang)?;
+
+        let latency_ms = start_time.elapsed().as_millis() as u64;
+
+        // Record metering (mirrors send_message_ephemeral pattern)
+        let model = &manifest.model.model;
+        let cost = MeteringEngine::estimate_cost_with_catalog(
+            &self.llm.model_catalog.load(),
+            model,
+            result.total_usage.input_tokens,
+            result.total_usage.output_tokens,
+            result.total_usage.cache_read_input_tokens,
+            result.total_usage.cache_creation_input_tokens,
+        );
+        let billed_provider = result
+            .actual_provider
+            .clone()
+            .unwrap_or_else(|| manifest.model.provider.clone());
+        // Attribute cost to the parent agent so it appears in per-agent budget
+        // rollups. If there is no parent (direct API call), bill against the
+        // ephemeral temp UUID.
+        let billed_agent = parent.unwrap_or(agent_id);
+
+        let usage_record = librefang_memory::usage::UsageRecord {
+            agent_id: billed_agent,
+            provider: billed_provider,
+            model: result.actual_model.clone().unwrap_or_else(|| model.clone()),
+            input_tokens: result.total_usage.input_tokens,
+            output_tokens: result.total_usage.output_tokens,
+            cost_usd: cost,
+            tool_calls: result.decision_traces.len() as u32,
+            latency_ms,
+            user_id: None,
+            channel: None,
+            session_id: None,
+        };
+        if let Err(e) = self.metering.engine.check_all_and_record(
+            &usage_record,
+            &manifest.resources,
+            &self.current_budget(),
+        ) {
+            tracing::warn!(error = %e, "Ephemeral worker metering failed");
+            let _ = self.metering.engine.record(&usage_record);
+        }
+
+        let mut result = result;
+        result.cost_usd = if cost > 0.0 { Some(cost) } else { None };
+        result.latency_ms = latency_ms;
+
+        tracing::info!(
+            agent_id = %agent_id,
+            name = %agent_name,
+            iterations = result.iterations,
+            cost = cost,
+            latency_ms = latency_ms,
+            "Ephemeral worker completed"
+        );
+
+        Ok(result)
+    }
+
+    /// Resolve an `AgentManifest` from an `EphemeralSpawnRequest`.
+    /// Tries agent_type template first, then inline fields, then kernel defaults.
+    fn resolve_ephemeral_manifest(
+        &self,
+        request: &librefang_types::agent::EphemeralSpawnRequest,
+    ) -> KernelResult<librefang_types::agent::AgentManifest> {
+        let mut manifest = if let Some(ref type_name) = request.agent_type {
+            // Path-traversal guard: only [A-Za-z0-9_-] for <name>.toml
+            if type_name.is_empty()
+                || type_name.len() > 64
+                || !type_name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(KernelError::LibreFang(LibreFangError::Internal(format!(
+                    "agent_type '{type_name}' contains disallowed characters — \
+                     only [A-Za-z0-9_-] permitted"
+                ))));
+            }
+            // Load from ~/.librefang/templates/<name>.toml
+            let templates_dir = self.home_dir_boot.join("templates");
+            let path = templates_dir.join(format!("{type_name}.toml"));
+            if path.exists() {
+                let content = std::fs::read_to_string(&path).map_err(|e| {
+                    KernelError::LibreFang(LibreFangError::Internal(format!(
+                        "Failed to read agent type {type_name}: {e}"
+                    )))
+                })?;
+                toml::from_str(&content).map_err(|e| {
+                    KernelError::LibreFang(LibreFangError::Internal(format!(
+                        "Invalid agent type {type_name}: {e}"
+                    )))
+                })?
+            } else {
+                // Fallback: check workspaces/agents/<name>/agent.toml
+                let agent_path = self
+                    .home_dir_boot
+                    .join("workspaces")
+                    .join("agents")
+                    .join(type_name)
+                    .join("agent.toml");
+                if agent_path.exists() {
+                    let content = std::fs::read_to_string(&agent_path).map_err(|e| {
+                        KernelError::LibreFang(LibreFangError::Internal(format!(
+                            "Failed to read template agent {type_name}: {e}"
+                        )))
+                    })?;
+                    toml::from_str(&content).map_err(|e| {
+                        KernelError::LibreFang(LibreFangError::Internal(format!(
+                            "Invalid template agent {type_name}: {e}"
+                        )))
+                    })?
+                } else {
+                    return Err(KernelError::LibreFang(LibreFangError::AgentNotFound(
+                        format!("Agent type '{type_name}' not found"),
+                    )));
+                }
+            }
+        } else {
+            // Inline: build minimal manifest
+            librefang_types::agent::AgentManifest {
+                name: format!("ephemeral-{}", uuid::Uuid::new_v4().as_simple()),
+                ..Default::default()
+            }
+        };
+
+        // Apply overrides from request
+        if let Some(ref prompt) = request.system_prompt {
+            manifest.model.system_prompt = prompt.clone();
+        }
+        if let Some(ref model_cfg) = request.model {
+            manifest.model.provider = model_cfg.provider.clone();
+            manifest.model.model = model_cfg.model.clone();
+            if model_cfg.max_tokens > 0 {
+                manifest.model.max_tokens = model_cfg.max_tokens;
+            }
+            if let Some(ref base_url) = model_cfg.base_url {
+                manifest.model.base_url = Some(base_url.clone());
+            }
+            if let Some(ref api_key_env) = model_cfg.api_key_env {
+                manifest.model.api_key_env = Some(api_key_env.clone());
+            }
+        }
+
+        Ok(manifest)
     }
 
     /// Decide the channel scope used to derive the per-channel `SessionId`,
@@ -2443,6 +2791,60 @@ impl LibreFangKernel {
         );
         let mut manifest = entry.manifest.clone();
 
+        // Resolve "default" provider/model to the effective default.
+        // Mirrors the resolution in `execute_llm_agent` so the streaming
+        // path (WebUI, Telegram, forks) and the non-streaming path stay in
+        // sync. Without this, agents spawned post-boot with
+        // provider="default"/model="default" reach the LLM API with
+        // the literal sentinel values still in place.
+        {
+            let cfg = self.config.load();
+            let is_default_provider =
+                manifest.model.provider.is_empty() || manifest.model.provider == "default";
+            let is_default_model =
+                manifest.model.model.is_empty() || manifest.model.model == "default";
+            let is_auto_spawned = entry.name == "assistant"
+                && manifest
+                    .description
+                    .starts_with("General-purpose assistant");
+            if (is_default_provider && is_default_model) || is_auto_spawned {
+                let override_guard = self
+                    .llm
+                    .default_model_override
+                    .read()
+                    .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                let dm = override_guard.as_ref().unwrap_or(&cfg.default_model);
+                if !dm.provider.is_empty() {
+                    manifest.model.provider = dm.provider.clone();
+                }
+                if !dm.model.is_empty() {
+                    manifest.model.model = dm.model.clone();
+                }
+                if !dm.api_key_env.is_empty() && manifest.model.api_key_env.is_none() {
+                    manifest.model.api_key_env = Some(dm.api_key_env.clone());
+                }
+                if dm.base_url.is_some() && manifest.model.base_url.is_none() {
+                    manifest.model.base_url.clone_from(&dm.base_url);
+                }
+            }
+        }
+
+        // Stamp sender_chat_id into the manifest so tool dispatch
+        // (agent_send, defer, approval-resume) can thread the
+        // conversation context through async task registration.
+        // Mirrors the identical block in send_message_full_inner so
+        // the streaming and non-streaming paths stay in sync.
+        if let Some(ctx) = sender_context {
+            if let Some(cid) = &ctx.chat_id {
+                if !cid.is_empty() {
+                    manifest.metadata.insert(
+                        "sender_chat_id".to_string(),
+                        serde_json::Value::String(cid.clone()),
+                    );
+                }
+            }
+        }
+
         // Apply per-session model override (#4898) before any manifest field is
         // read downstream (model catalog lookup, system prompt build, billing).
         // The pre-lock session snapshot already carries model_override; the
@@ -3550,6 +3952,53 @@ impl LibreFangKernel {
 mod tests {
     use super::sidecar_default_conversation;
     use librefang_types::config::SidecarChannelConfig;
+
+    /// #7723 — an agent-type-based ephemeral mission gets a uid name and a
+    /// transient workspace that is removed after the run ends (here: the
+    /// run fails immediately without LLM drivers, which still exercises the
+    /// cleanup path).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ephemeral_mission_folder_created_and_cleaned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().to_path_buf();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        std::fs::create_dir_all(home.join("templates")).unwrap();
+        std::fs::write(
+            home.join("templates").join("qa-mission.toml"),
+            "name = \"qa-mission\"\nmodule = \"builtin:chat\"\n",
+        )
+        .unwrap();
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            ..librefang_types::config::KernelConfig::default()
+        };
+        let kernel = super::LibreFangKernel::boot_with_config(config).expect("boot");
+        std::mem::forget(dir);
+
+        let req = librefang_types::agent::EphemeralSpawnRequest {
+            system_prompt: None,
+            message: "probe".to_string(),
+            agent_type: Some("qa-mission".to_string()),
+            model: None,
+            tools: None,
+            skills: None,
+            max_iterations: Some(1),
+        };
+        let result = kernel.spawn_ephemeral_worker(req, None).await;
+        // No LLM driver is configured: the run must fail, and the cleanup
+        // must still have removed the mission dir.
+        assert!(result.is_err(), "worker must fail without a driver");
+        let transient = home.join("transient");
+        let leftovers: Vec<_> = std::fs::read_dir(&transient)
+            .map(|rd| rd.filter_map(|e| e.ok()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert!(
+            leftovers.is_empty(),
+            "transient dir must be empty after the run: {} entries left",
+            leftovers.len()
+        );
+    }
 
     fn sc(json: serde_json::Value) -> SidecarChannelConfig {
         serde_json::from_value(json).expect("valid SidecarChannelConfig")

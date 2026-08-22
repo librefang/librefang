@@ -1,4 +1,4 @@
-use super::install::parse_plugin_i18n_blocks;
+use super::install::{parse_plugin_i18n_blocks, pip_in_venv, resolve_python_install};
 use super::registry::{
     is_valid_registry_pubkey_b64, registry_index_urls, registry_pubkey_cache_path,
     EMBEDDED_REGISTRY_PUBKEYS,
@@ -362,6 +362,99 @@ description = "Spanish description"
         i18n["es"].description.as_deref(),
         Some("Spanish description")
     );
+}
+
+// ── Shared python interpreter/args resolver (install.rs) ──
+
+/// `python3` exists and is preferred over `python`.
+#[tokio::test]
+async fn resolve_python_install_prefers_python3() {
+    let (interpreter, args) =
+        resolve_python_install(|name| std::future::ready(name == "python3"), false)
+            .await
+            .expect("python3 probe should hit");
+    assert_eq!(interpreter, "python3");
+    assert_eq!(args[..3], ["-m", "pip", "install"]);
+    assert!(args.contains(&"--user"));
+    assert!(args.contains(&"--break-system-packages"));
+}
+
+/// Only `python` exists — the resolver falls back to it.
+#[tokio::test]
+async fn resolve_python_install_falls_back_to_python() {
+    let (interpreter, args) =
+        resolve_python_install(|name| std::future::ready(name == "python"), false)
+            .await
+            .expect("python probe should hit");
+    assert_eq!(interpreter, "python");
+    assert_eq!(args[..3], ["-m", "pip", "install"]);
+    assert!(args.contains(&"--user"));
+    assert!(args.contains(&"--break-system-packages"));
+}
+
+/// Neither interpreter exists — clean error naming both candidates.
+#[tokio::test]
+async fn resolve_python_install_no_interpreter_is_clean_error() {
+    let err = resolve_python_install(|_| std::future::ready(false), false)
+        .await
+        .expect_err("no interpreter available — resolver must error");
+    assert!(err.contains("python3"), "error should name python3: {err}");
+    assert!(err.contains("python"), "error should name python: {err}");
+}
+
+/// Inside a virtualenv/Conda env, `--user` / `--break-system-packages`
+/// must be omitted (pip rejects `--user` there).
+#[tokio::test]
+async fn resolve_python_install_omits_user_flags_in_venv() {
+    let (interpreter, args) =
+        resolve_python_install(|name| std::future::ready(name == "python3"), true)
+            .await
+            .expect("python3 probe should hit");
+    assert_eq!(interpreter, "python3");
+    assert_eq!(args[..3], ["-m", "pip", "install"]);
+    assert!(!args.contains(&"--user"));
+    assert!(!args.contains(&"--break-system-packages"));
+}
+
+/// Outside a virtualenv, both flags must be present (PEP 668).
+#[tokio::test]
+async fn resolve_python_install_adds_user_flags_outside_venv() {
+    let (interpreter, args) =
+        resolve_python_install(|name| std::future::ready(name == "python3"), false)
+            .await
+            .expect("python3 probe should hit");
+    assert_eq!(interpreter, "python3");
+    assert!(args.contains(&"--user"));
+    assert!(args.contains(&"--break-system-packages"));
+}
+
+/// The venv detection mirrors the env vars pip itself honors.
+#[test]
+fn pip_in_venv_detects_virtualenv_and_conda() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let venv = std::env::var_os("VIRTUAL_ENV");
+    let conda = std::env::var_os("CONDA_PREFIX");
+    std::env::remove_var("VIRTUAL_ENV");
+    std::env::remove_var("CONDA_PREFIX");
+    assert!(!pip_in_venv(), "neither var set — not a venv");
+
+    std::env::set_var("VIRTUAL_ENV", "/tmp/fake-venv");
+    assert!(pip_in_venv(), "VIRTUAL_ENV set — venv");
+
+    std::env::remove_var("VIRTUAL_ENV");
+    std::env::set_var("CONDA_PREFIX", "/opt/fake-conda");
+    assert!(pip_in_venv(), "CONDA_PREFIX set — conda env");
+
+    // Restore the prior environment.
+    match venv {
+        Some(v) => std::env::set_var("VIRTUAL_ENV", v),
+        None => std::env::remove_var("VIRTUAL_ENV"),
+    }
+    match conda {
+        Some(c) => std::env::set_var("CONDA_PREFIX", c),
+        None => std::env::remove_var("CONDA_PREFIX"),
+    }
 }
 
 // ── #3805 — registry pubkey resolver (env > TOFU cache > worker fetch) ──

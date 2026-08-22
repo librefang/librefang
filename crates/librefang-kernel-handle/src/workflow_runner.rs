@@ -223,8 +223,9 @@ pub trait WorkflowRunner: Send + Sync {
         &self,
         workflow_id: &str,
         input: &str,
+        caller_agent_id: Option<&str>,
     ) -> Result<(String, String), KernelOpError> {
-        let _ = (workflow_id, input);
+        let _ = (workflow_id, input, caller_agent_id);
         Err(KernelOpError::unavailable("Workflow engine"))
     }
 
@@ -297,5 +298,28 @@ pub trait WorkflowRunner: Send + Sync {
     async fn cancel_workflow_run(&self, run_id: &str) -> Result<(), KernelOpError> {
         let _ = run_id;
         Err(KernelOpError::unavailable("Workflow engine"))
+    }
+
+    /// Create a new workflow from a JSON definition (same shape as
+    /// `POST /api/workflows`). Writes the `.workflow.toml` file to
+    /// `~/.librefang/workflows/` and registers it in the engine.
+    /// Returns the created workflow id on success.
+    async fn create_workflow(
+        &self,
+        workflow_json: &str,
+        caller_agent_id: Option<&str>,
+    ) -> Result<String, KernelOpError> {
+        let _ = (workflow_json, caller_agent_id);
+        Err(KernelOpError::unavailable("Workflow engine"))
+    }
+}
+
+#[async_trait]
+pub trait AgentTypeTools: Send + Sync {
+    /// Create an agent type (template) from the flat JSON shape shared with
+    /// `POST /api/templates` (#7722). Returns the normalized name on success.
+    async fn create_agent_type(&self, json: &str) -> Result<String, KernelOpError> {
+        let _ = json;
+        Err(KernelOpError::unavailable("Agent types"))
     }
 }

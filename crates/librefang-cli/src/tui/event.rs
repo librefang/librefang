@@ -13,9 +13,11 @@ use std::sync::{mpsc, Arc, OnceLock};
 use std::time::Duration;
 
 use super::screens::{
+    agents::PromptEntry,
     audit::AuditEntry,
     dashboard::AuditRow,
     extensions::{ExtensionHealthInfo, ExtensionInfo},
+    goals::GoalInfo,
     hands::{HandInfo, HandInstanceInfo},
     logs::LogEntry,
     memory::{AgentEntry, KvPair},
@@ -168,6 +170,16 @@ pub enum AppEvent {
     PeersLoaded(Vec<PeerInfo>),
     /// Log entries loaded.
     LogsLoaded(Vec<LogEntry>),
+    /// Goals loaded.
+    GoalsLoaded(Vec<GoalInfo>),
+    /// Goal created.
+    GoalCreated(String),
+    /// Goal deleted.
+    GoalDeleted(String),
+    /// Goal run started.
+    GoalRunStarted(String),
+    /// Goal run stopped.
+    GoalRunStopped(String),
     /// Hand definitions loaded (marketplace).
     HandsLoaded(Vec<HandInfo>),
     /// Active hand instances loaded.
@@ -223,6 +235,11 @@ pub enum AppEvent {
     ChatModelsForPicker(Vec<super::screens::chat::ModelEntry>),
     /// Agent list loaded for the /agents chat command.
     ChatAgentListLoaded(Vec<String>),
+
+    /// Prompts library loaded for the prompt picker.
+    PromptsLoaded(Vec<PromptEntry>),
+    /// Router profiles loaded for model routing config.
+    RouterProfilesLoaded(Vec<String>),
 }
 
 /// Spawn the crossterm polling + tick thread. Returns sender + receiver.
@@ -1332,6 +1349,77 @@ pub fn spawn_update_agent_mcp_servers(
     });
 }
 
+/// Fetch the fleet-wide prompts library (`GET /api/prompts/overview`).
+pub fn spawn_fetch_prompts(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client
+                .get(format!("{base_url}/api/prompts/overview"))
+                .send()
+            {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let items = body.get("items").and_then(|v| v.as_array());
+                    let prompts: Vec<PromptEntry> = items
+                        .map(|arr| {
+                            arr.iter()
+                                .map(|item| PromptEntry {
+                                    agent_name: item["agent_name"]
+                                        .as_str()
+                                        .unwrap_or("?")
+                                        .to_string(),
+                                    content: item["live_system_prompt"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = tx.send(AppEvent::PromptsLoaded(prompts));
+                    return;
+                }
+            }
+            let _ = tx.send(AppEvent::PromptsLoaded(Vec::new()));
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::PromptsLoaded(Vec::new()));
+        }
+    });
+}
+
+/// Fetch available router profile names.
+pub fn spawn_fetch_router_profiles(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client
+                .get(format!("{base_url}/api/model-router/profiles"))
+                .send()
+            {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let profiles: Vec<String> = body
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = tx.send(AppEvent::RouterProfilesLoaded(profiles));
+                    return;
+                }
+            }
+            // If endpoint doesn't exist, return empty list
+            let _ = tx.send(AppEvent::RouterProfilesLoaded(Vec::new()));
+        }
+        BackendRef::InProcess(_kernel) => {
+            // Router profiles not exposed via kernel API in-process yet
+            let _ = tx.send(AppEvent::RouterProfilesLoaded(Vec::new()));
+        }
+    });
+}
+
 // ── New screen spawn functions ───────────────────────────────────────────────
 
 /// Build a blocking reqwest client for daemon calls.
@@ -1645,6 +1733,7 @@ fn parse_clawhub_results(body: &serde_json::Value) -> Vec<ClawHubResult> {
 
     items
         .map(|arr| {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             arr.iter()
                 .map(|r| ClawHubResult {
                     name: r["name"].as_str().unwrap_or("").to_string(),
@@ -1653,6 +1742,12 @@ fn parse_clawhub_results(body: &serde_json::Value) -> Vec<ClawHubResult> {
                     downloads: r["downloads"].as_u64().unwrap_or(0),
                     runtime: r["runtime"].as_str().unwrap_or("").to_string(),
                 })
+                // The ClawHub index contains duplicate entries for the same
+                // slug under different display casings (e.g. "Prd" and
+                // "prd"). Dedupe by lowercase slug so the marketplace list
+                // never shows the same skill twice and one install press
+                // never appears to install several entries.
+                .filter(|entry| seen.insert(entry.slug.to_lowercase()))
                 .collect()
         })
         .unwrap_or_default()
@@ -1671,10 +1766,31 @@ pub fn spawn_install_skill(backend: BackendRef, slug: String, tx: mpsc::Sender<A
                 Ok(resp) if resp.status().is_success() => {
                     let _ = tx.send(AppEvent::SkillInstalled(slug));
                 }
-                _ => {
+                Ok(resp) => {
+                    // Surface the daemon's actual error (e.g. "YAML parse
+                    // error ...") instead of a generic failure line, so a
+                    // 4xx from a broken marketplace skill is actionable
+                    // rather than reading like an internal server error.
+                    let http_status = resp.status();
+                    let detail = resp
+                        .json::<serde_json::Value>()
+                        .ok()
+                        .and_then(|b| b.get("error").and_then(|v| v.as_str()).map(String::from))
+                        .unwrap_or_else(|| {
+                            crate::i18n::t_args(
+                                "tui-event-skill-install-http-fallback",
+                                &[("status", http_status.as_str())],
+                            )
+                        });
                     let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-skill-install-failed",
-                        &[("slug", &slug)],
+                        "tui-event-skill-install-failed-detail",
+                        &[("slug", &slug), ("detail", &detail)],
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-skill-install-failed-detail",
+                        &[("slug", &slug), ("detail", &e.to_string())],
                     )));
                 }
             }
@@ -2260,6 +2376,206 @@ pub fn spawn_fetch_logs(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::LogsLoaded(Vec::new()));
+        }
+    });
+}
+
+// ── Goals events ────────────────────────────────────────────────────────────
+
+/// Fetch goals list.
+pub fn spawn_fetch_goals(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client.get(format!("{base_url}/api/goals")).send() {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let goals: Vec<GoalInfo> = body
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .map(|g| GoalInfo {
+                                    id: g["id"].as_str().unwrap_or("").to_string(),
+                                    title: g["title"].as_str().unwrap_or("").to_string(),
+                                    description: g["description"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    status: g["status"].as_str().unwrap_or("").to_string(),
+                                    progress: g["progress"].as_u64().unwrap_or(0) as u8,
+                                    agent_id: g["agent_id"].as_str().map(|s| s.to_string()),
+                                    loop_engineering: g["loop_engineering"]
+                                        .as_bool()
+                                        .unwrap_or(false),
+                                    verify_agent_id: g["verify_agent_id"]
+                                        .as_str()
+                                        .map(|s| s.to_string()),
+                                    evaluator_model: g["evaluator_model"]
+                                        .as_str()
+                                        .map(|s| s.to_string()),
+                                    run_phase: g["run_phase"].as_str().map(|s| s.to_string()),
+                                    run_iteration: g["run_iteration"].as_u64().map(|v| v as u32),
+                                    run_max_iterations: g["run_max_iterations"]
+                                        .as_u64()
+                                        .map(|v| v as u32),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = tx.send(AppEvent::GoalsLoaded(goals));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::GoalsLoaded(Vec::new()));
+        }
+    });
+}
+
+/// Create a goal.
+#[allow(clippy::too_many_arguments)] // goal-run context args; grouping churns all callers
+pub fn spawn_create_goal(
+    backend: BackendRef,
+    title: String,
+    description: String,
+    agent_id: String,
+    loop_engineering: bool,
+    verify_agent_id: String,
+    evaluator_model: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let mut body = serde_json::json!({
+                "title": title,
+                "description": description,
+                "agent_id": agent_id,
+                "loop_engineering": loop_engineering,
+            });
+            if !verify_agent_id.is_empty() {
+                body["verify_agent_id"] = serde_json::json!(verify_agent_id);
+            }
+            if !evaluator_model.is_empty() {
+                body["evaluator_model"] = serde_json::json!(evaluator_model);
+            }
+            match client
+                .post(format!("{base_url}/api/goals"))
+                .json(&body)
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let resp_body: serde_json::Value = resp.json().unwrap_or_default();
+                    let id = resp_body["id"]
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "created".to_string());
+                    let _ = tx.send(AppEvent::GoalCreated(id));
+                }
+                Ok(resp) => {
+                    let err_body: serde_json::Value = resp.json().unwrap_or_default();
+                    let msg = err_body["error"]
+                        .as_str()
+                        .unwrap_or(&crate::i18n::t("tui-goal-create-failed"))
+                        .to_string();
+                    let _ = tx.send(AppEvent::FetchError(msg));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(format!("Create goal: {e}")));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
+        }
+    });
+}
+
+/// Delete a goal.
+pub fn spawn_delete_goal(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .delete(format!("{base_url}/api/goals/{goal_id}"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::GoalDeleted(goal_id));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-goal-delete-failed",
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
+        }
+    });
+}
+
+/// Start a goal run.
+pub fn spawn_start_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .post(format!("{base_url}/api/goals/{goal_id}/start"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::GoalRunStarted(goal_id));
+                }
+                Ok(resp) => {
+                    let err_body: serde_json::Value = resp.json().unwrap_or_default();
+                    let msg = err_body["error"]
+                        .as_str()
+                        .unwrap_or(&crate::i18n::t("tui-goal-start-failed"))
+                        .to_string();
+                    let _ = tx.send(AppEvent::FetchError(msg));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-goal-start-error",
+                        &[("error", &e.to_string())],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
+        }
+    });
+}
+
+/// Stop a goal run.
+pub fn spawn_stop_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .post(format!("{base_url}/api/goals/{goal_id}/stop"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::GoalRunStopped(goal_id));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t("tui-goal-stop-failed")));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
         }
     });
 }

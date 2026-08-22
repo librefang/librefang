@@ -17,6 +17,7 @@
     "tasks": "Tasks",
     "goals": "Goals",
     "agents": "Agents",
+    "agent_types": "Agent Types",
     "users": "Users",
     "providers": "Providers",
     "channels": "Channels",
@@ -273,6 +274,26 @@
       "no_peers": "no peers"
     },
     "setup_failed": "Quick init failed"
+  },
+  "agentTypes": {
+    "title": "Agent Types",
+    "create": "Create Type",
+    "edit": "Edit Type",
+    "delete": "Delete Type",
+    "quickRun": "Quick Run",
+    "name": "Name",
+    "description": "Description",
+    "systemPrompt": "System Prompt",
+    "provider": "Provider",
+    "model": "Model",
+    "tools": "Tools",
+    "message": "Message",
+    "result": "Result",
+    "noTypes": "No agent types defined yet",
+    "confirmDelete": "Delete this agent type?",
+    "iterations": "Iterations",
+    "latency": "Latency",
+    "cost": "Cost"
   },
   "agents": {
     "title": "Agents",
@@ -1175,7 +1196,8 @@
     "pending_title": "Skill workshop pending",
     "pending_load_failed": "Failed to load pending candidates:",
     "pending_unknown_error": "unknown error",
-    "pending_desc": "Drafts captured from agent conversations awaiting your review (#3328)."
+    "pending_desc": "Drafts captured from agent conversations awaiting your review (#3328).",
+    "viewOnMarketplace": "View on {{marketplace}}"
   },
   "hands": {
     "title": "Hands",
@@ -1686,7 +1708,11 @@
       "pending_review_one": "1 workflow run awaiting operator review",
       "pending_review_other": "{{count}} workflow runs awaiting operator review",
       "empty_artifact": "(empty artifact)"
-    }
+    },
+    "save_from_chat": "Save as workflow",
+    "saved_to_canvas": "Workflow opened in Canvas",
+    "invalid_json": "That JSON block isn't valid workflow JSON",
+    "no_json_found": "No JSON block in this message to save"
   },
   "scheduler": {
     "title": "Scheduler",

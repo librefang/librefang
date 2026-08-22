@@ -1180,7 +1180,7 @@ pub async fn execute_tool_raw(
         "goal_update" => tool_goal_update(input, *kernel),
 
         // Workflow tools.
-        "workflow_run" => tool_workflow_run(input, *kernel).await,
+        "workflow_run" => tool_workflow_run(input, *kernel, *caller_agent_id).await,
         "workflow_list" => tool_workflow_list(*kernel).await,
         "workflow_describe" => tool_workflow_describe(input, *kernel).await,
         "workflow_status" => tool_workflow_status(input, *kernel).await,
@@ -1188,6 +1188,8 @@ pub async fn execute_tool_raw(
             tool_workflow_start(input, *kernel, *caller_agent_id, *session_id).await
         }
         "workflow_cancel" => tool_workflow_cancel(input, *kernel).await,
+        "workflow_create" => tool_workflow_create(input, kernel.as_deref(), *caller_agent_id).await,
+        "agent_type_create" => tool_agent_type_create(input, kernel.as_deref()).await,
 
         // Browser automation tools
         #[cfg(feature = "browser")]

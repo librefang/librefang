@@ -37,9 +37,14 @@ pub async fn create_workflow(
             StepAgent::ByName {
                 name: name.to_string(),
             }
+        } else if let Some(t) = s["type"].as_str() {
+            StepAgent::ByType {
+                template: t.to_string(),
+                fresh: s["fresh"].as_bool().unwrap_or(false),
+            }
         } else {
             return ApiErrorResponse::bad_request(format!(
-                "Step '{}' needs 'agent_id' or 'agent_name'",
+                "Step '{}' needs 'agent_id', 'agent_name', or 'type'",
                 step_name
             ))
             .into_json_tuple();
@@ -59,6 +64,14 @@ pub async fn create_workflow(
 
         steps.push(WorkflowStep {
             name: step_name,
+            required_skills: s["required_skills"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
             agent,
             prompt_template: s["prompt"].as_str().unwrap_or("{{input}}").to_string(),
             mode,
@@ -330,9 +343,14 @@ pub async fn update_workflow(
                 StepAgent::ByName {
                     name: aname.to_string(),
                 }
+            } else if let Some(t) = s["type"].as_str() {
+                StepAgent::ByType {
+                    template: t.to_string(),
+                    fresh: s["fresh"].as_bool().unwrap_or(false),
+                }
             } else {
                 return ApiErrorResponse::bad_request(format!(
-                    "Step '{}' needs 'agent_id' or 'agent_name'",
+                    "Step '{}' needs 'agent_id', 'agent_name', or 'type'",
                     step_name
                 ))
                 .into_json_tuple();
@@ -352,6 +370,14 @@ pub async fn update_workflow(
 
             parsed_steps.push(WorkflowStep {
                 name: step_name,
+                required_skills: s["required_skills"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 agent,
                 prompt_template: s["prompt"].as_str().unwrap_or("{{input}}").to_string(),
                 mode,
@@ -525,6 +551,9 @@ fn spawn_background_run(
                             let inherit = entry.manifest.inherit_parent_context;
                             Some((entry.id, entry.name.clone(), inherit))
                         }
+                        StepAgent::ByType { template, fresh } => state_for_resolver
+                            .kernel
+                            .resolve_agent_by_type_or_spawn(template, None, *fresh),
                     }
                 },
                 move |agent_id: librefang_types::agent::AgentId,
@@ -551,6 +580,11 @@ fn spawn_background_run(
                             })
                             .map_err(|e| format!("{e}"))
                     }
+                },
+                |agent_id, required| {
+                    state
+                        .kernel
+                        .check_step_required_skills(agent_id, required)
                 },
             )
             .await;
@@ -782,6 +816,8 @@ pub async fn get_workflow_run(
                 "workflow_name": run.workflow_name,
                 "input": run.input,
                 "state": serde_json::to_value(&run.state).unwrap_or_default(),
+                "current_step_index": run.current_step_index,
+                "total_steps": run.total_steps,
                 "output": run.output,
                 "error": run.error,
                 "started_at": run.started_at.to_rfc3339(),
@@ -796,6 +832,7 @@ pub async fn get_workflow_run(
                     "output_tokens": s.output_tokens,
                     "duration_ms": s.duration_ms,
                     "error": s.error,
+                    "variables": s.variables,
                 })).collect::<Vec<_>>(),
             })),
         ),
@@ -1070,6 +1107,7 @@ pub async fn resume_workflow_run(
     };
 
     // Build agent resolver and send_message for the resume execution.
+    let owner_for_resolver = state.kernel.workflow_engine().run_owner(run_id);
     let state_for_resolver = state.clone();
     let state_for_sender = state.clone();
 
@@ -1090,6 +1128,9 @@ pub async fn resume_workflow_run(
                 let inherit = entry.manifest.inherit_parent_context;
                 Some((entry.id, entry.name.clone(), inherit))
             }
+            StepAgent::ByType { template, fresh } => state_for_resolver
+                .kernel
+                .resolve_agent_by_type_or_spawn(template, owner_for_resolver, *fresh),
         }
     };
 
@@ -1149,13 +1190,22 @@ pub async fn resume_workflow_run(
         },
     }
 
-    // Check for DAG workflow (unsupported for resume).
-    // We need the workflow definition to know if it uses DAG deps.
-    // peek at workflow steps: if the run has dag deps, surface 409.
-    // Actually — easier to just let resume_run handle it and map the error.
-    // But we've already peeked; just spawn and map DagUnsupported -> 409.
-    // The pre-check above validates the token, so the spawn won't hit 401.
-    // Spawn resume in the background; return 200 immediately.
+    // Check for DAG workflow (unsupported for resume). Return 409
+    // synchronously instead of spawning and logging DagUnsupported.
+    let run = peek.as_ref().unwrap(); // safe: None returns 404 above
+    if let Some(workflow) = engine.get_workflow(run.workflow_id).await {
+        let has_dag_deps = workflow.steps.iter().any(|s| !s.depends_on.is_empty());
+        if has_dag_deps {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "dag_unsupported",
+                    "message": "Resume is not supported for DAG workflows. \
+                        Create a new run instead.",
+                })),
+            );
+        }
+    }
     // `state_for_sender` is an `Arc<AppState>` — clone it once more so the
     // `Fn` send_message closure can clone-per-call without conflicting with
     // the borrow held by `.workflow_engine().resume_run(...)`.
@@ -1192,6 +1242,9 @@ pub async fn resume_workflow_run(
                             })
                             .map_err(|e| format!("{e}"))
                     }
+                },
+                |agent_id, required| {
+                    state.kernel.check_step_required_skills(agent_id, required)
                 },
             )
             .await;
@@ -1302,20 +1355,34 @@ pub async fn operator_action_workflow_run(
     // Pre-validate the pause synchronously so we can return 404/409 before
     // spawning the (async) resume. Mirrors `resume_workflow_run`'s peek.
     let engine = state.kernel.workflow_engine();
-    if engine.inspect_operator_pause(run_id).await.is_none() {
-        // Distinguish "run unknown" from "not an operator pause" for a
-        // useful status code.
-        if engine.get_run(run_id).await.is_none() {
-            return ApiErrorResponse::not_found(format!("Run '{run_id}' not found"))
-                .into_json_tuple();
+    let pause = match engine.inspect_operator_pause(run_id).await {
+        Some(p) => p,
+        None => {
+            // Distinguish "run unknown" from "not an operator pause" for a
+            // useful status code.
+            if engine.get_run(run_id).await.is_none() {
+                return ApiErrorResponse::not_found(format!("Run '{run_id}' not found"))
+                    .into_json_tuple();
+            }
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "not_operator_pause",
+                    "message": format!("Run '{run_id}' is not paused at an operator step"),
+                })),
+            );
         }
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": "not_operator_pause",
-                "message": format!("Run '{run_id}' is not paused at an operator step"),
-            })),
-        );
+    };
+
+    // Validate the requested action is in the step's allowed actions.
+    if !pause.actions.contains(&action) {
+        let allowed: Vec<String> = pause.actions.iter().map(|a| format!("{a:?}")).collect();
+        return ApiErrorResponse::bad_request(format!(
+            "action '{action_str}' is not allowed at this operator step \
+             (allowed actions: {})",
+            allowed.join(", "),
+        ))
+        .into_json_tuple();
     }
 
     // Reject / payload-less actions need no payload; Edit / *Input do —
@@ -1332,6 +1399,7 @@ pub async fn operator_action_workflow_run(
     }
 
     let payload = payload_opt.clone();
+    let owner_for_resolver = state.kernel.workflow_engine().run_owner(run_id);
     let state_for_resolver = state.clone();
     let agent_resolver = move |agent_ref: &librefang_kernel::workflow::StepAgent| {
         use librefang_kernel::workflow::StepAgent;
@@ -1350,6 +1418,9 @@ pub async fn operator_action_workflow_run(
                 let inherit = entry.manifest.inherit_parent_context;
                 Some((entry.id, entry.name.clone(), inherit))
             }
+            StepAgent::ByType { template, fresh } => state_for_resolver
+                .kernel
+                .resolve_agent_by_type_or_spawn(template, owner_for_resolver, *fresh),
         }
     };
 
@@ -1393,6 +1464,11 @@ pub async fn operator_action_workflow_run(
                             })
                             .map_err(|e| format!("{e}"))
                     }
+                },
+                |agent_id, required| {
+                    state_for_engine
+                        .kernel
+                        .check_step_required_skills(agent_id, required)
                 },
             )
             .await;
@@ -1527,6 +1603,8 @@ pub async fn list_workflow_runs(
                 "workflow_name": r.workflow_name,
                 "state": serde_json::to_value(&r.state).unwrap_or_default(),
                 "steps_completed": r.step_results.len(),
+                "current_step_index": r.current_step_index,
+                "total_steps": r.total_steps,
                 "input": r.input,
                 "error": r.error,
                 "started_at": r.started_at.to_rfc3339(),

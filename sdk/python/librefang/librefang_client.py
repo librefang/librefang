@@ -208,6 +208,9 @@ class _AgentsResource(_Resource):
     def reset_agent_identity(self, name: str, confirm: Any = None):
         return self._c._request("POST", f"/api/agents/identities/{name}/reset", None, query={"confirm": confirm})
 
+    def spawn_ephemeral_agent(self, **data):
+        return self._c._request("POST", "/api/agents/spawn-ephemeral", data)
+
     def get_agent(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}")
 
@@ -1245,8 +1248,17 @@ class _SystemResource(_Resource):
     def list_agent_templates(self):
         return self._c._request("GET", "/api/templates")
 
+    def create_template(self, **data):
+        return self._c._request("POST", "/api/templates", data)
+
     def get_agent_template(self, name: str):
         return self._c._request("GET", f"/api/templates/{name}")
+
+    def update_template(self, name: str, **data):
+        return self._c._request("PUT", f"/api/templates/{name}", data)
+
+    def delete_template(self, name: str):
+        return self._c._request("DELETE", f"/api/templates/{name}")
 
     def get_agent_template_toml(self, name: str):
         return self._c._request("GET", f"/api/templates/{name}/toml")

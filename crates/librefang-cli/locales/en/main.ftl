@@ -1398,7 +1398,8 @@ tui-event-session-management-not-available-in-process = Session management not a
 tui-event-kv-save-failed = Failed to save KV pair
 tui-event-kv-not-available-in-process = Memory KV not available in in-process mode
 tui-event-kv-delete-failed = Failed to delete KV pair
-tui-event-skill-install-failed = Failed to install { $slug }
+tui-event-skill-install-http-fallback = HTTP { $status }
+tui-event-skill-install-failed-detail = Failed to install { $slug }: { $detail }
 tui-event-skill-install-not-available-in-process = Skill installation not available in in-process mode
 tui-event-skill-uninstall-failed = Failed to uninstall { $name }
 tui-event-skill-uninstall-not-available-in-process = Skill uninstall not available in in-process mode
@@ -1689,7 +1690,7 @@ tui-security-feat-prompt-name = Prompt Injection Scanner
 tui-security-feat-prompt-desc = Detects override attempts and data exfiltration
 
 # templates.rs
-tui-templates-title = Templates
+tui-templates-title = Agent types
 tui-templates-cat-all = All
 tui-templates-cat-general = General
 tui-templates-cat-development = Development
@@ -2042,6 +2043,17 @@ tui-agents-detail-all-servers = [All servers]
 tui-agents-detail-none = [None]
 tui-agents-default-desc = A custom { $name } agent
 tui-agents-default-prompt = You are { $name }, a helpful agent.
+tui-agents-title-custom-model-routing = Custom — Model Routing
+tui-agents-title-edit-routing = Edit Model Routing
+tui-agents-title-prompt-picker = Prompt Library
+tui-agents-prompt-routing =   Model Routing Configuration:
+tui-agents-prompt-select-prompt =   Select a prompt from the library:
+tui-agents-hints-routing-flexible =   [↑↓] Navigate profiles  [Tab] Toggle profile  [Space] Toggle mode  [h/l] Budget  [Enter] Create  [Esc] Back
+tui-agents-hints-routing-fixed =   [Space] Toggle Flexible mode  [Enter] Create  [Esc] Back
+tui-agents-hints-prompt-picker =   [↑↓] Navigate  [Enter] Select prompt  [Esc] Back
+tui-agents-hints-input-prompt =     [Enter] Next  [Tab] Browse prompts library  [Esc] Back
+tui-agents-label-no-prompts = (no prompts available)
+tui-agents-detail-routing =   Routing:
 
 # --- Workflows screen ---
 tui-workflows-title-screen = Workflows
@@ -2239,3 +2251,62 @@ tui-wizard-status-continuing = Continuing...
 
 
 
+
+tui-tab-goals = Goals
+tui-goals-title = ⌖ Goals
+tui-goal-created = Goal created: { $id }
+tui-goal-deleted = Goal deleted: { $id }
+tui-goal-run-started = Run started for goal: { $id }
+tui-goal-run-stopped = Run stopped for goal: { $id }
+tui-goal-create-failed = Failed to create goal
+tui-goal-inproc-unavailable = Goal management not available in-process
+tui-goal-delete-failed = Failed to delete goal
+tui-goal-start-failed = Failed to start goal run
+tui-goal-start-error = Start goal run: { $error }
+tui-goal-stop-failed = Failed to stop goal run
+
+tui-agents-space-toggle =   (Space to toggle)
+tui-agents-cost-budget =   Cost Budget: 
+tui-agents-hl-change =   (h/l to change)
+tui-agents-allowed-profiles =   Allowed Profiles (Tab to toggle):
+tui-agents-no-profiles =     (no profiles available)
+
+tui-goals-filter =   filter: { $query }
+tui-goals-loading = Loading goals...
+tui-goals-empty = No goals found.
+tui-goals-hints =   / search | n new | d delete | s start/stop | Enter detail | r refresh
+tui-goals-none-selected = No goal selected.
+tui-goals-judge-label =   Goal Judge: 
+tui-goals-phase-label =   Run Phase: 
+tui-goals-hint-stop = s stop run
+tui-goals-hint-start = s start run
+tui-goals-detail-hints =   q/Esc close | { $run_hint } | r refresh
+tui-goals-new-title = New Goal
+tui-goals-step =   step { $n }/6
+tui-goals-example = e.g. "Fix login timeout"
+tui-goals-prompt = What should the agent accomplish?
+tui-goals-agent-hint = UUID or empty to auto-spawn one
+tui-goals-verify-hint = Toggle Space/Tab — verifier checks quality each iteration
+tui-goals-reviewer-hint = UUID or empty to auto-spawn a reviewer
+tui-goals-judge = Goal Judge:
+tui-goals-model-hint = Model for done-check, e.g. "claude-haiku" (optional)
+tui-goals-review-on = ▣ Auto-review enabled (reviewer will check each iteration)
+tui-goals-review-off = ▢ Auto-review disabled
+tui-goals-nav-submit = Esc back | Enter submit
+tui-goals-nav-toggle = Esc back | Space/Tab toggle | Enter next
+tui-goals-nav-next = Esc back | Enter next
+tui-goals-phase-actv = ● ACTV
+tui-goals-phase-done = ○ DONE
+tui-goals-phase-canc = ○ CANC
+tui-goals-phase-fail = ● FAIL
+tui-goals-phase-pend = ○ PEND
+cmd-goal-create-error = Error creating goal: { $error }
+cmd-goal-created = Goal created: { $id }
+cmd-goal-start-error = Error starting goal run: { $error }
+cmd-goal-watching = Watching goal run (Ctrl+C to stop)...
+cmd-goal-progress =   [{ $current }/{ $total }] phase={ $phase } progress={ $progress }%
+cmd-goal-finished =   Goal finished successfully!
+cmd-goal-max-iterations =   Goal reached max iterations.
+cmd-goal-rate-limited =   Goal run rate-limited.
+cmd-goal-stopped =   Goal run stopped.
+cmd-goal-error =   error: { $error }

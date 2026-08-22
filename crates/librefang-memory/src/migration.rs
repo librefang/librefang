@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 47;
+const SCHEMA_VERSION: u32 = 48;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -225,6 +225,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // which is backward compatible with every existing row and a no-op for
     // single-user agents.
     run_step!(47, migrate_v47);
+    run_step!(48, migrate_v48);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -884,6 +885,23 @@ fn migrate_v47(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (47, datetime('now'), 'Add peer_id to entities and relations for per-user isolation (#6494)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// V48: Add `owner_agent_id` to `workflow_runs` so resumed/restored runs
+/// keep their billed owner (workflow step agents bill to the run owner).
+fn migrate_v48(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "workflow_runs", "owner_agent_id")? {
+        conn.execute(
+            "ALTER TABLE workflow_runs ADD COLUMN owner_agent_id TEXT",
+            [],
+        )?;
+    }
+
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (48, datetime('now'), 'Add owner_agent_id to workflow_runs (#workflow-owner)')",
         [],
     )?;
     Ok(())
@@ -2435,6 +2453,17 @@ mod tests {
             dup.is_err(),
             "a duplicate shared entity must violate the (id, '') PK"
         );
+    }
+
+    #[test]
+    fn test_migrate_v48_adds_owner_agent_id_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(column_exists(&conn, "workflow_runs", "owner_agent_id"));
+        // Idempotence: the registered step must tolerate a rerun (the column
+        // guard makes the ALTER a no-op the second time).
+        migrate_v48(&conn).unwrap();
     }
 
     #[test]
