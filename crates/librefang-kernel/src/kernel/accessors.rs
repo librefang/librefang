@@ -38,6 +38,7 @@ fn read_accessor_state<'a, T>(
             state,
             "kernel accessor read lock poisoned; recovering inner state"
         );
+        lock.clear_poison();
         poisoned.into_inner()
     })
 }
@@ -51,6 +52,7 @@ fn write_accessor_state<'a, T>(
             state,
             "kernel accessor write lock poisoned; recovering inner state"
         );
+        lock.clear_poison();
         poisoned.into_inner()
     })
 }
@@ -64,6 +66,7 @@ fn lock_accessor_state<'a, T>(
             state,
             "kernel accessor lock poisoned; recovering inner state"
         );
+        lock.clear_poison();
         poisoned.into_inner()
     })
 }
@@ -1593,11 +1596,25 @@ mod tests {
                 .join()
         });
         assert!(rw_poison.is_err());
+        assert!(rw_state.is_poisoned());
         assert_eq!(
             &*read_accessor_state(&rw_state, "test_state"),
             &["loaded", "stale"]
         );
+        assert!(!rw_state.is_poisoned());
+
+        let rw_poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _state = rw_state.write().unwrap();
+                    panic!("poison accessor rwlock before write recovery");
+                })
+                .join()
+        });
+        assert!(rw_poison.is_err());
+        assert!(rw_state.is_poisoned());
         write_accessor_state(&rw_state, "test_state").clear();
+        assert!(!rw_state.is_poisoned());
         assert!(read_accessor_state(&rw_state, "test_state").is_empty());
 
         let mutex_state = std::sync::Mutex::new(vec!["cached"]);
@@ -1610,7 +1627,9 @@ mod tests {
                 .join()
         });
         assert!(mutex_poison.is_err());
+        assert!(mutex_state.is_poisoned());
         lock_accessor_state(&mutex_state, "test_state").clear();
+        assert!(!mutex_state.is_poisoned());
         assert!(lock_accessor_state(&mutex_state, "test_state").is_empty());
     }
 
