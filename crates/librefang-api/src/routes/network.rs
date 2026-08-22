@@ -824,7 +824,7 @@ fn is_private_ip(ip: &IpAddr) -> bool {
                 || v4.is_private()         // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
                 || v4.is_link_local()      // 169.254.0.0/16 (cloud metadata)
                 || v4.is_broadcast()       // 255.255.255.255
-                || v4.is_unspecified()     // 0.0.0.0
+                || v4.octets()[0] == 0     // 0.0.0.0/8 ("this" network)
                 || v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64 // 100.64.0.0/10 (CGNAT)
         }
         IpAddr::V6(v6) => {
@@ -2464,6 +2464,8 @@ mod tests {
         assert!(is_private_ip(&"::ffff:169.254.169.254".parse().unwrap()));
         assert!(is_private_ip(&"::ffff:192.168.1.1".parse().unwrap()));
         assert!(is_private_ip(&"::ffff:100.64.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"0.1.2.3".parse().unwrap()));
+        assert!(is_private_ip(&"::ffff:0.1.2.3".parse().unwrap()));
     }
 
     #[test]
