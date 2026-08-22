@@ -235,7 +235,7 @@ impl LibreFangKernel {
             model: model.to_string(),
             messages: std::sync::Arc::new(vec![Message::user(prompt.to_string())]),
             tools: std::sync::Arc::new(vec![]),
-            max_tokens: 10,
+            max_tokens: 50, // enough for YES/NO + brief rationale
             temperature: 0.0,
             system: None,
             thinking: None,
@@ -624,7 +624,7 @@ impl LibreFangKernel {
                                         tokio::spawn(async move {
                                             match tokio::time::timeout(
                                                 timeout_for_spawn,
-                                                kernel_for_spawn.run_workflow(wf_id, msg),
+                                                kernel_for_spawn.run_workflow(wf_id, msg, None),
                                             )
                                             .await
                                             {
@@ -1235,6 +1235,7 @@ impl LibreFangKernel {
         &self,
         workflow_id: WorkflowId,
         input: String,
+        owner: Option<AgentId>,
     ) -> KernelResult<(WorkflowRunId, String)> {
         let cfg = self.config.load_full();
 
@@ -1284,6 +1285,9 @@ impl LibreFangKernel {
                     let entry = self.agents.registry.find_by_name(name)?;
                     let inherit = entry.manifest.inherit_parent_context;
                     Some((entry.id, entry.name.clone(), inherit))
+                }
+                StepAgent::ByType { template, fresh } => {
+                    self.resolve_agent_by_type_or_spawn(template, owner, *fresh)
                 }
             }
         };
@@ -1350,9 +1354,12 @@ impl LibreFangKernel {
 
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(max_workflow_secs),
-            self.workflows
-                .engine
-                .execute_run(run_id, resolver, send_message),
+            self.workflows.engine.execute_run(
+                run_id,
+                resolver,
+                send_message,
+                |agent_id, required| self.check_step_required_skills(agent_id, required),
+            ),
         )
         .await
         .map_err(|_| {
@@ -1388,6 +1395,24 @@ impl LibreFangKernel {
                         let entry = self.agents.registry.find_by_name(name)?;
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((entry.id, entry.name.clone(), inherit))
+                    }
+                    StepAgent::ByType { template, .. } => {
+                        // Dry runs must not mutate the registry — never
+                        // spawn here. Reuse an existing instance, or, when
+                        // the template exists on disk, report its name as
+                        // "will spawn on a real run".
+                        if let Some(entry) = self.agents.registry.find_by_name(template) {
+                            let inherit = entry.manifest.inherit_parent_context;
+                            Some((entry.id, entry.name.clone(), inherit))
+                        } else {
+                            let manifest = super::spawn::load_agent_manifest_from_template_dirs(
+                                &self.home_dir_boot,
+                                template,
+                            )?;
+                            let inherit = manifest.inherit_parent_context;
+                            let name = manifest.name.clone();
+                            Some((librefang_types::agent::AgentId::new(), name, inherit))
+                        }
                     }
                 }
             };
@@ -1486,6 +1511,7 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
             );
             return;
         };
+        let run_owner = kernel.workflows.engine.run_owner(run_id);
         let resolver = {
             let kernel = kernel.clone();
             move |agent_ref: &StepAgent| -> Option<(AgentId, String, bool)> {
@@ -1500,6 +1526,9 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
                         let entry = kernel.agents.registry.find_by_name(name)?;
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((entry.id, entry.name.clone(), inherit))
+                    }
+                    StepAgent::ByType { template, fresh } => {
+                        kernel.resolve_agent_by_type_or_spawn(template, run_owner, *fresh)
                     }
                 }
             }
@@ -1558,6 +1587,7 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
                 timeout_action,
                 resolver,
                 send_message,
+                |agent_id, required| kernel.check_step_required_skills(agent_id, required),
             )
             .await
         {

@@ -1,5 +1,5 @@
 import type { KeyboardEvent } from "react";
-import { Plus, Sparkles, X } from "lucide-react";
+import { Clock, Plus, Sparkles, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 /**
@@ -43,6 +43,11 @@ export interface AgentSkillItemProps {
   onRemove?: () => void;
   /** Disable the trailing affordance while a mutation is in flight. */
   busy?: boolean;
+  /**
+   * Declared in the agent manifest but not installed yet. Shown as a
+   * distinct "pending activation" row instead of the generic fallback.
+   */
+  pending?: boolean;
 }
 
 export function AgentSkillItem({
@@ -52,12 +57,17 @@ export function AgentSkillItem({
   action = "none",
   onRemove,
   busy = false,
+  pending = false,
 }: AgentSkillItemProps) {
   const { t } = useTranslation();
   const trimmedDescription = description?.trim();
-  const subtitle = trimmedDescription && trimmedDescription.length > 0
-    ? trimmedDescription
-    : t("agents.detail.skill_meta", { defaultValue: "installed" });
+  const subtitle = pending
+    ? t("agents.detail.skill_pending", {
+        defaultValue: "Pending activation — available on the next skills reload",
+      })
+    : trimmedDescription && trimmedDescription.length > 0
+      ? trimmedDescription
+      : t("agents.detail.skill_meta", { defaultValue: "installed" });
   // The row is interactive when an onClick is provided. Mirror that to
   // keyboard + assistive tech with role/tabIndex/Enter+Space handling so
   // it isn't a mouse-only target.
@@ -122,6 +132,8 @@ export function AgentSkillItem({
           className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5"
           data-testid="agent-skill-item-add"
         />
+      ) : pending ? (
+        <Clock className="w-3.5 h-3.5 text-amber-500/80 shrink-0 mt-0.5" data-testid="agent-skill-item-pending" />
       ) : (
         <Sparkles className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
       )}

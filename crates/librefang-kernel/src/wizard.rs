@@ -163,6 +163,7 @@ impl SetupWizard {
                 context_window: None,
                 max_output_tokens: None,
                 extra_params: std::collections::BTreeMap::new(),
+                ..Default::default()
             },
             resources: ResourceQuota::default(),
             priority: Priority::default(),

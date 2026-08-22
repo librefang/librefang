@@ -68,6 +68,7 @@ import {
 import { useCreateSchedule } from "../lib/mutations/schedules";
 import { useWorkflows, useWorkflowTemplates, workflowQueries } from "../lib/queries/workflows";
 import { useAgents } from "../lib/queries/agents";
+import { useAgentTypes } from "../lib/queries/agentTypes";
 import { useQueryClient } from "@tanstack/react-query";
 
 /** Shape of a node entry persisted into sessionStorage by the templates flow. */
@@ -82,7 +83,7 @@ type StoredCanvasNode = {
  *  attaches when rendering. Not on the canonical `WorkflowStep` because not
  *  every list endpoint hydrates it. */
 type LoadedWorkflowStep = WorkflowStep & {
-  agent?: { id?: string; name?: string };
+  agent?: { id?: string; name?: string; type?: string; fresh?: boolean };
 };
 
 /**
@@ -94,6 +95,9 @@ type WorkflowStepBuild = {
   name: string;
   agent_id?: string;
   agent_name?: string;
+  type?: string;
+  fresh?: boolean;
+  required_skills?: string[];
   prompt: string;
   timeout_secs: number;
   mode?:
@@ -643,9 +647,13 @@ function NodeConfigPanel({
   onClose: () => void; onDelete: (id: string) => void; t: (key: string) => string;
 }) {
   const d = node.data;
+  const agentTypesQuery = useAgentTypes();
+  const agentTypes = agentTypesQuery.data ?? [];
   const [label, setLabel] = useState(d.label || "");
   const [description, setDescription] = useState(d.description || "");
   const [agentId, setAgentId] = useState(d.agentId || "");
+  const [agentType, setAgentType] = useState(d.agentType || "");
+  const [fresh, setFresh] = useState(d.fresh || false);
   const [prompt, setPrompt] = useState(d.prompt || d.description || "");
   const [mode, setMode] = useState<string>(d.stepMode || "sequential");
   const [errorMode, setErrorMode] = useState<string>(d.errorMode || "fail");
@@ -696,8 +704,10 @@ function NodeConfigPanel({
     onUpdate(node.id, {
       ...d,
       label, description,
-      agentId: agentId || undefined,
-      agentName: agent?.name || undefined,
+      agentId: agentType ? undefined : agentId || undefined,
+      agentName: agentType ? undefined : agent?.name || undefined,
+      agentType: agentType || undefined,
+      fresh: agentType ? fresh : undefined,
       prompt,
       stepMode: mode,
       errorMode,
@@ -712,7 +722,7 @@ function NodeConfigPanel({
     onClose();
   };
 
-  const hasAgent = !!agentId;
+  const hasAgent = !!agentId || !!agentType;
 
   return (
     <motion.aside
@@ -758,12 +768,25 @@ function NodeConfigPanel({
         {/* Agent binding */}
         <div>
           <label className={labelClass}>{t("canvas.assign_agent")}</label>
-          <select value={agentId} onChange={e => setAgentId(e.target.value)} className={inputClass}>
+          <select value={agentType ? "" : agentId} onChange={e => setAgentId(e.target.value)} className={inputClass}>
             <option value="">{t("canvas.no_agent")}</option>
             {agents.map(a => (
               <option key={a.id} value={a.id}>{a.name}{a.state === "Running" ? "" : ` (${a.state})`}</option>
             ))}
           </select>
+          <label className={labelClass}>{t("canvas.agent_type_label")}</label>
+          <select value={agentType} onChange={e => { setAgentType(e.target.value); if (e.target.value) setAgentId(""); }} className={inputClass}>
+            <option value="">{t("canvas.no_agent_type")}</option>
+            {(agentTypes ?? []).map(t => (
+              <option key={t.name} value={t.name}>{t.name}</option>
+            ))}
+          </select>
+          {agentType && (
+            <label className="flex items-center gap-2 text-sm text-text-dim">
+              <input type="checkbox" checked={fresh} onChange={e => setFresh(e.target.checked)} />
+              {t("canvas.fresh_label")}
+            </label>
+          )}
         </div>
 
         {/* Prompt */}
@@ -1519,7 +1542,7 @@ function CanvasPageInner() {
         id: `node-${idx}`,
         type: "custom",
         position: { x: 80 + idx * 260, y: 100 },
-        data: { label: s.name, prompt: s.prompt_template || "", nodeType: "agent", agentId: s.agent?.id, agentName: s.agent?.name },
+        data: { label: s.name, prompt: s.prompt_template || "", nodeType: "agent", agentId: s.agent?.id, agentName: s.agent?.name, agentType: s.agent?.type, fresh: s.agent?.fresh },
       }));
       const hasDag = steps.some((step) => Array.isArray(step.depends_on) && step.depends_on.length > 0);
       if (hasDag) {
@@ -1804,7 +1827,7 @@ function CanvasPageInner() {
 
   // Build backend steps from nodes: only nodes bound to a real agent are steps
   const buildSteps = useCallback((nodeList: CanvasNode[]) => {
-    const stepNodes = nodeList.filter(n => n.data.agentId || n.data.agentName);
+    const stepNodes = nodeList.filter(n => n.data.agentId || n.data.agentName || n.data.agentType);
     const dependencyOptions = stepNodes.map((node, idx) => ({
       id: node.id,
       label: node.data.label || `Step ${idx + 1}`,
@@ -1814,8 +1837,10 @@ function CanvasPageInner() {
         const d = n.data;
         const step: WorkflowStepBuild = {
           name: d.label || `Step ${idx + 1}`,
-          agent_id: d.agentId,
-          agent_name: d.agentName,
+          agent_id: d.agentType ? undefined : d.agentId,
+          agent_name: d.agentType ? undefined : d.agentName,
+          type: d.agentType,
+          fresh: d.agentType ? d.fresh || false : undefined,
           prompt: d.prompt || d.description || "",
           timeout_secs: d.timeoutSecs || 120,
         };

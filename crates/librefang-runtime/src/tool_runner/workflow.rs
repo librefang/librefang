@@ -127,6 +127,7 @@ pub(super) fn build_workflow_run_result(
 pub(super) async fn tool_workflow_run(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> ToolResult {
     let workflow_id = input["workflow_id"]
         .as_str()
@@ -147,7 +148,7 @@ pub(super) async fn tool_workflow_run(
     // Two reasons, the same ones spelled out in `tool_agent_send`: `Upstream` lifts to a 5xx-class `ToolExecution` that reads as a downstream crash to retry logic, and `PermissionDenied` classifies as `ToolExecutionStatus::Denied` — a soft failure — so a capped agent that keeps trying does not burn through `MAX_CONSECUTIVE_ALL_FAILED` and lose the turn to an abort.
     // Every other kernel failure stays `Upstream`.
     let (run_id, output) = kh
-        .run_workflow(workflow_id, &input_str)
+        .run_workflow(workflow_id, &input_str, caller_agent_id)
         .await
         .map_err(|e| match e {
             librefang_types::error::LibreFangError::CapabilityDenied(msg) => {
@@ -367,4 +368,85 @@ pub(super) async fn tool_workflow_describe(
         "step_names": description.step_names,
         "input_schema": input_schema,
     }))?)
+}
+
+pub(super) async fn tool_workflow_create(
+    input: &serde_json::Value,
+    kernel: Option<&std::sync::Arc<dyn crate::kernel_handle::KernelHandle>>,
+    caller_agent_id: Option<&str>,
+) -> ToolResult {
+    let kh = require_kernel_typed(kernel)?;
+    let name = input["name"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("name"))?;
+    let description = input["description"].as_str().unwrap_or("");
+
+    // Validate name — same rules as validate_template_name
+    if name.is_empty() || name.len() > 64 {
+        return Err(ToolError::InvalidParameter {
+            name: "name",
+            reason: "Workflow name must be 1-64 characters".to_string(),
+        });
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(ToolError::InvalidParameter {
+            name: "name",
+            reason: "Workflow name must be [A-Za-z0-9_-] only".to_string(),
+        });
+    }
+
+    let steps = input["steps"]
+        .as_array()
+        .ok_or(ToolError::InvalidParameter {
+            name: "steps",
+            reason: "steps must be an array".to_string(),
+        })?;
+
+    if steps.is_empty() {
+        return Err(ToolError::InvalidParameter {
+            name: "steps",
+            reason: "Workflow must have at least one step".to_string(),
+        });
+    }
+
+    // Serialize to workflow JSON the same shape the HTTP API expects
+    let workflow_json = serde_json::json!({
+        "name": name,
+        "description": description,
+        "steps": steps,
+        "input_schema": input.get("input_schema"),
+        "total_timeout_secs": input.get("total_timeout_secs"),
+    });
+
+    let workflow_json_str = serde_json::to_string(&workflow_json)
+        .map_err(|e| ToolError::upstream_msg(e.to_string()))?;
+
+    kh.create_workflow(&workflow_json_str, caller_agent_id)
+        .await
+        .map_err(ToolError::upstream)
+}
+
+/// `agent_type_create` — write a new agent type (template) from the flat
+/// JSON shape shared with `POST /api/templates` (#7722).
+pub(super) async fn tool_agent_type_create(
+    input: &serde_json::Value,
+    kernel: Option<&std::sync::Arc<dyn crate::kernel_handle::KernelHandle>>,
+) -> ToolResult {
+    let kh = require_kernel_typed(kernel)?;
+    let name = input["name"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("name"))?;
+    let json = serde_json::to_string(input).map_err(|e| ToolError::InvalidParameter {
+        name: "input",
+        reason: format!("cannot re-serialize input: {e}"),
+    })?;
+
+    let created = kh
+        .create_agent_type(&json)
+        .await
+        .map_err(ToolError::upstream)?;
+    Ok(format!("Agent type '{name}' created: {created}"))
 }

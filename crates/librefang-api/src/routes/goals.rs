@@ -195,29 +195,119 @@ pub async fn start_goal_run(
             return ApiErrorResponse::not_found(format!("Goal '{id}' not found")).into_json_tuple();
         }
     };
-    // Distinguish "never assigned" from "assigned, but the stored id is not a
-    // UUID" (#6562).
-    // Create and update now reject a non-UUID `agent_id` at the boundary, but goals written before that fix still carry `""` or other junk, and reporting them as unassigned sends the operator to a field that already looks filled in.
     let stored_agent_id = goal["agent_id"].as_str().map(str::trim).unwrap_or("");
     let agent_id = match stored_agent_id.parse::<uuid::Uuid>() {
         Ok(u) => AgentId(u),
-        Err(_) if stored_agent_id.is_empty() => {
-            return ApiErrorResponse::bad_request(
-                "Assign an agent to this goal before starting a run",
-            )
-            .into_json_tuple();
-        }
         Err(_) => {
-            return ApiErrorResponse::bad_request(format!(
-                "This goal's agent_id ('{stored_agent_id}') is not a valid agent UUID — reassign the agent to repair it"
-            ))
-            .into_json_tuple();
+            // Auto-spawn a disposable agent for this goal.
+            // The agent lives only for the duration of the goal run.
+            let manifest = librefang_types::agent::AgentManifest {
+                name: format!("goal-{}", &id[..8.min(id.len())]),
+                version: "0.1.0".into(),
+                description: format!(
+                    "Auto-spawned agent for goal: {}",
+                    goal["title"].as_str().unwrap_or(&id)
+                ),
+                author: "goal-runner".into(),
+                module: "builtin:chat".into(),
+                schedule: librefang_types::agent::ScheduleMode::Reactive,
+                session_mode: librefang_types::agent::SessionMode::New,
+                model: librefang_types::agent::ModelConfig {
+                    provider: "deepseek".into(),
+                    model: "deepseek-v4-pro".into(),
+                    ..Default::default()
+                },
+                capabilities: librefang_types::agent::ManifestCapabilities {
+                    shell: vec!["*".into()],
+                    tools: vec![
+                        "file_read".into(),
+                        "file_write".into(),
+                        "shell_exec".into(),
+                        "web_fetch".into(),
+                        "web_search".into(),
+                        "agent_send".into(),
+                        "agent_spawn".into(),
+                    ],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            match state.kernel.spawn_agent_typed(manifest) {
+                Ok(aid) => {
+                    // Store the spawned agent ID back in the goal so the
+                    // dashboard shows it and the runner knows who to drive.
+                    let _ = state.kernel.memory_substrate().structured_modify(
+                        goals_shared_agent_id(),
+                        GOALS_KEY,
+                        |cur| {
+                            let mut goals = match cur {
+                                Some(serde_json::Value::Array(a)) => a,
+                                _ => Vec::new(),
+                            };
+                            for g in goals.iter_mut() {
+                                if g["id"].as_str() == Some(id.as_str()) {
+                                    g["agent_id"] = serde_json::Value::String(aid.to_string());
+                                }
+                            }
+                            Ok((serde_json::Value::Array(goals), ()))
+                        },
+                    );
+                    aid
+                }
+                Err(e) => {
+                    return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+                }
+            }
         }
     };
 
     let max_iterations = body
         .as_ref()
         .and_then(|b| b.0.get("max_iterations"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+
+    let loop_engineering = goal["loop_engineering"].as_bool().unwrap_or(false);
+    let mut verify_agent_id = goal["verify_agent_id"]
+        .as_str()
+        .and_then(|s| s.parse::<uuid::Uuid>().ok())
+        .map(AgentId);
+    // Auto-spawn verifier when loop_engineering is on but no verifier assigned.
+    // Mirroring Claude Code: the system provisions disposable workers automatically.
+    if loop_engineering && verify_agent_id.is_none() {
+        let vmanifest = librefang_types::agent::AgentManifest {
+            name: format!("goal-verifier-{}", &id[..8.min(id.len())]),
+            version: "0.1.0".into(),
+            description: format!(
+                "Auto-spawned verifier for goal: {}",
+                goal["title"].as_str().unwrap_or(&id)
+            ),
+            author: "goal-runner".into(),
+            module: "builtin:chat".into(),
+            schedule: librefang_types::agent::ScheduleMode::Reactive,
+            session_mode: librefang_types::agent::SessionMode::New,
+            model: librefang_types::agent::ModelConfig {
+                provider: "deepseek".into(),
+                model: "deepseek-v4-pro".into(),
+                ..Default::default()
+            },
+            capabilities: librefang_types::agent::ManifestCapabilities {
+                tools: vec!["file_read".into(), "shell_exec".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        match state.kernel.spawn_agent_typed(vmanifest) {
+            Ok(vid) => {
+                verify_agent_id = Some(vid);
+            }
+            Err(e) => tracing::warn!(goal_id=%id, error=%e, "Failed to auto-spawn verifier agent"),
+        }
+    }
+    let evaluator_model = goal["evaluator_model"].as_str().map(|s| s.to_string());
+    let verify_max_retries = body
+        .as_ref()
+        .and_then(|b| b.0.get("verify_max_retries"))
         .and_then(|v| v.as_u64())
         .map(|n| n as u32);
 
@@ -255,13 +345,19 @@ pub async fn start_goal_run(
         );
     }
 
-    state
-        .kernel
-        .start_goal_run(goal_id, agent_id, max_iterations);
+    let started = state.kernel.start_goal_run(
+        goal_id,
+        agent_id,
+        max_iterations,
+        loop_engineering,
+        verify_agent_id,
+        verify_max_retries,
+        evaluator_model,
+    );
     let run = state.kernel.goal_run_state(goal_id);
     (
         StatusCode::OK,
-        Json(serde_json::json!({ "ok": true, "run": run })),
+        Json(serde_json::json!({ "ok": started, "run": run })),
     )
 }
 
@@ -345,6 +441,9 @@ pub async fn create_goal(
             return ApiErrorResponse::bad_request("Invalid agent_id").into_json_tuple();
         }
     }
+    let loop_engineering = req["loop_engineering"].as_bool().unwrap_or(false);
+    let verify_agent_id_str = req["verify_agent_id"].as_str().map(|s| s.to_string());
+    let evaluator_model_str = req["evaluator_model"].as_str().map(|s| s.to_string());
 
     let now = chrono::Utc::now().to_rfc3339();
     let goal_id = uuid::Uuid::new_v4().to_string();
@@ -354,6 +453,7 @@ pub async fn create_goal(
         "description": description,
         "status": status,
         "progress": progress,
+        "loop_engineering": loop_engineering,
         "created_at": now,
         "updated_at": now,
     });
@@ -363,6 +463,12 @@ pub async fn create_goal(
     }
     if let Some(ref aid) = agent_id_str {
         entry["agent_id"] = serde_json::Value::String(aid.clone());
+    }
+    if let Some(ref vid) = verify_agent_id_str {
+        entry["verify_agent_id"] = serde_json::Value::String(vid.clone());
+    }
+    if let Some(ref em) = evaluator_model_str {
+        entry["evaluator_model"] = serde_json::Value::String(em.clone());
     }
 
     // Atomic read-modify-write under BEGIN IMMEDIATE (#5138). Parent
@@ -560,6 +666,23 @@ pub async fn update_goal_by_id(
                             g.as_object_mut().map(|obj| obj.remove("agent_id"));
                         } else if let Some(aid) = agent_id.as_str() {
                             g["agent_id"] = serde_json::Value::String(aid.trim().to_string());
+                        }
+                    }
+                    if let Some(loop_eng) = req.get("loop_engineering").and_then(|v| v.as_bool()) {
+                        g["loop_engineering"] = serde_json::json!(loop_eng);
+                    }
+                    if let Some(vid) = req.get("verify_agent_id") {
+                        if vid.is_null() {
+                            g.as_object_mut().map(|obj| obj.remove("verify_agent_id"));
+                        } else if let Some(v) = vid.as_str() {
+                            g["verify_agent_id"] = serde_json::Value::String(v.to_string());
+                        }
+                    }
+                    if let Some(em) = req.get("evaluator_model") {
+                        if em.is_null() {
+                            g.as_object_mut().map(|obj| obj.remove("evaluator_model"));
+                        } else if let Some(v) = em.as_str() {
+                            g["evaluator_model"] = serde_json::Value::String(v.to_string());
                         }
                     }
                     g["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());

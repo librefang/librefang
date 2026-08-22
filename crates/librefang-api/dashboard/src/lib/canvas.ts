@@ -13,6 +13,8 @@ export type CanvasNodeData = {
   description?: string;
   agentId?: string;
   agentName?: string;
+  agentType?: string;
+  fresh?: boolean;
   prompt?: string;
   timeoutSecs?: number;
   maxRetries?: number;

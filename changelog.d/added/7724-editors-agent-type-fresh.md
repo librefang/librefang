@@ -1,0 +1,1 @@
+The Canvas step editor can bind a step to an agent type (template) with a per-run fresh-instance checkbox, mirroring the workflow type/fresh fields already in the kernel and API parser; agent-type CRUD is reachable at /api/agent-types (alias) and the TUI workflows creator accepts the same fields through its raw steps JSON. (@DaBlitzStein)

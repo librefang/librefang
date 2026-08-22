@@ -17,6 +17,7 @@
     "tasks": "任务",
     "goals": "目标",
     "agents": "智能体",
+    "agent_types": "智能体类型",
     "users": "用户",
     "providers": "供应商",
     "channels": "通道",
@@ -273,6 +274,26 @@
       "no_peers": "暂无节点"
     },
     "setup_failed": "快速初始化失败"
+  },
+  "agentTypes": {
+    "title": "智能体类型",
+    "create": "创建类型",
+    "edit": "编辑类型",
+    "delete": "删除类型",
+    "quickRun": "快速运行",
+    "name": "名称",
+    "description": "描述",
+    "systemPrompt": "系统提示词",
+    "provider": "提供商",
+    "model": "模型",
+    "tools": "工具",
+    "message": "消息",
+    "result": "结果",
+    "noTypes": "尚未定义智能体类型",
+    "confirmDelete": "删除此智能体类型？",
+    "iterations": "迭代次数",
+    "latency": "延迟",
+    "cost": "成本"
   },
   "agents": {
     "title": "智能体",
@@ -1175,7 +1196,8 @@
     "pending_title": "Skill workshop 待处理",
     "pending_load_failed": "加载待处理候选失败:",
     "pending_unknown_error": "未知错误",
-    "pending_desc": "从智能体对话捕获的草稿正在等待你审查（#3328）。"
+    "pending_desc": "从智能体对话捕获的草稿正在等待你审查（#3328）。",
+    "viewOnMarketplace": "在 {{marketplace}} 上查看"
   },
   "hands": {
     "title": "Hands",
@@ -1435,12 +1457,12 @@
     "topology_description": "高性能事件总线协调。",
     "total_channels": "总通道数",
     "connected": "已连接",
-    "recent_events": "最近事件（最多 50 条）",
     "uptime": "运行时间",
     "events": "事件",
     "events_desc": "实时消息事件。",
     "connections": "连接",
-    "help": "Comms 是消息总线的实时监控页。Channels 管配置，Comms 显示流量——已连接的 adapter、最近的发 / 收事件、agent ↔ channel 拓扑、基本健康状态。\n\n使用步骤：\n\n1. 健康行。活跃 channel、当日事件总数、daemon 运行时长——快速判断 \"总线还活着吗\"。\n\n2. 事件时间线。最新的 send / receive / error 事件，含来源、类型、时间戳。搜索可按 channel、agent 或文本过滤。\n\n3. 拓扑。可视化展示当前哪些 agent 在哪些 channel 上可达。\n\n典型场景：\n\n  · \"用户说 Telegram 机器人没回\" ——在时间线上找匹配的 receive 事件，看是否有对应的 send 发出。\n  · 抓那种 adapter 静默掉线（没有心跳事件）的情况。\n  · 看部署刚上线后流量是否在几秒内恢复。\n\n注意事项：\n\n  · 事件流是内存里的有上限缓冲，旧事件会被挤掉。要看深历史去审计轨迹和 channel 日志。\n  · 这里 \"在线\" 指 adapter 已连接，不保证上游服务（Slack、Telegram 等）也健康。"
+    "help": "Comms 是消息总线的实时监控页。Channels 管配置，Comms 显示流量——已连接的 adapter、最近的发 / 收事件、agent ↔ channel 拓扑、基本健康状态。\n\n使用步骤：\n\n1. 健康行。活跃 channel、当日事件总数、daemon 运行时长——快速判断 \"总线还活着吗\"。\n\n2. 事件时间线。最新的 send / receive / error 事件，含来源、类型、时间戳。搜索可按 channel、agent 或文本过滤。\n\n3. 拓扑。可视化展示当前哪些 agent 在哪些 channel 上可达。\n\n典型场景：\n\n  · \"用户说 Telegram 机器人没回\" ——在时间线上找匹配的 receive 事件，看是否有对应的 send 发出。\n  · 抓那种 adapter 静默掉线（没有心跳事件）的情况。\n  · 看部署刚上线后流量是否在几秒内恢复。\n\n注意事项：\n\n  · 事件流是内存里的有上限缓冲，旧事件会被挤掉。要看深历史去审计轨迹和 channel 日志。\n  · 这里 \"在线\" 指 adapter 已连接，不保证上游服务（Slack、Telegram 等）也健康。",
+    "recent_events": "Recent Events (max 50)"
   },
   "canvas": {
     "title": "流程设计器",
@@ -1613,7 +1635,10 @@
     "workflow_load_error": "加载工作流失败",
     "ctx_menu_label": "上下文菜单",
     "output": "输出",
-    "prompt_sent": "已发送提示"
+    "prompt_sent": "已发送提示",
+    "agent_type_label": "智能体类型（模板）",
+    "no_agent_type": "无智能体类型",
+    "fresh_label": "每次运行新实例"
   },
   "workflows": {
     "title": "工作流",
@@ -1686,7 +1711,11 @@
       "pending_review_one": "1 个工作流运行正在等待操作员审查",
       "pending_review_other": "{{count}} 个工作流运行正在等待操作员审查",
       "empty_artifact": "（空产物）"
-    }
+    },
+    "save_from_chat": "保存为工作流",
+    "saved_to_canvas": "工作流已在画布中打开",
+    "invalid_json": "该 JSON 代码块不是有效的工作流 JSON",
+    "no_json_found": "此消息中没有可保存的 JSON 代码块"
   },
   "scheduler": {
     "title": "调度器",

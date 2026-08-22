@@ -17,6 +17,7 @@
     "tasks": "작업",
     "goals": "목표",
     "agents": "에이전트",
+    "agent_types": "에이전트 유형",
     "users": "사용자",
     "providers": "공급자",
     "channels": "채널",
@@ -273,6 +274,26 @@
       "no_peers": "피어 없음"
     },
     "setup_failed": "빠른 초기화 실패"
+  },
+  "agentTypes": {
+    "title": "에이전트 유형",
+    "create": "유형 생성",
+    "edit": "유형 편집",
+    "delete": "유형 삭제",
+    "quickRun": "빠른 실행",
+    "name": "이름",
+    "description": "설명",
+    "systemPrompt": "시스템 프롬프트",
+    "provider": "제공자",
+    "model": "모델",
+    "tools": "도구",
+    "message": "메시지",
+    "result": "결과",
+    "noTypes": "아직 정의된 에이전트 유형이 없습니다",
+    "confirmDelete": "이 에이전트 유형을 삭제하시겠습니까?",
+    "iterations": "반복 횟수",
+    "latency": "지연 시간",
+    "cost": "비용"
   },
   "agents": {
     "title": "에이전트",
@@ -1175,7 +1196,8 @@
     "pending_title": "기술 워크샵 진행 중",
     "pending_load_failed": "대기 중인 후보를 로드하지 못했습니다.",
     "pending_unknown_error": "알 수 없는 오류",
-    "pending_desc": "검토를 기다리는 에이전트 대화에서 캡처된 초안(#3328)"
+    "pending_desc": "검토를 기다리는 에이전트 대화에서 캡처된 초안(#3328)",
+    "viewOnMarketplace": "{{marketplace}}에서 보기"
   },
   "hands": {
     "title": "손",
@@ -1613,7 +1635,10 @@
     "workflow_load_error": "워크플로를 로드하지 못했습니다.",
     "ctx_menu_label": "상황에 맞는 메뉴",
     "output": "출력",
-    "prompt_sent": "메시지가 전송되었습니다."
+    "prompt_sent": "메시지가 전송되었습니다.",
+    "agent_type_label": "에이전트 유형 (템플릿)",
+    "no_agent_type": "에이전트 유형 없음",
+    "fresh_label": "실행마다 새 인스턴스"
   },
   "workflows": {
     "title": "워크플로",
@@ -1686,7 +1711,11 @@
       "pending_review_one": "운영자 검토를 기다리는 워크플로 실행 1개",
       "pending_review_other": "운영자 검토를 기다리는 워크플로 실행 {{count}}개",
       "empty_artifact": "(빈 인공물)"
-    }
+    },
+    "save_from_chat": "워크플로로 저장",
+    "saved_to_canvas": "캔버스에서 워크플로를 열었습니다",
+    "invalid_json": "해당 JSON 블록은 올바른 워크플로 JSON이 아닙니다",
+    "no_json_found": "이 메시지에는 저장할 JSON 블록이 없습니다"
   },
   "scheduler": {
     "title": "스케줄러",

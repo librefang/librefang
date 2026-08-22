@@ -1,0 +1,1 @@
+Ephemeral workers spawned from an agent type get a uid display name and a transient mission workspace (created at spawn, deleted when the run ends, success or failure); the folder is passed as the agent workspace root so tools can drop intermediates that are guaranteed to be cleaned up. (@DaBlitzStein)
