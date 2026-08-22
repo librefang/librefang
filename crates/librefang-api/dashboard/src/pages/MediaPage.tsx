@@ -58,6 +58,11 @@ const textareaClass =
 
 const MAX_BASE64_LENGTH = 2 * 1024 * 1024;
 
+export function normalizeSpeechSpeed(speed: number): number | undefined {
+  if (!Number.isFinite(speed)) return undefined;
+  return Math.min(Math.max(speed, 0.25), 4);
+}
+
 export function MediaPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -344,29 +349,70 @@ function ImagePanel({
           )}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {result.images.map((img, i) => (
-              <a
+              <GeneratedImage
                 key={i}
-                href={safeUrl(img.url) || undefined}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block rounded-xl overflow-hidden border border-border-subtle hover:border-brand/40 transition-colors"
-              >
-                {img.url ? (
-                  <img src={img.url} alt={t("media.generated_alt", { index: i + 1, defaultValue: "generated {{index}}" })} className="w-full h-auto" />
-                ) : img.data_base64 && img.data_base64.length > MAX_BASE64_LENGTH ? (
-                  <div className="flex items-center gap-2 p-3 text-xs text-warning">
-                    <AlertCircle className="w-4 h-4 shrink-0" />
-                    <span>{t("media.image_too_large", { defaultValue: "Image too large to display" })}</span>
-                  </div>
-                ) : (
-                  <img src={`data:image/png;base64,${img.data_base64}`} alt={t("media.generated_alt", { index: i + 1, defaultValue: "generated {{index}}" })} className="w-full h-auto" />
-                )}
-              </a>
+                url={img.url}
+                dataBase64={img.data_base64}
+                alt={t("media.generated_alt", { index: i + 1, defaultValue: "generated {{index}}" })}
+              />
             ))}
           </div>
         </ResultBlock>
       )}
     </form>
+  );
+}
+
+function GeneratedImage({
+  url,
+  dataBase64,
+  alt,
+}: {
+  url?: string;
+  dataBase64?: string;
+  alt: string;
+}) {
+  const { t } = useTranslation();
+  const sanitizedUrl = safeUrl(url);
+  const base64 = dataBase64?.trim();
+  const containerClass =
+    "block rounded-xl overflow-hidden border border-border-subtle";
+
+  if (sanitizedUrl) {
+    return (
+      <a
+        href={sanitizedUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={`${containerClass} hover:border-brand/40 transition-colors`}
+      >
+        <img src={sanitizedUrl} alt={alt} className="w-full h-auto" />
+      </a>
+    );
+  }
+
+  if (!base64) {
+    return (
+      <div className={`${containerClass} flex items-center gap-2 p-3 text-xs text-text-dim`}>
+        <AlertCircle className="w-4 h-4 shrink-0" />
+        <span>{t("media.image_unavailable", { defaultValue: "Image unavailable" })}</span>
+      </div>
+    );
+  }
+
+  if (base64.length > MAX_BASE64_LENGTH) {
+    return (
+      <div className={`${containerClass} flex items-center gap-2 p-3 text-xs text-warning`}>
+        <AlertCircle className="w-4 h-4 shrink-0" />
+        <span>{t("media.image_too_large", { defaultValue: "Image too large to display" })}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className={containerClass}>
+      <img src={`data:image/png;base64,${base64}`} alt={alt} className="w-full h-auto" />
+    </div>
   );
 }
 
@@ -402,7 +448,7 @@ function SpeechPanel({
             model: model || undefined,
             voice: voice || undefined,
             format: format || undefined,
-            speed: speed ?? undefined,
+            speed: normalizeSpeechSpeed(speed),
           },
           {
             onSuccess: (data) => {
@@ -497,7 +543,8 @@ function VideoPanel({
   const [taskId, setTaskId] = useState<string | null>(null);
   const [taskProvider, setTaskProvider] = useState<string | null>(null);
   const completionToastShown = useRef<string | null>(null);
-  const errorToastShown = useRef<string | null>(null);
+  const queryErrorToastShown = useRef<string | null>(null);
+  const statusErrorToastShown = useRef<string | null>(null);
 
   const submit = useSubmitVideo();
   const videoTaskQuery = useVideoTask(
@@ -515,8 +562,8 @@ function VideoPanel({
   useEffect(() => {
     if (!videoTaskQuery.isError) return;
     const message = videoTaskQuery.error instanceof Error ? videoTaskQuery.error.message : t("common.error");
-    if (errorToastShown.current === message) return;
-    errorToastShown.current = message;
+    if (queryErrorToastShown.current === message) return;
+    queryErrorToastShown.current = message;
     onToast(message, "error");
   }, [videoTaskQuery.error, videoTaskQuery.isError, onToast, t]);
 
@@ -529,8 +576,8 @@ function VideoPanel({
       return;
     }
     if (statusError) {
-      if (errorToastShown.current === statusError) return;
-      errorToastShown.current = statusError;
+      if (statusErrorToastShown.current === statusError) return;
+      statusErrorToastShown.current = statusError;
       onToast(statusError, "error");
     }
   }, [onToast, statusError, statusState, t, taskId]);
@@ -558,7 +605,8 @@ function VideoPanel({
               setTaskId(data.task_id);
               setTaskProvider(data.provider);
               completionToastShown.current = null;
-              errorToastShown.current = null;
+              queryErrorToastShown.current = null;
+              statusErrorToastShown.current = null;
               onToast(t("media.video_submitted"), "success");
             },
             onError: (err: unknown) => onToast((err instanceof Error ? err.message : String(err)) || t("common.error"), "error"),
