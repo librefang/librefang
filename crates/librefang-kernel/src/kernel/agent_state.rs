@@ -415,7 +415,20 @@ impl LibreFangKernel {
             new_manifest.workspace = entry.manifest.workspace.clone();
         }
         new_manifest.name = entry.manifest.name.clone();
-        new_manifest.tags = entry.manifest.tags.clone();
+
+        // Tags: unlike name (which has no dedicated rename API), tags now
+        // have one — `AgentRegistry::update_tags` (#7742). Route a change
+        // through it BEFORE `replace_manifest` so `entry.tags` and the
+        // `tag_index` stay in sync with the incoming manifest; a plain
+        // `replace_manifest` only swaps `entry.manifest` and would silently
+        // desync `entry.tags` from `manifest.tags` (see that method's doc
+        // comment on why it deliberately leaves tags alone).
+        if new_manifest.tags != entry.tags {
+            self.agents
+                .registry
+                .update_tags(agent_id, new_manifest.tags.clone())
+                .map_err(KernelError::LibreFang)?;
+        }
 
         self.agents
             .registry

@@ -221,6 +221,26 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
   const [editingInterval, setEditingInterval] = useState(false);
   const [intervalDraft, setIntervalDraft] = useState<string>(String(continuousInterval));
 
+  // ----- periodic cron editor (inline, #7742) -------------------------------
+  // `agent.schedule` only carries a human-readable summary string, so the
+  // draft seeds from the parsed cron expression when we have one (periodic
+  // mode) and from empty otherwise — there is no richer source to read from
+  // here. `parsedMode.cron` is only defined in periodic branches; the
+  // `undefined` fallback covers the render before that branch is known.
+  const [editingCron, setEditingCron] = useState(false);
+  const [cronDraft, setCronDraft] = useState<string>(
+    parsedMode.kind === "periodic" ? parsedMode.cron : "",
+  );
+
+  // ----- proactive conditions editor (inline, #7742) ------------------------
+  // Same limitation as the cron draft above: the schedule summary string
+  // doesn't carry the current condition list, so this can only submit a
+  // *replacement* list, not show what's live today. The full manifest
+  // editor (AgentManifestForm, seeded from the raw manifest TOML) is the
+  // only surface that shows the true current conditions.
+  const [editingConditions, setEditingConditions] = useState(false);
+  const [conditionsDraft, setConditionsDraft] = useState<string>("");
+
   // ----- cron create / edit ------------------------------------------------
   const [cronModal, setCronModal] = useState<
     | { mode: "create" }
@@ -513,6 +533,8 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
           onSuccess: () => {
             addToast(successLabel, "success");
             setEditingInterval(false);
+            setEditingCron(false);
+            setEditingConditions(false);
           },
           onError: (err) => {
             const msg = err instanceof Error ? err.message : String(err);
@@ -540,6 +562,32 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
       t("agents.detail.schedule_updated", { defaultValue: "Schedule updated" }),
     );
   }, [intervalDraft, submitSchedule, addToast, t]);
+
+  const saveCron = useCallback(() => {
+    const trimmed = cronDraft.trim();
+    if (!trimmed) {
+      addToast(
+        t("agents.form.cron_required_error", { defaultValue: "Cron expression is required" }),
+        "error",
+      );
+      return;
+    }
+    submitSchedule(
+      { periodic: { cron: trimmed } },
+      t("agents.detail.schedule_updated", { defaultValue: "Schedule updated" }),
+    );
+  }, [cronDraft, submitSchedule, addToast, t]);
+
+  const saveConditions = useCallback(() => {
+    const conditions = conditionsDraft
+      .split(",")
+      .map((c) => c.trim())
+      .filter(Boolean);
+    submitSchedule(
+      { proactive: { conditions } },
+      t("agents.detail.schedule_updated", { defaultValue: "Schedule updated" }),
+    );
+  }, [conditionsDraft, submitSchedule, addToast, t]);
 
   const cronJobs = (cronJobsQuery.data ?? []) as CronJobItem[];
   const triggers = triggersQuery.data ?? [];
@@ -626,14 +674,29 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
           >
             {t("agents.detail.switch_to_continuous", { defaultValue: "Switch to continuous" })}
           </Button>
+        ) : parsedMode.kind === "periodic" ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setCronDraft(parsedMode.cron);
+              setEditingCron((v) => !v);
+            }}
+            disabled={patchAgent.isPending}
+          >
+            <Pencil className="w-3.5 h-3.5 mr-1" />
+            {t("common.edit", { defaultValue: "Edit" })}
+          </Button>
         ) : (
-          // Periodic / proactive: editing those requires manifest changes
-          // we don't yet surface here. Hide the toggle rather than offering
-          // a button that silently overwrites the user's `periodic` / `proactive`
-          // schedule with continuous.
-          <span className="text-[10px] uppercase tracking-[0.06em] text-text-dim/70 shrink-0 px-2">
-            {t("agents.detail.schedule_manifest_only", { defaultValue: "manifest-controlled" })}
-          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setEditingConditions((v) => !v)}
+            disabled={patchAgent.isPending}
+          >
+            <Pencil className="w-3.5 h-3.5 mr-1" />
+            {t("common.edit", { defaultValue: "Edit" })}
+          </Button>
         )}
       </div>
       {isContinuous && editingInterval && (
@@ -675,6 +738,87 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
           >
             {t("common.cancel", { defaultValue: "Cancel" })}
           </Button>
+        </div>
+      )}
+
+      {parsedMode.kind === "periodic" && editingCron && (
+        <div className="px-3.5 py-3 rounded-lg border border-border-subtle bg-main/40 flex items-end gap-2 flex-wrap">
+          <div className="flex-1 min-w-[200px]">
+            <label
+              htmlFor={`${formId}-cron`}
+              className="text-[10px] font-bold text-text-dim uppercase"
+            >
+              {t("agents.form.cron", { defaultValue: "Cron expression" })}
+            </label>
+            <input
+              id={`${formId}-cron`}
+              type="text"
+              value={cronDraft}
+              onChange={(e) => setCronDraft(e.target.value)}
+              placeholder={t("agents.form.cron_placeholder", { defaultValue: "0 9 * * *" })}
+              className={`${INPUT_CLASS} font-mono`}
+            />
+          </div>
+          <Button variant="primary" size="sm" onClick={saveCron} disabled={patchAgent.isPending}>
+            {patchAgent.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : null}
+            {t("common.save", { defaultValue: "Save" })}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setEditingCron(false)}
+            disabled={patchAgent.isPending}
+          >
+            {t("common.cancel", { defaultValue: "Cancel" })}
+          </Button>
+        </div>
+      )}
+
+      {parsedMode.kind === "proactive" && editingConditions && (
+        <div className="px-3.5 py-3 rounded-lg border border-border-subtle bg-main/40 flex flex-col gap-2">
+          <div>
+            <label
+              htmlFor={`${formId}-conditions`}
+              className="text-[10px] font-bold text-text-dim uppercase"
+            >
+              {t("agents.detail.proactive_conditions", { defaultValue: "Conditions (comma-separated)" })}
+            </label>
+            <input
+              id={`${formId}-conditions`}
+              type="text"
+              value={conditionsDraft}
+              onChange={(e) => setConditionsDraft(e.target.value)}
+              placeholder={t("agents.detail.proactive_conditions_placeholder", {
+                defaultValue: "e.g. agent.tags contains 'urgent'",
+              })}
+              className={INPUT_CLASS}
+            />
+            <p className="text-[10px] text-text-dim/70 mt-1">
+              {t("agents.detail.proactive_conditions_hint", {
+                defaultValue:
+                  "This replaces the full condition list — it isn't pre-filled with the current one. Use the full manifest editor to see what's live today.",
+              })}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={saveConditions}
+              disabled={patchAgent.isPending}
+            >
+              {patchAgent.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : null}
+              {t("common.save", { defaultValue: "Save" })}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setEditingConditions(false)}
+              disabled={patchAgent.isPending}
+            >
+              {t("common.cancel", { defaultValue: "Cancel" })}
+            </Button>
+          </div>
         </div>
       )}
 

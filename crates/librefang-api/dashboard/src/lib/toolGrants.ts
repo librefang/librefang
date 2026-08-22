@@ -82,3 +82,26 @@ export function isMcpServerGranted(
   const target = normalizeMcpName(server);
   return (mcpServers ?? []).some((s) => normalizeMcpName(s) === target);
 }
+
+/**
+ * Add or remove `server` from a staged `mcp_servers` grant list, comparing
+ * names after `normalizeMcpName` so a draft that already carries
+ * `"Brave-Search"` recognizes a toggle of `"brave_search"` as "already
+ * granted" rather than adding a case/dash-variant duplicate.
+ *
+ * Powers the Tools tab's per-group MCP grant/revoke (#6565 follow-up): the
+ * agent detail Tools tab used to point operators at a non-existent "MCP
+ * servers tab" to change an MCP grant because `PUT /agents/{id}/tools`
+ * cannot carry `mcp_servers` — the grant now stages here instead and saves
+ * through the dedicated `PUT /agents/{id}/mcp_servers` endpoint.
+ */
+export function toggleMcpServerGrant(
+  current: readonly string[],
+  server: string,
+): string[] {
+  const target = normalizeMcpName(server);
+  const granted = current.some((s) => normalizeMcpName(s) === target);
+  return granted
+    ? current.filter((s) => normalizeMcpName(s) !== target)
+    : [...current, server];
+}

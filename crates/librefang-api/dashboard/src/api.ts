@@ -1513,9 +1513,60 @@ export type AgentSchedulePatch =
 
 /** PATCH /api/agents/{id} — manifest-level partial updates (name, description,
  * system_prompt, mcp_servers, model, schedule). Distinct from `/agents/{id}/config`
- * which only accepts the model-tuning subset. */
-export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch }): Promise<ApiActionResponse> {
+ * which only accepts the model-tuning subset.
+ *
+ * `manifest_toml`, when present, takes a wholly different path server-side
+ * (`lifecycle.rs: patch_agent` — the `PUT /agents/{id}/update` full-manifest
+ * replacement folded into this endpoint by #3748): the entire body is parsed
+ * as an `AgentManifest` and every other field on this request is ignored.
+ * Powers the dashboard's full manifest editor (#7742), seeded from
+ * `getAgentManifest` and serialized via `serializeManifestForm`. */
+export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch; manifest_toml?: string; auto_evolve?: boolean }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
+}
+
+/** GET /api/agents/{id}/manifest — the agent's full manifest as raw TOML.
+ *
+ * Seeds the dashboard's full manifest editor (#7742): unlike the curated
+ * `AgentDetail` shape returned by `getAgentDetail`, this carries every
+ * `AgentManifest` field (resources, autonomous, thinking, response_format,
+ * routing, context_injection, …), the same content `PATCH .../manifest_toml`
+ * writes back. Reflects the live in-memory manifest, not necessarily the
+ * on-disk `agent.toml` (they can differ for a moment after a partial PATCH
+ * that hasn't flushed to disk yet). */
+export async function getAgentManifest(agentId: string): Promise<string> {
+  return getText(`/api/agents/${encodeURIComponent(agentId)}/manifest`);
+}
+
+/** Response shape for `GET /api/agents/{id}/channels`. */
+export interface AgentChannelsResponse {
+  /** Channel-type allowlist currently pinned on the agent. Empty means "all". */
+  assigned: string[];
+  /** Every channel type configured on this instance (`[[sidecar_channels]]`),
+   *  regardless of whether it's assigned to this agent — the picker's option list. */
+  available: string[];
+  /** 'all' when `assigned` is empty, 'allowlist' otherwise. */
+  mode: "all" | "allowlist";
+}
+
+/** GET /api/agents/{id}/channels — the agent's channel allowlist plus the
+ *  catalog of channels configured on this instance (#7742). Empty
+ *  `assigned` means the agent is reachable from every configured channel. */
+export async function getAgentChannels(agentId: string): Promise<AgentChannelsResponse> {
+  return get<AgentChannelsResponse>(`/api/agents/${encodeURIComponent(agentId)}/channels`);
+}
+
+/** PUT /api/agents/{id}/channels — replace the agent's channel allowlist
+ *  (`agent.toml: channels`). An empty array clears the allowlist, making
+ *  the agent reachable from every configured channel again (#7742). */
+export async function setAgentChannels(
+  agentId: string,
+  channels: string[],
+): Promise<{ status: string; channels: string[] }> {
+  return put<{ status: string; channels: string[] }>(
+    `/api/agents/${encodeURIComponent(agentId)}/channels`,
+    { channels },
+  );
 }
 
 export interface AgentToolsResponse {
@@ -1576,6 +1627,27 @@ export async function setAgentSkills(
   return put<{ status: string; skills: string[] }>(
     `/api/agents/${encodeURIComponent(agentId)}/skills`,
     { skills },
+  );
+}
+
+/**
+ * PUT /api/agents/{id}/mcp_servers — replace the agent's MCP server grant
+ * list (`agent.toml: mcp_servers`).
+ *
+ * Distinct from `updateAgentTools` (`PUT /agents/{id}/tools`), which only
+ * carries `capabilities_tools` / `tool_allowlist` / `tool_blocklist` — MCP
+ * tools are granted through this allowlist instead, not through
+ * `capabilities_tools` (#6565). An empty array clears the grant (mode
+ * "none"); `["*"]` grants every connected server (mode "all"); anything
+ * else pins a specific set of server names (mode "allowlist").
+ */
+export async function setAgentMcpServers(
+  agentId: string,
+  mcpServers: string[],
+): Promise<{ status: string; mcp_servers: string[] }> {
+  return put<{ status: string; mcp_servers: string[] }>(
+    `/api/agents/${encodeURIComponent(agentId)}/mcp_servers`,
+    { mcp_servers: mcpServers },
   );
 }
 

@@ -47,6 +47,16 @@ interface AgentManifestFormProps {
    * users can reference servers the dashboard doesn't know about yet.
    */
   mcpCatalog?: ManifestCatalogEntry[];
+  /**
+   * When true, the Name field is rendered disabled with a hint explaining
+   * where to rename instead. Set this when editing an *existing* agent
+   * (#7742): `update_manifest` always keeps `entry.manifest.name` pinned to
+   * `entry.name` (renames go through the dedicated rename API so the
+   * registry's `name_index` stays consistent), so a submitted name change
+   * would otherwise be silently discarded — the same antipattern this
+   * editor exists to eliminate elsewhere. Defaults to false (create flow).
+   */
+  nameLocked?: boolean;
 }
 
 export function AgentManifestForm({
@@ -59,6 +69,7 @@ export function AgentManifestForm({
   skillCatalog,
   toolCatalog,
   mcpCatalog,
+  nameLocked = false,
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
 
@@ -106,14 +117,20 @@ export function AgentManifestForm({
   return (
     <div className="space-y-4">
       <Section title={t("agents.form.basics")}>
-        <Field label={t("agents.form.name")} required invalid={invalidFields.has("name")}>
+        <Field
+          label={t("agents.form.name")}
+          required
+          invalid={invalidFields.has("name")}
+          hint={nameLocked ? t("agents.form.name_locked_hint") : undefined}
+        >
           <input
             type="text"
             value={value.name}
             onChange={(e) => update({ name: e.target.value })}
             placeholder={t("agents.form.name_placeholder")}
             className={inputClass}
-            autoFocus
+            autoFocus={!nameLocked}
+            disabled={nameLocked}
           />
         </Field>
         <Field label={t("agents.form.description")}>

@@ -1519,6 +1519,38 @@
         }
       }
     },
+    "/api/agents/{id}/manifest": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/manifest — Get the agent's full manifest as raw TOML.",
+        "description": "Powers the dashboard's full manifest editor (#7742): the Configure\ndrawer's quick-edit widgets only cover a handful of fields, so this\nendpoint hands back every field `AgentManifest` carries for\n`AgentManifestForm` to parse and pre-fill, with `PATCH /api/agents/{id}`\n(`manifest_toml`) as the matching write path. Renders the live\nin-memory manifest the same way `persist_manifest_to_disk` writes\n`agent.toml`, rather than re-reading the on-disk file, so the response\nalways reflects the latest state even if a prior partial PATCH hasn't\nflushed to disk yet.",
+        "operationId": "get_agent_manifest_toml",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent manifest as raw TOML",
+            "content": {
+              "application/toml": {}
+            }
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/mcp_servers": {
       "get": {
         "tags": [
