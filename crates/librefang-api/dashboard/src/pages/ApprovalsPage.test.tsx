@@ -171,14 +171,6 @@ function renderPage() {
   );
 }
 
-// useListNav scrolls the focused option into view; jsdom does not implement
-// Element.scrollIntoView, so stub it for the duration of these tests.
-beforeEach(() => {
-  if (!Element.prototype.scrollIntoView) {
-    Element.prototype.scrollIntoView = function () {};
-  }
-});
-
 describe("ApprovalsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();

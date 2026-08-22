@@ -15,7 +15,6 @@ use std::sync::Arc;
 
 use librefang_channels::types::SenderContext;
 use librefang_runtime::agent_loop::{run_agent_loop, AgentLoopResult};
-use librefang_runtime::kernel_handle::prelude::*;
 use librefang_types::agent::{AgentId, AgentState, SessionId};
 use librefang_types::error::LibreFangError;
 use tracing::info;
