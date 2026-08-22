@@ -1,0 +1,1 @@
+Validate canonical OpenRouter model identities and integer context windows before same-directory atomic snapshot replacement, while bounding and serializing the automated update PR flow. (#7302) (@xiaomo)
