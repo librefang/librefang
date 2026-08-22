@@ -883,7 +883,13 @@ impl LibreFangKernel {
             );
         }
         for fb in &config.fallback_providers {
-            if everyapi_suppressed && fb.provider == "everyapi" {
+            let (fb_provider, fb_model) = resolve_fallback_target(
+                &fb.provider,
+                &fb.model,
+                &config.default_model.provider,
+                &config.default_model.model,
+            );
+            if everyapi_suppressed && fb_provider == "everyapi" {
                 warn!("EveryAPI fallback provider is suppressed; skipping slot");
                 continue;
             }
@@ -892,9 +898,9 @@ impl LibreFangKernel {
             // aux.primary and the CLI-profile / init-failure primary shortcuts, so
             // an ungated slot here lets a failover reach a disallowed vendor.
             // Fail-closed skip + WARN, mirroring the per-slot gate in resolve_driver.
-            if !config.providers.is_provider_allowed(&fb.provider) {
+            if !config.providers.is_provider_allowed(&fb_provider) {
                 warn!(
-                    provider = %fb.provider,
+                    provider = %fb_provider,
                     allowed = ?config.providers.allowed,
                     "Fallback LLM provider blocked by org-wide allowlist; skipping slot"
                 );
@@ -904,47 +910,47 @@ impl LibreFangKernel {
                 std::env::var(&fb.api_key_env).ok()
             } else {
                 // Resolve using provider_api_keys / convention for custom providers
-                let env_var = config.resolve_api_key_env(&fb.provider);
+                let env_var = config.resolve_api_key_env(&fb_provider);
                 std::env::var(&env_var).ok()
             };
             let fb_config = DriverConfig {
-                provider: fb.provider.clone(),
+                provider: fb_provider.clone(),
                 api_key: fb_api_key,
                 base_url: fb
                     .base_url
                     .clone()
-                    .or_else(|| config.provider_urls.get(&fb.provider).cloned()),
+                    .or_else(|| config.provider_urls.get(&fb_provider).cloned()),
                 vertex_ai: config.vertex_ai.clone(),
                 azure_openai: config.azure_openai.clone(),
                 skip_permissions: true,
                 message_timeout_secs: config.default_model.message_timeout_secs,
                 mcp_bridge: Some(mcp_bridge_cfg.clone()),
-                proxy_url: config.provider_proxy_urls.get(&fb.provider).cloned(),
+                proxy_url: config.provider_proxy_urls.get(&fb_provider).cloned(),
                 request_timeout_secs: config
                     .provider_request_timeout_secs
-                    .get(&fb.provider)
+                    .get(&fb_provider)
                     .copied(),
                 emit_caller_trace_headers: config.telemetry.emit_caller_trace_headers,
                 max_retries: config
                     .provider_max_retries
-                    .get(&fb.provider)
+                    .get(&fb_provider)
                     .copied()
                     .unwrap_or_else(|| DriverConfig::default().max_retries),
             };
             match drivers::create_driver(&fb_config) {
                 Ok(d) => {
                     info!(
-                        provider = %fb.provider,
-                        model = %fb.model,
+                        provider = %fb_provider,
+                        model = %fb_model,
                         "Fallback provider configured"
                     );
                     driver_chain.push(d.clone());
-                    model_chain.push((d, strip_provider_prefix(&fb.model, &fb.provider)));
-                    provider_chain.push(fb.provider.clone());
+                    model_chain.push((d, fb_model));
+                    provider_chain.push(fb_provider);
                 }
                 Err(e) => {
                     warn!(
-                        provider = %fb.provider,
+                        provider = %fb_provider,
                         error = %e,
                         "Fallback provider init failed — skipped"
                     );

@@ -418,15 +418,13 @@ impl LibreFangKernel {
                 agent_provider.clone(),
             )];
             for fb in &effective_fallbacks {
-                // Resolve "default" to the actual default provider, but if the
-                // model name implies a specific provider (e.g. "gemini-2.0-flash"
-                // → "gemini"), use that instead of blindly falling back to the
-                // default provider which may be a completely different service.
-                let fb_provider = if fb.provider.is_empty() || fb.provider == "default" {
-                    infer_provider_from_model(&fb.model).unwrap_or_else(|| default_provider.clone())
-                } else {
-                    fb.provider.clone()
-                };
+                // A sentinel model inherits the authoritative default provider/model pair; an explicit fallback model may infer its provider. This uses the same hot-reloadable default snapshot as the primary slot.
+                let (fb_provider, fb_model) = resolve_fallback_target(
+                    &fb.provider,
+                    &fb.model,
+                    default_provider,
+                    &effective_default.model,
+                );
                 if fb_provider == "everyapi"
                     && self.llm.model_catalog.load().is_suppressed(&fb_provider)
                 {
@@ -519,11 +517,7 @@ impl LibreFangKernel {
                     self.llm.driver_cache.get_or_create(&config)
                 };
                 match fallback_driver {
-                    Ok(d) => chain.push((
-                        d,
-                        strip_provider_prefix(&fb.model, &fb_provider),
-                        fb_provider.clone(),
-                    )),
+                    Ok(d) => chain.push((d, fb_model, fb_provider.clone())),
                     Err(e) => {
                         warn!("Fallback driver '{}' failed to init: {e}", fb_provider);
                     }
@@ -673,6 +667,42 @@ mod tests {
             result[0].model, "gpt-4o-mini",
             "model must match agent chain"
         );
+    }
+
+    #[test]
+    fn fallback_target_inherits_defaults_and_infers_explicit_models() {
+        let (provider, model) =
+            resolve_fallback_target("default", "gemini/gemini-2.0-flash", "openai", "gpt-4.1");
+
+        assert_eq!(provider, "gemini");
+        assert_eq!(model, "gemini-2.0-flash");
+
+        let (provider, model) =
+            resolve_fallback_target("", "", "anthropic", "anthropic/claude-sonnet-4-5");
+        assert_eq!(provider, "anthropic");
+        assert_eq!(model, "claude-sonnet-4-5");
+
+        let (provider, model) =
+            resolve_fallback_target("openai", "default", "openai", "openai/gpt-4.1");
+        assert_eq!(provider, "openai");
+        assert_eq!(model, "gpt-4.1");
+    }
+
+    #[test]
+    fn fallback_target_preserves_aggregated_default_provider_pair() {
+        let (provider, model) =
+            resolve_fallback_target("default", "default", "everyapi", "claude-sonnet-5");
+        assert_eq!(provider, "everyapi");
+        assert_eq!(model, "claude-sonnet-5");
+
+        let (provider, model) = resolve_fallback_target(
+            "default",
+            "default",
+            "openrouter",
+            "anthropic/claude-sonnet-4-5",
+        );
+        assert_eq!(provider, "openrouter");
+        assert_eq!(model, "anthropic/claude-sonnet-4-5");
     }
 
     /// Regression test for #5755: a custom provider whose `api_key_env` doesn't
@@ -993,7 +1023,7 @@ key_required = true
         let loop_start = boot
             .find("for fb in &config.fallback_providers {")
             .expect("boot.rs must build the default_driver fallback chain");
-        let window = 800.min(boot.len() - loop_start);
+        let window = 1400.min(boot.len() - loop_start);
         assert!(
             boot[loop_start..loop_start + window].contains("is_provider_allowed"),
             "the boot default_driver fallback loop must gate each slot via \
