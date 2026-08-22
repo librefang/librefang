@@ -7,6 +7,28 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [Unreleased]
 
+### Fixed
+
+- An agent's own inference settings now win over the per-model override instead of losing to it.
+  Two instances of one agent type can finally run the same model at different temperatures — tuning the shared model no longer overwrites both of them with one value and discards their individual settings in silence.
+  The inversion was not a decision about precedence but a workaround for a missing state: `ModelConfig.max_tokens` / `.temperature` were plain numbers, so every agent carried a concrete 4096 / 0.7 whether or not anyone chose them, and letting the manifest win would have made per-model overrides unreachable for every agent in existence.
+  Both fields are now `Option`, `None` means "inherit", and the chain runs agent manifest → per-model override → system default.
+  `reasoning_effort` deliberately keeps the opposite rule: it is a fact about the endpoint rather than a preference, a gateway that rejects it rejects every turn that carries it (#7770), so the model level still wins there and an agent cannot force it on.
+  Existing agents are unaffected on upgrade — every persisted manifest carries explicit numbers, which stay explicit; the inherit state appears only on new agents and where an operator picks it (#7781, #7786) (@DaBlitzStein)
+
+- An agent can now set all five sampling preferences, not just two.
+  `top_p`, `frequency_penalty` and `presence_penalty` existed per model but had no per-agent equivalent, so an agent that wanted its own `top_p` had no way to ask for one.
+  The two endpoint limits, `context_window` and `max_output_tokens`, are editable per agent from every surface as well (#7781, #7786) (@DaBlitzStein)
+
+### Added
+
+- Asking for more tokens than a model allows is now reported instead of being silently accepted.
+  The warning appears when the value is saved — red in the editors, a `warnings` entry on `PATCH /api/agents/{id}/config`, a `WARN` in the daemon log — and the value is stored and sent exactly as entered.
+  Nothing is clamped: if the catalog's figure is the thing that is wrong, a silent truncation leaves the operator debugging a number they never chose, whereas an explicit provider error names the problem.
+  Only a limit that something actually asserted produces a warning.
+  A `ModelCatalogEntry` now carries `limits_known`, and `merge_discovered_models` marks its `131_072` / `16_384` placeholders as unknown, because a gateway-discovered model has no capacity to source — `DiscoveredModelInfo` has no such field and the OpenAI-compatible `/v1/models` shape carries none either.
+  Warning against a ceiling invented from a model's name is noise, and noise is what trains people to stop reading warnings (#7780, #7781, #7786) (@DaBlitzStein)
+
 ## [2026.8.19] - 2026-08-19
 
 _474 PRs from 5 contributors since v2026.7.31._

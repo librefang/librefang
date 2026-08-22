@@ -195,6 +195,14 @@ pub struct ModelCatalogEntry {
     /// downstream calculations.
     #[serde(default)]
     pub max_output_tokens: u64,
+    /// Whether `context_window` / `max_output_tokens` were actually sourced.
+    ///
+    /// `false` marks an entry whose capacities are placeholders: `merge_discovered_models` admits a gateway-discovered model with hardcoded `131_072` / `16_384` because the OpenAI-compatible `/v1/models` shape carries no capacity field at all (#7780).
+    /// The number is still there — compaction and budget math need *something* — but nothing may present it to an operator as measured, and [`Self::known_max_output_tokens`] refuses to hand it out as a ceiling to warn against.
+    ///
+    /// Registry-shipped entries carry curated values, and older files predate the field, so a missing value defaults to `true` — the same convention as [`Self::pricing_known`].
+    #[serde(default = "default_true")]
+    pub limits_known: bool,
     /// Cost per million input tokens (USD) — text tokens for image/audio models.
     pub input_cost_per_m: f64,
     /// Cost per million output tokens (USD) — text tokens for image/audio models.
@@ -287,6 +295,33 @@ impl ModelCatalogEntry {
         self.modality == Modality::Image
     }
 
+    /// This entry's context window as a limit that may be warned against, or
+    /// `None` when it is absent (`0`) or a discovery placeholder.
+    ///
+    /// The `limits_known` gate is what keeps a `131_072` that nobody measured
+    /// from being reported to an operator as a ceiling they crossed (#7780).
+    pub fn known_context_window(&self) -> Option<crate::inference_params::KnownLimit> {
+        if !self.limits_known {
+            return None;
+        }
+        crate::inference_params::KnownLimit::new(
+            self.context_window,
+            crate::inference_params::LimitSource::Registry,
+        )
+    }
+
+    /// This entry's maximum output tokens as a warnable limit.
+    /// See [`Self::known_context_window`].
+    pub fn known_max_output_tokens(&self) -> Option<crate::inference_params::KnownLimit> {
+        if !self.limits_known {
+            return None;
+        }
+        crate::inference_params::KnownLimit::new(
+            self.max_output_tokens,
+            crate::inference_params::LimitSource::Registry,
+        )
+    }
+
     /// Modality-aware schema check applied after TOML deserialization.
     ///
     /// `context_window` and `max_output_tokens` use `#[serde(default)]` so
@@ -324,6 +359,7 @@ impl Default for ModelCatalogEntry {
             modality: Modality::default(),
             context_window: 0,
             max_output_tokens: 0,
+            limits_known: true,
             input_cost_per_m: 0.0,
             output_cost_per_m: 0.0,
             pricing_known: true,

@@ -455,14 +455,10 @@ target = { type = "wandb", project = "rollouts", entity = "team", api_key_env = 
             model: ModelConfig {
                 provider: "ollama".to_string(),
                 model: "test-model".to_string(),
-                max_tokens: 4096,
-                temperature: 0.7,
+                max_tokens: Some(4096),
+                temperature: Some(0.7),
                 system_prompt: "you are a test".to_string(),
-                api_key_env: None,
-                base_url: None,
-                context_window: None,
-                max_output_tokens: None,
-                extra_params: std::collections::BTreeMap::new(),
+                ..Default::default()
             },
             rl_export: librefang_types::agent::RlExportOverride {
                 enabled: rl_enabled,

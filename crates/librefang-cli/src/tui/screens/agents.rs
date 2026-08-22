@@ -54,6 +54,8 @@ pub enum AgentSubScreen {
     EditSkills,
     /// Edit MCP servers for existing agent
     EditMcpServers,
+    /// Edit the inference parameters (temperature, ladders, limits) for an existing agent
+    EditModelParams,
     /// Spawning agent (waiting for result)
     Spawning,
 }
@@ -95,6 +97,9 @@ pub struct AgentSelectState {
     pub skill_cursor: usize,
     pub available_mcp: Vec<(String, bool)>,
     pub mcp_cursor: usize,
+
+    // Inference-parameter editor (detail view)
+    pub model_params: super::model_params::ModelParamsEditor,
 
     // Result
     pub spawned_toml: Option<String>,
@@ -158,6 +163,14 @@ pub enum AgentAction {
     FetchAgentSkills(String),
     /// Fetch MCP data for an agent.
     FetchAgentMcpServers(String),
+    /// Fetch the agent's current inference parameters before editing them.
+    FetchAgentModelParams(String),
+    /// Persist edited inference parameters. `None` in a pair clears the agent's
+    /// own value so the per-model override supplies it again.
+    UpdateModelParams {
+        id: String,
+        changes: Vec<(String, Option<f64>)>,
+    },
 }
 
 impl AgentSelectState {
@@ -179,6 +192,7 @@ impl AgentSelectState {
             custom_prompt: String::new(),
             tool_checks: DEFAULT_TOOLS.to_vec(),
             tool_cursor: 0,
+            model_params: super::model_params::ModelParamsEditor::new(),
             available_skills: Vec::new(),
             skill_cursor: 0,
             available_mcp: Vec::new(),
@@ -367,6 +381,7 @@ impl AgentSelectState {
         match self.sub {
             AgentSubScreen::AgentList => self.handle_agent_list(key),
             AgentSubScreen::AgentDetail => self.handle_detail(key),
+            AgentSubScreen::EditModelParams => self.handle_edit_model_params(key),
             AgentSubScreen::CreateMethod => self.handle_create_method(key),
             AgentSubScreen::TemplatePicker => self.handle_template_picker(key),
             AgentSubScreen::CustomName => self.handle_custom_name(key),
@@ -497,6 +512,65 @@ impl AgentSelectState {
                     let id = detail.id.clone();
                     self.sub = AgentSubScreen::EditMcpServers;
                     return AgentAction::FetchAgentMcpServers(id);
+                }
+            }
+            KeyCode::Char('p') => {
+                // Edit this agent's inference parameters
+                if let Some(ref detail) = self.detail {
+                    let id = detail.id.clone();
+                    self.sub = AgentSubScreen::EditModelParams;
+                    return AgentAction::FetchAgentModelParams(id);
+                }
+            }
+            _ => {}
+        }
+        AgentAction::Continue
+    }
+
+    /// Key handling for the inference-parameter editor.
+    ///
+    /// While a custom value is being typed the editor swallows navigation keys
+    /// — otherwise `j` in "0.5j" would move the cursor instead of being
+    /// rejected as a non-numeric character.
+    fn handle_edit_model_params(&mut self, key: KeyEvent) -> AgentAction {
+        if self.model_params.custom_buffer().is_some() {
+            match key.code {
+                KeyCode::Esc => self.model_params.cancel_custom(),
+                KeyCode::Backspace => self.model_params.pop_custom_char(),
+                KeyCode::Enter => match self.model_params.commit_custom() {
+                    Ok(()) => self.model_params.status.clear(),
+                    Err(e) => self.model_params.status = e,
+                },
+                KeyCode::Char(c) => self.model_params.push_custom_char(c),
+                _ => {}
+            }
+            return AgentAction::Continue;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.model_params.move_cursor(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.model_params.move_cursor(1),
+            KeyCode::Left | KeyCode::Char('h') => self.model_params.step(-1),
+            KeyCode::Right | KeyCode::Char('l') => self.model_params.step(1),
+            KeyCode::Char('i') => self.model_params.set_inherit(),
+            KeyCode::Char('e') => self.model_params.begin_custom(),
+            KeyCode::Enter => {
+                let changes: Vec<(String, Option<f64>)> = self
+                    .model_params
+                    .changes()
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v))
+                    .collect();
+                self.sub = AgentSubScreen::AgentDetail;
+                if !changes.is_empty() {
+                    if let Some(ref detail) = self.detail {
+                        return AgentAction::UpdateModelParams {
+                            id: detail.id.clone(),
+                            changes,
+                        };
+                    }
                 }
             }
             _ => {}
@@ -879,6 +953,10 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
             draw_edit_allowlist(f, area, state);
             return;
         }
+        AgentSubScreen::EditModelParams => {
+            draw_edit_model_params(f, area, state);
+            return;
+        }
         _ => {}
     }
 
@@ -886,7 +964,8 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
         AgentSubScreen::AgentList
         | AgentSubScreen::AgentDetail
         | AgentSubScreen::EditSkills
-        | AgentSubScreen::EditMcpServers => unreachable!(),
+        | AgentSubScreen::EditMcpServers
+        | AgentSubScreen::EditModelParams => unreachable!(),
         AgentSubScreen::CreateMethod => crate::i18n::t("tui-agents-title-create-method"),
         AgentSubScreen::TemplatePicker => crate::i18n::t("tui-agents-title-templates"),
         AgentSubScreen::CustomName => crate::i18n::t("tui-agents-title-custom-name"),
@@ -1463,6 +1542,101 @@ fn draw_edit_allowlist(f: &mut Frame, area: Rect, state: &AgentSelectState) {
         cursor,
         &crate::i18n::t("tui-agents-hints-save"),
     );
+}
+
+/// Width of the label column in the inference-parameter editor, in cells.
+const LABEL_COLUMN_WIDTH: usize = 22;
+
+/// The {24d8} info glyph the TUI convention puts in front of a field hint.
+const INFO_ICON: char = '\u{24d8}';
+
+/// Render the inference-parameter editor.
+///
+/// Every row shows the resolved-looking value or the word `inherit`, so "this
+/// agent has no opinion" reads as a state rather than as a blank. The ladder
+/// fields also show which rungs exist, which is the whole reason for replacing
+/// the free slider: the useful values are a short list, not a continuum.
+fn draw_edit_model_params(f: &mut Frame, area: Rect, state: &AgentSelectState) {
+    use super::model_params::FIELDS;
+
+    let inner = widgets::render_screen_block(
+        f,
+        area,
+        crate::i18n::t("tui-agents-title-model-params").trim(),
+    );
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(3),
+        Constraint::Length(2),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    f.render_widget(
+        Paragraph::new(format!(
+            "  {}",
+            crate::i18n::t("tui-agents-prompt-model-params")
+        )),
+        chunks[0],
+    );
+
+    let editor = &state.model_params;
+    let rows: Vec<ListItem> = FIELDS
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let selected = i == editor.cursor();
+            let value = match (selected, editor.custom_buffer()) {
+                (true, Some(buf)) => format!("{buf}\u{2588}"),
+                _ => editor.display(i),
+            };
+            let style = if selected {
+                Style::default()
+                    .fg(theme::CYAN)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let marker = if editor.value(i).is_none() {
+                "\u{25cb}"
+            } else {
+                "\u{25c9}"
+            };
+            // Assembled by pushes rather than a format literal: the layout
+            // string would otherwise read as untranslated user-facing text to
+            // the i18n scanner, which cannot tell padding from prose.
+            let mut cell = String::from("  ");
+            cell.push_str(marker);
+            cell.push(' ');
+            cell.push_str(&field.label());
+            while cell.chars().count() < LABEL_COLUMN_WIDTH {
+                cell.push(' ');
+            }
+            ListItem::new(Line::from(vec![
+                Span::styled(cell, style),
+                Span::styled(value, style),
+            ]))
+        })
+        .collect();
+    f.render_widget(List::new(rows), chunks[1]);
+
+    let mut hint_line = String::from("  ");
+    hint_line.push(INFO_ICON);
+    hint_line.push(' ');
+    hint_line.push_str(&FIELDS[editor.cursor()].hint());
+    f.render_widget(
+        Paragraph::new(hint_line).style(Style::default().fg(theme::DIM)),
+        chunks[2],
+    );
+
+    let hints = if editor.custom_buffer().is_some() {
+        crate::i18n::t("tui-agents-hints-model-params-custom")
+    } else if editor.status.is_empty() {
+        crate::i18n::t("tui-agents-hints-model-params")
+    } else {
+        editor.status.clone()
+    };
+    f.render_widget(widgets::hint_bar(&hints), chunks[3]);
 }
 
 fn draw_checkbox_list(

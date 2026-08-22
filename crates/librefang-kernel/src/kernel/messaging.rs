@@ -1172,7 +1172,7 @@ impl LibreFangKernel {
             // output, plus a conservative input estimate equal to the
             // same token count. Real cost is settled later via
             // `check_all_and_record`; this only sizes the in-memory hold.
-            let max_out = entry.manifest.model.max_tokens as u64;
+            let max_out = u64::from(entry.manifest.model.effective_max_tokens());
             let est_in = max_out;
             {
                 let catalog = self.llm.model_catalog.load();
@@ -1194,7 +1194,7 @@ impl LibreFangKernel {
 
         // Enforce quota on the effective target agent (after routing).
         // Use reserve_tokens so the estimated token budget is pre-charged inside the same DashMap write-lock, closing the TOCTOU race where N concurrent callers all pass the check before any of them calls record_usage (#3736).
-        let estimated_tokens = entry.manifest.model.max_tokens as u64;
+        let estimated_tokens = u64::from(entry.manifest.model.effective_max_tokens());
         let token_reservation = match self
             .agents
             .scheduler
@@ -2113,7 +2113,7 @@ impl LibreFangKernel {
         // the duration of the spawned task and settled/released alongside the
         // token reservation below.
         let estimated_usd = {
-            let max_out = entry.manifest.model.max_tokens as u64;
+            let max_out = u64::from(entry.manifest.model.effective_max_tokens());
             let est_in = max_out;
             let catalog = self.llm.model_catalog.load();
             MeteringEngine::estimate_cost_with_catalog(
@@ -2134,7 +2134,7 @@ impl LibreFangKernel {
         // Pre-charge the estimated token budget atomically to prevent the
         // TOCTOU race (#3736).  The reservation is settled inside the spawned
         // task after the LLM call completes.
-        let estimated_tokens = entry.manifest.model.max_tokens as u64;
+        let estimated_tokens = u64::from(entry.manifest.model.effective_max_tokens());
         let token_reservation = match self
             .agents
             .scheduler
