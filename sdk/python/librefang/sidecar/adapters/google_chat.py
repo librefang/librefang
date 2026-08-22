@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 import socketserver
@@ -104,10 +105,10 @@ WEBHOOK_MAX_BODY_BYTES = 1 * 1024 * 1024
 
 HTTP_TIMEOUT_SECS = 30
 
-# Default webhook bind address. `0.0.0.0` matches the established
-# sidecar convention (teams / webhook); operators behind a reverse
-# proxy override via `GOOGLE_CHAT_BIND_HOST = "127.0.0.1"`.
-DEFAULT_BIND_HOST = "0.0.0.0"
+# Default to a local reverse-proxy boundary as defense in depth. Requests are
+# authenticated independently because a public reverse proxy still reaches
+# this listener through a loopback connection.
+DEFAULT_BIND_HOST = "127.0.0.1"
 
 
 # ---------------------------------------------------------------------------
@@ -420,10 +421,17 @@ SCHEMA = Schema(
         ),
         Field(
             "GOOGLE_CHAT_BIND_HOST",
-            "Bind address (default 0.0.0.0; set 127.0.0.1 behind a reverse proxy)",
+            "Bind address (default 127.0.0.1 behind a reverse proxy)",
             "text",
             advanced=True,
             placeholder=DEFAULT_BIND_HOST,
+        ),
+        Field(
+            "GOOGLE_CHAT_VERIFICATION_TOKEN",
+            "Inbound event verification token",
+            "secret",
+            required=True,
+            advanced=True,
         ),
         Field(
             "GOOGLE_CHAT_ACCOUNT_ID",
@@ -472,6 +480,14 @@ class GoogleChatAdapter(SidecarAdapter):
         self._bind_host = (
             os.environ.get("GOOGLE_CHAT_BIND_HOST", "").strip() or DEFAULT_BIND_HOST
         )
+        self._verification_token = os.environ.get(
+            "GOOGLE_CHAT_VERIFICATION_TOKEN", "",
+        ).strip()
+        if not self._verification_token:
+            raise RuntimeError(
+                "GOOGLE_CHAT_VERIFICATION_TOKEN is required for inbound "
+                "webhook authentication"
+            )
         self.account_id = os.environ.get("GOOGLE_CHAT_ACCOUNT_ID") or None
 
         # Pre-parse the RSA key once so a bad PEM fails at startup
@@ -785,6 +801,20 @@ def _make_webhook_handler(
                 self.send_response(400)
                 self.end_headers()
                 return
+            expected_token = adapter._verification_token
+            if expected_token:
+                supplied_token = payload.get("token")
+                if (
+                    not isinstance(supplied_token, str)
+                    or not hmac.compare_digest(
+                        supplied_token.encode("utf-8"),
+                        expected_token.encode("utf-8"),
+                    )
+                ):
+                    log.warn("google_chat rejected unauthenticated webhook")
+                    self.send_response(401)
+                    self.end_headers()
+                    return
 
             event = _parse_webhook_event(payload, adapter._space_ids)
             if event is not None:
