@@ -4,15 +4,44 @@ on:
   schedule:
     - cron: '0 */6 * * *'  # every 6 hours — primary trigger; catches failing PRs
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/scripts/auto-update-branches.js'
+      - '.github/scripts/tests/auto-update-branches.test.js'
+      - '.github/workflows/auto-update-branches.yml'
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
+
+concurrency:
+  group: auto-update-pr-branches-${{ github.event_name == 'pull_request' && github.ref || 'reconcile' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  update-branches:
+  test-helper:
+    name: Test branch reconciliation helper
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Parse helper and tests
+        run: |
+          node --check .github/scripts/auto-update-branches.js
+          node --check .github/scripts/tests/auto-update-branches.test.js
+      - name: Run helper tests
+        run: node .github/scripts/tests/auto-update-branches.test.js
+
+  update-branches:
+    needs: test-helper
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           # Use a PAT (not the default GITHUB_TOKEN) so the resulting merge
@@ -24,47 +53,30 @@ jobs:
           # that protection.
           github-token: ${{ secrets.WEBSITE_REPO_TOKEN }}
           script: |
+            const {
+              hasFailingStatus,
+              listCheckRuns,
+              listOpenPulls,
+            } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/auto-update-branches.js`);
+
             // Only update PRs whose CI is currently failing. Skipping
             // green / pending PRs avoids a cascade of redundant CI runs
             // every time main moves — the previous unconditional update
             // burnt CI minutes on every open PR after every merge.
             //
             // Trade-off: a PR that is currently green will not pick up
-            // newer main commits until either its own CI later turns red
-            // or the 6h cron fires. Acceptable because (a) green PRs are
-            // by definition still building against a viable base, and
-            // (b) the merge queue / final pre-merge "Update branch" click
-            // still re-validates against fresh main before the actual
-            // merge.
-            const FAIL_CONCLUSIONS = new Set([
-              'failure',
-              'timed_out',
-              'action_required',
-              'startup_failure',
-              'cancelled',
-            ]);
-
-            const { data: prs } = await github.rest.pulls.list({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              per_page: 100,
-            });
+            // newer main commits until its own CI later turns red.
+            // A green PR is still building against a viable base.
+            // The merge queue or final pre-merge update still re-validates against fresh main.
+            const prs = await listOpenPulls(github, context.repo);
 
             for (const pr of prs) {
               const ref = pr.head.sha;
               let failing = false;
               try {
                 // GitHub Actions check runs (the primary signal for this repo).
-                const checks = await github.rest.checks.listForRef({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  ref,
-                  per_page: 100,
-                });
-                failing = checks.data.check_runs.some(
-                  (r) => r.conclusion && FAIL_CONCLUSIONS.has(r.conclusion),
-                );
+                const checks = await listCheckRuns(github, context.repo, ref);
+                failing = hasFailingStatus(checks, null);
                 // Fall through to legacy commit statuses (third-party CIs
                 // that post via the older statuses API rather than checks).
                 if (!failing) {
@@ -73,7 +85,7 @@ jobs:
                     repo: context.repo.repo,
                     ref,
                   });
-                  failing = status.data.state === 'failure';
+                  failing = hasFailingStatus([], status.data.state);
                 }
               } catch (e) {
                 console.log(`PR #${pr.number}: status query failed (${e.message}) — skipping`);
@@ -90,6 +102,7 @@ jobs:
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   pull_number: pr.number,
+                  expected_head_sha: ref,
                 });
                 console.log(`Updated PR #${pr.number} (CI was failing)`);
               } catch (e) {
