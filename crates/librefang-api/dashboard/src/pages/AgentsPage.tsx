@@ -1480,6 +1480,9 @@ export function AgentsPage() {
       skillsData?.mode ?? (agent as AgentDetail).skills_mode;
     const skillsDisabled =
       skillsData?.disabled ?? skillsMode === "none";
+    // Declared-but-uninstalled skills: retained in the manifest, activate on
+    // the next skills reload. Rendered as pending rows in the assigned grid.
+    const pendingSkills: string[] = (skillsData?.pending ?? []).slice().sort();
     // The persisted allowlist as the server currently has it: the pinned set
     // in allowlist mode, empty in all-mode (an empty allowlist === all-mode on
     // write). `draft` is the locally-staged copy — `skillsDraft` is null until
@@ -1702,6 +1705,7 @@ export function AgentsPage() {
                       action="remove"
                       onRemove={() => removeSkill(s)}
                       busy={mutating}
+                      pending={pendingSkills.includes(s)}
                     />
                   ))}
                 </div>

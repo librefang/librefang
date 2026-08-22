@@ -1482,11 +1482,16 @@ pub async fn install_plugin_deps(name: &str) -> Result<Vec<String>, String> {
     let cmd_info: Option<(&'static str, Vec<&'static str>, &'static str)> = match runtime.as_str() {
         "python" | "py" => {
             if plugin_dir.join("requirements.txt").exists() {
-                Some((
-                    "pip",
-                    vec!["install", "-r", "requirements.txt"],
-                    "requirements.txt",
-                ))
+                // Share the interpreter/args resolver with the install path
+                // (install_requirements): try python3 then python, and omit
+                // --user / --break-system-packages inside a virtualenv/conda.
+                let (interpreter, mut args) = install::resolve_python_install(
+                    install::interpreter_exists,
+                    install::pip_in_venv(),
+                )
+                .await?;
+                args.extend(["-r", "requirements.txt"]);
+                Some((interpreter, args, "requirements.txt"))
             } else {
                 None
             }

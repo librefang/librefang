@@ -56,6 +56,13 @@ export const agentKeys = {
     [...agentKeys.all, "skills", agentId] as const,
 };
 
+export const agentTypeKeys = {
+  all: ["agent-types"] as const,
+  lists: () => [...agentTypeKeys.all, "list"] as const,
+  details: () => [...agentTypeKeys.all, "detail"] as const,
+  detail: (name: string) => [...agentTypeKeys.details(), name] as const,
+};
+
 // Central prompt repository (#6160). The fleet-wide overview
 // (`GET /api/prompts/overview`) is a genuinely new endpoint and gets its
 // own domain key. Per-agent version lists keep using

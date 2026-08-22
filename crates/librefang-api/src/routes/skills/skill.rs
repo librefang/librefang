@@ -202,7 +202,21 @@ pub async fn install_skill(
         ),
         Err(e) => {
             tracing::warn!("Skill install failed: {e}");
-            ApiErrorResponse::internal_scrub(e).into_json_tuple()
+            let status = match &e {
+                librefang_skills::SkillError::NotFound(_) => StatusCode::NOT_FOUND,
+                librefang_skills::SkillError::SecurityBlocked(_) => StatusCode::FORBIDDEN,
+                librefang_skills::SkillError::InvalidManifest(_)
+                | librefang_skills::SkillError::TomlParse(_)
+                | librefang_skills::SkillError::YamlParse(_)
+                | librefang_skills::SkillError::RuntimeNotAvailable(_) => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            let msg = format!("{e}");
+            if status == StatusCode::INTERNAL_SERVER_ERROR {
+                ApiErrorResponse::internal_scrub(e).into_json_tuple()
+            } else {
+                (status, Json(serde_json::json!({"error": msg})))
+            }
         }
     }
 }

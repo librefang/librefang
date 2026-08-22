@@ -1,0 +1,51 @@
+# ModelRouter profiles — tag-based model selection by task complexity.
+# Shipped as builtin defaults. Override with ~/.librefang/model_profiles.toml.
+# Alpha feature. Only active when [model_router] enabled = true in config.toml.
+
+[[profiles]]
+name = "quick"
+tags = ["classify", "summarize", "extract", "translate", "validate", "echo", "ping", "list", "format", "count", "check"]
+provider = "anthropic"
+model = "claude-haiku-4-5"
+context_window = 131072
+cost_tier = "cheap"
+priority = 1
+max_complexity = 0.3
+fallback = "coder"
+description = "Fast, cheap model for simple classification/summarization tasks"
+
+[[profiles]]
+name = "coder"
+tags = ["code", "debug", "refactor", "implement", "build", "fix", "develop", "test", "deploy", "optimize"]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+context_window = 131072
+cost_tier = "medium"
+priority = 10
+max_complexity = 0.8
+fallback = "quick"
+description = "Balanced model for code generation, debugging, and implementation"
+
+[[profiles]]
+name = "architect"
+tags = ["design", "architecture", "plan", "audit", "research", "investigate", "migrate", "security", "compliance", "pipeline"]
+provider = "anthropic"
+model = "claude-opus-4-8"
+context_window = 200000
+cost_tier = "expensive"
+priority = 20
+max_complexity = 1.0
+fallback = "coder"
+description = "High-capability model for deep reasoning, architecture, and complex planning"
+
+[[profiles]]
+name = "researcher"
+tags = ["search", "browse", "analyze", "investigate", "document", "review", "report"]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+context_window = 262144
+cost_tier = "medium"
+priority = 15
+max_complexity = 0.9
+fallback = "coder"
+description = "High-context model for web research, document analysis, and investigation"

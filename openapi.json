@@ -650,6 +650,41 @@
         }
       }
     },
+    "/api/agents/spawn-ephemeral": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/spawn-ephemeral — Run a throwaway worker (no workspace,\nno DB, no registry entry) for a single turn and return its result.",
+        "operationId": "spawn_ephemeral_agent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Ephemeral worker result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Provider budget exhausted"
+          },
+          "500": {
+            "description": "Ephemeral spawn failed"
+          }
+        }
+      }
+    },
     "/api/agents/{id}": {
       "get": {
         "tags": [
@@ -11783,7 +11818,7 @@
         "tags": [
           "system"
         ],
-        "summary": "GET /api/templates — List available agent templates.",
+        "summary": "GET /api/templates — List available agent templates from both\n`~/.librefang/workspaces/agents/` (source = \"agent\") and\n`~/.librefang/templates/` (source = \"template\").",
         "operationId": "list_agent_templates",
         "responses": {
           "200": {
@@ -11796,6 +11831,41 @@
                 }
               }
             }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/templates — Create a new agent template from JSON.",
+        "operationId": "create_template",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Template created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "409": {
+            "description": "Template already exists"
           }
         }
       }
@@ -11828,6 +11898,85 @@
                 }
               }
             }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "system"
+        ],
+        "summary": "PUT /api/agent-types/:name — Update an existing agent type from JSON.",
+        "operationId": "update_template",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Template name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Template updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "404": {
+            "description": "Template not found"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "system"
+        ],
+        "summary": "DELETE /api/agent-types/:name — Delete an agent type file.",
+        "operationId": "delete_template",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Template name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Template deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Template not found"
           }
         }
       }

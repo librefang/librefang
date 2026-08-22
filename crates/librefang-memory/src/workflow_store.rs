@@ -22,6 +22,8 @@ pub struct WorkflowRunRow {
     pub id: String,
     pub workflow_id: String,
     pub workflow_name: String,
+    /// The agent that initiated the run (billed owner), if any.
+    pub owner_agent_id: Option<String>,
     pub state: String,
     pub input: String,
     pub output: Option<String>,
@@ -81,12 +83,12 @@ impl WorkflowStore {
                 id, workflow_id, workflow_name, state, input, output, error,
                 resume_token, pause_reason, paused_at, paused_step_index,
                 paused_variables, paused_current_input,
-                step_results, started_at, completed_at
+                step_results, started_at, completed_at, owner_agent_id
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                 ?8, ?9, ?10, ?11,
                 ?12, ?13,
-                ?14, ?15, ?16
+                ?14, ?15, ?16, ?17
             ) ON CONFLICT(id) DO UPDATE SET
                 state = excluded.state,
                 input = excluded.input,
@@ -99,7 +101,8 @@ impl WorkflowStore {
                 paused_variables = excluded.paused_variables,
                 paused_current_input = excluded.paused_current_input,
                 step_results = excluded.step_results,
-                completed_at = excluded.completed_at",
+                completed_at = excluded.completed_at,
+                owner_agent_id = excluded.owner_agent_id",
             rusqlite::params![
                 row.id,
                 row.workflow_id,
@@ -117,6 +120,7 @@ impl WorkflowStore {
                 row.step_results,
                 row.started_at,
                 row.completed_at,
+                row.owner_agent_id,
             ],
         )
         .map_err(|e| LibreFangError::memory_msg(format!("workflow upsert failed: {e}")))?;
@@ -131,7 +135,7 @@ impl WorkflowStore {
                 "SELECT id, workflow_id, workflow_name, state, input, output, error,
                         resume_token, pause_reason, paused_at, paused_step_index,
                         paused_variables, paused_current_input,
-                        step_results, started_at, completed_at, created_at
+                        step_results, started_at, completed_at, created_at, owner_agent_id
                  FROM workflow_runs WHERE id = ?1",
             )
             .map_err(|e| {
@@ -159,7 +163,7 @@ impl WorkflowStore {
                 "SELECT id, workflow_id, workflow_name, state, input, output, error,
                         resume_token, pause_reason, paused_at, paused_step_index,
                         paused_variables, paused_current_input,
-                        step_results, started_at, completed_at, created_at
+                        step_results, started_at, completed_at, created_at, owner_agent_id
                  FROM workflow_runs WHERE state = ?1 ORDER BY started_at DESC"
                     .to_string(),
                 vec![Box::new(state.to_string()) as Box<dyn rusqlite::types::ToSql>],
@@ -168,7 +172,7 @@ impl WorkflowStore {
                 "SELECT id, workflow_id, workflow_name, state, input, output, error,
                         resume_token, pause_reason, paused_at, paused_step_index,
                         paused_variables, paused_current_input,
-                        step_results, started_at, completed_at, created_at
+                        step_results, started_at, completed_at, created_at, owner_agent_id
                  FROM workflow_runs ORDER BY started_at DESC"
                     .to_string(),
                 vec![],
@@ -314,6 +318,7 @@ fn row_from_sqlite(row: &rusqlite::Row<'_>) -> Result<WorkflowRunRow, rusqlite::
         started_at: row.get(14)?,
         completed_at: row.get(15)?,
         created_at: row.get(16)?,
+        owner_agent_id: row.get(17)?,
     })
 }
 
@@ -335,6 +340,7 @@ mod tests {
             id: id.to_string(),
             workflow_id: "wf-001".to_string(),
             workflow_name: "test-workflow".to_string(),
+            owner_agent_id: None,
             state: state.to_string(),
             input: "hello world".to_string(),
             output: None,

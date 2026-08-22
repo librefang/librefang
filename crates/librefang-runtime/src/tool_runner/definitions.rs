@@ -96,6 +96,8 @@ pub(crate) mod tool_name {
     pub const WORKFLOW_STATUS: &str = "workflow_status";
     pub const WORKFLOW_START: &str = "workflow_start";
     pub const WORKFLOW_CANCEL: &str = "workflow_cancel";
+    pub const WORKFLOW_CREATE: &str = "workflow_create";
+    pub const AGENT_TYPE_CREATE: &str = "agent_type_create";
     pub const SYSTEM_TIME: &str = "system_time";
     pub const CANVAS_PRESENT: &str = "canvas_present";
     pub const READ_ARTIFACT: &str = "read_artifact";
@@ -138,6 +140,7 @@ pub const ALWAYS_NATIVE_TOOLS: &[&str] = &[
     tool_name::FILE_LIST,
     tool_name::CODE_SEARCH,
     tool_name::AGENT_SEND,
+    tool_name::WORKFLOW_CREATE,
     tool_name::AGENT_LIST,
     tool_name::CHANNEL_SEND,
     tool_name::NOTIFY_OWNER,
@@ -340,34 +343,85 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             },
             ToolDefinition {
                 name: tool_name::AGENT_SPAWN.to_string(),
-                description: "Spawn a new agent from settings. Returns the new agent's ID and name.".to_string(),
+                description: "Spawn a new agent (permanent or ephemeral). Permanent: creates a persistent agent, returns ID. Ephemeral: runs a task in an isolated worker with no persistence, returns the result directly.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
+                        "ephemeral": {
+                            "type": "boolean",
+                            "description": "When true, spawn a temporary worker that runs the task and returns the result directly. No workspace, no DB persistence. When false (default), spawn a permanent agent."
+                        },
                         "name": {
                             "type": "string",
-                            "description": "Unique name for the new agent. Ensure it does not conflict with existing agents."
+                            "description": "Unique name for the new agent (permanent spawn only)."
                         },
                         "system_prompt": {
                             "type": "string",
-                            "description": "The system prompt for the new agent"
+                            "description": "The system prompt / mission for the agent."
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "The task message to execute (ephemeral spawn only)."
+                        },
+                        "agent_type": {
+                            "type": "string",
+                            "description": "Named agent type template (ephemeral spawn only). Provides default system_prompt, model, and tools."
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "Model override as 'provider/model' (ephemeral spawn only)."
                         },
                         "tools": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Select from all available tools, including MCP tools. Use the full tool names only"
+                            "description": "Tool names to enable."
+                        },
+                        "skills": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Skill names to enable (ephemeral spawn only)."
+                        },
+                        "max_iterations": {
+                            "type": "integer",
+                            "description": "Max LLM iterations before forced return (ephemeral spawn only)."
                         },
                         "network": {
                             "type": "boolean",
-                            "description": "Whether to enable network access for the new agent (required to be true when web_fetch is in tools)"
+                            "description": "Whether to enable network access (permanent spawn only)."
                         },
                         "shell": {
                             "type": "array",
                             "items": { "type": "string" },
                             "description": "Preset necessary shell commands based on the agent's task (e.g., [\"uv *\", \"pnpm *\"]). "
+                        },
+                        "profile": {
+                            "type": "string",
+                            "description": "Model profile name to use for this spawn (e.g. 'coder', 'architect', 'quick'). When set, overrides the parent agent's model. When omitted and the ModelRouter is enabled, the router picks the best profile based on task complexity."
+                        },
+                        "model_override": {
+                            "type": "object",
+                            "description": "Raw model/provider override. Use when you need a specific model not covered by profiles. Keys: provider (string), model (string), context_window (integer, optional).",
+                            "properties": {
+                                "provider": { "type": "string" },
+                                "model": { "type": "string" },
+                                "context_window": { "type": "integer" }
+                            }
+                        },
+                        "ephemeral": {
+                            "type": "boolean",
+                            "description": "When true, the spawned agent runs a single turn and is killed immediately after — no workspace persistence, no session reuse. Mirrors Claude Code disposable workers. Default false (persistent agent)."
                         }
                     },
-                    "required": ["name", "system_prompt"]
+                    "oneOf": [
+                        {
+                            "required": ["message"],
+                            "description": "Ephemeral spawn: message is the task to execute."
+                        },
+                        {
+                            "required": ["name", "system_prompt"],
+                            "description": "Permanent spawn: name and system_prompt define the new agent."
+                        }
+                    ]
                 }),
             },
             ToolDefinition {
@@ -1204,6 +1258,77 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                         "run_id": { "type": "string", "description": "The workflow run UUID to cancel" }
                     },
                     "required": ["run_id"]
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::WORKFLOW_CREATE.to_string(),
+                description: "Create a new workflow and save it. The workflow appears in the dashboard and is available for workflow_run, workflow_start, and workflow_list. Use agent_find first to discover available agents for each step.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Unique workflow name. Only [A-Za-z0-9_-] allowed, max 64 chars. Used as the filename."
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "What this workflow does and when to use it."
+                        },
+                        "steps": {
+                            "type": "array",
+                            "description": "The workflow steps in execution order.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string", "description": "Step name for display and variable referencing." },
+                                    "agent": { "type": ["string", "object"], "description": "Agent name, UUID, or { \"type\": \"<template>\" } to auto-spawn from an agent type when no instance exists." },
+                                    "prompt_template": { "type": "string", "description": "The prompt sent to the agent. Use {{input}} for the previous step's output, {{var_name}} for named variables, and {{param}} for workflow input parameters." },
+                                    "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Names of steps this step depends on. When set, steps execute in DAG order instead of sequentially." },
+                                    "output_var": { "type": "string", "description": "When set, this step's output is stored as a named variable accessible in later steps via {{name}}." },
+                                    "mode": { "type": "string", "enum": ["sequential", "fan_out", "collect"], "description": "Execution mode. Default: sequential. (conditional / loop / wait / approval require workflow-toml authoring until the object-form schema lands.)" },
+                                    "timeout_secs": { "type": "integer", "description": "Max seconds for this step. Default: 120." },
+                                    "error_mode": { "type": "string", "enum": ["fail", "skip"], "description": "What to do on failure. Default: fail. (retry requires workflow-toml authoring until the object-form schema lands.)" }
+                                },
+                                "required": ["name", "agent", "prompt_template"]
+                            }
+                        },
+                        "input_schema": {
+                            "type": "array",
+                            "description": "Declared input parameters so callers know what to pass in workflow_run.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string" },
+                                    "description": { "type": "string" },
+                                    "type": { "type": "string", "enum": ["string", "number", "boolean", "file", "image", "agent_id"] },
+                                    "required": { "type": "boolean" }
+                                },
+                                "required": ["name", "type"]
+                            }
+                        },
+                        "total_timeout_secs": {
+                            "type": "integer",
+                            "description": "Max wall-clock seconds for the entire workflow run."
+                        }
+                    },
+                    "required": ["name", "steps"]
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::AGENT_TYPE_CREATE.to_string(),
+                description: "Create a new agent type (template) that can be spawned later via agent_spawn's agent_type field or a workflow step's type field. Provide a unique name, a system prompt, an optional model/provider, and the tools/skills the type should carry.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Unique agent type name. Only [A-Za-z0-9_-] allowed, max 64 chars." },
+                        "description": { "type": "string", "description": "What this agent type is for." },
+                        "system_prompt": { "type": "string", "description": "The default system prompt for agents spawned from this type." },
+                        "provider": { "type": "string", "description": "Optional LLM provider (default: the daemon default)." },
+                        "model": { "type": "string", "description": "Optional model name (default: the daemon default)." },
+                        "tools": { "type": "array", "items": { "type": "string" }, "description": "Tool names this type's agents get." },
+                        "skills": { "type": "array", "items": { "type": "string" }, "description": "Skill names this type's agents get." }
+                    },
+                    "required": ["name"]
                 }),
             },
             ToolDefinition {

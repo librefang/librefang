@@ -454,7 +454,7 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                             Some(wf_id) => {
                                 match tokio::time::timeout(
                                     timeout,
-                                    kernel_job.run_workflow(wf_id, input_text),
+                                    kernel_job.run_workflow(wf_id, input_text, None),
                                 )
                                 .await
                                 {

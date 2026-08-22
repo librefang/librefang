@@ -17,6 +17,7 @@
     "tasks": "任务",
     "goals": "目标",
     "agents": "智能体",
+    "agent_types": "智能体类型",
     "users": "用户",
     "providers": "供应商",
     "channels": "通道",
@@ -273,6 +274,26 @@
       "no_peers": "暂无节点"
     },
     "setup_failed": "快速初始化失败"
+  },
+  "agentTypes": {
+    "title": "智能体类型",
+    "create": "创建类型",
+    "edit": "编辑类型",
+    "delete": "删除类型",
+    "quickRun": "快速运行",
+    "name": "名称",
+    "description": "描述",
+    "systemPrompt": "系统提示词",
+    "provider": "提供商",
+    "model": "模型",
+    "tools": "工具",
+    "message": "消息",
+    "result": "结果",
+    "noTypes": "尚未定义智能体类型",
+    "confirmDelete": "删除此智能体类型？",
+    "iterations": "迭代次数",
+    "latency": "延迟",
+    "cost": "成本"
   },
   "agents": {
     "title": "智能体",
@@ -1175,7 +1196,8 @@
     "pending_title": "Skill workshop 待处理",
     "pending_load_failed": "加载待处理候选失败:",
     "pending_unknown_error": "未知错误",
-    "pending_desc": "从智能体对话捕获的草稿正在等待你审查（#3328）。"
+    "pending_desc": "从智能体对话捕获的草稿正在等待你审查（#3328）。",
+    "viewOnMarketplace": "在 {{marketplace}} 上查看"
   },
   "hands": {
     "title": "Hands",
@@ -1435,7 +1457,7 @@
     "topology_description": "高性能事件总线协调。",
     "total_channels": "总通道数",
     "connected": "已连接",
-    "recent_events": "最近事件（最多 50 条）",
+    "events_today": "今日事件",
     "uptime": "运行时间",
     "events": "事件",
     "events_desc": "实时消息事件。",
@@ -1686,7 +1708,11 @@
       "pending_review_one": "1 个工作流运行正在等待操作员审查",
       "pending_review_other": "{{count}} 个工作流运行正在等待操作员审查",
       "empty_artifact": "（空产物）"
-    }
+    },
+    "save_from_chat": "保存为工作流",
+    "saved_to_canvas": "工作流已在画布中打开",
+    "invalid_json": "该 JSON 代码块不是有效的工作流 JSON",
+    "no_json_found": "此消息中没有可保存的 JSON 代码块"
   },
   "scheduler": {
     "title": "调度器",

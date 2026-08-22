@@ -353,6 +353,7 @@ fn is_safe_asset_path(path: &str) -> bool {
 /// scan over a handful of entries.
 const SPA_ROUTES: &[&str] = &[
     "a2a",
+    "agent-types",
     "agents",
     "analytics",
     "approvals",

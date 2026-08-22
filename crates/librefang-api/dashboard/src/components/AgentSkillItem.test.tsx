@@ -124,4 +124,12 @@ describe("AgentSkillItem", () => {
     await userEvent.click(btn);
     expect(onRemove).not.toHaveBeenCalled();
   });
+
+  it("shows the pending-activation hint instead of 'installed' when pending", () => {
+    render(<AgentSkillItem name="ghost-skill" pending />);
+    expect(
+      screen.getByTestId("agent-skill-item-description").textContent,
+    ).toContain("Pending activation");
+    expect(screen.getByTestId("agent-skill-item-pending")).toBeTruthy();
+  });
 });

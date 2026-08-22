@@ -1398,7 +1398,8 @@ tui-event-session-management-not-available-in-process = 인프로세스 모드�
 tui-event-kv-save-failed = KV 쌍을 저장하지 못했습니다
 tui-event-kv-not-available-in-process = 인프로세스 모드에서는 메모리 KV를 사용할 수 없습니다
 tui-event-kv-delete-failed = KV 쌍을 삭제하지 못했습니다
-tui-event-skill-install-failed = { $slug }을(를) 설치하지 못했습니다
+tui-event-skill-install-http-fallback = HTTP { $status }
+tui-event-skill-install-failed-detail = { $slug }을(를) 설치하지 못했습니다: { $detail }
 tui-event-skill-install-not-available-in-process = 인프로세스 모드에서는 스킬 설치를 사용할 수 없습니다
 tui-event-skill-uninstall-failed = { $name }을(를) 제거하지 못했습니다
 tui-event-skill-uninstall-not-available-in-process = 인프로세스 모드에서는 스킬 제거를 사용할 수 없습니다
@@ -1689,7 +1690,7 @@ tui-security-feat-prompt-name = 프롬프트 인젝션 스캐너
 tui-security-feat-prompt-desc = 재정의 시도 및 데이터 유출을 탐지
 
 # templates.rs
-tui-templates-title = 템플릿
+tui-templates-title = 에이전트 유형
 tui-templates-cat-all = 전체
 tui-templates-cat-general = 일반
 tui-templates-cat-development = 개발
@@ -2239,3 +2240,74 @@ tui-wizard-status-continuing = 계속하는 중...
 
 
 
+
+tui-tab-goals = 목표
+tui-goals-title = ⌖ 목표
+tui-goal-created = 목표 생성됨: { $id }
+tui-goal-deleted = 목표 삭제됨: { $id }
+tui-goal-run-started = 목표 실행 시작: { $id }
+tui-goal-run-stopped = 목표 실행 중지됨: { $id }
+tui-goal-create-failed = 목표를 생성하지 못했습니다
+tui-goal-inproc-unavailable = 인프로세스 모드에서는 목표 관리를 사용할 수 없습니다
+tui-goal-delete-failed = 목표를 삭제하지 못했습니다
+tui-goal-start-failed = 목표 실행을 시작하지 못했습니다
+tui-goal-start-error = 목표 실행: { $error }
+tui-goal-stop-failed = 목표 실행을 중지하지 못했습니다
+
+tui-agents-space-toggle =   (Space 키로 전환)
+tui-agents-cost-budget =   비용 예산: 
+tui-agents-hl-change =   (h/l로 변경)
+tui-agents-allowed-profiles =   허용된 프로필 (Tab으로 전환):
+tui-agents-no-profiles =     (사용 가능한 프로필 없음)
+
+tui-goals-filter =   필터: { $query }
+tui-goals-loading = 목표 불러오는 중...
+tui-goals-empty = 목표를 찾을 수 없습니다.
+tui-goals-hints =   / 검색 | n 새로 만들기 | d 삭제 | s 시작/중지 | Enter 세부사항 | r 새로고침
+tui-goals-none-selected = 선택된 목표가 없습니다.
+tui-goals-judge-label =   목표 심사자: 
+tui-goals-phase-label =   실행 단계: 
+tui-goals-hint-stop = s 실행 중지
+tui-goals-hint-start = s 실행 시작
+tui-goals-detail-hints =   q/Esc 닫기 | { $run_hint } | r 새로고침
+tui-goals-new-title = 새 목표
+tui-goals-step =   단계 { $n }/6
+tui-goals-example = 예: "로그인 시간 초과 수정"
+tui-goals-prompt = 에이전트가 무엇을 수행해야 합니까?
+tui-goals-agent-hint = UUID 또는 비워 두면 자동 생성
+tui-goals-verify-hint = Space/Tab 전환 — 검증자가 매 반복 품질 확인
+tui-goals-reviewer-hint = UUID 또는 비워 두면 검토자 자동 생성
+tui-goals-judge = 목표 심사자:
+tui-goals-model-hint = 완료 확인 모델, 예: "claude-haiku" (선택)
+tui-goals-review-on = ▣ 자동 검토 활성화 (검토자가 매 반복 확인)
+tui-goals-review-off = ▢ 자동 검토 비활성화
+tui-goals-nav-submit = Esc 뒤로 | Enter 제출
+tui-goals-nav-toggle = Esc 뒤로 | Space/Tab 전환 | Enter 다음
+tui-goals-nav-next = Esc 뒤로 | Enter 다음
+tui-goals-phase-actv = ● ACTV
+tui-goals-phase-done = ○ DONE
+tui-goals-phase-canc = ○ CANC
+tui-goals-phase-fail = ● FAIL
+tui-goals-phase-pend = ○ PEND
+cmd-goal-create-error = 목표 생성 오류: { $error }
+cmd-goal-created = 목표 생성됨: { $id }
+cmd-goal-start-error = 목표 실행 시작 오류: { $error }
+cmd-goal-watching = 목표 실행 관찰 중 (중지: Ctrl+C)...
+cmd-goal-progress =   [{ $current }/{ $total }] 단계={ $phase } 진행률={ $progress }%
+cmd-goal-finished =   목표가 성공적으로 완료되었습니다!
+cmd-goal-max-iterations =   목표가 최대 반복 횟수에 도달했습니다.
+cmd-goal-rate-limited =   목표 실행이 속도 제한에 걸렸습니다.
+cmd-goal-stopped =   목표 실행이 중지되었습니다.
+cmd-goal-error =   오류: { $error }
+
+tui-agents-detail-routing =   라우팅:
+tui-agents-hints-input-prompt =     [Enter] 다음  [Tab] 프롬프트 라이브러리 탐색  [Esc] 뒤로
+tui-agents-hints-prompt-picker =   [↑↓] 탐색  [Enter] 프롬프트 선택  [Esc] 뒤로
+tui-agents-hints-routing-fixed =   [Space] 유연 모드 전환  [Enter] 생성  [Esc] 뒤로
+tui-agents-hints-routing-flexible =   [↑↓] 프로필 탐색  [Tab] 프로필 전환  [Space] 모드 전환  [h/l] 예산  [Enter] 생성  [Esc] 뒤로
+tui-agents-label-no-prompts = (사용 가능한 프롬프트 없음)
+tui-agents-prompt-routing =   모델 라우팅 구성:
+tui-agents-prompt-select-prompt =   라이브러리에서 프롬프트 선택:
+tui-agents-title-custom-model-routing = 사용자 정의 — 모델 라우팅
+tui-agents-title-edit-routing = 모델 라우팅 편집
+tui-agents-title-prompt-picker = 프롬프트 라이브러리
