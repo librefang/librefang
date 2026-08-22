@@ -12,6 +12,8 @@ on:
       - 'crates/librefang-api/dashboard/vite.config.*'
       - 'crates/librefang-api/dashboard/tsconfig.*'
       - 'crates/librefang-api/dashboard/eslint.config.*'
+      - '.github/scripts/dashboard-release-tag.sh'
+      - '.github/scripts/tests/dashboard-release-tag.test.sh'
       - '.github/workflows/dashboard-build.yml'
   pull_request:
     paths:
@@ -21,6 +23,8 @@ on:
       - 'crates/librefang-api/dashboard/vite.config.*'
       - 'crates/librefang-api/dashboard/tsconfig.*'
       - 'crates/librefang-api/dashboard/eslint.config.*'
+      - '.github/scripts/dashboard-release-tag.sh'
+      - '.github/scripts/tests/dashboard-release-tag.test.sh'
       - '.github/workflows/dashboard-build.yml'
   release:
     types: [published]
@@ -38,16 +42,22 @@ concurrency:
   group: dashboard-build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Dashboard Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # ESLint guards security-sensitive JSX (jsx-no-target-blank,
     # no-danger-with-children) and acts as a fast pre-build gate so the
     # heavier typecheck + build jobs don't waste a runner on a PR that
     # would have failed the lint anyway (refs #5561).
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test release tag selection
+        run: .github/scripts/tests/dashboard-release-tag.test.sh
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: 10
@@ -63,8 +73,7 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
@@ -95,34 +104,53 @@ jobs:
         run: pnpm run build
 
       - name: Package dashboard assets
+        if: github.event_name != 'pull_request'
         run: |
           cd crates/librefang-api/static/react
           tar -czf /tmp/dashboard-dist.tar.gz .
 
-      - name: Upload to release
+      - name: Retain packaged dashboard
         if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dashboard-release-asset
+          path: /tmp/dashboard-dist.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  upload:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dashboard-release-asset
+          path: /tmp
+      - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag || '' }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          case "${{ github.event_name }}" in
-            release)
-              TAG="${{ github.event.release.tag_name }}"
-              ;;
-            workflow_dispatch)
-              TAG="${{ github.event.inputs.tag }}"
-              ;;
-            *)
-              # push to main — upload to the most recent release
-              TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
-              ;;
-          esac
+          set -euo pipefail
+          TAG=$(sh .github/scripts/dashboard-release-tag.sh)
           if [ -z "$TAG" ]; then
-            echo "No release found, skipping upload"
+            echo "No stable release found, skipping upload"
             exit 0
           fi
           echo "Uploading dashboard-dist.tar.gz to $TAG"
           for attempt in $(seq 1 5); do
-            if gh release upload "$TAG" /tmp/dashboard-dist.tar.gz --clobber; then
+            if gh release upload --repo "$REPOSITORY" --clobber -- \
+              "$TAG" /tmp/dashboard-dist.tar.gz; then
               echo "✓ Upload succeeded (attempt $attempt)"
               exit 0
             fi
