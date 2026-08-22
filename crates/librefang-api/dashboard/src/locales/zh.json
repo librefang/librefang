@@ -2902,6 +2902,7 @@
     "summary_status": "状态",
     "finish_action": "启动 LibreFang",
     "finalize_failed": "初始化失败：{{message}}",
+    "quick_init_failed": "默认提供商已保存，但初始化失败：{{message}}。请重试以继续。",
     "done_title": "LibreFang 已就绪",
     "done_desc": "默认供应商已配置，入门 Agent 已创建。现在可以开始聊天或进入控制台。",
     "go_overview": "进入总览",

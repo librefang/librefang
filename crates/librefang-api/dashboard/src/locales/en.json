@@ -2936,6 +2936,7 @@
     "summary_status": "Status",
     "finish_action": "Launch LibreFang",
     "finalize_failed": "Setup failed: {{message}}",
+    "quick_init_failed": "The default provider was saved, but initialization failed: {{message}}. Retry to continue.",
     "done_title": "LibreFang is ready",
     "done_desc": "Your default provider is configured and a starter agent has been created. You can now chat or jump into the dashboard.",
     "go_overview": "Go to Overview",

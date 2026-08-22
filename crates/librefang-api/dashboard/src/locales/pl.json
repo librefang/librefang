@@ -2938,6 +2938,7 @@
     "summary_status": "Status",
     "finish_action": "Uruchom LibreFang",
     "finalize_failed": "Konfiguracja nie powiodła się: {{message}}",
+    "quick_init_failed": "Domyślny dostawca został zapisany, ale inicjalizacja nie powiodła się: {{message}}. Spróbuj ponownie, aby kontynuować.",
     "done_title": "LibreFang jest gotowy",
     "done_desc": "Twój domyślny dostawca został skonfigurowany, a agent startowy został utworzony. Możesz teraz czatować lub przejść do panelu.",
     "go_overview": "Przejdź do Przeglądu",

@@ -2936,6 +2936,7 @@
     "summary_status": "상태",
     "finish_action": "LibreFang 실행",
     "finalize_failed": "설정 실패: {{message}}",
+    "quick_init_failed": "기본 제공자는 저장되었지만 초기화에 실패했습니다: {{message}}. 계속하려면 다시 시도하세요.",
     "done_title": "LibreFang이 준비되었습니다",
     "done_desc": "기본 공급자가 구성되었으며 스타터 에이전트가 생성되었습니다. 이제 채팅을 하거나 대시보드로 이동할 수 있습니다.",
     "go_overview": "개요로 이동",
