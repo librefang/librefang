@@ -42,7 +42,11 @@ impl LibreFangKernel {
     /// stored in the model catalog but NOT in `self.config.provider_urls` (which is
     /// the boot-time snapshot). This helper checks both sources so that custom
     /// providers work immediately without a daemon restart.
-    fn lookup_provider_url(&self, provider: &str) -> Option<String> {
+    // `pub(super)` rather than private: the ephemeral-spawn path in
+    // `kernel::messaging` resolves a provider URL the same way, and a second
+    // copy of the boot-config-then-catalog lookup would be a second place to
+    // forget the runtime-catalog half of it.
+    pub(super) fn lookup_provider_url(&self, provider: &str) -> Option<String> {
         let cfg = self.config.load();
         // 1. Boot-time config (from config.toml [provider_urls])
         if let Some(url) = cfg.provider_urls.get(provider) {

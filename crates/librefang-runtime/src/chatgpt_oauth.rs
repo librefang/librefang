@@ -1063,10 +1063,30 @@ mod tests {
             result,
             Err("Authentication timed out -- no callback received within 5 minutes".to_string())
         );
-        let rebound = tokio::net::TcpListener::bind(address)
-            .await
-            .expect("callback listener should be released after timeout");
-        drop(rebound);
+        // Rebinding the same address is the proof that the listener was
+        // released — but the address came from an ephemeral port, and the
+        // moment it is freed the OS may hand it to any of the other tests in
+        // this crate that also bind `:0`. A single attempt therefore fails
+        // for a reason that has nothing to do with the code under test.
+        //
+        // Retrying keeps the assertion honest: a genuinely leaked listener
+        // holds the port for the life of the process, so every attempt fails
+        // and the test still catches the regression it exists for. Only a
+        // transient neighbour is tolerated.
+        let mut last_err = None;
+        for _ in 0..40 {
+            match tokio::net::TcpListener::bind(address).await {
+                Ok(rebound) => {
+                    drop(rebound);
+                    return;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            }
+        }
+        panic!("callback listener should be released after timeout: {last_err:?}");
     }
 
     #[test]

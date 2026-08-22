@@ -650,6 +650,41 @@
         }
       }
     },
+    "/api/agents/spawn-ephemeral": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/spawn-ephemeral — Run a throwaway worker (no workspace,\nno DB, no registry entry) for a single turn and return its result.",
+        "operationId": "spawn_ephemeral_agent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Ephemeral worker result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Provider budget exhausted"
+          },
+          "500": {
+            "description": "Ephemeral spawn failed"
+          }
+        }
+      }
+    },
     "/api/agents/{id}": {
       "get": {
         "tags": [

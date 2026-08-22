@@ -466,6 +466,14 @@ fn read_capped(path: &Path) -> io::Result<Option<String>> {
 
 #[cfg(test)]
 mod tests {
+    //! Every test here goes through the process-global context cache, so
+    //! they share state by construction. `poisoned_cache_lock_recovers_cached_context`
+    //! deliberately poisons that lock and then asserts the flag is set —
+    //! but any sibling test that reads the cache in the meantime clears
+    //! the poison through the very recovery branch under test, and the
+    //! assertion fails for a reason that has nothing to do with the code.
+    //! The named serial group gives that test exclusivity against its
+    //! siblings without serialising the other 2300 tests in the crate.
     use super::*;
     use std::io::Write;
 
@@ -485,6 +493,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(agent_context_cache)]
     fn poisoned_cache_lock_recovers_cached_context() {
         let poison = std::thread::spawn(|| {
             let _guard = cache().lock().unwrap();
@@ -506,6 +515,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(agent_context_cache)]
     fn reread_picks_up_external_update() {
         let ws = fresh_workspace("reread");
         let path = ws.join(CONTEXT_FILENAME);
@@ -528,6 +538,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(agent_context_cache)]
     fn cache_context_true_freezes_first_read() {
         let ws = fresh_workspace("cache");
         let path = ws.join(CONTEXT_FILENAME);
@@ -545,6 +556,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(agent_context_cache)]
     fn missing_file_returns_none() {
         let ws = fresh_workspace("missing");
         assert!(load_context_md(&ws, false).is_none());
@@ -553,6 +565,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(agent_context_cache)]
     fn read_failure_falls_back_to_cache() {
         let ws = fresh_workspace("fallback");
         let path = ws.join(CONTEXT_FILENAME);
@@ -576,6 +589,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(agent_context_cache)]
     fn empty_file_treated_as_absent() {
         let ws = fresh_workspace("empty");
         let path = ws.join(CONTEXT_FILENAME);
@@ -585,6 +599,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(agent_context_cache)]
     fn identity_dir_takes_precedence_over_root() {
         let ws = fresh_workspace("identity");
         let identity_dir = ws.join(".identity");
@@ -602,6 +617,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(agent_context_cache)]
     fn falls_back_to_root_when_identity_dir_missing() {
         let ws = fresh_workspace("rootonly");
         fs::write(ws.join(CONTEXT_FILENAME), "root only payload").unwrap();
@@ -616,6 +632,7 @@ mod tests {
     /// Without a no-follow open bound to the subsequent handle checks, an attacker who can drop a symlink into the agent workspace could point context.md at /etc/passwd and have its contents injected into the LLM prompt.
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial(agent_context_cache)]
     fn rejects_symlink_context_file() {
         let ws = fresh_workspace("symlink");
         let real = ws.join("real.md");
@@ -633,6 +650,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial(agent_context_cache)]
     fn context_file_opener_does_not_follow_symlinks() {
         let ws = fresh_workspace("nofollow_open");
         let real = ws.join("real.md");
@@ -648,6 +666,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(agent_context_cache)]
     fn windows_handle_path_containment_is_exact_and_component_bounded() {
         let root: Vec<u16> = r"\\?\C:\work\Foo".encode_utf16().collect();
         let child: Vec<u16> = r"\\?\C:\work\Foo\context.md".encode_utf16().collect();
@@ -662,6 +681,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial(agent_context_cache)]
     fn context_reader_does_not_block_on_fifo() {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
@@ -690,6 +710,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    #[serial_test::serial(agent_context_cache)]
     fn windows_context_file_opener_rejects_file_symlink() {
         let ws = fresh_workspace("windows_file_symlink");
         let target = ws.join("target.md");
@@ -711,6 +732,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    #[serial_test::serial(agent_context_cache)]
     fn windows_context_file_opener_rejects_symlinked_identity_directory() {
         let ws = fresh_workspace("windows_identity_dir_symlink");
         let outside = fresh_workspace("windows_identity_dir_target");
@@ -734,6 +756,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial(agent_context_cache)]
     fn identity_symlink_falls_back_to_regular_root_context() {
         let ws = fresh_workspace("identity_symlink_fallback");
         let identity_dir = ws.join(".identity");
@@ -752,6 +775,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial(agent_context_cache)]
     fn identity_directory_symlink_falls_back_to_regular_root_context() {
         let ws = fresh_workspace("identity_dir_symlink_fallback");
         let target_dir = ws.join("untrusted-identity");
@@ -769,6 +793,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial(agent_context_cache)]
     fn symlink_replacement_falls_back_to_cached_context() {
         let ws = fresh_workspace("symlink_cache_fallback");
         let context = ws.join(CONTEXT_FILENAME);
@@ -791,6 +816,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial(agent_context_cache)]
     fn identity_symlink_replacement_falls_back_to_cached_context() {
         let ws = fresh_workspace("identity_symlink_cache_fallback");
         let identity_dir = ws.join(".identity");
@@ -817,6 +843,7 @@ mod tests {
     /// path. This pins the byte-for-byte equivalence with the sync API
     /// — if a future refactor diverges, this test will catch it.
     #[tokio::test]
+    #[serial_test::serial(agent_context_cache)]
     async fn async_variant_matches_sync_for_basic_read() {
         let ws = fresh_workspace("async_basic");
         fs::write(ws.join(CONTEXT_FILENAME), "async-ok payload").unwrap();
@@ -830,6 +857,7 @@ mod tests {
     /// Async API must honour the symlink rejection identically to sync.
     #[cfg(unix)]
     #[tokio::test]
+    #[serial_test::serial(agent_context_cache)]
     async fn async_variant_rejects_symlink_context_file() {
         let ws = fresh_workspace("async_symlink");
         let real = ws.join("real.md");
@@ -848,6 +876,7 @@ mod tests {
     /// Async API picks up `.identity/context.md` over the legacy root
     /// fallback — same precedence rule as the sync version.
     #[tokio::test]
+    #[serial_test::serial(agent_context_cache)]
     async fn async_variant_identity_dir_takes_precedence() {
         let ws = fresh_workspace("async_identity");
         let identity_dir = ws.join(".identity");

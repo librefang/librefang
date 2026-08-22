@@ -553,6 +553,18 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn spawn_ephemeral_agent(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "agents", "spawn-ephemeral"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,

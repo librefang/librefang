@@ -977,6 +977,26 @@ impl AgentControl for DispatchCapture {
     fn max_agent_call_depth(&self) -> u32 {
         10
     }
+
+    /// Records the tool names the caller actually resolved (post-allowlist-filtering) so a test can assert on it without a real kernel.
+    /// #6930 review: `tool_agent_spawn`'s ephemeral branch is otherwise dispatch-only up to this call — nothing else observes what made it through.
+    async fn spawn_ephemeral_detailed(
+        &self,
+        request: librefang_types::agent::EphemeralSpawnRequest,
+        parent_id: Option<&str>,
+    ) -> Result<librefang_types::agent::EphemeralSpawnResult, librefang_kernel_handle::KernelOpError>
+    {
+        self.calls.lock().unwrap().push(format!(
+            "spawn_ephemeral:parent={};tools={:?}",
+            parent_id.unwrap_or("none"),
+            request.tools.unwrap_or_default()
+        ));
+        Ok(librefang_types::agent::EphemeralSpawnResult {
+            response: "stub".to_string(),
+            cost_usd: None,
+            iterations: 0,
+        })
+    }
 }
 
 impl MemoryAccess for DispatchCapture {
@@ -1560,6 +1580,182 @@ async fn agent_send_quota_sees_depth_established_by_with_agent_call_depth() {
         cap.calls.lock().unwrap().is_empty(),
         "the refusal must short-circuit before dispatch"
     );
+}
+
+// ── agent_spawn(ephemeral: true) guard tests (#6930) ───────────────────────
+//
+// `tool_agent_spawn`'s ephemeral branch has its own depth guard, taint check
+// and tool-allowlist filter, all run before `kh.spawn_ephemeral_detailed` is
+// ever called — mirrored here against `DispatchCapture`, the same mock
+// `KernelHandle` the `agent_send` guard tests above use.
+
+/// Same policy mapping as `agent_send_depth_exceeded_is_permission_denied`: the ephemeral-spawn depth guard must reject with `PermissionDenied` (→ HTTP 403), not silently dispatch.
+#[tokio::test]
+async fn ephemeral_spawn_depth_exceeded_is_permission_denied() {
+    use super::error::ToolError;
+    use super::AGENT_CALL_DEPTH;
+
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    let input = serde_json::json!({ "ephemeral": true, "message": "do the thing" });
+
+    // DispatchCapture::max_agent_call_depth() returns 10.
+    let result = AGENT_CALL_DEPTH
+        .scope(std::cell::Cell::new(10), async {
+            super::agent::tool_agent_spawn(&input, Some(&kernel), Some("parent-agent"), None).await
+        })
+        .await;
+
+    let err = result.expect_err("depth >= max must short-circuit before dispatch");
+    match &err {
+        ToolError::PermissionDenied(msg) => assert!(
+            msg.contains("Inter-agent call depth exceeded"),
+            "message text must survive, got: {msg}"
+        ),
+        other => panic!("expected PermissionDenied, got {other:?}"),
+    }
+    assert!(
+        cap.calls.lock().unwrap().is_empty(),
+        "depth-exceeded must short-circuit before spawn_ephemeral_detailed is called"
+    );
+}
+
+/// A secret-shaped `message` must be rejected before the worker is spawned, exactly like the permanent-agent branch's own `check_taint_outbound_text(message, ...)` call.
+#[tokio::test]
+async fn ephemeral_spawn_rejects_tainted_message() {
+    use super::error::ToolError;
+
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    let input = serde_json::json!({
+        "ephemeral": true,
+        "message": "here is my api_key=sk-12345678901234567890123456789012",
+    });
+
+    let err = super::agent::tool_agent_spawn(&input, Some(&kernel), Some("parent-agent"), None)
+        .await
+        .expect_err("secret-shaped message must be rejected");
+    match &err {
+        ToolError::PermissionDenied(msg) => {
+            assert!(msg.contains("Taint violation (message)"), "got: {msg}")
+        }
+        other => panic!("expected PermissionDenied, got {other:?}"),
+    }
+    assert!(cap.calls.lock().unwrap().is_empty());
+}
+
+/// #6930 review: `system_prompt` becomes the worker's actual system prompt, so it must be taint-checked the same way `message` already is on this path, and the same way `system_prompt` already is on the permanent-agent branch a few lines below.
+#[tokio::test]
+async fn ephemeral_spawn_rejects_tainted_system_prompt() {
+    use super::error::ToolError;
+
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    let input = serde_json::json!({
+        "ephemeral": true,
+        "message": "benign task",
+        "system_prompt": "leaked token: ghp_1234567890123456789012345678901234567890",
+    });
+
+    let err = super::agent::tool_agent_spawn(&input, Some(&kernel), Some("parent-agent"), None)
+        .await
+        .expect_err("secret-shaped system_prompt must be rejected");
+    match &err {
+        ToolError::PermissionDenied(msg) => assert!(
+            msg.contains("Taint violation (system_prompt)"),
+            "got: {msg}"
+        ),
+        other => panic!("expected PermissionDenied, got {other:?}"),
+    }
+    assert!(
+        cap.calls.lock().unwrap().is_empty(),
+        "a tainted system_prompt must short-circuit before spawn_ephemeral_detailed is called"
+    );
+}
+
+/// A restricted parent's `agent_spawn(ephemeral: true, tools: [...])` call must have its `tools` filtered down to the intersection with `parent_allowed_tools`, the same enforcement the permanent-spawn branch applies via `tools_to_parent_capabilities`.
+#[tokio::test]
+async fn ephemeral_spawn_filters_tools_by_parent_allowlist() {
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    let allowed = vec!["web_search".to_string(), "file_read".to_string()];
+    let input = serde_json::json!({
+        "ephemeral": true,
+        "message": "look something up",
+        "tools": ["web_search", "shell_exec", "file_read"],
+    });
+
+    super::agent::tool_agent_spawn(&input, Some(&kernel), Some("parent-agent"), Some(&allowed))
+        .await
+        .expect(
+            "a partially-allowed tool list must still succeed with the disallowed tool dropped",
+        );
+
+    let calls = cap.calls.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        1,
+        "expected exactly one spawn_ephemeral_detailed call: {calls:?}"
+    );
+    assert!(
+        calls[0].contains("web_search") && calls[0].contains("file_read"),
+        "allowed tools must reach the request: {calls:?}"
+    );
+    assert!(
+        !calls[0].contains("shell_exec"),
+        "shell_exec is outside the parent's allowlist and must be dropped: {calls:?}"
+    );
+}
+
+/// When the parent has no tool restriction at all (`parent_allowed_tools: None`), the caller's requested tools pass through unfiltered.
+#[tokio::test]
+async fn ephemeral_spawn_unrestricted_parent_passes_tools_through() {
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    let input = serde_json::json!({
+        "ephemeral": true,
+        "message": "do anything",
+        "tools": ["shell_exec"],
+    });
+
+    super::agent::tool_agent_spawn(&input, Some(&kernel), Some("parent-agent"), None)
+        .await
+        .expect("unrestricted parent must be able to spawn with any requested tool");
+
+    let calls = cap.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].contains("shell_exec"),
+        "an unrestricted parent's requested tools must pass through unfiltered: {calls:?}"
+    );
+}
+
+/// A restricted parent whose allowlist shares nothing with the requested `tools` must be refused outright, not silently spawn a worker with zero tools.
+#[tokio::test]
+async fn ephemeral_spawn_rejects_when_no_requested_tool_is_allowed() {
+    use super::error::ToolError;
+
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    let allowed = vec!["web_search".to_string()];
+    let input = serde_json::json!({
+        "ephemeral": true,
+        "message": "do the thing",
+        "tools": ["shell_exec"],
+    });
+
+    let err =
+        super::agent::tool_agent_spawn(&input, Some(&kernel), Some("parent-agent"), Some(&allowed))
+            .await
+            .expect_err("no overlap between requested and allowed tools must be refused");
+    match &err {
+        ToolError::PermissionDenied(msg) => assert!(
+            msg.contains("None of the requested tools are allowed"),
+            "got: {msg}"
+        ),
+        other => panic!("expected PermissionDenied, got {other:?}"),
+    }
+    assert!(cap.calls.lock().unwrap().is_empty());
 }
 
 /// The nesting-depth refusal must reach the model as a policy error, the same way `agent_send`'s does (refs #6659).

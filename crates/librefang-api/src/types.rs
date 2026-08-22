@@ -393,6 +393,77 @@ pub struct SpawnResponse {
     pub name: String,
 }
 
+/// OpenAPI schema stand-in for `librefang_types::agent::ModelConfig`, restricted to the fields `POST /api/agents/spawn-ephemeral` actually reads.
+///
+/// `librefang-types` does not depend on utoipa, so the real deserialize target keeps its full shape and this mirror documents only what `resolve_ephemeral_manifest` honours on this path — the rest of `ModelConfig` (`temperature`, `system_prompt`, `extra_params`, …) is silently ignored here.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[allow(dead_code)]
+pub struct EphemeralModelOverrideSchema {
+    /// LLM provider name.
+    pub provider: String,
+    /// Model identifier.
+    pub model: String,
+    /// Maximum tokens for completion. 0 (the default) means "use the resolved default".
+    #[serde(default)]
+    pub max_tokens: u32,
+    /// Base URL override.
+    /// Must match a value the operator has already configured for this provider, or the request is refused with 500 and a `CapabilityDenied` message.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// API key environment variable name override.
+    /// Must match a value the operator has already configured for this provider, or the request is refused with 500 and a `CapabilityDenied` message.
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+}
+
+/// OpenAPI request-body schema for `POST /api/agents/spawn-ephemeral`.
+///
+/// Mirrors `librefang_types::agent::EphemeralSpawnRequest`, the real deserialize target — see [`EphemeralModelOverrideSchema`] for why this crate keeps its own copy instead of deriving `utoipa::ToSchema` on the domain type directly.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[allow(dead_code)]
+pub struct EphemeralSpawnRequestSchema {
+    /// Inline system prompt — the worker's mission. Required if no `agent_type`.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    /// Named agent type from `~/.librefang/templates/`, or (as a fallback) a live agent's own workspace manifest name.
+    #[serde(default)]
+    pub agent_type: Option<String>,
+    /// Model override.
+    #[serde(default)]
+    pub model: Option<EphemeralModelOverrideSchema>,
+    /// Tool names to enable. Omitted or empty means no tools (pure LLM).
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+    /// Skill names to enable.
+    /// Currently accepted but not applied — a non-empty value is logged and dropped, because the skill registry is not wired up for ephemeral workers yet.
+    #[serde(default)]
+    pub skills: Option<Vec<String>>,
+    /// The task message to execute.
+    pub message: String,
+    /// Max LLM iterations before forced return.
+    #[serde(default)]
+    pub max_iterations: Option<u32>,
+    /// Agent id to bill this run's cost against, instead of the ephemeral worker's own throwaway id.
+    /// Requires an `Admin`+ bearer; the target agent must already be registered or the request is refused with 400.
+    /// If `agent_type` names a *different* live agent (not a saved template file), the request is also refused — see `librefang_types::agent::EphemeralSpawnRequest::parent_agent_id`.
+    #[serde(default)]
+    pub parent_agent_id: Option<String>,
+}
+
+/// OpenAPI response schema for `POST /api/agents/spawn-ephemeral`'s 200 body.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[allow(dead_code)]
+pub struct EphemeralSpawnResponseSchema {
+    /// The worker's final text response.
+    pub response: String,
+    /// Estimated cost in USD, when the kernel could compute it.
+    pub cost_usd: Option<f64>,
+    /// Number of agent-loop iterations the worker ran.
+    pub iterations: u32,
+    /// Wall-clock latency of the run, in milliseconds.
+    pub latency_ms: u64,
+}
+
 /// OpenAPI schema stand-in for `librefang_channels::types::ParticipantRef`.
 ///
 /// The real type lives in `librefang-channels`, which does not depend on

@@ -959,6 +959,55 @@ pub struct FallbackModel {
     pub extra_params: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
+/// Request to spawn an ephemeral (no-workspace, no-DB) agent worker.
+/// The caller controls everything; nothing is inherited from the parent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EphemeralSpawnRequest {
+    /// Inline system prompt — the worker's mission. Required if no `agent_type`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    /// Named agent type from `~/.librefang/templates/`. Provides defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    /// Model override (provider/model/max_tokens).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelConfig>,
+    /// Tool names to enable. `None` = no tools (pure LLM).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+    /// Skill names to enable. `None` = no skills.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
+    /// The task message to execute.
+    pub message: String,
+    /// Max LLM iterations before forced return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<u32>,
+    /// Agent id to bill this run's cost against, for the direct HTTP route only.
+    ///
+    /// The `agent_spawn` tool call path never reads this field — it derives its own trusted `parent_id` from execution context (which agent is actually running the tool call) and passes that separately into `spawn_ephemeral_detailed`.
+    /// `POST /api/agents/spawn-ephemeral` has no such execution context (it is not invoked by any agent turn), so this is the only way a caller can attribute cost to a specific agent's budget rather than the ephemeral worker's own throwaway id.
+    /// The route requires `Admin`+ (see `middleware.rs::user_role_allows_request`), and an Admin credential can already reconfigure or delete any agent, so accepting this claim adds no privilege an Admin caller did not already have (#6930 review).
+    ///
+    /// Interaction with `agent_type`: the kernel feeds this same value into `resolve_ephemeral_manifest`'s "may not borrow another agent's identity" guard, since that guard has no other way to tell an HTTP caller apart from a tool call.
+    /// Setting `parent_agent_id` to one agent while `agent_type` names a *different* live agent (not a saved template file) is refused — set `agent_type` to that same agent's own name, or omit `parent_agent_id` and use a saved template instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent_id: Option<String>,
+}
+
+/// Result of an ephemeral worker run, carrying the metering the API surface reports back to callers.
+/// The plain `spawn_ephemeral` handle returns only `response`; this struct is returned by the detailed handle so cost and iteration counts survive the trait boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EphemeralSpawnResult {
+    /// The worker's final text response.
+    pub response: String,
+    /// Estimated cost in USD, when the kernel could compute it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// Number of agent-loop iterations the worker ran.
+    pub iterations: u32,
+}
+
 /// Tool configuration within an agent manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolConfig {
