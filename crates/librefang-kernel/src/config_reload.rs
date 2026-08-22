@@ -434,6 +434,13 @@ pub fn build_reload_plan_with_caps(
         );
     }
 
+    if field_changed(&old.media, &new.media) {
+        plan.restart_required = true;
+        plan.restart_reasons.push(
+            "media config changed (MediaEngine is boot-captured; restart required)".to_string(),
+        );
+    }
+
     if field_changed(&old.approval, &new.approval) {
         plan.hot_actions.push(HotAction::UpdateApprovalPolicy);
     }
@@ -858,7 +865,6 @@ pub fn build_reload_plan_with_caps(
             "notification",
         );
         noop_if_changed(field_changed(&old.tts, &new.tts), "tts");
-        noop_if_changed(field_changed(&old.media, &new.media), "media");
         // The hands marketplace install handler reads `hands.registry_allowed_hosts`
         // live from `config_snapshot()` on every request, so a swap is effective
         // on the next install with no explicit reapply action.
@@ -1849,6 +1855,24 @@ mod tests {
         assert_eq!(plan.noop_changes.len(), 2);
         assert!(plan.noop_changes.iter().any(|c| c.contains("language")));
         assert!(plan.noop_changes.iter().any(|c| c.contains("mode")));
+    }
+
+    #[test]
+    fn media_config_change_requires_restart() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.media.audio_provider = Some("openai".to_string());
+
+        let plan = build_reload_plan(&a, &b);
+        assert!(plan.restart_required);
+        assert!(plan
+            .restart_reasons
+            .iter()
+            .any(|reason| reason.contains("media config changed")));
+        assert!(!plan
+            .noop_changes
+            .iter()
+            .any(|change| change.contains("media")));
     }
 
     #[test]

@@ -11,6 +11,7 @@ use librefang_types::media::{
 };
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 use tracing::info;
@@ -246,6 +247,8 @@ impl MediaEngine {
         }
 
         let _permit = self.semaphore.acquire().await.map_err(|e| e.to_string())?;
+        let ffmpeg_timeout = Duration::from_secs(self.config.ffmpeg_timeout_secs);
+        let transcription_timeout = Duration::from_secs(self.config.transcription_timeout_secs);
 
         // A windowed call over a file on disk never needs the bytes in memory: ffmpeg seeks into the file itself, and everything downstream works on the window it cuts.
         // Skipping the read here is what keeps a walk's cost proportional to the recording rather than to the recording times the number of windows — the read, and for a `Base64` attachment the decode as well, would otherwise be repeated in full for every window.
@@ -311,7 +314,7 @@ impl MediaEngine {
                 Some(path) => WindowSource::Path(path.as_path()),
                 None => WindowSource::Bytes(&audio_bytes),
             };
-            let Some(cut) = extract_media_window(source, window)
+            let Some(cut) = extract_media_window(source, window, ffmpeg_timeout)
                 .await
                 .map_err(|e| format!("ffmpeg window extraction failed: {e}"))?
             else {
@@ -357,7 +360,7 @@ impl MediaEngine {
         // target the `.oga` path below produces — so the whisper-upload code
         // that follows never has to know a video container was involved.
         if window.is_none() && attachment.media_type == MediaType::Video {
-            let extracted = extract_video_audio_track(&audio_bytes)
+            let extracted = extract_video_audio_track(&audio_bytes, ffmpeg_timeout)
                 .await
                 .map_err(|e| format!("ffmpeg audio extraction failed: {e}"))?;
             info!(
@@ -378,7 +381,7 @@ impl MediaEngine {
         // fallback is useless (the bug this fixes is exactly that raw
         // .oga is rejected).
         if ext == "oga" || mime.eq_ignore_ascii_case("audio/oga") {
-            let transcoded = transcode_oga_to_ogg_opus(&audio_bytes)
+            let transcoded = transcode_oga_to_ogg_opus(&audio_bytes, ffmpeg_timeout)
                 .await
                 .map_err(|e| format!("ffmpeg .oga transcode failed: {e}"))?;
             info!(
@@ -436,13 +439,18 @@ impl MediaEngine {
                         mime: &mime,
                         language: effective_language,
                         prompt: effective_prompt,
+                        timeout: transcription_timeout,
                     })
                     .await
                 }
                 // Gemini — multimodal content generation with audio input
-                "gemini" => gemini_transcribe(model, audio_bytes, &mime).await,
+                "gemini" => {
+                    gemini_transcribe(model, audio_bytes, &mime, transcription_timeout).await
+                }
                 // ElevenLabs — Speech-to-Text API
-                "elevenlabs" => elevenlabs_transcribe(model, audio_bytes, &mime).await,
+                "elevenlabs" => {
+                    elevenlabs_transcribe(model, audio_bytes, &mime, transcription_timeout).await
+                }
                 // Custom / self-hosted OpenAI-compatible Whisper endpoint
                 _other => {
                     let (api_url, api_key) = custom_stt_config(provider, &self.config.custom_stt)?;
@@ -455,6 +463,7 @@ impl MediaEngine {
                         mime: &mime,
                         language: effective_language,
                         prompt: effective_prompt,
+                        timeout: transcription_timeout,
                     })
                     .await
                 }
@@ -929,6 +938,7 @@ struct WhisperTranscribeParams<'a> {
     mime: &'a str,
     language: Option<&'a str>,
     prompt: Option<&'a str>,
+    timeout: Duration,
 }
 
 /// Transcribe using an OpenAI-compatible Whisper endpoint.
@@ -946,6 +956,7 @@ async fn whisper_transcribe(params: WhisperTranscribeParams<'_>) -> Result<Strin
         mime,
         language,
         prompt,
+        timeout,
     } = params;
 
     let file_part = reqwest::multipart::Part::bytes(audio_bytes)
@@ -969,10 +980,7 @@ async fn whisper_transcribe(params: WhisperTranscribeParams<'_>) -> Result<Strin
     // self-hosted servers (e.g. faster-whisper-server with no auth) reject
     // or ignore an empty `Bearer ` token; omitting the header entirely is
     // safer.
-    let mut req = client
-        .post(api_url)
-        .multipart(form)
-        .timeout(std::time::Duration::from_secs(60));
+    let mut req = client.post(api_url).multipart(form).timeout(timeout);
     if !api_key.is_empty() {
         req = req.bearer_auth(api_key);
     }
@@ -1006,6 +1014,7 @@ async fn gemini_transcribe(
     model: &str,
     audio_bytes: Vec<u8>,
     mime: &str,
+    timeout: Duration,
 ) -> Result<String, String> {
     use base64::Engine;
 
@@ -1040,7 +1049,7 @@ async fn gemini_transcribe(
     let resp = client
         .post(&url)
         .json(&body)
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(timeout)
         .send()
         .await
         .map_err(|e| {
@@ -1075,6 +1084,7 @@ async fn elevenlabs_transcribe(
     model: &str,
     audio_bytes: Vec<u8>,
     mime: &str,
+    timeout: Duration,
 ) -> Result<String, String> {
     let api_key = std::env::var("ELEVENLABS_API_KEY").map_err(|_| "ELEVENLABS_API_KEY not set")?;
 
@@ -1092,7 +1102,7 @@ async fn elevenlabs_transcribe(
         .post("https://api.elevenlabs.io/v1/speech-to-text")
         .header("xi-api-key", &api_key)
         .multipart(form)
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(timeout)
         .send()
         .await
         .map_err(|e| {
@@ -1176,13 +1186,12 @@ impl ScopedTempFile {
 /// Shared by every ffmpeg-based transcode in this module so the spawn / pipe / timeout / kill-on-timeout plumbing exists once.
 ///
 /// `install_hint` names the feature that needs ffmpeg, so the "not on PATH"
-/// error tells the operator what stopped working rather than just that a
-/// subprocess failed to spawn. 30 s wall-clock cap; on timeout the child is
-/// killed and reaped explicitly so there are no zombies.
+/// error tells the operator what stopped working rather than just that a subprocess failed to spawn. On timeout the child is killed and reaped explicitly so there are no zombies.
 async fn run_ffmpeg_pipe(
     args: &[&str],
     input_bytes: Option<&[u8]>,
     install_hint: &str,
+    timeout: Duration,
 ) -> Result<Vec<u8>, String> {
     use std::process::Stdio;
 
@@ -1235,14 +1244,16 @@ async fn run_ffmpeg_pipe(
         buf
     });
 
-    let status = match tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await
-    {
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => return Err(format!("ffmpeg wait failed: {e}")),
         Err(_) => {
             let _ = child.start_kill();
             let _ = child.wait().await;
-            return Err("ffmpeg transcode timed out after 30s".to_string());
+            return Err(format!(
+                "ffmpeg transcode timed out after {}s",
+                timeout.as_secs()
+            ));
         }
     };
 
@@ -1264,7 +1275,10 @@ async fn run_ffmpeg_pipe(
 
 /// Re-encode `.oga` into Ogg/Opus. Same Opus payload, just re-packetised —
 /// `-c:a copy` avoids a re-encode since the input is already Opus.
-async fn transcode_oga_to_ogg_opus(input_bytes: &[u8]) -> Result<Vec<u8>, String> {
+async fn transcode_oga_to_ogg_opus(
+    input_bytes: &[u8],
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
     run_ffmpeg_pipe(
         &[
             "-hide_banner",
@@ -1283,6 +1297,7 @@ async fn transcode_oga_to_ogg_opus(input_bytes: &[u8]) -> Result<Vec<u8>, String
         ],
         Some(input_bytes),
         "process .oga voice notes",
+        timeout,
     )
     .await
 }
@@ -1305,7 +1320,10 @@ async fn transcode_oga_to_ogg_opus(input_bytes: &[u8]) -> Result<Vec<u8>, String
 /// Those bytes then went to the transcription provider, and the operator saw whatever a provider says about a soundless file — arbitrarily far from the real cause.
 ///
 /// `mkv` and `avi` are streamable and were never affected, which is why the four container types enabled by #6679 / #6683 split exactly in half.
-async fn extract_video_audio_track(input_bytes: &[u8]) -> Result<Vec<u8>, String> {
+async fn extract_video_audio_track(
+    input_bytes: &[u8],
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
     let staged = ScopedTempFile::write(input_bytes, "media").await?;
     let input_path = staged.path().to_string_lossy().into_owned();
 
@@ -1331,6 +1349,7 @@ async fn extract_video_audio_track(input_bytes: &[u8]) -> Result<Vec<u8>, String
         ],
         None,
         "extract audio from video files",
+        timeout,
     )
     .await?;
 
@@ -1411,6 +1430,7 @@ enum WindowSource<'a> {
 async fn extract_media_window(
     input: WindowSource<'_>,
     window: MediaWindow,
+    timeout: Duration,
 ) -> Result<Option<Vec<u8>>, String> {
     // Staging only when the caller has bytes rather than a file.
     // A source already on disk is already seekable, so copying it to scratch would buy nothing and cost a full write per window — and a walk issues one call per window, so that cost would be paid for the whole recording every time rather than once.
@@ -1452,6 +1472,7 @@ async fn extract_media_window(
         ],
         None,
         "transcribe a time window of a recording",
+        timeout,
     )
     .await?;
 
@@ -1465,7 +1486,7 @@ async fn extract_media_window(
     // One cheap probe settles it: cut a second from the very start of the same source.
     // If that carries audio the track decodes fine and the empty window really is past the end; if it does not, the input is the problem and saying so is worth the extra second.
     if !ogg_contains_audio(&out) {
-        if window.start_sec > 0.0 && source_decodes(&input_path).await? {
+        if window.start_sec > 0.0 && source_decodes(&input_path, timeout).await? {
             return Ok(None);
         }
         return Err(format!(
@@ -1482,7 +1503,7 @@ async fn extract_media_window(
 ///
 /// Only consulted when a window came back empty, which is rare — once at the end of a walk — so the extra ffmpeg call costs a second on a path that was already stopping.
 /// It buys the difference between "this window is past the end" and "this file's audio does not decode", which are byte-identical outcomes and mean opposite things to the caller.
-async fn source_decodes(input_path: &str) -> Result<bool, String> {
+async fn source_decodes(input_path: &str, timeout: Duration) -> Result<bool, String> {
     let probe = run_ffmpeg_pipe(
         &[
             "-hide_banner",
@@ -1507,6 +1528,7 @@ async fn source_decodes(input_path: &str) -> Result<bool, String> {
         ],
         None,
         "check whether a recording's audio track decodes",
+        timeout,
     )
     .await;
     // A probe that cannot even run says nothing about the source, so it must not be read as "the file is fine" — treat it as undecodable and let the caller report the original failure.
@@ -1684,6 +1706,9 @@ mod tests {
     use super::*;
     use librefang_types::media::{MediaSource, MAX_IMAGE_BYTES};
 
+    const TEST_FFMPEG_TIMEOUT: Duration = Duration::from_secs(30);
+    const TEST_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(60);
+
     #[test]
     fn test_engine_creation() {
         let config = MediaConfig::default();
@@ -1815,7 +1840,7 @@ mod tests {
         let input_bytes = gen.stdout;
         assert!(!input_bytes.is_empty());
 
-        let out = transcode_oga_to_ogg_opus(&input_bytes)
+        let out = transcode_oga_to_ogg_opus(&input_bytes, TEST_FFMPEG_TIMEOUT)
             .await
             .expect("transcode must succeed on a valid Ogg/Opus");
         assert!(!out.is_empty());
@@ -1833,7 +1858,9 @@ mod tests {
         // any stdout ("ffmpeg exited ..."), older ones exit 0 with an empty
         // stream ("empty output"). Either is an acceptable rejection here —
         // what matters is that we don't accept the zero-byte input.
-        let err = transcode_oga_to_ogg_opus(&[]).await.unwrap_err();
+        let err = transcode_oga_to_ogg_opus(&[], TEST_FFMPEG_TIMEOUT)
+            .await
+            .unwrap_err();
         assert!(
             err.contains("empty output") || err.contains("ffmpeg exited"),
             "expected ffmpeg to reject zero-byte input, got: {err}"
@@ -1849,7 +1876,9 @@ mod tests {
         // 256 bytes of non-Ogg junk — ffmpeg rejects the container and exits
         // non-zero before producing any stdout bytes.
         let garbage: Vec<u8> = (0..=255u8).collect();
-        let err = transcode_oga_to_ogg_opus(&garbage).await.unwrap_err();
+        let err = transcode_oga_to_ogg_opus(&garbage, TEST_FFMPEG_TIMEOUT)
+            .await
+            .unwrap_err();
         assert!(
             err.contains("ffmpeg exited"),
             "expected ffmpeg-exit rejection, got: {err}"
@@ -1901,7 +1930,7 @@ mod tests {
         let mp4_bytes = gen.stdout;
         assert!(!mp4_bytes.is_empty());
 
-        let out = extract_video_audio_track(&mp4_bytes)
+        let out = extract_video_audio_track(&mp4_bytes, TEST_FFMPEG_TIMEOUT)
             .await
             .expect("extraction must succeed on a valid mp4 with an audio track");
         assert!(!out.is_empty());
@@ -1984,7 +2013,7 @@ mod tests {
         let mp4_bytes = std::fs::read(&fixture).expect("fixture readable");
         assert!(!mp4_bytes.is_empty());
 
-        let out = extract_video_audio_track(&mp4_bytes)
+        let out = extract_video_audio_track(&mp4_bytes, TEST_FFMPEG_TIMEOUT)
             .await
             .expect("a plain non-fragmented mp4 must extract");
 
@@ -2021,7 +2050,9 @@ mod tests {
             return;
         }
         let garbage: Vec<u8> = (0..=255u8).collect();
-        let err = extract_video_audio_track(&garbage).await.unwrap_err();
+        let err = extract_video_audio_track(&garbage, TEST_FFMPEG_TIMEOUT)
+            .await
+            .unwrap_err();
         assert!(
             err.contains("ffmpeg exited") || err.contains("empty output"),
             "expected ffmpeg to reject non-video junk, got: {err}"
@@ -2097,6 +2128,7 @@ mod tests {
             mime: "audio/mpeg",
             language: Some("en"),
             prompt: Some("proper nouns: LibreFang, Whisper"),
+            timeout: TEST_TRANSCRIPTION_TIMEOUT,
         })
         .await;
 
@@ -2139,6 +2171,7 @@ mod tests {
             mime: "audio/mpeg",
             language: None,
             prompt: None,
+            timeout: TEST_TRANSCRIPTION_TIMEOUT,
         })
         .await;
 
@@ -2150,6 +2183,91 @@ mod tests {
             !body.contains("name=\"language\"") && !body.contains("name=\"prompt\""),
             "request body must not carry either field when both are unset:\n{body}"
         );
+    }
+
+    #[tokio::test]
+    async fn media_engine_applies_configured_transcription_timeout() {
+        use base64::Engine as _;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _ = accepted_tx.send(());
+            std::future::pending::<()>().await;
+            drop(stream);
+        });
+        let config = MediaConfig {
+            audio_provider: Some("local-whisper".to_string()),
+            transcription_timeout_secs: 1,
+            custom_stt: librefang_types::media::CustomSttConfig {
+                base_url: format!("http://{addr}/v1/audio/transcriptions"),
+                key_required: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let engine = MediaEngine::new(config);
+        let audio = b"fake audio bytes";
+        let attachment = MediaAttachment {
+            media_type: MediaType::Audio,
+            mime_type: "audio/wav".to_string(),
+            source: MediaSource::Base64 {
+                data: base64::engine::general_purpose::STANDARD.encode(audio),
+                mime_type: "audio/wav".to_string(),
+            },
+            size_bytes: audio.len() as u64,
+        };
+
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            engine.transcribe_audio(&attachment, None, None),
+        )
+        .await
+        .expect("the configured one-second request timeout must fire");
+        accepted_rx
+            .await
+            .expect("the local endpoint must be reached");
+        server.abort();
+
+        assert_eq!(result.unwrap_err(), "Transcription request failed");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the old hard-coded 60-second timeout must not remain active"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_ffmpeg_pipe_applies_configured_timeout() {
+        if !ffmpeg_available() {
+            eprintln!("ffmpeg not on PATH — skipping");
+            return;
+        }
+
+        let err = run_ffmpeg_pipe(
+            &[
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc",
+                "-f",
+                "null",
+                "-",
+            ],
+            None,
+            "run the timeout regression test",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err, "ffmpeg transcode timed out after 1s");
     }
 
     #[tokio::test]
@@ -2868,6 +2986,7 @@ mod tests {
                 start_sec: 2.0,
                 max_secs: 5.0,
             },
+            TEST_FFMPEG_TIMEOUT,
         )
         .await
         .expect("window extraction must succeed")
@@ -2897,6 +3016,7 @@ mod tests {
                     start_sec,
                     max_secs: 600.0,
                 },
+                TEST_FFMPEG_TIMEOUT,
             )
             .await
             .expect("an overshoot must not be an error");
@@ -2928,6 +3048,7 @@ mod tests {
                     start_sec,
                     max_secs: 600.0,
                 },
+                TEST_FFMPEG_TIMEOUT,
             )
             .await
             .err();
@@ -2969,6 +3090,7 @@ mod tests {
                 start_sec: 60.0,
                 max_secs: 600.0,
             },
+            TEST_FFMPEG_TIMEOUT,
         )
         .await
         .expect("extraction itself succeeds");
@@ -2995,6 +3117,7 @@ mod tests {
                 start_sec: 1.0,
                 max_secs: 3.0,
             },
+            TEST_FFMPEG_TIMEOUT,
         )
         .await
         .expect("path input must work")
@@ -3005,6 +3128,7 @@ mod tests {
                 start_sec: 1.0,
                 max_secs: 3.0,
             },
+            TEST_FFMPEG_TIMEOUT,
         )
         .await
         .expect("byte input must work")
@@ -3033,6 +3157,7 @@ mod tests {
                 start_sec: 4.0,
                 max_secs: 600.0,
             },
+            TEST_FFMPEG_TIMEOUT,
         )
         .await
         .expect("a window overlapping the end must still produce audio")
