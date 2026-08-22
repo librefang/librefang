@@ -537,7 +537,10 @@
       "err_label": "错误",
       "system_prompt_placeholder": "你是一个有用的 AI 助手...",
       "description_placeholder": "这个版本有什么不同？",
-      "experiment_name_placeholder": "我的 A/B 测试"
+      "experiment_name_placeholder": "我的 A/B 测试",
+      "delete_version_title": "删除提示词版本",
+      "delete_version_message": "永久删除版本 v{{version}}？此操作无法撤销。",
+      "variant_limit": "百分比流量分配最多支持 {{count}} 个变体。"
     },
     "thinking": "扩展思考",
     "thinking_enabled": "已启用",

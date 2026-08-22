@@ -537,7 +537,10 @@
       "err_label": "오류",
       "system_prompt_placeholder": "당신은 유용한 AI 비서입니다 ...",
       "description_placeholder": "이 버전에서는 무엇이 다른가요?",
-      "experiment_name_placeholder": "내 A/B 테스트"
+      "experiment_name_placeholder": "내 A/B 테스트",
+      "delete_version_title": "프롬프트 버전 삭제",
+      "delete_version_message": "v{{version}}을(를) 영구적으로 삭제하시겠습니까? 이 작업은 취소할 수 없습니다.",
+      "variant_limit": "백분율 트래픽 분할은 최대 {{count}}개의 변형을 지원합니다."
     },
     "thinking": "확장된 사고",
     "thinking_enabled": "활성화됨",

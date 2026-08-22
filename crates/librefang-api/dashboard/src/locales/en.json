@@ -537,7 +537,10 @@
       "err_label": "err",
       "system_prompt_placeholder": "You are a helpful AI assistant...",
       "description_placeholder": "What's different in this version?",
-      "experiment_name_placeholder": "My A/B Test"
+      "experiment_name_placeholder": "My A/B Test",
+      "delete_version_title": "Delete prompt version",
+      "delete_version_message": "Permanently delete v{{version}}? This cannot be undone.",
+      "variant_limit": "A percentage split supports at most {{count}} variants."
     },
     "thinking": "Extended Thinking",
     "thinking_enabled": "Enabled",
