@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::{oneshot, Mutex};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, info, warn};
 
@@ -659,10 +660,13 @@ impl BrowserSession {
         auth_token: Option<&str>,
     ) -> Result<CdpConnection, String> {
         if let Some(token) = auth_token {
-            let req = http::Request::get(ws_url)
-                .header("Authorization", format!("Bearer {token}"))
-                .body(())
+            let mut req = ws_url
+                .into_client_request()
                 .map_err(|e| format!("Failed to build CDP auth request: {e}"))?;
+            let authorization = http::HeaderValue::from_str(&format!("Bearer {token}"))
+                .map_err(|e| format!("Failed to build CDP auth request: {e}"))?;
+            req.headers_mut()
+                .insert(http::header::AUTHORIZATION, authorization);
             let (stream, _) = tokio::time::timeout(
                 Duration::from_secs(CDP_CONNECT_TIMEOUT_SECS),
                 tokio_tungstenite::connect_async(req),
@@ -2898,6 +2902,42 @@ mod tests {
         });
 
         (format!("ws://127.0.0.1:{port}/"), seen)
+    }
+
+    #[tokio::test]
+    async fn connect_with_auth_sends_a_complete_websocket_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let (headers_tx, headers_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            #[allow(clippy::result_large_err)]
+            let capture_headers =
+                move |request: &http::Request<()>, response: http::Response<()>| {
+                    let authorization = request
+                        .headers()
+                        .get(http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    let websocket_key_present = request.headers().contains_key("Sec-WebSocket-Key");
+                    headers_tx
+                        .send((authorization, websocket_key_present))
+                        .unwrap();
+                    Ok(response)
+                };
+            tokio_tungstenite::accept_hdr_async(stream, capture_headers)
+                .await
+                .unwrap();
+        });
+
+        let connection = BrowserSession::connect_with_auth(&url, Some("test-token"))
+            .await
+            .expect("authenticated CDP WebSocket handshake should succeed");
+        let (authorization, websocket_key_present) = headers_rx.await.unwrap();
+        assert_eq!(authorization.as_deref(), Some("Bearer test-token"));
+        assert!(websocket_key_present);
+        drop(connection);
+        server.await.unwrap();
     }
 
     /// A page-level endpoint must behave exactly as it did before the handshake existed.
