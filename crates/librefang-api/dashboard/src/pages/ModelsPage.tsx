@@ -45,16 +45,78 @@ const formatCtx = (tokens?: number) => {
   return String(tokens);
 };
 
+function formatCost(cost?: number) {
+  if (cost === undefined || cost === null) return "—";
+  if (cost === 0) return "0";
+  return formatCostUtil(cost);
+}
+
+export function modelPricingKind(
+  model: ModelItem,
+): "unknown" | "free" | "paid" {
+  if (
+    model.pricing_known === false ||
+    model.input_cost_per_m == null ||
+    model.output_cost_per_m == null
+  ) {
+    return "unknown";
+  }
+  if (model.input_cost_per_m === 0 && model.output_cost_per_m === 0) {
+    return "free";
+  }
+  return "paid";
+}
+
+function ModelPricing({ model }: { model: ModelItem }) {
+  const { t } = useTranslation();
+  const kind = modelPricingKind(model);
+  if (kind === "unknown") return <span className="font-mono">—</span>;
+  if (kind === "free") {
+    return (
+      <span className="font-mono text-success font-bold">
+        {t("models.free")}
+      </span>
+    );
+  }
+  return (
+    <span className="font-mono">
+      <span className="text-text" title={t("models.col_input")}>
+        ${formatCost(model.input_cost_per_m)}
+      </span>
+      <span className="text-text-dim/50"> / </span>
+      <span className="text-text" title={t("models.col_output")}>
+        ${formatCost(model.output_cost_per_m)}
+      </span>
+      <span className="text-text-dim/40"> / M</span>
+    </span>
+  );
+}
+
+function useMountedRef() {
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  return mountedRef;
+}
+
+export function numberInputValue(raw: string): number | "" {
+  return raw === "" ? "" : Number(raw);
+}
+
 // ── Add-form reducer (MD4) ──────────────────────────────────────
 
 type AddFormState = {
   id: string;
   provider: string;
   displayName: string;
-  contextWindow: number;
-  maxOutput: number;
-  inputCost: number;
-  outputCost: number;
+  contextWindow: number | "";
+  maxOutput: number | "";
+  inputCost: number | "";
+  outputCost: number | "";
   tools: boolean;
   vision: boolean;
   streaming: boolean;
@@ -122,7 +184,7 @@ type SettingsState = {
 
 type SettingsAction =
   | { type: "SET_FIELD"; field: keyof SettingsState; value: SettingsState[keyof SettingsState] }
-  | { type: "HYDRATE"; payload: Partial<SettingsState> };
+  | { type: "HYDRATE"; payload: SettingsState };
 
 const settingsInitial: SettingsState = {
   modelType: "chat",
@@ -158,12 +220,72 @@ function overrideToBool(v: CapOverride): boolean | undefined {
   return undefined;
 }
 
+export function settingsStateFromOverrides(
+  overrides: ModelOverrides,
+): SettingsState {
+  return {
+    ...settingsInitial,
+    ...(overrides.model_type ? { modelType: overrides.model_type } : {}),
+    ...(overrides.temperature != null
+      ? { temperature: overrides.temperature, tempEnabled: true }
+      : {}),
+    ...(overrides.top_p != null
+      ? { topP: overrides.top_p, topPEnabled: true }
+      : {}),
+    ...(overrides.max_tokens != null
+      ? { maxTokens: overrides.max_tokens, maxTokensEnabled: true }
+      : {}),
+    ...(overrides.frequency_penalty != null
+      ? { freqPenalty: overrides.frequency_penalty, freqEnabled: true }
+      : {}),
+    ...(overrides.presence_penalty != null
+      ? { presPenalty: overrides.presence_penalty, presEnabled: true }
+      : {}),
+    reasoningEffort: overrides.reasoning_effort ?? "",
+    useMaxCompletionTokens: overrides.use_max_completion_tokens ?? false,
+    noSystemRole: overrides.no_system_role ?? false,
+    forceMaxTokens: overrides.force_max_tokens ?? false,
+    toolsOverride: boolToOverride(overrides.supports_tools),
+    visionOverride: boolToOverride(overrides.supports_vision),
+    streamingOverride: boolToOverride(overrides.supports_streaming),
+    thinkingOverride: boolToOverride(overrides.supports_thinking),
+  };
+}
+
+export function settingsStateEqual(
+  left: SettingsState,
+  right: SettingsState,
+): boolean {
+  return (Object.keys(settingsInitial) as (keyof SettingsState)[]).every(
+    (key) => left[key] === right[key],
+  );
+}
+
+export function capabilityOverrideLabel(
+  option: CapOverride,
+  catalogDefault: boolean | undefined,
+  labels: {
+    auto: string;
+    on: string;
+    off: string;
+    forceOn: string;
+    forceOff: string;
+  },
+): string {
+  if (option === "default") {
+    const catalogLabel = catalogDefault ? labels.on : labels.off;
+    return `${labels.auto} (${catalogLabel})`;
+  }
+  if (option === "on") return labels.forceOn;
+  return labels.forceOff;
+}
+
 function settingsReducer(state: SettingsState, action: SettingsAction): SettingsState {
   switch (action.type) {
     case "SET_FIELD":
       return { ...state, [action.field]: action.value };
     case "HYDRATE":
-      return { ...state, ...action.payload };
+      return action.payload;
     default:
       return state;
   }
@@ -187,13 +309,6 @@ const ModelCard = memo(function ModelCard({ m, hidden, onOpen, onSettings, onTog
   // NOT a user-added custom model — it has no persisted custom entry, so its
   // delete button would always 404. Only treat genuine custom models as deletable.
   const isCustom = m.tier === "custom" && m.source !== "cli_config";
-  const free = m.pricing_known !== false && m.input_cost_per_m === 0 && m.output_cost_per_m === 0;
-
-  const formatCost = (cost?: number) => {
-    if (cost === undefined || cost === null) return "—";
-    if (cost === 0) return "0";
-    return formatCostUtil(cost);
-  };
 
   return (
     <div
@@ -233,18 +348,7 @@ const ModelCard = memo(function ModelCard({ m, hidden, onOpen, onSettings, onTog
       <div className="flex items-center gap-3 text-[11px] text-text-dim">
         <span className="font-mono" title={t("models.context_window")}>{formatCtx(m.context_window)}</span>
         <span className="text-border-subtle">·</span>
-        {m.pricing_known === false
-          ? <span className="font-mono">—</span>
-          : free
-          ? <span className="font-mono text-success font-bold">{t("models.free")}</span>
-          : (
-            <span className="font-mono">
-              <span className="text-text" title={t("models.col_input")}>${formatCost(m.input_cost_per_m)}</span>
-              <span className="text-text-dim/50"> / </span>
-              <span className="text-text" title={t("models.col_output")}>${formatCost(m.output_cost_per_m)}</span>
-              <span className="text-text-dim/40"> / M</span>
-            </span>
-          )}
+        <ModelPricing model={m} />
       </div>
 
       {/* Bottom row: capabilities */}
@@ -397,6 +501,7 @@ export function ModelsPage() {
   // for screen readers / label-click focus (#5140).
   const fieldId = useId();
   const addToast = useUIStore((s) => s.addToast);
+  const mountedRef = useMountedRef();
   const [search, setSearch] = useState("");
   const [tierFilter, setTierFilter] = useState<string>("all");
   const [providerFilter, setProviderFilter] = useState<string>("all");
@@ -432,17 +537,27 @@ export function ModelsPage() {
         id: form.id.trim(),
         provider: form.provider.trim(),
         display_name: form.displayName.trim() || undefined,
-        context_window: form.contextWindow,
-        max_output_tokens: form.maxOutput,
-        input_cost_per_m: form.inputCost,
-        output_cost_per_m: form.outputCost,
+        ...(form.contextWindow === ""
+          ? {}
+          : { context_window: form.contextWindow }),
+        ...(form.maxOutput === ""
+          ? {}
+          : { max_output_tokens: form.maxOutput }),
+        ...(form.inputCost === ""
+          ? {}
+          : { input_cost_per_m: form.inputCost }),
+        ...(form.outputCost === ""
+          ? {}
+          : { output_cost_per_m: form.outputCost }),
         supports_tools: form.tools,
         supports_vision: form.vision,
         supports_streaming: form.streaming,
       });
+      if (!mountedRef.current) return;
       addToast(t("models.model_added"), "success");
       resetForm();
     } catch (err: unknown) {
+      if (!mountedRef.current) return;
       const msg = err instanceof Error ? err.message : String(err);
       addToast(msg || t("common.error"), "error");
     }
@@ -535,13 +650,15 @@ export function ModelsPage() {
       const model = allModelsRef.current.find(m => m.id === id);
       const key = model ? modelKey(model) : null;
       await deleteMut.mutateAsync(id);
+      if (!mountedRef.current) return;
       addToast(t("models.model_deleted"), "success");
       if (key && hiddenModelKeysRef.current.includes(key)) unhideModelAction(key);
     } catch (err: unknown) {
+      if (!mountedRef.current) return;
       const msg = err instanceof Error ? err.message : String(err);
       addToast(msg || t("common.error"), "error");
     }
-  }, [deleteMut, addToast, t, unhideModelAction]);
+  }, [deleteMut, addToast, mountedRef, t, unhideModelAction]);
 
   const detailHidden = detailModel ? hiddenSet.has(modelKey(detailModel)) : false;
 
@@ -707,19 +824,19 @@ export function ModelsPage() {
             </div>
             <div>
               <label htmlFor={`${fieldId}-context-window`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.context_window")}</label>
-              <input id={`${fieldId}-context-window`} type="number" value={form.contextWindow} onChange={e => dispatchForm({ type: "SET_FIELD", field: "contextWindow", value: +e.target.value })} className={inputClass} />
+              <input id={`${fieldId}-context-window`} type="number" value={form.contextWindow} onChange={e => dispatchForm({ type: "SET_FIELD", field: "contextWindow", value: numberInputValue(e.target.value) })} className={inputClass} />
             </div>
             <div>
               <label htmlFor={`${fieldId}-max-output`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.max_output")}</label>
-              <input id={`${fieldId}-max-output`} type="number" value={form.maxOutput} onChange={e => dispatchForm({ type: "SET_FIELD", field: "maxOutput", value: +e.target.value })} className={inputClass} />
+              <input id={`${fieldId}-max-output`} type="number" value={form.maxOutput} onChange={e => dispatchForm({ type: "SET_FIELD", field: "maxOutput", value: numberInputValue(e.target.value) })} className={inputClass} />
             </div>
             <div>
               <label htmlFor={`${fieldId}-input-cost`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.input_cost")}</label>
-              <input id={`${fieldId}-input-cost`} type="number" step="0.01" value={form.inputCost} onChange={e => dispatchForm({ type: "SET_FIELD", field: "inputCost", value: +e.target.value })} className={inputClass} />
+              <input id={`${fieldId}-input-cost`} type="number" step="0.01" value={form.inputCost} onChange={e => dispatchForm({ type: "SET_FIELD", field: "inputCost", value: numberInputValue(e.target.value) })} className={inputClass} />
             </div>
             <div>
               <label htmlFor={`${fieldId}-output-cost`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.output_cost")}</label>
-              <input id={`${fieldId}-output-cost`} type="number" step="0.01" value={form.outputCost} onChange={e => dispatchForm({ type: "SET_FIELD", field: "outputCost", value: +e.target.value })} className={inputClass} />
+              <input id={`${fieldId}-output-cost`} type="number" step="0.01" value={form.outputCost} onChange={e => dispatchForm({ type: "SET_FIELD", field: "outputCost", value: numberInputValue(e.target.value) })} className={inputClass} />
             </div>
           </div>
           <div className="flex flex-wrap gap-3">
@@ -800,36 +917,24 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
   const overridesQuery = useModelOverrides(overrideKey);
   const updateMut = useUpdateModelOverrides();
   const deleteMut = useDeleteModelOverrides();
+  const mountedRef = useMountedRef();
 
   const [saving, setSaving] = useState(false);
 
   const [state, dispatch] = useReducer(settingsReducer, settingsInitial);
   const stateRef = useRef(state);
   stateRef.current = state;
-  const hydratedRef = useRef(false);
+  const lastHydratedRef = useRef<SettingsState | null>(null);
 
   useEffect(() => {
-    if (hydratedRef.current) return;
-    const o = overridesQuery.data;
-    if (!o) return;
-    const payload: Partial<SettingsState> = {};
-    if (o.model_type) payload.modelType = o.model_type;
-    if (o.temperature != null) { payload.temperature = o.temperature; payload.tempEnabled = true; }
-    if (o.top_p != null) { payload.topP = o.top_p; payload.topPEnabled = true; }
-    if (o.max_tokens != null) { payload.maxTokens = o.max_tokens; payload.maxTokensEnabled = true; }
-    if (o.frequency_penalty != null) { payload.freqPenalty = o.frequency_penalty; payload.freqEnabled = true; }
-    if (o.presence_penalty != null) { payload.presPenalty = o.presence_penalty; payload.presEnabled = true; }
-    if (o.reasoning_effort) payload.reasoningEffort = o.reasoning_effort;
-    if (o.use_max_completion_tokens != null) payload.useMaxCompletionTokens = o.use_max_completion_tokens;
-    if (o.no_system_role != null) payload.noSystemRole = o.no_system_role;
-    if (o.force_max_tokens != null) payload.forceMaxTokens = o.force_max_tokens;
-    payload.toolsOverride = boolToOverride(o.supports_tools);
-    payload.visionOverride = boolToOverride(o.supports_vision);
-    payload.streamingOverride = boolToOverride(o.supports_streaming);
-    payload.thinkingOverride = boolToOverride(o.supports_thinking);
-    dispatch({ type: "HYDRATE", payload });
-    hydratedRef.current = true;
-  }, [overridesQuery.data]);
+    if (!overridesQuery.data) return;
+    const next = settingsStateFromOverrides(overridesQuery.data);
+    const lastHydrated = lastHydratedRef.current;
+    if (lastHydrated && !settingsStateEqual(state, lastHydrated)) return;
+    if (lastHydrated && settingsStateEqual(next, lastHydrated)) return;
+    lastHydratedRef.current = next;
+    dispatch({ type: "HYDRATE", payload: next });
+  }, [overridesQuery.data, state]);
 
   const handleSave = useCallback(async () => {
     const s = stateRef.current;
@@ -855,26 +960,30 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
     if (thinking !== undefined) overrides.supports_thinking = thinking;
     try {
       await updateMut.mutateAsync({ modelKey: overrideKey, overrides });
+      if (!mountedRef.current) return;
       onSaved();
       onClose();
     } catch (e: unknown) {
+      if (!mountedRef.current) return;
       const msg = e instanceof Error ? e.message : String(e);
       onError(msg);
     } finally {
-      setSaving(false);
+      if (mountedRef.current) setSaving(false);
     }
-  }, [overrideKey, updateMut, onSaved, onClose, onError]);
+  }, [mountedRef, overrideKey, updateMut, onSaved, onClose, onError]);
 
   const handleReset = useCallback(async () => {
     try {
       await deleteMut.mutateAsync(overrideKey);
+      if (!mountedRef.current) return;
       onReset();
       onClose();
     } catch (e: unknown) {
+      if (!mountedRef.current) return;
       const msg = e instanceof Error ? e.message : String(e);
       onError(msg);
     }
-  }, [overrideKey, onReset, onClose, onError, deleteMut]);
+  }, [mountedRef, overrideKey, onReset, onClose, onError, deleteMut]);
 
   if (overridesQuery.isLoading) {
     return (
@@ -939,9 +1048,13 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
                 </span>
                 <div className="flex flex-1 gap-0.5 rounded-xl border border-border-subtle bg-surface p-0.5">
                   {(["default", "on", "off"] as const).map((opt) => {
-                    const label = opt === "default"
-                      ? `${t("models.cap_auto")} (${catalogDefault ? t("models.cap_on") : t("models.cap_off")})`
-                      : opt === "on" ? t("models.cap_force_on") : t("models.cap_force_off");
+                    const label = capabilityOverrideLabel(opt, catalogDefault, {
+                      auto: t("models.cap_auto"),
+                      on: t("models.cap_on"),
+                      off: t("models.cap_off"),
+                      forceOn: t("models.cap_force_on"),
+                      forceOff: t("models.cap_force_off"),
+                    });
                     return (
                       <button
                         key={opt}
