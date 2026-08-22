@@ -1,4 +1,4 @@
-import { Link, Outlet, useRouterState } from "@tanstack/react-router";
+import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
@@ -100,7 +100,7 @@ type DashboardRoute =
 type NavItem = { to: DashboardRoute; label: string; icon: NavIcon };
 type NavGroup = { key: string; label: string; items: NavItem[] };
 
-function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
+export function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
   const { t } = useTranslation();
   const [key, setKey] = useState("");
   const [username, setUsername] = useState("");
@@ -108,7 +108,7 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
   const [authMethod, setAuthMethod] = useState<"credentials" | "api_key">(
     mode === "api_key" ? "api_key" : "credentials",
   );
-  const [errorKey, setErrorKey] = useState<"invalid_api_key" | "invalid_credentials" | "invalid_totp" | null>(null);
+  const [errorKey, setErrorKey] = useState<"invalid" | "invalid_api_key" | "invalid_credentials" | "invalid_totp" | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [totpRequired, setTotpRequired] = useState(false);
   const [totpCode, setTotpCode] = useState("");
@@ -122,6 +122,14 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
     setTotpRequired(false);
     setTotpCode("");
   }, [mode]);
+
+  const discardApiKey = () => {
+    try {
+      clearApiKey();
+    } catch {
+      // Storage may be unavailable. Authentication still fails visibly.
+    }
+  };
 
   async function handleApiKeySubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -137,11 +145,15 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
       setApiKey(key.trim());
       const isAuthenticated = await verifyStoredAuth();
       if (!isAuthenticated) {
+        discardApiKey();
         setErrorKey("invalid_api_key");
         return;
       }
 
       onAuthenticated();
+    } catch {
+      discardApiKey();
+      setErrorKey("invalid");
     } finally {
       setSubmitting(false);
     }
@@ -184,6 +196,8 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
       }
 
       onAuthenticated();
+    } catch {
+      setErrorKey("invalid");
     } finally {
       setSubmitting(false);
     }
@@ -220,6 +234,87 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
   // dashboard principal). Hidden during the TOTP step and on unsupported
   // browsers.
   const showPasskey = passkeySupported && isCredentials && !totpRequired;
+  let isSubmitDisabled = submitting;
+  if (!isSubmitDisabled) {
+    if (!isCredentials) {
+      isSubmitDisabled = !key.trim();
+    } else if (totpRequired) {
+      isSubmitDisabled = totpCode.length !== 6;
+    } else {
+      isSubmitDisabled = !username.trim() || !password;
+    }
+  }
+
+  const renderAuthFormFields = () => {
+    if (isCredentials && totpRequired) {
+      return (
+        <>
+          <p className="text-sm text-text-dim text-center">{t("auth.totp_prompt")}</p>
+          <input
+            type="text"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            pattern="[0-9]{6}"
+            maxLength={6}
+            value={totpCode}
+            onChange={(e) => { setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6)); setErrorKey(null); }}
+            placeholder="000000"
+            autoFocus
+            className={`w-full rounded-xl border px-4 py-3 text-center text-2xl font-mono tracking-[0.5em] focus:ring-2 outline-none transition-colors ${
+              errorKey === "invalid_totp"
+                ? "border-error focus:border-error focus:ring-error/10"
+                : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
+            }`}
+          />
+        </>
+      );
+    }
+
+    if (isCredentials) {
+      return (
+        <>
+          <input
+            type="text"
+            value={username}
+            onChange={(e) => { setUsername(e.target.value); setErrorKey(null); }}
+            placeholder={t("auth.username_placeholder")}
+            autoFocus
+            className={`w-full rounded-xl border px-4 py-3 text-sm focus:ring-2 outline-none transition-colors ${
+              errorKey
+                ? "border-error focus:border-error focus:ring-error/10"
+                : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
+            }`}
+          />
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => { setPassword(e.target.value); setErrorKey(null); }}
+            placeholder={t("auth.password_placeholder")}
+            className={`w-full rounded-xl border px-4 py-3 text-sm focus:ring-2 outline-none transition-colors ${
+              errorKey
+                ? "border-error focus:border-error focus:ring-error/10"
+                : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
+            }`}
+          />
+        </>
+      );
+    }
+
+    return (
+      <input
+        type="password"
+        value={key}
+        onChange={(e) => { setKey(e.target.value); setErrorKey(null); }}
+        placeholder={t("auth.placeholder")}
+        autoFocus
+        className={`w-full rounded-xl border px-4 py-3 text-sm focus:ring-2 outline-none transition-colors ${
+          errorKey
+            ? "border-error focus:border-error focus:ring-error/10"
+            : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
+        }`}
+      />
+    );
+  };
 
   return (
     <div className="fixed inset-0 z-200 flex items-center justify-center bg-black/70 backdrop-blur-md">
@@ -255,72 +350,13 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
             </div>
           )}
           <form onSubmit={isCredentials ? handleCredentialsSubmit : handleApiKeySubmit} className="space-y-4">
-            {isCredentials && totpRequired ? (
-              <>
-                <p className="text-sm text-text-dim text-center">{t("auth.totp_prompt")}</p>
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
-                  pattern="[0-9]{6}"
-                  maxLength={6}
-                  value={totpCode}
-                  onChange={(e) => { setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6)); setErrorKey(null); }}
-                  placeholder="000000"
-                  autoFocus
-                  className={`w-full rounded-xl border px-4 py-3 text-center text-2xl font-mono tracking-[0.5em] focus:ring-2 outline-none transition-colors ${
-                    errorKey === "invalid_totp"
-                      ? "border-error focus:border-error focus:ring-error/10"
-                      : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
-                  }`}
-                />
-              </>
-            ) : isCredentials ? (
-              <>
-                <input
-                  type="text"
-                  value={username}
-                  onChange={(e) => { setUsername(e.target.value); setErrorKey(null); }}
-                  placeholder={t("auth.username_placeholder")}
-                  autoFocus
-                  className={`w-full rounded-xl border px-4 py-3 text-sm focus:ring-2 outline-none transition-colors ${
-                    errorKey
-                      ? "border-error focus:border-error focus:ring-error/10"
-                      : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
-                  }`}
-                />
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => { setPassword(e.target.value); setErrorKey(null); }}
-                  placeholder={t("auth.password_placeholder")}
-                  className={`w-full rounded-xl border px-4 py-3 text-sm focus:ring-2 outline-none transition-colors ${
-                    errorKey
-                      ? "border-error focus:border-error focus:ring-error/10"
-                      : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
-                  }`}
-                />
-              </>
-            ) : (
-              <input
-                type="password"
-                value={key}
-                onChange={(e) => { setKey(e.target.value); setErrorKey(null); }}
-                placeholder={t("auth.placeholder")}
-                autoFocus
-                className={`w-full rounded-xl border px-4 py-3 text-sm focus:ring-2 outline-none transition-colors ${
-                  errorKey
-                    ? "border-error focus:border-error focus:ring-error/10"
-                    : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
-                }`}
-              />
-            )}
+            {renderAuthFormFields()}
             {errorKey && (
               <p className="text-xs text-error font-medium">{t(`auth.${errorKey}`)}</p>
             )}
             <button
               type="submit"
-              disabled={submitting || (isCredentials ? (totpRequired ? totpCode.length !== 6 : !username.trim() || !password) : !key.trim())}
+              disabled={isSubmitDisabled}
               className="w-full rounded-xl bg-brand py-3 text-sm font-bold text-white hover:bg-brand/90 transition-colors shadow-lg shadow-brand/20"
             >
               {totpRequired ? t("auth.verify_totp") : t("auth.submit")}
@@ -863,6 +899,7 @@ const NO_AUTH_ROUTES = new Set(["/connect"]);
 
 function DashboardApp() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const theme = useUIStore((s) => s.theme);
   const toggleTheme = useUIStore((s) => s.toggleTheme);
   const pathname = useRouterState({ select: (state) => state.location.pathname });
@@ -1115,7 +1152,10 @@ function DashboardApp() {
       <div className="flex h-screen items-center justify-center bg-main text-slate-900 dark:text-slate-100">
         <AuthDialog
           mode={authMode}
-          onAuthenticated={() => { setAuthNeeded(false); window.location.hash = "#/overview"; }}
+          onAuthenticated={() => {
+            setAuthNeeded(false);
+            void navigate({ to: "/overview", replace: true });
+          }}
         />
       </div>
     );
