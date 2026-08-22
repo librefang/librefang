@@ -495,6 +495,9 @@ pub(super) async fn authorize_terminal_request(
                     proxied = locality.is_proxied,
                     reason = "origin_mismatch",
                     origin = %reason,
+                    config_key = "terminal.allowed_origins",
+                    allowed_origins = ?cfg.terminal.allowed_origins,
+                    listen_port = ?listen_port,
                     "Terminal rejected — origin validation failed"
                 );
                 return Err(axum::http::StatusCode::FORBIDDEN.into_response());
@@ -504,6 +507,9 @@ pub(super) async fn authorize_terminal_request(
                 proxied = locality.is_proxied,
                 reason = "origin_mismatch",
                 origin = %reason,
+                config_key = "terminal.allowed_origins",
+                allowed_origins = ?cfg.terminal.allowed_origins,
+                listen_port = ?listen_port,
                 "Terminal origin mismatch — continuing to auth decision"
             );
         }

@@ -204,11 +204,25 @@ pub fn ws_bearer_protocol(headers: &HeaderMap) -> Option<String> {
 /// Validates the WebSocket `Origin` header against allowed origins.
 /// Returns Ok(()) if: (a) no Origin header (non-browser client), or (b) Origin matches.
 /// Returns Err(reason) if Origin is present but doesn't match any allowed origin.
+///
+/// An Origin is accepted when any of the following holds:
+///
+/// 1. It designates the same host and port the request was addressed to (the `Host` header) — see [`origin_is_self`].
+///    The dashboard this daemon serves is always in this case, so it can never reject its own client.
+/// 2. It is loopback (`localhost` / `127.0.0.1` / `::1`) on `listen_port`.
+/// 3. `extra_origins` contains `"*"` and `allow_wildcard` is set.
+/// 4. It matches an entry of `extra_origins` on scheme, host and port.
+///
+/// `allow_wildcard` gates rule 3 only. The terminal route passes
+/// `terminal.allow_remote` because an unauthenticated remote shell is worth a
+/// second explicit opt-in; the agent-chat route passes `true`, so that a
+/// top-level `cors_origin = ["*"]` is honoured exactly as the CORS layer
+/// honours the same list.
 pub fn validate_ws_origin(
     headers: &HeaderMap,
     listen_port: Option<u16>,
     extra_origins: &[String],
-    allow_remote: bool,
+    allow_wildcard: bool,
 ) -> Result<(), String> {
     let origin = match headers.get("origin") {
         Some(v) => v.to_str().map_err(|_| "Invalid origin header encoding")?,
@@ -221,17 +235,23 @@ pub fn validate_ws_origin(
         .host_str()
         .ok_or_else(|| format!("Origin missing host: {origin}"))?;
     if origin_scheme != "http" && origin_scheme != "https" {
-        return Err(format!("Origin {origin} not in allowed list"));
+        return Err(format!(
+            "Origin {origin} rejected: scheme '{origin_scheme}' is not http or https"
+        ));
     }
 
-    let origin_port = if origin_scheme == "https" {
-        parsed.port().unwrap_or(443)
-    } else {
-        parsed.port().unwrap_or(80)
-    };
+    let origin_port = parsed
+        .port()
+        .unwrap_or_else(|| default_port_for_scheme(origin_scheme));
 
-    // Only loopback hosts (localhost / 127.0.0.1 / ::1) on the same port
-    // are auto-allowed. Fail closed when listen_port is unknown — otherwise
+    // The server's own origin is always allowed: a dashboard served by this
+    // daemon must never be rejected by it, whatever the configuration says.
+    if origin_is_self(headers, origin_scheme, origin_host, origin_port) {
+        return Ok(());
+    }
+
+    // Loopback hosts (localhost / 127.0.0.1 / ::1) on the same port are
+    // auto-allowed. Fail closed when listen_port is unknown — otherwise
     // a malformed api_listen would cause us to trust the wrong localhost:port.
     if let Some(lp) = listen_port {
         if origin_port == lp {
@@ -242,25 +262,29 @@ pub fn validate_ws_origin(
         }
     }
 
-    // Wildcard "*" means allow all origins — only permitted when allow_remote is true.
+    // Wildcard "*" means allow all origins — only permitted when allow_wildcard is true.
     // NOTE: The scheme check above (http/https only) runs before this wildcard path,
     // so non-http schemes are always rejected regardless of wildcard.
-    if allow_remote && extra_origins.iter().any(|o| o == "*") {
+    if allow_wildcard && extra_origins.iter().any(|o| o == "*") {
         return Ok(());
     }
 
     for extra in extra_origins {
+        // The wildcard is not a URL; it was handled above and would otherwise
+        // abort the whole scan with "Invalid extra origin URL: *", masking the
+        // real reason and hiding any later entry in the list.
+        if extra == "*" {
+            continue;
+        }
         let extra_parsed =
             Url::parse(extra).map_err(|_| format!("Invalid extra origin URL: {extra}"))?;
         let extra_scheme = extra_parsed.scheme();
         let extra_host = extra_parsed
             .host_str()
             .ok_or_else(|| format!("Origin missing host in allowed origin: {extra}"))?;
-        let extra_port = if extra_scheme == "https" {
-            extra_parsed.port().unwrap_or(443)
-        } else {
-            extra_parsed.port().unwrap_or(80)
-        };
+        let extra_port = extra_parsed
+            .port()
+            .unwrap_or_else(|| default_port_for_scheme(extra_scheme));
 
         let normalized_extra_host = normalize_origin_host(extra_host);
 
@@ -272,7 +296,97 @@ pub fn validate_ws_origin(
         }
     }
 
-    Err(format!("Origin {origin} not in allowed list"))
+    Err(rejection_reason(
+        origin,
+        headers,
+        listen_port,
+        extra_origins,
+    ))
+}
+
+/// Builds the rejection message for [`validate_ws_origin`].
+///
+/// The message names every input the decision was made from — the request's own
+/// `Host`, the listen port, and the effective allow list — because an operator
+/// hitting this line needs to know *which* list was consulted, and an empty one
+/// is exactly the case that a misplaced `allowed_origins` key produces.
+fn rejection_reason(
+    origin: &str,
+    headers: &HeaderMap,
+    listen_port: Option<u16>,
+    extra_origins: &[String],
+) -> String {
+    let host_header = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("<absent>");
+    let listen = listen_port.map_or_else(|| "unknown".to_string(), |p| p.to_string());
+    let allowed = if extra_origins.is_empty() {
+        "<empty>".to_string()
+    } else {
+        extra_origins.join(", ")
+    };
+    format!(
+        "Origin {origin} rejected: it is not this server's own origin (Host: {host_header}), \
+         not loopback on the listen port ({listen}), and not in the allowed list [{allowed}]"
+    )
+}
+
+/// Returns `true` when `origin_host`:`origin_port` is the very host and port the
+/// request was addressed to, per the `Host` header.
+///
+/// A browser sets `Origin` and `Host` independently and a page cannot forge
+/// `Origin`, so the two coincide exactly when the page was served by this
+/// daemon — which is the dashboard it ships. A cross-site attacker reaching the
+/// same daemon sends its own `Origin` (`http://evil.example`) next to our
+/// `Host`, the two differ, and this check does not fire; cross-site WebSocket
+/// hijacking (#3731) stays blocked.
+///
+/// The scheme is deliberately not compared: `Host` carries none, and behind a
+/// TLS-terminating proxy the browser's `https` cannot be reconstructed from the
+/// plaintext hop. The origin's own scheme supplies the default port so that
+/// `Host: dash.example.com` matches `Origin: https://dash.example.com`.
+///
+/// `X-Forwarded-Host` is deliberately ignored — it is attacker-controlled
+/// unless the peer is a verified proxy, and this function has no view of the
+/// peer. A proxied deployment whose public hostname differs from `Host` lists
+/// that origin in `cors_origin` instead.
+fn origin_is_self(
+    headers: &HeaderMap,
+    origin_scheme: &str,
+    origin_host: &str,
+    origin_port: u16,
+) -> bool {
+    let Some(host_header) = headers.get("host").and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let host_header = host_header.trim();
+    if host_header.is_empty() {
+        return false;
+    }
+
+    // Parse through `Url` so IPv6 literals (`[::1]:4545`) split into host and
+    // port the same way the Origin header does.
+    let Ok(parsed) = Url::parse(&format!("{origin_scheme}://{host_header}")) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let port = parsed
+        .port()
+        .unwrap_or_else(|| default_port_for_scheme(origin_scheme));
+
+    port == origin_port
+        && normalize_origin_host(host).eq_ignore_ascii_case(normalize_origin_host(origin_host))
+}
+
+fn default_port_for_scheme(scheme: &str) -> u16 {
+    if scheme == "https" {
+        443
+    } else {
+        80
+    }
 }
 
 fn normalize_origin_host(host: &str) -> &str {
@@ -506,14 +620,38 @@ pub async fn agent_ws(
             .parse::<std::net::SocketAddr>()
             .ok()
             .map(|a| a.port());
-        let allow_remote = std::env::var("LIBREFANG_ALLOW_NO_AUTH")
-            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
-            .unwrap_or(false);
-        if let Err(reason) =
-            validate_ws_origin(&headers, listen_port, &cfg.cors_origin, allow_remote)
-        {
-            warn!(reason = %reason, "WebSocket upgrade rejected: Origin validation failed");
-            return axum::http::StatusCode::FORBIDDEN.into_response();
+        // A `"*"` entry is honoured here without a second opt-in: the operator
+        // wrote it into `cors_origin`, the CORS layer already applies that same
+        // list verbatim (`server.rs`), and gating it on `LIBREFANG_ALLOW_NO_AUTH`
+        // — an auth switch, unrelated to origins — left the documented wildcard
+        // permanently unreachable on this route.
+        if let Err(reason) = validate_ws_origin(&headers, listen_port, &cfg.cors_origin, true) {
+            warn!(
+                reason = %reason,
+                config_key = "cors_origin",
+                allowed_origins = ?cfg.cors_origin,
+                listen_port = ?listen_port,
+                "WebSocket upgrade rejected: Origin validation failed"
+            );
+            // The body names the rejected origin and the knob that admits it,
+            // but never the list's contents — that detail belongs in the WARN
+            // above, because this handler is reachable before any credential on
+            // a daemon with no auth configured. The origin is echoed back
+            // because the caller sent it and it is what makes the failure
+            // recognisable in a browser console.
+            let rejected = headers
+                .get("origin")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("<unreadable>");
+            return (
+                axum::http::StatusCode::FORBIDDEN,
+                format!(
+                    "WebSocket upgrade rejected: origin {rejected} is not allowed. \
+                     Add it to `cors_origin` in config.toml (or set it to [\"*\"]) \
+                     and restart the daemon."
+                ),
+            )
+                .into_response();
         }
     }
 
@@ -2772,6 +2910,145 @@ mod tests {
         headers.insert("origin", "not-a-url".parse().unwrap());
         let result = validate_ws_origin(&headers, Some(4545), &["*".to_string()], true);
         assert!(result.is_err());
+    }
+
+    /// Headers as a browser sends them on a WebSocket upgrade: it sets `Host`
+    /// from the URL it dialled and `Origin` from the page's own origin, and a
+    /// page cannot forge the latter.
+    fn browser_headers(host: &str, origin: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", host.parse().unwrap());
+        headers.insert("origin", origin.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn validate_ws_origin_accepts_the_servers_own_lan_origin() {
+        // The reported failure. Nothing configured, non-loopback host, and the
+        // Origin is the very host:port that served the dashboard.
+        let headers = browser_headers("192.168.1.161:4545", "http://192.168.1.161:4545");
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_accepts_own_origin_on_a_port_other_than_listen_port() {
+        // `listen_port` is what `api_listen` advertises; `Host` is what the
+        // request actually arrived on. When a port-mapping deployment makes
+        // them differ, the client the daemon served is still its own.
+        let headers = browser_headers("dash.internal:8443", "https://dash.internal:8443");
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_accepts_own_origin_behind_a_tls_proxy() {
+        // The proxy forwards `Host: dash.example.com` with no port; the browser
+        // page is https, so its origin port is 443. The scheme's default port
+        // has to bridge the two or every TLS-terminated deployment breaks.
+        let headers = browser_headers("dash.example.com", "https://dash.example.com");
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_rejects_cross_site_origin_carrying_our_host() {
+        // The attack the self-origin rule must not open: the browser dialled us,
+        // so `Host` is ours, but `Origin` belongs to the attacker's page.
+        let headers = browser_headers("192.168.1.161:4545", "http://evil.example");
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_err());
+    }
+
+    #[test]
+    fn validate_ws_origin_rejects_own_host_on_a_different_port() {
+        // Same machine, different port — a different origin, and a service on
+        // another port of the same host must not be able to reach this one.
+        let headers = browser_headers("192.168.1.161:4545", "http://192.168.1.161:9999");
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_err());
+    }
+
+    #[test]
+    fn validate_ws_origin_self_rule_matches_ipv6_literal_host() {
+        let headers = browser_headers("[fd00::1]:4545", "http://[fd00::1]:4545");
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_self_rule_ignores_a_malformed_host_header() {
+        // A garbage `Host` must fall through to the list, not accept blindly.
+        let headers = browser_headers("not a host", "http://192.168.1.161:4545");
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_err());
+    }
+
+    #[test]
+    fn validate_ws_origin_self_rule_never_admits_a_non_http_scheme() {
+        // The scheme check precedes the self rule, so a `file://` origin cannot
+        // ride in on a matching host.
+        let headers = browser_headers("evil.example", "file://evil.example");
+        assert!(validate_ws_origin(&headers, Some(4545), &[], true).is_err());
+    }
+
+    #[test]
+    fn validate_ws_origin_wildcard_entry_does_not_abort_the_list_scan() {
+        // `"*"` is not a URL. Parsing it as one aborted the whole scan with
+        // "Invalid extra origin URL: *", so every entry after the wildcard was
+        // unreachable whenever the wildcard branch itself was declined.
+        //
+        // `allow_wildcard = false` is what gives this test teeth: with `true`
+        // the wildcard branch returns `Ok` before the scan is ever reached, and
+        // the assertion would hold with the bug still in place. This is the
+        // terminal route's configuration — `terminal.allow_remote = false` plus
+        // a `"*"` an operator left in `terminal.allowed_origins` — which is the
+        // only way the broken path was reachable from config.
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "https://dash.example.com".parse().unwrap());
+        let list = vec!["*".to_string(), "https://dash.example.com".to_string()];
+        assert!(validate_ws_origin(&headers, Some(4545), &list, false).is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_wildcard_entry_does_not_poison_the_rejection_reason() {
+        // The other half of the same bug. When the scan aborted on `"*"`, an
+        // origin that genuinely should be rejected was rejected for the wrong
+        // reason — `Invalid extra origin URL: *`, which names neither the
+        // origin nor the list and sends the operator hunting a config typo that
+        // is not there. The wildcard must be skipped, and the caller must get
+        // the real rejection.
+        let headers = browser_headers("192.168.1.161:4545", "http://evil.example");
+        let list = vec!["*".to_string(), "https://dash.example.com".to_string()];
+        let err = validate_ws_origin(&headers, Some(4545), &list, false).unwrap_err();
+        assert!(
+            !err.contains("Invalid extra origin URL"),
+            "the wildcard must not hijack the rejection reason: {err}"
+        );
+        assert!(err.contains("http://evil.example"), "{err}");
+        assert!(err.contains("https://dash.example.com"), "{err}");
+    }
+
+    #[test]
+    fn validate_ws_origin_rejection_names_host_listen_port_and_list() {
+        // The message is the whole diagnostic surface for this failure: without
+        // the list an operator cannot tell a misplaced config key from a typo.
+        let headers = browser_headers("192.168.1.161:4545", "http://evil.example");
+        let err = validate_ws_origin(
+            &headers,
+            Some(4545),
+            &["https://dash.example.com".to_string()],
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("http://evil.example"), "{err}");
+        assert!(err.contains("192.168.1.161:4545"), "{err}");
+        assert!(err.contains("4545"), "{err}");
+        assert!(err.contains("https://dash.example.com"), "{err}");
+    }
+
+    #[test]
+    fn validate_ws_origin_rejection_reports_an_empty_list_as_empty() {
+        // The exact signature of the reported bug: the operator set
+        // `allowed_origins` under `[api]`, `KernelConfig` has no such field, the
+        // table was dropped, and the list consulted here was empty. Saying so
+        // is what points at the config rather than at the browser.
+        let headers = browser_headers("192.168.1.161:4545", "http://evil.example");
+        let err = validate_ws_origin(&headers, Some(4545), &[], false).unwrap_err();
+        assert!(err.contains("<empty>"), "{err}");
     }
 
     #[test]
