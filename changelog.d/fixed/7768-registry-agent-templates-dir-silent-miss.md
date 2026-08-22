@@ -1,0 +1,4 @@
+A registry checkout whose agent-templates directory cannot be resolved now says so instead of failing silently.
+Three call sites each open-coded a `join("agents")` plus an existence check and skipped their whole block with no log when it was absent, so a fresh install with no preinstalled agent templates, and hands declaring `base = "<template>"` dropping out of routing, were indistinguishable from a registry that genuinely ships nothing — and the 24h cache TTL made that state persist.
+All three now share `librefang_types::registry_paths::resolve_agent_types_dir`, which logs at error level and names both paths it tried when neither resolves.
+The resolver also accepts an `agent-types/` directory ahead of the `agents/` name the registry serves today, without warning on the latter, since warning on the current correct state would fire on every sync for every install (#7768) (@DaBlitzStein)

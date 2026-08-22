@@ -87,14 +87,14 @@ struct HandTomlWrapper {
 }
 
 /// Resolve the agents registry directory from a home directory.
-/// Returns `Some(path)` if `{home_dir}/registry/agents/` exists and is a directory.
+///
+/// Delegates to [`librefang_types::registry_paths::resolve_agent_types_dir`],
+/// which accepts either `agent-types/` or the `agents/` name the registry
+/// serves today, and logs at error level when neither is present. Returns
+/// `None` in that last case — same contract as before, but now with a signal
+/// in the logs instead of a silent miss.
 fn resolve_agents_dir(home_dir: &Path) -> Option<std::path::PathBuf> {
-    let dir = home_dir.join("registry").join("agents");
-    if dir.is_dir() {
-        Some(dir)
-    } else {
-        None
-    }
+    librefang_types::registry_paths::resolve_agent_types_dir(&home_dir.join("registry"))
 }
 
 /// Parse a HAND.toml into a HandDefinition with its skill content attached.
