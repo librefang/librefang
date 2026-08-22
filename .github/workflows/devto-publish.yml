@@ -1,97 +1,43 @@
 name: Publish to Dev.to
 
 on:
+  pull_request:
+    paths:
+      - 'articles/*.md'
+      - '.github/scripts/publish-devto.rb'
+      - '.github/scripts/test-publish-devto.rb'
+      - '.github/workflows/devto-publish.yml'
   push:
     branches: [main]
     paths:
       - 'articles/*.md'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: devto-publish-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'production' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  publish:
+  validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test publisher
+        run: ruby .github/scripts/test-publish-devto.rb
+
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Publish articles
+        shell: bash
         env:
           DEVTO_API_KEY: ${{ secrets.DEVTO_API_KEY }}
-        run: |
-          if [ -z "$DEVTO_API_KEY" ]; then
-            echo "No Dev.to API key configured, skipping"
-            exit 0
-          fi
-
-          for article in articles/*.md; do
-            [ -f "$article" ] || continue
-            FILENAME=$(basename "$article" .md)
-
-            # Parse front matter
-            TITLE=$(sed -n 's/^title: *"\(.*\)"/\1/p' "$article" | head -1)
-            DESCRIPTION=$(sed -n 's/^description: *"\(.*\)"/\1/p' "$article" | head -1)
-            TAGS=$(sed -n 's/^tags: *//p' "$article" | head -1)
-            PUBLISHED=$(sed -n 's/^published: *//p' "$article" | head -1)
-            COVER=$(sed -n 's/^cover_image: *//p' "$article" | head -1)
-            CANONICAL=$(sed -n 's/^canonical_url: *//p' "$article" | head -1)
-
-            [ -z "$TITLE" ] && echo "Skipping $article (no title)" && continue
-            [ "$PUBLISHED" != "true" ] && echo "Skipping $article (not published)" && continue
-
-            # Extract body (everything after second ---)
-            BODY=$(awk '/^---$/{c++;next} c>=2{print}' "$article")
-
-            # Check if article already exists on Dev.to
-            EXISTING=$(curl -s -H "api-key: $DEVTO_API_KEY" \
-              "https://dev.to/api/articles/me?per_page=100" | \
-              MATCH_TITLE="$TITLE" python3 -c "
-          import json,sys,os
-          articles = json.load(sys.stdin)
-          for a in articles:
-              if a.get('title') == os.environ['MATCH_TITLE']:
-                  print(a['id'])
-                  break
-          " 2>/dev/null || true)
-
-            # Build JSON payload to file (avoids shell expansion of $vars in body)
-            ARTICLE_FILE="$article" ARTICLE_TITLE="$TITLE" ARTICLE_TAGS="$TAGS" \
-              ARTICLE_DESC="$DESCRIPTION" ARTICLE_COVER="$COVER" ARTICLE_CANONICAL="$CANONICAL" \
-              python3 -c "
-          import json, os
-          body = open(os.environ['ARTICLE_FILE']).read()
-          parts = body.split('---', 2)
-          body_content = parts[2].strip() if len(parts) >= 3 else body
-
-          article = {
-              'title': os.environ['ARTICLE_TITLE'],
-              'body_markdown': body_content,
-              'published': True,
-              'tags': [t.strip() for t in os.environ['ARTICLE_TAGS'].split(',') if t.strip()],
-          }
-          desc = os.environ.get('ARTICLE_DESC', '')
-          if desc:
-              article['description'] = desc
-          cover = os.environ.get('ARTICLE_COVER', '')
-          if cover:
-              article['main_image'] = cover
-          canonical = os.environ.get('ARTICLE_CANONICAL', '')
-          if canonical:
-              article['canonical_url'] = canonical
-
-          print(json.dumps({'article': article}))
-          " > /tmp/payload.json
-
-            if [ -n "$EXISTING" ]; then
-              echo "Updating: $TITLE (id=$EXISTING)"
-              RESP=$(curl -s -X PUT "https://dev.to/api/articles/$EXISTING" \
-                -H "api-key: $DEVTO_API_KEY" \
-                -H "Content-Type: application/json" \
-                -d @/tmp/payload.json)
-              echo "$RESP" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('url',''))" 2>/dev/null || echo "Warning: failed to parse response for '$TITLE'"
-            else
-              echo "Creating: $TITLE"
-              RESP=$(curl -s -X POST "https://dev.to/api/articles" \
-                -H "api-key: $DEVTO_API_KEY" \
-                -H "Content-Type: application/json" \
-                -d @/tmp/payload.json)
-              echo "$RESP" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('url',''))" 2>/dev/null || echo "Warning: failed to parse response for '$TITLE'"
-            fi
-          done
+        run: ruby .github/scripts/publish-devto.rb articles/*.md
