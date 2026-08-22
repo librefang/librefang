@@ -16,6 +16,7 @@ WORKFLOWS = (
     ROOT / ".github" / "workflows" / "release-tag.yml",
     ROOT / ".github" / "workflows" / "release-cli.yml",
 )
+DESKTOP_WORKFLOW = ROOT / ".github" / "workflows" / "release-desktop.yml"
 INPUTS_TOKEN = re.compile(r"\binputs\b")
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
@@ -133,6 +134,34 @@ def check_repository_automation() -> None:
             for uses in actual_actions
         ):
             raise SystemExit(f"supply-chain-audit {job_name} has a non-SHA action pin")
+
+    desktop_source = DESKTOP_WORKFLOW.read_text(encoding="utf-8")
+    desktop = yaml.safe_load(desktop_source)
+    desktop_job = desktop.get("jobs", {}).get("desktop", {})
+    cask_job = desktop.get("jobs", {}).get("sync_homebrew_cask", {})
+    if desktop_job.get("timeout-minutes") != 90:
+        raise SystemExit("desktop release builds do not have the expected timeout")
+    if desktop_job.get("strategy", {}).get("max-parallel") != 1:
+        raise SystemExit("desktop updater manifest writes are not serialized")
+    if cask_job.get("timeout-minutes") != 15:
+        raise SystemExit("desktop cask sync does not have the expected timeout")
+    if "*latest.json" in desktop_source:
+        raise SystemExit("desktop release rebuilds delete the shared updater manifest")
+    if desktop_source.count("uploadUpdaterJson: true") != 2:
+        raise SystemExit("desktop release builds do not upload updater manifests")
+    if desktop_source.count("retryAttempts: 3") != 2:
+        raise SystemExit("desktop updater manifest uploads do not retry conflicts")
+    for required in (
+        'if [ "$LISTED" != true ]',
+        'gh release delete-asset "$TAG" "$name" --yes',
+        "Clean up macOS signing keychain",
+        'security delete-keychain "$KEYCHAIN_PATH"',
+        'TAURI_VERSION" != "$X86_TAURI_VERSION',
+        "--connect-timeout 10 --max-time 60 --retry 3",
+        'git rebase "origin/$BRANCH"',
+    ):
+        if required not in desktop_source:
+            raise SystemExit(f"desktop release hardening is missing: {required}")
 
 
 def main() -> None:
