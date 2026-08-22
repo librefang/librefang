@@ -8,7 +8,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { UserBudgetPage } from "./UserBudgetPage";
+import {
+  UserBudgetPage,
+  isBudgetFormDirty,
+  parseBudgetNumber,
+} from "./UserBudgetPage";
 import { useUserBudget } from "../lib/queries/userBudget";
 import {
   useUpdateUserBudget,
@@ -73,11 +77,11 @@ const HAPPY_DATA = {
   monthly: { spend: 12.345, limit: 100.0, pct: 0.12345 },
 };
 
-function renderPage(): void {
+function renderPage() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: 0 } },
   });
-  render(
+  return render(
     <QueryClientProvider client={queryClient}>
       <UserBudgetPage />
     </QueryClientProvider>,
@@ -198,9 +202,102 @@ describe("UserBudgetPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /Save/ }));
 
     expect(
-      await screen.findByText("alert_threshold must be in 0.0..=1.0"),
+      await screen.findByText("alert_threshold must be greater than 0 and at most 1"),
     ).toBeInTheDocument();
     expect(updateMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("rejects a zero alert_threshold without firing the mutation", async () => {
+    useUserBudgetMock.mockReturnValue({
+      data: HAPPY_DATA,
+      isLoading: false,
+      error: null,
+    });
+    renderPage();
+
+    const inputs = screen.getAllByRole("spinbutton") as HTMLInputElement[];
+    fireEvent.change(inputs[3], { target: { value: "0" } });
+    fireEvent.click(screen.getByRole("button", { name: /Save/ }));
+
+    expect(
+      await screen.findByText("alert_threshold must be greater than 0 and at most 1"),
+    ).toBeInTheDocument();
+    expect(updateMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("treats equivalent numeric strings as unchanged", () => {
+    useUserBudgetMock.mockReturnValue({
+      data: HAPPY_DATA,
+      isLoading: false,
+      error: null,
+    });
+    renderPage();
+
+    const inputs = screen.getAllByRole("spinbutton") as HTMLInputElement[];
+    fireEvent.change(inputs[0], { target: { value: "1.00" } });
+
+    expect(screen.getByRole("button", { name: /Save/ })).toBeDisabled();
+    expect(
+      isBudgetFormDirty(
+        {
+          max_hourly_usd: "1.00",
+          max_daily_usd: "10",
+          max_monthly_usd: "100",
+          alert_threshold: "0.80",
+        },
+        {
+          max_hourly_usd: "1",
+          max_daily_usd: "10.0",
+          max_monthly_usd: "100",
+          alert_threshold: ".8",
+        },
+      ),
+    ).toBe(false);
+  });
+
+  it("reseeds after every save even when wall-clock timestamps collide", async () => {
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    useUserBudgetMock.mockReturnValue({
+      data: HAPPY_DATA,
+      isLoading: false,
+      error: null,
+    });
+    updateMutateAsync
+      .mockImplementationOnce(async () => {
+        useUserBudgetMock.mockReturnValue({
+          data: {
+            ...HAPPY_DATA,
+            hourly: { ...HAPPY_DATA.hourly, limit: 2.25 },
+          },
+          isLoading: false,
+          error: null,
+        });
+      })
+      .mockImplementationOnce(async () => {
+        useUserBudgetMock.mockReturnValue({
+          data: {
+            ...HAPPY_DATA,
+            hourly: { ...HAPPY_DATA.hourly, limit: 3.25 },
+          },
+          isLoading: false,
+          error: null,
+        });
+      });
+    renderPage();
+
+    let hourly = screen.getAllByRole("spinbutton")[0] as HTMLInputElement;
+    fireEvent.change(hourly, { target: { value: "2.5" } });
+    fireEvent.click(screen.getByRole("button", { name: /Save/ }));
+    await waitFor(() => expect(hourly.value).toBe("2.25"));
+
+    fireEvent.change(hourly, { target: { value: "3.5" } });
+    fireEvent.click(screen.getByRole("button", { name: /Save/ }));
+    await waitFor(() => {
+      hourly = screen.getAllByRole("spinbutton")[0] as HTMLInputElement;
+      expect(hourly.value).toBe("3.25");
+    });
+    expect(updateMutateAsync).toHaveBeenCalledTimes(2);
+    dateNow.mockRestore();
   });
 
   it("calls useDeleteUserBudget with the user name when Clear cap is clicked", async () => {
@@ -230,5 +327,14 @@ describe("UserBudgetPage", () => {
     renderPage();
 
     expect(screen.getByText("alert breach")).toBeInTheDocument();
+  });
+
+  it("parses only complete finite decimal strings", () => {
+    expect(parseBudgetNumber(" 12.50 ")).toBe(12.5);
+    expect(parseBudgetNumber(".75")).toBe(0.75);
+    expect(parseBudgetNumber("12abc")).toBeNull();
+    expect(parseBudgetNumber("1e3")).toBeNull();
+    expect(parseBudgetNumber("Infinity")).toBeNull();
+    expect(parseBudgetNumber("   ")).toBeNull();
   });
 });

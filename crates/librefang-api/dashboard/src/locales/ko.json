@@ -3649,7 +3649,7 @@
     },
     "errors": {
       "non_negative": "{{field}}는 음수가 아닌 유한한 숫자여야 합니다.",
-      "threshold_range": "alert_threshold는 0.0..=1.0이어야 합니다."
+      "threshold_range": "alert_threshold는 0보다 크고 1 이하여야 합니다."
     },
     "toast": {
       "saved": "지출 한도가 저장되었습니다."

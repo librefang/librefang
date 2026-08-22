@@ -3655,7 +3655,7 @@
     },
     "errors": {
       "non_negative": "{{field}} musi być skończoną, nieujemną liczbą",
-      "threshold_range": "alert_threshold musi mieścić się w przedziale 0.0..=1.0"
+      "threshold_range": "alert_threshold musi być większy od 0 i nie większy niż 1"
     },
     "toast": {
       "saved": "Zapisano limit wydatków"
