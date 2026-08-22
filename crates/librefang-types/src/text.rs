@@ -2,9 +2,12 @@
 
 /// The canonical set of invisible / format Unicode code points stripped at prompt security boundaries.
 ///
-/// This is the single source of truth for sanitization. Every place that strips these code points before scanning skill content or interpolating text into an LLM prompt references this const instead of maintaining its own copy, so the set cannot silently drift between crates. `librefang-skills::verify` keeps a parallel labeled table and pins it to this set in a unit test.
+/// This is the single source of truth for sanitization.
+/// Every place that strips these code points before scanning skill content or interpolating text into an LLM prompt references this const instead of maintaining its own copy, so the set cannot silently drift between crates.
+/// `librefang-skills::verify` keeps a parallel labeled table and pins it to this set in a unit test.
 ///
-/// Sanitization deliberately includes format characters that are legitimate inside ordinary emoji and other display sequences. Standalone injection signaling has different false-positive costs and uses [`INJECTION_SIGNAL_CHARS`] instead.
+/// Sanitization deliberately includes format characters that are legitimate inside ordinary emoji and other display sequences.
+/// Standalone injection signaling has different false-positive costs and uses [`INJECTION_SIGNAL_CHARS`] instead.
 pub const INVISIBLE_FORMAT_CHARS: &[char] = &[
     // Zero-width & joiner code points
     '\u{00AD}', // soft hyphen
@@ -59,7 +62,8 @@ pub const INVISIBLE_FORMAT_CHARS: &[char] = &[
 
 /// Invisible / format code points whose presence is a standalone prompt-injection signal.
 ///
-/// This excludes variation selectors and U+200D because Unicode defines them as components of ordinary presentation and emoji ZWJ sequences. They remain in [`INVISIBLE_FORMAT_CHARS`], so prompt sanitizers still remove them before matching or interpolation.
+/// This excludes variation selectors and U+200D because Unicode defines them as components of ordinary presentation and emoji ZWJ sequences.
+/// They remain in [`INVISIBLE_FORMAT_CHARS`], so prompt sanitizers still remove them before matching or interpolation.
 pub const INJECTION_SIGNAL_CHARS: &[char] = &[
     '\u{00AD}', // soft hyphen
     '\u{034F}', // combining grapheme joiner

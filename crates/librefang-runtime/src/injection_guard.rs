@@ -19,7 +19,8 @@
 
 /// Invisible / zero-width Unicode code points whose presence alone is an injection signal.
 ///
-/// This intentionally excludes emoji variation selectors and U+200D. Sanitizers still strip the complete [`librefang_types::text::INVISIBLE_FORMAT_CHARS`] set before prompt interpolation; signaling is narrower because ordinary display sequences must not produce a security warning.
+/// This intentionally excludes emoji variation selectors and U+200D.
+/// Sanitizers still strip the complete [`librefang_types::text::INVISIBLE_FORMAT_CHARS`] set before prompt interpolation; signaling is narrower because ordinary display sequences must not produce a security warning.
 const INVISIBLE_CHARS: &[char] = librefang_types::text::INJECTION_SIGNAL_CHARS;
 
 /// Text patterns that strongly indicate a prompt injection attempt.
