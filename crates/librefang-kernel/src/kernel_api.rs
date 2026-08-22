@@ -345,6 +345,10 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn running_session_ids(&self) -> std::collections::HashSet<SessionId>;
     fn verify_signed_manifest(&self, signed_json: &str) -> KernelResult<String>;
     fn available_tools(&self, agent_id: AgentId) -> Arc<Vec<ToolDefinition>>;
+    fn pending_skill_and_mcp_declarations(
+        &self,
+        agent_id: AgentId,
+    ) -> crate::kernel::PendingSkillMcpDeclarations;
 
     // ====================================================================
     // Messaging
@@ -1166,6 +1170,12 @@ impl KernelApi for LibreFangKernel {
     }
     fn available_tools(&self, agent_id: AgentId) -> Arc<Vec<ToolDefinition>> {
         Self::available_tools(self, agent_id)
+    }
+    fn pending_skill_and_mcp_declarations(
+        &self,
+        agent_id: AgentId,
+    ) -> crate::kernel::PendingSkillMcpDeclarations {
+        Self::pending_skill_and_mcp_declarations(self, agent_id)
     }
 
     async fn send_message(

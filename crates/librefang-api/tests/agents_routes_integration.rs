@@ -2326,3 +2326,110 @@ async fn test_patch_identity_empty_string_clears_a_single_field() {
         "clearing one field must not disturb the others"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Deferred skills/MCP resolution — declared-but-uninstalled skills surface
+// as pending and activate after a skills reload without re-spawning.
+// ---------------------------------------------------------------------------
+
+/// Spawn an agent whose manifest declares `ghost-skill` (not installed),
+/// verify the pending state is visible on both detail surfaces, install the
+/// skill on disk, reload, and verify it activated without a re-spawn.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pending_skill_surfaces_and_activates_after_reload() {
+    let h = boot(TEST_TOKEN).await;
+
+    let manifest_toml = r#"
+name = "pending-skills-agent"
+description = "agent with a declared-but-uninstalled skill"
+skills = ["ghost-skill"]
+
+[model]
+provider = "ollama"
+model = "test-model"
+"#;
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            "/api/agents",
+            serde_json::json!({ "manifest_toml": manifest_toml }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "spawn must succeed; body={body:?}"
+    );
+    let id = body["agent_id"]
+        .as_str()
+        .expect("spawn response agent_id")
+        .to_string();
+
+    // Pending state visible on the agent detail payload.
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["skills"],
+        serde_json::json!(["ghost-skill"]),
+        "declaration must be retained verbatim"
+    );
+    assert_eq!(
+        body["pending_skills"],
+        serde_json::json!(["ghost-skill"]),
+        "uninstalled skill must surface as pending"
+    );
+    assert_eq!(body["pending_mcp_servers"], serde_json::json!([]));
+
+    // ...and on the skills endpoint.
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/skills"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["pending"],
+        serde_json::json!(["ghost-skill"]),
+        "skills endpoint must list the pending skill"
+    );
+
+    // Simulate installing the skill on disk, then reload.
+    let home = h.state.kernel.home_dir().to_path_buf();
+    let skill_dir = home.join("skills").join("ghost-skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("skill.toml"),
+        r#"
+[skill]
+name = "ghost-skill"
+version = "0.1.0"
+description = "Test skill"
+
+[runtime]
+type = "python"
+entry = "main.py"
+
+[[tools.provided]]
+name = "ghost-skill_tool"
+description = "A test tool"
+input_schema = { type = "object" }
+"#,
+    )
+    .expect("write skill.toml");
+
+    let (status, _) = send(
+        h.app.clone(),
+        post_json("/api/skills/reload", serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "skills reload must succeed");
+
+    // Pending cleared; no re-spawn happened (same agent id).
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["pending_skills"],
+        serde_json::json!([]),
+        "installed skill must clear the pending state"
+    );
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/skills"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["pending"], serde_json::json!([]));
+}

@@ -1,0 +1,1 @@
+Spawned agents surface skills and MCP servers declared in their template but not yet available: a WARN at spawn, `pending_skills` / `pending_mcp_servers` on the agents API, and badges on the dashboard skills tab — installing the skill or connecting the server activates it on the next reload without re-spawn. (@DaBlitzStein)

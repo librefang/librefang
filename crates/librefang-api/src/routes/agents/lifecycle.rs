@@ -1009,6 +1009,7 @@ pub async fn get_agent(
             .with_code("agent_not_found")
             .into_response();
     }
+    let pending = state.kernel.pending_skill_and_mcp_declarations(agent_id);
 
     let dm = {
         let dm_override = state
@@ -1066,6 +1067,10 @@ pub async fn get_agent(
             },
             "skills": entry.manifest.skills,
             "skills_mode": skill_assignment_mode(&entry.manifest),
+            // Declared-but-unavailable skills/MCP servers (retained in the
+            // manifest, activate on the next skills reload / MCP reconnect).
+            "pending_skills": pending.skills,
+            "pending_mcp_servers": pending.mcp_servers,
             "schedule": format_schedule_mode(&entry.manifest.schedule),
             "skills_disabled": entry.manifest.skills_disabled,
             "tools_disabled": entry.manifest.tools_disabled,

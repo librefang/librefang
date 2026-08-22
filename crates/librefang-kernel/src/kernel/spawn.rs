@@ -329,6 +329,20 @@ impl LibreFangKernel {
             .register(entry.clone())
             .map_err(KernelError::LibreFang)?;
 
+        // Surface declared-but-unavailable skills/MCP servers instead of a
+        // silent drop: the declaration stays in the manifest and activates on
+        // the next skills reload / MCP reconnect, but the operator should see
+        // the pending state at spawn time.
+        let pending = self.pending_skill_and_mcp_declarations(agent_id);
+        if !pending.skills.is_empty() || !pending.mcp_servers.is_empty() {
+            warn!(
+                agent = %name,
+                pending_skills = ?pending.skills,
+                pending_mcp_servers = ?pending.mcp_servers,
+                "Agent spawned with skills/MCP servers that are not installed yet — declarations retained, they will activate on the next skills reload / MCP reconnect"
+            );
+        }
+
         // Inject reset/context prompts only after the agent is registered so
         // agent-scoped injections and tag-gated global injections are visible.
         self.inject_reset_prompt(&mut session, agent_id);

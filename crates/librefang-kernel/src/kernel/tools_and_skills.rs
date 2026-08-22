@@ -71,6 +71,22 @@ pub struct SkillReloadOutcome {
     pub count: usize,
 }
 
+/// Skills and MCP servers declared in an agent manifest that are not
+/// currently available on this instance.
+///
+/// The declaration is always retained verbatim (spawn and persistence never
+/// drop it); this type makes the "declared but not available" gap visible so
+/// operators can distinguish a pending activation from a silent drop.
+#[derive(Debug, Clone, Default)]
+pub struct PendingSkillMcpDeclarations {
+    /// Declared skill names absent from the loaded skill registry
+    /// (allowlist mode only; empty in `none`/`all`/disabled modes).
+    pub skills: Vec<String>,
+    /// Declared MCP server names absent from the effective server list
+    /// (allowlist mode only; empty when disabled, empty, or `["*"]`).
+    pub mcp_servers: Vec<String>,
+}
+
 impl LibreFangKernel {
     /// Get the list of tools available to an agent based on its manifest.
     ///
@@ -403,6 +419,74 @@ impl LibreFangKernel {
         );
 
         tools
+    }
+
+    /// Compute which skills and MCP servers declared in an agent's manifest
+    /// are not currently available on this instance.
+    ///
+    /// Declarations are retained verbatim at spawn and persistence — nothing
+    /// is ever dropped. The gap is purely resolution-time: `available_tools`
+    /// only surfaces tools from the loaded skill registry and the connected
+    /// MCP servers, so a declared-but-missing skill or server contributes no
+    /// tools until it is installed / configured and the corresponding
+    /// generation counter is bumped. This method surfaces that pending state
+    /// so the API, dashboard, and spawn logs can show it instead of a silent
+    /// drop. Mode semantics mirror `available_tools` exactly: allowlist mode
+    /// only (`["*"]` means "all", so nothing is pending there), and disabled
+    /// modes yield nothing.
+    pub fn pending_skill_and_mcp_declarations(
+        &self,
+        agent_id: AgentId,
+    ) -> PendingSkillMcpDeclarations {
+        let Some(entry) = self.agents.registry.get(agent_id) else {
+            return PendingSkillMcpDeclarations::default();
+        };
+        let manifest = &entry.manifest;
+
+        let mut skills = Vec::new();
+        if !manifest.skills_disabled && !manifest.skills.is_empty() {
+            let registry = read_kernel_state(&self.skills.skill_registry, "skill_registry");
+            let installed = registry.skill_names();
+            skills = manifest
+                .skills
+                .iter()
+                .filter(|name| !installed.iter().any(|n| n == *name))
+                .cloned()
+                .collect();
+            skills.sort();
+        }
+
+        let mut mcp_servers = Vec::new();
+        if !manifest.mcp_disabled
+            && !manifest.mcp_servers.is_empty()
+            && !manifest.mcp_servers.iter().any(|s| s == "*")
+        {
+            let configured: Vec<String> = self
+                .mcp
+                .effective_mcp_servers
+                .read()
+                .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
+                .unwrap_or_default();
+            let configured_normalized: Vec<String> = configured
+                .iter()
+                .map(|s| librefang_runtime::mcp::normalize_name(s))
+                .collect();
+            mcp_servers = manifest
+                .mcp_servers
+                .iter()
+                .filter(|name| {
+                    let n = librefang_runtime::mcp::normalize_name(name);
+                    !configured_normalized.iter().any(|c| c == &n)
+                })
+                .cloned()
+                .collect();
+            mcp_servers.sort();
+        }
+
+        PendingSkillMcpDeclarations {
+            skills,
+            mcp_servers,
+        }
     }
 
     /// Collect prompt context from prompt-only skills for system prompt injection.
@@ -2015,5 +2099,237 @@ mod tests {
             pending.is_empty(),
             "no candidate should reach disk after a security block"
         );
+    }
+    // ── pending_skill_and_mcp_declarations (deferred skills/MCP, #TODO2) ──
+
+    /// Minimal manifest with the given skill/MCP declarations, used by the
+    /// pending-state tests. Skills are NOT installed / servers NOT configured
+    /// unless the test does it explicitly.
+    fn pending_test_manifest(
+        name: &str,
+        skills: Vec<&str>,
+        mcp_servers: Vec<&str>,
+        skills_disabled: bool,
+        mcp_disabled: bool,
+    ) -> AgentManifest {
+        AgentManifest {
+            name: name.to_string(),
+            description: "pending-declarations test agent".to_string(),
+            author: "test".to_string(),
+            module: "builtin:chat".to_string(),
+            skills: skills.into_iter().map(str::to_string).collect(),
+            mcp_servers: mcp_servers.into_iter().map(str::to_string).collect(),
+            skills_disabled,
+            mcp_disabled,
+            ..Default::default()
+        }
+    }
+
+    /// Boot a kernel in a temp home and spawn an agent with the given
+    /// skill/MCP declarations.
+    fn kernel_with_pending_agent(
+        skills: Vec<&str>,
+        mcp_servers: Vec<&str>,
+    ) -> (LibreFangKernel, tempfile::TempDir, AgentId) {
+        kernel_with_pending_agent_flags(skills, mcp_servers, false, false)
+    }
+
+    fn kernel_with_pending_agent_flags(
+        skills: Vec<&str>,
+        mcp_servers: Vec<&str>,
+        skills_disabled: bool,
+        mcp_disabled: bool,
+    ) -> (LibreFangKernel, tempfile::TempDir, AgentId) {
+        let dir = tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        std::fs::create_dir_all(home.join("skills")).unwrap();
+        let cfg = KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
+        let agent_id = kernel
+            .spawn_agent_inner(
+                pending_test_manifest(
+                    "pending-agent",
+                    skills,
+                    mcp_servers,
+                    skills_disabled,
+                    mcp_disabled,
+                ),
+                None,
+                None,
+                None,
+            )
+            .expect("agent should spawn");
+        (kernel, dir, agent_id)
+    }
+
+    /// Write a tool-providing skill at `home/skills/<name>/` so the registry
+    /// can load it (mirrors the `create_test_skill` fixture format).
+    fn install_tool_skill(home: &std::path::Path, name: &str) {
+        let skill_dir = home.join("skills").join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("skill.toml"),
+            format!(
+                r#"
+[skill]
+name = "{name}"
+version = "0.1.0"
+description = "Test skill"
+
+[runtime]
+type = "python"
+entry = "main.py"
+
+[[tools.provided]]
+name = "{name}_tool"
+description = "A test tool"
+input_schema = {{ type = "object" }}
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    /// A declared-but-uninstalled skill must stay in the manifest, surface as
+    /// pending, contribute no tools — and activate after install + reload
+    /// WITHOUT re-spawning the agent.
+    #[test]
+    fn pending_skill_surfaces_and_activates_after_install_without_respawn() {
+        let (kernel, dir, agent_id) = kernel_with_pending_agent(vec!["ghost-skill"], vec![]);
+
+        // Declaration retained verbatim in the registry entry.
+        let entry = kernel
+            .agents
+            .registry
+            .get(agent_id)
+            .expect("registry entry");
+        assert_eq!(
+            entry.manifest.skills,
+            vec!["ghost-skill".to_string()],
+            "manifest must keep the declared skill"
+        );
+
+        // Pending state visible, no tools contributed.
+        let pending = kernel.pending_skill_and_mcp_declarations(agent_id);
+        assert_eq!(pending.skills, vec!["ghost-skill".to_string()]);
+        assert!(pending.mcp_servers.is_empty());
+        let tools = kernel.available_tools(agent_id);
+        assert!(
+            !tools.iter().any(|t| t.name == "ghost-skill_tool"),
+            "uninstalled skill must not contribute tools"
+        );
+
+        // Simulate installing the skill on disk, then reload.
+        install_tool_skill(dir.path(), "ghost-skill");
+        kernel.reload_skills();
+
+        let pending = kernel.pending_skill_and_mcp_declarations(agent_id);
+        assert!(
+            pending.skills.is_empty(),
+            "installed skill must clear the pending state"
+        );
+        let tools = kernel.available_tools(agent_id);
+        assert!(
+            tools.iter().any(|t| t.name == "ghost-skill_tool"),
+            "skill must activate after reload without re-spawning the agent"
+        );
+        kernel.shutdown();
+    }
+
+    /// A declared-but-unconfigured MCP server must surface as pending, then
+    /// activate once the server is configured (effective list + generation
+    /// bump) without re-spawning.
+    #[test]
+    fn pending_mcp_surfaces_and_activates_after_server_configured_without_respawn() {
+        let (kernel, _dir, agent_id) = kernel_with_pending_agent(vec![], vec!["ghost-mcp"]);
+
+        let pending = kernel.pending_skill_and_mcp_declarations(agent_id);
+        assert_eq!(pending.mcp_servers, vec!["ghost-mcp".to_string()]);
+        assert!(pending.skills.is_empty());
+        let tools = kernel.available_tools(agent_id);
+        assert!(
+            !tools.iter().any(|t| t.name == "mcp__ghost-mcp__t"),
+            "unconfigured server must not contribute tools"
+        );
+
+        // Simulate `reload_mcp_servers` + connect: update the effective
+        // server list, push a synthetic tool, bump the generation counter
+        // (mirrors mcp_setup.rs).
+        kernel.mcp.effective_mcp_servers.write().unwrap().push(
+            librefang_types::config::McpServerConfigEntry {
+                name: "ghost-mcp".to_string(),
+                template_id: None,
+                transport: None,
+                timeout_secs: 30,
+                env: vec![],
+                headers: vec![],
+                oauth: None,
+                taint_scanning: true,
+                taint_policy: None,
+            },
+        );
+        kernel.mcp.mcp_tools.lock().unwrap().push(ToolDefinition {
+            name: "mcp_ghost_mcp_t".to_string(),
+            description: "synthetic tool".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        });
+        kernel
+            .mcp
+            .mcp_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let pending = kernel.pending_skill_and_mcp_declarations(agent_id);
+        assert!(
+            pending.mcp_servers.is_empty(),
+            "configured server must clear the pending state"
+        );
+        let tools = kernel.available_tools(agent_id);
+        assert!(
+            tools.iter().any(|t| t.name == "mcp_ghost_mcp_t"),
+            "server tools must appear after configuration without re-spawning"
+        );
+        kernel.shutdown();
+    }
+
+    /// Nothing is "pending" in none/all/disabled modes — the feature only
+    /// applies to allowlist mode, mirroring `available_tools` semantics.
+    #[test]
+    fn pending_declarations_yield_empty_outside_allowlist_mode() {
+        // Skills: empty allowlist (all-mode).
+        let (kernel, _dir, agent_id) = kernel_with_pending_agent(vec![], vec!["ghost-mcp"]);
+        let pending = kernel.pending_skill_and_mcp_declarations(agent_id);
+        assert!(pending.skills.is_empty());
+        assert_eq!(pending.mcp_servers, vec!["ghost-mcp".to_string()]);
+        kernel.shutdown();
+
+        // Skills: disabled.
+        let (kernel, _dir, agent_id) =
+            kernel_with_pending_agent_flags(vec!["ghost-skill"], vec![], true, false);
+        assert!(kernel
+            .pending_skill_and_mcp_declarations(agent_id)
+            .skills
+            .is_empty());
+        kernel.shutdown();
+
+        // MCP: wildcard (all-mode).
+        let (kernel, _dir, agent_id) = kernel_with_pending_agent(vec![], vec!["*"]);
+        assert!(kernel
+            .pending_skill_and_mcp_declarations(agent_id)
+            .mcp_servers
+            .is_empty());
+        kernel.shutdown();
+
+        // MCP: disabled.
+        let (kernel, _dir, agent_id) =
+            kernel_with_pending_agent_flags(vec![], vec!["ghost-mcp"], false, true);
+        let pending = kernel.pending_skill_and_mcp_declarations(agent_id);
+        assert!(pending.mcp_servers.is_empty());
+        assert!(pending.skills.is_empty());
+        kernel.shutdown();
     }
 }
