@@ -1269,6 +1269,9 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((entry.id, entry.name.clone(), inherit))
                     }
+                    StepAgent::ByType { template } => {
+                        kernel.resolve_agent_by_type_or_spawn(template)
+                    }
                 },
                 |agent_id, message, session_mode_override| {
                     let k = kernel.clone();

@@ -369,6 +369,9 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((entry.id, entry.name.clone(), inherit))
                     }
+                    crate::workflow::StepAgent::ByType { template } => {
+                        k1.resolve_agent_by_type_or_spawn(template)
+                    }
                 }
             };
             // `session_mode_override` carries `WorkflowStep::session_mode`

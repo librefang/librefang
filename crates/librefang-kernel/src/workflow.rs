@@ -313,16 +313,19 @@ fn clamp_timeout_duration(timeout_secs: u64) -> std::time::Duration {
 
 /// How to identify the agent for a step.
 ///
-/// Deserialization accepts THREE on-wire shapes for operator ergonomics
+/// Deserialization accepts FOUR on-wire shapes for operator ergonomics
 /// (the issue / PR docs use the bare-string form; the kernel and HTTP
 /// payloads use the tagged forms):
 ///
 /// 1. Bare string: `agent = "researcher"` → [`StepAgent::ByName`].
 /// 2. Tagged object: `{ name = "researcher" }` → [`StepAgent::ByName`].
 /// 3. Tagged object: `{ id = "<uuid>" }` → [`StepAgent::ById`].
+/// 4. Tagged object: `{ type = "researcher" }` → [`StepAgent::ByType`]
+///    (reuse the registered agent with the template's name, or spawn one
+///    from the template when no instance exists — find-or-spawn).
 ///
-/// Exactly one of `id` / `name` must be present in the tagged form;
-/// supplying both or neither is a deserialization error.
+/// Exactly one of `id` / `name` / `type` must be present in the tagged
+/// form; supplying more than one or none is a deserialization error.
 ///
 /// Serialization continues to emit the tagged-object form (`Serialize`
 /// derive on the untagged-style enum picks the matching variant cleanly).
@@ -333,6 +336,10 @@ pub enum StepAgent {
     ById { id: String },
     /// Reference an agent by name (first match).
     ByName { name: String },
+    /// Reference an agent type: the resolver reuses the registered agent
+    /// with the template's name, or spawns one from the template manifest
+    /// on first use.
+    ByType { template: String },
 }
 
 impl<'de> Deserialize<'de> for StepAgent {
@@ -352,17 +359,26 @@ impl<'de> Deserialize<'de> for StepAgent {
             serde_json::Value::Object(map) => {
                 let id = map.get("id").and_then(|x| x.as_str());
                 let name = map.get("name").and_then(|x| x.as_str());
-                match (id, name) {
-                    (Some(_), Some(_)) => Err(D::Error::custom(
-                        "StepAgent: object form must set exactly one of `id` or `name`, not both",
-                    )),
-                    (Some(id), None) => Ok(StepAgent::ById { id: id.to_string() }),
-                    (None, Some(name)) => Ok(StepAgent::ByName {
+                let template = map.get("type").and_then(|x| x.as_str());
+                // Exactly one of `id` / `name` / `type` must be set; the
+                // optional `fresh` key (paired with `type` by the step-flag
+                // feature) is not counted here.
+                let present = id.is_some() as u8 + name.is_some() as u8 + template.is_some() as u8;
+                if present != 1 {
+                    return Err(D::Error::custom(
+                        "StepAgent: object form must set exactly one of `id`, `name`, or `type`",
+                    ));
+                }
+                if let Some(id) = id {
+                    Ok(StepAgent::ById { id: id.to_string() })
+                } else if let Some(name) = name {
+                    Ok(StepAgent::ByName {
                         name: name.to_string(),
-                    }),
-                    (None, None) => Err(D::Error::custom(
-                        "StepAgent: object form must set exactly one of `id` or `name`",
-                    )),
+                    })
+                } else {
+                    Ok(StepAgent::ByType {
+                        template: template.unwrap().to_string(),
+                    })
                 }
             }
             other => Err(D::Error::custom(format!(
@@ -1294,6 +1310,10 @@ fn format_missing_agent_error(step_name: &str, agent: &StepAgent) -> String {
         StepAgent::ById { id } => format!(
             "Registry agent with id '{id}' not found for workflow step '{step_name}' \
              (referenced by id; check the agent exists and the id is well-formed)"
+        ),
+        StepAgent::ByType { template } => format!(
+            "Agent type '{template}' not found for workflow step '{step_name}' \
+             (no template file and no registered agent with that name)"
         ),
     }
 }
@@ -6077,6 +6097,7 @@ impl Workflow {
                 let agent = match &step.agent {
                     StepAgent::ByName { name } => Some(name.clone()),
                     StepAgent::ById { id } => Some(id.clone()),
+                    StepAgent::ByType { template } => Some(template.clone()),
                 };
 
                 WorkflowTemplateStep {
@@ -11194,6 +11215,45 @@ prompt_template = "do {{x}}"
         match by_id.agent {
             StepAgent::ById { id } => assert_eq!(id, "agent-uuid-123"),
             other => panic!("expected ById, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_agent_deserializes_object_by_type() {
+        let v: StepAgent =
+            serde_json::from_str(r#"{"type":"researcher"}"#).expect("object form by type");
+        match v {
+            StepAgent::ByType { template } => assert_eq!(template, "researcher"),
+            other => panic!("expected ByType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_agent_rejects_ambiguous_type_keys() {
+        // `type` together with a different routing key is ambiguous.
+        assert!(
+            serde_json::from_str::<StepAgent>(r#"{"type":"a","name":"b"}"#).is_err(),
+            "must reject type and name set"
+        );
+        assert!(
+            serde_json::from_str::<StepAgent>(r#"{"type":"a","id":"b"}"#).is_err(),
+            "must reject type and id set"
+        );
+        // Empty object: no routing key at all.
+        assert!(serde_json::from_str::<StepAgent>("{}").is_err());
+    }
+
+    #[test]
+    fn step_agent_by_type_round_trips_through_toml() {
+        #[derive(serde::Deserialize)]
+        struct Wrap {
+            agent: StepAgent,
+        }
+        let parsed: Wrap =
+            toml::from_str("agent = { type = \"researcher\" }").expect("toml by type");
+        match parsed.agent {
+            StepAgent::ByType { template } => assert_eq!(template, "researcher"),
+            other => panic!("expected ByType, got {other:?}"),
         }
     }
 

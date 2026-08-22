@@ -6711,6 +6711,33 @@ async fn workflow_send_message_closure_honours_per_agent_semaphore() {
     Arc::try_unwrap(kernel_arc).ok().unwrap().shutdown();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_dry_run_by_type_does_not_spawn() {
+    let kernel = boot_kernel_for_display_tests();
+    write_agent_template(&kernel, "researcher");
+    let before = kernel.agents.registry.count();
+
+    let engine = &kernel.workflows.engine;
+    let wf_id = engine.register(by_type_probe_workflow("researcher")).await;
+    let steps = kernel
+        .dry_run_workflow(wf_id, "input".to_string())
+        .await
+        .expect("dry run must succeed");
+
+    let step = steps.first().expect("one step");
+    assert!(step.agent_found, "the template must resolve on dry run");
+    assert_eq!(step.agent_name.as_deref(), Some("researcher"));
+    assert_eq!(
+        kernel.agents.registry.count(),
+        before,
+        "a dry run must not spawn the step agent"
+    );
+    assert!(
+        kernel.agents.registry.find_by_name("researcher").is_none(),
+        "no instance may exist after a dry run"
+    );
+}
+
 /// Source-shape sentinel for the fix above: the production workflow
 /// `send_message` closure (and its operator-resume twin) in
 /// `triggers_and_workflow.rs` must acquire the per-agent semaphore
@@ -6985,6 +7012,184 @@ async fn nested_workflow_run_past_max_agent_call_depth_is_capability_denied() {
     }
 
     kernel.shutdown();
+}
+
+/// Build a one-step workflow whose step targets an agent type
+/// (find-or-spawn), mirroring `depth_probe_workflow`'s shape.
+fn by_type_probe_workflow(template: &str) -> crate::workflow::Workflow {
+    use crate::workflow::{ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep};
+    Workflow {
+        id: WorkflowId::new(),
+        name: "by-type-probe".to_string(),
+        description: "one step referencing an agent type".to_string(),
+        steps: vec![WorkflowStep {
+            name: "only-step".to_string(),
+            agent: StepAgent::ByType {
+                template: template.to_string(),
+            },
+            prompt_template: "{{input}}".to_string(),
+            mode: StepMode::Sequential,
+            timeout_secs: 30,
+            error_mode: ErrorMode::Fail,
+            output_var: None,
+            inherit_context: None,
+            depends_on: vec![],
+            session_mode: None,
+        }],
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: Some(30),
+        input_schema: None,
+    }
+}
+
+/// Write a minimal `workspaces/agents/<name>/agent.toml` template so the
+/// find-or-spawn path has a manifest to load.
+fn write_agent_template(kernel: &LibreFangKernel, name: &str) {
+    let agent_dir = kernel
+        .home_dir_boot
+        .join("workspaces")
+        .join("agents")
+        .join(name);
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("agent.toml"),
+        format!("name = \"{name}\"\nmodule = \"builtin:chat\"\n"),
+    )
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_step_by_type_spawns_agent_from_template() {
+    let kernel = boot_kernel_for_display_tests();
+    write_agent_template(&kernel, "researcher");
+
+    let engine = &kernel.workflows.engine;
+    let wf_id = engine.register(by_type_probe_workflow("researcher")).await;
+    let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
+
+    let sent_ids = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let resolver = |agent_ref: &crate::workflow::StepAgent| -> Option<(AgentId, String, bool)> {
+        match agent_ref {
+            crate::workflow::StepAgent::ByType { template } => {
+                kernel.resolve_agent_by_type_or_spawn(template)
+            }
+            _ => None,
+        }
+    };
+    let sender = {
+        let sent_ids = sent_ids.clone();
+        move |id: AgentId, msg: String, _sm: Option<librefang_types::agent::SessionMode>| {
+            let sent_ids = sent_ids.clone();
+            async move {
+                sent_ids.lock().unwrap().push(id);
+                Ok((msg, 0u64, 0u64))
+            }
+        }
+    };
+    let result = engine.execute_run(run_id, resolver, sender).await;
+    assert!(result.is_ok(), "run must complete: {result:?}");
+
+    let entry = kernel
+        .agents
+        .registry
+        .find_by_name("researcher")
+        .expect("agent must be registered after the run");
+    let dispatched = sent_ids.lock().unwrap().clone();
+    assert_eq!(
+        entry.id,
+        *dispatched.first().expect("step must dispatch"),
+        "the step must send to the spawned agent"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_step_by_type_reuses_existing_agent() {
+    let kernel = std::sync::Arc::new(boot_kernel_for_display_tests());
+    write_agent_template(&kernel, "researcher");
+
+    let engine = &kernel.workflows.engine;
+    let wf_id = engine.register(by_type_probe_workflow("researcher")).await;
+
+    async fn run_once(
+        engine: &crate::workflow::WorkflowEngine,
+        kernel: &std::sync::Arc<LibreFangKernel>,
+        wf_id: crate::workflow::WorkflowId,
+    ) -> Vec<AgentId> {
+        let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
+        let sent_ids = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kernel = std::sync::Arc::clone(kernel);
+        let resolver = |agent_ref: &crate::workflow::StepAgent| -> Option<(AgentId, String, bool)> {
+            match agent_ref {
+                crate::workflow::StepAgent::ByType { template } => {
+                    kernel.resolve_agent_by_type_or_spawn(template)
+                }
+                _ => None,
+            }
+        };
+        let sender = {
+            let sent_ids = sent_ids.clone();
+            move |id: AgentId, msg: String, _sm: Option<librefang_types::agent::SessionMode>| {
+                let sent_ids = sent_ids.clone();
+                async move {
+                    sent_ids.lock().unwrap().push(id);
+                    Ok((msg, 0u64, 0u64))
+                }
+            }
+        };
+        engine.execute_run(run_id, resolver, sender).await.unwrap();
+        let x = sent_ids.lock().unwrap().clone();
+        x
+    }
+
+    let first = run_once(engine, &kernel, wf_id).await;
+    let before = kernel.agents.registry.count();
+    let second = run_once(engine, &kernel, wf_id).await;
+
+    assert_eq!(
+        first, second,
+        "second run must reuse the same agent instance"
+    );
+    assert_eq!(
+        kernel.agents.registry.count(),
+        before,
+        "reuse must not spawn a second agent"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_step_by_type_missing_template_fails_run() {
+    let kernel = boot_kernel_for_display_tests(); // no template written on purpose
+
+    let engine = &kernel.workflows.engine;
+    let wf_id = engine.register(by_type_probe_workflow("ghost")).await;
+    let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
+
+    let resolver = |agent_ref: &crate::workflow::StepAgent| -> Option<(AgentId, String, bool)> {
+        match agent_ref {
+            crate::workflow::StepAgent::ByType { template } => {
+                kernel.resolve_agent_by_type_or_spawn(template)
+            }
+            _ => None,
+        }
+    };
+    let sender = |_id: AgentId, msg: String, _sm: Option<librefang_types::agent::SessionMode>| async move {
+        Ok((msg, 0u64, 0u64))
+    };
+    let result = engine.execute_run(run_id, resolver, sender).await;
+    assert!(result.is_err(), "a missing agent type must fail the run");
+
+    let run = engine.get_run(run_id).await.unwrap();
+    assert!(
+        matches!(run.state, crate::workflow::WorkflowRunState::Failed),
+        "run must be Failed, not stuck in Running: {:?}",
+        run.state
+    );
+    let err = run.error.as_deref().unwrap_or("");
+    assert!(
+        err.contains("Agent type 'ghost' not found"),
+        "error must name the missing type: {err}"
+    );
 }
 
 /// Source-shape sentinel for the other half of the fix, in the style of `workflow_send_message_closure_contains_per_agent_semaphore_acquire` above.

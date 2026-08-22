@@ -193,6 +193,7 @@ fn workflow_to_json(w: &Workflow) -> serde_json::Value {
                 "agent": match &s.agent {
                     StepAgent::ById { id } => serde_json::json!({"agent_id": id}),
                     StepAgent::ByName { name } => serde_json::json!({"agent_name": name}),
+                    StepAgent::ByType { template } => serde_json::json!({"type": template}),
                 },
                 "prompt_template": s.prompt_template,
                 "mode": serde_json::to_value(&s.mode).unwrap_or_default(),

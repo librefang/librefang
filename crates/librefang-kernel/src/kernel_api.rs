@@ -87,6 +87,13 @@ pub trait KernelApi: KernelHandle + Send + Sync {
 
     fn agent_registry(&self) -> &AgentRegistry;
     fn agent_identities(&self) -> &Arc<crate::agent_identity_registry::AgentIdentityRegistry>;
+    /// Find-or-spawn for workflow steps that reference an agent type:
+    /// reuse the registered agent with that name, else load the template
+    /// manifest (templates/ then workspaces/agents/) and spawn it top-level.
+    /// Returns (agent_id, agent_name, inherit_parent_context), or None when
+    /// no template exists and no agent is registered. Sync — callable from
+    /// the resolver closures the workflow engine injects.
+    fn resolve_agent_by_type_or_spawn(&self, template: &str) -> Option<(AgentId, String, bool)>;
     fn approvals(&self) -> &ApprovalManager;
     fn audit(&self) -> &Arc<AuditLog>;
     fn auth_manager(&self) -> &AuthManager;
@@ -805,6 +812,9 @@ impl KernelApi for LibreFangKernel {
     }
     fn agent_identities(&self) -> &Arc<crate::agent_identity_registry::AgentIdentityRegistry> {
         <Self as crate::AgentSubsystemApi>::identities_ref(self)
+    }
+    fn resolve_agent_by_type_or_spawn(&self, template: &str) -> Option<(AgentId, String, bool)> {
+        LibreFangKernel::resolve_agent_by_type_or_spawn(self, template)
     }
     fn approvals(&self) -> &ApprovalManager {
         <Self as crate::GovernanceSubsystemApi>::approvals(self)

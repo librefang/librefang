@@ -1285,6 +1285,7 @@ impl LibreFangKernel {
                     let inherit = entry.manifest.inherit_parent_context;
                     Some((entry.id, entry.name.clone(), inherit))
                 }
+                StepAgent::ByType { template } => self.resolve_agent_by_type_or_spawn(template),
             }
         };
 
@@ -1388,6 +1389,24 @@ impl LibreFangKernel {
                         let entry = self.agents.registry.find_by_name(name)?;
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((entry.id, entry.name.clone(), inherit))
+                    }
+                    StepAgent::ByType { template } => {
+                        // Dry runs must not mutate the registry — never
+                        // spawn here. Reuse an existing instance, or, when
+                        // the template exists on disk, report its name as
+                        // "will spawn on a real run".
+                        if let Some(entry) = self.agents.registry.find_by_name(template) {
+                            let inherit = entry.manifest.inherit_parent_context;
+                            Some((entry.id, entry.name.clone(), inherit))
+                        } else {
+                            let manifest = super::spawn::load_agent_manifest_from_template_dirs(
+                                &self.home_dir_boot,
+                                template,
+                            )?;
+                            let inherit = manifest.inherit_parent_context;
+                            let name = manifest.name.clone();
+                            Some((librefang_types::agent::AgentId::new(), name, inherit))
+                        }
                     }
                 }
             };
@@ -1500,6 +1519,9 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
                         let entry = kernel.agents.registry.find_by_name(name)?;
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((entry.id, entry.name.clone(), inherit))
+                    }
+                    StepAgent::ByType { template } => {
+                        kernel.resolve_agent_by_type_or_spawn(template)
                     }
                 }
             }
