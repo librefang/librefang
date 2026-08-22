@@ -4,6 +4,7 @@
 use super::error::{ToolError, ToolResult};
 use super::{
     check_taint_outbound_text, current_agent_depth, require_kernel_typed, with_agent_call_depth,
+    AGENT_CALL_DEPTH,
 };
 use crate::kernel_handle::prelude::*;
 use librefang_types::taint::TaintSink;
@@ -175,12 +176,16 @@ pub(super) async fn tool_agent_send(
 }
 
 /// Build agent manifest TOML from parsed parameters.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_agent_manifest_toml(
     name: &str,
     system_prompt: &str,
     tools: Vec<String>,
     shell: Vec<String>,
     network: bool,
+    profile: Option<&str>,
+    model_provider: Option<&str>,
+    model_name: Option<&str>,
 ) -> Result<String, String> {
     let mut tools = tools;
     let has_shell = !shell.is_empty();
@@ -200,11 +205,23 @@ pub(super) fn build_agent_manifest_toml(
         capabilities["shell"] = serde_json::json!(shell);
     }
 
+    let mut model_json = serde_json::json!({
+        "system_prompt": system_prompt,
+    });
+    // Apply model_override or profile to the spawned agent's model config.
+    if let Some(p) = model_provider {
+        model_json["provider"] = serde_json::json!(p);
+    }
+    if let Some(m) = model_name {
+        model_json["model"] = serde_json::json!(m);
+    }
+    if profile.is_some() {
+        model_json["mode"] = serde_json::json!("flexible");
+    }
+
     let manifest_json = serde_json::json!({
         "name": name,
-        "model": {
-            "system_prompt": system_prompt,
-        },
+        "model": model_json,
         "capabilities": capabilities,
     });
 
@@ -265,6 +282,105 @@ pub(super) async fn tool_agent_spawn(
 ) -> ToolResult {
     let kh = require_kernel_typed(kernel)?;
 
+    // Ephemeral path: spawn a temporary worker, run task, return result directly
+    if input["ephemeral"].as_bool().unwrap_or(false) {
+        // Ephemeral spawn runs the agent loop inline on the caller's task, so
+        // each nesting level stacks another ~56 KB of future (#6659). Reject
+        // before we build the request, same as agent_send.
+        let max_depth = kh.max_agent_call_depth();
+        let current_depth = super::current_agent_depth();
+        if current_depth >= max_depth {
+            return Err(ToolError::PermissionDenied(format!(
+                "Inter-agent call depth exceeded (max {max_depth}). \
+                 A->B->C chain is too deep. Use the task queue or a permanent agent instead."
+            )));
+        }
+
+        let message = input["message"]
+            .as_str()
+            .ok_or(ToolError::MissingParameter("message"))?;
+
+        let spawn_sink = TaintSink::agent_message();
+        if let Some(violation) = check_taint_outbound_text(message, &spawn_sink) {
+            return Err(ToolError::PermissionDenied(format!(
+                "Taint violation (message): {violation}"
+            )));
+        }
+
+        // Enforce parent's tool allowlist on the ephemeral worker, same as the
+        // permanent-agent path below. An unrestricted parent (None) passes
+        // through the caller's requested tools unfiltered.
+        let requested_tools: Option<Vec<String>> = input["tools"].as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        });
+        let tools = match (parent_allowed_tools, requested_tools) {
+            (Some(allowed), Some(ref req)) if !req.is_empty() => {
+                let filtered: Vec<String> = req
+                    .iter()
+                    .filter(|t| allowed.iter().any(|a| a == *t))
+                    .cloned()
+                    .collect();
+                if filtered.is_empty() && !req.is_empty() {
+                    return Err(ToolError::PermissionDenied(
+                        "None of the requested tools are allowed by the parent agent's tool list"
+                            .to_string(),
+                    ));
+                }
+                Some(filtered)
+            }
+            (Some(_), _) => None,
+            (None, tools) => tools,
+        };
+
+        let request = librefang_types::agent::EphemeralSpawnRequest {
+            system_prompt: input["system_prompt"].as_str().map(String::from),
+            agent_type: input["agent_type"].as_str().map(String::from),
+            model: input.get("model").and_then(|v| {
+                if let Some(s) = v.as_str() {
+                    // "provider/model" shorthand
+                    let mut parts = s.splitn(2, '/');
+                    let provider = parts.next().unwrap_or("default").to_string();
+                    let model = parts.next().unwrap_or("default").to_string();
+                    Some(librefang_types::agent::ModelConfig {
+                        provider,
+                        model,
+                        ..Default::default()
+                    })
+                } else {
+                    // Object form: accept ONLY provider/model. Do not
+                    // pass base_url / api_key_env through — a
+                    // prompt-injected agent could point the worker at an
+                    // attacker-controlled endpoint with a real env key
+                    // (#6930 review — credential-exfiltration
+                    // primitive).
+                    let obj = v.as_object()?;
+                    let provider = obj.get("provider")?.as_str()?.to_string();
+                    let model = obj.get("model")?.as_str()?.to_string();
+                    Some(librefang_types::agent::ModelConfig {
+                        provider,
+                        model,
+                        ..Default::default()
+                    })
+                }
+            }),
+            tools,
+            skills: input["skills"].as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            }),
+            message: message.to_string(),
+            max_iterations: input["max_iterations"].as_u64().map(|v| v as u32),
+        };
+
+        return kh
+            .spawn_ephemeral(request, parent_id)
+            .await
+            .map_err(ToolError::upstream);
+    }
+
     let name = input["name"]
         .as_str()
         .ok_or(ToolError::MissingParameter("name"))?;
@@ -281,6 +397,18 @@ pub(super) async fn tool_agent_spawn(
     if let Some(violation) = check_taint_outbound_text(system_prompt, &spawn_sink) {
         return Err(ToolError::PermissionDenied(format!(
             "Taint violation (system_prompt): {violation}"
+        )));
+    }
+
+    // Depth guard: prevent unbounded recursive spawn chains. Mirrors the
+    // agent_send guard. Without this, a spawned agent calls agent_spawn to
+    // create another, which spawns another — burning tokens indefinitely.
+    let max_depth = kh.max_agent_call_depth();
+    let current_depth = AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0);
+    if current_depth >= max_depth {
+        return Err(ToolError::PermissionDenied(format!(
+            "Agent spawn depth exceeded (max {max_depth}). \
+             Too many nested agent_spawn calls."
         )));
     }
 
@@ -317,8 +445,27 @@ pub(super) async fn tool_agent_spawn(
         })
         .unwrap_or_default();
 
-    let manifest_toml = build_agent_manifest_toml(name, system_prompt, tools, shell, network)
-        .map_err(ToolError::upstream_msg)?;
+    let ephemeral = input["ephemeral"].as_bool().unwrap_or(false);
+    let task_description = input["task"].as_str().unwrap_or(system_prompt);
+    let profile = input["profile"].as_str();
+    let model_provider = input["model_override"]
+        .get("provider")
+        .and_then(|v| v.as_str());
+    let model_name = input["model_override"]
+        .get("model")
+        .and_then(|v| v.as_str());
+
+    let manifest_toml = build_agent_manifest_toml(
+        name,
+        system_prompt,
+        tools,
+        shell,
+        network,
+        profile,
+        model_provider,
+        model_name,
+    )
+    .map_err(ToolError::upstream_msg)?;
     // Build parent capabilities from the parent's allowed tools list.
     // This prevents a sub-agent from escalating privileges beyond what
     // its parent is permitted to use (capability inheritance enforcement).
@@ -341,6 +488,24 @@ pub(super) async fn tool_agent_spawn(
         .spawn_agent_checked(&manifest_toml, parent_id, &parent_caps)
         .await
         .map_err(ToolError::upstream)?;
+
+    if ephemeral {
+        // Send the task as a user message, wait for response, kill agent.
+        // No workspace persistence, no session reuse — like Claude Code.
+        let response = kh
+            .send_to_agent(&id.to_string(), task_description)
+            .await
+            .map_err(ToolError::upstream)?;
+        let _ = kh.kill_agent(&id.to_string());
+        return Ok(serde_json::json!({
+            "agent_id": id.to_string(),
+            "agent_name": agent_name,
+            "response": response,
+            "status": "completed_and_killed"
+        })
+        .to_string());
+    }
+
     Ok(format!(
         "Agent spawned successfully.\n  ID: {id}\n  Name: {agent_name}"
     ))

@@ -179,6 +179,20 @@ function renderPage(): void {
   );
 }
 
+/**
+ * Select the Template Library tab.
+ *
+ * The page opens on "My Workflows" and stays there even when the workflow list
+ * is empty — see the comment above the selection effect in `WorkflowsPage.tsx`:
+ * the empty state offers "Create your first workflow" and "Ask an agent"
+ * *before* nudging anyone toward templates. The templates panel is only mounted
+ * while its tab is active, so any assertion about template cards has to open
+ * the tab rather than assume an automatic switch.
+ */
+function showTemplatesTab(): void {
+  fireEvent.click(screen.getByRole("tab", { name: /workflows.template_library/ }));
+}
+
 const sampleWorkflow = {
   id: "wf-1",
   name: "alpha-flow",
@@ -214,7 +228,7 @@ describe("WorkflowsPage", () => {
     expect(screen.queryByText("alpha-flow")).not.toBeInTheDocument();
   });
 
-  it("auto-switches to templates tab when there are no workflows", () => {
+  it("stays on the workflows tab when there are no workflows, and opens templates on demand", () => {
     useWorkflowsMock.mockReturnValue(makeQuery([]));
     useWorkflowTemplatesMock.mockReturnValue(
       makeQuery([
@@ -228,11 +242,21 @@ describe("WorkflowsPage", () => {
       ]),
     );
     renderPage();
-    // Templates tab content surfaces the template card.
-    expect(screen.getByText("Sample Template")).toBeInTheDocument();
-    // Templates tab is selected.
+
+    // An empty workflow list must NOT jump the operator to the template
+    // library: the "My Workflows" empty state offers "Create your first
+    // workflow" and "Ask an agent" first, and the page comment above the
+    // selection effect states that intent explicitly.
+    const workflowsTab = screen.getByRole("tab", { name: /workflows.my_workflows/ });
     const templatesTab = screen.getByRole("tab", { name: /workflows.template_library/ });
+    expect(workflowsTab).toHaveAttribute("aria-selected", "true");
+    expect(templatesTab).toHaveAttribute("aria-selected", "false");
+    expect(screen.queryByText("Sample Template")).not.toBeInTheDocument();
+
+    // Choosing the tab is what surfaces the template card.
+    showTemplatesTab();
     expect(templatesTab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("Sample Template")).toBeInTheDocument();
   });
 
   it("renders workflow rows from the query data", () => {
@@ -350,6 +374,7 @@ describe("WorkflowsPage", () => {
     mutations.inst.mutateAsync.mockResolvedValue({ workflow_id: "wf-new" });
 
     renderPage();
+    showTemplatesTab();
 
     // The Use template button drives instantiation.
     fireEvent.click(screen.getByText("Use template"));
@@ -373,6 +398,7 @@ describe("WorkflowsPage", () => {
     );
     const mutations = setMutationDefaults();
     renderPage();
+    showTemplatesTab();
 
     // The preview button uses the Eye icon — find it as the second button
     // inside the template card footer (the first is "Use template").
@@ -494,6 +520,7 @@ describe("WorkflowsPage", () => {
       ]),
     );
     renderPage();
+    showTemplatesTab();
 
     // Both render under the default "all" filter.
     expect(screen.getByText("AlphaTpl")).toBeInTheDocument();

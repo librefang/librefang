@@ -336,7 +336,7 @@ impl SkillhubClient {
             .iter()
             .find(|s| s.slug == slug)
             .ok_or_else(|| {
-                SkillError::Network(format!("Skill '{slug}' not found in Skillhub index"))
+                SkillError::NotFound(format!("Skill '{slug}' not found in Skillhub index"))
             })?;
         let version = &entry.version;
 

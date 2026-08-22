@@ -112,6 +112,7 @@ mod subsystem_forwards;
 pub mod subsystems;
 mod task_registry;
 mod tools_and_skills;
+pub use tools_and_skills::PendingSkillMcpDeclarations;
 pub use tools_and_skills::SkillReloadOutcome;
 mod triggers_and_workflow;
 

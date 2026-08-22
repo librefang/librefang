@@ -17,6 +17,7 @@
     "tasks": "Zadania",
     "goals": "Cele",
     "agents": "Agenci",
+    "agent_types": "Typy agentów",
     "users": "Użytkownicy",
     "providers": "Dostawcy",
     "channels": "Kanały",
@@ -273,6 +274,26 @@
       "no_peers": "brak węzłów"
     },
     "setup_failed": "Szybka inicjalizacja nie powiodła się"
+  },
+  "agentTypes": {
+    "title": "Typy agentów",
+    "create": "Utwórz typ",
+    "edit": "Edytuj typ",
+    "delete": "Usuń typ",
+    "quickRun": "Szybkie uruchomienie",
+    "name": "Nazwa",
+    "description": "Opis",
+    "systemPrompt": "Prompt systemowy",
+    "provider": "Dostawca",
+    "model": "Model",
+    "tools": "Narzędzia",
+    "message": "Wiadomość",
+    "result": "Wynik",
+    "noTypes": "Nie zdefiniowano jeszcze żadnych typów agentów",
+    "confirmDelete": "Usunąć ten typ agenta?",
+    "iterations": "Iteracje",
+    "latency": "Opóźnienie",
+    "cost": "Koszt"
   },
   "agents": {
     "title": "Agenci",
@@ -1175,7 +1196,8 @@
     "pending_title": "Oczekujący warsztat umiejętności",
     "pending_load_failed": "Nie udało się załadować oczekujących kandydatów:",
     "pending_unknown_error": "nieznany błąd",
-    "pending_desc": "Projekty przechwycone z rozmów z agentami oczekujące na Twoją recenzję (#3328)."
+    "pending_desc": "Projekty przechwycone z rozmów z agentami oczekujące na Twoją recenzję (#3328).",
+    "viewOnMarketplace": "Zobacz w {{marketplace}}"
   },
   "hands": {
     "title": "Ręce (Hands)",
@@ -1688,7 +1710,11 @@
       "pending_review_many": "{{count}} uruchomień przepływu pracy oczekuje na weryfikację operatora",
       "pending_review_other": "{{count}} uruchomień przepływu pracy oczekujących na weryfikację operatora",
       "empty_artifact": "(pusty artefakt)"
-    }
+    },
+    "save_from_chat": "Zapisz jako przepływ pracy",
+    "saved_to_canvas": "Przepływ pracy otwarty w Kanwie",
+    "invalid_json": "Ten blok JSON nie jest prawidłowym JSON-em przepływu pracy",
+    "no_json_found": "W tej wiadomości nie ma bloku JSON do zapisania"
   },
   "scheduler": {
     "title": "Harmonogram",

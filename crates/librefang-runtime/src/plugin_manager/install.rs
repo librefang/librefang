@@ -635,6 +635,69 @@ pub fn remove_plugin(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether the daemon itself runs inside a virtualenv or Conda environment.
+///
+/// pip rejects `--user` installs there, so the install flags must omit
+/// `--user` / `--break-system-packages`.
+pub(super) fn pip_in_venv() -> bool {
+    std::env::var("VIRTUAL_ENV").is_ok() || std::env::var("CONDA_PREFIX").is_ok()
+}
+
+/// Whether `name` resolves on the daemon's PATH. Minimal images (Orange
+/// Pi) often ship `python3` without a `python` alias. Runs on Tokio so the
+/// async install paths never block on a synchronous spawn.
+pub(super) async fn interpreter_exists(name: &str) -> bool {
+    tokio::process::Command::new(name)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .is_ok()
+}
+
+/// Resolve the Python interpreter and pip install args for a plugin's
+/// `requirements.txt`.
+///
+/// Shared by `install_requirements` and `install_plugin_deps` so both
+/// install paths use the same interpreter fallback (`python3` first, then
+/// `python`) and the same virtualenv behavior: inside a virtualenv or
+/// Conda environment pip rejects `--user`, so `--user` and
+/// `--break-system-packages` are omitted there.
+///
+/// `probe` decides whether an interpreter name is usable and `in_venv`
+/// carries the `pip_in_venv()` result; both are injectable so tests can
+/// fake interpreter availability and environment without touching PATH or
+/// process-global env vars.
+pub(super) async fn resolve_python_install<F, Fut>(
+    probe: F,
+    in_venv: bool,
+) -> Result<(&'static str, Vec<&'static str>), String>
+where
+    F: Fn(&'static str) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    for name in ["python3", "python"] {
+        if probe(name).await {
+            let mut args = vec!["-m", "pip", "install"];
+            if !in_venv {
+                args.push("--user");
+                // PEP 668 "externally managed" environments (Ubuntu 23.04+,
+                // including the Orange Pi images) reject pip installs without
+                // this override. In a venv the flag is unnecessary and pip
+                // warns, so it is only added outside one.
+                args.push("--break-system-packages");
+            }
+            return Ok((name, args));
+        }
+    }
+    Err(
+        "No Python interpreter found on PATH (tried python3, then python) — \
+         cannot install plugin requirements"
+            .to_string(),
+    )
+}
+
 /// Install Python requirements for a plugin.
 pub async fn install_requirements(plugin_name: &str) -> Result<String, String> {
     validate_plugin_name(plugin_name)?;
@@ -645,34 +708,31 @@ pub async fn install_requirements(plugin_name: &str) -> Result<String, String> {
         return Ok("No requirements.txt found — nothing to install".to_string());
     }
 
-    // In virtualenv/conda environments, pip forbids --user installs.
-    let in_venv = std::env::var("VIRTUAL_ENV").is_ok() || std::env::var("CONDA_PREFIX").is_ok();
-    let mut args = vec!["-m", "pip", "install"];
-    if !in_venv {
-        args.push("--user");
-    }
+    let in_venv = pip_in_venv();
+    let (interpreter, mut args) = resolve_python_install(interpreter_exists, in_venv).await?;
     args.push("-r");
 
     warn!(
         plugin = plugin_name,
         requirements = %requirements.display(),
         venv = in_venv,
+        interpreter = interpreter,
         "Installing Python requirements"
     );
 
-    let output = tokio::process::Command::new("python")
+    let output = tokio::process::Command::new(interpreter)
         .args(&args)
         .arg(&requirements)
         .output()
         .await
-        .map_err(|e| format!("Failed to run python -m pip: {e}"))?;
+        .map_err(|e| format!("Failed to run {interpreter} -m pip: {e}"))?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(stdout.to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("python -m pip install failed: {stderr}"))
+        Err(format!("{interpreter} -m pip install failed: {stderr}"))
     }
 }
 

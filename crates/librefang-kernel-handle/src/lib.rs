@@ -128,6 +128,7 @@ pub trait KernelHandle:
     + ChannelSender
     + PromptStore
     + WorkflowRunner
+    + AgentTypeTools
     + GoalControl
     + ToolPolicy
     + ApiAuth
@@ -154,6 +155,7 @@ impl<T> KernelHandle for T where
         + ChannelSender
         + PromptStore
         + WorkflowRunner
+        + AgentTypeTools
         + GoalControl
         + ToolPolicy
         + ApiAuth

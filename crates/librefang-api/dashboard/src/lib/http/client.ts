@@ -19,6 +19,9 @@ export { ApiError } from "./errors";
 export {
   // agents
   listAgents,
+  // agent types
+  listAgentTypes,
+  getAgentType,
   getAgentDetail,
   getAgentStats,
   listAgentEvents,
@@ -28,6 +31,13 @@ export {
   listPromptsOverview,
   listExperiments,
   getExperimentMetrics,
+  // agent types
+  listAgentTypes,
+  getAgentType,
+  createAgentType,
+  updateAgentType,
+  deleteAgentType,
+  spawnEphemeral,
   // analytics / usage / budget
   getUsageSummary,
   listUsageByAgent,
@@ -179,6 +189,12 @@ export type {
   OperatorPause,
   OperatorActionVerb,
   OperatorActionDescriptor,
+  // agent types (#6699)
+  AgentType,
+  AgentTypeSummary,
+  AgentTypeInput,
+  EphemeralResult,
+  EphemeralSpawnRequest,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -187,6 +203,11 @@ export type {
 export {
   // agents
   spawnAgent,
+  // agent types + ephemeral spawning
+  createAgentType,
+  updateAgentType,
+  deleteAgentType,
+  spawnEphemeral,
   cloneAgent,
   stopAgent,
   suspendAgent,
@@ -362,6 +383,11 @@ export {
 export type {
   A2AAgentItem,
   A2ATaskStatus,
+  AgentTypeSummary,
+  AgentType,
+  AgentTypeInput,
+  EphemeralResult,
+  EphemeralSpawnRequest,
   AutoDreamAbortOutcome,
   AutoDreamAgentStatus,
   AutoDreamProgress,

@@ -492,7 +492,8 @@ tui-event-session-management-not-available-in-process = 进程内模式下会话
 tui-event-kv-save-failed = 保存键值对失败
 tui-event-kv-not-available-in-process = 进程内模式下内存 KV 不可用
 tui-event-kv-delete-failed = 删除键值对失败
-tui-event-skill-install-failed = 安装 { $slug } 失败
+tui-event-skill-install-http-fallback = HTTP { $status }
+tui-event-skill-install-failed-detail = 安装 { $slug } 失败: { $detail }
 tui-event-skill-install-not-available-in-process = 进程内模式下技能安装不可用
 tui-event-skill-uninstall-failed = 卸载 { $name } 失败
 tui-event-skill-uninstall-not-available-in-process = 进程内模式下技能卸载不可用
@@ -771,7 +772,7 @@ tui-security-feat-prompt-name = 提示词注入扫描器
 tui-security-feat-prompt-desc = 检测覆盖尝试和数据外泄
 
 # templates.rs
-tui-templates-title = 模板
+tui-templates-title = 智能体类型
 tui-templates-cat-all = 全部
 tui-templates-cat-general = 通用
 tui-templates-cat-development = 开发
@@ -2194,3 +2195,74 @@ status-mb = { $mb } MB
 status-summary-down = librefang down home={ $home } default={ $provider }/{ $model }
 status-uptime-format = { $hours }h { $mins }m
 # --- Brand/proper names ---
+
+tui-tab-goals = 目标
+tui-goals-title = ⌖ 目标
+tui-goal-created = 目标已创建: { $id }
+tui-goal-deleted = 目标已删除: { $id }
+tui-goal-run-started = 目标运行已启动: { $id }
+tui-goal-run-stopped = 目标运行已停止: { $id }
+tui-goal-create-failed = 创建目标失败
+tui-goal-inproc-unavailable = 进程内模式下目标管理不可用
+tui-goal-delete-failed = 删除目标失败
+tui-goal-start-failed = 启动目标失败
+tui-goal-start-error = 启动目标运行: { $error }
+tui-goal-stop-failed = 停止目标失败
+
+tui-agents-space-toggle =   (空格切换)
+tui-agents-cost-budget =   费用预算: 
+tui-agents-hl-change =   (h/l 更改)
+tui-agents-allowed-profiles =   允许的配置 (Tab 切换):
+tui-agents-no-profiles =     (无可用配置)
+
+tui-goals-filter =   过滤: { $query }
+tui-goals-loading = 正在加载目标...
+tui-goals-empty = 未找到目标。
+tui-goals-hints =   / 搜索 | n 新建 | d 删除 | s 启动/停止 | Enter 详情 | r 刷新
+tui-goals-none-selected = 未选择目标。
+tui-goals-judge-label =   目标裁判: 
+tui-goals-phase-label =   运行阶段: 
+tui-goals-hint-stop = s 停止运行
+tui-goals-hint-start = s 启动运行
+tui-goals-detail-hints =   q/Esc 关闭 | { $run_hint } | r 刷新
+tui-goals-new-title = 新建目标
+tui-goals-step =   步骤 { $n }/6
+tui-goals-example = 例如 "修复登录超时"
+tui-goals-prompt = 代理需要完成什么？
+tui-goals-agent-hint = UUID 或留空自动创建
+tui-goals-verify-hint = Space/Tab 切换 — 验证器每次迭代检查质量
+tui-goals-reviewer-hint = UUID 或留空自动创建审查者
+tui-goals-judge = 目标裁判:
+tui-goals-model-hint = 完成检查模型，例如 "claude-haiku"（可选）
+tui-goals-review-on = ▣ 自动审查已启用（审查者将检查每次迭代）
+tui-goals-review-off = ▢ 自动审查已禁用
+tui-goals-nav-submit = Esc 返回 | Enter 提交
+tui-goals-nav-toggle = Esc 返回 | Space/Tab 切换 | Enter 下一步
+tui-goals-nav-next = Esc 返回 | Enter 下一步
+tui-goals-phase-actv = ● 活动
+tui-goals-phase-done = ○ 完成
+tui-goals-phase-canc = ○ 取消
+tui-goals-phase-fail = ● 失败
+tui-goals-phase-pend = ○ 待定
+cmd-goal-create-error = 创建目标出错: { $error }
+cmd-goal-created = 目标已创建: { $id }
+cmd-goal-start-error = 启动目标出错: { $error }
+cmd-goal-watching = 正在观察目标运行（Ctrl+C 停止）...
+cmd-goal-progress =   [{ $current }/{ $total }] 阶段={ $phase } 进度={ $progress }%
+cmd-goal-finished =   目标已成功完成！
+cmd-goal-max-iterations =   目标达到最大迭代次数。
+cmd-goal-rate-limited =   目标运行受限流限制。
+cmd-goal-stopped =   目标运行已停止。
+cmd-goal-error =   错误: { $error }
+
+tui-agents-detail-routing =   路由:
+tui-agents-hints-input-prompt =     [Enter] 下一步  [Tab] 浏览提示词库  [Esc] 返回
+tui-agents-hints-prompt-picker =   [↑↓] 导航  [Enter] 选择提示词  [Esc] 返回
+tui-agents-hints-routing-fixed =   [Space] 切换灵活模式  [Enter] 创建  [Esc] 返回
+tui-agents-hints-routing-flexible =   [↑↓] 导航配置  [Tab] 切换配置  [Space] 切换模式  [h/l] 预算  [Enter] 创建  [Esc] 返回
+tui-agents-label-no-prompts = （无可用提示词）
+tui-agents-prompt-routing =   模型路由配置:
+tui-agents-prompt-select-prompt =   从库中选择提示词:
+tui-agents-title-custom-model-routing = 自定义 — 模型路由
+tui-agents-title-edit-routing = 编辑模型路由
+tui-agents-title-prompt-picker = 提示词库

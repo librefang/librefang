@@ -370,6 +370,7 @@ pub async fn get_agent_skills(
         );
     }
     let available = read_agent_skills_registry(state.kernel.skill_registry_ref()).skill_names();
+    let pending = state.kernel.pending_skill_and_mcp_declarations(agent_id);
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -377,6 +378,7 @@ pub async fn get_agent_skills(
             "available": available,
             "mode": skill_assignment_mode(&entry.manifest),
             "disabled": entry.manifest.skills_disabled,
+            "pending": pending.skills,
         })),
     )
 }
@@ -493,12 +495,14 @@ pub async fn get_agent_mcp_servers(
         }
     }
     let mode = mcp_servers_mode(&entry.manifest.mcp_servers);
+    let pending = state.kernel.pending_skill_and_mcp_declarations(agent_id);
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "assigned": entry.manifest.mcp_servers,
             "available": available,
             "mode": mode,
+            "pending": pending.mcp_servers,
         })),
     )
 }
