@@ -3467,7 +3467,8 @@
     "copied": "已复制",
     "copy_failed": "复制失败",
     "download": "下载",
-    "loading": "加载中…"
+    "loading": "加载中…",
+    "source_changed": "TOML 已在此编辑器之外发生更改。请取消并重新打开编辑后再保存。"
   },
   "audit": {
     "title": "审计日志",

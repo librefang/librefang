@@ -3467,7 +3467,8 @@
     "copied": "클립보드에 복사됨",
     "copy_failed": "복사하지 못했습니다.",
     "download": "다운로드",
-    "loading": "로드 중…"
+    "loading": "로드 중…",
+    "source_changed": "이 편집기 외부에서 TOML이 변경되었습니다. 저장하기 전에 취소하고 편집을 다시 여세요."
   },
   "audit": {
     "title": "감사 추적",

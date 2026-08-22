@@ -3467,7 +3467,8 @@
     "copied": "Copied to clipboard",
     "copy_failed": "Failed to copy",
     "download": "Download",
-    "loading": "Loading…"
+    "loading": "Loading…",
+    "source_changed": "The TOML changed outside this editor. Cancel and reopen editing before saving."
   },
   "audit": {
     "title": "Audit trail",
