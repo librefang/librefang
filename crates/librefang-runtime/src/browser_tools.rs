@@ -72,6 +72,12 @@ pub async fn tool_browser_click(
     let selector = input["selector"]
         .as_str()
         .ok_or(ToolError::MissingParameter("selector"))?;
+    if selector.trim().is_empty() {
+        return Err(ToolError::InvalidParameter {
+            name: "selector",
+            reason: "must not be empty".to_string(),
+        });
+    }
 
     let resp = mgr
         .send_command(
@@ -326,6 +332,26 @@ mod tests {
             ],
             "links_base": "https://news.ycombinator.com",
         })
+    }
+
+    #[tokio::test]
+    async fn empty_click_selector_is_invalid_input_without_opening_a_session() {
+        let manager = BrowserManager::new(Default::default());
+        let error = tool_browser_click(
+            &serde_json::json!({"selector": "   "}),
+            &manager,
+            "test-agent",
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ToolError::InvalidParameter {
+                name: "selector",
+                ..
+            }
+        ));
     }
 
     /// The link table is content lifted out of the page, so it belongs inside the untrusted-content boundary rather than in the trusted preamble around it.
