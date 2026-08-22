@@ -223,8 +223,9 @@ pub trait WorkflowRunner: Send + Sync {
         &self,
         workflow_id: &str,
         input: &str,
+        caller_agent_id: Option<&str>,
     ) -> Result<(String, String), KernelOpError> {
-        let _ = (workflow_id, input);
+        let _ = (workflow_id, input, caller_agent_id);
         Err(KernelOpError::unavailable("Workflow engine"))
     }
 

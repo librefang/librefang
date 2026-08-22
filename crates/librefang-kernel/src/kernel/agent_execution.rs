@@ -1452,8 +1452,13 @@ impl LibreFangKernel {
             .actual_provider
             .clone()
             .unwrap_or_else(|| manifest.model.provider.clone());
+        // Parent-attribution for permanent parented spawns (workflow step
+        // agents spawned from a template): their spend bills to the spawner,
+        // mirroring the ephemeral `billed_agent` pattern. Top-level agents
+        // (parent None) keep billing to themselves.
+        let billed_agent = entry.parent.unwrap_or(agent_id);
         let usage_record = librefang_memory::usage::UsageRecord {
-            agent_id,
+            agent_id: billed_agent,
             provider: billed_provider,
             // #6134: honour `actual_model` so a driver that resolved its own
             // model (e.g. codex-cli) records the model it actually ran. Mirrors

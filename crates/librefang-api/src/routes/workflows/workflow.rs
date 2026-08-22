@@ -37,9 +37,14 @@ pub async fn create_workflow(
             StepAgent::ByName {
                 name: name.to_string(),
             }
+        } else if let Some(t) = s["type"].as_str() {
+            StepAgent::ByType {
+                template: t.to_string(),
+                fresh: s["fresh"].as_bool().unwrap_or(false),
+            }
         } else {
             return ApiErrorResponse::bad_request(format!(
-                "Step '{}' needs 'agent_id' or 'agent_name'",
+                "Step '{}' needs 'agent_id', 'agent_name', or 'type'",
                 step_name
             ))
             .into_json_tuple();
@@ -330,9 +335,14 @@ pub async fn update_workflow(
                 StepAgent::ByName {
                     name: aname.to_string(),
                 }
+            } else if let Some(t) = s["type"].as_str() {
+                StepAgent::ByType {
+                    template: t.to_string(),
+                    fresh: s["fresh"].as_bool().unwrap_or(false),
+                }
             } else {
                 return ApiErrorResponse::bad_request(format!(
-                    "Step '{}' needs 'agent_id' or 'agent_name'",
+                    "Step '{}' needs 'agent_id', 'agent_name', or 'type'",
                     step_name
                 ))
                 .into_json_tuple();
@@ -525,6 +535,9 @@ fn spawn_background_run(
                             let inherit = entry.manifest.inherit_parent_context;
                             Some((entry.id, entry.name.clone(), inherit))
                         }
+                        StepAgent::ByType { template, fresh } => state_for_resolver
+                            .kernel
+                            .resolve_agent_by_type_or_spawn(template, None, *fresh),
                     }
                 },
                 move |agent_id: librefang_types::agent::AgentId,
@@ -1070,6 +1083,7 @@ pub async fn resume_workflow_run(
     };
 
     // Build agent resolver and send_message for the resume execution.
+    let owner_for_resolver = state.kernel.workflow_engine().run_owner(run_id);
     let state_for_resolver = state.clone();
     let state_for_sender = state.clone();
 
@@ -1090,6 +1104,9 @@ pub async fn resume_workflow_run(
                 let inherit = entry.manifest.inherit_parent_context;
                 Some((entry.id, entry.name.clone(), inherit))
             }
+            StepAgent::ByType { template, fresh } => state_for_resolver
+                .kernel
+                .resolve_agent_by_type_or_spawn(template, owner_for_resolver, *fresh),
         }
     };
 
@@ -1332,6 +1349,7 @@ pub async fn operator_action_workflow_run(
     }
 
     let payload = payload_opt.clone();
+    let owner_for_resolver = state.kernel.workflow_engine().run_owner(run_id);
     let state_for_resolver = state.clone();
     let agent_resolver = move |agent_ref: &librefang_kernel::workflow::StepAgent| {
         use librefang_kernel::workflow::StepAgent;
@@ -1350,6 +1368,9 @@ pub async fn operator_action_workflow_run(
                 let inherit = entry.manifest.inherit_parent_context;
                 Some((entry.id, entry.name.clone(), inherit))
             }
+            StepAgent::ByType { template, fresh } => state_for_resolver
+                .kernel
+                .resolve_agent_by_type_or_spawn(template, owner_for_resolver, *fresh),
         }
     };
 

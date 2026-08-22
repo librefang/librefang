@@ -1180,7 +1180,7 @@ pub async fn execute_tool_raw(
         "goal_update" => tool_goal_update(input, *kernel),
 
         // Workflow tools.
-        "workflow_run" => tool_workflow_run(input, *kernel).await,
+        "workflow_run" => tool_workflow_run(input, *kernel, *caller_agent_id).await,
         "workflow_list" => tool_workflow_list(*kernel).await,
         "workflow_describe" => tool_workflow_describe(input, *kernel).await,
         "workflow_status" => tool_workflow_status(input, *kernel).await,

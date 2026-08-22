@@ -49,6 +49,72 @@ impl LibreFangKernel {
         self.spawn_agent_inner(manifest, parent, source_toml_path, None)
     }
 
+    /// Find-or-spawn for workflow steps that reference an agent type:
+    /// reuse the registered agent with that name, else load the template
+    /// manifest (templates/ then workspaces/agents/) and spawn it top-level.
+    /// None = no template and no agent. Sync — callable from the resolver
+    /// closures (all of them are `Fn`, not async).
+    ///
+    /// Spawns are permanent: the canonical name-derived UUID (race-safe via
+    /// `agent_identities`, #4614) makes concurrent runs converge on one
+    /// instance whose session survives daemon restarts, mirroring
+    /// `resolve_or_spawn_specialist` in `assistant_routing`.
+    pub fn resolve_agent_by_type_or_spawn(
+        &self,
+        template: &str,
+        owner: Option<AgentId>,
+        fresh: bool,
+    ) -> Option<(AgentId, String, bool)> {
+        if !fresh {
+            if let Some(entry) = self.agents.registry.find_by_name(template) {
+                let inherit = entry.manifest.inherit_parent_context;
+                return Some((entry.id, entry.name.clone(), inherit));
+            }
+        }
+        let mut manifest = load_agent_manifest_from_template_dirs(&self.home_dir_boot, template)?;
+        let inherit = manifest.inherit_parent_context;
+        let name = manifest.name.clone();
+        // Deterministic canonical id for reuse across runs (race-safe via
+        // agent_identities, #4614) — computed explicitly because
+        // spawn_agent_inner derives a RANDOM id once a parent is set,
+        // which would break the find-or-spawn contract. fresh=true
+        // deliberately requests a new random instance per run; the
+        // registry is name-unique (AgentAlreadyExists), so a fresh
+        // instance also gets a unique name tag — it must never shadow
+        // the canonical name in find_by_name anyway.
+        let predetermined = if fresh {
+            let tag: String = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+            manifest.name = format!("{name}-{tag}");
+            AgentId::new()
+        } else {
+            let derived = AgentId::from_name(&name);
+            self.agents
+                .agent_identities
+                .register_if_absent(&name, derived)
+        };
+        let spawned_name = manifest.name.clone();
+        let id = match self.spawn_agent_inner(manifest, owner, None, Some(predetermined)) {
+            Ok(id) => id,
+            Err(e) => {
+                // Concurrent find-or-spawn race: another task may have
+                // registered the canonical instance between our
+                // find_by_name probe and the spawn above. Reuse the
+                // winner instead of failing the step.
+                if !fresh {
+                    if let Some(entry) = self.agents.registry.find_by_name(&name) {
+                        warn!(agent_type = %template, error = %e,
+                            "workflow step: lost the spawn race — reusing the winning instance");
+                        return Some((entry.id, entry.name.clone(), inherit));
+                    }
+                }
+                warn!(agent_type = %template, error = %e,
+                    "workflow step: template found but agent spawn failed");
+                return None;
+            }
+        };
+        Some((id, spawned_name, inherit))
+    }
+
     /// Pure, side-effect-free spawn pre-checks shared by `spawn_agent_inner` and destructive callers that must validate before mutating state.
     ///
     /// Runs the manifest module-path sandbox check (#3533), the reserved agent-name namespace check (#4980), and the tool_exec backend override check (#3332).
@@ -535,5 +601,60 @@ impl LibreFangKernel {
             keys.push(fixed);
         }
         Ok(keys)
+    }
+}
+
+/// Load an agent-type template manifest, mirroring `resolve_ephemeral_manifest`'s
+/// directory order: `templates/<name>.toml` first, `workspaces/agents/<name>/agent.toml`
+/// second (deliberately not refactored to share — messaging.rs stays untouched).
+/// Returns None when no template exists; a read/parse failure is logged and
+/// treated as missing so the workflow step surfaces the ByType "not found"
+/// error instead of a raw filesystem error.
+pub(crate) fn load_agent_manifest_from_template_dirs(
+    home_dir_boot: &std::path::Path,
+    template: &str,
+) -> Option<AgentManifest> {
+    // Path-traversal guard: only [A-Za-z0-9_-] for <name>.toml.
+    if template.is_empty()
+        || template.len() > 64
+        || !template
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        warn!(agent_type = %template, "workflow step: agent type contains disallowed characters");
+        return None;
+    }
+    let templates_dir = home_dir_boot.join("templates");
+    let path = templates_dir.join(format!("{template}.toml"));
+    if path.exists() {
+        return load_manifest_file(&path, template);
+    }
+    let agent_path = home_dir_boot
+        .join("workspaces")
+        .join("agents")
+        .join(template)
+        .join("agent.toml");
+    if agent_path.exists() {
+        return load_manifest_file(&agent_path, template);
+    }
+    None
+}
+
+fn load_manifest_file(path: &std::path::Path, template: &str) -> Option<AgentManifest> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(agent_type = %template, path = %path.display(), error = %e,
+                "workflow step: failed to read template manifest");
+            return None;
+        }
+    };
+    match toml::from_str::<AgentManifest>(&content) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            warn!(agent_type = %template, path = %path.display(), error = %e,
+                "workflow step: invalid template manifest");
+            None
+        }
     }
 }

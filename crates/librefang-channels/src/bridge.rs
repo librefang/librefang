@@ -400,7 +400,12 @@ pub trait ChannelBridgeHandle: Send + Sync {
     }
 
     /// Run a workflow by name with the given input text.
-    async fn run_workflow_text(&self, _name: &str, _input: &str) -> String {
+    async fn run_workflow_text(
+        &self,
+        _name: &str,
+        _input: &str,
+        _owner: Option<librefang_types::agent::AgentId>,
+    ) -> String {
         "Workflows not available.".to_string()
     }
 
@@ -7094,7 +7099,9 @@ async fn handle_command(
                 } else {
                     String::new()
                 };
-                handle.run_workflow_text(wf_name, &input).await
+                handle
+                    .run_workflow_text(wf_name, &input, resolve_for_command())
+                    .await
             } else {
                 "Usage: /workflow run <name> [input]".to_string()
             }

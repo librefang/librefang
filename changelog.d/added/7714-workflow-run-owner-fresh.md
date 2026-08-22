@@ -1,0 +1,1 @@
+Workflow runs record their owner and bill template-spawned step agents to it; steps can request a fresh agent instance per run with `{ type = "x", fresh = true }`, which spawns a new random-id instance with a unique name tag instead of reusing the canonical one. (@DaBlitzStein)

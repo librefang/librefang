@@ -42,6 +42,7 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
         &self,
         workflow_id: &str,
         input: &str,
+        caller_agent_id: Option<&str>,
     ) -> Result<(String, String), kernel_handle::KernelOpError> {
         use crate::workflow::WorkflowId;
         use kernel_handle::KernelOpError;
@@ -66,7 +67,10 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
         // The nesting cap in `LibreFangKernel::run_workflow` raises `CapabilityDenied`, and folding it into `Internal` here would deliver it to `tool_workflow_run` as an opaque upstream failure — a 5xx-class shape that reads as a downstream crash and invites retry, which is exactly the confusion the comment in `tool_agent_send` argues against.
         // `KernelOpError` *is* `LibreFangError`, so the variant survives verbatim.
         // Everything else keeps the historical stringified `Internal` shape, including its prefix.
-        let (run_id, output) = LibreFangKernel::run_workflow(self, wf_id, input.to_string())
+        let owner = caller_agent_id
+            .and_then(|s| s.parse::<uuid::Uuid>().ok())
+            .map(librefang_types::agent::AgentId);
+        let (run_id, output) = LibreFangKernel::run_workflow(self, wf_id, input.to_string(), owner)
             .await
             .map_err(|e| match e {
                 crate::error::KernelError::LibreFang(
@@ -288,10 +292,13 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
                 })?
         };
 
+        let owner = caller_agent_id
+            .and_then(|s| s.parse::<uuid::Uuid>().ok())
+            .map(librefang_types::agent::AgentId);
         let run_id = self
             .workflows
             .engine
-            .create_run(wf_id, input.to_string())
+            .create_run_with_owner(wf_id, input.to_string(), owner)
             .await
             .ok_or_else(|| KernelOpError::Internal("Workflow not found".to_string()))?;
 
@@ -368,6 +375,9 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
                         let entry = k1.agents.registry.find_by_name(name)?;
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((entry.id, entry.name.clone(), inherit))
+                    }
+                    crate::workflow::StepAgent::ByType { template, fresh } => {
+                        k1.resolve_agent_by_type_or_spawn(template, owner, *fresh)
                     }
                 }
             };
