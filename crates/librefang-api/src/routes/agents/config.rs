@@ -877,26 +877,35 @@ pub async fn patch_agent_config(
         }
     }
 
-    // Update model/provider — always go through set_agent_model so that
-    // provider-change semantics (prefix stripping, canonical-session cleanup,
-    // and clearing of stale per-agent api_key_env / base_url overrides) are
-    // applied uniformly. Bypassing it via update_model_and_provider was the
-    // root cause of #2380: switching to a non-default provider via the
-    // dashboard left stale CLOUDVERSE_API_KEY / cloudverse base_url on the
-    // manifest, so the new provider's request was sent to the old URL with
-    // the old credentials and rejected with "Missing Authentication header".
-    if let Some(ref new_model) = req.model {
-        if !new_model.is_empty() {
-            let explicit_provider = req.provider.as_deref().filter(|p| !p.is_empty());
-            if let Err(e) = state
-                .kernel
-                .set_agent_model(agent_id, new_model, explicit_provider)
-            {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": scrub_500(&e, &t)})),
-                );
-            }
+    // Update model/provider through set_agent_model so provider-change semantics (prefix stripping, canonical-session cleanup, and stale per-agent credential/base URL removal) are applied uniformly. Bypassing it was the root cause of #2380.
+    // A provider-only PATCH keeps the stored model. Ignoring that shape returned 200 without changing anything (#7765).
+    let requested_model = req.model.as_deref().filter(|model| !model.is_empty());
+    let explicit_provider = req
+        .provider
+        .as_deref()
+        .filter(|provider| !provider.is_empty());
+    if requested_model.is_some() || explicit_provider.is_some() {
+        let model = match requested_model {
+            Some(model) => model.to_string(),
+            None => match state.kernel.agent_registry().get(agent_id) {
+                Some(entry) => entry.manifest.model.model,
+                None => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+                    );
+                }
+            },
+        };
+        if let Err(e) = state
+            .kernel
+            .set_agent_model(agent_id, &model, explicit_provider)
+        {
+            let status = kernel_err_to_status(&e);
+            return (
+                status,
+                Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
+            );
         }
     }
 
