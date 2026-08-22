@@ -352,10 +352,7 @@ pub fn decide_auth(
 ///
 /// Returns `Ok(AuthMethod)` on success, or `Err(ready-made Response)` on any
 /// rejection so callers can return it immediately.
-// The `Err` payload is an axum `Response`, which clippy 1.98 flags at 128
-// bytes. Boxing it would ripple through every call site to save stack on a
-// path that is already building an HTTP response, so the size is accepted
-// here rather than papered over with an allocation.
+// The `Err` payload is an axum `Response`, which clippy 1.98 flags at 128 bytes. Boxing it would ripple through every call site to save stack on a path that is already building an HTTP response, so the size is accepted here rather than papered over with an allocation.
 #[allow(clippy::result_large_err)]
 pub(super) async fn authorize_terminal_request(
     headers: &axum::http::HeaderMap,
@@ -544,10 +541,7 @@ pub(super) async fn authorize_terminal_request(
 
 // ── REST: tmux window management ─────────────────────────────────────────────
 
-// The `Err` payload is an axum `Response`, which clippy 1.98 flags at 128
-// bytes. Boxing it would ripple through every call site to save stack on a
-// path that is already building an HTTP response, so the size is accepted
-// here rather than papered over with an allocation.
+// The `Err` payload is an axum `Response`, which clippy 1.98 flags at 128 bytes. Boxing it would ripple through every call site to save stack on a path that is already building an HTTP response, so the size is accepted here rather than papered over with an allocation.
 #[allow(clippy::result_large_err)]
 async fn tmux_controller(state: &AppState) -> Result<TmuxController, axum::response::Response> {
     use axum::response::IntoResponse as _;
