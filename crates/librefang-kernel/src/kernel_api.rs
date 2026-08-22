@@ -125,7 +125,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         goal_id: librefang_types::goal::GoalId,
         agent_id: AgentId,
         max_iterations: Option<u32>,
-    );
+    ) -> bool;
     /// Stop an active goal run. Returns whether a run was stopped.
     fn stop_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool;
     /// Snapshot the observable state of a goal's run, if one is active.
@@ -887,8 +887,8 @@ impl KernelApi for LibreFangKernel {
         goal_id: librefang_types::goal::GoalId,
         agent_id: AgentId,
         max_iterations: Option<u32>,
-    ) {
-        self.goal_run_start(goal_id, agent_id, max_iterations);
+    ) -> bool {
+        self.goal_run_start(goal_id, agent_id, max_iterations)
     }
     fn stop_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool {
         self.goal_run_stop(goal_id)
