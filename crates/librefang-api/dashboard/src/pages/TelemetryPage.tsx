@@ -15,153 +15,13 @@ import {
   RotateCcw, Users, ChevronDown, ChevronUp,
 } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
+import {
+  parseMetrics,
+  type HttpMetric,
+} from "./telemetryMetrics";
 
-// ── Parsed metric types ──────────────────────────────────────────────
-
-interface HttpMetric {
-  method: string;
-  path: string;
-  status: string;
-  count: number;
-}
-
-interface AgentTokenMetric {
-  agent: string;
-  provider: string;
-  model: string;
-  tokens: number;
-  inputTokens: number;
-  outputTokens: number;
-  toolCalls: number;
-  llmCalls: number;
-}
-
-interface SystemMetrics {
-  uptime: number;
-  agentsActive: number;
-  agentsTotal: number;
-  activeSessions: number;
-  costToday: number;
-  panics: number;
-  restarts: number;
-  version: string;
-}
-
-interface ParsedMetrics {
-  requests: HttpMetric[];
-  agents: AgentTokenMetric[];
-  system: SystemMetrics;
-}
-
-// ── Parser ───────────────────────────────────────────────────────────
-
-function ensureAgentEntry(map: Map<string, AgentTokenMetric>, agent: string): AgentTokenMetric {
-  if (!map.has(agent)) {
-    map.set(agent, {
-      agent,
-      provider: "",
-      model: "",
-      tokens: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      toolCalls: 0,
-      llmCalls: 0,
-    });
-  }
-  return map.get(agent)!;
-}
-
-function parseMetrics(text: string): ParsedMetrics {
-  const requests: HttpMetric[] = [];
-  const agentMap = new Map<string, AgentTokenMetric>();
-  const gaugeMap = new Map<string, number>();
-  const lines = text.split("\n");
-  let version = "";
-
-  for (const line of lines) {
-    if (line.startsWith("#")) continue;
-
-    const spaceIdx = line.indexOf(" ");
-    if (spaceIdx > 0) {
-      const namePart = line.slice(0, spaceIdx);
-      if (!namePart.includes("{")) {
-        gaugeMap.set(namePart, parseFloat(line.slice(spaceIdx + 1)) || 0);
-      }
-    }
-
-    if (line.startsWith("librefang_http_requests_total{")) {
-      const match = line.match(
-        /librefang_http_requests_total\{method="([^"]+)",path="([^"]+)",status="([^"]+)"\}\s+(\d+)/
-      );
-      if (match) {
-        requests.push({ method: match[1], path: match[2], status: match[3], count: parseInt(match[4], 10) });
-      }
-    }
-
-    if (line.startsWith("librefang_tokens{")) {
-      const match = line.match(
-        /librefang_tokens\{agent="([^"]+)",provider="([^"]+)",model="([^"]+)"\}\s+([\d.]+)/
-      );
-      if (match) {
-        const key = match[1];
-        if (!agentMap.has(key)) {
-          agentMap.set(key, {
-            agent: match[1], provider: match[2], model: match[3],
-            tokens: 0, inputTokens: 0, outputTokens: 0, toolCalls: 0, llmCalls: 0,
-          });
-        }
-        agentMap.get(key)!.tokens = parseFloat(match[4]);
-      }
-    }
-    if (line.startsWith("librefang_tokens_input{")) {
-      const match = line.match(/librefang_tokens_input\{agent="([^"]+)"[^}]*\}\s+([\d.]+)/);
-      if (match) {
-        ensureAgentEntry(agentMap, match[1]).inputTokens = parseFloat(match[2]);
-      }
-    }
-    if (line.startsWith("librefang_tokens_output{")) {
-      const match = line.match(/librefang_tokens_output\{agent="([^"]+)"[^}]*\}\s+([\d.]+)/);
-      if (match) {
-        ensureAgentEntry(agentMap, match[1]).outputTokens = parseFloat(match[2]);
-      }
-    }
-    if (line.startsWith("librefang_tool_calls{")) {
-      const match = line.match(/librefang_tool_calls\{agent="([^"]+)"[^}]*\}\s+([\d.]+)/);
-      if (match) {
-        ensureAgentEntry(agentMap, match[1]).toolCalls = parseFloat(match[2]);
-      }
-    }
-    if (line.startsWith("librefang_llm_calls{")) {
-      const match = line.match(/librefang_llm_calls\{agent="([^"]+)"[^}]*\}\s+([\d.]+)/);
-      if (match) {
-        ensureAgentEntry(agentMap, match[1]).llmCalls = parseFloat(match[2]);
-      }
-    }
-
-    if (!version && line.startsWith("librefang_info{")) {
-      const match = line.match(/version="([^"]+)"/);
-      if (match) version = match[1];
-    }
-  }
-
-  const system: SystemMetrics = {
-    uptime: gaugeMap.get("librefang_uptime_seconds") || 0,
-    agentsActive: gaugeMap.get("librefang_agents_active") || 0,
-    agentsTotal: gaugeMap.get("librefang_agents_total") || 0,
-    activeSessions: gaugeMap.get("librefang_active_sessions") || 0,
-    costToday: gaugeMap.get("librefang_cost_usd_today") || 0,
-    panics: gaugeMap.get("librefang_panics_total") || 0,
-    restarts: gaugeMap.get("librefang_restarts_total") || 0,
-    version,
-  };
-
-  return {
-    requests,
-    // Skip rollup rows emitted for namespace-like aggregate metrics.
-    agents: Array.from(agentMap.values()).filter(a => !a.agent.includes(":")),
-    system,
-  };
-}
+const METRICS_ENDPOINT = "/api/metrics";
+const RAW_METRICS_TRUNCATE = 8000;
 
 // Roll up `(method, path, status)` rows into one row per `(method, path)`,
 // with the status counts collapsed into a per-class summary. Lets the
@@ -317,6 +177,20 @@ export function TelemetryPage() {
   }, [parsed]);
 
   const errorRate = totalRequests > 0 ? (errorCount / totalRequests) * 100 : 0;
+  let errorRateColor = "";
+  let errorRateIconColor = "text-text-dim/40";
+  let errorRateVariant: MetricVariant = "success";
+  let errorRateDigits = 2;
+  if (errorRate > 1) {
+    errorRateColor = "text-error";
+    errorRateIconColor = "text-error";
+    errorRateVariant = "error";
+  } else if (errorRate > 0) {
+    errorRateColor = "text-warning";
+    errorRateIconColor = "text-warning";
+    errorRateVariant = "warning";
+    if (errorRate < 0.01) errorRateDigits = 3;
+  }
 
   const agentsByTokens = useMemo(
     () => [...parsed.agents].sort((a, b) => b.tokens - a.tokens),
@@ -481,13 +355,13 @@ export function TelemetryPage() {
             />
             <MetricCard
               label={t("telemetry.error_rate")}
-              icon={<AlertTriangle className={`w-3.5 h-3.5 ${errorRate > 1 ? "text-error" : "text-text-dim/40"}`} />}
+              icon={<AlertTriangle className={`w-3.5 h-3.5 ${errorRateIconColor}`} />}
               value={
-                <p className={`text-xl font-black tracking-tight ${errorRate > 1 ? "text-error" : errorRate > 0 ? "text-warning" : ""}`}>
-                  {errorRate.toFixed(errorRate > 0 && errorRate < 0.01 ? 3 : 2)}%
+                <p className={`text-xl font-black tracking-tight ${errorRateColor}`}>
+                  {errorRate.toFixed(errorRateDigits)}%
                 </p>
               }
-              variant={errorRate > 1 ? "error" : errorRate > 0 ? "warning" : "success"}
+              variant={errorRateVariant}
               sub={totalRequests > 0 ? `${errorCount.toLocaleString()} / ${totalRequests.toLocaleString()}` : undefined}
             />
           </StaggerList>
@@ -601,7 +475,7 @@ export function TelemetryPage() {
                 )}
               </button>
               <a
-                href="/api/metrics"
+                href={METRICS_ENDPOINT}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-xs text-brand hover:underline shrink-0"
@@ -612,9 +486,9 @@ export function TelemetryPage() {
             {rawExpanded && (
               <>
                 <pre className="mt-4 text-xs font-mono bg-main rounded-lg p-4 overflow-auto max-h-96 text-text-dim">
-                  {metricsQuery.data?.slice(0, 8000) || ""}
+                  {metricsQuery.data?.slice(0, RAW_METRICS_TRUNCATE) || ""}
                 </pre>
-                {(metricsQuery.data?.length || 0) > 8000 && (
+                {(metricsQuery.data?.length || 0) > RAW_METRICS_TRUNCATE && (
                   <span className="text-xs text-text-dim mt-2 block">{t("telemetry.truncated")}</span>
                 )}
               </>
