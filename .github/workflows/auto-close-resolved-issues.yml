@@ -19,12 +19,17 @@ name: Auto-close Resolved Issues
 #  - Skips refs to issues older than the lookback window unless their
 #    state is currently `open` (avoids re-touching ancient closed ones).
 #  - Skips PRs (issues API surfaces them with `pull_request` set).
-#  - Idempotent: skips issues already labeled `auto-close-candidate`
-#    in dry-run mode, and obviously skips already-closed issues.
+#  - Idempotent: hidden markers prevent duplicate dry-run and live comments.
+#    A live retry still attempts the close when its prior comment succeeded.
 
 on:
   schedule:
     - cron: '15 7 * * *'  # Daily at 07:15 UTC
+  pull_request:
+    paths:
+      - '.github/scripts/auto-close-resolved-issues.js'
+      - '.github/scripts/tests/auto-close-resolved-issues.test.js'
+      - '.github/workflows/auto-close-resolved-issues.yml'
   workflow_dispatch:
     inputs:
       lookback_days:
@@ -38,15 +43,38 @@ on:
 
 permissions:
   contents: read
-  issues: write
+
+concurrency:
+  group: auto-close-resolved-issues-${{ github.event_name == 'pull_request' && github.ref || 'reconcile' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  reconcile:
+  test-helper:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Parse resolved-issue helper and corpus
+        run: |
+          node --check .github/scripts/auto-close-resolved-issues.js
+          node --check .github/scripts/tests/auto-close-resolved-issues.test.js
+      - name: Run resolved-issue helper corpus
+        run: node .github/scripts/tests/auto-close-resolved-issues.test.js
+
+  reconcile:
+    needs: test-helper
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
 
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         env:
@@ -55,8 +83,16 @@ jobs:
           LIVE_VAR: ${{ vars.AUTO_CLOSE_LIVE || '' }}
         with:
           script: |
-            const { execSync } = require('child_process');
-            const lookback = parseInt(process.env.LOOKBACK_DAYS, 10);
+            const { execFileSync } = require('child_process');
+            const {
+              CLOSE_MARKER,
+              FLAG_MARKER,
+              collectRefs,
+              commentDisposition,
+              parseLookback,
+              sanitizeInlineCode,
+            } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/auto-close-resolved-issues.js`);
+            const lookback = parseLookback(process.env.LOOKBACK_DAYS);
             const live =
               process.env.LIVE_INPUT.toLowerCase() === 'true' ||
               process.env.LIVE_VAR.toLowerCase() === 'true';
@@ -66,38 +102,19 @@ jobs:
             // "have we already flagged this issue?". A label is added on top
             // for human discoverability, but the marker is what prevents
             // re-spam if a maintainer removes the label without closing.
-            const MARKER = '<!-- auto-close-reconciler:flagged -->';
             const since = new Date(Date.now() - lookback * 86400_000).toISOString();
 
             core.info(`Mode: ${live ? 'LIVE (will close)' : 'DRY-RUN (comment + label only)'}`);
             core.info(`Lookback: ${lookback} days (since ${since})`);
 
             // 1. Collect issue refs from commit messages on main
-            const log = execSync(
-              `git log origin/main --since="${since}" --pretty=format:"%H%n%B%n---COMMIT-END---"`,
+            const log = execFileSync(
+              'git',
+              ['log', 'origin/main', `--since=${since}`, '-z', '--format=%H%x00%s%x00%B'],
               { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }
             );
 
-            // Closing-keyword regex matching GitHub's set.
-            // Anchor to start-of-line OR after whitespace to skip prose like
-            // "doesn't fix #N" / "this does not close #N" — those start with
-            // 'not '/'doesn't '/'does not ' which we negative-look-behind for.
-            // (?<! not ) and (?<! n't ) handle the common negation forms.
-            const refRegex =
-              /(?<!\bnot )(?<!\bn't )(?<!\bnever )(?<!\bwon't )(?<!\bwouldn't )(?<!\bcannot )(?<!\bcan't )\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
-            const refs = new Map(); // issueNumber -> { sha, subject }
-
-            for (const block of log.split('---COMMIT-END---')) {
-              const trimmed = block.trim();
-              if (!trimmed) continue;
-              const lines = trimmed.split('\n');
-              const sha = lines[0];
-              const subject = lines[1] || '';
-              for (const m of trimmed.matchAll(refRegex)) {
-                const n = parseInt(m[2], 10);
-                if (!refs.has(n)) refs.set(n, { sha: sha.slice(0, 7), subject });
-              }
-            }
+            const refs = collectRefs(log);
 
             core.info(`Found ${refs.size} unique issue refs`);
             if (refs.size === 0) {
@@ -157,19 +174,17 @@ jobs:
               if (issue.pull_request) { skipped.push(`#${num} (is PR)`); continue; }
               if (issue.state !== 'open') { skipped.push(`#${num} (already closed)`); continue; }
 
-              // Skip if already flagged in a previous dry-run cycle.
-              // Source of truth is the MARKER in a bot comment, NOT the label
-              // — labels can be removed by humans without intent to dismiss
-              // re-flagging, and we must not spam if that happens.
-              if (!live) {
-                const comments = await github.paginate(
-                  github.rest.issues.listComments,
-                  { owner: context.repo.owner, repo: context.repo.repo, issue_number: num, per_page: 100 }
-                );
-                if (comments.some((c) => typeof c.body === 'string' && c.body.includes(MARKER))) {
-                  skipped.push(`#${num} (already flagged)`);
-                  continue;
-                }
+              // Dry-run and live comments use distinct markers. A dry-run
+              // marker must not prevent a later live close. If a live comment
+              // was posted but closing failed, retry the close without spam.
+              const comments = await github.paginate(
+                github.rest.issues.listComments,
+                { owner: context.repo.owner, repo: context.repo.repo, issue_number: num, per_page: 100 }
+              );
+              const commentState = commentDisposition(live, comments.map((c) => c.body));
+              if (commentState.skipIssue) {
+                skipped.push(`#${num} (already flagged)`);
+                continue;
               }
 
               // Check timeline for reopened events — never auto-close something humans deliberately reopened
@@ -183,15 +198,19 @@ jobs:
               }
 
               if (live) {
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: num,
-                  body:
-                    `Auto-closing: commit \`${info.sha}\` on \`main\` references this issue ` +
-                    `with a closing keyword (\`${info.subject}\`), but GitHub's auto-close ` +
-                    `did not fire. Reopen if this is in error.`,
-                });
+                const safeSubject = sanitizeInlineCode(info.subject);
+                if (commentState.addComment) {
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: num,
+                    body:
+                      `${CLOSE_MARKER}\n` +
+                      `Auto-closing: commit \`${info.sha}\` on \`main\` references this issue ` +
+                      `with a closing keyword (\`${safeSubject}\`), but GitHub's auto-close ` +
+                      `did not fire. Reopen if this is in error.`,
+                  });
+                }
                 await github.rest.issues.update({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
@@ -201,13 +220,14 @@ jobs:
                 });
                 closed.push(`#${num} (by ${info.sha})`);
               } else {
+                const safeSubject = sanitizeInlineCode(info.subject);
                 await github.rest.issues.createComment({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   issue_number: num,
                   body:
-                    `${MARKER}\n` +
-                    `🤖 Looks resolved by commit \`${info.sha}\` on \`main\` (\`${info.subject}\`).\n\n` +
+                    `${FLAG_MARKER}\n` +
+                    `🤖 Looks resolved by commit \`${info.sha}\` on \`main\` (\`${safeSubject}\`).\n\n` +
                     `Dry-run flag from the auto-close reconciliation workflow. ` +
                     `Close manually if correct. The bot keys off the hidden marker in this ` +
                     `comment to avoid re-flagging — delete this comment if you want the bot ` +
