@@ -36,6 +36,16 @@ pub struct OpenAIDriver {
     /// Cache of uploaded file IDs for Moonshot/Kimi (hash of bytes → file_id).
     /// Avoids re-uploading the same file across agent loop iterations.
     moonshot_file_cache: std::sync::Arc<tokio::sync::Mutex<HashMap<[u8; 32], String>>>,
+    /// Model names known to reject `reasoning_effort` with a 400 from this
+    /// provider (one driver instance = one base_url / gateway, so caching by
+    /// model alone already scopes to the provider+model combination). Set
+    /// the first time a request for a given model hits that rejection (see
+    /// the strip-and-retry branch in `complete`/`stream`); once cached,
+    /// `build_request` omits `reasoning_effort` for that model up front so
+    /// the same combination never round-trips a second 400. In-memory only —
+    /// resets on daemon restart, which is fine: the cost of relearning is one
+    /// extra round-trip, not a correctness issue.
+    reasoning_effort_unsupported: std::sync::Arc<dashmap::DashSet<String>>,
     /// Per-provider HTTP request timeout in seconds.
     /// Overrides the HTTP client's default read timeout when set.
     request_timeout_secs: Option<u64>,
@@ -88,6 +98,7 @@ impl OpenAIDriver {
             use_api_key_header: false,
             url_query: None,
             moonshot_file_cache: Default::default(),
+            reasoning_effort_unsupported: Default::default(),
             request_timeout_secs,
             emit_caller_trace_headers: true,
             max_retries: 3,
@@ -134,6 +145,7 @@ impl OpenAIDriver {
             use_api_key_header: true,
             url_query: Some(format!("api-version={}", api_version)),
             moonshot_file_cache: Default::default(),
+            reasoning_effort_unsupported: Default::default(),
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
             max_retries: 3,
@@ -1193,7 +1205,13 @@ impl OpenAIDriver {
             },
             // Request extended thinking when the caller configured a budget (#6398).
             // Emitted only under the default `None` echo policy: `EmptyString` (Kimi) disables thinking wire-side above, and `Strip` / `Echo` models (DeepSeek R1 / V4) reason by default without an opt-in — this API family rejects requests with unexpected reasoning fields (see the R1 `reasoning_content` note above), so nothing extra is sent to them.
-            reasoning_effort: if echo_policy == ReasoningEchoPolicy::None {
+            // Also withheld once this model has already 400'd on the field
+            // (`reasoning_effort_unsupported`) — no point round-tripping a
+            // second guaranteed rejection for a combination we already know
+            // the gateway/adapter will not accept.
+            reasoning_effort: if echo_policy == ReasoningEchoPolicy::None
+                && !self.reasoning_effort_unsupported.contains(&request.model)
+            {
                 request
                     .thinking
                     .as_ref()
@@ -1364,6 +1382,35 @@ impl LlmDriver for OpenAIDriver {
                     oai_request.temperature = None;
                     // Small backoff before retrying so we don't tight-loop on a
                     // misconfigured request (100 ms × attempt, max ~300 ms).
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt as u64 + 1),
+                    ))
+                    .await;
+                    continue;
+                }
+
+                // Gateway/adapter rejected `reasoning_effort` as unsupported
+                // for this provider+model combination — confirmed live
+                // against a litellm gateway: `litellm.UnsupportedParamsError:
+                // openai does not support parameters: ['reasoning_effort']`
+                // when the underlying model group's adapter is
+                // `openai`-shaped but the model itself doesn't accept the
+                // field. This is deterministic (the same request 400s again
+                // every time), so strip the field, remember the model so
+                // `build_request` omits it up front on future calls, and
+                // retry immediately.
+                if status == 400
+                    && oai_request.reasoning_effort.is_some()
+                    && crate::llm_errors::is_unsupported_reasoning_effort_error(&body)
+                    && attempt < max_retries
+                {
+                    warn!(
+                        model = %oai_request.model,
+                        "Provider rejected reasoning_effort as unsupported; retrying without it"
+                    );
+                    oai_request.reasoning_effort = None;
+                    self.reasoning_effort_unsupported
+                        .insert(oai_request.model.clone());
                     tokio::time::sleep(std::time::Duration::from_millis(
                         100 * (attempt as u64 + 1),
                     ))
@@ -1793,6 +1840,28 @@ impl LlmDriver for OpenAIDriver {
                 {
                     warn!(model = %oai_request.model, "Stripping temperature for this model (stream)");
                     oai_request.temperature = None;
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt + 1) as u64,
+                    ))
+                    .await;
+                    continue;
+                }
+
+                // Gateway/adapter rejected `reasoning_effort` as unsupported —
+                // see the identical, more-commented branch in `complete()`
+                // for why this is deterministic and safe to strip-and-retry.
+                if status == 400
+                    && oai_request.reasoning_effort.is_some()
+                    && crate::llm_errors::is_unsupported_reasoning_effort_error(&body)
+                    && attempt < max_retries
+                {
+                    warn!(
+                        model = %oai_request.model,
+                        "Provider rejected reasoning_effort as unsupported; retrying without it (stream)"
+                    );
+                    oai_request.reasoning_effort = None;
+                    self.reasoning_effort_unsupported
+                        .insert(oai_request.model.clone());
                     tokio::time::sleep(std::time::Duration::from_millis(
                         100 * (attempt + 1) as u64,
                     ))
@@ -4795,5 +4864,193 @@ mod tests {
             .await
             .expect("default max_retries=3 must survive 3 transport errors");
         assert_eq!(resp.text(), "ok");
+    }
+
+    // ── litellm `UnsupportedParamsError` for `reasoning_effort` ─────────────
+    //
+    // Live-confirmed shape (bug report): a litellm gateway 400s with
+    // `litellm.UnsupportedParamsError: openai does not support parameters:
+    // ['reasoning_effort'], for model=<model>` when the underlying model
+    // group's adapter is OpenAI-shaped but the model itself doesn't accept
+    // the field. The driver must strip the field and retry transparently,
+    // then remember the model so it never sends the field to that
+    // combination again.
+
+    /// Answers 400 with a litellm-shaped `UnsupportedParamsError` whenever the
+    /// request body contains `reasoning_effort`, and 200 otherwise. Records,
+    /// in connection order, whether each request carried the field — tests
+    /// assert on this sequence to prove exactly which attempts carried it.
+    async fn spawn_reasoning_effort_rejecting_server(
+        seen: std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let ok_body = serde_json::json!({
+            "id": "cmpl-test",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })
+        .to_string();
+
+        let err_body = serde_json::json!({
+            "error": {
+                "message": "litellm.UnsupportedParamsError: openai does not support \
+                             parameters: ['reasoning_effort'], for \
+                             model=Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf. Received Model \
+                             Group=sensor-model-generic-high",
+                "type": "UnsupportedParamsError",
+                "code": 400
+            }
+        })
+        .to_string();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = [0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let has_reasoning_effort =
+                    String::from_utf8_lossy(&buf[..n]).contains("reasoning_effort");
+                seen.lock().unwrap().push(has_reasoning_effort);
+
+                let resp = if has_reasoning_effort {
+                    format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        err_body.len(),
+                        err_body
+                    )
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        ok_body.len(),
+                        ok_body
+                    )
+                };
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// A request that opts into extended thinking (budget above the 1024
+    /// floor) so `build_request` populates `reasoning_effort` — the
+    /// precondition for every test below.
+    fn thinking_request(model: &str) -> librefang_llm_driver::CompletionRequest {
+        use librefang_types::config::ThinkingConfig;
+        librefang_llm_driver::CompletionRequest {
+            model: model.to_string(),
+            thinking: Some(ThinkingConfig {
+                budget_tokens: 8000,
+                stream_thinking: false,
+            }),
+            ..transport_retry_request()
+        }
+    }
+
+    /// A 400 whose body is litellm's `UnsupportedParamsError` for
+    /// `reasoning_effort` must cause an in-driver retry WITHOUT the field,
+    /// and that retry must succeed.
+    #[tokio::test]
+    async fn unsupported_reasoning_effort_400_retries_without_it_and_succeeds() {
+        let _g = crate::backoff::enable_test_zero_backoff();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base = spawn_reasoning_effort_rejecting_server(seen.clone()).await;
+        let driver = OpenAIDriver::new("test-key".to_string(), base);
+
+        let resp = driver
+            .complete(thinking_request("sensor-model-generic-high"))
+            .await
+            .expect("driver must strip reasoning_effort and retry successfully");
+        assert_eq!(resp.text(), "ok");
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![true, false],
+            "first attempt must carry reasoning_effort (and get rejected); \
+             the in-driver retry must not"
+        );
+    }
+
+    /// After the first rejection, the SAME model must never send
+    /// `reasoning_effort` again: `build_request` consults the cache the
+    /// strip-and-retry branch populates, so a second independent `complete()`
+    /// call for the same model succeeds in exactly one HTTP round trip with
+    /// no second 400.
+    #[tokio::test]
+    async fn cached_rejection_omits_reasoning_effort_on_next_request() {
+        let _g = crate::backoff::enable_test_zero_backoff();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base = spawn_reasoning_effort_rejecting_server(seen.clone()).await;
+        let driver = OpenAIDriver::new("test-key".to_string(), base);
+        let model = "sensor-model-generic-high";
+
+        // First call learns the rejection (2 HTTP round trips: 400 then 200).
+        driver
+            .complete(thinking_request(model))
+            .await
+            .expect("first call must recover via strip-and-retry");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+
+        // Second, independent call for the SAME model must not carry the
+        // field at all, so it succeeds in a single round trip.
+        let resp = driver
+            .complete(thinking_request(model))
+            .await
+            .expect("second call must succeed without re-learning the rejection");
+        assert_eq!(resp.text(), "ok");
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![true, false, false],
+            "the third HTTP attempt (second complete() call) must not carry \
+             reasoning_effort — no second 400 for the same model"
+        );
+
+        // Direct confirmation at the `build_request` level too: the cache
+        // makes the field disappear from the built request regardless of
+        // transport.
+        let req = driver
+            .build_request(&thinking_request(model))
+            .expect("build_request");
+        assert!(
+            req.reasoning_effort.is_none(),
+            "cached model must never build a request carrying reasoning_effort again"
+        );
+    }
+
+    /// The cache is keyed per model, not blanket-disabled for the whole
+    /// provider/driver instance — a different model must still get
+    /// `reasoning_effort` even after another model on the same driver was
+    /// cached as rejecting it.
+    #[test]
+    fn cache_is_scoped_per_model_not_per_provider() {
+        let driver = OpenAIDriver::new("test-key".to_string(), "http://localhost".to_string());
+        driver
+            .reasoning_effort_unsupported
+            .insert("rejected-model".to_string());
+
+        let rejected = driver
+            .build_request(&thinking_request("rejected-model"))
+            .expect("build_request");
+        assert!(rejected.reasoning_effort.is_none());
+
+        let other = driver
+            .build_request(&thinking_request("other-model"))
+            .expect("build_request");
+        assert!(
+            other.reasoning_effort.is_some(),
+            "an unrelated model must still get reasoning_effort"
+        );
     }
 }

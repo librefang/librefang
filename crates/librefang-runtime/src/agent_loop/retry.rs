@@ -161,6 +161,32 @@ fn build_user_facing_llm_error(
     )
 }
 
+/// Whether a failed LLM call should count against the provider circuit
+/// breaker (`ProviderCooldown`).
+///
+/// A 400 caused by the gateway/provider adapter rejecting an unsupported
+/// request parameter (e.g. litellm's `UnsupportedParamsError` for
+/// `reasoning_effort` against an OpenAI-shaped model group — see
+/// `librefang_llm_drivers::drivers::openai`, which already strips the field
+/// and retries transparently, so in the common case a call never even
+/// reaches this function) is a deterministic, self-inflicted mismatch
+/// between what we sent and what the adapter accepts. It carries no
+/// information about whether the provider is reachable or healthy, so
+/// counting it here would open a multi-minute cooldown for an error class
+/// that has nothing to do with provider health — muting the agent even
+/// though the provider is up and reachable. This is only a fallback for the
+/// case where the driver's own in-place retry did not resolve it (e.g. its
+/// retry budget was exhausted first on the same rejection).
+///
+/// Any OTHER 400 (bad credentials, malformed payload, nonexistent model,
+/// context overflow, ...) still counts — those DO indicate a request or
+/// configuration problem worth backing off on, and the operator needs the
+/// circuit breaker to actually protect against a request storm hitting a
+/// provider that keeps rejecting it for a real reason.
+fn should_count_against_circuit_breaker(error: &LlmError) -> bool {
+    !llm_errors::is_unsupported_parameter_error(&error.to_string())
+}
+
 #[instrument(
     skip_all,
     fields(
@@ -227,8 +253,15 @@ pub(super) async fn call_with_retry(
                 );
             }
             Err(e) => {
-                let (is_billing, err) = build_user_facing_llm_error(&e, "LLM error classified");
-                record_retry_failure(provider, cooldown, is_billing);
+                if should_count_against_circuit_breaker(&e) {
+                    let (is_billing, err) = build_user_facing_llm_error(&e, "LLM error classified");
+                    record_retry_failure(provider, cooldown, is_billing);
+                    return Err(err);
+                }
+                let (_, err) = build_user_facing_llm_error(
+                    &e,
+                    "LLM error classified (unsupported-parameter rejection, not counted against circuit breaker)",
+                );
                 return Err(err);
             }
         }
@@ -483,9 +516,16 @@ pub(super) async fn stream_with_retry(
                     .await;
                     continue;
                 }
-                let (is_billing, err) =
-                    build_user_facing_llm_error(&e, "LLM stream error classified");
-                record_retry_failure(provider, cooldown, is_billing);
+                if should_count_against_circuit_breaker(&e) {
+                    let (is_billing, err) =
+                        build_user_facing_llm_error(&e, "LLM stream error classified");
+                    record_retry_failure(provider, cooldown, is_billing);
+                    return Err(err);
+                }
+                let (_, err) = build_user_facing_llm_error(
+                    &e,
+                    "LLM stream error classified (unsupported-parameter rejection, not counted against circuit breaker)",
+                );
                 return Err(err);
             }
         }
@@ -499,7 +539,99 @@ pub(super) async fn stream_with_retry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth_cooldown::CircuitState;
     use crate::llm_driver::CompletionResponse;
+
+    /// A driver that always fails `complete`/`stream` with a fixed
+    /// `LlmError::Api { status, message, .. }` — used to drive the circuit
+    /// breaker exclusion tests below without a real HTTP round trip.
+    struct FixedErrorDriver {
+        status: u16,
+        message: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmDriver for FixedErrorDriver {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::Api {
+                status: self.status,
+                message: self.message.to_string(),
+                code: None,
+            })
+        }
+        async fn stream(
+            &self,
+            _req: CompletionRequest,
+            _tx: mpsc::Sender<StreamEvent>,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::Api {
+                status: self.status,
+                message: self.message.to_string(),
+                code: None,
+            })
+        }
+    }
+
+    /// Live-confirmed shape: litellm 400s with `UnsupportedParamsError` when
+    /// the model group's adapter doesn't forward `reasoning_effort`. This is
+    /// a deterministic, self-inflicted parameter mismatch — not a provider
+    /// health signal — so it must not open the circuit breaker (a 300s
+    /// cooldown that would mute the agent even though litellm is reachable).
+    #[tokio::test]
+    async fn unsupported_parameter_400_does_not_open_circuit_breaker() {
+        let cooldown = ProviderCooldown::new(CooldownConfig::default());
+        let driver = FixedErrorDriver {
+            status: 400,
+            message: "litellm.UnsupportedParamsError: openai does not support parameters: \
+                      ['reasoning_effort'], for model=Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf. \
+                      Received Model Group=sensor-model-generic-high",
+        };
+
+        let result = call_with_retry(
+            &driver,
+            CompletionRequest::default(),
+            Some("litellm"),
+            Some(&cooldown),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "the error must still be surfaced to the caller"
+        );
+        assert_eq!(
+            cooldown.get_state("litellm"),
+            CircuitState::Closed,
+            "an unsupported-parameter 400 must not open the circuit breaker"
+        );
+    }
+
+    /// A 400 of a DIFFERENT class (malformed request, not a parameter
+    /// rejection) must still count against the circuit breaker — the
+    /// exclusion above is narrow, not a blanket "ignore all 400s".
+    #[tokio::test]
+    async fn other_400_still_opens_circuit_breaker() {
+        let cooldown = ProviderCooldown::new(CooldownConfig::default());
+        let driver = FixedErrorDriver {
+            status: 400,
+            message: "Invalid request: missing required field 'messages'",
+        };
+
+        let result = call_with_retry(
+            &driver,
+            CompletionRequest::default(),
+            Some("litellm"),
+            Some(&cooldown),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            cooldown.get_state("litellm"),
+            CircuitState::Open,
+            "a generic bad-request 400 must still open the circuit breaker"
+        );
+    }
 
     /// A streaming driver that forwards one observable delta and then errors with a *retryable* variant — the shape that makes an un-guarded retry re-stream and duplicate output.
     struct PartialThenOverloaded;
