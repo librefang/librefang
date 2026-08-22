@@ -877,8 +877,10 @@ pub async fn patch_agent_config(
         }
     }
 
-    // Update model/provider through set_agent_model so provider-change semantics (prefix stripping, canonical-session cleanup, and stale per-agent credential/base URL removal) are applied uniformly. Bypassing it was the root cause of #2380.
-    // A provider-only PATCH keeps the stored model. Ignoring that shape returned 200 without changing anything (#7765).
+    // Update model/provider through set_agent_model so provider-change semantics (prefix stripping, canonical-session cleanup, and stale per-agent credential/base URL removal) are applied uniformly.
+    // Bypassing it was the root cause of #2380.
+    // A provider-only PATCH keeps the stored model.
+    // Ignoring that shape returned 200 without changing anything (#7765).
     let requested_model = req.model.as_deref().filter(|model| !model.is_empty());
     let explicit_provider = req
         .provider
