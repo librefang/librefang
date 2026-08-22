@@ -71,7 +71,8 @@ pub struct AgentSubsystem {
     /// Per-agent invocation semaphore — caps concurrent **trigger
     /// dispatch** fires to a single agent.
     pub(crate) agent_concurrency: DashMap<AgentId, Arc<tokio::sync::Semaphore>>,
-    /// Per-manifest write locks. Writers re-read registry and disk state after acquiring the path lock so field patches cannot overwrite a concurrent full persist with a stale snapshot.
+    /// Per-manifest write locks.
+    /// Writers re-read registry and disk state after acquiring the path lock so field patches cannot overwrite a concurrent full persist with a stale snapshot.
     pub(crate) manifest_write_locks: DashMap<PathBuf, Arc<std::sync::Mutex<()>>>,
     /// Per-hand-instance lock serializing mutations that touch both the `HandInstance` and the live `AgentRegistry` entries it owns — runtime-override PATCH/DELETE and settings-config saves.
     pub(crate) hand_instance_locks: DashMap<Uuid, Arc<std::sync::Mutex<()>>>,

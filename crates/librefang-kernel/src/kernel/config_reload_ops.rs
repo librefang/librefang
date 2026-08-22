@@ -88,7 +88,8 @@ impl LibreFangKernel {
         // `noop_changes` are present. In Off / Restart modes the user expects
         // no runtime change until a full restart.
         if should_store_config(old_cfg.reload.mode, &plan) {
-            // Serialize MCP config replacement with every connection creator before taking the config write lock. An in-flight connection may still publish `NeedsAuth`; waiting here ensures the hot action clears that result only after the old operation has finished, without holding `config_reload_lock` across the potentially long connection wait.
+            // Serialize MCP config replacement with every connection creator before taking the config write lock.
+            // An in-flight connection may still publish `NeedsAuth`; waiting here ensures the hot action clears that result only after the old operation has finished, without holding `config_reload_lock` across the potentially long connection wait.
             let _mcp_connection_op = if plan
                 .hot_actions
                 .contains(&crate::config_reload::HotAction::ReloadMcpServers)

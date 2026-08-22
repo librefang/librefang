@@ -599,7 +599,8 @@ impl LibreFangKernel {
         Ok(())
     }
 
-    /// Update an agent's MCP server allowlist. Empty disables MCP servers; `["*"]` enables all connected servers.
+    /// Update an agent's MCP server allowlist.
+    /// Empty disables MCP servers; `["*"]` enables all connected servers.
     pub fn set_agent_mcp_servers(
         &self,
         agent_id: AgentId,
