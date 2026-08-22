@@ -402,7 +402,7 @@ impl LibreFangKernel {
             // store-aware `FallbackDriver` can pre-skip a budget-exhausted
             // slot (#5980): the gate flags the provider in the shared
             // `ProviderExhaustionStore`, and this driver reads that SAME
-            // store via `is_slot_exhausted`. Mirrors boot.rs:698-714.
+            // store via `slot_exhaustion`. Mirrors boot.rs:698-714.
             let mut chain: Vec<(
                 std::sync::Arc<dyn librefang_runtime::llm_driver::LlmDriver>,
                 String,
