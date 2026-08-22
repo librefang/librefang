@@ -624,7 +624,7 @@ impl LibreFangKernel {
                         .format("%A, %B %d, %Y (%Y-%m-%d %Z)")
                         .to_string(),
                 ),
-                active_goals: self.active_goals_for_prompt(Some(agent_id)),
+                active_goals: self.active_goals_for_prompt(agent_id),
                 is_group: false,
                 was_mentioned: false,
                 context_md,
@@ -2668,7 +2668,7 @@ impl LibreFangKernel {
                         .format("%A, %B %d, %Y (%Y-%m-%d %Z)")
                         .to_string(),
                 ),
-                active_goals: self.active_goals_for_prompt(Some(agent_id)),
+                active_goals: self.active_goals_for_prompt(agent_id),
                 context_md,
                 dynamic_sections,
             };
