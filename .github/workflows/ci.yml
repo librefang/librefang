@@ -502,6 +502,8 @@ jobs:
           python-version: '3.11'
       - name: Fixture corpus — the gate fails at the configured threshold
         run: python3 scripts/check-image-vulns.py --self-test
+      - name: Docker startup probe helper corpus
+        run: sh .github/scripts/tests/docker-smoke.test.sh
 
   # ── CHANGELOG attribution check ────────────────────────────────────────────────
   # Enforces the `(@username)` suffix on bullets *added* to the [Unreleased]
