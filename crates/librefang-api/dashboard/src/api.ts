@@ -3707,6 +3707,91 @@ export async function spawnAgent(req: {
   return post<ApiActionResponse>("/api/agents", req);
 }
 
+// ── Agent types + ephemeral spawning ────────────────────────────────────────
+
+/** List-row summary. The list endpoint returns only these fields; the full
+ *  definition (system prompt, model, tools, skills) comes from the detail GET. */
+export interface AgentTypeSummary {
+  name: string;
+  description: string;
+  source: string;
+}
+
+/** Full agent-type definition. Flat JSON, as returned by the detail GET and
+ *  accepted by create/update. `model` is a model id string; `provider` is a
+ *  separate id. */
+export interface AgentType {
+  name: string;
+  description?: string;
+  system_prompt?: string;
+  provider?: string;
+  model?: string;
+  tools?: string[];
+  skills?: string[];
+}
+
+/** Body for create/update. Same flat shape as {@link AgentType}; `name` is
+ *  ignored on update (the path segment is authoritative). */
+export type AgentTypeInput = AgentType;
+
+export async function listAgentTypes(): Promise<AgentTypeSummary[]> {
+  const data = await get<PaginatedResponse<AgentTypeSummary>>(
+    "/api/templates",
+  );
+  return data.items ?? [];
+}
+
+export async function getAgentType(name: string): Promise<AgentType> {
+  return get<AgentType>(`/api/templates/${encodeURIComponent(name)}`);
+}
+
+export async function createAgentType(
+  body: AgentTypeInput,
+): Promise<AgentType> {
+  return post<AgentType>("/api/templates", body);
+}
+
+export async function updateAgentType(
+  name: string,
+  body: AgentTypeInput,
+): Promise<AgentType> {
+  return put<AgentType>(`/api/templates/${encodeURIComponent(name)}`, body);
+}
+
+export async function deleteAgentType(name: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/templates/${encodeURIComponent(name)}`);
+}
+
+/** Result of a one-shot ephemeral run. `response` is the agent's reply text;
+ *  `cost_usd` is null when the kernel could not compute it. */
+export interface EphemeralResult {
+  response: string;
+  cost_usd: number | null;
+  iterations: number;
+  latency_ms: number;
+}
+
+/** Request for `POST /api/agents/spawn-ephemeral`. `message` is required;
+ *  `agent_type` or `system_prompt` supplies the base mission. */
+export interface EphemeralSpawnRequest {
+  message: string;
+  agent_type?: string;
+  system_prompt?: string;
+  tools?: string[];
+  skills?: string[];
+  max_iterations?: number;
+}
+
+export async function spawnEphemeral(
+  body: EphemeralSpawnRequest,
+): Promise<EphemeralResult> {
+  return post<EphemeralResult>(
+    "/api/agents/spawn-ephemeral",
+    body,
+    LONG_RUNNING_TIMEOUT_MS,
+  );
+}
+
 export async function getCommsTopology(): Promise<CommsTopology> {
   return get<CommsTopology>("/api/comms/topology");
 }

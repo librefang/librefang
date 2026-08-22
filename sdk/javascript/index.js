@@ -1555,8 +1555,20 @@ class SystemResource {
     return this._c._request("GET", "/api/templates");
   }
 
+  async createTemplate(data) {
+    return this._c._request("POST", "/api/templates", data, undefined);
+  }
+
   async getAgentTemplate(name) {
     return this._c._request("GET", `/api/templates/${name}`);
+  }
+
+  async updateTemplate(name, data) {
+    return this._c._request("PUT", `/api/templates/${name}`, data, undefined);
+  }
+
+  async deleteTemplate(name) {
+    return this._c._request("DELETE", `/api/templates/${name}`);
   }
 
   async getAgentTemplateToml(name) {

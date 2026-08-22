@@ -1,0 +1,2 @@
+Agent types are now managed from the dashboard: `/api/templates` gained POST, PUT and DELETE, so the named templates under `~/.librefang/templates/` can be created, edited and removed without hand-editing files on the daemon host, and the listing returns both those templates (`source = "template"`) and the workspace agents under `~/.librefang/workspaces/agents/` (`source = "agent"`).
+The new Agent Types page renders them as a card grid with create / edit / delete plus a Quick Run action that spawns an ephemeral worker from the selected type (#6931) (@DaBlitzStein)

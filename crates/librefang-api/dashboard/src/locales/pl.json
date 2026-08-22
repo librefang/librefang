@@ -17,6 +17,7 @@
     "tasks": "Zadania",
     "goals": "Cele",
     "agents": "Agenci",
+    "agent_types": "Typy agentów",
     "users": "Użytkownicy",
     "providers": "Dostawcy",
     "channels": "Kanały",
@@ -273,6 +274,26 @@
       "no_peers": "brak węzłów"
     },
     "setup_failed": "Szybka inicjalizacja nie powiodła się"
+  },
+  "agentTypes": {
+    "title": "Typy agentów",
+    "create": "Utwórz typ",
+    "edit": "Edytuj typ",
+    "delete": "Usuń typ",
+    "quickRun": "Szybkie uruchomienie",
+    "name": "Nazwa",
+    "description": "Opis",
+    "systemPrompt": "Prompt systemowy",
+    "provider": "Dostawca",
+    "model": "Model",
+    "tools": "Narzędzia",
+    "message": "Wiadomość",
+    "result": "Wynik",
+    "noTypes": "Nie zdefiniowano jeszcze żadnych typów agentów",
+    "confirmDelete": "Usunąć ten typ agenta?",
+    "iterations": "Iteracje",
+    "latency": "Opóźnienie",
+    "cost": "Koszt"
   },
   "agents": {
     "title": "Agenci",

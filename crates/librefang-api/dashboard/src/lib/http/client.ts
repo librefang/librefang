@@ -19,6 +19,9 @@ export { ApiError } from "./errors";
 export {
   // agents
   listAgents,
+  // agent types
+  listAgentTypes,
+  getAgentType,
   getAgentDetail,
   getAgentStats,
   listAgentEvents,
@@ -187,6 +190,11 @@ export type {
 export {
   // agents
   spawnAgent,
+  // agent types + ephemeral spawning
+  createAgentType,
+  updateAgentType,
+  deleteAgentType,
+  spawnEphemeral,
   cloneAgent,
   stopAgent,
   suspendAgent,
@@ -362,6 +370,11 @@ export {
 export type {
   A2AAgentItem,
   A2ATaskStatus,
+  AgentTypeSummary,
+  AgentType,
+  AgentTypeInput,
+  EphemeralResult,
+  EphemeralSpawnRequest,
   AutoDreamAbortOutcome,
   AutoDreamAgentStatus,
   AutoDreamProgress,
