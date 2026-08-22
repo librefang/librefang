@@ -2024,6 +2024,8 @@
     "totp_recovery_title": "Коди відновлення (збережіть їх у безпечному місці):",
     "totp_recovery_reveal": "Показати коди",
     "totp_recovery_hide": "Приховати коди",
+    "totp_secret_reveal": "Показати секрет",
+    "totp_secret_hide": "Приховати секрет",
     "totp_reset_placeholder": "Поточний TOTP або код відновлення",
     "totp_verify_reset": "Перевірити та скинути",
     "totp_revoke_placeholder": "TOTP або код відновлення",
@@ -2092,6 +2094,7 @@
     "export_config_btn": "Експортувати конфігурацію",
     "export_config_desc": "Завантажити поточну конфігурацію як TOML-файл.",
     "export_config_title": "Експортувати конфігурацію",
+    "export_config_failed": "Не вдалося експортувати конфігурацію.",
     "totp_qr_alt": "QR-код TOTP"
   },
   "config": {
