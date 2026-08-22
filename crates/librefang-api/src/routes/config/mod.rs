@@ -1138,9 +1138,7 @@ async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value 
     static SKILL_COUNT_CACHE: std::sync::Mutex<Option<(usize, std::time::Instant)>> =
         std::sync::Mutex::new(None);
     let skill_count = {
-        let cached = SKILL_COUNT_CACHE
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        let cached = lock_skill_count_cache(&SKILL_COUNT_CACHE)
             .as_ref()
             .and_then(|(n, t)| {
                 if t.elapsed() < std::time::Duration::from_secs(30) {
@@ -1162,8 +1160,7 @@ async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value 
                     .read()
                     .map(|r| r.list().len())
                     .unwrap_or(0);
-                *SKILL_COUNT_CACHE.lock().unwrap_or_else(|p| p.into_inner()) =
-                    Some((n, std::time::Instant::now()));
+                *lock_skill_count_cache(&SKILL_COUNT_CACHE) = Some((n, std::time::Instant::now()));
                 n
             }
         }
@@ -1193,6 +1190,41 @@ async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value 
         "workflowCount": workflow_count,
         "webSearchAvailable": web_search_available,
     })
+}
+
+fn lock_skill_count_cache<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!("dashboard skill count cache lock poisoned; recovering cached value");
+        mutex.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
+#[cfg(test)]
+mod skill_count_cache_lock_tests {
+    use super::lock_skill_count_cache;
+    use std::sync::Mutex;
+
+    #[test]
+    fn poisoned_cache_lock_recovers_preserved_value_and_remains_usable() {
+        let cache = Mutex::new(Some(7usize));
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut value = cache.lock().unwrap();
+                    *value = Some(11);
+                    panic!("poison skill count cache lock");
+                })
+                .join()
+        });
+        assert!(poison.is_err());
+        assert!(cache.is_poisoned());
+        assert_eq!(*lock_skill_count_cache(&cache), Some(11));
+        assert!(!cache.is_poisoned());
+
+        *lock_skill_count_cache(&cache) = Some(13);
+        assert_eq!(*cache.lock().unwrap(), Some(13));
+    }
 }
 
 #[cfg(test)]
