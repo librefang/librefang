@@ -1827,12 +1827,44 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         chat_id: Option<&str>,
     ) -> Result<String, String> {
         let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
+
+        // The message path resolves the session through more options than
+        // the channel-derived sid alone: the agent's canonical session
+        // (`entry.session_id`) wins whenever the sender context falls past
+        // the channel branch (WebUI chat, some routing chains). Resetting
+        // only the derived sid then "succeeds" on a dead session while the
+        // conversation the user sees keeps its history — the /new no-op
+        // observed on proteo. Mirror the canonical option: reset it too
+        // when it differs from the derived sid. Same #7140 divergence
+        // family, session dimension.
+        let canonical = self
+            .kernel
+            .agent_registry()
+            .get(agent_id)
+            .map(|e| e.session_id)
+            .filter(|csid| *csid != sid);
+
+        // Count what we are about to clear so the ack is diagnosable in
+        // the chat itself ("did /new do anything?" → "N messages cleared").
+        let mut cleared = 0usize;
+        if let Some(csid) = canonical {
+            if let Ok(Some(s)) = self.kernel.memory_substrate().get_session(csid) {
+                cleared += s.messages.len();
+            }
+            self.kernel
+                .reset_session(agent_id, ResetScope::Session(csid))
+                .await
+                .map_err(|e| format!("{e}"))?;
+        }
+        if let Ok(Some(s)) = self.kernel.memory_substrate().get_session(sid) {
+            cleared += s.messages.len();
+        }
         self.kernel
             .reset_session(agent_id, ResetScope::Session(sid))
             .await
             .map_err(|e| format!("{e}"))?;
         Ok(format!(
-            "Session reset for this {channel} chat. Other surfaces untouched."
+            "Session reset for this {channel} chat ({cleared} messages cleared). Other surfaces untouched."
         ))
     }
 
@@ -1843,6 +1875,18 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         chat_id: Option<&str>,
     ) -> Result<String, String> {
         let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
+        let canonical = self
+            .kernel
+            .agent_registry()
+            .get(agent_id)
+            .map(|e| e.session_id)
+            .filter(|csid| *csid != sid);
+        if let Some(csid) = canonical {
+            self.kernel
+                .reboot_session(agent_id, ResetScope::Session(csid))
+                .await
+                .map_err(|e| format!("{e}"))?;
+        }
         self.kernel
             .reboot_session(agent_id, ResetScope::Session(sid))
             .await
@@ -1859,6 +1903,18 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         chat_id: Option<&str>,
     ) -> Result<String, String> {
         let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
+        let canonical = self
+            .kernel
+            .agent_registry()
+            .get(agent_id)
+            .map(|e| e.session_id)
+            .filter(|csid| *csid != sid);
+        if let Some(csid) = canonical {
+            self.kernel
+                .compact_agent_session_with_id(agent_id, Some(csid), true)
+                .await
+                .map_err(|e| format!("{e}"))?;
+        }
         self.kernel
             .compact_agent_session_with_id(agent_id, Some(sid), true)
             .await
@@ -3441,6 +3497,72 @@ mod tests {
             .seed_instance_default("ghost-bot", "does-not-exist")
             .unwrap();
         assert_eq!(adapter.resolve_instance_default("ghost-bot").await, None);
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reset_channel_session_clears_derived_and_canonical() {
+        // Regression for the proteo /new no-op: the telegram conversation
+        // lived in the agent's canonical session (`entry.session_id`) while
+        // /new reset only the channel-derived sid — the ack was honest
+        // about a dead session. The adapter must clear BOTH when they
+        // differ and report the number of cleared messages.
+        use librefang_testing::MockKernelBuilder;
+        use librefang_types::message::Message;
+
+        let (kernel, _tmp) = MockKernelBuilder::new().build();
+        let assistant = kernel
+            .agent_registry()
+            .find_by_name("assistant")
+            .expect("default assistant agent should exist after boot")
+            .id;
+        let canonical = kernel
+            .agent_registry()
+            .get(assistant)
+            .expect("assistant entry")
+            .session_id;
+        let derived = SessionId::for_sender_scope(assistant, "telegram", Some("chat-42"));
+        assert_ne!(canonical, derived, "test premise: sids must differ");
+
+        let substrate = kernel.memory_substrate();
+        let mut c = substrate
+            .create_session(assistant)
+            .expect("create canonical seed");
+        c.id = canonical;
+        c.messages = vec![Message::user("canonical history")];
+        substrate.save_session(&c).expect("save canonical seed");
+        let mut d = substrate
+            .create_session(assistant)
+            .expect("create derived seed");
+        d.id = derived;
+        d.messages = vec![Message::user("derived history")];
+        substrate.save_session(&d).expect("save derived seed");
+
+        let adapter = KernelBridgeAdapter {
+            kernel: kernel.clone(),
+            started_at: Instant::now(),
+            thinking_prefs: std::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+        let reply = adapter
+            .reset_channel_session(assistant, "telegram", Some("chat-42"))
+            .await
+            .expect("reset must succeed");
+        assert!(
+            reply.contains("2 messages cleared"),
+            "ack must report the cleared count, got: {reply}"
+        );
+
+        let c_after = substrate
+            .get_session(canonical)
+            .expect("lookup canonical")
+            .expect("canonical session must still exist (empty)");
+        let d_after = substrate
+            .get_session(derived)
+            .expect("lookup derived")
+            .expect("derived session must still exist (empty)");
+        assert!(c_after.messages.is_empty());
+        assert!(d_after.messages.is_empty());
 
         kernel.shutdown();
     }
