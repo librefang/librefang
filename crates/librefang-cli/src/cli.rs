@@ -1203,6 +1203,46 @@ pub(crate) enum AgentCommands {
         /// New value.
         value: String,
     },
+    /// Show an agent's model routing settings.
+    #[command(
+        long_about = "Show whether an agent uses its own model or lets the router pick one\nper task, plus any profile allowlist and cost budget.\n\nExamples:\n  librefang agent routing coder\n  librefang agent routing coder --json"
+    )]
+    Routing {
+        /// Agent ID (UUID) or name.
+        agent_id: String,
+        /// Output as JSON for scripting.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Update an agent's model routing settings.
+    #[command(
+        long_about = "Switch an agent between a fixed model and router-chosen models, and\nconstrain what the router may pick.\n\n`--mode fixed` clears the allowlist and the budget: they only describe a\nrouting decision that will not happen.\n\nExamples:\n  librefang agent routing-set coder --mode flexible\n  librefang agent routing-set coder --mode flexible --profiles coder,quick\n  librefang agent routing-set coder --mode flexible --budget medium\n  librefang agent routing-set coder --mode fixed"
+    )]
+    RoutingSet {
+        /// Agent ID (UUID) or name.
+        agent_id: String,
+        /// "fixed" (use the agent's own model) or "flexible" (let the router pick).
+        #[arg(long, default_value = "flexible")]
+        mode: String,
+        /// Comma-separated profile names the router may pick. Omit for any profile.
+        #[arg(long)]
+        profiles: Option<String>,
+        /// Highest cost tier the router may pick: cheap, medium or expensive. Omit for no cap.
+        #[arg(long)]
+        budget: Option<String>,
+        /// Profile to use when nothing matches the task.
+        #[arg(long)]
+        default_profile: Option<String>,
+    },
+    /// List the resolved model-router profile catalog.
+    #[command(
+        long_about = "List the model profiles the router matches against: the builtin\ncatalog with ~/.librefang/model_profiles.toml merged over it.\n\nExamples:\n  librefang agent routing-profiles\n  librefang agent routing-profiles --json"
+    )]
+    RoutingProfiles {
+        /// Output as JSON for scripting.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

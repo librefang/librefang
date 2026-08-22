@@ -53,4 +53,35 @@ pub trait CatalogQuery: Send + Sync {
     fn proactive_memory_extraction_model_for(&self, _agent_id: &str) -> Option<String> {
         None
     }
+
+    /// Resolve a model-router profile by name.
+    ///
+    /// Lets the runtime turn a profile name — `"quick"`, `"coder"` — into the
+    /// provider/model pair it stands for, without depending on
+    /// `librefang-kernel`, which owns the catalog and depends on the runtime
+    /// in the other direction. This is the same trait-injection seam the rest
+    /// of `CatalogQuery` uses.
+    ///
+    /// Returns `None` when no profile of that name exists, so callers can
+    /// tell "unknown profile" apart from "no profile asked for".
+    ///
+    /// Default impl returns `None` so existing stubs and tooling don't have to
+    /// opt in; the real kernel impl consults the resolved profile catalog.
+    fn resolve_model_profile(
+        &self,
+        _name: &str,
+    ) -> Option<librefang_types::model_profile::ModelProfile> {
+        None
+    }
+
+    /// The names of every profile in the resolved catalog, ordered.
+    ///
+    /// Used to make an "unknown profile" failure actionable by telling the
+    /// caller what it could have asked for instead. Ordered so the message is
+    /// byte-identical across processes (#3298) — it reaches an agent's
+    /// conversation as a tool error, and unstable ordering there would churn
+    /// the prompt cache on every retry.
+    fn model_profile_names(&self) -> Vec<String> {
+        Vec::new()
+    }
 }

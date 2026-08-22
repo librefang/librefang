@@ -365,6 +365,10 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                             "type": "array",
                             "items": { "type": "string" },
                             "description": "Preset necessary shell commands based on the agent's task (e.g., [\"uv *\", \"pnpm *\"]). "
+                        },
+                        "profile": {
+                            "type": "string",
+                            "description": "Model profile the new agent should run on, by name (e.g. 'quick', 'coder', 'architect', 'researcher'). Pins the profile's provider and model on the spawned agent instead of inheriting the default. Use a cheap profile for narrow work — a sub-agent that only checks whether something is done does not need the most capable model. Omit to inherit the default model. Naming a profile that does not exist fails with the list of available ones."
                         }
                     },
                     "required": ["name", "system_prompt"]

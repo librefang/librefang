@@ -73,4 +73,31 @@ impl kernel_handle::CatalogQuery for LibreFangKernel {
             .proactive_memory
             .resolve_extraction_model(&cfg.proactive_memory)
     }
+
+    /// Look a profile up in the resolved catalog — the builtin asset with
+    /// `~/.librefang/model_profiles.toml` merged over it.
+    ///
+    /// Deliberately **not** gated on `[model_router] enabled`. That switch
+    /// governs the *automatic* per-turn router, which picks a model nobody
+    /// asked for; naming a profile on an `agent_spawn` call is an explicit
+    /// choice by the parent agent, and silently ignoring an explicit
+    /// parameter is the exact failure this lookup exists to remove. It also
+    /// keeps the subagent case usable — spawning a cheap verifier does not
+    /// require switching every agent onto automatic routing.
+    fn resolve_model_profile(
+        &self,
+        name: &str,
+    ) -> Option<librefang_types::model_profile::ModelProfile> {
+        let cfg = self.config.load();
+        crate::model_router::ProfileCatalog::load_cached(cfg.home_dir.as_path(), &cfg.model_router)
+            .get(name)
+            .cloned()
+    }
+
+    /// Ordered by construction: `ProfileCatalog` name-sorts at load (#3298).
+    fn model_profile_names(&self) -> Vec<String> {
+        let cfg = self.config.load();
+        crate::model_router::ProfileCatalog::load_cached(cfg.home_dir.as_path(), &cfg.model_router)
+            .names()
+    }
 }

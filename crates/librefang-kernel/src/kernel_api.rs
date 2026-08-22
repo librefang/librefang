@@ -326,6 +326,14 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()>;
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()>;
     fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()>;
+    /// Update an agent's model selection mode and per-agent router override.
+    /// See [`LibreFangKernel::set_agent_model_routing`] for the full contract.
+    fn set_agent_model_routing(
+        &self,
+        agent_id: AgentId,
+        mode: librefang_types::agent::ModelMode,
+        router_override: Option<librefang_types::model_profile::AgentRouterOverride>,
+    ) -> KernelResult<()>;
     /// Update an agent's schedule mode and restart its background loop so
     /// the change takes effect immediately, without a daemon restart.
     /// See [`LibreFangKernel::set_agent_schedule`] for the full contract.
@@ -1136,6 +1144,15 @@ impl KernelApi for LibreFangKernel {
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()> {
         Self::set_agent_mcp_servers(self, agent_id, servers)
     }
+    fn set_agent_model_routing(
+        &self,
+        agent_id: AgentId,
+        mode: librefang_types::agent::ModelMode,
+        router_override: Option<librefang_types::model_profile::AgentRouterOverride>,
+    ) -> KernelResult<()> {
+        Self::set_agent_model_routing(self, agent_id, mode, router_override)
+    }
+
     fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()> {
         Self::set_agent_channels(self, agent_id, channels)
     }

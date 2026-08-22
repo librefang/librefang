@@ -838,7 +838,8 @@
       "skills": "技能",
       "tools": "工具",
       "schedule": "计划",
-      "logs": "日志"
+      "logs": "日志",
+      "routing": "路由"
     },
     "configure": "配置",
     "select_an_agent": "选择智能体",
@@ -848,7 +849,28 @@
     "tools_declared_desc": "此智能体可使用的工具。留空则可不受限制地访问所有工具。",
     "providers_error_loading": "加载错误",
     "no_providers": "没有供应商",
-    "select_provider_first": "请先选择供应商"
+    "select_provider_first": "请先选择供应商",
+    "routing": {
+      "title": "模型路由",
+      "description": "选择该智能体是始终使用自己的模型，还是由路由器根据任务复杂度为每个任务挑选模型。",
+      "disabledKernelWide": "config.toml 中路由器已关闭",
+      "mode": "模式",
+      "modeFixed": "固定模型",
+      "modeFlexible": "由路由器选择",
+      "modeFixedHint": "该智能体始终使用其清单中的提供方和模型。",
+      "modeFlexibleHint": "路由器会为每轮对话评分并选择匹配的配置。请在下方限制其选择范围。",
+      "allowedProfiles": "允许的配置",
+      "noProfiles": "尚未配置模型配置",
+      "noProfilesHint": "将配置添加到 ~/.librefang/model_profiles.toml 后即可在此选择。",
+      "anyProfile": "未选择 — 路由器可以选择任意配置。",
+      "someProfiles": "路由器只能从已选配置中挑选。",
+      "costBudget": "费用预算",
+      "costBudgetHint": "即使任务匹配，路由器也绝不会选择高于该档位的配置。",
+      "noCap": "无上限",
+      "saved": "已保存模型路由",
+      "saveFailed": "无法保存模型路由",
+      "loadFailed": "无法加载模型路由"
+    }
   },
   "providers": {
     "title": "供应商",

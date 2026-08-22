@@ -499,6 +499,25 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Update an agent's model selection mode and per-agent router override
+    /// (profile allowlist + cost budget). Mutates the manifest only; use
+    /// [`crate::LibreFangKernel::set_agent_model_routing`] to also persist to
+    /// SQLite and `agent.toml`. Mirrors `update_web_search_augmentation`.
+    pub fn update_model_routing(
+        &self,
+        id: AgentId,
+        mode: librefang_types::agent::ModelMode,
+        router_override: Option<librefang_types::model_profile::AgentRouterOverride>,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.mode = mode;
+            entry.manifest.model.router_override = router_override;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
     /// Update an agent's schedule mode (Reactive / Periodic / Proactive /
     /// Continuous). Mutates the manifest only — the kernel-level wrapper
     /// `LibreFangKernel::set_agent_schedule` is what callers should use to

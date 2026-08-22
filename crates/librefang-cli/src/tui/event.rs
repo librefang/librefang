@@ -204,6 +204,16 @@ pub enum AppEvent {
     AgentSkillsUpdated(String),
     /// Agent MCP servers updated.
     AgentMcpServersUpdated(String),
+    /// Agent model routing loaded (for the routing editor). `available` is the
+    /// resolved profile catalog; `allowed_profiles` is this agent's allowlist.
+    AgentModelRoutingLoaded {
+        mode: String,
+        allowed_profiles: Vec<String>,
+        cost_budget: Option<String>,
+        available: Vec<String>,
+    },
+    /// Agent model routing updated.
+    AgentModelRoutingUpdated(String),
     /// Comms topology loaded.
     CommsTopologyLoaded {
         nodes: Vec<super::screens::comms::CommsNode>,
@@ -1324,6 +1334,175 @@ pub fn spawn_update_agent_mcp_servers(
                         let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
                             "tui-event-mcp-update-error",
                             &[("error", &e.to_string())],
+                        )));
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Fetch an agent's model routing settings **and** the profile catalog.
+///
+/// Both in one call because the editor is unusable with either half missing:
+/// without the catalog there is nothing to tick, and without the agent's own
+/// settings the editor would show whatever the previous screen left behind and
+/// could save a value the operator never chose.
+pub fn spawn_fetch_agent_model_routing(
+    backend: BackendRef,
+    agent_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+
+            let available: Vec<String> = client
+                .get(format!("{base_url}/api/model-router/profiles"))
+                .send()
+                .ok()
+                .and_then(|r| r.json::<serde_json::Value>().ok())
+                .map(|body| {
+                    body["profiles"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|p| p["name"].as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+
+            if let Ok(resp) = client
+                .get(format!("{base_url}/api/agents/{agent_id}/model_routing"))
+                .send()
+            {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let mode = body["mode"].as_str().unwrap_or("fixed").to_string();
+                    let allowed_profiles: Vec<String> = body["allowed_profiles"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let cost_budget = body["cost_budget"].as_str().map(String::from);
+                    let _ = tx.send(AppEvent::AgentModelRoutingLoaded {
+                        mode,
+                        allowed_profiles,
+                        cost_budget,
+                        available,
+                    });
+                    return;
+                }
+            }
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-model-routing-fetch-failed",
+            )));
+        }
+        BackendRef::InProcess(kernel) => {
+            let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) else {
+                let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                    "tui-event-model-routing-fetch-failed",
+                )));
+                return;
+            };
+            let aid = librefang_types::agent::AgentId(uuid);
+            let Some(entry) = kernel.agent_registry_ref().get(aid) else {
+                let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                    "tui-event-model-routing-fetch-failed",
+                )));
+                return;
+            };
+
+            let cfg = kernel.config_snapshot();
+            let available = librefang_kernel::model_router::ProfileCatalog::load_cached(
+                cfg.home_dir.as_path(),
+                &cfg.model_router,
+            )
+            .names();
+
+            let mode = match entry.manifest.model.mode {
+                librefang_types::agent::ModelMode::Fixed => "fixed",
+                librefang_types::agent::ModelMode::Flexible => "flexible",
+            }
+            .to_string();
+            let router_override = entry.manifest.model.router_override.as_ref();
+            let allowed_profiles = router_override
+                .map(|o| o.allowed_profiles.iter().cloned().collect())
+                .unwrap_or_default();
+            let cost_budget = router_override
+                .and_then(|o| o.cost_budget)
+                .map(|t| t.as_str().to_string());
+
+            let _ = tx.send(AppEvent::AgentModelRoutingLoaded {
+                mode,
+                allowed_profiles,
+                cost_budget,
+                available,
+            });
+        }
+    });
+}
+
+/// Persist an agent's model routing mode and router override.
+pub fn spawn_update_agent_model_routing(
+    backend: BackendRef,
+    agent_id: String,
+    mode: String,
+    allowed_profiles: Vec<String>,
+    cost_budget: Option<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .put(format!("{base_url}/api/agents/{agent_id}/model_routing"))
+                .json(&serde_json::json!({
+                    "mode": mode,
+                    "allowed_profiles": allowed_profiles,
+                    "cost_budget": cost_budget,
+                }))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::AgentModelRoutingUpdated(agent_id));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-model-routing-update-failed",
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(kernel) => {
+            if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
+                let aid = librefang_types::agent::AgentId(uuid);
+                let flexible = mode == "flexible";
+                let router_mode = if flexible {
+                    librefang_types::agent::ModelMode::Flexible
+                } else {
+                    librefang_types::agent::ModelMode::Fixed
+                };
+                let router_override =
+                    flexible.then(|| librefang_types::model_profile::AgentRouterOverride {
+                        fixed: false,
+                        allowed_profiles: allowed_profiles.into_iter().collect(),
+                        cost_budget: cost_budget
+                            .as_deref()
+                            .and_then(librefang_types::model_profile::CostTier::parse),
+                        default_profile: None,
+                    });
+                match kernel.set_agent_model_routing(aid, router_mode, router_override) {
+                    Ok(()) => {
+                        let _ = tx.send(AppEvent::AgentModelRoutingUpdated(agent_id));
+                    }
+                    Err(_) => {
+                        let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                            "tui-event-model-routing-update-failed",
                         )));
                     }
                 }

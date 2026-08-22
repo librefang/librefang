@@ -175,12 +175,25 @@ pub(super) async fn tool_agent_send(
 }
 
 /// Build agent manifest TOML from parsed parameters.
+///
+/// `profile` is the already-resolved model-router profile the spawned agent
+/// should run on, or `None` to leave the model unset so the child inherits the
+/// kernel default exactly as it did before profiles existed.
+///
+/// A profile pins `provider` and `model` outright rather than setting
+/// `mode = "flexible"`. Naming a profile at spawn time is a request for *that*
+/// model — a verifier asked to run on `quick` should stay on `quick`, not be
+/// handed to the per-turn router which could move it back onto an expensive
+/// model on the next turn. It also means the parameter works with
+/// `[model_router] enabled = false`, which is the common case for an operator
+/// who wants cheap subagents without automatic routing everywhere.
 pub(super) fn build_agent_manifest_toml(
     name: &str,
     system_prompt: &str,
     tools: Vec<String>,
     shell: Vec<String>,
     network: bool,
+    profile: Option<&librefang_types::model_profile::ModelProfile>,
 ) -> Result<String, String> {
     let mut tools = tools;
     let has_shell = !shell.is_empty();
@@ -200,15 +213,47 @@ pub(super) fn build_agent_manifest_toml(
         capabilities["shell"] = serde_json::json!(shell);
     }
 
+    let mut model_json = serde_json::json!({
+        "system_prompt": system_prompt,
+    });
+    if let Some(profile) = profile {
+        model_json["provider"] = serde_json::json!(profile.provider);
+        model_json["model"] = serde_json::json!(profile.model);
+        // Only carried when the profile actually states one, so a profile
+        // without an explicit window keeps the runtime's own resolution
+        // (registry, persisted cache, live `/v1/models` probe) rather than
+        // pinning a value the profile author never chose.
+        if let Some(context_window) = profile.context_window {
+            model_json["context_window"] = serde_json::json!(context_window);
+        }
+    }
+
     let manifest_json = serde_json::json!({
         "name": name,
-        "model": {
-            "system_prompt": system_prompt,
-        },
+        "model": model_json,
         "capabilities": capabilities,
     });
 
     toml::to_string(&manifest_json).map_err(|e| format!("Failed to serialize to TOML: {}", e))
+}
+
+/// Error for an `agent_spawn` naming a profile that is not in the catalog.
+///
+/// Lists what *is* available, because the caller is usually an LLM: an error
+/// that only says "unknown" invites a second guess, while one that enumerates
+/// the catalog lets the next attempt succeed. `available` is already ordered
+/// by the catalog (#3298), so the message is stable across retries.
+pub(super) fn unknown_profile_error(name: &str, available: &[String]) -> ToolError {
+    if available.is_empty() {
+        return ToolError::upstream_msg(format!(
+            "Unknown model profile '{name}'. No model profiles are configured — \
+             add them to ~/.librefang/model_profiles.toml."
+        ));
+    }
+    ToolError::upstream_msg(format!(
+        "Unknown model profile '{name}'. Available profiles: {}.",
+        available.join(", ")
+    ))
 }
 
 /// Expand a list of tool names into full `Capability` grants for the parent.
@@ -317,8 +362,24 @@ pub(super) async fn tool_agent_spawn(
         })
         .unwrap_or_default();
 
-    let manifest_toml = build_agent_manifest_toml(name, system_prompt, tools, shell, network)
-        .map_err(ToolError::upstream_msg)?;
+    // Resolve the profile name before spawning so an unknown name fails loudly
+    // here instead of silently producing an agent on the wrong model.
+    let profile = match input["profile"].as_str() {
+        Some(profile_name) => match kh.resolve_model_profile(profile_name) {
+            Some(profile) => Some(profile),
+            None => {
+                return Err(unknown_profile_error(
+                    profile_name,
+                    &kh.model_profile_names(),
+                ))
+            }
+        },
+        None => None,
+    };
+
+    let manifest_toml =
+        build_agent_manifest_toml(name, system_prompt, tools, shell, network, profile.as_ref())
+            .map_err(ToolError::upstream_msg)?;
     // Build parent capabilities from the parent's allowed tools list.
     // This prevents a sub-agent from escalating privileges beyond what
     // its parent is permitted to use (capability inheritance enforcement).

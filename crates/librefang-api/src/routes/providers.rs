@@ -24,6 +24,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
                 .delete(delete_model_overrides),
         )
         .route("/models/{*id}", axum::routing::get(get_model))
+        .route(
+            "/model-router/profiles",
+            axum::routing::get(list_model_router_profiles),
+        )
         .route("/providers", axum::routing::get(list_providers))
         .route("/catalog/update", axum::routing::post(catalog_update))
         .route("/catalog/status", axum::routing::get(catalog_status))
@@ -909,6 +913,39 @@ fn provider_max_output_tokens(
         .map(u64::from);
     let catalog_max = (model.max_output_tokens > 0).then_some(model.max_output_tokens);
     override_max.or(catalog_max)
+}
+
+/// GET /api/model-router/profiles — List the resolved model-router profiles.
+///
+/// The catalog is the builtin asset with `~/.librefang/model_profiles.toml`
+/// merged over it, so this is what the router will actually match against —
+/// not just the compiled-in defaults. Profiles come back ordered by name.
+///
+/// `enabled` reports whether `[model_router]` is switched on kernel-wide; the
+/// profile list is returned either way so an operator can review the catalog
+/// before flipping the switch.
+#[utoipa::path(
+    get,
+    path = "/api/model-router/profiles",
+    tag = "models",
+    responses(
+        (status = 200, description = "List resolved model-router profiles", body = crate::types::JsonObject)
+    )
+)]
+pub async fn list_model_router_profiles(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cfg = state.kernel.config_snapshot();
+    let catalog = librefang_kernel::model_router::ProfileCatalog::load_cached(
+        cfg.home_dir.as_path(),
+        &cfg.model_router,
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "enabled": cfg.model_router.enabled,
+            "default_profile": cfg.model_router.default_profile,
+            "profiles": catalog.profiles(),
+        })),
+    )
 }
 
 /// GET /api/providers — List all providers with auth status.

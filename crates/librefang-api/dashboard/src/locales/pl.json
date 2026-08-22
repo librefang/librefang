@@ -838,7 +838,8 @@
       "skills": "Umiejętności",
       "tools": "Narzędzia",
       "schedule": "Harmonogram",
-      "logs": "Logi"
+      "logs": "Logi",
+      "routing": "Routing"
     },
     "configure": "Konfiguruj",
     "select_an_agent": "Wybierz agenta",
@@ -848,7 +849,28 @@
     "tools_declared_desc": "Narzędzia, których ten agent może używać. Pozostaw puste, aby uzyskać nieograniczony dostęp do wszystkich narzędzi.",
     "providers_error_loading": "Błąd ładowania",
     "no_providers": "Brak dostawców",
-    "select_provider_first": "Najpierw wybierz dostawcę"
+    "select_provider_first": "Najpierw wybierz dostawcę",
+    "routing": {
+      "title": "Routing modeli",
+      "description": "Zdecyduj, czy ten agent zawsze używa własnego modelu, czy router dobiera model do każdego zadania na podstawie jego złożoności.",
+      "disabledKernelWide": "Router wyłączony w config.toml",
+      "mode": "Tryb",
+      "modeFixed": "Stały model",
+      "modeFlexible": "Router wybiera",
+      "modeFixedHint": "Ten agent zawsze używa dostawcy i modelu z własnego manifestu.",
+      "modeFlexibleHint": "Router ocenia każdą turę i wybiera pasujący profil. Ogranicz wybór poniżej.",
+      "allowedProfiles": "Dozwolone profile",
+      "noProfiles": "Brak skonfigurowanych profili modeli",
+      "noProfilesHint": "Dodaj profile do ~/.librefang/model_profiles.toml, aby były tutaj dostępne.",
+      "anyProfile": "Nic nie wybrano — router może wybrać dowolny profil.",
+      "someProfiles": "Router może wybierać wyłącznie spośród zaznaczonych profili.",
+      "costBudget": "Budżet kosztów",
+      "costBudgetHint": "Router nigdy nie wybierze profilu powyżej tego poziomu, nawet jeśli zadanie do niego pasuje.",
+      "noCap": "Bez limitu",
+      "saved": "Zapisano routing modeli",
+      "saveFailed": "Nie udało się zapisać routingu modeli",
+      "loadFailed": "Nie udało się wczytać routingu modeli"
+    }
   },
   "providers": {
     "title": "Dostawcy",

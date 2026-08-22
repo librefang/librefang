@@ -603,6 +603,25 @@ pub enum SessionMode {
     New,
 }
 
+/// Model selection mode for an agent.
+///
+/// Like [`SessionMode`] above, this deserializes strictly: there is no
+/// `#[serde(other)]` arm, so `mode = "Flexible"` (capitalised typo) is a hard
+/// parse error rather than a silent downgrade to `Fixed`. A typo that quietly
+/// pinned the agent back to its manifest model would be invisible — the agent
+/// would keep working, just never routed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelMode {
+    /// Always use the provider/model in [`ModelConfig`]. Default, and
+    /// fully backward-compatible with manifests written before routing existed.
+    #[default]
+    Fixed,
+    /// Let the profile router pick the model for each turn.
+    /// Only honoured when `[model_router] enabled = true` in `config.toml`.
+    Flexible,
+}
+
 /// Web search augmentation mode.
 ///
 /// Controls whether the agent loop automatically searches the web using the
@@ -875,6 +894,16 @@ impl ToolProfile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
+    /// Model selection mode. `"fixed"` (default) always uses the
+    /// provider/model below; `"flexible"` lets the profile router pick per
+    /// turn. Only honoured when `[model_router] enabled = true` in
+    /// `config.toml`.
+    #[serde(default)]
+    pub mode: ModelMode,
+    /// Per-agent router constraints, applied when `mode = "flexible"`.
+    /// Ignored entirely in `"fixed"` mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_override: Option<crate::model_profile::AgentRouterOverride>,
     /// LLM provider name.
     pub provider: String,
     /// Model identifier.
@@ -928,6 +957,8 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
+            mode: ModelMode::default(),
+            router_override: None,
             provider: "default".to_string(),
             model: "default".to_string(),
             max_tokens: 4096,
@@ -3125,6 +3156,8 @@ model = "llama-3.3-70b-versatile"
         extra.insert("memory_max_window".to_string(), serde_json::json!(50));
 
         let config = ModelConfig {
+            mode: ModelMode::Fixed,
+            router_override: None,
             provider: "qwen".to_string(),
             model: "qwen3.6".to_string(),
             max_tokens: 4096,
