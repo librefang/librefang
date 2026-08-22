@@ -3995,7 +3995,6 @@
     "page_assets_updated": "页面资源已更新",
     "react_state_reset": "React 状态已重置 — 正在重新加载",
     "new_version_available": "新版本可用。重新加载以获取最新版本。",
-    "unexpected": "发生意外错误。",
     "force_reload_title": "清除自动重新加载冷却并强制重新加载",
     "force_reload": "强制重新加载",
     "stack": "堆栈",
