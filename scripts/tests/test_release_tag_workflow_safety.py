@@ -231,6 +231,64 @@ def main() -> None:
     ):
         raise SystemExit("release-cli workflow does not verify the exact release tag")
 
+    for workflow_name in ("mobile-smoke.yml", "release.yml"):
+        mobile_document = yaml.safe_load(
+            (ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
+        )
+        if mobile_document.get("env", {}).get("TAURI_CLI_VERSION") != "2.11.4":
+            raise SystemExit(f"{workflow_name} does not pin Tauri CLI 2.11.4")
+        mobile_steps = [
+            step
+            for job in mobile_document.get("jobs", {}).values()
+            for step in job.get("steps", [])
+        ]
+        cache_keys = [
+            step.get("with", {}).get("key", "")
+            for step in mobile_steps
+            if step.get("name") == "Cache tauri-cli binary"
+        ]
+        if len(cache_keys) != 2 or any(
+            "env.TAURI_CLI_VERSION" not in key for key in cache_keys
+        ):
+            raise SystemExit(f"{workflow_name} Tauri CLI caches omit the pinned version")
+        install_scripts = [
+            step.get("run", "")
+            for step in mobile_steps
+            if step.get("name") == "Install Tauri CLI"
+        ]
+        if len(install_scripts) != 2 or any(
+            'cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked'
+            not in script
+            for script in install_scripts
+        ):
+            raise SystemExit(f"{workflow_name} does not install the pinned Tauri CLI")
+        if any(
+            'test "$(cargo tauri --version)" = "tauri-cli $TAURI_CLI_VERSION"'
+            not in script
+            for script in install_scripts
+        ):
+            raise SystemExit(f"{workflow_name} does not verify the installed Tauri CLI")
+        ios_init = next(
+            (
+                step.get("run", "")
+                for step in mobile_steps
+                if step.get("name") == "Initialise iOS project"
+            ),
+            "",
+        )
+        if "rm -rf gen/apple\ncargo tauri ios init" not in ios_init:
+            raise SystemExit(f"{workflow_name} does not remove iOS placeholders before init")
+        ndk_step = next(
+            (
+                step.get("run", "")
+                for step in mobile_steps
+                if step.get("name") == "Symlink legacy NDK binutils for openssl-src cross-compile"
+            ),
+            "",
+        )
+        if '[ -x "$NDK_BIN/llvm-$tool" ]' not in ndk_step:
+            raise SystemExit(f"{workflow_name} does not validate NDK tools before linking")
+
     print("release and repository automation safety checks passed")
 
 
