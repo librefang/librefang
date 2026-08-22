@@ -3292,6 +3292,7 @@
       "create_failed": "창을 생성하지 못했습니다.",
       "delete_failed": "창을 닫지 못했습니다.",
       "rename_failed": "창 이름을 바꾸지 못했습니다.",
+      "switch_unavailable": "터미널 연결이 끊어진 동안에는 창을 전환할 수 없습니다.",
       "rename_hint": "이름을 바꾸려면 두 번 클릭하세요.",
       "name_label": "창 이름",
       "name_invalid": "이름은 1~64자여야 하며 | 또는 제어 문자를 포함할 수 없습니다.",

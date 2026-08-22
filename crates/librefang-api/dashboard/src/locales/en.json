@@ -3292,6 +3292,7 @@
       "create_failed": "Failed to create window",
       "delete_failed": "Failed to close window",
       "rename_failed": "Failed to rename window",
+      "switch_unavailable": "Cannot switch windows while the terminal is disconnected.",
       "rename_hint": "Double-click to rename",
       "name_label": "Window name",
       "name_invalid": "Name must be 1–64 characters and cannot contain | or control characters.",

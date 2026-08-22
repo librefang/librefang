@@ -3292,6 +3292,7 @@
       "create_failed": "创建窗口失败",
       "delete_failed": "关闭窗口失败",
       "rename_failed": "重命名窗口失败",
+      "switch_unavailable": "终端断开连接时无法切换窗口。",
       "rename_hint": "双击可重命名",
       "name_label": "窗口名称",
       "name_invalid": "名称须为 1–64 个字符，不能包含 | 或控制字符。",
