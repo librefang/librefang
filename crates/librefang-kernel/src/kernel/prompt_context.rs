@@ -14,7 +14,8 @@
 
 use std::path::Path;
 
-use librefang_types::agent::AgentId;
+use librefang_runtime::prompt_builder::ActiveGoalPrompt;
+use librefang_types::{agent::AgentId, goal::GoalId};
 
 use super::*;
 
@@ -31,6 +32,17 @@ fn goal_is_active_for_agent(goal: &serde_json::Value, agent_id: AgentId) -> bool
         .as_str()
         .and_then(|stored| stored.trim().parse::<AgentId>().ok())
         == Some(agent_id)
+}
+
+fn active_goal_for_prompt(goal: &serde_json::Value) -> Option<ActiveGoalPrompt> {
+    let id = goal["id"].as_str()?;
+    id.parse::<GoalId>().ok()?;
+    Some(ActiveGoalPrompt {
+        id: id.to_string(),
+        title: goal["title"].as_str().unwrap_or("").to_string(),
+        status: goal["status"].as_str().unwrap_or("pending").to_string(),
+        progress: goal_progress_for_prompt(goal),
+    })
 }
 
 impl LibreFangKernel {
@@ -129,8 +141,8 @@ impl LibreFangKernel {
         metadata
     }
 
-    /// Load active goals assigned to the agent as (title, status, progress) tuples for injection into its system prompt. Unassigned goals remain visible in management APIs but are not agent work.
-    pub(crate) fn active_goals_for_prompt(&self, agent_id: AgentId) -> Vec<(String, String, u8)> {
+    /// Load active goals assigned to the agent for injection into its system prompt. Unassigned goals remain visible in management APIs but are not agent work.
+    pub(crate) fn active_goals_for_prompt(&self, agent_id: AgentId) -> Vec<ActiveGoalPrompt> {
         let shared_id = shared_memory_agent_id();
         let goals: Vec<serde_json::Value> = match self
             .memory
@@ -143,12 +155,7 @@ impl LibreFangKernel {
         goals
             .into_iter()
             .filter(|goal| goal_is_active_for_agent(goal, agent_id))
-            .map(|g| {
-                let title = g["title"].as_str().unwrap_or("").to_string();
-                let status = g["status"].as_str().unwrap_or("pending").to_string();
-                let progress = goal_progress_for_prompt(&g);
-                (title, status, progress)
-            })
+            .filter_map(|goal| active_goal_for_prompt(&goal))
             .collect()
     }
 
@@ -412,6 +419,30 @@ mod goal_prompt_tests {
 
         assert_eq!(visible_to_a, vec!["owned by A"]);
         assert_eq!(visible_to_b, vec!["owned by B"]);
+    }
+
+    #[test]
+    fn prompt_goal_preserves_valid_id_and_rejects_unusable_ids() {
+        let goal_id: GoalId = "b5264016-e9cc-4fd1-83c6-d13626b404dc".parse().unwrap();
+        let stored_id = goal_id.to_string().to_uppercase();
+        let valid = serde_json::json!({
+            "id": stored_id,
+            "title": "owned goal",
+            "status": "in_progress",
+            "progress": 140,
+        });
+
+        let prompt_goal = active_goal_for_prompt(&valid).unwrap();
+        assert_eq!(prompt_goal.id, stored_id);
+        assert_eq!(prompt_goal.title, "owned goal");
+        assert_eq!(prompt_goal.status, "in_progress");
+        assert_eq!(prompt_goal.progress, 100);
+
+        assert!(active_goal_for_prompt(&serde_json::json!({"title": "missing id"})).is_none());
+        assert!(active_goal_for_prompt(
+            &serde_json::json!({"id": "not-a-uuid", "title": "malformed id"})
+        )
+        .is_none());
     }
 }
 
