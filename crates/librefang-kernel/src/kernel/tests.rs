@@ -5818,6 +5818,74 @@ async fn gc_sweep_aborts_orphaned_running_task_5142() {
     kernel.shutdown();
 }
 
+/// A live agent that starts one short-lived background watcher may never call `register_agent_watcher` again, so registration-time cleanup alone cannot reclaim the completed JoinHandle.
+/// The periodic sweep must drop completed handles while retaining tasks that are still running for `kill_agent` to abort later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gc_sweep_reaps_finished_agent_watchers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-gc-agent-watchers");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "gc-agent-watcher".to_string(),
+        description: "agent for watcher GC".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    let finished = tokio::spawn(async {});
+    while !finished.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    let running = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    });
+    let running_abort = running.abort_handle();
+
+    kernel.agents.agent_watchers.insert(
+        agent_id,
+        Arc::new(std::sync::Mutex::new(vec![finished, running])),
+    );
+
+    kernel.gc_sweep();
+
+    {
+        let slot = kernel
+            .agents
+            .agent_watchers
+            .get(&agent_id)
+            .expect("live agent watcher slot must remain");
+        let handles = slot.lock().expect("watcher lock");
+        assert_eq!(handles.len(), 1, "finished watcher must be reclaimed");
+        assert!(
+            !handles[0].is_finished(),
+            "running watcher must remain tracked for kill_agent"
+        );
+    }
+
+    kernel.kill_agent(agent_id).expect("kill should succeed");
+    for _ in 0..50 {
+        if running_abort.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        running_abort.is_finished(),
+        "retained watcher must still be aborted when the agent is killed"
+    );
+
+    kernel.shutdown();
+}
+
 /// TOCTOU regression: the periodic GC sweep must NOT abort a *successor* turn that swapped into `running_tasks` after the sweep snapshotted a finished predecessor under the same `(agent, session)` key.
 /// Pre-fix the sweep collected the keys, then did a bare `running_tasks.remove(&key)`; a faster successor inserted between the collect and the remove was dropped and its in-flight `AbortHandle` fired, killing a live turn.
 /// The fix snapshots the observed `task_id` and removes via `remove_if(... v.task_id == observed)`, so a swapped-in successor (different task_id) is never touched.

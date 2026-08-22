@@ -1305,6 +1305,22 @@ impl LibreFangKernel {
             }
         }
 
+        // 2. agent_watchers — completed background tasks no longer need to be retained just so a future kill_agent can abort them.
+        // Registration also performs this cleanup opportunistically, but an agent that starts only one watcher would otherwise retain its finished JoinHandle for the rest of the daemon lifetime.
+        for slot in self.agents.agent_watchers.iter() {
+            match slot.value().lock() {
+                Ok(mut handles) => {
+                    let before = handles.len();
+                    handles.retain(|handle| !handle.is_finished());
+                    total_removed += before - handles.len();
+                }
+                Err(_) => warn!(
+                    agent_id = %slot.key(),
+                    "Agent watcher lock poisoned during GC; leaving handles for a later sweep"
+                ),
+            }
+        }
+
         // 3. agent_msg_locks — remove locks for dead agents, but only when the
         // map slot is the sole remaining holder of the Arc (`Arc::strong_count
         // == 1`). This mirrors the session_msg_locks pass below. The dead-agent
