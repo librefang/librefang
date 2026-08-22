@@ -14727,7 +14727,7 @@
             "items": {
               "type": "string"
             },
-            "description": "MCP server names assigned to the agent. An empty list disables MCP servers for the agent; `[\"*\"]` enables all connected servers."
+            "description": "MCP server names assigned to the agent.\nAn empty list disables MCP servers for the agent; `[\"*\"]` enables all connected servers."
           }
         },
         "additionalProperties": false
