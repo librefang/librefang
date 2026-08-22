@@ -149,8 +149,8 @@ async fn create_event_webhook_rejects_ssrf_urls() {
     );
     let err = err_message(&json);
     assert!(
-        err.contains("169.254.169.254") || err.contains("not allowed"),
-        "error should mention the rejected host; got {err:?}"
+        err.contains("169.254.169.254"),
+        "error should mention the rejected SSRF host; got {err:?}"
     );
 
     // The other internal-URL families the gate blocks.
@@ -222,7 +222,7 @@ async fn update_event_webhook_rejects_ssrf_url() {
     );
     let id = created["id"]
         .as_str()
-        .expect("created webhook id")
+        .unwrap_or_else(|| panic!("created webhook id should be a string; body={created}"))
         .to_string();
 
     // 2. Try to repoint it at the metadata IP — must be rejected.
@@ -240,8 +240,8 @@ async fn update_event_webhook_rejects_ssrf_url() {
     );
     let err = err_message(&json);
     assert!(
-        err.contains("169.254.169.254") || err.contains("not allowed"),
-        "error should mention the rejected host; got {err:?}"
+        err.contains("169.254.169.254"),
+        "error should mention the rejected SSRF host; got {err:?}"
     );
 
     // 3. The stored webhook must still hold the original benign URL.
