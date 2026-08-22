@@ -2475,7 +2475,7 @@ jobs:
         # warning instead of failing the whole release. The .ipa still
         # landed on the GitHub Release in the prior step.
         continue-on-error: true
-        uses: Apple-Actions/upload-testflight-build@1ad58030672057aa084b4e96beb6f7a8c627f9e6 # v5.2.1
+        uses: Apple-Actions/upload-testflight-build@5e75ff58276689011512ba87a381d93dc67dbcf8 # v5.3.0
         with:
           app-path: ${{ steps.art.outputs.ipa }}
           issuer-id: ${{ secrets.APPLE_API_KEY_ISSUER_ID }}
@@ -2952,7 +2952,7 @@ jobs:
         # `!cancelled()` so a failed gate still publishes the findings that failed it; `conclusion != 'skipped'` keeps this quiet when the scan never ran; `continue-on-error` keeps a repository without code scanning enabled from turning a green scan red on the upload alone.
         if: ${{ !cancelled() && steps.scan.conclusion != 'skipped' && github.repository == 'librefang/librefang' }}
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           sarif_file: ${{ runner.temp }}/trivy-reports/release-${{ matrix.slug }}.sarif
           # Per-architecture: code scanning replaces the previous results for a category, so a shared one would discard one of the two platforms.
