@@ -438,6 +438,7 @@ impl HandRegistry {
     pub fn persist_state(&self, path: &std::path::Path) -> HandResult<()> {
         let _guard = self.persist_lock.lock().unwrap_or_else(|e| {
             warn!("persist_state: persist_lock poisoned, recovering: {e}");
+            self.persist_lock.clear_poison();
             e.into_inner()
         });
         let instances: Vec<PersistedInstance> = self
@@ -1836,6 +1837,29 @@ fn check_option_available(provider_env: Option<&str>, binary: Option<&str>) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poisoned_persist_lock_recovers_and_persistence_remains_usable() {
+        let reg = HandRegistry::new();
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _guard = reg.persist_lock.lock().unwrap();
+                    panic!("poison hand persistence lock");
+                })
+                .join()
+        });
+        assert!(poison.is_err());
+        assert!(reg.persist_lock.is_poisoned());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("hand_state.json");
+        reg.persist_state(&state_path).unwrap();
+
+        assert!(!reg.persist_lock.is_poisoned());
+        assert!(state_path.is_file());
+        reg.persist_state(&state_path).unwrap();
+    }
 
     #[test]
     fn poisoned_activation_lock_recovers_and_activation_remains_usable() {
