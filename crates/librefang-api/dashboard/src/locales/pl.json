@@ -1056,6 +1056,7 @@
     "pending_tab": "Oczekujące",
     "install": "Zainstaluj",
     "installing": "Instalowanie...",
+    "viewOnMarketplace": "Zobacz w {{marketplace}}",
     "installed_count": "{{count}} zainstalowanych",
     "browse": "Przeglądaj",
     "browse_registry": "Rejestr",

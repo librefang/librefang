@@ -1056,6 +1056,7 @@
     "pending_tab": "待审",
     "install": "安装",
     "installing": "安装中...",
+    "viewOnMarketplace": "在 {{marketplace}} 上查看",
     "installed_count": "已安装 {{count}} 个",
     "browse": "浏览",
     "browse_registry": "注册表",

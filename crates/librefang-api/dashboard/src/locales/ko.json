@@ -1056,6 +1056,7 @@
     "pending_tab": "보류 중",
     "install": "설치",
     "installing": "설치 중...",
+    "viewOnMarketplace": "{{marketplace}}에서 보기",
     "installed_count": "{{count}} 설치됨",
     "browse": "찾아보기",
     "browse_registry": "레지스트리",
