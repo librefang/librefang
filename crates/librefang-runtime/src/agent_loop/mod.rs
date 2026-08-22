@@ -1227,8 +1227,12 @@ async fn run_agent_loop_inner(
             } else {
                 tools_cache.get(available_tools, &session_loaded_tools)
             },
-            max_tokens: manifest.model.max_tokens,
-            temperature: manifest.model.temperature,
+            // Already resolved by the kernel (agent manifest > per-model
+            // override > system default). The `effective_*` fallback covers
+            // the callers that build a loop without going through
+            // `execute_llm_agent` at all.
+            max_tokens: manifest.model.effective_max_tokens(),
+            temperature: manifest.model.effective_temperature(),
             // Clone from the pre-built snapshot rather than the original to
             // avoid redundant Arc-deref / string traversal on every iteration.
             system: Some(system_prompt_snapshot.clone()),

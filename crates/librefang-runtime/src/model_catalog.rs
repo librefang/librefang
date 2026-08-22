@@ -1415,8 +1415,16 @@ impl ModelCatalog {
                 display_name: display,
                 provider: provider.to_string(),
                 tier: ModelTier::Local,
+                // Placeholders, and flagged as such. `DiscoveredModelInfo`
+                // has no capacity field and the OpenAI-compatible
+                // `/v1/models` shape carries none either, so there is no
+                // value to source here — but compaction and budget math
+                // still need a number. `limits_known: false` is what keeps
+                // that number from being presented to an operator as a
+                // measured ceiling, or warned against as one (#7780).
                 context_window: 131_072,
                 max_output_tokens: 16_384,
+                limits_known: false,
                 input_cost_per_m: 0.0,
                 output_cost_per_m: 0.0,
                 supports_tools,

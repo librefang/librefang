@@ -20,8 +20,9 @@ fn parses_form_full_output_with_capabilities_and_resources() {
     let m: AgentManifest = toml::from_str(toml).expect("full manifest must parse");
     assert_eq!(m.tags, vec!["beta", "research"]);
     assert_eq!(m.skills, vec!["coder"]);
-    assert_eq!(m.model.temperature, 0.3);
-    assert_eq!(m.model.max_tokens, 8192);
+    // The TOML names both, so both are explicit rather than inherited.
+    assert_eq!(m.model.temperature, Some(0.3));
+    assert_eq!(m.model.max_tokens, Some(8192));
     assert_eq!(m.resources.max_tool_calls_per_minute, 30);
     assert_eq!(m.resources.max_cost_per_hour_usd, 1.5);
     assert_eq!(m.capabilities.network, vec!["api.openai.com:443"]);

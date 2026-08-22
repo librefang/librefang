@@ -1499,7 +1499,7 @@ mod tests {
     fn test_patch_config_request_temperature_deserialization() {
         let json = r#"{"temperature": 1.5}"#;
         let req: PatchAgentConfigRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.temperature, Some(1.5));
+        assert_eq!(req.temperature, Some(Some(1.5)));
         assert!(req.max_tokens.is_none());
         assert!(req.model.is_none());
     }
@@ -1510,18 +1510,18 @@ mod tests {
         for temp in [0.0, 0.5, 1.0, 1.5, 2.0] {
             let json = format!(r#"{{"temperature": {temp}}}"#);
             let req: PatchAgentConfigRequest = serde_json::from_str(&json).unwrap();
-            assert_eq!(req.temperature, Some(temp));
+            assert_eq!(req.temperature, Some(Some(temp)));
         }
 
         // Out of range values still deserialize (validation happens in handler)
         let json = r#"{"temperature": 3.0}"#;
         let req: PatchAgentConfigRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.temperature, Some(3.0));
+        assert_eq!(req.temperature, Some(Some(3.0)));
 
         // Negative values still deserialize (validation happens in handler)
         let json = r#"{"temperature": -0.5}"#;
         let req: PatchAgentConfigRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.temperature, Some(-0.5));
+        assert_eq!(req.temperature, Some(Some(-0.5)));
     }
 
     #[test]
@@ -1529,7 +1529,47 @@ mod tests {
         let json = r#"{"max_tokens": 4096}"#;
         let req: PatchAgentConfigRequest = serde_json::from_str(json).unwrap();
         assert!(req.temperature.is_none());
-        assert_eq!(req.max_tokens, Some(4096));
+        assert_eq!(req.max_tokens, Some(Some(4096)));
+    }
+
+    /// The three states have to stay distinguishable over the wire: an absent
+    /// key leaves the stored value alone, an explicit `null` hands the field
+    /// back to inherit. A plain `Option<T>` collapses both into `None`, which
+    /// is why the inherit state was unreachable over HTTP before.
+    #[test]
+    fn test_patch_config_request_null_is_not_absent() {
+        let absent: PatchAgentConfigRequest = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(absent.temperature, None);
+        assert_eq!(absent.max_tokens, None);
+
+        let cleared: PatchAgentConfigRequest =
+            serde_json::from_str(r#"{"temperature": null, "max_tokens": null}"#).unwrap();
+        assert_eq!(cleared.temperature, Some(None));
+        assert_eq!(cleared.max_tokens, Some(None));
+    }
+
+    /// The four knobs an agent could not reach before (#7781): each is
+    /// accepted on the same tri-state contract as temperature.
+    #[test]
+    fn test_patch_config_request_accepts_the_remaining_preference_knobs() {
+        let json = r#"{"top_p": 0.9, "frequency_penalty": 0.5, "presence_penalty": -0.25,
+                       "context_window": 200000, "max_output_tokens": 8192}"#;
+        let req: PatchAgentConfigRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.top_p, Some(Some(0.9)));
+        assert_eq!(req.frequency_penalty, Some(Some(0.5)));
+        assert_eq!(req.presence_penalty, Some(Some(-0.25)));
+        assert_eq!(req.context_window, Some(Some(200_000)));
+        assert_eq!(req.max_output_tokens, Some(Some(8192)));
+    }
+
+    /// `reasoning_effort` is deliberately not on this request: it is an
+    /// endpoint fact, not an agent preference, and letting an agent force it
+    /// on reintroduces the gateway-rejects-every-turn failure of #7770.
+    /// `deny_unknown_fields` turns the attempt into a `400`.
+    #[test]
+    fn test_patch_config_request_rejects_reasoning_effort() {
+        let json = r#"{"reasoning_effort": "high"}"#;
+        assert!(serde_json::from_str::<PatchAgentConfigRequest>(json).is_err());
     }
 
     /// #3464 — when the awaiting future is dropped (simulates client

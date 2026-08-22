@@ -1049,8 +1049,17 @@ pub async fn get_agent(
             "model": {
                 "provider": resolved_provider,
                 "model": resolved_model,
+                // `null` means "inherit" — the agent has no opinion and the
+                // per-model override (or the system default) supplies the
+                // value. Surfaces render that as the inherit state rather than
+                // as a number the agent chose.
                 "max_tokens": entry.manifest.model.max_tokens,
                 "temperature": entry.manifest.model.temperature,
+                "top_p": entry.manifest.model.top_p,
+                "frequency_penalty": entry.manifest.model.frequency_penalty,
+                "presence_penalty": entry.manifest.model.presence_penalty,
+                "context_window": entry.manifest.model.context_window,
+                "max_output_tokens": entry.manifest.model.max_output_tokens,
             },
             "capabilities": {
                 "tools": entry.manifest.capabilities.tools,

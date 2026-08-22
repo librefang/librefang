@@ -412,10 +412,10 @@ impl LibreFangKernel {
                     manifest.model.base_url = base_url;
                 }
                 if let Some(max_tokens) = runtime_override.max_tokens {
-                    manifest.model.max_tokens = max_tokens;
+                    manifest.model.max_tokens = Some(max_tokens);
                 }
                 if let Some(temperature) = runtime_override.temperature {
-                    manifest.model.temperature = temperature;
+                    manifest.model.temperature = Some(temperature);
                 }
                 if let Some(mode) = runtime_override.web_search_augmentation {
                     manifest.web_search_augmentation = mode;
@@ -1009,13 +1009,13 @@ impl LibreFangKernel {
         if let Some(max_tokens) = merged.max_tokens {
             self.agents
                 .registry
-                .update_max_tokens(agent_id, max_tokens)
+                .update_max_tokens(agent_id, Some(max_tokens))
                 .map_err(KernelError::LibreFang)?;
         }
         if let Some(temperature) = merged.temperature {
             self.agents
                 .registry
-                .update_temperature(agent_id, temperature)
+                .update_temperature(agent_id, Some(temperature))
                 .map_err(KernelError::LibreFang)?;
         }
         if let Some(mode) = merged.web_search_augmentation {

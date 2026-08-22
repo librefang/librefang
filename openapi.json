@@ -14458,6 +14458,15 @@
               "null"
             ]
           },
+          "context_window": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Context-window override in tokens — a limit, not a preference.\nSame tri-state as [`Self::max_tokens`]; `null` returns resolution to\nthe registry / probe chain.",
+            "minimum": 0
+          },
           "description": {
             "type": [
               "string",
@@ -14477,11 +14486,28 @@
             ],
             "items": {}
           },
+          "frequency_penalty": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Frequency penalty (-2.0–2.0). Same tri-state as [`Self::max_tokens`]."
+          },
           "greeting_style": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "max_output_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Maximum-output-tokens override for this endpoint — a limit, not a\npreference. Same tri-state as [`Self::context_window`].",
+            "minimum": 0
           },
           "max_tokens": {
             "type": [
@@ -14489,7 +14515,7 @@
               "null"
             ],
             "format": "int32",
-            "description": "Maximum tokens for LLM response. Controls conversation window size.",
+            "description": "Maximum tokens to request for the LLM response.\n\nTri-state: omit the key to leave it unchanged, send `null` to hand the\nfield back to \"inherit\" (the per-model override, then the system\ndefault, supplies it), or send a number to pin it for this agent.",
             "minimum": 0
           },
           "model": {
@@ -14503,6 +14529,14 @@
               "string",
               "null"
             ]
+          },
+          "presence_penalty": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Presence penalty (-2.0–2.0). Same tri-state as [`Self::max_tokens`]."
           },
           "provider": {
             "type": [
@@ -14522,7 +14556,15 @@
               "null"
             ],
             "format": "float",
-            "description": "Sampling temperature (0.0–2.0). Lower values are more deterministic."
+            "description": "Sampling temperature (0.0–2.0). Lower values are more deterministic.\nSame tri-state as [`Self::max_tokens`]."
+          },
+          "top_p": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Top-p / nucleus sampling (0.0–1.0). Same tri-state as [`Self::max_tokens`]."
           },
           "vibe": {
             "type": [

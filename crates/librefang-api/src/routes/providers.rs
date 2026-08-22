@@ -407,6 +407,9 @@ pub async fn list_models(
                 "modality": m.modality,
                 "context_window": m.context_window,
                 "max_output_tokens": m.max_output_tokens,
+                // See `get_model` — `false` means the capacities above are
+                // placeholders, not measurements (#7780).
+                "limits_known": m.limits_known,
                 "input_cost_per_m": m.input_cost_per_m,
                 "output_cost_per_m": m.output_cost_per_m,
                 "pricing_known": m.pricing_known,
@@ -639,6 +642,12 @@ pub async fn get_model(
                     "modality": m.modality,
                     "context_window": m.context_window,
                     "max_output_tokens": m.max_output_tokens,
+                    // `false` marks the two capacities above as placeholders
+                    // rather than measurements — a gateway-discovered entry
+                    // carries a number nothing sourced (#7780). Surfaces render
+                    // the difference, and neither the editors' ladders nor the
+                    // save-time limit check treat an unknown limit as a ceiling.
+                    "limits_known": m.limits_known,
                     "input_cost_per_m": m.input_cost_per_m,
                     "output_cost_per_m": m.output_cost_per_m,
                     "pricing_known": m.pricing_known,
@@ -879,16 +888,36 @@ fn provider_key_present(provider: &librefang_types::model_catalog::ProviderInfo)
     provider_api_key(provider).is_some()
 }
 
-/// Resolve the effective max-output-token limit shown for a provider on the
-/// dashboard (issue #6209). The headline value is the provider's
-/// representative model's per-request output cap: the user's `max_tokens`
-/// override when set, otherwise the model's catalog `max_output_tokens`.
+/// The output capacity the dashboard shows for a provider (issue #6209): how
+/// many tokens its representative model can emit.
 ///
 /// "Representative model" is the provider's default model
 /// (`default_model_for_provider`) when one exists, falling back to the first
 /// catalog model for the provider. Returns `None` when the provider has no
-/// usable model or the representative model declares no output limit (e.g. an
-/// image-only provider), so the dashboard renders "-".
+/// usable model, when the representative model declares no output limit (e.g.
+/// an image-only provider), or when its capacities were never sourced — the
+/// dashboard renders "-" for all three.
+///
+/// This used to answer with a `ModelOverrides.max_tokens` when one was set,
+/// falling back to the catalog capacity otherwise. That mixed the two
+/// categories this crate now keeps apart (see
+/// `librefang_types::inference_params`): `max_tokens` is a **preference** —
+/// how long a reply to *ask* for — while `max_output_tokens` is a **capacity**
+/// — how long a reply the endpoint can produce. Publishing the preference
+/// under the capacity's name made the column answer a different question than
+/// it asks: an operator reading "this provider gives at most N" was in fact
+/// being shown what somebody had requested.
+///
+/// It was also not a correct preference display, which is what settles it. An
+/// unset override does not mean "the catalog maximum will be requested" — it
+/// means the resolution chain falls through to `DEFAULT_MODEL_MAX_TOKENS`
+/// (4096). So the old value was neither the capacity nor the effective request
+/// length; it was a number with no referent.
+///
+/// The `limits_known` gate is the same principle from the other side (#7780):
+/// a gateway-discovered entry carries a placeholder capacity that nothing
+/// sourced, and publishing that as the provider's headline figure states an
+/// authority it does not have.
 fn provider_max_output_tokens(
     catalog: &librefang_kernel::model_catalog::ModelCatalog,
     provider_id: &str,
@@ -902,13 +931,7 @@ fn provider_max_output_tokens(
         .as_deref()
         .and_then(|id| models.iter().copied().find(|m| m.id == id))
         .or_else(|| models.first().copied())?;
-    let key = format!("{}:{}", model.provider, model.id);
-    let override_max = catalog
-        .get_overrides(&key)
-        .and_then(|o| o.max_tokens)
-        .map(u64::from);
-    let catalog_max = (model.max_output_tokens > 0).then_some(model.max_output_tokens);
-    override_max.or(catalog_max)
+    model.known_max_output_tokens().map(|limit| limit.tokens)
 }
 
 /// GET /api/providers — List all providers with auth status.
@@ -1206,6 +1229,9 @@ pub async fn get_provider(
                             "modality": m.modality,
                             "context_window": m.context_window,
                             "max_output_tokens": m.max_output_tokens,
+                            // See `get_model` — `false` means the capacities above are
+                            // placeholders, not measurements (#7780).
+                            "limits_known": m.limits_known,
                             "input_cost_per_m": m.input_cost_per_m,
                             "output_cost_per_m": m.output_cost_per_m,
                             "pricing_known": m.pricing_known,
@@ -1330,6 +1356,15 @@ pub async fn add_custom_model(
         modality,
         context_window,
         max_output_tokens: max_output,
+        // Known only when the operator actually typed both numbers. Letting
+        // either default to the `128_000` / `8_192` literals above is the same
+        // invention as a discovery placeholder, and a limit nobody asserted is
+        // not a ceiling to warn against (#7780). Conservative on purpose: the
+        // only consequence of marking a real limit unknown is one missing
+        // advisory, whereas the reverse tells an operator they crossed a
+        // ceiling that this handler made up.
+        limits_known: body.get("context_window").is_some()
+            && body.get("max_output_tokens").is_some(),
         input_cost_per_m: body
             .get("input_cost_per_m")
             .and_then(|v| v.as_f64())

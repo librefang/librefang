@@ -10,6 +10,7 @@ import { useCredentialPools, useProviders, useProviderStatus } from "../lib/quer
 import type { CredentialPoolStatus, CredentialPoolKeySnapshot } from "../api";
 import { useModels, useModelOverrides } from "../lib/queries/models";
 import { useUpdateModelOverrides } from "../lib/mutations/models";
+import { resolveMaxTokensDraft } from "../lib/modelOverrideDraft";
 import { useTestProvider, useSetProviderKey, useDeleteProviderKey, useEnableProvider, useSetProviderUrl, useSetProviderDiscovery, useSetDefaultProvider, useCreateRegistryContent, useConnectEveryApi, EVERYAPI_PROVIDER } from "../lib/mutations/providers";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -186,39 +187,44 @@ function ProviderMaxTokensSection({ providerId, addToast }: {
   const overridesQuery = useModelOverrides(overrideKey);
   const updateOverrides = useUpdateModelOverrides();
 
-  // The effective value: an explicit `max_tokens` override wins, else the
-  // model's catalog `max_output_tokens`. Mirrors the backend resolution.
+  // This field edits a *preference* — how long a reply to ask this model for —
+  // not the model's capacity. The capacity is the headline figure on the card
+  // and nothing here moves it.
+  //
+  // The two used to be blended: the field was seeded with `override ?? catalog
+  // max`, so an unset override displayed the capacity as though somebody had
+  // chosen it. Nothing requests the capacity by default — an unset override
+  // falls through to the kernel's own default — so the number shown was one no
+  // request would ever carry. An empty field now means exactly what it says:
+  // no preference here, let the resolution chain supply one.
   const overrideMax = overridesQuery.data?.max_tokens;
   const catalogMax = selectedModel?.max_output_tokens;
-  const effectiveMax = overrideMax ?? catalogMax;
 
-  // Local input state, seeded from the effective value once it resolves and
+  // Local input state, seeded from the stored override once it resolves and
   // re-seeded when the user switches models.
   const [input, setInput] = useState("");
   const [seededFor, setSeededFor] = useState("");
   useEffect(() => {
     if (overrideKey && overrideKey !== seededFor && !overridesQuery.isLoading) {
-      setInput(effectiveMax != null ? String(effectiveMax) : "");
+      setInput(overrideMax != null ? String(overrideMax) : "");
       setSeededFor(overrideKey);
     }
-  }, [overrideKey, seededFor, overridesQuery.isLoading, effectiveMax]);
+  }, [overrideKey, seededFor, overridesQuery.isLoading, overrideMax]);
 
   const [saving, setSaving] = useState(false);
 
-  const parsed = input.trim() === "" ? null : Number(input);
-  const invalid = parsed != null && (!Number.isInteger(parsed) || parsed <= 0);
-  // The override the value would resolve to once saved: an explicit number
-  // that already equals the catalog default needs no override row, so treat
-  // it as "clear". A blank input also clears.
-  const targetOverride = parsed != null && parsed !== catalogMax ? parsed : null;
-  const dirty = targetOverride !== (overrideMax ?? null);
+  // Blank clears the override; any positive whole number sets it. Extracted so
+  // the save payload and the Save-button gate cannot drift apart — see
+  // `modelOverrideDraft.ts` for why the model's capacity is not consulted.
+  const { value: targetOverride, invalid, dirty } = resolveMaxTokensDraft(input, overrideMax);
 
   const handleSave = async () => {
     if (!overrideKey || invalid) return;
     setSaving(true);
     try {
       if (targetOverride == null) {
-        // Reverts to the catalog default → drop any existing override.
+        // No preference here → drop any existing override and let the
+        // resolution chain supply the value.
         if (overrideMax != null) {
           const next = { ...overridesQuery.data };
           delete next.max_tokens;
@@ -241,6 +247,7 @@ function ProviderMaxTokensSection({ providerId, addToast }: {
   return (
     <div className="border-t border-border-subtle pt-3 mt-1 space-y-2">
       <label className="text-[10px] font-bold text-text-dim uppercase">{t("providers.max_tokens")}</label>
+      <p className="text-[10px] text-text-dim/60 leading-snug">{t("providers.max_tokens_scope")}</p>
       {modelsQuery.isLoading ? (
         <div className="w-full h-10 rounded-xl bg-bg-subtle animate-pulse" />
       ) : models.length === 0 ? (
@@ -266,7 +273,7 @@ function ProviderMaxTokensSection({ providerId, addToast }: {
               step={1}
               value={input}
               onChange={e => setInput(e.target.value)}
-              placeholder={catalogMax != null ? String(catalogMax) : t("providers.max_tokens_placeholder")}
+              placeholder={t("providers.max_tokens_placeholder")}
               className={`flex-1 rounded-xl border bg-main px-3 py-2 text-sm font-mono outline-none focus:ring-1 ${invalid ? "border-error focus:border-error focus:ring-error/20" : "border-border-subtle focus:border-brand focus:ring-brand/20"}`}
               aria-invalid={invalid || undefined}
             />
@@ -282,8 +289,8 @@ function ProviderMaxTokensSection({ providerId, addToast }: {
             <p className="text-[10px] text-error">{t("providers.max_tokens_invalid")}</p>
           )}
           <p className="text-[10px] text-text-dim/60 leading-snug">
-            {overrideMax != null
-              ? t("providers.max_tokens_hint_override", { value: catalogMax != null ? catalogMax.toLocaleString() : "-" })
+            {catalogMax != null
+              ? t("providers.max_tokens_hint_capacity", { value: catalogMax.toLocaleString() })
               : t("providers.max_tokens_hint_default")}
           </p>
         </>
@@ -541,9 +548,14 @@ const ProviderCard = memo(function ProviderCard({ provider: p, isSelected, isDef
             <p className={`text-xs font-black ${getLatencyColor(p.latency_ms)}`}>{p.latency_ms != null ? `${p.latency_ms}ms` : "-"}</p>
             <p className="text-[8px] uppercase text-text-dim">{t("providers.latency")}</p>
           </div>
+          {/*
+            Capacity, not a preference: how many tokens this provider's
+            representative model can emit. "-" when the catalog never sourced
+            the figure — a placeholder is not a capacity (#7780).
+          */}
           <div className="text-center" title={p.max_output_tokens != null ? p.max_output_tokens.toLocaleString() : undefined}>
             <p className="text-xs font-black">{p.max_output_tokens != null ? formatCompact(p.max_output_tokens) : "-"}</p>
-            <p className="text-[8px] uppercase text-text-dim">{t("providers.max_tokens")}</p>
+            <p className="text-[8px] uppercase text-text-dim">{t("providers.output_capacity")}</p>
           </div>
           {p.last_tested && (
             <div className="text-center w-20">
@@ -666,7 +678,7 @@ const ProviderCard = memo(function ProviderCard({ provider: p, isSelected, isDef
           >
             <div className="flex items-center gap-1.5 mb-1">
               <Gauge className="w-3 h-3 text-brand" />
-              <p className="text-[9px] font-black uppercase tracking-wider text-text-dim/70">{t("providers.max_tokens")}</p>
+              <p className="text-[9px] font-black uppercase tracking-wider text-text-dim/70">{t("providers.output_capacity")}</p>
             </div>
             <p className="text-xl font-black text-text-main">
               {p.max_output_tokens != null ? formatCompact(p.max_output_tokens) : "-"}

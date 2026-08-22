@@ -51,6 +51,7 @@ pub fn test_catalog_baseline() -> CatalogSeed {
         modality: Modality::default(),
         context_window: 128_000,
         max_output_tokens: 16_384,
+        limits_known: true,
         input_cost_per_m: 0.15,
         output_cost_per_m: 0.6,
         pricing_known: true,

@@ -7,6 +7,40 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [Unreleased]
 
+### Fixed
+
+- An agent's own inference settings now win over the per-model override instead of losing to it.
+  Two instances of one agent type can finally run the same model at different temperatures — tuning the shared model no longer overwrites both of them with one value and discards their individual settings in silence.
+  The inversion was not a decision about precedence but a workaround for a missing state: `ModelConfig.max_tokens` / `.temperature` were plain numbers, so every agent carried a concrete 4096 / 0.7 whether or not anyone chose them, and letting the manifest win would have made per-model overrides unreachable for every agent in existence.
+  Both fields are now `Option`, `None` means "inherit", and the chain runs agent manifest → per-model override → system default.
+  `reasoning_effort` deliberately keeps the opposite rule: it is a fact about the endpoint rather than a preference, a gateway that rejects it rejects every turn that carries it (#7770), so the model level still wins there and an agent cannot force it on.
+  Existing agents are unaffected on upgrade — every persisted manifest carries explicit numbers, which stay explicit; the inherit state appears only on new agents and where an operator picks it (#7781, #7786) (@DaBlitzStein)
+
+- The providers table now reports what a provider can emit instead of what somebody asked it for.
+  The "max output tokens" column answered with a per-model `max_tokens` override when one was set — a preference published under a capacity's name, so an operator reading "this provider gives at most N" was shown a request length.
+  It was not a correct preference display either, which is what settles it: an unset override does not mean the catalog maximum gets requested, it means the chain falls through to the compiled default, so the old value was neither the capacity nor the effective request length.
+  The column is now the representative model's capacity, and it goes blank rather than publishing a figure nothing sourced (#7780).
+  The field that edits the preference stays, relabelled for what it does, and it no longer treats a typed value equal to the model's capacity as "same as the default, so clear it" — that rule silently discarded a deliberate setting and left the model on the compiled default instead (#6209, #7781, #7788) (@DaBlitzStein)
+- An agent can now set all five sampling preferences, not just two.
+  `top_p`, `frequency_penalty` and `presence_penalty` existed per model but had no per-agent equivalent, so an agent that wanted its own `top_p` had no way to ask for one.
+  The two endpoint limits, `context_window` and `max_output_tokens`, are editable per agent from every surface as well (#7781, #7786) (@DaBlitzStein)
+
+### Added
+
+- Asking for more tokens than a model allows is now reported instead of being silently accepted.
+  The warning appears when the value is saved — red in the editors, a `warnings` entry on `PATCH /api/agents/{id}/config`, a `WARN` in the daemon log — and the value is stored and sent exactly as entered.
+  Nothing is clamped: if the catalog's figure is the thing that is wrong, a silent truncation leaves the operator debugging a number they never chose, whereas an explicit provider error names the problem.
+  Only a limit that something actually asserted produces a warning.
+  A `ModelCatalogEntry` now carries `limits_known`, and `merge_discovered_models` marks its `131_072` / `16_384` placeholders as unknown, because a gateway-discovered model has no capacity to source — `DiscoveredModelInfo` has no such field and the OpenAI-compatible `/v1/models` shape carries none either.
+  Warning against a ceiling invented from a model's name is noise, and noise is what trains people to stop reading warnings (#7780, #7781, #7786) (@DaBlitzStein)
+
+- The response-length and context-window fields are now step ladders with a custom entry, replacing free sliders.
+  The useful values for a token count are an order-of-magnitude sequence, so the ladder offers 8K · 32K · 128K · 256K · 512K · 1M · 2M for context and 1K · 4K · 8K · 16K · 32K · 64K · 128K for output, plus a field for anything else.
+  The two ladders are deliberately different: output tokens are not context tokens, Gemini's 1M / 2M are how much it can *read*, and no model generates a million tokens of reply — a ladder offering 1M output would assert a value the provider will refuse.
+  `inherit` is a rung rather than an empty box, so "this agent has no opinion" is something you can point at.
+  A limit the model actually declared trims the ladder; a limit nobody measured leaves it whole.
+  Available in the agent editor, the agent-type editor, the TUI (agent detail → `p`), and the CLI (`librefang agent set <id> temperature 0.2`, or `inherit` to clear) (#7781, #7782, #7787) (@DaBlitzStein)
+
 ## [2026.8.19] - 2026-08-19
 
 _474 PRs from 5 contributors since v2026.7.31._

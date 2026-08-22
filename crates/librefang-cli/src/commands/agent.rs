@@ -673,12 +673,128 @@ pub(crate) fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {
                 std::process::exit(1);
             }
         }
+        _ if INFERENCE_PARAM_FIELDS.contains(&field) => {
+            cmd_agent_set_inference_param(agent_id_str, field, value)
+        }
         _ => {
             eprintln!(
                 "{}",
                 i18n::t_args("agent-set-unknown-field", &[("field", field)])
             );
             std::process::exit(1);
+        }
+    }
+}
+
+/// The per-agent knobs `librefang agent set` accepts beyond `model`.
+///
+/// Five sampling preferences plus the two endpoint limits — the same set the
+/// dashboard and the TUI expose, so no surface can set something the others
+/// cannot.
+pub(crate) const INFERENCE_PARAM_FIELDS: &[&str] = &[
+    "temperature",
+    "max_tokens",
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "context_window",
+    "max_output_tokens",
+];
+
+/// Values that hand a knob back to "inherit" rather than pinning a number.
+const INHERIT_LITERALS: &[&str] = &["inherit", "default", "none", "unset", ""];
+
+/// Parse a CLI value for one inference field into the JSON the PATCH expects.
+///
+/// `inherit` (and its synonyms) becomes a JSON `null`, which the endpoint reads
+/// as "clear this agent's own value". Everything else must parse as the field's
+/// numeric type — integers for the token counts, floats for the sampling knobs
+/// — so a typo is a parse error here rather than a `400` after a round trip.
+pub(crate) fn parse_inference_param(field: &str, value: &str) -> Result<serde_json::Value, String> {
+    let trimmed = value.trim();
+    if INHERIT_LITERALS.contains(&trimmed.to_ascii_lowercase().as_str()) {
+        return Ok(serde_json::Value::Null);
+    }
+    match field {
+        "max_tokens" => trimmed
+            .parse::<u32>()
+            .map(|v| serde_json::json!(v))
+            .map_err(|_| invalid_param(field, trimmed, true)),
+        "context_window" | "max_output_tokens" => trimmed
+            .parse::<u64>()
+            .map(|v| serde_json::json!(v))
+            .map_err(|_| invalid_param(field, trimmed, true)),
+        _ => trimmed
+            .parse::<f32>()
+            .map(|v| serde_json::json!(v))
+            .map_err(|_| invalid_param(field, trimmed, false)),
+    }
+}
+
+/// Localized "that is not a valid value for this field" message.
+///
+/// `whole` picks between the integer and decimal wordings, which is the only
+/// axis the caller varies.
+fn invalid_param(field: &str, value: &str, whole: bool) -> String {
+    let key = if whole {
+        "agent-set-invalid-integer"
+    } else {
+        "agent-set-invalid-decimal"
+    };
+    i18n::t_args(key, &[("field", field), ("value", value)])
+}
+
+fn cmd_agent_set_inference_param(agent_id_str: &str, field: &str, value: &str) {
+    let parsed = match parse_inference_param(field, value) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let Some(base) = find_daemon() else {
+        eprintln!("{}", i18n::t("agent-set-no-daemon"));
+        std::process::exit(1);
+    };
+    let agent_id = resolve_agent_id(&base, agent_id_str);
+    let client = daemon_client();
+    let body = daemon_json(
+        client
+            .patch(format!("{base}/api/agents/{agent_id}/config"))
+            .json(&serde_json::json!({ field: parsed }))
+            .send(),
+    );
+    if body.get("status").is_none() {
+        let err_fallback = i18n::t("error-unknown");
+        eprintln!(
+            "{}",
+            i18n::t_args(
+                "agent-set-model-failed-with-reason",
+                &[("error", body["error"].as_str().unwrap_or(&err_fallback))]
+            )
+        );
+        std::process::exit(1);
+    }
+    let shown = if parsed.is_null() {
+        "inherit".to_string()
+    } else {
+        parsed.to_string()
+    };
+    println!(
+        "{}",
+        i18n::t_args(
+            "agent-set-field-success",
+            &[("id", &agent_id), ("field", field), ("value", &shown)]
+        )
+    );
+    // Advisory only — the value was stored as asked. Printing it here is the
+    // CLI's half of "warn at save time but send what you asked for".
+    for w in body["warnings"].as_array().into_iter().flatten() {
+        if let Some(msg) = w["message"].as_str() {
+            eprintln!(
+                "{}",
+                i18n::t_args("agent-set-limit-warning", &[("message", msg)])
+            );
         }
     }
 }
@@ -982,5 +1098,51 @@ pub(crate) fn cmd_message(agent: &str, text: &str, json: bool, incognito: bool) 
             "{}",
             serde_json::to_string_pretty(&body).unwrap_or_default()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_inference_param;
+
+    #[test]
+    fn inherit_literals_become_json_null() {
+        for literal in ["inherit", "Inherit", "DEFAULT", "none", "unset", ""] {
+            assert!(
+                parse_inference_param("temperature", literal)
+                    .expect("inherit literal must parse")
+                    .is_null(),
+                "'{literal}' should clear the agent's own value"
+            );
+        }
+    }
+
+    #[test]
+    fn token_counts_parse_as_integers_and_sampling_knobs_as_floats() {
+        assert_eq!(
+            parse_inference_param("max_tokens", "8192").unwrap(),
+            serde_json::json!(8192)
+        );
+        assert_eq!(
+            parse_inference_param("context_window", "200000").unwrap(),
+            serde_json::json!(200_000u64)
+        );
+        assert_eq!(
+            parse_inference_param("temperature", "0.2").unwrap(),
+            serde_json::json!(0.2_f32)
+        );
+        assert_eq!(
+            parse_inference_param("presence_penalty", "-0.5").unwrap(),
+            serde_json::json!(-0.5_f32)
+        );
+    }
+
+    /// A typo fails here rather than as a `400` after a round trip to the
+    /// daemon — the CLI knows the field's type without asking.
+    #[test]
+    fn a_non_numeric_value_is_rejected_locally() {
+        assert!(parse_inference_param("max_tokens", "lots").is_err());
+        assert!(parse_inference_param("max_tokens", "0.5").is_err());
+        assert!(parse_inference_param("temperature", "hot").is_err());
     }
 }

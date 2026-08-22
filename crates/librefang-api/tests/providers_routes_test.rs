@@ -696,16 +696,20 @@ async fn get_provider_unknown_returns_404() {
 }
 
 /// Issue #6209 — the provider list and detail endpoints surface the
-/// representative model's max-output-token limit so the dashboard can show
-/// (and edit) it. Without an override, the value is the catalog
-/// `max_output_tokens` of the provider's default/first model; setting a
-/// `max_tokens` override changes the headline value the dashboard renders.
+/// representative model's output capacity so the dashboard can show it.
+///
+/// The column reports what the endpoint **can emit**, and nothing else moves
+/// it. It used to answer with a `ModelOverrides.max_tokens` when one was set,
+/// which is a preference — how long a reply to *ask* for — published under a
+/// capacity's name. Two things were wrong with that at once: an operator
+/// reading "this provider gives at most N" was shown what somebody had
+/// requested, and it was not even a correct preference display, because an
+/// unset override resolves to `DEFAULT_MODEL_MAX_TOKENS` (4096) rather than to
+/// the catalog maximum it fell back to.
 #[tokio::test(flavor = "multi_thread")]
-async fn provider_max_output_tokens_reflects_catalog_then_override() {
+async fn provider_max_output_tokens_reports_capacity_not_a_preference() {
     let h = boot();
 
-    // The baseline seeds openai → gpt-4o-mini with max_output_tokens 16_384
-    // and no override, so the headline value is the catalog default.
     let find_openai = |body: &serde_json::Value| -> serde_json::Value {
         body["providers"]
             .as_array()
@@ -716,13 +720,14 @@ async fn provider_max_output_tokens_reflects_catalog_then_override() {
             .expect("openai provider present in baseline catalog")
     };
 
+    // The baseline seeds openai → gpt-4o-mini with max_output_tokens 16_384.
     let (status, body) = json_request(&h, Method::GET, "/api/providers", None).await;
     assert_eq!(status, StatusCode::OK);
     let openai = find_openai(&body);
     assert_eq!(
         openai["max_output_tokens"].as_u64(),
         Some(16_384),
-        "list should expose the catalog max_output_tokens before any override: {openai}"
+        "list should expose the representative model's capacity: {openai}"
     );
 
     // The single-provider detail endpoint exposes the same value.
@@ -730,7 +735,9 @@ async fn provider_max_output_tokens_reflects_catalog_then_override() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(detail["max_output_tokens"].as_u64(), Some(16_384));
 
-    // Set a max_tokens override on the representative model.
+    // Set a max_tokens override on the representative model. This is a
+    // request-length preference and says nothing about what the endpoint can
+    // emit, so the capacity column must not move.
     let (status, _body) = json_request(
         &h,
         Method::PUT,
@@ -740,21 +747,31 @@ async fn provider_max_output_tokens_reflects_catalog_then_override() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    // The headline value now reflects the override on both endpoints.
     let (status, body) = json_request(&h, Method::GET, "/api/providers", None).await;
     assert_eq!(status, StatusCode::OK);
     let openai = find_openai(&body);
     assert_eq!(
         openai["max_output_tokens"].as_u64(),
-        Some(8_000),
-        "list should reflect the max_tokens override after PUT: {openai}"
+        Some(16_384),
+        "a request-length preference must not be published as the provider's capacity: {openai}"
     );
 
     let (status, detail) = json_request(&h, Method::GET, "/api/providers/openai", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(detail["max_output_tokens"].as_u64(), Some(8_000));
+    assert_eq!(detail["max_output_tokens"].as_u64(), Some(16_384));
 
-    // Clearing the override reverts the headline to the catalog default.
+    // The override is still stored and still readable — it drives the agent's
+    // resolution chain, it just is not this column.
+    let (status, overrides) = json_request(
+        &h,
+        Method::GET,
+        "/api/models/overrides/openai:gpt-4o-mini",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(overrides["max_tokens"].as_u64(), Some(8_000));
+
     let (status, _body) = json_request(
         &h,
         Method::DELETE,
@@ -766,11 +783,72 @@ async fn provider_max_output_tokens_reflects_catalog_then_override() {
 
     let (status, body) = json_request(&h, Method::GET, "/api/providers", None).await;
     assert_eq!(status, StatusCode::OK);
-    let openai = find_openai(&body);
     assert_eq!(
-        openai["max_output_tokens"].as_u64(),
+        find_openai(&body)["max_output_tokens"].as_u64(),
+        Some(16_384)
+    );
+}
+
+/// A capacity nobody sourced is not published as the provider's headline
+/// figure (#7780).
+///
+/// `merge_discovered_models` stamps a gateway-discovered entry with a
+/// placeholder capacity it has no source for — `DiscoveredModelInfo` carries
+/// no such field and the OpenAI-compatible `/v1/models` shape carries none
+/// either. Rendering that as "this provider emits at most 16K" states an
+/// authority it does not have, so the column goes blank instead and the
+/// dashboard shows "-".
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_max_output_tokens_is_absent_when_the_limit_was_never_sourced() {
+    // Two providers whose entries differ in exactly one field, so the assertion
+    // isolates `limits_known` and nothing else.
+    let provider = |id: &str| ProviderInfo {
+        id: id.to_string(),
+        display_name: id.to_string(),
+        api_key_env: String::new(),
+        base_url: "http://127.0.0.1:1/v1".to_string(),
+        key_required: false,
+        auth_status: AuthStatus::default(),
+        model_count: 1,
+        ..ProviderInfo::default()
+    };
+    let model = |provider_id: &str, limits_known: bool| ModelCatalogEntry {
+        id: format!("{provider_id}-model"),
+        display_name: format!("{provider_id} model"),
+        provider: provider_id.to_string(),
+        tier: ModelTier::Local,
+        modality: Modality::Text,
+        context_window: 131_072,
+        max_output_tokens: 16_384,
+        limits_known,
+        ..Default::default()
+    };
+
+    let test = TestAppState::with_builder(MockKernelBuilder::new().with_catalog_seed((
+        vec![provider("sourced"), provider("guessed")],
+        vec![model("sourced", true), model("guessed", false)],
+    )));
+    let state = test.state.clone();
+    let h = Harness {
+        app: Router::new()
+            .nest("/api", routes::providers::router())
+            .with_state(state.clone()),
+        _state: state,
+        _test: test,
+    };
+
+    let (status, body) = json_request(&h, Method::GET, "/api/providers", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(
+        find_provider(&body, "sourced")["max_output_tokens"].as_u64(),
         Some(16_384),
-        "list should revert to catalog default after the override is deleted: {openai}"
+        "a sourced capacity is the provider's headline figure"
+    );
+    assert!(
+        find_provider(&body, "guessed")["max_output_tokens"].is_null(),
+        "an unsourced capacity must not be published: {}",
+        find_provider(&body, "guessed")
     );
 }
 
@@ -1465,6 +1543,7 @@ fn boot_with_provider(provider: ProviderInfo) -> Harness {
         modality: Modality::default(),
         context_window: 8_192,
         max_output_tokens: 2_048,
+        limits_known: true,
         input_cost_per_m: 0.0,
         output_cost_per_m: 0.0,
         pricing_known: true,
