@@ -1685,7 +1685,10 @@
       "submit_action": "{{action}} 제출",
       "pending_review_one": "운영자 검토를 기다리는 워크플로 실행 1개",
       "pending_review_other": "운영자 검토를 기다리는 워크플로 실행 {{count}}개",
-      "empty_artifact": "(빈 인공물)"
+      "empty_artifact": "(빈 인공물)",
+      "load_failed": "대기 중인 운영자 검토를 불러오지 못했습니다.",
+      "review_run": "{{workflow}} — {{step}} 검토",
+      "more_pending": "대기 중 {{count}}개 더 있음"
     }
   },
   "scheduler": {

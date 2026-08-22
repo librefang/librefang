@@ -1685,7 +1685,10 @@
       "submit_action": "Submit {{action}}",
       "pending_review_one": "1 workflow run awaiting operator review",
       "pending_review_other": "{{count}} workflow runs awaiting operator review",
-      "empty_artifact": "(empty artifact)"
+      "empty_artifact": "(empty artifact)",
+      "load_failed": "Failed to load pending operator reviews.",
+      "review_run": "Review {{workflow}} — {{step}}",
+      "more_pending": "+{{count}} more pending"
     }
   },
   "scheduler": {

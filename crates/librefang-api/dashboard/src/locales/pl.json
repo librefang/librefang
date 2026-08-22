@@ -1687,7 +1687,10 @@
       "pending_review_few": "{{count}} uruchomienia przepływu pracy oczekują na weryfikację operatora",
       "pending_review_many": "{{count}} uruchomień przepływu pracy oczekuje na weryfikację operatora",
       "pending_review_other": "{{count}} uruchomień przepływu pracy oczekujących na weryfikację operatora",
-      "empty_artifact": "(pusty artefakt)"
+      "empty_artifact": "(pusty artefakt)",
+      "load_failed": "Nie udało się wczytać oczekujących weryfikacji operatora.",
+      "review_run": "Zweryfikuj {{workflow}} — {{step}}",
+      "more_pending": "+{{count}} oczekujących"
     }
   },
   "scheduler": {
