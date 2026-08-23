@@ -1,0 +1,5 @@
+`browser_read_page` no longer folds code blocks into the prose around them.
+The walk had no branch for `pre`, so a listing fell through to the text-node branch, which trims every line: the text survived, but nothing separated it from the surrounding prose and its indentation was gone, which is what makes a compiler diagnostic unreadable.
+A `pre` is now taken as text rather than walked, and emitted as a fenced block carrying any `language-` or `lang-` class from the element or from an inner `code`.
+The fence is emitted for any `pre`, not only `pre > code`, because Python's documentation marks listings up as highlighted spans with no `code` element, the RFC series uses a bare `pre`, and so do diagnostics.
+Measured against pages loaded in a live browser, counting `pre` elements in the DOM against fenced blocks in the extraction: the Rust book 0 of 15 to 15, Python's tutorial 0 of 35 to 35, and the Rust Wikipedia article 0 of 29 to 29, with link counts identical before and after on every page (#7822) (@nevgenov)
