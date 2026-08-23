@@ -221,18 +221,35 @@ async fn load_agent_templates(
                 ));
             }
         };
-        let manifest = toml::from_str::<AgentManifest>(&content).map_err(|e| {
-            format!(
-                "invalid agent template manifest {}: {e}",
-                manifest_path.display()
-            )
-        })?;
+        let manifest = match toml::from_str::<AgentManifest>(&content) {
+            Ok(manifest) => manifest,
+            Err(e) => {
+                // One operator typo must not blank the whole catalog for every client.
+                // Skip the entry and name the file so the mistake is diagnosable instead of arriving as a bare 500.
+                tracing::warn!(
+                    "skipping agent template {}: invalid manifest: {e}",
+                    manifest_path.display()
+                );
+                continue;
+            }
+        };
         let name = entry.file_name().to_string_lossy().into_owned();
+        // Do not advertise a template whose name `/templates/{name}` and `/templates/{name}/toml` will reject — a listed row a client cannot fetch or spawn from is a dead end.
+        if validate_template_name(&name).is_err() {
+            tracing::warn!("skipping agent template directory with unusable name: {name:?}");
+            continue;
+        }
         templates.push(serde_json::json!({
             "name": name,
             "description": manifest.description,
+            // `provider` / `model` let a client show and gate on what the template actually declares rather than assuming a default (#7760).
+            "provider": manifest.model.provider,
+            "model": manifest.model.model,
         }));
     }
+
+    // `read_dir` order is filesystem-defined; sort so the catalog renders in a stable order across calls and hosts.
+    templates.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
 
     Ok(templates)
 }

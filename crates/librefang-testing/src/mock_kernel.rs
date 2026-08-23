@@ -227,6 +227,18 @@ impl MockKernelBuilder {
         // Use in-memory SQLite (setting path to :memory: doesn't work; boot_with_config uses file paths)
         // So we use a file path under the temp directory instead
         self.config.memory.sqlite_path = Some(self.config.data_dir.join("test.db"));
+        // #7743: be explicitly driverless rather than accidentally driverless.
+        // `KernelConfig::default()` carries `default_model.provider = "auto"`, which makes
+        // `boot_with_config` interrogate the host — provider API-key env vars, a TCP probe
+        // for a local Ollama, a coding-agent CLI on `PATH` — and adopt the first thing it
+        // finds. A test kernel built that way has no driver on a CI runner and a live,
+        // billable `claude-code` driver on the laptop of anyone who develops LibreFang with
+        // Claude Code installed, so any test that reaches an agent turn either asserts
+        // "the run failed" for the wrong reason or spawns the real CLI against the checkout.
+        //
+        // Applied before `config_fn`, so a test that needs a driver (a mock
+        // OpenAI-compatible server, `provider = "ollama"`, …) still overrides it there.
+        self.config.default_model = librefang_types::config::DefaultModelConfig::driverless();
 
         // Apply custom configuration
         if let Some(f) = self.config_fn.take() {

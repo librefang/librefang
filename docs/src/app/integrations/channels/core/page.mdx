@@ -144,6 +144,7 @@ common `[[sidecar_channels]]` fields documented under
 3. Go to **OAuth & Permissions** and add Bot Token Scopes:
    - `chat:write`
    - `files:write` (required for `File` / `FileData` attachments sent by agents)
+   - `files:read` (required to forward user-uploaded files and images to the agent)
    - `app_mentions:read`
    - `im:history`
    - `im:read`
@@ -176,6 +177,11 @@ SLACK_BOT_TOKEN = "xoxb-..."
 # SLACK_FORCE_FLAT_REPLIES = "false"   # set "true" to post replies as top-level messages
 # SLACK_REACTIONS = "true"             # set "false" to drop the 👀 / ✅ receipt
 # SLACK_PROGRESS_CARD = "true"         # set "false" to drop the task-progress card
+# SLACK_FILE_DOWNLOADS = "true"        # set "false" to stop forwarding user uploads to the agent
+# SLACK_FILE_MAX_BYTES = "10485760"    # inbound attachment size cap
+# SLACK_FILE_ALLOWED_EXTENSIONS = ""   # comma-separated allow-list; empty accepts every extension
+# SLACK_FILE_DOWNLOAD_CHANNELS = ""    # comma-separated channel IDs; empty means every channel
+# SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS = ""   # channel IDs that never accept uploads
 ```
 
 8. Restart the daemon.
@@ -183,6 +189,15 @@ SLACK_BOT_TOKEN = "xoxb-..."
 ### How It Works
 
 The Slack adapter uses Socket Mode, which establishes a WebSocket connection to Slack's servers. This avoids the need for a public webhook URL. The adapter receives events (app mentions, direct messages) and routes them to the configured agent. Text responses are posted via the `chat.postMessage` Web API. `File` and `FileData` responses use Slack's external upload flow and retain the same thread context. URL-backed files are downloaded only from public HTTP(S) targets and both URL-backed and inline files are capped at 10 MiB. When `threading = true`, replies are sent to the message's thread via `thread_ts`.
+
+### User Uploads
+
+A file or image dropped into a channel or DM reaches the agent as the message content, so the agent can look at the picture, transcribe the clip or read the document instead of being handed a URL it cannot open.
+Slack's private file URLs require the bot token, so the adapter declares a per-host authorization rule for Slack's own file hosts and the daemon downloads the file with it; the token is never attached to any other host, which matters because a workspace member can register a remote file pointing anywhere.
+One attachment per message is forwarded (the wire protocol carries one content value per message) and the attachment takes precedence over the message text, which rides along as its caption.
+Link-preview images are not followed — those belong to a URL somebody pasted, not to an upload.
+
+Four knobs gate it, all optional: `SLACK_FILE_DOWNLOADS` turns the whole feature off, `SLACK_FILE_MAX_BYTES` caps the size (10 MiB by default), `SLACK_FILE_ALLOWED_EXTENSIONS` restricts which extensions are accepted, and `SLACK_FILE_DOWNLOAD_CHANNELS` / `SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS` decide which channels participate — the pair a busy channel needs to opt out without disabling uploads everywhere.
 
 ### Processing-State Reactions
 
