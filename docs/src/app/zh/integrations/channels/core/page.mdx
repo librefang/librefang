@@ -129,6 +129,7 @@ Sidecar 自动处理 Gateway 重连、周期性心跳（首次心跳带 RFC 要�
    - 复制令牌（`xapp-...`）。
 3. 前往 **OAuth & Permissions**，添加 Bot Token Scopes：
    - `chat:write`
+   - `files:write`（Agent 发送 `File` / `FileData` 附件时必需）
    - `app_mentions:read`
    - `im:history`
    - `im:read`
@@ -167,7 +168,7 @@ SLACK_BOT_TOKEN = "xoxb-..."
 
 ### 工作原理
 
-Slack 适配器使用 Socket Mode，通过 WebSocket 连接到 Slack 服务器。这避免了需要公网 Webhook URL 的问题。适配器接收事件（应用提及、私信）并路由到配置的 Agent。响应通过 `chat.postMessage` Web API 发送。当 `threading = true` 时，回复通过 `thread_ts` 发送到消息所在的线程。
+Slack 适配器使用 Socket Mode，通过 WebSocket 连接到 Slack 服务器。这避免了需要公网 Webhook URL 的问题。适配器接收事件（应用提及、私信）并路由到配置的 Agent。文本响应通过 `chat.postMessage` Web API 发送；`File` 与 `FileData` 响应使用 Slack external upload 流程，并保留同一 thread 上下文。URL 文件只会从公网 HTTP(S) 地址下载，URL 与内联文件均限制为 10 MiB。当 `threading = true` 时，回复通过 `thread_ts` 发送到消息所在的线程。
 
 ### 处理状态反应（Reactions）
 

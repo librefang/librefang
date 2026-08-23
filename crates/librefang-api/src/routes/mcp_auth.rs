@@ -1181,10 +1181,13 @@ pub async fn auth_revoke(
         let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
         auth_states.insert(name.clone(), McpAuthState::NeedsAuth);
     }
-    {
-        let mut conns = state.kernel.mcp_connections_ref().lock().await;
-        conns.retain(|c| c.name() != name);
-    }
+    state.kernel.disconnect_mcp_server(&name).await;
+    state
+        .kernel
+        .mcp_auth_states_ref()
+        .lock()
+        .await
+        .insert(name.clone(), McpAuthState::NeedsAuth);
 
     let provider = state.kernel.oauth_provider_ref();
     if let Err(e) = provider.clear_tokens(&server_url).await {
@@ -1845,9 +1848,9 @@ mod tests {
     #[test]
     fn flow_vault_cleanup_removes_all_per_flow_keys_on_drop() {
         // Vault crypto needs a 32-byte key.
-        // Pin it through the crate's single owner rather than setting the variable here: `server.rs`'s TOTP-lockout tests pin one too, and under `cargo test` (one process, tests as threads) two different keys race — whoever writes last wins and the loser's freshly written vault no longer decrypts, which is how this test came to fail with `Decryption failed: aead::Error` while passing in isolation.
+        // Pin it through the shared test helper rather than setting the variable here: `server.rs`'s TOTP-lockout tests and MockKernelBuilder use it too, and under `cargo test` (one process, tests as threads) two different keys race — whoever writes last wins and the loser's freshly written vault no longer decrypts, which is how this test came to fail with `Decryption failed: aead::Error` while passing in isolation.
         // nextest hides it by giving every test its own process, so CI never saw it.
-        crate::test_vault::pin_vault_key();
+        librefang_testing::ensure_test_vault_key();
         let home = std::env::temp_dir().join(format!("lf-vault-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
         let provider = KernelOAuthProvider::new(home.clone());

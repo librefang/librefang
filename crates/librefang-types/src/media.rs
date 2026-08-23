@@ -113,6 +113,10 @@ pub struct MediaConfig {
     pub video_description: bool,
     /// Max concurrent media processing tasks. Default: 2.
     pub max_concurrency: usize,
+    /// Timeout for one audio transcription provider request in seconds. Default: 60.
+    pub transcription_timeout_secs: u64,
+    /// Timeout for one ffmpeg subprocess in seconds. Default: 30.
+    pub ffmpeg_timeout_secs: u64,
     /// Preferred image description provider (auto-detect if None).
     pub image_provider: Option<String>,
     /// Preferred image description model (provider default if None).
@@ -152,6 +156,8 @@ impl Default for MediaConfig {
             audio_transcription: true,
             video_description: false,
             max_concurrency: 2,
+            transcription_timeout_secs: 60,
+            ffmpeg_timeout_secs: 30,
             image_provider: None,
             image_model: None,
             audio_provider: None,
@@ -990,6 +996,27 @@ mod tests {
         assert_eq!(config.max_concurrency, 2);
         assert!(config.image_provider.is_none());
         assert!(config.image_model.is_none());
+        let value = serde_json::to_value(config).unwrap();
+        assert_eq!(value["transcription_timeout_secs"], 60);
+        assert_eq!(value["ffmpeg_timeout_secs"], 30);
+    }
+
+    #[test]
+    fn test_media_config_timeout_defaults_and_overrides() {
+        let defaults: serde_json::Value = serde_json::from_str("{}").unwrap();
+        let defaults: MediaConfig = serde_json::from_value(defaults).unwrap();
+        let defaults = serde_json::to_value(defaults).unwrap();
+        assert_eq!(defaults["transcription_timeout_secs"], 60);
+        assert_eq!(defaults["ffmpeg_timeout_secs"], 30);
+
+        let configured: MediaConfig = serde_json::from_value(serde_json::json!({
+            "transcription_timeout_secs": 91,
+            "ffmpeg_timeout_secs": 47
+        }))
+        .unwrap();
+        let configured = serde_json::to_value(configured).unwrap();
+        assert_eq!(configured["transcription_timeout_secs"], 91);
+        assert_eq!(configured["ffmpeg_timeout_secs"], 47);
     }
 
     #[test]

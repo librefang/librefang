@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::{oneshot, Mutex};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, info, warn};
 
@@ -659,10 +660,13 @@ impl BrowserSession {
         auth_token: Option<&str>,
     ) -> Result<CdpConnection, String> {
         if let Some(token) = auth_token {
-            let req = http::Request::get(ws_url)
-                .header("Authorization", format!("Bearer {token}"))
-                .body(())
+            let mut req = ws_url
+                .into_client_request()
                 .map_err(|e| format!("Failed to build CDP auth request: {e}"))?;
+            let authorization = http::HeaderValue::from_str(&format!("Bearer {token}"))
+                .map_err(|e| format!("Failed to build CDP auth request: {e}"))?;
+            req.headers_mut()
+                .insert(http::header::AUTHORIZATION, authorization);
             let (stream, _) = tokio::time::timeout(
                 Duration::from_secs(CDP_CONNECT_TIMEOUT_SECS),
                 tokio_tungstenite::connect_async(req),
@@ -786,6 +790,9 @@ impl BrowserSession {
     }
 
     async fn cmd_click(&self, selector: &str, max_content_chars: usize) -> BrowserResponse {
+        if selector.trim().is_empty() {
+            return BrowserResponse::err("Click selector cannot be empty");
+        }
         // A `⟨n⟩` marker from the extracted content identifies one exact link, which the text fallback below cannot: matching on a substring of the link text resolves to the wrong element for 28% of the links on a page like Hacker News, because the first element *containing* that text wins.
         // The brackets are what the extraction emits, so a bracketed selector is unambiguous and is taken here.
         if let Some(id) = parse_link_marker(selector) {
@@ -795,7 +802,8 @@ impl BrowserSession {
         let js = format!(
             r#"(() => {{
     let sel = {sel_json};
-    let el = document.querySelector(sel);
+    let el = null;
+    try {{ el = document.querySelector(sel); }} catch (_) {{}}
     if (!el) {{
         const all = document.querySelectorAll('a, button, [role="button"], input[type="submit"], [onclick]');
         const lower = sel.toLowerCase();
@@ -1409,8 +1417,13 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
     if (!body) return JSON.stringify({title, url, content: ''});
 
     const clone = body.cloneNode(true);
-    const remove = ['script','style','nav','footer','header','aside','iframe','noscript','svg','canvas'];
+    const remove = ['script','style','nav','aside','iframe','noscript','svg','canvas'];
     remove.forEach(tag => clone.querySelectorAll(tag).forEach(el => el.remove()));
+    // A header/footer is a page landmark only when it is not scoped to sectioning content.
+    // Removing every descendant drops card titles, bylines, and links from article/feed layouts.
+    clone.querySelectorAll('header,footer').forEach(el => {
+        if (!el.closest('article,main,section,[role="main"]')) el.remove();
+    });
 
     // `querySelector` returns the *first* match, which on a feed or a results page is one card rather than the list of them — measured at 13.7% of the page on a DuckDuckGo results page.
     // Repeated sibling `article` elements are the signature of that shape, so climb to the ancestor that holds them, the way Readability resolves the same case by walking to the common ancestor of its close-scoring candidates.
@@ -1493,7 +1506,11 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
         const tag = node.tagName.toLowerCase();
         if (['h1','h2','h3','h4','h5','h6'].includes(tag)) {
             const level = '#'.repeat(parseInt(tag[1]));
-            emit('\n' + level + ' ' + plain(node.textContent.trim()));
+            const start = lines.length;
+            for (const child of node.childNodes) walk(child);
+            const heading = lines.splice(start).join(' ').replace(/\s+/g, ' ').trim();
+            isBullet.splice(start);
+            if (heading) emit('\n' + level + ' ' + heading);
             return;
         }
         if (tag === 'a' && node.href && node.textContent.trim()) {
@@ -1520,6 +1537,7 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
             };
             for (let i = 0; i < produced.length; i++) {
                 if (flags[i]) { flush(); emit('  ' + produced[i], true); opened = true; }
+                else if (produced[i] === '') flush();
                 else run.push(produced[i]);
             }
             flush();
@@ -1534,6 +1552,8 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
 
     const content = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
     const cap = __MAX_CONTENT_CHARS__;
+    const contentChars = Array.from(content);
+    function charLength(text) { return Array.from(text).length; }
 
     // Same-origin links are listed as their path alone, against the `url` already in this response.
     // Most links on a page point back into it — 1383 of 1383 on a Wikipedia article — so repeating the origin per entry is the single largest avoidable cost in the table.
@@ -1541,6 +1561,16 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
     const origin = location.origin || '';
     function shorten(href) {
         return origin && href.startsWith(origin + '/') ? href.slice(origin.length) : href;
+    }
+    const maxLinkDisplayChars = Math.min(2048, Math.floor(cap / 4));
+    function displayUrl(href) {
+        const chars = Array.from(href);
+        if (chars.length <= maxLinkDisplayChars) return href;
+        if (maxLinkDisplayChars <= 0) return '';
+        if (maxLinkDisplayChars === 1) return '…';
+        const suffixChars = Math.min(64, Math.floor((maxLinkDisplayChars - 1) / 4));
+        const prefixChars = maxLinkDisplayChars - suffixChars - 1;
+        return chars.slice(0, prefixChars).join('') + '…' + chars.slice(chars.length - suffixChars).join('');
     }
     // Only the links the surviving prose can still refer to: a marker past the cut is unreachable, and listing its URL would spend context on a link the model cannot see.
     function tableFor(text) {
@@ -1552,7 +1582,8 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
         const kept = [];
         for (let i = 0; i < links.length; i++) {
             if (!present.has(i + 1)) continue;
-            kept.push({ id: i + 1, url: shorten(links[i]) });
+            const url = shorten(links[i]);
+            kept.push({ id: i + 1, url, display_url: displayUrl(url) });
         }
         return kept;
     }
@@ -1561,18 +1592,18 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
     // Mirrors `render_page_body` — change one and the other has to follow.
     function tableCost(kept) {
         if (!kept.length) return 0;
-        let n = '\n\nLinks (click with browser_click, e.g. ⟨1⟩)\n'.length;
-        if (origin) n += ('; paths are relative to ' + origin).length;
-        for (const e of kept) n += ('⟨' + e.id + '⟩ ' + e.url + '\n').length;
+        let n = charLength('\n\nLinks (click with browser_click, e.g. ⟨1⟩)\n');
+        if (origin) n += charLength('; paths are relative to ' + origin);
+        for (const e of kept) n += charLength('⟨' + e.id + '⟩ ' + e.display_url + '\n');
         return n;
     }
-    function cut(text, budget) {
-        if (text.length <= budget) return text;
+    function cut(budget) {
+        if (contentChars.length <= budget) return content;
         // The marker is part of what the model receives, so it counts against the cap: cut far enough back that content + marker lands within `cap`, and the operator's number is a real ceiling on what reaches the context.
         // The marker's own length varies with the total it prints, so it is measured rather than approximated by a reserved constant.
-        const total = text.length;
+        const total = contentChars.length;
         const marker = '\n... (truncated, ' + total + ' chars total)';
-        return text.substring(0, Math.max(0, budget - marker.length)) + marker;
+        return contentChars.slice(0, Math.max(0, budget - charLength(marker))).join('') + marker;
     }
 
     // `cap` bounds prose *and* table together.
@@ -1582,9 +1613,9 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
     // Searched rather than subtracted: cutting prose drops markers, which drops table entries too, so one corrective subtraction overshoots badly — 34k against a 50k cap on a Wikipedia-shaped page, a third of the operator's budget left unspent.
     // A longer cut is a prefix of a longer one still, so the surviving marker set only grows with the budget and the total is monotone, which is what makes the search valid.
     function attempt(budget) {
-        const out = cut(content, budget);
+        const out = cut(budget);
         const kept = tableFor(out);
-        return { out, kept, total: out.length + tableCost(kept) };
+        return { out, kept, total: charLength(out) + tableCost(kept) };
     }
     let best = attempt(cap);
     if (best.total > cap) {
@@ -1667,7 +1698,12 @@ fn render_page_body_inner(data: &serde_json::Value, content: &str) -> String {
     // At full length that is every one of them, since the extraction already listed only its own surviving markers; on a shortened preview it is what keeps the table in proportion to the prose above it.
     let entries: Vec<String> = links
         .iter()
-        .filter_map(|l| Some((l["id"].as_u64()?, l["url"].as_str()?)))
+        .filter_map(|l| {
+            Some((
+                l["id"].as_u64()?,
+                l["display_url"].as_str().or_else(|| l["url"].as_str())?,
+            ))
+        })
         .filter(|(id, _)| content.contains(&format!("\u{27e8}{id}\u{27e9}")))
         .map(|(id, url)| format!("\u{27e8}{id}\u{27e9} {url}\n"))
         .collect();
@@ -1901,6 +1937,159 @@ mod tests {
         );
         assert!(extract_content_js(1_000).contains("1000"));
         assert!(extract_content_js(50_000).contains("50000"));
+    }
+
+    async fn live_browser_session() -> Option<BrowserSession> {
+        let mut config = BrowserConfig::default();
+        let chromium = match find_chromium(&config) {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!(
+                    "skipping live extraction fixture because Chromium is unavailable: {error}"
+                );
+                return None;
+            }
+        };
+        config.chromium_path = Some(chromium.to_string_lossy().into_owned());
+        Some(
+            BrowserSession::launch(&config)
+                .await
+                .expect("discovered Chromium must launch for extraction fixtures"),
+        )
+    }
+
+    async fn load_html_fixture(session: &BrowserSession, html: &str) {
+        let html = serde_json::to_string(html).unwrap();
+        session
+            .cdp
+            .run_js(&format!(
+                "document.open(); document.write({html}); document.close(); 'ready'"
+            ))
+            .await
+            .expect("fixture HTML must load");
+    }
+
+    async fn extract_fixture(session: &BrowserSession, cap: usize) -> serde_json::Value {
+        let encoded = session
+            .cdp
+            .run_js(&extract_content_js(cap))
+            .await
+            .expect("extraction script must execute");
+        serde_json::from_str(
+            encoded
+                .as_str()
+                .expect("extraction script must return encoded JSON"),
+        )
+        .expect("extraction result must remain valid JSON")
+    }
+
+    #[tokio::test]
+    async fn live_extraction_preserves_structure_click_fallback_and_budget() {
+        let Some(session) = live_browser_session().await else {
+            return;
+        };
+
+        load_html_fixture(
+            &session,
+            r##"<!doctype html><html><head><title>structure</title></head><body><header>Global chrome</header><main><article><header><h2><a href="#card">Card</a></h2></header><p>Body</p><footer>Byline</footer></article><ul><li>Plan<table><tr><td>Price</td><td>Qty</td></tr><tr><td>5</td><td>10</td></tr></table>Done</li></ul><button onclick="window.clicked = true">7</button></main></body></html>"##,
+        )
+        .await;
+        let structure = extract_fixture(&session, 10_000).await;
+        let content = structure["content"].as_str().unwrap();
+        assert!(
+            content.contains("## Card⟨1⟩"),
+            "a heading must retain its nested link marker: {content}"
+        );
+        assert!(
+            content.contains("Byline"),
+            "section-scoped footer content must survive pruning: {content}"
+        );
+        assert!(
+            !content.contains("Global chrome"),
+            "the page-level header must still be pruned: {content}"
+        );
+        assert!(
+            !content.contains("- Plan Price Qty 5 10 Done"),
+            "block rows inside a list item must not flatten into one line: {content}"
+        );
+        for line in ["- Plan", "  Price Qty", "  5 10", "  Done"] {
+            assert!(
+                content.lines().any(|actual| actual == line),
+                "list-item block line {line:?} is missing from: {content}"
+            );
+        }
+
+        let empty_click = session.cmd_click("", 10_000).await;
+        assert!(
+            !empty_click.success,
+            "an empty selector must not click the first interactive element"
+        );
+
+        let click = session.cmd_click("7", 10_000).await;
+        assert!(
+            click.success,
+            "an invalid CSS selector must still reach text fallback: {:?}",
+            click.error
+        );
+        assert_eq!(
+            session.cdp.run_js("window.clicked === true").await.unwrap(),
+            true
+        );
+
+        let unicode_text = format!("{}😀{}", "a".repeat(67), "b".repeat(131));
+        load_html_fixture(&session, &format!("<main><p>{unicode_text}</p></main>")).await;
+        let unicode = extract_fixture(&session, 101).await;
+        assert!(
+            unicode["content"].as_str().unwrap().contains('😀'),
+            "a character-budget cut must not split a surrogate pair"
+        );
+
+        let long_url = format!("https://example.com/{}", "q".repeat(28_000));
+        let tail = "tail ".repeat(1_000);
+        load_html_fixture(
+            &session,
+            &format!("<main><p>intro <a href=\"{long_url}\">huge</a> after {tail}</p></main>"),
+        )
+        .await;
+        let budgeted = extract_fixture(&session, 2_000).await;
+        let budgeted_content = budgeted["content"].as_str().unwrap();
+        assert!(
+            budgeted_content.chars().count() > 1_000,
+            "one long href must not starve the prose budget: {} chars",
+            budgeted_content.chars().count()
+        );
+        assert_eq!(
+            budgeted["links"][0]["url"].as_str(),
+            Some(long_url.as_str()),
+            "the actionable URL must remain complete"
+        );
+        assert!(
+            budgeted["links"][0]["display_url"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count()
+                <= 500,
+            "the rendered URL must be bounded relative to the response cap"
+        );
+        assert!(
+            render_page_body(&budgeted).chars().count() <= 2_000,
+            "rendered prose and link table must respect the cap"
+        );
+    }
+
+    #[test]
+    fn rendered_link_table_uses_bounded_display_url() {
+        let full_url = format!("https://example.com/{}", "q".repeat(10_000));
+        let page = serde_json::json!({
+            "content": "Download⟨1⟩",
+            "links": [{"id": 1, "url": full_url, "display_url": "https://example.com/q…qqq"}],
+            "links_base": "",
+        });
+
+        let rendered = render_page_body(&page);
+        assert!(rendered.contains("https://example.com/q…qqq"));
+        assert!(!rendered.contains(&"q".repeat(1_000)));
     }
 
     /// A link inside a list item must keep its destination.
@@ -2514,7 +2703,7 @@ mod tests {
     #[test]
     fn test_link_table_is_budgeted_against_the_cap() {
         assert!(
-            EXTRACT_CONTENT_JS_TEMPLATE.contains("out.length + tableCost(kept)"),
+            EXTRACT_CONTENT_JS_TEMPLATE.contains("charLength(out) + tableCost(kept)"),
             "the rendered cost of the table must be measured against the cap"
         );
         assert!(
@@ -2898,6 +3087,42 @@ mod tests {
         });
 
         (format!("ws://127.0.0.1:{port}/"), seen)
+    }
+
+    #[tokio::test]
+    async fn connect_with_auth_sends_a_complete_websocket_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let (headers_tx, headers_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            #[allow(clippy::result_large_err)]
+            let capture_headers =
+                move |request: &http::Request<()>, response: http::Response<()>| {
+                    let authorization = request
+                        .headers()
+                        .get(http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    let websocket_key_present = request.headers().contains_key("Sec-WebSocket-Key");
+                    headers_tx
+                        .send((authorization, websocket_key_present))
+                        .unwrap();
+                    Ok(response)
+                };
+            tokio_tungstenite::accept_hdr_async(stream, capture_headers)
+                .await
+                .unwrap();
+        });
+
+        let connection = BrowserSession::connect_with_auth(&url, Some("test-token"))
+            .await
+            .expect("authenticated CDP WebSocket handshake should succeed");
+        let (authorization, websocket_key_present) = headers_rx.await.unwrap();
+        assert_eq!(authorization.as_deref(), Some("Bearer test-token"));
+        assert!(websocket_key_present);
+        drop(connection);
+        server.await.unwrap();
     }
 
     /// A page-level endpoint must behave exactly as it did before the handshake existed.

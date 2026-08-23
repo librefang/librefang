@@ -758,6 +758,8 @@
         "audio_transcription": true,
         "video_description": false,
         "max_concurrency": 2,
+        "transcription_timeout_secs": 60,
+        "ffmpeg_timeout_secs": 30,
         "image_provider": null,
         "image_model": null,
         "audio_provider": null,
@@ -4623,6 +4625,13 @@
             }
           ]
         },
+        "ffmpeg_timeout_secs": {
+          "description": "Timeout for one ffmpeg subprocess in seconds. Default: 30.",
+          "default": 30,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "image_description": {
           "description": "Enable image description. Default: true.",
           "default": true,
@@ -4649,6 +4658,13 @@
           "default": 2,
           "type": "integer",
           "format": "uint",
+          "minimum": 0.0
+        },
+        "transcription_timeout_secs": {
+          "description": "Timeout for one audio transcription provider request in seconds. Default: 60.",
+          "default": 60,
+          "type": "integer",
+          "format": "uint64",
           "minimum": 0.0
         },
         "video_description": {

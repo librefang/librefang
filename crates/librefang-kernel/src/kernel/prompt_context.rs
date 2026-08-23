@@ -14,12 +14,35 @@
 
 use std::path::Path;
 
-use librefang_types::agent::AgentId;
+use librefang_runtime::prompt_builder::ActiveGoalPrompt;
+use librefang_types::{agent::AgentId, goal::GoalId};
 
 use super::*;
 
 fn goal_progress_for_prompt(goal: &serde_json::Value) -> u8 {
     goal["progress"].as_u64().unwrap_or(0).min(100) as u8
+}
+
+fn goal_is_active_for_agent(goal: &serde_json::Value, agent_id: AgentId) -> bool {
+    let status = goal["status"].as_str().unwrap_or("");
+    if status != "pending" && status != "in_progress" {
+        return false;
+    }
+    goal["agent_id"]
+        .as_str()
+        .and_then(|stored| stored.trim().parse::<AgentId>().ok())
+        == Some(agent_id)
+}
+
+fn active_goal_for_prompt(goal: &serde_json::Value) -> Option<ActiveGoalPrompt> {
+    let id = goal["id"].as_str()?;
+    id.parse::<GoalId>().ok()?;
+    Some(ActiveGoalPrompt {
+        id: id.to_string(),
+        title: goal["title"].as_str().unwrap_or("").to_string(),
+        status: goal["status"].as_str().unwrap_or("pending").to_string(),
+        progress: goal_progress_for_prompt(goal),
+    })
 }
 
 impl LibreFangKernel {
@@ -118,12 +141,8 @@ impl LibreFangKernel {
         metadata
     }
 
-    /// Load active goals (pending/in_progress) as (title, status, progress) tuples
-    /// for injection into the agent system prompt.
-    pub(crate) fn active_goals_for_prompt(
-        &self,
-        agent_id: Option<AgentId>,
-    ) -> Vec<(String, String, u8)> {
+    /// Load active goals assigned to the agent for injection into its system prompt. Unassigned goals remain visible in management APIs but are not agent work.
+    pub(crate) fn active_goals_for_prompt(&self, agent_id: AgentId) -> Vec<ActiveGoalPrompt> {
         let shared_id = shared_memory_agent_id();
         let goals: Vec<serde_json::Value> = match self
             .memory
@@ -135,29 +154,8 @@ impl LibreFangKernel {
         };
         goals
             .into_iter()
-            .filter(|g| {
-                let status = g["status"].as_str().unwrap_or("");
-                let is_active = status == "pending" || status == "in_progress";
-                if !is_active {
-                    return false;
-                }
-                match agent_id {
-                    Some(aid) => {
-                        // Include goals assigned to this agent OR unassigned goals
-                        match g["agent_id"].as_str() {
-                            Some(gid) => gid == aid.to_string(),
-                            None => true,
-                        }
-                    }
-                    None => true,
-                }
-            })
-            .map(|g| {
-                let title = g["title"].as_str().unwrap_or("").to_string();
-                let status = g["status"].as_str().unwrap_or("pending").to_string();
-                let progress = goal_progress_for_prompt(&g);
-                (title, status, progress)
-            })
+            .filter(|goal| goal_is_active_for_agent(goal, agent_id))
+            .filter_map(|goal| active_goal_for_prompt(&goal))
             .collect()
     }
 
@@ -389,6 +387,62 @@ impl LibreFangKernel {
             ));
         }
         context_parts.join("\n\n")
+    }
+}
+
+#[cfg(test)]
+mod goal_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn agent_prompt_excludes_unassigned_and_other_agent_goals() {
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+        let goals = [
+            serde_json::json!({"title": "owned by A", "status": "pending", "agent_id": agent_a.to_string().to_uppercase()}),
+            serde_json::json!({"title": "owned by B", "status": "in_progress", "agent_id": agent_b.0.simple().to_string()}),
+            serde_json::json!({"title": "unassigned", "status": "pending"}),
+            serde_json::json!({"title": "malformed", "status": "pending", "agent_id": "not-a-uuid"}),
+            serde_json::json!({"title": "completed A", "status": "completed", "agent_id": agent_a.to_string()}),
+        ];
+
+        let visible_to_a: Vec<_> = goals
+            .iter()
+            .filter(|goal| goal_is_active_for_agent(goal, agent_a))
+            .map(|goal| goal["title"].as_str().unwrap())
+            .collect();
+        let visible_to_b: Vec<_> = goals
+            .iter()
+            .filter(|goal| goal_is_active_for_agent(goal, agent_b))
+            .map(|goal| goal["title"].as_str().unwrap())
+            .collect();
+
+        assert_eq!(visible_to_a, vec!["owned by A"]);
+        assert_eq!(visible_to_b, vec!["owned by B"]);
+    }
+
+    #[test]
+    fn prompt_goal_preserves_valid_id_and_rejects_unusable_ids() {
+        let goal_id: GoalId = "b5264016-e9cc-4fd1-83c6-d13626b404dc".parse().unwrap();
+        let stored_id = goal_id.to_string().to_uppercase();
+        let valid = serde_json::json!({
+            "id": stored_id,
+            "title": "owned goal",
+            "status": "in_progress",
+            "progress": 140,
+        });
+
+        let prompt_goal = active_goal_for_prompt(&valid).unwrap();
+        assert_eq!(prompt_goal.id, stored_id);
+        assert_eq!(prompt_goal.title, "owned goal");
+        assert_eq!(prompt_goal.status, "in_progress");
+        assert_eq!(prompt_goal.progress, 100);
+
+        assert!(active_goal_for_prompt(&serde_json::json!({"title": "missing id"})).is_none());
+        assert!(active_goal_for_prompt(
+            &serde_json::json!({"id": "not-a-uuid", "title": "malformed id"})
+        )
+        .is_none());
     }
 }
 

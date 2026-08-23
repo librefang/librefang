@@ -33,9 +33,7 @@ Behaviour parity with the Rust adapter:
 * **Block Kit interactive**: ``block_actions`` payloads → first
   action's ``value`` becomes ``ButtonCallback.action``; ``action_id``,
   ``trigger_id``, and the ``block_action`` flag ride in metadata.
-* **REST send**: ``POST /api/chat.postMessage`` with the bot token,
-  optional ``thread_ts`` and ``unfurl_links``. 3 000-char chunking
-  (matches the Rust ``SLACK_MSG_LIMIT``).
+* **REST send**: text and Block Kit responses use ``chat.postMessage`` with optional ``thread_ts`` / ``unfurl_links`` and 3 000-char chunking. ``File`` / ``FileData`` attachments use Slack's external upload flow, preserve ``thread_ts``, and require the ``files:write`` bot scope.
 * **Reactions** (#6731): the receipt is driven by the daemon's AgentPhase lifecycle, not by the receive hook — ``eyes`` on ``queued``, flipped to ``white_check_mark`` on ``done`` and ``x`` on ``error``.
   A message the daemon declines to answer (group mention-only gating, a rate-limit rejection, a slash command handled in-bridge) never reaches ``queued``, so it never gets a reaction at all instead of being left with a permanent ``eyes``.
   Opt out via ``SLACK_REACTIONS=false``.
@@ -43,9 +41,7 @@ Behaviour parity with the Rust adapter:
   Single-step turns post no card and keep just the receipt reactions.
   Toggled independently of the receipt via ``SLACK_PROGRESS_CARD`` (#6730), which defaults to whatever ``SLACK_REACTIONS`` is set to so neither knob silently turns the other's output on.
 
-Stdlib-only: HTTPS via ``urllib.request``, WebSocket via a
-hand-rolled RFC 6455 client over ``socket`` + ``ssl`` (same pattern
-as the discord sidecar #5299).
+Stdlib-only: Slack Web API calls use the shared urllib transport, URL-backed file downloads use DNS-pinned ``http.client`` connections, and WebSocket uses a hand-rolled RFC 6455 client over ``socket`` + ``ssl`` (same pattern as the discord sidecar #5299).
 
 Configure via ``[[sidecar_channels]]``::
 
@@ -70,12 +66,15 @@ API call).
 from __future__ import annotations
 
 import asyncio
+import http.client
+import ipaddress
 import json
 import os
 import re
+import socket
+import ssl
 import threading
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Callable, Optional
@@ -113,9 +112,241 @@ MAX_BLOCKS_PER_MESSAGE = 50
 
 SEND_TIMEOUT_SECS = 15.0
 HANDSHAKE_TIMEOUT_SECS = 15.0
+MAX_FILE_UPLOAD_BYTES = 10 * 1024 * 1024
 
 INITIAL_BACKOFF_SECS = 1.0
 READ_TICK_SECS = 30.0
+
+
+def _resolve_public_url(
+    url: str,
+    *,
+    require_https: bool = False,
+) -> tuple[urllib.parse.SplitResult, str, list[tuple[int, tuple]]]:
+    """Parse a URL, resolve every address, and reject the whole answer set if any target is non-public."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        host = parsed.hostname
+        port = parsed.port
+    except (TypeError, ValueError) as e:
+        raise RuntimeError(f"invalid URL: {e}") from e
+    if parsed.scheme not in ("http", "https"):
+        raise RuntimeError("only http/https URLs are allowed")
+    if require_https and parsed.scheme != "https":
+        raise RuntimeError("HTTPS is required")
+    if not host:
+        raise RuntimeError("URL has no host")
+    if parsed.username is not None or parsed.password is not None:
+        raise RuntimeError("URL credentials are not allowed")
+    if port is not None and not (1 <= port <= 65535):
+        raise RuntimeError("URL port is out of range")
+
+    normalized = host.rstrip(".").lower()
+    if (
+        normalized in {"localhost", "ip6-localhost", "metadata", "metadata.google.internal"}
+        or normalized.endswith(".localhost")
+        or normalized.endswith(".local")
+    ):
+        raise RuntimeError(f"host '{host}' is reserved or private")
+    try:
+        hostname = normalized.encode("idna").decode("ascii")
+    except UnicodeError as e:
+        raise RuntimeError(f"invalid internationalized hostname: {e}") from e
+    resolved_port = port or (443 if parsed.scheme == "https" else 80)
+    try:
+        answers = socket.getaddrinfo(
+            hostname,
+            resolved_port,
+            type=socket.SOCK_STREAM,
+        )
+    except OSError as e:
+        raise RuntimeError(f"DNS resolution failed for '{host}': {e}") from e
+
+    targets: list[tuple[int, tuple]] = []
+    seen: set[tuple[int, str, int]] = set()
+    for family, _socktype, _proto, _canonname, sockaddr in answers:
+        if family not in (socket.AF_INET, socket.AF_INET6):
+            continue
+        address = sockaddr[0].split("%", 1)[0]
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError as e:
+            raise RuntimeError(f"DNS returned invalid address '{address}'") from e
+        if not ip.is_global:
+            raise RuntimeError(f"host '{host}' resolves to non-public IP {ip}")
+        key = (family, str(ip), sockaddr[1])
+        if key not in seen:
+            seen.add(key)
+            targets.append((family, sockaddr))
+    if not targets:
+        raise RuntimeError(f"DNS resolution returned no usable addresses for '{host}'")
+    return parsed, hostname, targets
+
+
+def _validate_file_url(url: str) -> Optional[str]:
+    """Return an SSRF rejection reason, or ``None`` after validating every resolved address."""
+    try:
+        _resolve_public_url(url)
+    except RuntimeError as e:
+        return str(e)
+    return None
+
+
+def _read_bounded_response(response, max_bytes: int) -> bytes:
+    content_length = response.headers.get("content-length") if response.headers is not None else None
+    if content_length:
+        try:
+            declared = int(content_length)
+        except (TypeError, ValueError):
+            declared = None
+        if declared is not None and declared > max_bytes:
+            raise RuntimeError(f"file exceeds {max_bytes} byte upload cap")
+    data = response.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise RuntimeError(f"file exceeds {max_bytes} byte upload cap")
+    return data
+
+
+class _PreSendConnectionError(RuntimeError):
+    """A connection failure that occurred before any request bytes could be sent."""
+
+
+def _request_pinned_once(
+    parsed: urllib.parse.SplitResult,
+    hostname: str,
+    target: tuple[int, tuple],
+    *,
+    method: str,
+    body: Optional[bytes],
+    headers: Optional[dict[str, str]],
+    max_bytes: int,
+) -> tuple[int, bytes, Optional[str]]:
+    """Issue one request through an already-validated address while retaining the original Host header and TLS SNI."""
+    family, sockaddr = target
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if parsed.scheme == "https":
+        connection: http.client.HTTPConnection = http.client.HTTPSConnection(
+            hostname,
+            port,
+            timeout=SEND_TIMEOUT_SECS,
+            context=ssl.create_default_context(),
+        )
+    else:
+        connection = http.client.HTTPConnection(
+            hostname,
+            port,
+            timeout=SEND_TIMEOUT_SECS,
+        )
+
+    def _create_connection(
+        _address,
+        timeout=SEND_TIMEOUT_SECS,
+        source_address=None,
+        **_kwargs,
+    ):
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+            return sock
+        except BaseException:
+            sock.close()
+            raise
+
+    connection._create_connection = _create_connection
+    path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+    try:
+        try:
+            connection.connect()
+        except (OSError, http.client.HTTPException) as e:
+            raise _PreSendConnectionError(str(e)) from e
+        connection.request(method, path, body=body, headers=headers or {})
+        response = connection.getresponse()
+        data = _read_bounded_response(response, max_bytes)
+        return response.status, data, response.getheader("location")
+    finally:
+        connection.close()
+
+
+def _public_http_request(
+    url: str,
+    *,
+    method: str,
+    body: Optional[bytes] = None,
+    headers: Optional[dict[str, str]] = None,
+    max_bytes: int,
+    require_https: bool = False,
+) -> tuple[int, bytes]:
+    """Resolve and pin every request hop so validation and connection cannot diverge through DNS rebinding."""
+    current_url = url
+    method = method.upper()
+    for redirect_count in range(6):
+        parsed, hostname, targets = _resolve_public_url(
+            current_url,
+            require_https=require_https,
+        )
+        result = None
+        last_error: Optional[BaseException] = None
+        for target in targets:
+            try:
+                result = _request_pinned_once(
+                    parsed,
+                    hostname,
+                    target,
+                    method=method,
+                    body=body,
+                    headers=headers,
+                    max_bytes=max_bytes,
+                )
+                break
+            except _PreSendConnectionError as e:
+                last_error = e
+            except (OSError, http.client.HTTPException) as e:
+                if method != "GET":
+                    raise RuntimeError(f"request outcome is uncertain; refusing to retry {method} on another address") from e
+                last_error = e
+        if result is None:
+            raise RuntimeError(f"request failed for every validated address: {last_error}") from last_error
+
+        status, data, location = result
+        if status not in (301, 302, 303, 307, 308) or not location:
+            return status, data
+        if redirect_count == 5:
+            raise RuntimeError("too many redirects (cap: 5)")
+        if method != "GET" and status not in (307, 308):
+            raise RuntimeError(f"redirect status {status} would not preserve {method}")
+        try:
+            next_url = urllib.parse.urljoin(current_url, location)
+        except (TypeError, ValueError) as e:
+            raise RuntimeError(f"invalid URL in redirect: {e}") from e
+        current_url = next_url
+    raise RuntimeError("too many redirects (cap: 5)")
+
+
+def _safe_filename(raw: Any) -> str:
+    if not isinstance(raw, str):
+        return "file"
+    name = raw.replace("\\", "/").rsplit("/", 1)[-1].replace("\x00", "").strip()
+    if name in ("", ".", ".."):
+        return "file"
+    return name[:255]
+
+
+def _coerce_file_data(raw: Any) -> Optional[bytes]:
+    if isinstance(raw, bytes):
+        return raw
+    if isinstance(raw, bytearray):
+        return bytes(raw)
+    if not isinstance(raw, list):
+        return None
+    if any(isinstance(item, bool) or not isinstance(item, int) or not 0 <= item <= 255 for item in raw):
+        return None
+    return bytes(raw)
+
+
 def _bool_env(raw: str, *, default: bool) -> bool:
     """Parse a permissive bool env var. ``""`` / unset → ``default``."""
     v = raw.strip().lower()
@@ -520,6 +751,9 @@ class SlackAdapter(SidecarAdapter):
     # must not grow the map without bound.
     MAX_TASK_PROGRESS = 1_000
 
+    # Match the channel_send local-file boundary so the sidecar never holds or forwards a larger inline attachment than the producing tool permits.
+    MAX_UPLOAD_BYTES = MAX_FILE_UPLOAD_BYTES
+
     # ---- HTTP helpers ------------------------------------------------
 
     def _auth_headers(self, *, content_type: bool = False) -> dict:
@@ -625,6 +859,95 @@ class SlackAdapter(SidecarAdapter):
                 f"slack apps.connections.open: invalid url {url!r}"
             )
         return url
+
+    def _fetch_file_url(self, url: str) -> bytes:
+        """Download one public file URL with DNS-pinned redirect and size guards."""
+        status, data = _public_http_request(
+            url,
+            method="GET",
+            headers={"User-Agent": "librefang-slack-sidecar/1 (https://librefang.org)"},
+            max_bytes=self.MAX_UPLOAD_BYTES,
+        )
+        if status >= 300:
+            raise RuntimeError(f"file download failed (status={status})")
+        return data
+
+    def _upload_file_bytes(
+        self,
+        channel_id: str,
+        data: bytes,
+        filename: str,
+        *,
+        thread_ts: Optional[str] = None,
+    ) -> bool:
+        """Upload bytes with Slack's external-upload flow and share them once."""
+        filename = _safe_filename(filename)
+        if not data:
+            log.warn("slack file upload refused empty payload", filename=filename)
+            return False
+        if len(data) > self.MAX_UPLOAD_BYTES:
+            log.warn(
+                "slack file upload exceeds size cap",
+                filename=filename,
+                size=len(data),
+                max_bytes=self.MAX_UPLOAD_BYTES,
+            )
+            return False
+
+        ticket_body = json.dumps({"filename": filename, "length": len(data)}).encode("utf-8")
+        status, ticket, raw = self._http(
+            f"{self.api_base}/files.getUploadURLExternal",
+            method="POST",
+            body=ticket_body,
+            headers=self._auth_headers(content_type=True),
+        )
+        if status >= 300 or not isinstance(ticket, dict) or ticket.get("ok") is not True:
+            error = ticket.get("error") if isinstance(ticket, dict) else raw[:200].decode("utf-8", "replace")
+            log.warn("slack files.getUploadURLExternal failed", status=status, error=error or "unknown")
+            return False
+        upload_url = ticket.get("upload_url")
+        file_id = ticket.get("file_id")
+        if not isinstance(upload_url, str) or not isinstance(file_id, str) or not upload_url or not file_id:
+            log.warn("slack upload ticket missing URL or file id")
+            return False
+        try:
+            upload_status, upload_response = _public_http_request(
+                upload_url,
+                method="POST",
+                body=data,
+                headers={"Content-Type": "application/octet-stream"},
+                max_bytes=200,
+                require_https=True,
+            )
+        except RuntimeError as e:
+            log.warn("slack file byte upload failed", error=str(e))
+            return False
+        if upload_status >= 300:
+            log.warn(
+                "slack file byte upload failed",
+                status=upload_status,
+                body=upload_response.decode("utf-8", "replace"),
+            )
+            return False
+
+        complete_payload: dict[str, Any] = {
+            "files": [{"id": file_id, "title": filename}],
+            "channel_id": channel_id,
+        }
+        if thread_ts:
+            complete_payload["thread_ts"] = thread_ts
+        complete_body = json.dumps(complete_payload).encode("utf-8")
+        status, complete, raw = self._http(
+            f"{self.api_base}/files.completeUploadExternal",
+            method="POST",
+            body=complete_body,
+            headers=self._auth_headers(content_type=True),
+        )
+        if status >= 300 or not isinstance(complete, dict) or complete.get("ok") is not True:
+            error = complete.get("error") if isinstance(complete, dict) else raw[:200].decode("utf-8", "replace")
+            log.warn("slack files.completeUploadExternal failed", status=status, error=error or "unknown")
+            return False
+        return True
 
     def _post_message(
         self,
@@ -999,6 +1322,50 @@ class SlackAdapter(SidecarAdapter):
                     thread_ts=thread_ts, blocks=blocks,
                 ),
             )
+        elif isinstance(content, dict) and "FileData" in content:
+            payload = content["FileData"]
+
+            def _send_file_data() -> None:
+                if not isinstance(payload, dict):
+                    log.warn("slack FileData payload is not an object")
+                    return
+                data = _coerce_file_data(payload.get("data"))
+                if data is None:
+                    log.warn("slack FileData bytes are malformed")
+                    return
+                self._upload_file_bytes(
+                    channel_id,
+                    data,
+                    _safe_filename(payload.get("filename")),
+                    thread_ts=thread_ts,
+                )
+
+            await loop.run_in_executor(None, _send_file_data)
+        elif isinstance(content, dict) and "File" in content:
+            payload = content["File"]
+
+            def _send_file_url() -> None:
+                if not isinstance(payload, dict):
+                    log.warn("slack File payload is not an object")
+                    return
+                url = payload.get("url")
+                if not isinstance(url, str) or not url:
+                    log.warn("slack File URL is missing")
+                    return
+                filename = _safe_filename(payload.get("filename"))
+                try:
+                    data = self._fetch_file_url(url)
+                except RuntimeError as e:
+                    log.warn("slack File URL download failed", error=str(e))
+                    return
+                self._upload_file_bytes(
+                    channel_id,
+                    data,
+                    filename,
+                    thread_ts=thread_ts,
+                )
+
+            await loop.run_in_executor(None, _send_file_url)
         elif content and not (isinstance(content, dict) and "Text" in content):
             await loop.run_in_executor(
                 None,

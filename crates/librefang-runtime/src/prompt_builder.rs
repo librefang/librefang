@@ -5,7 +5,6 @@
 //! with a single, testable, ordered prompt builder.
 
 use crate::str_utils::safe_truncate_str;
-
 // ---------------------------------------------------------------------------
 // Skill prompt context budget
 // ---------------------------------------------------------------------------
@@ -119,6 +118,15 @@ pub fn sanitize_for_prompt(s: &str, max_chars: usize) -> String {
 /// Aliases the single source of truth `librefang_types::text::INVISIBLE_FORMAT_CHARS` so this set and the skill verifier's set cannot drift apart.
 pub(crate) const INVISIBLE_PROMPT_CHARS: &[char] = librefang_types::text::INVISIBLE_FORMAT_CHARS;
 
+/// An active goal exposed to an agent through its system prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveGoalPrompt {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub progress: u8,
+}
+
 /// All the context needed to build a system prompt for an agent.
 #[derive(Debug, Clone, Default)]
 pub struct PromptContext {
@@ -200,9 +208,8 @@ pub struct PromptContext {
     pub peer_agents: Vec<(String, String, String)>,
     /// Current date/time string for temporal awareness.
     pub current_date: Option<String>,
-    /// Active goals (pending/in_progress) for the agent. Each entry is a
-    /// (title, status, progress%) tuple.
-    pub active_goals: Vec<(String, String, u8)>,
+    /// Active goals (pending/in_progress) assigned to the agent.
+    pub active_goals: Vec<ActiveGoalPrompt>,
     /// Current on-disk `context.md` content for the agent (see `agent_context`).
     ///
     /// Read per-turn by the kernel so external writers (cron jobs, integrations)
@@ -1046,13 +1053,16 @@ fn build_channel_section(
 }
 
 /// Build the active goals section (Section 7.6).
-fn build_goals_section(goals: &[(String, String, u8)]) -> String {
+fn build_goals_section(goals: &[ActiveGoalPrompt]) -> String {
     let mut out = String::from(
         "## Active Goals\n\
          You are working toward these goals. Use the `goal_update` tool to report progress.\n",
     );
-    for (title, status, progress) in goals {
-        out.push_str(&format!("- [{status} {progress}%] {title}\n"));
+    for goal in goals {
+        out.push_str(&format!(
+            "- [{} {}%] {} (goal_id: {})\n",
+            goal.status, goal.progress, goal.title, goal.id
+        ));
     }
     out
 }

@@ -40,6 +40,7 @@ import { ToolCallsPanel } from "../components/ui/ToolCallsPanel";
 import { filterVisible } from "../lib/hiddenModels";
 import { useVoiceInput } from "../lib/useVoiceInput";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
+import { AuthenticatedImage } from "../components/AuthenticatedImage";
 import { useMathPlugins } from "../lib/hooks/useMathPlugins";
 import {
   useCreateAgentSession,
@@ -1401,19 +1402,17 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
               const isImage = !img.content_type || img.content_type.startsWith("image/");
               if (isImage) {
                 return (
-                  <a
+                  <AuthenticatedImage
                     key={img.file_id}
-                    href={src}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="block rounded-lg overflow-hidden border border-border-subtle hover:border-brand/40 transition-colors max-w-[240px]"
-                  >
-                    <img
-                      src={src}
-                      alt={img.filename || "attachment"}
-                      className="block max-h-[240px] w-auto object-contain bg-main/30"
-                    />
-                  </a>
+                    src={src}
+                    alt={img.filename || "attachment"}
+                    className="block max-h-[240px] w-auto object-contain bg-main/30"
+                    linkProps={{
+                      target: "_blank",
+                      rel: "noopener noreferrer",
+                      className: "block rounded-lg overflow-hidden border border-border-subtle hover:border-brand/40 transition-colors max-w-[240px]",
+                    }}
+                  />
                 );
               }
               const label = img.filename || img.file_id;
@@ -1567,7 +1566,7 @@ function AttachmentChip({ attachment, onRemove }: { attachment: PendingAttachmen
     }`}>
       <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-main/40">
         {isImage && imageSrc ? (
-          <img src={imageSrc} alt={attachment.filename} className="h-full w-full object-cover" />
+          <AuthenticatedImage src={imageSrc} alt={attachment.filename} className="h-full w-full object-cover" />
         ) : (
           <FileText className="h-4 w-4 text-text-dim" />
         )}

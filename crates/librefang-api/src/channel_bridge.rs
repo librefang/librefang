@@ -3266,7 +3266,17 @@ mod tests {
         use librefang_types::approval::{ApprovalRequest, RiskLevel, SecondFactor};
         use totp_rs::{Algorithm, Builder as TotpBuilder, Secret};
 
+        // This test writes the credential vault through MockKernelBuilder. Pin the shared test-process key before the kernel is constructed so another parallel API test cannot switch resolution from the shared keyring fallback to the env-first path between init and unlock.
+        librefang_testing::ensure_test_vault_key();
+        let pinned_vault_key = std::env::var_os("LIBREFANG_VAULT_KEY")
+            .expect("the process-global vault key must be pinned before this test boots a kernel");
+
         let (kernel, _tmp) = MockKernelBuilder::new().build();
+        assert_eq!(
+            std::env::var_os("LIBREFANG_VAULT_KEY").as_ref(),
+            Some(&pinned_vault_key),
+            "building the mock kernel must not replace the process-global vault key",
+        );
         let mut policy = kernel.approvals().policy();
         policy.second_factor = SecondFactor::Totp;
         policy.totp_tools = vec!["shell_exec".to_string()];

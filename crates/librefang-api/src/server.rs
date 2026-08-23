@@ -3963,8 +3963,8 @@ mod dashboard_login_totp_lockout_tests {
     /// Each gets its own `home_dir` tempdir, but the *key* does not come from there: `resolve_master_key` (crates/librefang-extensions/src/vault.rs) reads `LIBREFANG_VAULT_KEY` and otherwise falls back to a store that is shared beyond the test's tempdir.
     /// With neither pinned, `init()` and a later `resolve_master_key()` can settle on different keys and the freshly written vault fails to decrypt — the failure is which test loses the race, not which test is wrong, which is why CI showed a different one failing on each lane (`Test / Unit (lib+bin)` blamed the new test, `Test / Ubuntu (shard 1/4)` the pre-existing one).
     ///
-    /// The key and the `Once` live in `crate::test_vault` rather than here, so this module cannot become a second writer of the variable competing with another test module's key — which is exactly the bug that made `routes::mcp_auth::tests::flow_vault_cleanup_removes_all_per_flow_keys_on_drop` fail under `cargo test`. See that module's doc-comment.
-    use crate::test_vault::pin_vault_key;
+    /// The key and the `Once` live in `librefang-testing` rather than here, so API tests and `MockKernelBuilder` cannot become competing writers with different values — which is exactly the bug that made `routes::mcp_auth::tests::flow_vault_cleanup_removes_all_per_flow_keys_on_drop` fail under `cargo test`. See that module's doc-comment.
+    use librefang_testing::ensure_test_vault_key;
 
     /// Produce `count` 6-digit codes that are guaranteed NOT to match the
     /// enrolled secret in the current TOTP window (or the adjacent windows a
@@ -4034,7 +4034,7 @@ mod dashboard_login_totp_lockout_tests {
     /// keep returning "Invalid TOTP code" forever.
     #[tokio::test(flavor = "multi_thread")]
     async fn dashboard_login_locks_out_after_repeated_wrong_totp_codes() {
-        pin_vault_key();
+        ensure_test_vault_key();
         let tmp = tempfile::tempdir().expect("temp dir");
         librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
         let mut config = KernelConfig {
@@ -4114,7 +4114,7 @@ mod dashboard_login_totp_lockout_tests {
     async fn dashboard_login_fails_closed_when_totp_claim_persistence_fails() {
         use totp_rs::{Algorithm, Builder as TotpBuilder, Secret};
 
-        pin_vault_key();
+        ensure_test_vault_key();
         let tmp = tempfile::tempdir().expect("temp dir");
         librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
         let mut config = KernelConfig {

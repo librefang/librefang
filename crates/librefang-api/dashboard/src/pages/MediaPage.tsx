@@ -21,6 +21,8 @@ import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
+import { AuthenticatedImage } from "../components/AuthenticatedImage";
+import { isAuthenticatedImagePath } from "../api";
 import { useUIStore } from "../lib/store";
 import {
   Image as ImageIcon,
@@ -343,26 +345,36 @@ function ImagePanel({
             <p className="text-xs text-text-dim mb-3 italic">{t("media.revised_prompt")}: {result.revised_prompt}</p>
           )}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {result.images.map((img, i) => (
-              <a
-                key={i}
-                href={safeUrl(img.url) || undefined}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block rounded-xl overflow-hidden border border-border-subtle hover:border-brand/40 transition-colors"
-              >
-                {img.url ? (
-                  <img src={img.url} alt={t("media.generated_alt", { index: i + 1, defaultValue: "generated {{index}}" })} className="w-full h-auto" />
-                ) : img.data_base64 && img.data_base64.length > MAX_BASE64_LENGTH ? (
+            {result.images.map((img, i) => {
+              const imageSrc = img.url && (isAuthenticatedImagePath(img.url) ? img.url : safeUrl(img.url));
+              if (imageSrc) {
+                return (
+                  <AuthenticatedImage
+                    key={i}
+                    src={imageSrc}
+                    alt={t("media.generated_alt", { index: i + 1, defaultValue: "generated {{index}}" })}
+                    className="w-full h-auto"
+                    linkProps={{
+                      target: "_blank",
+                      rel: "noopener noreferrer",
+                      className: "block rounded-xl overflow-hidden border border-border-subtle hover:border-brand/40 transition-colors",
+                    }}
+                  />
+                );
+              }
+              return (
+                <div key={i} className="block rounded-xl overflow-hidden border border-border-subtle">
+                  {img.data_base64 && img.data_base64.length > MAX_BASE64_LENGTH ? (
                   <div className="flex items-center gap-2 p-3 text-xs text-warning">
                     <AlertCircle className="w-4 h-4 shrink-0" />
                     <span>{t("media.image_too_large", { defaultValue: "Image too large to display" })}</span>
                   </div>
-                ) : (
-                  <img src={`data:image/png;base64,${img.data_base64}`} alt={t("media.generated_alt", { index: i + 1, defaultValue: "generated {{index}}" })} className="w-full h-auto" />
-                )}
-              </a>
-            ))}
+                  ) : (
+                    <img src={`data:image/png;base64,${img.data_base64}`} alt={t("media.generated_alt", { index: i + 1, defaultValue: "generated {{index}}" })} className="w-full h-auto" />
+                  )}
+                </div>
+              );
+            })}
           </div>
         </ResultBlock>
       )}

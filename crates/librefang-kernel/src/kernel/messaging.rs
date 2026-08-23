@@ -15,7 +15,6 @@ use std::sync::Arc;
 
 use librefang_channels::types::SenderContext;
 use librefang_runtime::agent_loop::{run_agent_loop, AgentLoopResult};
-use librefang_runtime::kernel_handle::prelude::*;
 use librefang_types::agent::{AgentId, AgentState, SessionId};
 use librefang_types::error::LibreFangError;
 use tracing::info;
@@ -625,7 +624,7 @@ impl LibreFangKernel {
                         .format("%A, %B %d, %Y (%Y-%m-%d %Z)")
                         .to_string(),
                 ),
-                active_goals: self.active_goals_for_prompt(Some(agent_id)),
+                active_goals: self.active_goals_for_prompt(agent_id),
                 is_group: false,
                 was_mentioned: false,
                 context_md,
@@ -2669,7 +2668,7 @@ impl LibreFangKernel {
                         .format("%A, %B %d, %Y (%Y-%m-%d %Z)")
                         .to_string(),
                 ),
-                active_goals: self.active_goals_for_prompt(Some(agent_id)),
+                active_goals: self.active_goals_for_prompt(agent_id),
                 context_md,
                 dynamic_sections,
             };

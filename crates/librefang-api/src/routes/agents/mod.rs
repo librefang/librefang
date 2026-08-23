@@ -560,6 +560,27 @@ fn patch_agent_mcp_servers(body: &serde_json::Value) -> Result<Option<Vec<String
     Ok(Some(servers))
 }
 
+fn patch_agent_only_updates_mcp_servers(body: &serde_json::Value) -> bool {
+    if patch_agent_mcp_servers(body).ok().flatten().is_none() {
+        return false;
+    }
+    let Some(fields) = body.as_object() else {
+        return false;
+    };
+    if fields.len() != 1 {
+        return false;
+    }
+    if fields.contains_key("mcp_servers") {
+        return true;
+    }
+    fields
+        .get("capabilities")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|capabilities| {
+            capabilities.len() == 1 && capabilities.contains_key("mcp_servers")
+        })
+}
+
 /// Translate a kernel error into the right HTTP status code for the
 /// generic CRUD-style /api/agents/* error paths (audit:
 /// agent-not-found-returns-500). The handler then renders the error
@@ -1924,6 +1945,83 @@ mod monitoring_tests {
                 .mcp_servers,
             Vec::<String>::new()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn patch_agent_config_provider_only_preserves_model_and_persists() {
+        let (state, _tmp) = monitoring_test_app_state();
+        let manifest = AgentManifest {
+            name: "patch-provider-only".to_string(),
+            model: librefang_types::agent::ModelConfig {
+                provider: "openai".to_string(),
+                model: "gpt-4.1".to_string(),
+                api_key_env: Some("OLD_PROVIDER_API_KEY".to_string()),
+                base_url: Some("https://old-provider.invalid/v1".to_string()),
+                ..Default::default()
+            },
+            ..AgentManifest::default()
+        };
+        let agent_id = state.kernel.spawn_agent_typed(manifest).unwrap();
+        let request = serde_json::from_value(serde_json::json!({"provider": "litellm"})).unwrap();
+
+        let (status, body) = json_response(
+            patch_agent_config(
+                State(state.clone()),
+                Path(agent_id.to_string()),
+                None,
+                Json(request),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "response: {body}");
+        let entry = state.kernel.agent_registry().get(agent_id).unwrap();
+        assert_eq!(entry.manifest.model.model, "gpt-4.1");
+        assert_eq!(entry.manifest.model.provider, "litellm");
+        assert_eq!(entry.manifest.model.api_key_env, None);
+        assert_eq!(entry.manifest.model.base_url, None);
+
+        let persisted = state
+            .kernel
+            .memory_substrate()
+            .load_agent(agent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.manifest.model.model, "gpt-4.1");
+        assert_eq!(persisted.manifest.model.provider, "litellm");
+        assert_eq!(persisted.manifest.model.api_key_env, None);
+        assert_eq!(persisted.manifest.model.base_url, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn patch_agent_config_model_and_provider_shapes_return_not_found_consistently() {
+        let (state, _tmp) = monitoring_test_app_state();
+        let missing_id = AgentId::new();
+
+        for payload in [
+            serde_json::json!({"provider": "litellm"}),
+            serde_json::json!({"model": "gpt-4.1"}),
+            serde_json::json!({"model": "gpt-4.1", "provider": "litellm"}),
+        ] {
+            let request = serde_json::from_value(payload.clone()).unwrap();
+            let (status, body) = json_response(
+                patch_agent_config(
+                    State(state.clone()),
+                    Path(missing_id.to_string()),
+                    None,
+                    Json(request),
+                )
+                .await,
+            )
+            .await;
+
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "payload {payload} returned {body}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

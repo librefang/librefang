@@ -196,41 +196,6 @@ mod atomic_write_tests {
     }
 }
 
-/// One owner for the process-global `LIBREFANG_VAULT_KEY` that this crate's tests pin.
-///
-/// The vault master key is resolved from an environment variable, so it is process-global state that every test in the binary shares.
-/// `cargo test` runs the whole crate's tests as threads in one process, so two tests that pin *different* keys race: whichever writes last wins, and the vault the loser already wrote can no longer be decrypted — surfacing as `Crypto("Decryption failed: aead::Error")` in whichever test happens to lose.
-///
-/// That is not hypothetical. `server.rs`'s TOTP-lockout tests pinned one key while `routes/mcp_auth.rs`'s flow-cleanup test pinned 32 zero bytes, each under its own `Once` and each believing it was the only writer.
-/// Under `cargo test -p librefang-api --lib` the pair failed roughly one run in two, and CI never caught it because nextest gives every test its own process.
-///
-/// So the key lives here, exactly once, and both call [`pin_vault_key`].
-/// Anything else in this crate that needs a usable vault must do the same rather than setting the variable itself.
-#[cfg(test)]
-pub(crate) mod test_vault {
-    /// Syntactically-valid master key: base64 of exactly 32 bytes, so it decodes to the `[u8; 32]` the vault expects rather than failing key resolution.
-    /// (32 ASCII characters would *not* work — see the `LIBREFANG_VAULT_KEY` note in CLAUDE.md.)
-    pub(crate) const TEST_VAULT_KEY: &str = "dGVzdC12YXVsdC1rZXktZm9yLXRvdHAtbG9ja291dHM=";
-
-    /// Pin the vault master key for this process, idempotently.
-    ///
-    /// `resolve_master_key` (`crates/librefang-extensions/src/vault.rs`) reads `LIBREFANG_VAULT_KEY` first and otherwise falls back to a store shared beyond any single test's tempdir, so leaving it unset lets `init()` and a later resolution settle on different keys.
-    /// Setting it takes the documented env-first branch, making the two agree by construction.
-    ///
-    /// Set once and never removed: unsetting it on drop would reopen the race for whichever test is still running.
-    pub(crate) fn pin_vault_key() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            // SAFETY: the `Once` makes this the only writer in the process —
-            // which now holds, because this function is the crate's only
-            // writer of this variable.
-            unsafe {
-                std::env::set_var("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY);
-            }
-        });
-    }
-}
-
 #[cfg(windows)]
 pub mod acp_pipe;
 #[cfg(unix)]
