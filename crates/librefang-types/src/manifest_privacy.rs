@@ -44,23 +44,15 @@ pub const PREVIEW_MAX_CHARS: usize = 96;
 
 /// Maximum nesting depth the retained-value walk descends before giving up.
 ///
-/// A manifest's own shape is far shallower than this; the cap exists because
-/// `response_format`'s JSON schema is operator-supplied and arbitrarily deep,
-/// and a recursive walk over attacker-shaped input should not be able to
-/// exhaust the stack. Exceeding it produces an [`PrivacyCategory::Unscannable`]
-/// finding rather than a silent truncation.
+/// A manifest's own shape is far shallower than this; the cap exists because `response_format`'s JSON schema is operator-supplied and arbitrarily deep, and a recursive walk over attacker-shaped input should not be able to exhaust the stack.
+/// Exceeding it produces an [`PrivacyCategory::Unscannable`] finding rather than a silent truncation.
 const MAX_SCAN_DEPTH: usize = 24;
 
-/// Shortest unbroken alphanumeric run that makes a value look like an opaque
-/// credential rather than a structured identifier.
+/// Shortest unbroken alphanumeric run that makes a value look like an opaque credential rather than a structured identifier.
 ///
-/// Model ids, module paths and provider slugs break into short segments at
-/// `-`, `_`, `/`, `.` or `:` — `claude-sonnet-4-20250514` and
-/// `accounts/fireworks/models/llama-v3p1-405b-instruct` both top out at eight
-/// characters. Real opaque tokens carry one long unbroken run. Without this
-/// gate the taint scanner's `OpaqueToken` rule fires on every long model id in
-/// the manifest, and a detector that cries wolf on `model.model` teaches the
-/// operator to click through the findings that matter.
+/// Model ids, module paths and provider slugs break into short segments at `-`, `_`, `/`, `.` or `:` — `claude-sonnet-4-20250514` and `accounts/fireworks/models/llama-v3p1-405b-instruct` both top out at eight characters.
+/// Real opaque tokens carry one long unbroken run.
+/// Without this gate the taint scanner's `OpaqueToken` rule fires on every long model id in the manifest, and a detector that cries wolf on `model.model` teaches the operator to click through the findings that matter.
 const OPAQUE_RUN_THRESHOLD: usize = 20;
 
 /// Why a value must not travel with a published agent type.
@@ -71,31 +63,23 @@ pub enum PrivacyCategory {
     HostPath,
     /// The name of an environment variable that holds a credential.
     ///
-    /// The name is not the secret, but it names the operator's key management
-    /// and is meaningless on anyone else's machine.
+    /// The name is not the secret, but it names the operator's key management and is meaningless on anyone else's machine.
     CredentialBinding,
-    /// A base URL, network host allowlist entry, or peer pattern that may point
-    /// at a private, self-hosted or internal endpoint.
+    /// A base URL, network host allowlist entry, or peer pattern that may point at a private, self-hosted or internal endpoint.
     PrivateEndpoint,
-    /// Host-specific security or execution policy — command and environment
-    /// allowlists, the tool-execution backend, the context-engine wiring.
+    /// Host-specific security or execution policy — command and environment allowlists, the tool-execution backend, the context-engine wiring.
     HostPolicy,
-    /// Free-form operator-authored literal text, which is where internal
-    /// documentation, customer names and hostnames end up.
+    /// Free-form operator-authored literal text, which is where internal documentation, customer names and hostnames end up.
     OperatorText,
     /// An arbitrary operator-supplied key/value bag, or the author identity.
     OperatorMetadata,
-    /// A reference to something else on this install — another agent by name, a
-    /// local workflow id — that does not exist on the machine installing the type.
+    /// A reference to something else on this install — another agent by name, a local workflow id — that does not exist on the machine installing the type.
     LocalWiring,
-    /// A flag describing this install's runtime state or provenance rather than
-    /// the agent type itself.
+    /// A flag describing this install's runtime state or provenance rather than the agent type itself.
     LocalState,
-    /// A credential-shaped literal found inside a value, by the same denylist
-    /// the outbound tool-call sink uses.
+    /// A credential-shaped literal found inside a value, by the same denylist the outbound tool-call sink uses.
     SecretLiteral,
-    /// Personally identifiable information — an e-mail address, phone number,
-    /// card number or SSN — found inside a value.
+    /// Personally identifiable information — an e-mail address, phone number, card number or SSN — found inside a value.
     PersonalData,
     /// The value could not be rendered for scanning, so it is unreviewed.
     /// Treat it as suspect rather than clean.
@@ -131,31 +115,26 @@ impl fmt::Display for PrivacyCategory {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldClass {
-    /// Travels verbatim. This is the half that makes the agent type useful to
-    /// someone else, and dropping it would leave nothing worth publishing.
+    /// Travels verbatim.
+    /// This is the half that makes the agent type useful to someone else, and dropping it would leave nothing worth publishing.
     Portable,
     /// Removed, or reset to the type-level default. Carries the reason.
     Stripped(PrivacyCategory),
-    /// Kept, but with named inner fields stripped. Carries the reason those
-    /// inner fields go. The reduction itself is exhaustive over the inner type,
-    /// so a new inner field also has to be classified.
+    /// Kept, but with named inner fields stripped.
+    /// Carries the reason those inner fields go.
+    /// The reduction itself is exhaustive over the inner type, so a new inner field also has to be classified.
     Reduced(PrivacyCategory),
 }
 
 /// Every `AgentManifest` field and what publication does to it.
 ///
-/// This is documentation with a test attached, not the implementation:
-/// [`sanitize_for_publication`] is the implementation, and
-/// `classification_covers_every_serialized_manifest_field` asserts this table
-/// and the struct agree in both directions, so neither can drift ahead of the
-/// other.
+/// This is documentation with a test attached, not the implementation: [`sanitize_for_publication`] is the implementation, and `classification_covers_every_serialized_manifest_field` asserts this table and the struct agree in both directions, so neither can drift ahead of the other.
 pub const CLASSIFICATION: &[(&str, FieldClass)] = &[
     ("name", FieldClass::Portable),
     ("version", FieldClass::Portable),
     ("description", FieldClass::Portable),
-    // An operator's `author` is routinely a local username or an e-mail
-    // address. Attribution for a contribution belongs to the pull request that
-    // carries it, not to a field copied off one machine.
+    // An operator's `author` is routinely a local username or an e-mail address.
+    // Attribution for a contribution belongs to the pull request that carries it, not to a field copied off one machine.
     (
         "author",
         FieldClass::Stripped(PrivacyCategory::OperatorMetadata),
@@ -163,8 +142,7 @@ pub const CLASSIFICATION: &[(&str, FieldClass)] = &[
     ("module", FieldClass::Portable),
     ("schedule", FieldClass::Portable),
     ("session_mode", FieldClass::Portable),
-    // `provider` / `model` / `system_prompt` / sampling knobs travel;
-    // `api_key_env`, `base_url` and the free-form `extra_params` do not.
+    // `provider` / `model` / `system_prompt` / sampling knobs travel; `api_key_env`, `base_url` and the free-form `extra_params` do not.
     (
         "model",
         FieldClass::Reduced(PrivacyCategory::CredentialBinding),
@@ -175,24 +153,21 @@ pub const CLASSIFICATION: &[(&str, FieldClass)] = &[
     ),
     ("resources", FieldClass::Portable),
     ("priority", FieldClass::Portable),
-    // `tools` / memory scopes / spawn and message grants travel; the `network`,
-    // `shell` and `ofp_connect` allowlists are host policy naming host targets.
+    // `tools` / memory scopes / spawn and message grants travel; the `network`, `shell` and `ofp_connect` allowlists are host policy naming host targets.
     (
         "capabilities",
         FieldClass::Reduced(PrivacyCategory::HostPolicy),
     ),
     ("profile", FieldClass::Portable),
-    // Per-tool `params` is an untyped operator-supplied bag — the natural place
-    // for an inline token, an internal URL or a local path.
+    // Per-tool `params` is an untyped operator-supplied bag — the natural place for an inline token, an internal URL or a local path.
     ("tools", FieldClass::Stripped(PrivacyCategory::OperatorText)),
     ("skills", FieldClass::Portable),
     ("skills_disabled", FieldClass::Portable),
-    // Server *names*, not URLs — MCP endpoints and headers live in
-    // `KernelConfig`, never in a manifest. The names are what makes the type
-    // reproducible, so they travel.
+    // Server *names*, not URLs — MCP endpoints and headers live in `KernelConfig`, never in a manifest.
+    // The names are what makes the type reproducible, so they travel.
     ("mcp_servers", FieldClass::Portable),
-    // `channel_type` strings ("telegram", "discord"), not bindings. The tokens
-    // and chat ids live in `KernelConfig`.
+    // `channel_type` strings ("telegram", "discord"), not bindings.
+    // The tokens and chat ids live in `KernelConfig`.
     ("channels", FieldClass::Portable),
     ("mcp_disabled", FieldClass::Portable),
     (
@@ -205,8 +180,7 @@ pub const CLASSIFICATION: &[(&str, FieldClass)] = &[
     ("pinned_model", FieldClass::Portable),
     ("workspace", FieldClass::Stripped(PrivacyCategory::HostPath)),
     ("generate_identity_files", FieldClass::Portable),
-    // Both `path` and `mount` describe the host's directory layout, and the
-    // symbolic names themselves are often the operator's own vocabulary.
+    // Both `path` and `mount` describe the host's directory layout, and the symbolic names themselves are often the operator's own vocabulary.
     (
         "workspaces",
         FieldClass::Stripped(PrivacyCategory::HostPath),
@@ -234,11 +208,8 @@ pub const CLASSIFICATION: &[(&str, FieldClass)] = &[
     ("auto_dream_min_sessions", FieldClass::Portable),
     ("show_progress", FieldClass::Portable),
     ("auto_evolve", FieldClass::Portable),
-    // Free-text `system_prompt` / `model` overrides plus
-    // `group_trigger_patterns`, which are regexes naming the operator's bot
-    // aliases and the people it answers to. Dropped whole rather than reduced:
-    // the type is a large and fast-moving config struct, and an exhaustive
-    // reduction over it would couple this pass to churn it has no stake in.
+    // Free-text `system_prompt` / `model` overrides plus `group_trigger_patterns`, which are regexes naming the operator's bot aliases and the people it answers to.
+    // Dropped whole rather than reduced: the type is a large and fast-moving config struct, and an exhaustive reduction over it would couple this pass to churn it has no stake in.
     (
         "channel_overrides",
         FieldClass::Stripped(PrivacyCategory::OperatorText),
@@ -247,8 +218,7 @@ pub const CLASSIFICATION: &[(&str, FieldClass)] = &[
     ("max_concurrent_invocations", FieldClass::Portable),
     ("assignee_wake", FieldClass::Portable),
     ("cache_context", FieldClass::Portable),
-    // `ssh` / `daytona` name execution infrastructure that only resolves
-    // against the matching `[tool_exec.*]` subtable on this install.
+    // `ssh` / `daytona` name execution infrastructure that only resolves against the matching `[tool_exec.*]` subtable on this install.
     (
         "tool_exec_backend",
         FieldClass::Stripped(PrivacyCategory::HostPolicy),
@@ -262,8 +232,7 @@ pub const CLASSIFICATION: &[(&str, FieldClass)] = &[
         FieldClass::Stripped(PrivacyCategory::HostPolicy),
     ),
     ("rl_export", FieldClass::Portable),
-    // `target_agent` and `workflow_id` name records on this install, and
-    // `prompt_template` is operator free text.
+    // `target_agent` and `workflow_id` name records on this install, and `prompt_template` is operator free text.
     (
         "triggers",
         FieldClass::Stripped(PrivacyCategory::LocalWiring),
@@ -274,46 +243,35 @@ pub const CLASSIFICATION: &[(&str, FieldClass)] = &[
 
 /// One privacy risk in a manifest that is about to be published.
 ///
-/// Findings are operator-facing review output. They are not an error type and
-/// they are not a gate: the caller shows them and asks.
+/// Findings are operator-facing review output.
+/// They are not an error type and they are not a gate: the caller shows them and asks.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Finding {
-    /// Dotted path to the value, e.g. `model.api_key_env`,
-    /// `fallback_models[1].base_url`, `capabilities.agent_message[0]`.
+    /// Dotted path to the value, e.g. `model.api_key_env`, `fallback_models[1].base_url`, `capabilities.agent_message[0]`.
     pub field: String,
     /// Why this value must not travel.
     pub category: PrivacyCategory,
-    /// Bounded, single-line rendering of the offending value, capped at
-    /// [`PREVIEW_MAX_CHARS`] characters.
+    /// Bounded, single-line rendering of the offending value, capped at [`PREVIEW_MAX_CHARS`] characters.
     ///
-    /// This may contain the very material the finding is about. Show it to the
-    /// operator who owns it; do not log it, and do not attach it to the
-    /// published artefact.
+    /// This may contain the very material the finding is about.
+    /// Show it to the operator who owns it; do not log it, and do not attach it to the published artefact.
     pub preview: String,
-    /// `true` when [`sanitize_for_publication`] already removes this value, so
-    /// confirming publication is enough.
+    /// `true` when [`sanitize_for_publication`] already removes this value, so confirming publication is enough.
     ///
-    /// `false` when the value sits inside a field the sanitiser keeps — a
-    /// hostname pasted into a system prompt, an absolute path in a description
-    /// — and the operator has to edit it by hand before publishing.
+    /// `false` when the value sits inside a field the sanitiser keeps — a hostname pasted into a system prompt, an absolute path in a description — and the operator has to edit it by hand before publishing.
     pub removed_by_sanitizer: bool,
 }
 
-/// Return a publishable copy of `manifest` with the instance-specific fields
-/// removed or reset, leaving the portable half untouched.
+/// Return a publishable copy of `manifest` with the instance-specific fields removed or reset, leaving the portable half untouched.
 ///
-/// The input is borrowed and never mutated. The result is still a valid
-/// `AgentManifest`: it round-trips through TOML and keeps `name`,
-/// `description` and `module`, the three fields the registry validator
-/// requires.
+/// The input is borrowed and never mutated.
+/// The result is still a valid `AgentManifest`: it round-trips through TOML and keeps `name`, `description` and `module`, the three fields the registry validator requires.
 ///
-/// Pair it with [`scan_for_publication`], which reports what this removed
-/// *and* what it had to keep, so the operator can confirm before anything is
-/// published. See the module docs for why a new `AgentManifest` field cannot
-/// slip through here.
+/// Pair it with [`scan_for_publication`], which reports what this removed *and* what it had to keep, so the operator can confirm before anything is published.
+/// See the module docs for why a new `AgentManifest` field cannot slip through here.
 pub fn sanitize_for_publication(manifest: &AgentManifest) -> AgentManifest {
-    // Exhaustive destructure — no `..`. A new field fails to compile here
-    // until it is named, and `_` marks a deliberate decision to drop it.
+    // Exhaustive destructure — no `..`.
+    // A new field fails to compile here until it is named, and `_` marks a deliberate decision to drop it.
     let AgentManifest {
         name,
         version,
@@ -375,8 +333,8 @@ pub fn sanitize_for_publication(manifest: &AgentManifest) -> AgentManifest {
         async_tasks,
     } = manifest.clone();
 
-    // Exhaustive construction — no `..Default::default()`. A new field fails
-    // to compile here too.
+    // Exhaustive construction — no `..Default::default()`.
+    // A new field fails to compile here too.
     AgentManifest {
         name,
         version,
@@ -411,8 +369,7 @@ pub fn sanitize_for_publication(manifest: &AgentManifest) -> AgentManifest {
         tool_blocklist,
         tools_disabled,
         response_format,
-        // A type published from a disabled agent should install enabled;
-        // `false` here describes this install, not the type.
+        // A type published from a disabled agent should install enabled; `false` here describes this install, not the type.
         enabled: true,
         allowed_plugins,
         inherit_parent_context,
@@ -442,9 +399,7 @@ pub fn sanitize_for_publication(manifest: &AgentManifest) -> AgentManifest {
     }
 }
 
-/// Drop the credential binding, the endpoint override and the free-form
-/// provider extensions from a model config, keeping the parts that name a
-/// publicly available model.
+/// Drop the credential binding, the endpoint override and the free-form provider extensions from a model config, keeping the parts that name a publicly available model.
 fn reduce_model(model: ModelConfig) -> ModelConfig {
     let ModelConfig {
         provider,
@@ -492,8 +447,7 @@ fn reduce_fallback_model(entry: FallbackModel) -> FallbackModel {
     }
 }
 
-/// Drop the capability grants that enumerate host targets, keeping the tool,
-/// memory and agent-messaging grants that describe what the type does.
+/// Drop the capability grants that enumerate host targets, keeping the tool, memory and agent-messaging grants that describe what the type does.
 fn reduce_capabilities(capabilities: ManifestCapabilities) -> ManifestCapabilities {
     let ManifestCapabilities {
         network: _,
@@ -522,21 +476,13 @@ fn reduce_capabilities(capabilities: ManifestCapabilities) -> ManifestCapabiliti
 
 /// Report every privacy risk in `manifest`, in a stable order.
 ///
-/// Two passes, and the second is the reason this is not just a diff against
-/// [`sanitize_for_publication`]:
+/// Two passes, and the second is the reason this is not just a diff against [`sanitize_for_publication`]:
 ///
-/// 1. Every instance-specific field that is actually set, with a bounded
-///    preview of what publication would drop
-///    ([`Finding::removed_by_sanitizer`] `== true`).
-/// 2. Every string the publishable copy still carries, scanned for
-///    credential shapes, personal data, absolute host paths and private
-///    endpoints ([`Finding::removed_by_sanitizer`] `== false`). These are
-///    the ones the operator has to fix by hand — the sanitiser cannot know
-///    which half of a system prompt is the internal hostname.
+/// 1. Every instance-specific field that is actually set, with a bounded preview of what publication would drop ([`Finding::removed_by_sanitizer`] `== true`).
+/// 2. Every string the publishable copy still carries, scanned for credential shapes, personal data, absolute host paths and private endpoints ([`Finding::removed_by_sanitizer`] `== false`).
+///    These are the ones the operator has to fix by hand — the sanitiser cannot know which half of a system prompt is the internal hostname.
 ///
-/// An empty result means nothing was detected, not that publication is
-/// provably safe: see the module docs on the best-effort nature of the
-/// value-level scanners.
+/// An empty result means nothing was detected, not that publication is provably safe: see the module docs on the best-effort nature of the value-level scanners.
 pub fn scan_for_publication(manifest: &AgentManifest) -> Vec<Finding> {
     let mut findings = Vec::new();
     collect_stripped_findings(manifest, &mut findings);
@@ -651,8 +597,7 @@ fn collect_stripped_findings(manifest: &AgentManifest, out: &mut Vec<Finding>) {
         ));
     }
     if !manifest.workspaces.is_empty() {
-        // Sorted: the source is a `HashMap`, and a preview whose contents
-        // reshuffle between runs is not reviewable.
+        // Sorted: the source is a `HashMap`, and a preview whose contents reshuffle between runs is not reviewable.
         let mut entries: Vec<String> = manifest
             .workspaces
             .iter()
@@ -749,23 +694,15 @@ fn collect_stripped_findings(manifest: &AgentManifest, out: &mut Vec<Finding>) {
 
 /// Pass 2 — every string the publishable copy still carries.
 ///
-/// The walk is over the *serialized* publishable manifest rather than a list of
-/// field names, so a field added to `AgentManifest` tomorrow is scanned from
-/// the moment it exists. Ordering is stable: nothing that survives
-/// [`sanitize_for_publication`] is a `HashMap`, and `serde_json`'s object
-/// representation is ordered, so the same manifest always yields the same
-/// finding sequence.
+/// The walk is over the *serialized* publishable manifest rather than a list of field names, so a field added to `AgentManifest` tomorrow is scanned from the moment it exists.
+/// Ordering is stable: nothing that survives [`sanitize_for_publication`] is a `HashMap`, and `serde_json`'s object representation is ordered, so the same manifest always yields the same finding sequence.
 fn collect_retained_findings(manifest: &AgentManifest, out: &mut Vec<Finding>) {
     let publishable = sanitize_for_publication(manifest);
     let value = match serde_json::to_value(&publishable) {
         Ok(value) => value,
         Err(e) => {
-            // Defensive rather than reachable today: `serde_json` maps a
-            // non-finite float to null instead of failing, and nothing in a
-            // manifest uses a non-string map key. It stays because reporting a
-            // clean manifest when the scan could not run is the one failure
-            // mode this module must never have, and that should not become
-            // possible by accident.
+            // Defensive rather than reachable today: `serde_json` maps a non-finite float to null instead of failing, and nothing in a manifest uses a non-string map key.
+            // It stays because reporting a clean manifest when the scan could not run is the one failure mode this module must never have, and that should not become possible by accident.
             out.push(Finding {
                 field: "<manifest>".to_string(),
                 category: PrivacyCategory::Unscannable,
@@ -827,8 +764,7 @@ fn walk_strings(
     }
 }
 
-/// Categories that fire against one string value, deduplicated and returned in
-/// a fixed order so the finding list is stable across runs.
+/// Categories that fire against one string value, deduplicated and returned in a fixed order so the finding list is stable across runs.
 fn scan_text(text: &str, sink: &TaintSink) -> Vec<PrivacyCategory> {
     if text.is_empty() {
         return Vec::new();
@@ -836,16 +772,14 @@ fn scan_text(text: &str, sink: &TaintSink) -> Vec<PrivacyCategory> {
 
     let mut hits: HashSet<PrivacyCategory> = HashSet::new();
 
-    // The taint denylist, whole value first. `OpaqueToken` is skipped for
-    // values that break into short segments — see `OPAQUE_RUN_THRESHOLD`.
+    // The taint denylist, whole value first.
+    // `OpaqueToken` is skipped for values that break into short segments — see `OPAQUE_RUN_THRESHOLD`.
     for category in taint_categories(text, sink) {
         hits.insert(category);
     }
 
-    // `WellKnownPrefix` and `OpaqueToken` anchor on the whole payload, so a key
-    // pasted mid-sentence into a system prompt only matches when the value is
-    // scanned token by token as well. Only the credential rules are re-run
-    // per token: the PII rules already match anywhere in the text.
+    // `WellKnownPrefix` and `OpaqueToken` anchor on the whole payload, so a key pasted mid-sentence into a system prompt only matches when the value is scanned token by token as well.
+    // Only the credential rules are re-run per token: the PII rules already match anywhere in the text.
     if !hits.contains(&PrivacyCategory::SecretLiteral) {
         for token in text.split_whitespace().map(trim_token) {
             if token.is_empty() || token == text {
@@ -904,8 +838,8 @@ fn taint_categories(text: &str, sink: &TaintSink) -> Vec<PrivacyCategory> {
         .collect()
 }
 
-/// Whether `text` contains an unbroken run of at least `threshold`
-/// alphanumeric characters. See [`OPAQUE_RUN_THRESHOLD`].
+/// Whether `text` contains an unbroken run of at least `threshold` alphanumeric characters.
+/// See [`OPAQUE_RUN_THRESHOLD`].
 fn has_long_unbroken_alnum_run(text: &str, threshold: usize) -> bool {
     let mut run = 0usize;
     for ch in text.chars() {
@@ -921,8 +855,7 @@ fn has_long_unbroken_alnum_run(text: &str, threshold: usize) -> bool {
     false
 }
 
-/// Strip the punctuation a value picks up from surrounding prose, so
-/// `(sk-abc123…)` and `/Users/jane/notes.` are scanned as the value itself.
+/// Strip the punctuation a value picks up from surrounding prose, so `(sk-abc123…)` and `/Users/jane/notes.` are scanned as the value itself.
 fn trim_token(token: &str) -> &str {
     token.trim_matches(|c: char| {
         matches!(
@@ -946,15 +879,10 @@ fn trim_token(token: &str) -> &str {
     })
 }
 
-/// Path segments that make an absolute POSIX path a *host filesystem* path
-/// rather than a URL route or a slash-separated identifier.
+/// Path segments that make an absolute POSIX path a *host filesystem* path rather than a URL route or a slash-separated identifier.
 ///
-/// Restricting to known roots is a deliberate trade: `/api/v1/messages` inside
-/// a system prompt is not reported, and neither is a path under a
-/// non-standard root such as `/nvme0/agents/`. A detector that flags every
-/// slash-bearing string trains the operator to skip the findings that matter,
-/// and the field where a real workspace path lives — `workspace` — is stripped
-/// outright and reported by the first pass regardless of its root.
+/// Restricting to known roots is a deliberate trade: `/api/v1/messages` inside a system prompt is not reported, and neither is a path under a non-standard root such as `/nvme0/agents/`.
+/// A detector that flags every slash-bearing string trains the operator to skip the findings that matter, and the field where a real workspace path lives — `workspace` — is stripped outright and reported by the first pass regardless of its root.
 const HOST_PATH_ROOTS: &[&str] = &[
     "applications",
     "bin",
@@ -1032,10 +960,7 @@ const PRIVATE_HOST_SUFFIXES: &[&str] = &[
 
 /// Whether `token` names a host that only exists on the operator's network.
 ///
-/// Covers loopback and RFC 1918 / link-local literals, private domain
-/// suffixes, and — when the token carries a URL scheme — a single-label
-/// hostname such as `http://gitlab/`, which is only resolvable against the
-/// operator's own search domain.
+/// Covers loopback and RFC 1918 / link-local literals, private domain suffixes, and — when the token carries a URL scheme — a single-label hostname such as `http://gitlab/`, which is only resolvable against the operator's own search domain.
 fn looks_like_private_endpoint(token: &str) -> bool {
     let (host, had_scheme) = match split_host(token) {
         Some(parts) => parts,
@@ -1067,13 +992,12 @@ fn looks_like_private_endpoint(token: &str) -> bool {
     {
         return true;
     }
-    // A bare single-label host is only meaningful with an explicit scheme;
-    // without one, every ordinary word would match.
+    // A bare single-label host is only meaningful with an explicit scheme; without one, every ordinary word would match.
     had_scheme && !lower.contains('.')
 }
 
-/// Split the host out of a URL-ish token, reporting whether a scheme was
-/// present. Returns `None` for tokens that cannot carry a host at all.
+/// Split the host out of a URL-ish token, reporting whether a scheme was present.
+/// Returns `None` for tokens that cannot carry a host at all.
 fn split_host(token: &str) -> Option<(&str, bool)> {
     let (rest, had_scheme) = match token.find("://") {
         Some(index) => (&token[index + 3..], true),
@@ -1104,8 +1028,8 @@ fn split_host(token: &str) -> Option<(&str, bool)> {
     Some((host, had_scheme))
 }
 
-/// Parse `host` as a dotted-quad IPv4 literal. Requires all four octets so
-/// that a version string like `10.0.0` is not read as an RFC 1918 address.
+/// Parse `host` as a dotted-quad IPv4 literal.
+/// Requires all four octets so that a version string like `10.0.0` is not read as an RFC 1918 address.
 fn ipv4_octets(host: &str) -> Option<[u8; 4]> {
     let mut octets = [0u8; 4];
     let mut parts = host.split('.');
@@ -1147,8 +1071,7 @@ fn preview_sorted_keys<'a>(keys: impl Iterator<Item = &'a String>) -> String {
     preview_text(&names.join(", "))
 }
 
-/// Collapse control characters and runs of whitespace so a preview occupies one
-/// line however the operator formatted the original.
+/// Collapse control characters and runs of whitespace so a preview occupies one line however the operator formatted the original.
 fn single_line(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut pending_space = false;
@@ -1168,12 +1091,10 @@ fn single_line(text: &str) -> String {
 
 /// Truncate on a character boundary at [`PREVIEW_MAX_CHARS`], marking the cut.
 fn truncate_preview(text: &str) -> String {
-    let mut seen = 0usize;
-    for (index, _) in text.char_indices() {
+    for (seen, (index, _)) in text.char_indices().enumerate() {
         if seen == PREVIEW_MAX_CHARS {
             return format!("{}…", &text[..index]);
         }
-        seen += 1;
     }
     text.to_string()
 }
@@ -1190,9 +1111,7 @@ mod tests {
     // Fixtures
     // -----------------------------------------------------------------------
 
-    /// A manifest carrying one planted value per sensitive category, each
-    /// value a distinctive sentinel so `assert!(!rendered.contains(..))` is
-    /// unambiguous.
+    /// A manifest carrying one planted value per sensitive category, each value a distinctive sentinel so `assert!(!rendered.contains(..))` is unambiguous.
     fn leaky_manifest() -> AgentManifest {
         let mut manifest = AgentManifest {
             name: "researcher".to_string(),
@@ -1291,9 +1210,8 @@ mod tests {
         manifest
     }
 
-    /// A manifest with every top-level `skip_serializing_if` field populated,
-    /// so serializing it emits all 58 `AgentManifest` keys. Used only by the
-    /// classification-coverage test.
+    /// A manifest with every top-level `skip_serializing_if` field populated, so serializing it emits all 58 `AgentManifest` keys.
+    /// Used only by the classification-coverage test.
     fn fully_populated_manifest() -> AgentManifest {
         let mut manifest = leaky_manifest();
         manifest.compaction = Some(crate::agent::CompactionOverrides::default());
@@ -1323,13 +1241,8 @@ mod tests {
     // The classification cannot rot
     // -----------------------------------------------------------------------
 
-    /// The compile-time half of this guarantee is in
-    /// `sanitize_for_publication`: it destructures `AgentManifest` with no
-    /// `..` and rebuilds it with no `..Default::default()`, so a new field is
-    /// an `E0027`/`E0063` compile error there until it is classified. This
-    /// test is the runtime half — it keeps the human-readable
-    /// `CLASSIFICATION` table from falling behind the struct, in either
-    /// direction.
+    /// The compile-time half of this guarantee is in `sanitize_for_publication`: it destructures `AgentManifest` with no `..` and rebuilds it with no `..Default::default()`, so a new field is an `E0027`/`E0063` compile error there until it is classified.
+    /// This test is the runtime half — it keeps the human-readable `CLASSIFICATION` table from falling behind the struct, in either direction.
     #[test]
     fn classification_covers_every_serialized_manifest_field() {
         let value =
@@ -1754,8 +1667,7 @@ mod tests {
             description: "d".to_string(),
             ..AgentManifest::default()
         };
-        // Long, hyphen- and slash-segmented identifiers are exactly what the
-        // taint scanner's opaque-token rule would otherwise flag.
+        // Long, hyphen- and slash-segmented identifiers are exactly what the taint scanner's opaque-token rule would otherwise flag.
         manifest.model.model = "accounts/fireworks/models/llama-v3p1-405b-instruct".to_string();
         manifest.pinned_model = Some("claude-sonnet-4-5-20250929".to_string());
 
@@ -1792,8 +1704,8 @@ mod tests {
 
     #[test]
     fn nesting_past_the_scan_depth_is_reported_rather_than_passed_as_clean() {
-        // `response_format`'s JSON schema is operator-supplied and arbitrarily
-        // deep. The walk stops at `MAX_SCAN_DEPTH` and must say that it did.
+        // `response_format`'s JSON schema is operator-supplied and arbitrarily deep.
+        // The walk stops at `MAX_SCAN_DEPTH` and must say that it did.
         let mut schema = serde_json::json!({"type": "string"});
         for _ in 0..MAX_SCAN_DEPTH + 8 {
             schema = serde_json::json!({ "properties": schema });
