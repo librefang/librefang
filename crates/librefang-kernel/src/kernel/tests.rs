@@ -2693,6 +2693,10 @@ async fn test_send_message_ephemeral_unknown_agent_returns_not_found() {
     let config = KernelConfig {
         home_dir: home_dir.clone(),
         data_dir: home_dir.join("data"),
+        // #7743: this test dispatches an agent turn, so the default provider must be the
+        // explicit driverless sentinel rather than `"auto"` — otherwise boot adopts whatever
+        // provider the host machine has credentials or a logged-in CLI for.
+        default_model: DefaultModelConfig::driverless(),
         ..KernelConfig::default()
     };
 
@@ -2720,6 +2724,11 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
     let config = KernelConfig {
         home_dir: home_dir.clone(),
         data_dir: home_dir.join("data"),
+        // #7743: the ephemeral turn below is expected to fail for want of a driver, so say so
+        // explicitly. With the `"auto"` default, boot probes the host and — on any machine
+        // with the Anthropic `claude` CLI installed — the turn instead *succeeded*, spawning
+        // the real CLI against the checkout and making a billable call.
+        default_model: DefaultModelConfig::driverless(),
         ..KernelConfig::default()
     };
 
@@ -2738,11 +2747,25 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
     let session_before = kernel.memory.substrate.get_session(session_id).unwrap();
     let msg_count_before = session_before.map(|s| s.messages.len()).unwrap_or(0);
 
-    // Send ephemeral message (will fail because no LLM provider, but that's OK —
-    // the point is the session should remain untouched)
-    let _ = kernel
+    // The turn must not run, for the stated reason. The kernel is declared driverless, so
+    // resolution lands on the stub and the loop reports that structurally rather than
+    // erroring. Asserting the specific outcome instead of swallowing the result with
+    // `let _ =` is what keeps this test honest (#7743): pre-fix, on any machine with the
+    // Anthropic `claude` CLI installed, boot adopted a live `claude-code` driver and this
+    // turn *succeeded* — spawning the real CLI against the checkout and making a billable
+    // call — which `let _ =` could not tell apart from the intended outcome.
+    let result = kernel
         .send_message_ephemeral(agent_id, "what is 2+2?", None, None)
-        .await;
+        .await
+        .expect("the ephemeral path itself must not error");
+    assert!(
+        result.provider_not_configured,
+        "the ephemeral turn must stop on the driverless stub; got: {result:?}"
+    );
+    assert_eq!(
+        result.iterations, 0,
+        "no agent-loop iteration may run without a driver; got: {result:?}"
+    );
 
     // Check session is unchanged
     let session_after = kernel.memory.substrate.get_session(session_id).unwrap();
@@ -8227,6 +8250,10 @@ fn boot_kernel_for_display_tests() -> LibreFangKernel {
     let config = KernelConfig {
         home_dir: home_dir.clone(),
         data_dir: home_dir.join("data"),
+        // #7743: the hook tests built on this helper dispatch an ephemeral turn and only care
+        // that the hook fired before driver resolution. Declare the absence of a driver rather
+        // than inheriting `"auto"`, which resolves a live provider off the host.
+        default_model: DefaultModelConfig::driverless(),
         ..KernelConfig::default()
     };
     // Leak the tempdir so the kernel keeps a valid home for the rest of the
@@ -12464,6 +12491,10 @@ fn reentrant_test_kernel() -> (Arc<LibreFangKernel>, AgentId) {
     let config = KernelConfig {
         home_dir: home_dir.clone(),
         data_dir: home_dir.join("data"),
+        // #7743: the re-entrancy tests call `send_message_full`, which reaches driver
+        // resolution on the non-cycle path. Explicitly driverless, so neither leg can spawn a
+        // coding-agent CLI on a developer machine.
+        default_model: DefaultModelConfig::driverless(),
         ..KernelConfig::default()
     };
     let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel should boot"));

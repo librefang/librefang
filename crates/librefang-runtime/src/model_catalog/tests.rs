@@ -6,6 +6,15 @@ fn test_catalog() -> ModelCatalog {
     ModelCatalog::new(&home)
 }
 
+/// Wrap raw catalog TOML as a [`CatalogSource`] for `from_sources`.
+fn source(content: &str, is_custom: bool) -> CatalogSource {
+    CatalogSource {
+        content: content.to_string(),
+        is_custom,
+        origin: "<test>".to_string(),
+    }
+}
+
 /// Convert plain name strings to minimal `DiscoveredModelInfo` for tests
 /// that don't need to exercise capability inference.
 fn names_to_info(names: &[&str]) -> Vec<DiscoveredModelInfo> {
@@ -1678,10 +1687,7 @@ supports_tools = false
 supports_vision = false
 supports_streaming = false
 "#;
-    let sources = vec![
-        (provider_a.to_string(), false),
-        (provider_b.to_string(), false),
-    ];
+    let sources = vec![source(provider_a, false), source(provider_b, false)];
     ModelCatalog::from_sources(&sources, None)
 }
 
@@ -2062,7 +2068,7 @@ supports_tools = true
 supports_vision = false
 supports_streaming = true
 "#;
-    let catalog = ModelCatalog::from_sources(&[(toml_content.to_string(), false)], None);
+    let catalog = ModelCatalog::from_sources(&[source(toml_content, false)], None);
     let providers = catalog.list_providers();
     assert_eq!(providers.len(), 1);
     assert_eq!(providers[0].id, "testprov");
@@ -2097,7 +2103,7 @@ supports_tools = false
 supports_vision = false
 supports_streaming = true
 "#;
-    let catalog = ModelCatalog::from_sources(&[(toml_content.to_string(), false)], None);
+    let catalog = ModelCatalog::from_sources(&[source(toml_content, false)], None);
     let providers = catalog.list_providers();
     assert_eq!(providers.len(), 1);
     assert!(providers[0].media_capabilities.is_empty());
@@ -2526,4 +2532,112 @@ fn detect_auth_does_not_promote_a_cli_managed_entry_from_a_stray_env_key() {
         "the credential process owns this entry's status, not the environment"
     );
     assert!(provider.cli_managed);
+}
+
+// ── Partial provider overlays (#7776) ──────────────────────────────────
+//
+// The discovery toggle writes into `providers/<id>.toml`. When that file did
+// not exist it used to be created with `id` + `discover_models` and nothing
+// else, which failed `ProviderCatalogToml`'s required fields — so the loader
+// discarded the whole file and the setting reverted on every boot. The writer
+// now emits a complete record, but files written by older builds (and files an
+// operator hand-edits) still have the partial shape and must load.
+
+/// The exact file shape the old writer produced.
+const LEGACY_PARTIAL_OVERLAY: &str = "[provider]\nid = \"litellm\"\ndiscover_models = true\n";
+
+#[test]
+fn legacy_partial_overlay_still_yields_the_provider_and_its_flag() {
+    let catalog = ModelCatalog::from_sources(&[source(LEGACY_PARTIAL_OVERLAY, true)], None);
+    let provider = catalog
+        .get_provider("litellm")
+        .expect("a partial overlay must not take the whole file down with it");
+    assert!(
+        provider.discover_models,
+        "the flag the file exists to carry has to survive the round trip"
+    );
+    assert_eq!(provider.display_name, "litellm");
+    assert_eq!(provider.api_key_env, "LITELLM_API_KEY");
+    assert!(provider.is_custom, "the source's classification is kept");
+}
+
+#[test]
+fn a_partial_overlay_never_clobbers_a_full_record_for_the_same_id() {
+    let full = concat!(
+        "[provider]\n",
+        "id = \"litellm\"\n",
+        "display_name = \"LiteLLM Gateway\"\n",
+        "api_key_env = \"LITELLM_TOKEN\"\n",
+        "base_url = \"https://gateway.internal/v1\"\n",
+    );
+
+    // Both orders must give the same answer — `read_dir` order is arbitrary,
+    // so an order-dependent merge would be a heisenbug in production.
+    for sources in [
+        vec![source(full, false), source(LEGACY_PARTIAL_OVERLAY, true)],
+        vec![source(LEGACY_PARTIAL_OVERLAY, true), source(full, false)],
+    ] {
+        let catalog = ModelCatalog::from_sources(&sources, None);
+        assert_eq!(
+            catalog
+                .list_providers()
+                .iter()
+                .filter(|p| p.id == "litellm")
+                .count(),
+            1,
+            "duplicate ids collapse into a single entry"
+        );
+        let provider = catalog.get_provider("litellm").expect("merged entry");
+        assert_eq!(
+            provider.base_url, "https://gateway.internal/v1",
+            "an absent base_url must never overwrite a present one"
+        );
+        assert_eq!(provider.api_key_env, "LITELLM_TOKEN");
+        assert_eq!(provider.display_name, "LiteLLM Gateway");
+        assert!(
+            provider.discover_models,
+            "opting in from any contributing file is enough"
+        );
+        assert!(
+            !provider.is_custom,
+            "a registry-shipped contributor makes the entry non-deletable"
+        );
+    }
+}
+
+#[test]
+fn a_syntactically_invalid_catalog_file_is_skipped_without_taking_the_rest_down() {
+    let broken = "[provider\nid = \"oops\"\n";
+    let good = concat!(
+        "[provider]\n",
+        "id = \"acme\"\n",
+        "display_name = \"ACME\"\n",
+        "api_key_env = \"ACME_API_KEY\"\n",
+        "base_url = \"https://api.acme.test/v1\"\n",
+    );
+    let catalog = ModelCatalog::from_sources(&[source(broken, true), source(good, true)], None);
+    assert!(
+        catalog.get_provider("oops").is_none(),
+        "genuinely corrupt TOML is still dropped"
+    );
+    assert!(
+        catalog.get_provider("acme").is_some(),
+        "one corrupt file must not cost the operator the other providers"
+    );
+}
+
+/// End-to-end through the filesystem: what the API writes into
+/// `~/.librefang/providers/` is what the loader reads back on the next boot.
+#[test]
+fn provider_overlay_round_trips_through_the_directory_loader() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    std::fs::create_dir_all(&providers).expect("providers dir");
+    std::fs::write(providers.join("litellm.toml"), LEGACY_PARTIAL_OVERLAY).expect("write overlay");
+
+    let catalog = ModelCatalog::new_from_dir(&providers);
+    let provider = catalog
+        .get_provider("litellm")
+        .expect("the overlay on disk must produce a provider");
+    assert!(provider.discover_models);
 }

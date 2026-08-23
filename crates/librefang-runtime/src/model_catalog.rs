@@ -5,7 +5,7 @@
 
 use librefang_types::model_catalog::{
     AliasesCatalogFile, AuthStatus, EffectiveCapabilities, ModelCatalogEntry, ModelCatalogFile,
-    ModelOverrides, ModelTier, ProviderInfo,
+    ModelOverrides, ModelTier, ProviderCatalogToml, ProviderInfo,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -262,6 +262,59 @@ impl ModelCatalog {
     }
 }
 
+/// One provider-catalog TOML file as handed to [`ModelCatalog::from_sources`].
+struct CatalogSource {
+    /// Raw file contents.
+    content: String,
+    /// Whether the file is user-added rather than registry-shipped; copied onto
+    /// the resulting [`ProviderInfo`].
+    is_custom: bool,
+    /// Where the content came from, for diagnostics only. A parse failure has
+    /// to name the offending file or the operator is left grepping (#7776).
+    origin: String,
+}
+
+/// Fold a second `[provider]` record for an already-seen id into the first.
+///
+/// The invariant that matters: an absent value never overwrites a present one.
+/// A partial overlay — a file carrying `id` plus one flag — therefore adds its
+/// flag without erasing the `base_url`, `api_key_env` or `display_name` that
+/// the fuller record supplies (#7776). Where both records carry a value the
+/// later file wins, which is arbitrary but no worse than the previous
+/// behaviour of keeping two entries and letting `read_dir` order decide which
+/// one lookups found.
+///
+/// This deliberately operates on [`ProviderCatalogToml`] rather than the
+/// converted [`ProviderInfo`]: conversion back-fills the omitted fields (an
+/// absent `api_key_env` becomes the derived `{ID}_API_KEY`), and after that
+/// step "absent" is indistinguishable from "explicitly set to the default" —
+/// so a partial overlay would silently overwrite the operator's own values.
+fn merge_provider_record(existing: &mut ProviderCatalogToml, incoming: ProviderCatalogToml) {
+    fn take_non_empty(existing: &mut String, incoming: String) {
+        if !incoming.is_empty() {
+            *existing = incoming;
+        }
+    }
+    take_non_empty(&mut existing.display_name, incoming.display_name);
+    take_non_empty(&mut existing.api_key_env, incoming.api_key_env);
+    take_non_empty(&mut existing.base_url, incoming.base_url);
+    if incoming.signup_url.is_some() {
+        existing.signup_url = incoming.signup_url;
+    }
+    if !incoming.regions.is_empty() {
+        existing.regions = incoming.regions;
+    }
+    if !incoming.media_capabilities.is_empty() {
+        existing.media_capabilities = incoming.media_capabilities;
+    }
+    // `key_required` and `discover_models` both default when absent, so neither
+    // can distinguish "omitted" from "explicitly the default". Combine them so
+    // the result does not depend on `read_dir` order: any file declaring the
+    // provider keyless makes it keyless, any file opting in enables discovery.
+    existing.key_required &= incoming.key_required;
+    existing.discover_models |= incoming.discover_models;
+}
+
 impl ModelCatalog {
     /// Create a new catalog by loading providers from `home_dir/providers/`
     /// and aliases from `home_dir/aliases.toml`.
@@ -321,7 +374,7 @@ impl ModelCatalog {
                 })
             });
 
-        let mut sources: Vec<(String, bool)> = Vec::new();
+        let mut sources: Vec<CatalogSource> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(providers_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -331,7 +384,11 @@ impl ModelCatalog {
                             (Some(set), Some(name)) => !set.contains(name),
                             _ => false,
                         };
-                        sources.push((content, is_custom));
+                        sources.push(CatalogSource {
+                            content,
+                            is_custom,
+                            origin: path.display().to_string(),
+                        });
                     }
                 }
             }
@@ -346,24 +403,49 @@ impl ModelCatalog {
     ///
     /// Each source is tagged with an `is_custom` flag that is copied onto
     /// the corresponding [`ProviderInfo`].
-    fn from_sources(sources: &[(String, bool)], aliases_source: Option<&str>) -> Self {
+    fn from_sources(sources: &[CatalogSource], aliases_source: Option<&str>) -> Self {
         let mut models: Vec<ModelCatalogEntry> = Vec::new();
-        let mut providers: Vec<ProviderInfo> = Vec::new();
-        for (source, is_custom) in sources {
-            let file = match toml::from_str::<ModelCatalogFile>(source) {
+        // Accumulated in TOML shape so the merge below can still tell an absent
+        // field from a defaulted one; converted to `ProviderInfo` after the loop.
+        let mut raw_providers: Vec<(ProviderCatalogToml, bool)> = Vec::new();
+        for CatalogSource {
+            content,
+            is_custom,
+            origin,
+        } in sources
+        {
+            let file = match toml::from_str::<ModelCatalogFile>(content) {
                 Ok(f) => f,
                 Err(e) => {
                     // A syntax error here previously reverted to defaults with
                     // no log — a misconfigured custom provider just vanished.
-                    tracing::warn!(%e, "provider catalog TOML ignored: parse failed");
+                    // Name the file: without it the operator has no way to tell
+                    // which of a dozen catalog TOMLs was dropped (#7776).
+                    tracing::warn!(path = %origin, %e, "provider catalog TOML ignored: parse failed");
                     continue;
                 }
             };
             let provider_id = file.provider.as_ref().map(|p| p.id.clone());
             if let Some(p) = file.provider {
-                let mut info: ProviderInfo = p.into();
-                info.is_custom = *is_custom;
-                providers.push(info);
+                match raw_providers
+                    .iter_mut()
+                    .find(|(existing, _)| existing.id == p.id)
+                {
+                    // Two files declaring the same provider id used to produce
+                    // two entries, of which `get_provider` returned whichever
+                    // `read_dir` happened to yield first. Merge instead, and
+                    // never let an absent value win over a present one — a
+                    // partial overlay must be able to flip one flag without
+                    // erasing the endpoint the full record carries (#7776).
+                    Some((existing, existing_is_custom)) => {
+                        merge_provider_record(existing, p);
+                        // Custom only when no contributing file is
+                        // registry-shipped: if one is, the boot-time registry
+                        // sync owns the file and a dashboard delete cannot stick.
+                        *existing_is_custom &= *is_custom;
+                    }
+                    None => raw_providers.push((p, *is_custom)),
+                }
             }
             for mut model in file.models {
                 // Back-fill provider from the [provider] section when
@@ -383,6 +465,15 @@ impl ModelCatalog {
                 models.push(model);
             }
         }
+
+        let mut providers: Vec<ProviderInfo> = raw_providers
+            .into_iter()
+            .map(|(record, is_custom)| {
+                let mut info: ProviderInfo = record.into();
+                info.is_custom = is_custom;
+                info
+            })
+            .collect();
 
         // Builds embed the version-controlled OpenRouter `/models` snapshot.
         // It is a fallback snapshot only: runtime refreshes do not treat it as live-confirmed and replace it after the first successful API fetch.
@@ -1100,7 +1191,7 @@ impl ModelCatalog {
             true
         } else {
             // Custom provider — add a new entry so it appears in /api/providers
-            let env_var = format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"));
+            let env_var = librefang_types::model_catalog::default_api_key_env(provider);
             self.providers.push(ProviderInfo {
                 id: provider.to_string(),
                 display_name: provider.to_string(),

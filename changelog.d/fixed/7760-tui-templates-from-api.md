@@ -1,0 +1,2 @@
+The TUI templates screen now shows the agent types an operator actually created: it rendered a compiled-in list of ten starter templates and never called `GET /api/templates` at all, so anything under `workspaces/agents/` was invisible and could not be spawned from there.
+`GET /api/templates` now also returns each entry's declared provider and model so a row and its provider gate reflect the manifest rather than an assumed default, and a single unparseable manifest is skipped with a warning naming the file instead of failing the whole listing with a 500 (#7814) (@houko)
