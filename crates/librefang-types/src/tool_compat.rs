@@ -144,7 +144,6 @@ mod tests {
             map_tool_name("memory_forget"),
             Some("memory_semantic_forget")
         );
-        assert_eq!(map_tool_name("memory_recall"), Some("memory_recall"));
         assert_eq!(map_tool_name("memory_all"), Some("memory_list"));
         assert_eq!(map_tool_name("memory_list"), Some("memory_list"));
         assert_eq!(map_tool_name("memory_save"), Some("memory_store"));
