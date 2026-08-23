@@ -66,26 +66,20 @@ pub fn test_catalog_baseline() -> CatalogSeed {
     (providers, models)
 }
 
-/// Pin a deterministic vault master key for the test process the first
-/// time a mock kernel is built. Without this, parallel integration tests
-/// race on the process-shared `<data_local_dir>/librefang/.keyring` file
-/// (or OS keyring entry): one test's `init()` overwrites another's master
-/// key, and the loser's later `vault_get`/`vault_set` calls open a fresh
-/// `CredentialVault` whose `resolve_master_key` then loads the wrong key
-/// and fails to decrypt its own vault file (TOTP test flake on CI).
+/// Pin a deterministic vault master key for the test process before any kernel or vault is constructed.
+///
+/// Without this, parallel tests race on the process-shared `<data_local_dir>/librefang/.keyring` file (or OS keyring entry): one test's `init()` overwrites another's master key, and the loser's later `vault_get`/`vault_set` calls open a fresh `CredentialVault` whose `resolve_master_key` then loads the wrong key and fails to decrypt its own vault file.
+///
+/// This function is the single test-process owner of `LIBREFANG_VAULT_KEY`. Tests that access a vault directly must call it before doing so; `MockKernelBuilder::build` calls it automatically. An externally supplied key is preserved.
 ///
 /// 32 zero bytes, base64-encoded — value is irrelevant, only stability is.
 static VAULT_KEY_INIT: Once = Once::new();
 const TEST_VAULT_KEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
-fn ensure_test_vault_key() {
+pub fn ensure_test_vault_key() {
     VAULT_KEY_INIT.call_once(|| {
         if std::env::var_os("LIBREFANG_VAULT_KEY").is_none() {
-            // SAFETY: only runs once, before any kernel is booted in this
-            // process — no other thread can be reading the env at this point
-            // because all paths into the vault go through MockKernelBuilder
-            // (or `LibreFangKernel::boot_with_config`, which the builder
-            // owns the entry to).
+            // SAFETY: the shared Once makes this the only test helper that writes the variable, and callers invoke it before constructing a kernel or vault.
             std::env::set_var("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
         }
     });

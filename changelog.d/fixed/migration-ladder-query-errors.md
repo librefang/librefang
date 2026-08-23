@@ -1,1 +1,0 @@
-Fail startup migrations when the migration audit or table schemas cannot be inspected instead of treating SQLite query and row-decoding failures as missing history or columns and continuing from an unverified schema. (@xiaomo)

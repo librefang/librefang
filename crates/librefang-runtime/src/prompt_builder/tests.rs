@@ -721,14 +721,26 @@ fn test_capitalize() {
 #[test]
 fn test_goals_section_present_when_active() {
     let mut ctx = basic_ctx();
+    let goal_id = "C4D180E1-2F32-4585-A0A1-1C63435E62BB";
     ctx.active_goals = vec![
-        ("Ship v1.0".to_string(), "in_progress".to_string(), 40),
-        ("Write docs".to_string(), "pending".to_string(), 0),
+        ActiveGoalPrompt {
+            id: goal_id.to_string(),
+            title: "Ship v1.0".to_string(),
+            status: "in_progress".to_string(),
+            progress: 40,
+        },
+        ActiveGoalPrompt {
+            id: "968a4794-775b-4938-9a37-2eb7dc945ec5".to_string(),
+            title: "Write docs".to_string(),
+            status: "pending".to_string(),
+            progress: 0,
+        },
     ];
     let prompt = build_system_prompt(&ctx);
     assert!(prompt.contains("## Active Goals"));
     assert!(prompt.contains("[in_progress 40%] Ship v1.0"));
     assert!(prompt.contains("[pending 0%] Write docs"));
+    assert!(prompt.contains(&format!("goal_id: {goal_id}")));
     assert!(prompt.contains("goal_update"));
 }
 
@@ -743,7 +755,12 @@ fn test_goals_section_omitted_when_empty() {
 fn test_goals_section_present_for_subagents() {
     let mut ctx = basic_ctx();
     ctx.is_subagent = true;
-    ctx.active_goals = vec![("Sub-task".to_string(), "in_progress".to_string(), 50)];
+    ctx.active_goals = vec![ActiveGoalPrompt {
+        id: "46c7e82a-434f-4f58-a95f-6fc45d56aa67".to_string(),
+        title: "Sub-task".to_string(),
+        status: "in_progress".to_string(),
+        progress: 50,
+    }];
     let prompt = build_system_prompt(&ctx);
     // Goals should still be visible to subagents
     assert!(prompt.contains("## Active Goals"));

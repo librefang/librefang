@@ -1263,6 +1263,8 @@
     "token_limit": "토큰/시간",
     "alert_threshold": "경고 임계값",
     "budget_saved": "예산 한도가 업데이트되었습니다.",
+    "budget_no_changes": "저장하기 전에 유효한 예산 값을 하나 이상 입력하세요.",
+    "budget_bad_input": "{{field}} 값이 잘못되었습니다. 유한한 음이 아닌 수를 입력하고, 토큰 한도는 정수, 알림 임계값은 0~1로 설정하세요.",
     "total_cost": "총 비용",
     "avg_latency": "평균 지연 시간",
     "usage_by_agent": "에이전트별 사용량",
@@ -1323,6 +1325,7 @@
     "add": "추가",
     "filter_all": "모두",
     "showing": "{{count}} / {{total}} 표시 중",
+    "search_result_cap": "첫 50개 일치 항목",
     "no_memories": "아직 메모리가 없습니다",
     "created": "생성됨",
     "config_title": "메모리 구성",
@@ -1339,12 +1342,6 @@
     "embedding_section": "임베딩",
     "provider": "공급자",
     "auto_detect": "자동 감지",
-    "provider_openai": "OpenAI",
-    "provider_ollama": "Ollama",
-    "provider_vllm": "vLLM",
-    "provider_lmstudio": "LM Studio",
-    "provider_gemini": "Gemini",
-    "provider_minimax": "미니맥스",
     "model": "모델",
     "api_key_env": "API 키 환경",
     "api_key_env_hint": "로컬 공급자(Ollama / vLLM / LM Studio)는 일반적으로 키가 필요하지 않으므로 비워 두세요.",
@@ -2206,6 +2203,8 @@
     "fld_audio_prompt": "오디오 프롬프트",
     "fld_audio_provider": "오디오 제공업체",
     "fld_audio_transcription": "오디오 전사",
+    "fld_transcription_timeout_secs": "전사 시간 제한(초)",
+    "fld_ffmpeg_timeout_secs": "FFmpeg 시간 제한(초)",
     "fld_auto_approve": "자동 승인",
     "fld_auto_approve_autonomous": "자동 승인 자율",
     "fld_auto_memorize": "자동 암기",
@@ -2475,6 +2474,8 @@
     "desc_health_check_interval_secs": "MCP 서버에 대한 상태 확인 핑 간격(초)",
     "desc_image_description": "비전 모델을 사용하여 자동 이미지 설명 활성화",
     "desc_audio_transcription": "자동 오디오 전사 활성화",
+    "desc_transcription_timeout_secs": "오디오 전사 제공업체 요청 한 건의 시간 제한(초)이며 데몬을 재시작해야 적용됩니다",
+    "desc_ffmpeg_timeout_secs": "FFmpeg 하위 프로세스 한 건의 시간 제한(초)이며 데몬을 재시작해야 적용됩니다",
     "desc_video_description": "자동 비디오 설명 활성화",
     "desc_max_concurrency": "최대 동시 미디어 처리 작업 수",
     "desc_image_provider": "이미지 생성/분석 제공업체",
@@ -3664,7 +3665,6 @@
       "not_set": "설정되지 않음"
     },
     "errors": {
-      "empty_entry": "{{field}}에 빈 항목이 포함되어 있습니다.",
       "duplicate_entry": "{{field}}에 '{{item}}' 중복 항목이 포함되어 있습니다.",
       "writable_not_subset": "memory_access.writable_namespaces['{{ns}}']는 readable_namespaces에 없습니다(쓰기 가능은 읽기 가능의 하위 집합이어야 함)."
     },
@@ -3878,6 +3878,7 @@
     "error_disabled_body": "<a>구성 → 보안</a>에서 페어링을 활성화합니다(<code>pairing.enabled = true</code>).",
     "error_generic_title": "페어링 코드를 생성하지 못했습니다.",
     "qr_aria_label": "모바일 장치와 페어링하기 위한 QR 코드",
+    "qr_render_failed": "페어링 QR 코드를 표시할 수 없습니다. 새로고침하여 다시 시도하세요.",
     "btn_try_again": "다시 시도"
   },
   "shortcuts_help": {
@@ -3995,6 +3996,9 @@
   },
   "errors": {
     "something_went_wrong": "문제가 발생했습니다.",
+    "page_assets_updated": "페이지 자산이 업데이트되었습니다.",
+    "react_state_reset": "React 상태 재설정 — 다시 불러오는 중",
+    "new_version_available": "새 버전이 있습니다. 최신 버전을 받으려면 다시 불러오세요.",
     "unexpected": "예상치 못한 오류가 발생했습니다.",
     "force_reload_title": "자동 새로고침 쿨타임을 지우고 새로 불러옵니다.",
     "force_reload": "강제 새로고침",

@@ -668,6 +668,29 @@ async fn trigger_create_rejects_invalid_agent_id() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn trigger_create_returns_404_for_unknown_agent() {
+    let h = boot().await;
+    let unknown_agent = uuid::Uuid::new_v4().to_string();
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/triggers",
+        Some(serde_json::json!({
+            "agent_id": unknown_agent,
+            "pattern": "task_posted"
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+    let message = body["error"]
+        .as_str()
+        .or_else(|| body["error"]["message"].as_str())
+        .unwrap_or("");
+    assert!(message.contains(&unknown_agent), "{body:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn trigger_create_rejects_missing_pattern() {
     let h = boot().await;
     let (status, body) = json_request(
@@ -803,6 +826,34 @@ async fn cron_jobs_list_with_unknown_agent_id_is_empty() {
     let (status, body) = get(&h, &format!("/api/cron/jobs?agent_id={unknown}")).await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert_eq!(body["total"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_job_create_rejected_name_returns_400() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/cron/jobs",
+        Some(serde_json::json!({
+            "agent_id": uuid::Uuid::new_v4().to_string(),
+            "name": "daily — report",
+            "schedule": {"kind": "cron", "expr": "0 * * * *"},
+            "action": {"kind": "agent_turn", "message": "ping"},
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert_eq!(body["type"], "invalid_input", "{body:?}");
+    assert!(
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or_default()
+            .contains("name may only contain"),
+        "{body:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -22,6 +22,7 @@ export function Kpi({ label, value, unit, delta, trend = "flat", sub, sparkline,
       padding="none"
       glow
       onClick={onClick}
+      aria-label={onClick ? label : undefined}
       className="relative overflow-hidden surface-lit p-3.5"
     >
       <div className="text-label font-semibold uppercase tracking-label text-text-dim">{label}</div>

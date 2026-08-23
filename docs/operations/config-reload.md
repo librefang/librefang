@@ -225,7 +225,7 @@ classified differently — the row note spells out which is which.
 |---|---|---|
 | `web` | H | Web tools config (search + fetch) — rebuilds web context. |
 | `browser` | R | Browser automation config — the `BrowserManager` captures it by value at boot with no rebuild path, so a change needs a restart. |
-| `media` | N | Media-understanding config. |
+| `media` | R | Media-understanding config — `MediaEngine` captures it by value at boot with no rebuild path, so a change needs a restart. |
 | `links` | N | Link-understanding config. |
 | `canvas` | R | Canvas (A2UI) config. |
 | `tts` | N | Text-to-speech config. |

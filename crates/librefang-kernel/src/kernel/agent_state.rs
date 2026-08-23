@@ -12,8 +12,101 @@
 //! visibility surgery.
 
 use super::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize)]
+struct McpServersDocument {
+    #[serde(default)]
+    mcp_servers: Option<toml::Spanned<Vec<String>>>,
+}
+
+#[derive(Serialize)]
+struct McpServersValue<'a> {
+    mcp_servers: &'a [String],
+}
+
+fn patch_mcp_servers(source: &str, servers: &[String]) -> Result<String, String> {
+    toml::from_str::<AgentManifest>(source)
+        .map_err(|error| format!("existing agent.toml is invalid: {error}"))?;
+    let document: McpServersDocument = toml::from_str(source)
+        .map_err(|error| format!("failed to locate mcp_servers in agent.toml: {error}"))?;
+    let replacement = toml::to_string(&McpServersValue {
+        mcp_servers: servers,
+    })
+    .map_err(|error| format!("failed to serialize mcp_servers: {error}"))?;
+    let replacement_document: McpServersDocument = toml::from_str(&replacement)
+        .map_err(|error| format!("failed to locate serialized mcp_servers: {error}"))?;
+    let replacement_span = replacement_document
+        .mcp_servers
+        .ok_or_else(|| "serialized mcp_servers field is missing".to_string())?
+        .span();
+    let replacement_value = &replacement[replacement_span];
+
+    let patched = if let Some(current) = document.mcp_servers {
+        let mut patched = source.to_string();
+        patched.replace_range(current.span(), replacement_value);
+        patched
+    } else {
+        format!("mcp_servers = {replacement_value}\n{source}")
+    };
+
+    toml::from_str::<AgentManifest>(&patched)
+        .map_err(|error| format!("patched agent.toml is invalid: {error}"))?;
+    Ok(patched)
+}
 
 impl LibreFangKernel {
+    fn agent_manifest_path(
+        &self,
+        entry: &librefang_types::agent::AgentEntry,
+        agent_id: AgentId,
+    ) -> std::path::PathBuf {
+        entry.source_toml_path.clone().unwrap_or_else(|| {
+            // Match `resolve_workspace_dir` by using the agent UUID when the name has no safe path component; the old literal fallback made distinct non-ASCII names overwrite the same manifest (#6442).
+            let safe_name = safe_path_component(&entry.name, &agent_id.to_string());
+            self.config
+                .load()
+                .effective_agent_workspaces_dir()
+                .join(safe_name)
+                .join("agent.toml")
+        })
+    }
+
+    fn manifest_write_lock(&self, path: &std::path::Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+        self.agents
+            .manifest_write_locks
+            .entry(path.to_path_buf())
+            .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    }
+
+    fn persist_full_manifest_at(
+        &self,
+        entry: &librefang_types::agent::AgentEntry,
+        toml_path: &std::path::Path,
+    ) {
+        let Some(dir) = toml_path.parent() else {
+            warn!(agent = %entry.name, "Failed to derive parent dir for manifest persist");
+            return;
+        };
+        match toml::to_string_pretty(&entry.manifest) {
+            Ok(toml_str) => {
+                if let Err(error) = std::fs::create_dir_all(dir) {
+                    warn!(agent = %entry.name, "Failed to create agent dir for manifest persist: {error}");
+                    return;
+                }
+                if let Err(error) = atomic_write_toml(toml_path, &toml_str) {
+                    warn!(agent = %entry.name, "Failed to persist manifest to disk: {error}");
+                } else {
+                    debug!(agent = %entry.name, path = %toml_path.display(), "Persisted manifest to disk");
+                }
+            }
+            Err(error) => {
+                warn!(agent = %entry.name, "Failed to serialize manifest to TOML: {error}");
+            }
+        }
+    }
+
     /// Switch an agent's model.
     ///
     /// When `explicit_provider` is `Some`, that provider name is used as-is
@@ -36,48 +129,47 @@ impl LibreFangKernel {
         let Some(entry) = self.agents.registry.get(agent_id) else {
             return;
         };
-        let toml_path = match entry.source_toml_path.clone() {
-            Some(p) => p,
-            None => {
-                // Fall back to the agent's UUID, not the literal "agent" (#6442):
-                // `resolve_workspace_dir` spawns the workspace at
-                // `<workspaces>/<safe_path_component(name, agent_id)>`, so the
-                // fallback here must use the same UUID fallback string. The old
-                // `"agent"` literal made every agent whose name sanitizes to an
-                // empty string (fully Cyrillic / CJK / accented-Latin) collapse
-                // to the shared path `<workspaces>/agent/agent.toml` — distinct
-                // agents overwrote each other and the loader never matched the
-                // real `<workspaces>/<uuid>/` directory.
-                let safe_name = safe_path_component(&entry.name, &agent_id.to_string());
-                self.config
-                    .load()
-                    .effective_agent_workspaces_dir()
-                    .join(safe_name)
-                    .join("agent.toml")
-            }
+        let toml_path = self.agent_manifest_path(&entry, agent_id);
+        let write_lock = self.manifest_write_lock(&toml_path);
+        let _write_guard = write_lock.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(current_entry) = self.agents.registry.get(agent_id) else {
+            return;
         };
-        let dir = match toml_path.parent() {
-            Some(d) => d.to_path_buf(),
-            None => {
-                warn!(agent = %entry.name, "Failed to derive parent dir for manifest persist");
+        self.persist_full_manifest_at(&current_entry, &toml_path);
+    }
+
+    fn persist_mcp_servers_to_disk(&self, agent_id: AgentId) {
+        let Some(entry) = self.agents.registry.get(agent_id) else {
+            return;
+        };
+        let toml_path = self.agent_manifest_path(&entry, agent_id);
+        let write_lock = self.manifest_write_lock(&toml_path);
+        let _write_guard = write_lock.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(current_entry) = self.agents.registry.get(agent_id) else {
+            return;
+        };
+        let source = match std::fs::read_to_string(&toml_path) {
+            Ok(source) => source,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.persist_full_manifest_at(&current_entry, &toml_path);
+                return;
+            }
+            Err(error) => {
+                warn!(agent = %entry.name, "Failed to read agent manifest before MCP server persist: {error}");
                 return;
             }
         };
-        match toml::to_string_pretty(&entry.manifest) {
-            Ok(toml_str) => {
-                if let Err(e) = std::fs::create_dir_all(&dir) {
-                    warn!(agent = %entry.name, "Failed to create agent dir for manifest persist: {e}");
-                    return;
-                }
-                if let Err(e) = atomic_write_toml(&toml_path, &toml_str) {
-                    warn!(agent = %entry.name, "Failed to persist manifest to disk: {e}");
-                } else {
-                    debug!(agent = %entry.name, path = %toml_path.display(), "Persisted manifest to disk");
-                }
+        let patched = match patch_mcp_servers(&source, &current_entry.manifest.mcp_servers) {
+            Ok(patched) => patched,
+            Err(error) => {
+                warn!(agent = %entry.name, "Refusing to overwrite agent manifest during MCP server persist: {error}");
+                return;
             }
-            Err(e) => {
-                warn!(agent = %entry.name, "Failed to serialize manifest to TOML: {e}");
-            }
+        };
+        if let Err(error) = atomic_write_toml(&toml_path, &patched) {
+            warn!(agent = %entry.name, "Failed to persist MCP servers to agent manifest: {error}");
+        } else {
+            debug!(agent = %entry.name, path = %toml_path.display(), "Persisted MCP servers to agent manifest");
         }
     }
 
@@ -507,12 +599,24 @@ impl LibreFangKernel {
         Ok(())
     }
 
-    /// Update an agent's MCP server allowlist. Empty = all servers (backward compat).
+    /// Update an agent's MCP server allowlist.
+    /// Empty disables MCP servers; `["*"]` enables all connected servers.
     pub fn set_agent_mcp_servers(
         &self,
         agent_id: AgentId,
         servers: Vec<String>,
     ) -> KernelResult<()> {
+        if self
+            .agents
+            .registry
+            .get(agent_id)
+            .is_some_and(|entry| entry.is_hand)
+        {
+            return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                "Hand-derived agent MCP servers are controlled by the Hand definition".to_string(),
+            )));
+        }
+
         // Validate server names if allowlist is non-empty
         if !servers.is_empty() {
             if let Ok(mcp_tools) = self.mcp.mcp_tools.lock() {
@@ -571,7 +675,7 @@ impl LibreFangKernel {
         // reason as set_agent_skills: boot reconciliation overwrites DB-only
         // fields from the on-disk manifest, so an MCP allowlist set via the
         // dashboard would otherwise be wiped on the next restart.
-        self.persist_manifest_to_disk(agent_id);
+        self.persist_mcp_servers_to_disk(agent_id);
 
         info!(agent_id = %agent_id, servers = ?servers, "Agent MCP servers updated");
         Ok(())
@@ -754,5 +858,56 @@ impl LibreFangKernel {
         self.prompt_metadata_cache.tools.remove(&agent_id);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod mcp_manifest_patch_tests {
+    use super::*;
+
+    fn manifest_source() -> String {
+        toml::to_string_pretty(&AgentManifest {
+            name: "format-test".to_string(),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn replaces_multiline_value_and_preserves_surrounding_comments() {
+        let source = manifest_source().replace(
+            "mcp_servers = []",
+            "mcp_servers = [\n    \"old-server\",\n] # keep assignment note",
+        );
+        let patched = patch_mcp_servers(&source, &["new-server".to_string()]).unwrap();
+
+        assert!(patched.contains("mcp_servers = [\"new-server\"] # keep assignment note"));
+        assert!(!patched.contains("old-server"));
+        assert_eq!(
+            toml::from_str::<AgentManifest>(&patched)
+                .unwrap()
+                .mcp_servers,
+            vec!["new-server"]
+        );
+    }
+
+    #[test]
+    fn inserts_missing_root_field_without_reserializing_document() {
+        let source = manifest_source()
+            .lines()
+            .filter(|line| !line.starts_with("mcp_servers ="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let source = format!("# operator note\n{source}\n");
+        let patched = patch_mcp_servers(&source, &["new-server".to_string()]).unwrap();
+
+        assert!(patched.starts_with("mcp_servers = [\"new-server\"]\n# operator note\n"));
+        assert!(patched.ends_with(&source));
+    }
+
+    #[test]
+    fn invalid_document_is_rejected_before_any_write() {
+        let error = patch_mcp_servers("name = [", &[]).unwrap_err();
+        assert!(error.starts_with("existing agent.toml is invalid:"));
     }
 }

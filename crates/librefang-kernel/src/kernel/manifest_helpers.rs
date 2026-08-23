@@ -283,6 +283,31 @@ pub(super) fn infer_provider_from_model(model: &str) -> Option<String> {
     }
 }
 
+pub(super) fn resolve_fallback_target(
+    fallback_provider: &str,
+    fallback_model: &str,
+    default_provider: &str,
+    default_model: &str,
+) -> (String, String) {
+    let inherits_default_model = fallback_model.is_empty() || fallback_model == "default";
+    let resolved_model = if inherits_default_model {
+        default_model
+    } else {
+        fallback_model
+    };
+    let inherits_default_provider = fallback_provider.is_empty() || fallback_provider == "default";
+    let resolved_provider = if !inherits_default_provider {
+        fallback_provider.to_string()
+    } else if inherits_default_model {
+        default_provider.to_string()
+    } else {
+        infer_provider_from_model(resolved_model).unwrap_or_else(|| default_provider.to_string())
+    };
+    let resolved_model =
+        librefang_runtime::agent_loop::strip_provider_prefix(resolved_model, &resolved_provider);
+    (resolved_provider, resolved_model)
+}
+
 /// A well-known agent ID used for the legacy shared memory namespace.
 /// This is a fixed UUID. Pre-#5070, all agents read/wrote to this single
 /// namespace. Post-#5070, LLM-facing tools use per-agent scoping; this ID

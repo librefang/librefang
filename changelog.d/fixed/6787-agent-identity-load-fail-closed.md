@@ -1,1 +1,0 @@
-Agent identity persistence now remains blocked after an existing registry file fails to load, preserving recoverable on-disk mappings instead of replacing them with an empty fallback snapshot on the next mutation (#6787) (@houko)

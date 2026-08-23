@@ -1263,6 +1263,8 @@
     "token_limit": "Tokens/Hour",
     "alert_threshold": "Alert Threshold",
     "budget_saved": "Budget limits updated.",
+    "budget_no_changes": "Enter at least one valid budget value before saving.",
+    "budget_bad_input": "{{field}} has an invalid value. Use a finite non-negative number; token caps must be integers and alert threshold must be 0–1.",
     "total_cost": "Total Cost",
     "avg_latency": "Avg Latency",
     "usage_by_agent": "Usage by Agent",
@@ -1323,6 +1325,7 @@
     "add": "Add",
     "filter_all": "All",
     "showing": "Showing {{count}} / {{total}}",
+    "search_result_cap": "first 50 matches",
     "no_memories": "No memories yet",
     "created": "Created",
     "config_title": "Memory Configuration",
@@ -1339,12 +1342,6 @@
     "embedding_section": "Embedding",
     "provider": "Provider",
     "auto_detect": "Auto-detect",
-    "provider_openai": "OpenAI",
-    "provider_ollama": "Ollama",
-    "provider_vllm": "vLLM",
-    "provider_lmstudio": "LM Studio",
-    "provider_gemini": "Gemini",
-    "provider_minimax": "MiniMax",
     "model": "Model",
     "api_key_env": "API Key Env",
     "api_key_env_hint": "Local providers (Ollama / vLLM / LM Studio) typically don't need a key — leave blank.",
@@ -2206,6 +2203,8 @@
     "fld_audio_prompt": "Audio Prompt",
     "fld_audio_provider": "Audio Provider",
     "fld_audio_transcription": "Audio Transcription",
+    "fld_transcription_timeout_secs": "Transcription Timeout (s)",
+    "fld_ffmpeg_timeout_secs": "FFmpeg Timeout (s)",
     "fld_auto_approve": "Auto Approve",
     "fld_auto_approve_autonomous": "Auto Approve Autonomous",
     "fld_auto_memorize": "Auto Memorize",
@@ -2475,6 +2474,8 @@
     "desc_health_check_interval_secs": "Seconds between health check pings to MCP servers",
     "desc_image_description": "Enable automatic image description using vision models",
     "desc_audio_transcription": "Enable automatic audio transcription",
+    "desc_transcription_timeout_secs": "Timeout for one audio transcription provider request in seconds; requires a daemon restart",
+    "desc_ffmpeg_timeout_secs": "Timeout for one ffmpeg subprocess in seconds; requires a daemon restart",
     "desc_video_description": "Enable automatic video description",
     "desc_max_concurrency": "Maximum number of concurrent media processing tasks",
     "desc_image_provider": "Provider for image generation/analysis",
@@ -3664,7 +3665,6 @@
       "not_set": "Not set"
     },
     "errors": {
-      "empty_entry": "{{field}} contains an empty entry",
       "duplicate_entry": "{{field}} contains duplicate entry '{{item}}'",
       "writable_not_subset": "memory_access.writable_namespaces['{{ns}}'] is not in readable_namespaces (writable must be a subset of readable)"
     },
@@ -3878,6 +3878,7 @@
     "error_disabled_body": "Enable pairing in <a>Config → Security</a> (<code>pairing.enabled = true</code>).",
     "error_generic_title": "Failed to generate pairing code",
     "qr_aria_label": "QR code for pairing with a mobile device",
+    "qr_render_failed": "The pairing QR code could not be rendered. Refresh to try again.",
     "btn_try_again": "Try again"
   },
   "shortcuts_help": {
@@ -3995,6 +3996,9 @@
   },
   "errors": {
     "something_went_wrong": "Something went wrong",
+    "page_assets_updated": "Page assets have been updated",
+    "react_state_reset": "React state reset — reloading",
+    "new_version_available": "A new version is available. Reload to get the latest.",
     "unexpected": "An unexpected error occurred.",
     "force_reload_title": "Clears the auto-reload cooldown and forces a fresh load",
     "force_reload": "Force reload",

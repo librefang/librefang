@@ -7,7 +7,7 @@
       "name": "MIT",
       "url": "https://opensource.org/licenses/MIT"
     },
-    "version": "2026.7.31"
+    "version": "2026.8.19"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -1554,7 +1554,6 @@
         "tags": [
           "agents"
         ],
-        "summary": "PUT /api/agents/{id}/mcp_servers — Update an agent's MCP server allowlist.",
         "operationId": "set_agent_mcp_servers",
         "parameters": [
           {
@@ -1568,11 +1567,11 @@
           }
         ],
         "requestBody": {
-          "description": "Array of MCP server names",
+          "description": "Object containing the MCP server allowlist",
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/JsonArray"
+                "$ref": "#/components/schemas/SetAgentMcpServersRequest"
               }
             }
           },
@@ -1581,6 +1580,16 @@
         "responses": {
           "200": {
             "description": "Update an agent's MCP server allowlist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request body",
             "content": {
               "application/json": {
                 "schema": {
@@ -2451,7 +2460,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "GET /api/agents/{id}/sessions/{session_id}/stream — attach to a session's\nin-flight stream events (SSE).",
+        "summary": "GET /api/agents/{id}/sessions/{session_id}/stream — attach to a session's\nin-flight stream events (SSE or WebSocket).",
         "description": "Any client can subscribe to the events emitted by an active turn on this\nsession: the originating client (CLI, Tauri desktop, web) plus any number\nof additional clients. Late attachers begin receiving events from the\nmoment they subscribe — partial-turn snapshots are not replayed.\n\nReturns 404 if the session does not exist or belongs to a different agent.",
         "operationId": "attach_session_stream",
         "parameters": [
@@ -2475,6 +2484,9 @@
           }
         ],
         "responses": {
+          "101": {
+            "description": "WebSocket session event stream"
+          },
           "200": {
             "description": "Server-sent events stream of session events"
           },
@@ -7705,6 +7717,15 @@
             }
           },
           {
+            "name": "level",
+            "in": "query",
+            "description": "Optional memory level filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "offset",
             "in": "query",
             "description": "Pagination offset (default 0)",
@@ -7735,6 +7756,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid memory level filter"
           }
         }
       },
@@ -7795,6 +7819,15 @@
             }
           },
           {
+            "name": "level",
+            "in": "query",
+            "description": "Optional memory level filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "offset",
             "in": "query",
             "description": "Pagination offset (default 0)",
@@ -7825,6 +7858,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid memory level filter"
           }
         }
       },
@@ -8361,6 +8397,15 @@
             }
           },
           {
+            "name": "level",
+            "in": "query",
+            "description": "Optional memory level filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "Max results (default 10)",
@@ -8381,6 +8426,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid memory level filter"
           }
         }
       }
@@ -8662,6 +8710,15 @@
             }
           },
           {
+            "name": "level",
+            "in": "query",
+            "description": "Optional memory level filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "Max results (default 10)",
@@ -8682,6 +8739,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid memory level filter"
           }
         }
       }
@@ -11975,7 +12035,7 @@
           "required": true
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Trigger created",
             "content": {
               "application/json": {
@@ -11987,6 +12047,15 @@
           },
           "400": {
             "description": "Invalid trigger definition"
+          },
+          "404": {
+            "description": "Owner or target agent not found"
+          },
+          "500": {
+            "description": "Unexpected kernel failure"
+          },
+          "503": {
+            "description": "Trigger registration temporarily unavailable"
           }
         }
       }
@@ -12753,6 +12822,9 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Template serialization failed"
           }
         }
       }
@@ -12788,6 +12860,9 @@
           },
           "404": {
             "description": "Template not found"
+          },
+          "500": {
+            "description": "Template serialization failed"
           }
         }
       }
@@ -14636,6 +14711,23 @@
         "properties": {
           "content": {
             "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SetAgentMcpServersRequest": {
+        "type": "object",
+        "description": "PUT /api/agents/{id}/mcp_servers — Update an agent's MCP server allowlist.",
+        "required": [
+          "mcp_servers"
+        ],
+        "properties": {
+          "mcp_servers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "MCP server names assigned to the agent.\nAn empty list disables MCP servers for the agent; `[\"*\"]` enables all connected servers."
           }
         },
         "additionalProperties": false

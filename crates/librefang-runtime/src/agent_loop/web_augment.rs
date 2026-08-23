@@ -18,6 +18,58 @@ use tracing::{debug, warn};
 use super::strip_provider_prefix;
 use super::text_recovery::find_json_object_end;
 
+const MAX_SEARCH_QUERIES: usize = 3;
+const MAX_SEARCH_RESULT_CHARS_PER_QUERY: usize = 4_000;
+const MAX_WEB_SEARCH_AUGMENTATION_CHARS: usize = 10_000;
+const SEARCH_RESULTS_TRUNCATION_MARKER: &str = "\n[Search results truncated]\n";
+
+fn external_content_closing_boundary(content: &str) -> Option<&str> {
+    let boundary = content.rsplit_once('\n')?.1;
+    (boundary.starts_with("<<</EXTCONTENT_") && boundary.ends_with(">>>")).then_some(boundary)
+}
+
+fn truncate_search_results(content: &str, max_chars: usize) -> String {
+    let total_chars = content.chars().count();
+    if total_chars <= max_chars {
+        return content.to_string();
+    }
+
+    let marker_chars = SEARCH_RESULTS_TRUNCATION_MARKER.chars().count();
+    let closing_boundary = external_content_closing_boundary(content);
+    let closing_chars = closing_boundary.map_or(0, |boundary| boundary.chars().count());
+    let reserved_chars = marker_chars.saturating_add(closing_chars);
+
+    if reserved_chars >= max_chars {
+        return content.chars().take(max_chars).collect();
+    }
+
+    let prefix: String = content.chars().take(max_chars - reserved_chars).collect();
+    match closing_boundary {
+        Some(boundary) => format!("{prefix}{SEARCH_RESULTS_TRUNCATION_MARKER}{boundary}"),
+        None => format!("{prefix}{SEARCH_RESULTS_TRUNCATION_MARKER}"),
+    }
+}
+
+fn append_search_results(output: &mut String, results: &str) -> bool {
+    let output_chars = output.chars().count();
+    let separator_chars = usize::from(!output.is_empty());
+    let Some(remaining_chars) =
+        MAX_WEB_SEARCH_AUGMENTATION_CHARS.checked_sub(output_chars.saturating_add(separator_chars))
+    else {
+        return false;
+    };
+    if remaining_chars == 0 {
+        return false;
+    }
+
+    if separator_chars != 0 {
+        output.push('\n');
+    }
+    let query_limit = remaining_chars.min(MAX_SEARCH_RESULT_CHARS_PER_QUERY);
+    output.push_str(&truncate_search_results(results, query_limit));
+    true
+}
+
 /// Check if web search augmentation should be performed for this agent.
 pub(super) fn should_augment_web_search(manifest: &AgentManifest) -> bool {
     use librefang_types::agent::WebSearchAugmentationMode;
@@ -167,6 +219,7 @@ async fn generate_search_queries(
         .iter()
         .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
         .filter(|s| !s.is_empty())
+        .take(MAX_SEARCH_QUERIES)
         .collect();
 
     if queries.is_empty() {
@@ -231,8 +284,25 @@ pub(super) async fn web_search_augment(
     for query in &queries {
         match ctx.search.search(query, 3).await {
             Ok(results) if !results.trim().is_empty() => {
-                all_results.push_str(&results);
-                all_results.push('\n');
+                let original_chars = results.chars().count();
+                let before_chars = all_results.chars().count();
+                if !append_search_results(&mut all_results, &results) {
+                    debug!("Web search augmentation reached its context budget");
+                    break;
+                }
+                let added_chars = all_results
+                    .chars()
+                    .count()
+                    .saturating_sub(before_chars)
+                    .saturating_sub(usize::from(before_chars != 0));
+                if added_chars < original_chars {
+                    debug!(
+                        %query,
+                        original_chars,
+                        kept_chars = added_chars,
+                        "Truncated web search augmentation results"
+                    );
+                }
             }
             Ok(_) => {}
             Err(e) => {
@@ -419,5 +489,62 @@ mod tests {
         .await;
 
         assert_eq!(queries, Some(vec!["rust \"}\" parser".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn search_query_parser_limits_provider_output() {
+        let driver = QueryResponseDriver {
+            response: r#"{"queries":["one","two","three","four"]}"#.to_string(),
+        };
+        let queries = generate_search_queries(
+            &driver,
+            &test_manifest(),
+            &[],
+            "rust parser",
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+
+        assert_eq!(
+            queries,
+            Some(vec![
+                "one".to_string(),
+                "two".to_string(),
+                "three".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn truncation_is_unicode_safe_and_preserves_external_boundary() {
+        let wrapped = crate::web_content::wrap_external_content(
+            "test-search",
+            &"検索結果🙂".repeat(MAX_SEARCH_RESULT_CHARS_PER_QUERY),
+        );
+        let truncated = truncate_search_results(&wrapped, MAX_SEARCH_RESULT_CHARS_PER_QUERY);
+
+        assert_eq!(truncated.chars().count(), MAX_SEARCH_RESULT_CHARS_PER_QUERY);
+        assert!(truncated.contains(SEARCH_RESULTS_TRUNCATION_MARKER));
+        let boundary = crate::web_content::content_boundary("test-search");
+        assert!(truncated.ends_with(&format!("<<</{boundary}>>>")));
+    }
+
+    #[test]
+    fn combined_search_results_obey_per_query_and_total_budgets() {
+        let results = crate::web_content::wrap_external_content(
+            "test-search",
+            &"x".repeat(MAX_SEARCH_RESULT_CHARS_PER_QUERY * 2),
+        );
+        let mut combined = String::new();
+
+        assert!(append_search_results(&mut combined, &results));
+        assert!(append_search_results(&mut combined, &results));
+        assert!(append_search_results(&mut combined, &results));
+        assert_eq!(combined.chars().count(), MAX_WEB_SEARCH_AUGMENTATION_CHARS);
+        assert_eq!(
+            combined.matches(SEARCH_RESULTS_TRUNCATION_MARKER).count(),
+            3
+        );
+        assert!(!append_search_results(&mut combined, &results));
     }
 }
