@@ -2543,7 +2543,10 @@ async fn the_model_list_does_not_probe_a_provider_that_never_opted_in() {
     assert!(
         received.is_empty(),
         "no listing request should have been sent at all; got {:?}",
-        received.iter().map(|r| r.url.to_string()).collect::<Vec<_>>()
+        received
+            .iter()
+            .map(|r| r.url.to_string())
+            .collect::<Vec<_>>()
     );
 }
 
