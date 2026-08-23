@@ -666,6 +666,205 @@ async fn capability_override_partial_only_flips_set_fields() {
 }
 
 // ---------------------------------------------------------------------------
+// Capacity-limit overrides (refs #7774)
+// `context_window` / `max_output_tokens` are operator-editable at any time
+// through PUT /api/models/overrides/{id}, and the effective value must show up
+// on every surface that reports a model's limits, with the raw catalog value
+// kept alongside under `limits_catalog` so a revert-target UI can render it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_window_override_flips_effective_value_on_every_model_surface() {
+    let h = boot();
+    let model_id = "gpt-4o-mini";
+    let key = "openai:gpt-4o-mini";
+
+    // Baseline: no override, so every surface reports the catalog value and
+    // `limits_catalog` agrees with it.
+    let (status, base) =
+        json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let catalog_window = base["context_window"].as_u64().unwrap();
+    let catalog_max_out = base["max_output_tokens"].as_u64().unwrap();
+    assert!(catalog_window > 0, "fixture sanity: {base}");
+    assert_eq!(
+        base["limits_catalog"]["context_window"].as_u64(),
+        Some(catalog_window)
+    );
+    assert_eq!(
+        base["limits_catalog"]["max_output_tokens"].as_u64(),
+        Some(catalog_max_out)
+    );
+
+    // The correction an operator makes when the gateway under-reports: half
+    // the catalog window, and a distinct output cap.
+    let corrected_window = catalog_window / 2;
+    let corrected_max_out = catalog_max_out / 2;
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/models/overrides/{key}"),
+        Some(serde_json::json!({
+            "context_window": corrected_window,
+            "max_output_tokens": corrected_max_out,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["context_window"].as_u64(),
+        Some(corrected_window),
+        "PUT must echo the persisted context_window: {body}"
+    );
+    assert_eq!(body["max_output_tokens"].as_u64(), Some(corrected_max_out));
+
+    // GET the override back — the field round-trips through
+    // `model_overrides.json`, which is what makes it editable at any time.
+    let (status, stored) =
+        json_request(&h, Method::GET, &format!("/api/models/overrides/{key}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored["context_window"].as_u64(), Some(corrected_window));
+
+    // GET /api/models/{id} — effective value shifts, catalog value does not.
+    let (status, detail) =
+        json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["context_window"].as_u64(), Some(corrected_window));
+    assert_eq!(detail["max_output_tokens"].as_u64(), Some(corrected_max_out));
+    assert_eq!(
+        detail["limits_catalog"]["context_window"].as_u64(),
+        Some(catalog_window),
+        "limits_catalog must stay unmerged so the UI can offer a revert: {detail}"
+    );
+    assert_eq!(
+        detail["limits_catalog"]["max_output_tokens"].as_u64(),
+        Some(catalog_max_out)
+    );
+
+    // GET /api/models — the list surface agrees with the detail surface.
+    let (status, listed) = json_request(&h, Method::GET, "/api/models?provider=openai", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"].as_str() == Some(model_id))
+        .expect("gpt-4o-mini should be in the openai catalog slice");
+    assert_eq!(entry["context_window"].as_u64(), Some(corrected_window));
+    assert_eq!(
+        entry["limits_catalog"]["context_window"].as_u64(),
+        Some(catalog_window)
+    );
+
+    // GET /api/providers/{name} — the drilldown surface too.
+    let (status, prov) = json_request(&h, Method::GET, "/api/providers/openai", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let prov_entry = prov["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"].as_str() == Some(model_id))
+        .expect("gpt-4o-mini should be in /api/providers/openai");
+    assert_eq!(prov_entry["context_window"].as_u64(), Some(corrected_window));
+    assert_eq!(
+        prov_entry["limits_catalog"]["context_window"].as_u64(),
+        Some(catalog_window)
+    );
+
+    // DELETE — every surface reverts to the catalog value.
+    let (status, _) = json_request(
+        &h,
+        Method::DELETE,
+        &format!("/api/models/overrides/{key}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, reverted) =
+        json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reverted["context_window"].as_u64(), Some(catalog_window));
+    assert_eq!(
+        reverted["max_output_tokens"].as_u64(),
+        Some(catalog_max_out)
+    );
+}
+
+/// Refs #7774. Backward compatibility: an overrides document that carries only
+/// inference parameters must leave the reported limits exactly where they were.
+/// This is the guard against the new field quietly changing what an existing
+/// install reports.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_overrides_document_without_limits_leaves_reported_limits_unchanged() {
+    let h = boot();
+    let model_id = "gpt-4o-mini";
+    let key = "openai:gpt-4o-mini";
+
+    let (_, base) = json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
+    let catalog_window = base["context_window"].as_u64().unwrap();
+    let catalog_max_out = base["max_output_tokens"].as_u64().unwrap();
+
+    let (status, _) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/models/overrides/{key}"),
+        Some(serde_json::json!({ "temperature": 0.3, "max_tokens": 4_096 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, after) = json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
+    assert_eq!(after["context_window"].as_u64(), Some(catalog_window));
+    assert_eq!(after["max_output_tokens"].as_u64(), Some(catalog_max_out));
+    assert!(
+        after["overrides"]["context_window"].is_null(),
+        "an unset limit must not be serialized: {after}"
+    );
+}
+
+/// Refs #7774 / #6209. `max_tokens` — the per-request output cap — stays ahead
+/// of the `max_output_tokens` capacity correction in the provider headline,
+/// while the capacity correction still beats the catalog. Pins the three-way
+/// order so neither field silently swallows the other.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_headline_ranks_max_tokens_above_the_capacity_override() {
+    let h = boot();
+    let key = "openai:gpt-4o-mini";
+    let headline = |body: &serde_json::Value| -> Option<u64> {
+        body["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"].as_str() == Some("openai"))
+            .and_then(|p| p["max_output_tokens"].as_u64())
+    };
+
+    // Capacity correction alone → it wins over the catalog value.
+    let (status, _) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/models/overrides/{key}"),
+        Some(serde_json::json!({ "max_output_tokens": 6_000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = json_request(&h, Method::GET, "/api/providers", None).await;
+    assert_eq!(headline(&body), Some(6_000));
+
+    // Both set → the explicit per-request cap wins.
+    let (status, _) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/models/overrides/{key}"),
+        Some(serde_json::json!({ "max_output_tokens": 6_000, "max_tokens": 2_000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = json_request(&h, Method::GET, "/api/providers", None).await;
+    assert_eq!(headline(&body), Some(2_000));
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/providers + GET /api/providers/{name}
 // ---------------------------------------------------------------------------
 

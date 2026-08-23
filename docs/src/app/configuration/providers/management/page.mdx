@@ -271,6 +271,44 @@ When `pinned_model` is set on an agent manifest, that agent always uses the spec
 
 ---
 
+## Per-Model Configuration Overrides
+
+A model's own configuration — including its **context window** — is editable at any time, not only when the model is first registered.
+Overrides are keyed by `provider:model_id` and stored in `~/.librefang/data/model_overrides.json`, separately from the catalog entry, so a registry sync that rewrites the entry leaves them intact.
+
+```
+GET    /api/models/overrides/{provider}:{model_id}
+PUT    /api/models/overrides/{provider}:{model_id}
+DELETE /api/models/overrides/{provider}:{model_id}
+```
+
+`PUT` takes the whole document, not a patch — a field omitted from the body is cleared.
+
+```json
+{
+  "context_window": 16384,
+  "max_output_tokens": 4096,
+  "temperature": 0.3
+}
+```
+
+The two capacity limits answer a different question from the inference parameters next to them.
+`context_window` and `max_output_tokens` correct what the model *is* — facts a gateway in front of a self-hosted runtime routinely reports as `null` — while `max_tokens` is the per-request output cap sent on the wire.
+Setting the output cap to the model's window asks the model to reserve its entire context for the reply, which is the confusion these fields exist to end.
+
+### Context window precedence
+
+1. `agent.toml` — `[model] context_window`, the most specific layer: one agent stating its own window.
+2. `model_overrides.json` — `context_window`, the operator's correction for the model, inherited by every agent that uses it.
+3. The catalog entry — whatever the registry declared, or a live `/models` discovery pass assumed.
+4. `8192` — the conservative fallback the agent loop applies when nothing above resolves, with a `WARN` naming the value it assumed.
+
+A zero is treated as "unknown" at every layer, never as a limit, so clearing a field falls through to the next layer instead of pinning the window to zero tokens.
+
+`GET /api/models` and `GET /api/models/{id}` report the **effective** `context_window` / `max_output_tokens`, with the raw catalog values preserved under `limits_catalog` so a revert-to-default control has a target to name.
+
+---
+
 ## Model Routing
 
 LibreFang can automatically select the cheapest model capable of handling each query. This is configured per-agent via `ModelRoutingConfig`.

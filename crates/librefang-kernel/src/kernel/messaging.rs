@@ -651,7 +651,8 @@ impl LibreFangKernel {
 
         let driver = self.resolve_driver_for_owner(&manifest, owner)?;
 
-        // Resolve the context window: agent.toml override > catalog (#6568).
+        // Resolve the context window: agent.toml override > per-model operator
+        // override > catalog (#6568, #7774).
         // The ephemeral `/btw` session is created empty below, so it carries no
         // persisted hint to fall back to.
         let ctx_window = super::manifest_helpers::resolve_context_window(
@@ -2462,10 +2463,11 @@ impl LibreFangKernel {
             });
         }
 
-        // Resolve the context window: agent.toml override > catalog > session
-        // (#6568). Computed *after* the session model override is applied — the
-        // pre-#6568 code read `entry.manifest`, so a `/model` switch sized the
-        // budget from the manifest's original model.
+        // Resolve the context window: agent.toml override > per-model operator
+        // override > catalog > session (#6568, #7774). Computed *after* the
+        // session model override is applied — the pre-#6568 code read
+        // `entry.manifest`, so a `/model` switch sized the budget from the
+        // manifest's original model.
         let ctx_window = super::manifest_helpers::resolve_context_window(
             &self.llm.model_catalog.load(),
             &manifest.model,

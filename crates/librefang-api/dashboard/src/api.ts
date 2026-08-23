@@ -1758,6 +1758,8 @@ export interface ModelItem {
   display_name?: string;
   provider: string;
   tier?: string;
+  // Effective (catalog ∘ operator override). `0` is the catalog's "unknown"
+  // sentinel — never a limit. Refs #7774.
   context_window?: number;
   max_output_tokens?: number;
   input_cost_per_m?: number;
@@ -1774,6 +1776,12 @@ export interface ModelItem {
     supports_vision?: boolean;
     supports_streaming?: boolean;
     supports_thinking?: boolean;
+  };
+  // Raw catalog capacity limits — the same "Auto = revert target" role for the
+  // limit editors. Refs #7774.
+  limits_catalog?: {
+    context_window?: number;
+    max_output_tokens?: number;
   };
   aliases?: string[];
   available?: boolean;
@@ -1831,6 +1839,13 @@ export interface ModelOverrides {
   supports_vision?: boolean;
   supports_streaming?: boolean;
   supports_thinking?: boolean;
+  // Refs #7774: operator corrections to the model's capacity limits —
+  // undefined = use the catalog value, a positive number = force it. These are
+  // facts about the model, not per-request parameters: `max_tokens` above is the
+  // output cap sent on the wire, `max_output_tokens` here is what the model can
+  // produce at most.
+  context_window?: number;
+  max_output_tokens?: number;
 }
 
 export async function getModelOverrides(modelKey: string): Promise<ModelOverrides> {

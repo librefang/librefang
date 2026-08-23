@@ -2286,6 +2286,221 @@ fn effective_capabilities_for_resolves_by_alias() {
 }
 
 // ---------------------------------------------------------------------------
+// #7774: the operator's capacity-limit overrides — context window and max
+// output tokens — must beat whatever the catalog carries for the model, and
+// must apply even when the catalog carries nothing at all.
+// ---------------------------------------------------------------------------
+
+/// A locally discovered model, standing in for what `merge_discovered_models`
+/// produces: an entry whose window is whatever the discovery pass assumed
+/// rather than anything the model reported.
+fn discovered_entry(id: &str, context_window: u64, max_output_tokens: u64) -> ModelCatalogEntry {
+    ModelCatalogEntry {
+        id: id.to_string(),
+        display_name: format!("{id} (litellm)"),
+        provider: "litellm".to_string(),
+        tier: ModelTier::Local,
+        context_window,
+        max_output_tokens,
+        ..Default::default()
+    }
+}
+
+/// Refs #7774. With no override, effective limits equal the catalog entry's
+/// declared values — the backward-compatibility guarantee for every install
+/// that never touches the new fields.
+#[test]
+fn effective_limits_without_an_override_are_the_catalog_values() {
+    let catalog = test_catalog();
+    let entry = catalog.find_model("claude-sonnet-4-6").unwrap().clone();
+    assert!(entry.context_window > 0, "fixture sanity");
+    let lim = catalog.effective_limits(&entry);
+    assert_eq!(lim.context_window, Some(entry.context_window));
+    assert_eq!(lim.max_output_tokens, Some(entry.max_output_tokens));
+}
+
+/// Refs #7774 (and the precedence contract against #7780). The operator's
+/// override wins over the value discovery put on the entry — that is the whole
+/// point of the layer: a probe reporting a plausible-but-wrong window is
+/// exactly what the operator is correcting.
+#[test]
+fn an_operator_override_beats_the_discovered_context_window() {
+    let mut catalog = test_catalog();
+    catalog.add_custom_model(discovered_entry("sensor-model-generic-high", 131_072, 16_384));
+    let entry = catalog
+        .find_model("sensor-model-generic-high")
+        .unwrap()
+        .clone();
+    catalog.set_overrides(
+        "litellm:sensor-model-generic-high".to_string(),
+        ModelOverrides {
+            context_window: Some(16_384),
+            max_output_tokens: Some(4_096),
+            ..Default::default()
+        },
+    );
+    let lim = catalog.effective_limits(&entry);
+    assert_eq!(lim.context_window, Some(16_384), "override must win");
+    assert_eq!(lim.max_output_tokens, Some(4_096), "override must win");
+}
+
+/// Refs #7774. Each limit is independent: overriding the window leaves the
+/// output cap on its catalog value rather than blanking it.
+#[test]
+fn overriding_one_limit_leaves_the_other_on_the_catalog_value() {
+    let mut catalog = test_catalog();
+    catalog.add_custom_model(discovered_entry("half-known", 131_072, 16_384));
+    let entry = catalog.find_model("half-known").unwrap().clone();
+    catalog.set_overrides(
+        "litellm:half-known".to_string(),
+        ModelOverrides {
+            context_window: Some(32_768),
+            ..Default::default()
+        },
+    );
+    let lim = catalog.effective_limits(&entry);
+    assert_eq!(lim.context_window, Some(32_768));
+    assert_eq!(lim.max_output_tokens, Some(16_384));
+}
+
+/// Refs #7774. A zero on either side is "unknown", never a limit. An override
+/// cleared to `0` must not pin a model's window to zero tokens and poison the
+/// budget math the way `ModelCatalogEntry::context_window` warns about.
+#[test]
+fn a_zero_override_is_ignored_and_a_zero_catalog_value_reports_unknown() {
+    let mut catalog = test_catalog();
+    catalog.add_custom_model(discovered_entry("zeroed", 65_536, 0));
+    let entry = catalog.find_model("zeroed").unwrap().clone();
+    catalog.set_overrides(
+        "litellm:zeroed".to_string(),
+        ModelOverrides {
+            context_window: Some(0),
+            ..Default::default()
+        },
+    );
+    let lim = catalog.effective_limits(&entry);
+    assert_eq!(lim.context_window, Some(65_536), "zero override ignored");
+    assert_eq!(lim.max_output_tokens, None, "zero catalog value is unknown");
+}
+
+/// Refs #7774. The reported case: a gateway-served model that no catalog knows.
+/// `find_model_for_manifest` misses, so an override reachable only through a
+/// catalog entry would be unreachable — the key-based lookup is what makes the
+/// field usable here at all.
+#[test]
+fn an_override_applies_to_a_model_the_catalog_does_not_know() {
+    let mut catalog = test_catalog();
+    assert!(
+        catalog.find_model_for_manifest("litellm", "sensor-model-generic-high").is_none(),
+        "fixture sanity: the model must be absent from the catalog"
+    );
+    catalog.set_overrides(
+        "litellm:sensor-model-generic-high".to_string(),
+        ModelOverrides {
+            context_window: Some(16_384),
+            ..Default::default()
+        },
+    );
+    let lim = catalog.effective_limits_for_manifest("litellm", "sensor-model-generic-high");
+    assert_eq!(lim.context_window, Some(16_384));
+    assert_eq!(lim.max_output_tokens, None);
+}
+
+/// Refs #7774. No override and no catalog entry resolves to nothing, leaving
+/// the caller's own fallback (and its warning) in place. Pins the pre-change
+/// behaviour for the unknown-model path.
+#[test]
+fn an_unknown_model_with_no_override_resolves_to_nothing() {
+    let catalog = test_catalog();
+    let lim = catalog.effective_limits_for_manifest("litellm", "sensor-model-generic-high");
+    assert_eq!(lim.context_window, None);
+    assert_eq!(lim.max_output_tokens, None);
+}
+
+/// Refs #7774 / #6423. When the catalog reconciles a bare manifest model to a
+/// prefixed entry id, the key the operator typed — the manifest's own
+/// `provider:model` — is honoured, and the entry's key still works as the
+/// second candidate.
+#[test]
+fn both_the_manifest_key_and_the_reconciled_entry_key_are_honoured() {
+    let mut catalog = test_catalog();
+    catalog.add_custom_model(ModelCatalogEntry {
+        id: "openrouter/acme/mini".to_string(),
+        display_name: "Acme Mini".to_string(),
+        provider: "openrouter".to_string(),
+        tier: ModelTier::Custom,
+        context_window: 131_072,
+        max_output_tokens: 16_384,
+        ..Default::default()
+    });
+    // Reconciled entry key only.
+    catalog.set_overrides(
+        "openrouter:openrouter/acme/mini".to_string(),
+        ModelOverrides {
+            context_window: Some(64_000),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        catalog
+            .effective_limits_for_manifest("openrouter", "acme/mini")
+            .context_window,
+        Some(64_000),
+        "the reconciled entry key must be consulted"
+    );
+    // Manifest key present as well — it wins, because it is the id the
+    // operator sees and typed against.
+    catalog.set_overrides(
+        "openrouter:acme/mini".to_string(),
+        ModelOverrides {
+            context_window: Some(48_000),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        catalog
+            .effective_limits_for_manifest("openrouter", "acme/mini")
+            .context_window,
+        Some(48_000),
+        "the manifest key must win over the reconciled entry key"
+    );
+}
+
+/// Refs #7774. The override lives in `model_overrides.json`, not on the catalog
+/// entry, so a registry sync that rewrites the entry cannot erase it — the
+/// specific failure the dashboard used to document as "overwritten on registry
+/// sync".
+#[test]
+fn a_limit_override_survives_a_catalog_reload() {
+    let mut catalog = test_catalog();
+    catalog.add_custom_model(discovered_entry("resync-me", 131_072, 16_384));
+    catalog.set_overrides(
+        "litellm:resync-me".to_string(),
+        ModelOverrides {
+            context_window: Some(24_000),
+            ..Default::default()
+        },
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("model_overrides.json");
+    catalog.save_overrides(&path).expect("save");
+
+    // A fresh catalog stands in for the post-sync state: the entry is
+    // re-created from the registry with its declared window, and the override
+    // file is loaded back on top.
+    let mut resynced = test_catalog();
+    resynced.add_custom_model(discovered_entry("resync-me", 131_072, 16_384));
+    resynced.load_overrides(&path);
+    let entry = resynced.find_model("resync-me").unwrap().clone();
+    assert_eq!(entry.context_window, 131_072, "the entry itself is untouched");
+    assert_eq!(
+        resynced.effective_limits(&entry).context_window,
+        Some(24_000),
+        "the override survives the sync"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // #5137: malformed user config files must be skipped per-file (and logged),
 // not silently revert the whole catalog / clobber existing state.
 // ---------------------------------------------------------------------------

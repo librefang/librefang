@@ -4,8 +4,8 @@
 //! with alias resolution, auth status detection, and pricing lookups.
 
 use librefang_types::model_catalog::{
-    AliasesCatalogFile, AuthStatus, EffectiveCapabilities, ModelCatalogEntry, ModelCatalogFile,
-    ModelOverrides, ModelTier, ProviderInfo,
+    AliasesCatalogFile, AuthStatus, EffectiveCapabilities, EffectiveLimits, ModelCatalogEntry,
+    ModelCatalogFile, ModelOverrides, ModelTier, ProviderInfo,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -1050,6 +1050,71 @@ impl ModelCatalog {
             .map(|m| self.effective_capabilities(m))
     }
 
+    /// Compute the effective capacity limits for a catalog entry, applying any
+    /// operator override on top of the catalog-declared values (refs #7774).
+    ///
+    /// Precedence, per limit: operator override (`model_overrides.json`) >
+    /// catalog entry (registry-declared or probe-discovered) > `None`.
+    /// A zero on either side is "unknown", never a limit — `ModelCatalogEntry`
+    /// documents that rule for its own fields, and an override of `0` gets the
+    /// same treatment so a cleared dashboard field cannot pin a model's window
+    /// to zero tokens.
+    pub fn effective_limits(&self, entry: &ModelCatalogEntry) -> EffectiveLimits {
+        let key = format!("{}:{}", entry.provider, entry.id);
+        let o = self.overrides.get(&key);
+        EffectiveLimits {
+            context_window: o
+                .and_then(|x| x.context_window)
+                .filter(|v| *v > 0)
+                .or_else(|| known(entry.context_window)),
+            max_output_tokens: o
+                .and_then(|x| x.max_output_tokens)
+                .filter(|v| *v > 0)
+                .or_else(|| known(entry.max_output_tokens)),
+        }
+    }
+
+    /// Resolve a manifest's `(provider, model)` pair to its effective capacity
+    /// limits, **without requiring the model to be in the catalog** (refs #7774).
+    ///
+    /// This is the shape the operator override exists for. The reported case is
+    /// a gateway-served model that no catalog knows: `find_model_for_manifest`
+    /// misses, so an override attached to a catalog *entry* would be
+    /// unreachable — but the override map is keyed by `provider:model_id` and
+    /// needs no entry to exist.
+    ///
+    /// Two keys are consulted, in order: the manifest's own
+    /// `provider:model` (what every surface writes, and the only key available
+    /// for a model with no entry), then the resolved entry's
+    /// `provider:id` when the catalog reconciled the pair to a differently
+    /// spelled id (an OpenRouter manifest naming a bare model resolves to a
+    /// `openrouter/<vendor>/<model>` entry, #6423). The manifest key wins so
+    /// the value the operator typed against the id they see is the one that
+    /// takes effect.
+    pub fn effective_limits_for_manifest(&self, provider: &str, model: &str) -> EffectiveLimits {
+        let entry = self.find_model_for_manifest(provider, model);
+        let manifest_key = format!("{provider}:{model}");
+        let entry_key = entry.map(|e| format!("{}:{}", e.provider, e.id));
+        let mut candidates: Vec<&ModelOverrides> = Vec::with_capacity(2);
+        if let Some(o) = self.overrides.get(&manifest_key) {
+            candidates.push(o);
+        }
+        if let Some(k) = entry_key.filter(|k| *k != manifest_key) {
+            if let Some(o) = self.overrides.get(&k) {
+                candidates.push(o);
+            }
+        }
+        let pick = |f: fn(&ModelOverrides) -> Option<u64>| -> Option<u64> {
+            candidates.iter().filter_map(|o| f(o)).find(|v| *v > 0)
+        };
+        EffectiveLimits {
+            context_window: pick(|o| o.context_window)
+                .or_else(|| entry.and_then(|e| known(e.context_window))),
+            max_output_tokens: pick(|o| o.max_output_tokens)
+                .or_else(|| entry.and_then(|e| known(e.max_output_tokens))),
+        }
+    }
+
     /// Load model overrides from a JSON file.
     pub fn load_overrides(&mut self, path: &std::path::Path) {
         let data = match std::fs::read_to_string(path) {
@@ -2083,6 +2148,13 @@ fn extract_available_model_ids(body: &serde_json::Value) -> Option<Vec<String>> 
                 .collect()
         })
     }
+}
+
+/// A catalog / override capacity limit as `Option`: `0` means "unknown" and
+/// must never reach budget math as a limit (refs #7774, and the rule
+/// `ModelCatalogEntry::context_window` documents for its own fields).
+fn known(value: u64) -> Option<u64> {
+    (value > 0).then_some(value)
 }
 
 fn parse_openrouter_model_entries(body: &serde_json::Value) -> Vec<ModelCatalogEntry> {

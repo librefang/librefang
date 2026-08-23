@@ -258,6 +258,13 @@ fn synthesized_cli_model_row(
             "supports_streaming": true,
             "supports_thinking": false,
         },
+        // Emit the key so this row's shape matches every catalog row in the
+        // same response (#7774). Both sides are the "unknown" sentinel: there
+        // is no catalog entry behind a synthesized CLI row to revert to.
+        "limits_catalog": {
+            "context_window": 0,
+            "max_output_tokens": 0,
+        },
         "aliases": [],
         "available": available,
         // Marks this row as derived from the live CLI config rather than the
@@ -399,14 +406,19 @@ pub async fn list_models(
                 .unwrap_or(m.tier == librefang_types::model_catalog::ModelTier::Custom);
             // Effective `supports_*` reflects user overrides; `capabilities_catalog` ships the raw default for revert-target UIs. Refs #4745.
             let eff = catalog.effective_capabilities(m);
+            // Same shape for the capacity limits: `context_window` /
+            // `max_output_tokens` carry the effective value and `limits_catalog`
+            // the raw registry-or-probe one, so the dashboard can render both
+            // the value in force and the value a revert would restore. Refs #7774.
+            let lim = catalog.effective_limits(m);
             serde_json::json!({
                 "id": m.id,
                 "display_name": m.display_name,
                 "provider": m.provider,
                 "tier": m.tier,
                 "modality": m.modality,
-                "context_window": m.context_window,
-                "max_output_tokens": m.max_output_tokens,
+                "context_window": lim.context_window.unwrap_or(0),
+                "max_output_tokens": lim.max_output_tokens.unwrap_or(0),
                 "input_cost_per_m": m.input_cost_per_m,
                 "output_cost_per_m": m.output_cost_per_m,
                 "pricing_known": m.pricing_known,
@@ -421,6 +433,10 @@ pub async fn list_models(
                     "supports_vision": m.supports_vision,
                     "supports_streaming": m.supports_streaming,
                     "supports_thinking": m.supports_thinking,
+                },
+                "limits_catalog": {
+                    "context_window": m.context_window,
+                    "max_output_tokens": m.max_output_tokens,
                 },
                 "aliases": m.aliases,
                 "available": available,
@@ -629,6 +645,9 @@ pub async fn get_model(
             let overrides = catalog.get_overrides(&override_key);
             // Effective `supports_*` reflects user overrides; `capabilities_catalog` ships the raw default for revert-target UIs. Refs #4745.
             let eff = catalog.effective_capabilities(m);
+            // Effective capacity limits, with the raw catalog values under
+            // `limits_catalog`. Refs #7774.
+            let lim = catalog.effective_limits(m);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -637,8 +656,8 @@ pub async fn get_model(
                     "provider": m.provider,
                     "tier": m.tier,
                     "modality": m.modality,
-                    "context_window": m.context_window,
-                    "max_output_tokens": m.max_output_tokens,
+                    "context_window": lim.context_window.unwrap_or(0),
+                    "max_output_tokens": lim.max_output_tokens.unwrap_or(0),
                     "input_cost_per_m": m.input_cost_per_m,
                     "output_cost_per_m": m.output_cost_per_m,
                     "pricing_known": m.pricing_known,
@@ -653,6 +672,10 @@ pub async fn get_model(
                         "supports_vision": m.supports_vision,
                         "supports_streaming": m.supports_streaming,
                         "supports_thinking": m.supports_thinking,
+                    },
+                    "limits_catalog": {
+                        "context_window": m.context_window,
+                        "max_output_tokens": m.max_output_tokens,
                     },
                     "aliases": m.aliases,
                     "available": available,
@@ -697,6 +720,13 @@ pub async fn get_model(
 // ── Per-model overrides ─────────────────────────────────────────────────────
 
 /// GET /api/models/overrides/{id} — Get inference parameter overrides for a model.
+#[utoipa::path(
+    get,
+    path = "/api/models/overrides/{id}",
+    tag = "models",
+    params(("id" = String, Path, description = "Override key, `provider:model_id`")),
+    responses((status = 200, description = "The model's stored overrides, or `{}` when none are set", body = crate::types::JsonObject))
+)]
 pub async fn get_model_overrides(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -709,6 +739,24 @@ pub async fn get_model_overrides(
 }
 
 /// PUT /api/models/overrides/{id} — Set inference parameter overrides for a model.
+///
+/// The body is a whole `ModelOverrides` document, not a patch: a field omitted
+/// from the body is cleared. Alongside the inference parameters it carries the
+/// operator's capacity-limit corrections, `context_window` and
+/// `max_output_tokens` (#7774) — both editable at any time, and both surviving a
+/// registry sync because they live in `model_overrides.json` rather than on the
+/// catalog entry the sync rewrites.
+#[utoipa::path(
+    put,
+    path = "/api/models/overrides/{id}",
+    tag = "models",
+    params(("id" = String, Path, description = "Override key, `provider:model_id`")),
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 200, description = "The persisted overrides", body = crate::types::JsonObject),
+        (status = 500, description = "Overrides could not be persisted")
+    )
+)]
 pub async fn set_model_overrides(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -760,6 +808,13 @@ pub async fn set_model_overrides(
 }
 
 /// DELETE /api/models/overrides/{id} — Remove inference parameter overrides for a model.
+#[utoipa::path(
+    delete,
+    path = "/api/models/overrides/{id}",
+    tag = "models",
+    params(("id" = String, Path, description = "Override key, `provider:model_id`")),
+    responses((status = 204, description = "Overrides removed"))
+)]
 pub async fn delete_model_overrides(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -882,7 +937,13 @@ fn provider_key_present(provider: &librefang_types::model_catalog::ProviderInfo)
 /// Resolve the effective max-output-token limit shown for a provider on the
 /// dashboard (issue #6209). The headline value is the provider's
 /// representative model's per-request output cap: the user's `max_tokens`
-/// override when set, otherwise the model's catalog `max_output_tokens`.
+/// override when set, then the operator's `max_output_tokens` override
+/// (#7774), otherwise the model's catalog `max_output_tokens`.
+///
+/// `max_tokens` stays ahead of `max_output_tokens` because it is the cap the
+/// operator asked to be *sent on the wire*; `max_output_tokens` corrects what
+/// the model is *capable* of, which is the better fallback than the catalog but
+/// not a substitute for an explicit per-request choice.
 ///
 /// "Representative model" is the provider's default model
 /// (`default_model_for_provider`) when one exists, falling back to the first
@@ -907,8 +968,9 @@ fn provider_max_output_tokens(
         .get_overrides(&key)
         .and_then(|o| o.max_tokens)
         .map(u64::from);
-    let catalog_max = (model.max_output_tokens > 0).then_some(model.max_output_tokens);
-    override_max.or(catalog_max)
+    // `effective_limits` already ranks the `max_output_tokens` override above
+    // the catalog entry and filters both sides' zeros.
+    override_max.or(catalog.effective_limits(model).max_output_tokens)
 }
 
 /// GET /api/providers — List all providers with auth status.
@@ -1199,13 +1261,15 @@ pub async fn get_provider(
                     .map(|m| {
                         // Effective `supports_*` reflects user overrides; `capabilities_catalog` ships the raw default for revert-target UIs. Refs #4745.
                         let eff = catalog.effective_capabilities(m);
+                        // Effective capacity limits, raw values under `limits_catalog`. Refs #7774.
+                        let lim = catalog.effective_limits(m);
                         serde_json::json!({
                             "id": m.id,
                             "display_name": m.display_name,
                             "tier": m.tier,
                             "modality": m.modality,
-                            "context_window": m.context_window,
-                            "max_output_tokens": m.max_output_tokens,
+                            "context_window": lim.context_window.unwrap_or(0),
+                            "max_output_tokens": lim.max_output_tokens.unwrap_or(0),
                             "input_cost_per_m": m.input_cost_per_m,
                             "output_cost_per_m": m.output_cost_per_m,
                             "pricing_known": m.pricing_known,
@@ -1220,6 +1284,10 @@ pub async fn get_provider(
                                 "supports_vision": m.supports_vision,
                                 "supports_streaming": m.supports_streaming,
                                 "supports_thinking": m.supports_thinking,
+                            },
+                            "limits_catalog": {
+                                "context_window": m.context_window,
+                                "max_output_tokens": m.max_output_tokens,
                             },
                         })
                     })

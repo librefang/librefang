@@ -201,6 +201,9 @@ use crate::types;
         // ── Models & Providers ──
         routes::list_models,
         routes::get_model,
+        routes::get_model_overrides,
+        routes::set_model_overrides,
+        routes::delete_model_overrides,
         routes::list_aliases,
         routes::create_alias,
         routes::delete_alias,

@@ -1039,9 +1039,10 @@ impl LibreFangKernel {
 
         let driver = self.resolve_driver_for_owner(&manifest, owner)?;
 
-        // Resolve the context window: agent.toml override > catalog > session
-        // (#6568). See `manifest_helpers::resolve_context_window` for why the
-        // manifest override has to come first.
+        // Resolve the context window: agent.toml override > per-model operator
+        // override > catalog > session (#6568, #7774). See
+        // `manifest_helpers::resolve_context_window` for why the manifest
+        // override has to come first.
         let ctx_window = super::manifest_helpers::resolve_context_window(
             &self.llm.model_catalog.load(),
             &manifest.model,
