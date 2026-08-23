@@ -104,6 +104,9 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           git tag -- "$VERSION"
-          git push origin "refs/tags/$VERSION"
+          # Include a no-change main update in the atomic push. If main moves
+          # after the fetch above, this refspec becomes non-fast-forward and
+          # GitHub rejects both the branch ref and the new tag.
+          git push --atomic origin "HEAD:refs/heads/main" "refs/tags/$VERSION"
           echo "✓ Pushed tag $VERSION"
           echo "Note: this push will trigger release.yml on the tag — split workflows below are only needed if individual targets need to be re-run."
