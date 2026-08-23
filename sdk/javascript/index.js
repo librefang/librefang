@@ -925,6 +925,18 @@ class ModelsResource {
     return this._c._request("DELETE", `/api/models/custom/${id}`);
   }
 
+  async getModelOverrides(id) {
+    return this._c._request("GET", `/api/models/overrides/${id}`);
+  }
+
+  async setModelOverrides(id, data) {
+    return this._c._request("PUT", `/api/models/overrides/${id}`, data, undefined);
+  }
+
+  async deleteModelOverrides(id) {
+    return this._c._request("DELETE", `/api/models/overrides/${id}`);
+  }
+
   async getModel(id) {
     return this._c._request("GET", `/api/models/${id}`);
   }

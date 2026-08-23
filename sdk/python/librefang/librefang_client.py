@@ -769,6 +769,15 @@ class _ModelsResource(_Resource):
     def remove_custom_model(self, id: str):
         return self._c._request("DELETE", f"/api/models/custom/{id}")
 
+    def get_model_overrides(self, id: str):
+        return self._c._request("GET", f"/api/models/overrides/{id}")
+
+    def set_model_overrides(self, id: str, **data):
+        return self._c._request("PUT", f"/api/models/overrides/{id}", data)
+
+    def delete_model_overrides(self, id: str):
+        return self._c._request("DELETE", f"/api/models/overrides/{id}")
+
     def get_model(self, id: str):
         return self._c._request("GET", f"/api/models/{id}")
 
