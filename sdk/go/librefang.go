@@ -1036,6 +1036,18 @@ func (r *ModelsResource) RemoveCustomModel(id string) (interface{}, error) {
 	return r.client.request("DELETE", fmt.Sprintf("/api/models/custom/%s", id), nil, nil)
 }
 
+func (r *ModelsResource) GetModelOverrides(id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/models/overrides/%s", id), nil, nil)
+}
+
+func (r *ModelsResource) SetModelOverrides(id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/models/overrides/%s", id), data, nil)
+}
+
+func (r *ModelsResource) DeleteModelOverrides(id string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/models/overrides/%s", id), nil, nil)
+}
+
 func (r *ModelsResource) GetModel(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/models/%s", id), nil, nil)
 }

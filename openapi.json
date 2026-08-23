@@ -9057,6 +9057,105 @@
         }
       }
     },
+    "/api/models/overrides/{id}": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "GET /api/models/overrides/{id} — Get inference parameter overrides for a model.",
+        "operationId": "get_model_overrides",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Override key, `provider:model_id`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The model's stored overrides, or `{}` when none are set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "models"
+        ],
+        "summary": "PUT /api/models/overrides/{id} — Set inference parameter overrides for a model.",
+        "description": "The body is a whole `ModelOverrides` document, not a patch: a field omitted\nfrom the body is cleared. Alongside the inference parameters it carries the\noperator's capacity-limit corrections, `context_window` and\n`max_output_tokens` (#7774) — both editable at any time, and both surviving a\nregistry sync because they live in `model_overrides.json` rather than on the\ncatalog entry the sync rewrites.",
+        "operationId": "set_model_overrides",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Override key, `provider:model_id`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The persisted overrides",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Overrides could not be persisted"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "models"
+        ],
+        "summary": "DELETE /api/models/overrides/{id} — Remove inference parameter overrides for a model.",
+        "operationId": "delete_model_overrides",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Override key, `provider:model_id`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Overrides removed"
+          }
+        }
+      }
+    },
     "/api/models/{id}": {
       "get": {
         "tags": [
