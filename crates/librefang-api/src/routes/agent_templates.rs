@@ -240,23 +240,15 @@ async fn load_agent_templates(
 /// Build the privacy pass over an agent type that an operator is considering
 /// contributing to a shared registry (#7771).
 ///
-/// A manifest written on one machine carries that machine's details — an
-/// absolute workspace path, the environment variable holding the operator's
-/// provider credentials, a private base URL, a command allowlist, free text
-/// pasted into a system prompt. The registry validator requires only `name`,
-/// `description` and `module`, so nothing downstream catches any of it, and
-/// once published it is in git history.
+/// A manifest written on one machine carries that machine's details — an absolute workspace path, the environment variable holding the operator's provider credentials, a private base URL, a command allowlist, free text pasted into a system prompt.
+/// The registry validator requires only `name`, `description` and `module`, so nothing downstream catches any of it, and once published it is in git history.
 ///
-/// This is read-only and advisory. It reports what a promotion would strip
-/// (`findings` with `removed_by_sanitizer: true`), what the operator has to
-/// edit by hand because it sits inside a field worth keeping
-/// (`removed_by_sanitizer: false`, summarised by `requires_review`), and the
-/// scrubbed manifest itself so it can be attached to a registry pull request
-/// today. Nothing here rewrites the operator's file.
+/// This is read-only and advisory.
+/// It reports what a promotion would strip (`findings` with `removed_by_sanitizer: true`), what the operator has to edit by hand because it sits inside a field worth keeping (`removed_by_sanitizer: false`, summarised by `requires_review`), and the scrubbed manifest itself so it can be attached to a registry pull request today.
+/// Nothing here rewrites the operator's file.
 ///
-/// `manifest_toml` is `null` when the publishable copy cannot be rendered as
-/// TOML. That is not a reason to withhold the findings, which are the part
-/// that protects the operator.
+/// `manifest_toml` is `null` when the publishable copy cannot be rendered as TOML.
+/// That is not a reason to withhold the findings, which are the part that protects the operator.
 fn promotion_preview(name: &str, manifest: &AgentManifest) -> serde_json::Value {
     use librefang_types::manifest_privacy::{sanitize_for_publication, scan_for_publication};
 
