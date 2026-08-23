@@ -2326,7 +2326,11 @@ fn effective_limits_without_an_override_are_the_catalog_values() {
 #[test]
 fn an_operator_override_beats_the_discovered_context_window() {
     let mut catalog = test_catalog();
-    catalog.add_custom_model(discovered_entry("sensor-model-generic-high", 131_072, 16_384));
+    catalog.add_custom_model(discovered_entry(
+        "sensor-model-generic-high",
+        131_072,
+        16_384,
+    ));
     let entry = catalog
         .find_model("sensor-model-generic-high")
         .unwrap()
@@ -2391,7 +2395,9 @@ fn a_zero_override_is_ignored_and_a_zero_catalog_value_reports_unknown() {
 fn an_override_applies_to_a_model_the_catalog_does_not_know() {
     let mut catalog = test_catalog();
     assert!(
-        catalog.find_model_for_manifest("litellm", "sensor-model-generic-high").is_none(),
+        catalog
+            .find_model_for_manifest("litellm", "sensor-model-generic-high")
+            .is_none(),
         "fixture sanity: the model must be absent from the catalog"
     );
     catalog.set_overrides(
@@ -2492,7 +2498,10 @@ fn a_limit_override_survives_a_catalog_reload() {
     resynced.add_custom_model(discovered_entry("resync-me", 131_072, 16_384));
     resynced.load_overrides(&path);
     let entry = resynced.find_model("resync-me").unwrap().clone();
-    assert_eq!(entry.context_window, 131_072, "the entry itself is untouched");
+    assert_eq!(
+        entry.context_window, 131_072,
+        "the entry itself is untouched"
+    );
     assert_eq!(
         resynced.effective_limits(&entry).context_window,
         Some(24_000),
