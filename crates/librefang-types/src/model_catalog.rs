@@ -188,6 +188,7 @@ pub struct ModelCatalogEntry {
     /// applicable" — image and audio models in the registry omit this field.
     /// Consumers MUST treat `0` as unknown and supply their own default;
     /// never propagate `0` into compaction thresholds or budget math.
+    /// [`Self::limits_known`] distinguishes the two readings of `0`.
     #[serde(default)]
     pub context_window: u64,
     /// Maximum output tokens. `0` or absent means "unknown / not applicable".
@@ -204,6 +205,18 @@ pub struct ModelCatalogEntry {
     /// Older registry entries predate this field and carry explicit prices, so a missing value defaults to true.
     #[serde(default = "default_true")]
     pub pricing_known: bool,
+    /// Whether `context_window` / `max_output_tokens` above came from a source.
+    ///
+    /// `true` — a curated registry entry, an operator override, or the endpoint itself supplied the numbers, so a consumer may treat them as a real ceiling.
+    /// `false` — no source supplied them: whatever value is present is a LibreFang-chosen default, and it MUST NOT be packed against, clamped against, or presented to an operator as a discovered fact.
+    ///
+    /// The flag records provenance, which the number alone cannot.
+    /// An image or audio entry legitimately has no token context and carries `context_window: 0` with `limits_known: true` — the limits are known to be inapplicable, which is not the same as unknown.
+    /// A model discovered behind an OpenAI-compatible gateway that reports no capacity carries `limits_known: false`; that path additionally zeroes both fields so the existing `> 0` guards in the compaction and budget math fall through to their conservative default instead of packing a prompt against a guess (#7780).
+    ///
+    /// Older registry entries predate this field and carry real numbers, so a missing value defaults to true — the same convention `pricing_known` uses.
+    #[serde(default = "default_true")]
+    pub limits_known: bool,
     /// Cost per million image input tokens (USD). Only set for image/multimodal
     /// models where image pixels are priced separately from text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -327,6 +340,7 @@ impl Default for ModelCatalogEntry {
             input_cost_per_m: 0.0,
             output_cost_per_m: 0.0,
             pricing_known: true,
+            limits_known: true,
             image_input_cost_per_m: None,
             image_output_cost_per_m: None,
             supports_tools: false,
