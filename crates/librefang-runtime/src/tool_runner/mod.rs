@@ -77,7 +77,10 @@ use self::media::{
     tool_image_generate, tool_media_describe, tool_media_transcribe, tool_music_generate,
     tool_speech_to_text, tool_text_to_speech, tool_video_generate, tool_video_status,
 };
-use self::memory::{tool_memory_list, tool_memory_recall, tool_memory_store};
+use self::memory::{
+    tool_memory_list, tool_memory_recall, tool_memory_semantic_add, tool_memory_semantic_forget,
+    tool_memory_semantic_search, tool_memory_semantic_stats, tool_memory_store,
+};
 use self::meta::{tool_meta_load, tool_meta_search};
 use self::notify::tool_notify_owner;
 use self::process::{

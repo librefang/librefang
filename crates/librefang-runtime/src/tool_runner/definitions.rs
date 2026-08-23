@@ -34,6 +34,10 @@ pub(crate) mod tool_name {
     pub const MEMORY_STORE: &str = "memory_store";
     pub const MEMORY_RECALL: &str = "memory_recall";
     pub const MEMORY_LIST: &str = "memory_list";
+    pub const MEMORY_SEMANTIC_SEARCH: &str = "memory_semantic_search";
+    pub const MEMORY_SEMANTIC_ADD: &str = "memory_semantic_add";
+    pub const MEMORY_SEMANTIC_FORGET: &str = "memory_semantic_forget";
+    pub const MEMORY_SEMANTIC_STATS: &str = "memory_semantic_stats";
     pub const WIKI_GET: &str = "wiki_get";
     pub const WIKI_SEARCH: &str = "wiki_search";
     pub const WIKI_WRITE: &str = "wiki_write";
@@ -131,6 +135,14 @@ pub const ALWAYS_NATIVE_TOOLS: &[&str] = &[
     tool_name::MEMORY_STORE,
     tool_name::MEMORY_RECALL,
     tool_name::MEMORY_LIST,
+    // #7808: the semantic store is the one an agent is most likely to need and
+    // least likely to find. `memory_recall` sits in this list looking
+    // authoritative while only ever doing an exact-key KV lookup, so a model in
+    // lazy-load mode reaches for it and concludes the memory is gone. Paying
+    // this one schema keeps the honest alternative visible on the same turn.
+    // `memory_semantic_add` / `_forget` / `_stats` stay lazy behind
+    // `tool_search` / `tool_load` — a model that found `_search` can find them.
+    tool_name::MEMORY_SEMANTIC_SEARCH,
     tool_name::WEB_SEARCH,
     tool_name::WEB_FETCH,
     tool_name::FILE_READ,
@@ -391,7 +403,7 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             },
             ToolDefinition {
                 name: tool_name::MEMORY_STORE.to_string(),
-                description: "Store a value in the agent's memory. Each agent has its own isolated memory namespace. Use for persisting data across sessions.".to_string(),
+                description: "Store a value under an exact key in the agent's key/value store. Each agent has its own isolated namespace. This is a keyed store, not semantic memory: the value is retrievable only by passing the same key back to memory_recall. To record a fact you want found later by meaning, use memory_semantic_add.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -402,25 +414,76 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                 }),
             },
             ToolDefinition {
+                // #7808: the old description was "Recall a value from the
+                // agent's memory by key." — technically true and read by
+                // models as "this is how you look things up in memory". It is
+                // an exact-key hashmap lookup: it never touches the semantic
+                // store, never reads an embedding, and returns "not found" for
+                // anything that was not stored under precisely that key. The
+                // description now says what it does NOT do, and points at the
+                // tool that does.
                 name: tool_name::MEMORY_RECALL.to_string(),
-                description: "Recall a value from the agent's memory by key.".to_string(),
+                description: "Look up one value by its EXACT key in the agent's key/value store. This is not a search: it does no fuzzy, semantic, or substring matching, and returns 'not found' unless the key matches character for character. To search remembered facts by meaning, use memory_semantic_search instead.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "key": { "type": "string", "description": "The storage key to recall" }
+                        "key": { "type": "string", "description": "The exact storage key to look up (as previously passed to memory_store)" }
                     },
                     "required": ["key"]
                 }),
             },
             ToolDefinition {
                 name: tool_name::MEMORY_LIST.to_string(),
-                description: "List keys in the agent's memory with pagination.".to_string(),
+                description: "List the keys in the agent's key/value store, with pagination. Returns key names only, not values, and does not cover semantic memory — use memory_semantic_stats for that store.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "limit": { "type": "integer", "description": "Max keys to return (default 100)" },
                         "offset": { "type": "integer", "description": "Number of keys to skip" }
                     },
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::MEMORY_SEMANTIC_SEARCH.to_string(),
+                description: "Search this agent's semantic memory by meaning and return the matching fragments with their ids. This is the store the system recalls from automatically before each turn — use this tool to ask it a question yourself: \"what do I know about X?\". Ranked by embedding similarity when embeddings are configured. Each result carries an id you can pass to memory_semantic_forget to retract a memory that is now wrong.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "What to look for, in natural language" },
+                        "limit": { "type": "integer", "description": "Max fragments to return (default 5, max 50)" },
+                        "min_confidence": { "type": "number", "description": "Drop fragments whose confidence has decayed below this floor, 0.0-1.0. Use it to ask for nothing rather than stale noise." }
+                    },
+                    "required": ["query"]
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::MEMORY_SEMANTIC_ADD.to_string(),
+                description: "Deliberately record a durable fact in this agent's semantic memory, so it can be recalled later by meaning rather than by key. The content is passed through the memory extractor, which may distil it, merge it into an existing memory, or decline it as redundant — the result says exactly what was stored, and reports storing nothing when nothing was stored. For an exact key/value entry you control, use memory_store.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "content": { "type": "string", "description": "The fact to remember, phrased so it stands on its own without the surrounding conversation" }
+                    },
+                    "required": ["content"]
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::MEMORY_SEMANTIC_FORGET.to_string(),
+                description: "Retract one semantic memory by id, so it stops being recalled into future turns. Use this when a memory has gone stale and keeps contradicting what you can observe directly. Get ids from memory_semantic_search. Only memories belonging to this agent can be forgotten.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "memory_id": { "type": "string", "description": "The id of the memory to forget, as returned by memory_semantic_search" }
+                    },
+                    "required": ["memory_id"]
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::MEMORY_SEMANTIC_STATS.to_string(),
+                description: "Report how much this agent remembers semantically: total fragments, counts per level, counts per category, and whether automatic memorize/recall and LLM extraction are switched on. Use it to check whether semantic memory is actually enabled before concluding that a search found nothing because nothing was stored.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
                 }),
             },
             ToolDefinition {

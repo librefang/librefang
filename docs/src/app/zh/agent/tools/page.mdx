@@ -50,13 +50,28 @@ Lazy loading 在 manifest 用 `lazy_tools = true` 按 agent 开启。关掉则�
 
 ## Memory 工具(per-agent)
 
-从循环里直接访问 agent 的主动记忆存储。和自动召回机制不同 —— 这些是 agent 显式调的工具。
+一共有**两套记忆存储**、两套工具族,名字相近,值得仔细区分。
+
+`memory_store` / `memory_recall` / `memory_list` 是**键值存储**。`memory_recall` 只接受精确的 key,不做任何匹配 —— 它不是搜索。
 
 | 工具 | 参数 | 用途 |
 |---|---|---|
-| `memory_store` | `content`、可选 `category`、`scope` | 持久化一条自定义记忆。`scope` ∈ `user_memory` / `session_memory` / `agent_memory`。 |
-| `memory_recall` | `query`、可选 `limit`、`scope` | 在该 agent 的记忆上做语义搜索。 |
-| `memory_list` | 可选 `category`、`scope`、`limit` | 不带搜索条件枚举记忆。 |
+| `memory_store` | `key`、`value` | 以精确 key 持久化一个值,只能用同一个 key 取回。 |
+| `memory_recall` | `key` | 按精确 key 查一个值。key 不是逐字符相同就返回“未找到”。 |
+| `memory_list` | 可选 `limit`、`offset` | 枚举键值存储里的 key 名(不含值)。 |
+
+`memory_semantic_*` 是**语义存储** —— 也就是自动召回机制每轮之前读取的那套向量存储。有了这些工具,agent 才能主动查询它,而不是只能被动接收注入的内容。
+
+| 工具 | 参数 | 用途 |
+|---|---|---|
+| `memory_semantic_search` | `query`、可选 `limit`、`min_confidence` | 按语义搜索记忆片段,每条结果都带可用于撤回的 id。`min_confidence` 会过滤置信度已衰减的片段,让调用方可以选择“宁可什么都不要,也不要噪声”。 |
+| `memory_semantic_add` | `content` | 主动记录一条持久事实。内容会经过记忆抽取器,可能被提炼、被合并进已有记忆,或因冗余而被拒绝 —— 返回结果会如实说明实际写入了什么,包括“什么都没写”。 |
+| `memory_semantic_forget` | `memory_id` | 撤回一条记忆,使其不再被召回。这是修正“陈旧记忆持续与 agent 直接观测到的事实相矛盾”的手段。 |
+| `memory_semantic_stats` | — | 按层级与类别的计数,以及 auto-memorize、自动召回、LLM 抽取是否开启。用于区分“存储是空的”和“存储被关掉了”。 |
+
+只有 `memory_semantic_search` 每轮都会带上 schema;其余三个通过 `tool_search` / `tool_load` 获取。
+
+语义工具需要同时满足两个条件:`capabilities.tools` 允许它们(`memory_*` 这样的 glob 即可),**并且**记忆 scope 覆盖 agent 自己的记忆 —— `search` / `stats` 看 `capabilities.memory_read`,`add` / `forget` 看 `capabilities.memory_write`。未声明 scope 时保持开放;若声明的 scope 只覆盖键值存储(`memory_read = ["kv:*"]`),语义工具会被收回,键值工具不受影响。`[proactive_memory] enabled = false` 时它们也会被完全收回,因为此时存储根本没有构建。
 
 条目 schema、scope、衰减公式、整合触发器见[内存系统](/zh/agent/memory#主动记忆proactive-memory)。
 
