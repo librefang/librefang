@@ -352,17 +352,12 @@ async fn templates_toml_unknown_returns_plaintext_404() {
 // ---------------------------------------------------------------------------
 // /api/templates/{name} — registry-promotion privacy pass (refs #7771).
 //
-// An agent type an operator built on their own install is an `AgentManifest`
-// written against one machine. Contributing it to a shared registry publishes
-// that machine's details unless something strips them first, and the registry
-// validator requires only `name` / `description` / `module`, so nothing
-// downstream catches it. The detail endpoint carries the read-only half of
-// that pass; these tests pin its shape and its two directions — what must not
-// survive, and what must.
+// An agent type an operator built on their own install is an `AgentManifest` written against one machine.
+// Contributing it to a shared registry publishes that machine's details unless something strips them first, and the registry validator requires only `name` / `description` / `module`, so nothing downstream catches it.
+// The detail endpoint carries the read-only half of that pass; these tests pin its shape and its two directions — what must not survive, and what must.
 // ---------------------------------------------------------------------------
 
-/// A template manifest with one host-specific or secret-adjacent value per
-/// category, each a distinctive sentinel so the assertions are unambiguous.
+/// A template manifest with one host-specific or secret-adjacent value per category, each a distinctive sentinel so the assertions are unambiguous.
 fn leaky_manifest_toml(name: &str) -> String {
     format!(
         r#"name = "{name}"
@@ -425,8 +420,7 @@ async fn templates_get_reports_what_promotion_would_strip() {
         .map(|finding| finding["field"].as_str().unwrap_or_default())
         .collect();
 
-    // One assertion per category of sensitive field, so a regression names
-    // which category stopped being reported.
+    // One assertion per category of sensitive field, so a regression names which category stopped being reported.
     for expected in [
         "author",            // operator identity
         "model.api_key_env", // credential binding
@@ -493,8 +487,7 @@ async fn templates_get_promotion_preview_omits_host_specifics_and_keeps_the_port
         );
     }
 
-    // Stripping everything would leave nothing worth publishing, so pin the
-    // half that has to survive.
+    // Stripping everything would leave nothing worth publishing, so pin the half that has to survive.
     for kept in [
         "researcher",
         "Reads sources and writes briefs.",
@@ -510,8 +503,7 @@ async fn templates_get_promotion_preview_omits_host_specifics_and_keeps_the_port
         );
     }
 
-    // The raw file is still returned verbatim — this endpoint reports on the
-    // operator's manifest, it does not rewrite it.
+    // The raw file is still returned verbatim — this endpoint reports on the operator's manifest, it does not rewrite it.
     assert!(
         body["manifest_toml"]
             .as_str()
@@ -528,9 +520,8 @@ async fn templates_get_promotion_preview_flags_a_secret_inside_a_retained_prompt
     let _g = templates_lock().lock().await;
     let _ = templates_root();
 
-    // A credential pasted into the system prompt sits inside a field
-    // promotion has to keep, so the operator has to edit it by hand. The
-    // detector exists to say so rather than to silently keep it.
+    // A credential pasted into the system prompt sits inside a field promotion has to keep, so the operator has to edit it by hand.
+    // The detector exists to say so rather than to silently keep it.
     let unique = "tmpl_promo_review";
     write_template(
         unique,
