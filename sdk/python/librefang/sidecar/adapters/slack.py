@@ -15,31 +15,14 @@ Behaviour parity with the Rust adapter:
   read JSON envelopes (``hello`` / ``events_api`` / ``interactive`` /
   ``disconnect``). Each ``events_api`` / ``interactive`` envelope
   must be ACK'd by echoing back ``{"envelope_id": "..."}``.
-* **Event handling**: only ``message`` and ``app_mention`` types
-  produce ``message`` events. Subtype filter: bare messages pass,
-  ``message_changed`` extracts ``event.message`` (edit), ``file_share``
-  passes as an ordinary message carrying ``files`` (#7087), every other
-  subtype is dropped (joins, leaves, topic changes, etc.). Self-skip on
-  ``bot_id`` present OR ``user == bot_user_id``.
-* **Inbound attachments** (#7087): a message's ``files`` array becomes an
-  ``Image`` / ``Video`` / ``Audio`` / ``File`` content variant carrying
-  ``url_private_download``, and the adapter declares ``header_rules`` so the
-  daemon fetches that URL with the bot token — Slack's private file URLs
-  302 to a login page without it.
-  The URL is forwarded rather than the bytes because the daemon's media
-  pipeline is what produces a vision image block, an audio transcription or
-  a saved document path; inbound ``FileData`` is rendered as a text
-  placeholder and its payload discarded, so inlining bytes would deliver
-  nothing.
-  One attachment per message (the wire carries one ``ChannelContent``), the
-  attachment outranks the message text including a slash command, and the
-  message text rides along as the caption for every variant that has one.
-  Policy knobs: ``SLACK_FILE_DOWNLOADS``, ``SLACK_FILE_MAX_BYTES``,
-  ``SLACK_FILE_ALLOWED_EXTENSIONS``, ``SLACK_FILE_DOWNLOAD_CHANNELS`` and
-  ``SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS``.
-  Link-unfurl ``attachments[].image_url`` is deliberately **not** followed:
-  it is preview metadata for a URL somebody pasted, not an upload, and
-  fetching it would point the daemon at an arbitrary host.
+* **Event handling**: only ``message`` and ``app_mention`` types produce ``message`` events.
+  Subtype filter: bare messages pass, ``message_changed`` extracts ``event.message`` (edit), ``file_share`` passes as an ordinary message carrying ``files`` (#7087), every other subtype is dropped (joins, leaves, topic changes, etc.).
+  Self-skip on ``bot_id`` present OR ``user == bot_user_id``.
+* **Inbound attachments** (#7087): a message's ``files`` array becomes an ``Image`` / ``Video`` / ``Audio`` / ``File`` content variant carrying ``url_private_download``, and the adapter declares ``header_rules`` so the daemon fetches that URL with the bot token — Slack's private file URLs 302 to a login page without it.
+  The URL is forwarded rather than the bytes because the daemon's media pipeline is what produces a vision image block, an audio transcription or a saved document path; inbound ``FileData`` is rendered as a text placeholder and its payload discarded, so inlining bytes would deliver nothing.
+  One attachment per message (the wire carries one ``ChannelContent``), the attachment outranks the message text including a slash command, and the message text rides along as the caption for every variant that has one.
+  Policy knobs: ``SLACK_FILE_DOWNLOADS``, ``SLACK_FILE_MAX_BYTES``, ``SLACK_FILE_ALLOWED_EXTENSIONS``, ``SLACK_FILE_DOWNLOAD_CHANNELS`` and ``SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS``.
+  Link-unfurl ``attachments[].image_url`` is deliberately **not** followed: it is preview metadata for a URL somebody pasted, not an upload, and fetching it would point the daemon at an arbitrary host.
 * **Allowed channels**: empty list = allow all. When non-empty,
   channel must be in the list; DMs (``channel`` starts with ``D``)
   are exempt (the operator's per-user DM allowlist handles those).
@@ -140,25 +123,18 @@ SEND_TIMEOUT_SECS = 15.0
 HANDSHAKE_TIMEOUT_SECS = 15.0
 MAX_FILE_UPLOAD_BYTES = 10 * 1024 * 1024
 
-# Hosts that serve Slack's own `url_private` / `url_private_download` file
-# URLs. Inbound attachments are pinned to this set (#7087) and it is the
-# exact set declared in `header_rules`, so the bot token is only ever
-# attached to a fetch of a Slack-hosted file.
+# Hosts that serve Slack's own `url_private` / `url_private_download` file URLs.
+# Inbound attachments are pinned to this set (#7087) and it is the exact set declared in `header_rules`, so the bot token is only ever attached to a fetch of a Slack-hosted file.
 #
-# `files.remote.add` lets any workspace member register a "file" whose
-# `url_private` points at a host of their choosing, and a link unfurl can
-# put an arbitrary `image_url` in `attachments`. Both reach this adapter
-# through an authentic Socket Mode envelope, so "the event came from Slack"
-# says nothing about who chose the URL — the host pin is what keeps a
-# member-chosen address from being fetched with the bot's credentials.
+# `files.remote.add` lets any workspace member register a "file" whose `url_private` points at a host of their choosing, and a link unfurl can put an arbitrary `image_url` in `attachments`.
+# Both reach this adapter through an authentic Socket Mode envelope, so "the event came from Slack" says nothing about who chose the URL — the host pin is what keeps a member-chosen address from being fetched with the bot's credentials.
 SLACK_FILE_HOSTS = ("files.slack.com", "slack-files.com")
 
 # Slack `file.mode` values whose `url_private` no longer serves bytes.
 SLACK_UNFETCHABLE_FILE_MODES = frozenset({"tombstone", "hidden_by_limit"})
 
-# Default ceiling on an inbound attachment. Same 10 MiB as the outbound
-# upload cap so a round trip (user uploads, agent edits, agent posts back)
-# does not fail one direction with a size the other accepted.
+# Default ceiling on an inbound attachment.
+# Same 10 MiB as the outbound upload cap so a round trip (user uploads, agent edits, agent posts back) does not fail one direction with a size the other accepted.
 DEFAULT_INBOUND_FILE_MAX_BYTES = MAX_FILE_UPLOAD_BYTES
 
 INITIAL_BACKOFF_SECS = 1.0
@@ -441,15 +417,9 @@ def parse_users_info(body: dict) -> tuple[Optional[str], Optional[str]]:
 class SlackFilePolicy:
     """Resolved policy for inbound attachments.
 
-    ``enabled=False`` — the default when no policy is supplied — reproduces
-    the pre-#7087 behaviour of dropping every file-bearing message, so an
-    operator can turn the feature off without changing anything else.
+    ``enabled=False`` — the default when no policy is supplied — reproduces the pre-#7087 behaviour of dropping every file-bearing message, so an operator can turn the feature off without changing anything else.
 
-    ``channels`` is an allow-list (empty = every channel) and
-    ``excluded_channels`` a deny-list applied on top of it, which is the
-    ergonomic shape for the two things operators actually ask for: "only
-    this one channel accepts uploads" and "every channel except this busy
-    one".
+    ``channels`` is an allow-list (empty = every channel) and ``excluded_channels`` a deny-list applied on top of it, which is the ergonomic shape for the two things operators actually ask for: "only this one channel accepts uploads" and "every channel except this busy one".
     """
 
     enabled: bool = False
@@ -476,10 +446,8 @@ class SlackFilePolicy:
 def _file_extension(name: Any, filetype: Any) -> str:
     """Lowercased extension for an inbound Slack file object.
 
-    The filename wins because it is what the agent's tools will see; Slack's
-    own ``filetype`` token is the fallback for uploads that arrive without a
-    usable name. Returns ``""`` when neither yields one, which a non-empty
-    allow-list then rejects.
+    The filename wins because it is what the agent's tools will see; Slack's own ``filetype`` token is the fallback for uploads that arrive without a usable name.
+    Returns ``""`` when neither yields one, which a non-empty allow-list then rejects.
     """
     head, dot, tail = _safe_filename(name).rpartition(".")
     if dot and head and tail:
@@ -515,10 +483,8 @@ def _file_rejection(entry: Any, policy: SlackFilePolicy) -> Optional[str]:
         return "file entry is not an object"
     mode = entry.get("mode")
     if mode in SLACK_UNFETCHABLE_FILE_MODES:
-        # A deleted file, or one Slack has hidden behind a free-plan storage
-        # limit, still arrives with a `url_private` that no longer resolves.
-        # Refusing it here keeps a `[File download failed]` line out of the
-        # agent's prompt.
+        # A deleted file, or one Slack has hidden behind a free-plan storage limit, still arrives with a `url_private` that no longer resolves.
+        # Refusing it here keeps a `[File download failed]` line out of the agent's prompt.
         return f"file mode is {mode}"
     url = entry.get("url_private_download") or entry.get("url_private")
     if not isinstance(url, str) or not url:
@@ -538,13 +504,8 @@ def _file_rejection(entry: Any, policy: SlackFilePolicy) -> Optional[str]:
 def _file_content(entry: dict, companion_text: str) -> dict[str, Any]:
     """Map one policy-approved Slack file object onto a ``ChannelContent`` variant.
 
-    The URL is handed to the daemon rather than the bytes: the daemon's media
-    pipeline is what turns a URL into an image block for vision, a
-    transcription for audio, or a saved path for a document, and it attaches
-    the bot token for exactly the hosts this adapter declared in
-    ``header_rules``. Inlining bytes as ``FileData`` would not reach any of
-    that — the inbound side of the bridge renders ``FileData`` as a text
-    placeholder and discards the payload.
+    The URL is handed to the daemon rather than the bytes: the daemon's media pipeline is what turns a URL into an image block for vision, a transcription for audio, or a saved path for a document, and it attaches the bot token for exactly the hosts this adapter declared in ``header_rules``.
+    Inlining bytes as ``FileData`` would not reach any of that — the inbound side of the bridge renders ``FileData`` as a text placeholder and discards the payload.
     """
     url = entry.get("url_private_download") or entry.get("url_private")
     filename = _safe_filename(entry.get("name") or entry.get("title"))
@@ -568,9 +529,8 @@ def _file_content(entry: dict, companion_text: str) -> dict[str, Any]:
                              duration_seconds=duration_seconds,
                              title=title if isinstance(title, str) and title else None)
     if companion_text:
-        # `ChannelContent::File` has no caption field, so the accompanying
-        # message text has nowhere to ride. Same limitation (and the same
-        # warning) as the discord sidecar's file attachments.
+        # `ChannelContent::File` has no caption field, so the accompanying message text has nowhere to ride.
+        # Same limitation (and the same warning) as the discord sidecar's file attachments.
         log.warn(
             "slack file attachment has companion text that cannot be sent as a caption",
             filename=filename,
@@ -587,13 +547,10 @@ def parse_slack_files(
 ) -> Optional[dict[str, Any]]:
     """Pick the first policy-approved attachment out of a message's ``files`` array.
 
-    Returns the ``ChannelContent`` for it, or ``None`` when downloads are off
-    for this channel, the array is absent, or nothing in it passes policy.
+    Returns the ``ChannelContent`` for it, or ``None`` when downloads are off for this channel, the array is absent, or nothing in it passes policy.
 
-    One attachment per message, matching the discord sidecar: the wire
-    protocol carries a single ``ChannelContent`` per message, so a
-    multi-file upload has to pick one. Extras are counted in a warning
-    rather than silently dropped.
+    One attachment per message, matching the discord sidecar: the wire protocol carries a single ``ChannelContent`` per message, so a multi-file upload has to pick one.
+    Extras are counted in a warning rather than silently dropped.
     """
     if policy is None or not policy.enabled_for(channel):
         return None
@@ -642,8 +599,7 @@ def parse_slack_event(
     Returns the ``message`` event dict ready to ``emit``, or ``None``
     when the payload should be skipped.
 
-    ``file_policy`` defaults to ``None``, which drops every attachment and
-    leaves the pre-#7087 text-only behaviour untouched.
+    ``file_policy`` defaults to ``None``, which drops every attachment and leaves the pre-#7087 text-only behaviour untouched.
     """
     if not isinstance(event, dict):
         return None
@@ -659,14 +615,11 @@ def parse_slack_event(
         msg_data = inner
         is_edit = True
     elif subtype is not None and subtype != "file_share":
-        # Other subtypes (joins, leaves, topic changes, …) are skipped —
-        # matches the Rust adapter precisely.
+        # Other subtypes (joins, leaves, topic changes, …) are skipped — matches the Rust adapter precisely.
         return None
     else:
-        # `file_share` shares this arm: it is an ordinary message that also
-        # carries `files`, and dropping the whole subtype (#7087) discarded
-        # the user's upload before any content parsing ran. The attachment
-        # itself is still gated by `file_policy` below.
+        # `file_share` shares this arm: it is an ordinary message that also carries `files`, and dropping the whole subtype (#7087) discarded the user's upload before any content parsing ran.
+        # The attachment itself is still gated by `file_policy` below.
         msg_data = event
         is_edit = False
 
@@ -702,8 +655,7 @@ def parse_slack_event(
         companion_text=text,
         policy=file_policy,
     )
-    # An upload with no comment is a complete message; a text-only message
-    # with no text is not.
+    # An upload with no comment is a complete message; a text-only message with no text is not.
     if file_content is None and not text:
         return None
 
@@ -712,10 +664,8 @@ def parse_slack_event(
         ts = str(ts)
 
     if file_content is not None:
-        # The attachment outranks the text, slash commands included: one
-        # message carries one `ChannelContent`, and the upload is the part
-        # the agent cannot reconstruct from the transcript. Same precedence
-        # as the discord sidecar.
+        # The attachment outranks the text, slash commands included: one message carries one `ChannelContent`, and the upload is the part the agent cannot reconstruct from the transcript.
+        # Same precedence as the discord sidecar.
         content = file_content
     elif text.startswith("/"):
         head, _, tail = text[1:].partition(" ")
@@ -1046,15 +996,9 @@ class SlackAdapter(SidecarAdapter):
                 os.environ.get("SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS", ""),
             )),
         )
-        # `url_private_download` 302s to a login page without the bot token,
-        # so the daemon needs it to fetch what we forward. `header_rules` is
-        # the mechanism for that (matrix uses it for MSC3916 media): the
-        # daemon exact-matches the request host against these rules and
-        # attaches nothing for anything else, so the token cannot follow a
-        # member-chosen URL out of the workspace — see `fetch_headers_for` in
-        # `crates/librefang-channels/src/sidecar.rs`. The rules are only
-        # declared when attachment forwarding is on, so an operator who turns
-        # it off does not ship the token at all.
+        # `url_private_download` 302s to a login page without the bot token, so the daemon needs it to fetch what we forward.
+        # `header_rules` is the mechanism for that (matrix uses it for MSC3916 media): the daemon exact-matches the request host against these rules and attaches nothing for anything else, so the token cannot follow a member-chosen URL out of the workspace — see `fetch_headers_for` in `crates/librefang-channels/src/sidecar.rs`.
+        # The rules are only declared when attachment forwarding is on, so an operator who turns it off does not ship the token at all.
         #
         # Sorted so the ready event is byte-identical across runs.
         if self.file_policy.enabled:
