@@ -2445,14 +2445,10 @@ async fn custom_provider_without_the_flag_is_not_probed_for_models() {
     );
 }
 
-/// #7775: the models a self-hosted OpenAI-compatible gateway serves must reach
-/// `GET /api/models`, which is the list every surface picks a model from.
+/// #7775: the models a self-hosted OpenAI-compatible gateway serves must reach `GET /api/models`, which is the list every surface picks a model from.
 ///
-/// The ids belong to the operator, so no checked-in catalogue can ship them —
-/// and before this fix `list_models` refreshed a live catalogue for OpenRouter
-/// and EveryAPI only, then merely *read* the probe cache to filter static
-/// entries. A gateway had nothing static to filter and nothing live to add, so
-/// the list came back with only whatever the operator had hand-registered.
+/// The ids belong to the operator, so no checked-in catalogue can ship them — and before this fix `list_models` refreshed a live catalogue for OpenRouter and EveryAPI only, then merely *read* the probe cache to filter static entries.
+/// A gateway had nothing static to filter and nothing live to add, so the list came back with only whatever the operator had hand-registered.
 #[tokio::test(flavor = "multi_thread")]
 async fn gateway_served_models_reach_the_model_list() {
     use wiremock::matchers::{method, path};
@@ -2494,19 +2490,15 @@ async fn gateway_served_models_reach_the_model_list() {
         ids.contains(&"sensor-model-generic") && ids.contains(&"sensor-model-generic-high"),
         "every model the gateway lists must be selectable from /api/models; got {ids:?}"
     );
-    // The hand-registered entry is not collateral: the live filter (#3191) runs
-    // against the same probe result and must not drop a custom-tier model the
-    // operator added themselves.
+    // The hand-registered entry is not collateral: the live filter (#3191) runs against the same probe result and must not drop a custom-tier model the operator added themselves.
     assert!(
         ids.contains(&"acme-gateway-test-model"),
         "discovery must not evict an operator-registered model; got {ids:?}"
     );
 }
 
-/// The counterpart guard: `/api/models` must not turn into a probe of every
-/// configured provider. A provider that never opted into discovery is left
-/// alone entirely — no request, not merely no merge — so enabling this on one
-/// gateway does not start billing round-trips against the others.
+/// The counterpart guard: `/api/models` must not turn into a probe of every configured provider.
+/// A provider that never opted into discovery is left alone entirely — no request, not merely no merge — so enabling this on one gateway does not start billing round-trips against the others.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_model_list_does_not_probe_a_provider_that_never_opted_in() {
     use wiremock::matchers::{method, path};
