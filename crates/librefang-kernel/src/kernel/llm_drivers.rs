@@ -608,8 +608,7 @@ mod tests {
     use librefang_types::{
         agent::FallbackModel,
         config::{
-            DefaultModelConfig, FallbackProviderConfig, KernelConfig, MemoryConfig,
-            NO_LLM_PROVIDER,
+            DefaultModelConfig, FallbackProviderConfig, KernelConfig, MemoryConfig, NO_LLM_PROVIDER,
         },
     };
 
@@ -975,7 +974,8 @@ key_required = true
             let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
 
             assert_eq!(
-                kernel.config_ref().default_model.provider, NO_LLM_PROVIDER,
+                kernel.config_ref().default_model.provider,
+                NO_LLM_PROVIDER,
                 "boot rewrote an explicitly driverless provider, which only happens when the \
                  host probe ran and won (stray base_url: {stray_base_url:?})"
             );
@@ -989,7 +989,9 @@ key_required = true
                     Ok(d) => d,
                     // `Arc<dyn LlmDriver>` is not `Debug`, so `expect` on the
                     // Result will not compile — match the error out instead.
-                    Err(e) => panic!("driverless resolution must yield the stub, not an error: {e}"),
+                    Err(e) => {
+                        panic!("driverless resolution must yield the stub, not an error: {e}")
+                    }
                 };
                 assert!(
                     !driver.is_configured(),
