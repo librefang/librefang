@@ -63,6 +63,8 @@ discover_models = true
 ```
 
 开启后，该提供商会走内置本地提供商完全相同的路径：周期性探测循环、`POST /api/providers/{name}/test` 刷新（响应中随之带上 `discovered_models`），以及 `GET /api/models` 上的实时模型过滤。
+`GET /api/models` 自己也会去请求一次模型列表，走的是 Dashboard 提供商网格所用的同一个 60 秒探测缓存，因此网关提供的模型在第一次请求时就已经在列表里，而不必等某一次后台探测恰好跑过。
+拉取列表失败并不构成错误：响应会退回到内置目录，失败原因以 `debug` 级别写入日志，因此一个只代理 `/chat/completions`、不暴露 `/models` 的网关，其行为与开启该开关之前完全一致。
 这个开关不会把内置 id 的发现能力关掉——那些由 id 决定而非由开关决定——所以已有安装不受影响。
 
 Dashboard 在「添加提供商」向导和提供商的配置抽屉里提供同一个开关**自动发现模型**；后者调用 `PUT /api/providers/{name}/discovery`，请求体为 `{"discover_models": true}`，并把值写回该提供商自己的 TOML。

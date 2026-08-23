@@ -303,6 +303,15 @@ pub async fn list_models(
             tracing::warn!(%error, "EveryAPI live catalog unavailable; using registered snapshot");
         }
     }
+    // Every other provider used to be served from the checked-in catalogue
+    // alone, which has nothing to show for a self-hosted OpenAI-compatible
+    // gateway: the model ids there are the operator's own, so no snapshot can
+    // ship them (#7775). The probe below is the same `/models` listing the
+    // periodic loop and `GET /api/providers` already query — this handler
+    // previously only *read* `provider_probe_cache` for the #3191 filter and
+    // never filled it, so a `/api/models` call that arrived before either of
+    // those had run reported the gateway as having no models at all.
+    refresh_discovered_models(&state, provider_filter.as_deref()).await;
     let cli_tier_ok = tier_filter
         .as_deref()
         .map(|t| t == "custom")
@@ -794,6 +803,111 @@ fn probe_failure_downgrades_auth(provider_id: &str) -> bool {
     librefang_kernel::provider_health::is_local_provider(provider_id)
 }
 
+/// Merge a probe's live `/models` listing into the catalog so the discovered
+/// ids become selectable models rather than a count in a probe response.
+///
+/// Does nothing when the probe found no models, so an unreachable gateway or
+/// one that does not serve a listing leaves the checked-in catalogue alone.
+fn merge_probe_into_catalog(
+    probe: &librefang_kernel::provider_health::ProbeResult,
+    provider_id: &str,
+    kernel: &dyn librefang_kernel::KernelApi,
+) {
+    if probe.discovered_models.is_empty() {
+        return;
+    }
+    // Pre-compute the merged info outside the RCU closure: the closure
+    // may re-run on CAS retry (#3384) so all allocation happens here once.
+    let info: Vec<librefang_kernel::provider_health::DiscoveredModelInfo> =
+        if probe.discovered_model_info.is_empty() {
+            probe
+                .discovered_models
+                .iter()
+                .map(
+                    |name| librefang_kernel::provider_health::DiscoveredModelInfo {
+                        name: name.clone(),
+                        parameter_size: None,
+                        quantization_level: None,
+                        family: None,
+                        families: None,
+                        size: None,
+                        capabilities: vec![],
+                    },
+                )
+                .collect()
+        } else {
+            probe.discovered_model_info.clone()
+        };
+    kernel.model_catalog_update(&mut |cat| {
+        cat.merge_discovered_models(provider_id, &info);
+    });
+}
+
+/// Query the live `/models` listing of every provider that participates in
+/// model discovery and merge what it serves into the catalog, so `/api/models`
+/// reflects a self-hosted gateway's own model ids instead of only the
+/// checked-in snapshot (#7775).
+///
+/// `provider_filter` is the already-lowercased `?provider=` query value; only
+/// that provider is probed when one is given, matching how the OpenRouter and
+/// EveryAPI refreshers scope themselves.
+///
+/// Failures are non-fatal by construction: `probe_provider_cached` reports an
+/// unreachable result instead of erroring, the merge is skipped, and the
+/// response falls back to the checked-in catalogue.
+/// The 60-second [`ProbeCache`](librefang_kernel::provider_health::ProbeCache)
+/// TTL is what keeps a dashboard that polls the Models page from turning every
+/// poll into a round-trip to the operator's own infrastructure, and it is the
+/// same cache `GET /api/providers` already fills on every dashboard load.
+async fn refresh_discovered_models(state: &AppState, provider_filter: Option<&str>) {
+    // `local_provider_probe_targets` is the single definition of "participates
+    // in discovery" — built-in local ids plus `discover_models` opt-ins, with
+    // an empty base URL and user-suppressed providers excluded. Going through
+    // it keeps this handler from drifting away from the periodic probe loop.
+    let targets: Vec<(String, String, Option<String>)> = {
+        let catalog = state.kernel.model_catalog_ref().load();
+        catalog
+            .local_provider_probe_targets()
+            .into_iter()
+            .filter(|(id, _)| provider_filter.is_none_or(|f| f == id.to_lowercase()))
+            .map(|(id, base_url)| {
+                let api_key = catalog.get_provider(&id).and_then(provider_api_key);
+                (id, base_url, api_key)
+            })
+            .collect()
+    };
+    if targets.is_empty() {
+        return;
+    }
+    let probes = futures::future::join_all(targets.iter().map(|(id, base_url, api_key)| {
+        librefang_kernel::provider_health::probe_provider_cached(
+            id,
+            base_url,
+            api_key.as_deref(),
+            &state.provider_probe_cache,
+        )
+    }))
+    .await;
+    for ((id, _, _), probe) in targets.iter().zip(probes) {
+        if probe.discovered_models.is_empty() {
+            // `debug!`, not `warn!`: a built-in local id that is simply not
+            // running is the expected steady state and this handler can be
+            // called on every dashboard poll, so warning here would be a line
+            // per request forever. The operator-facing report lives on
+            // `GET /api/providers` (`reachable` / `error_message`) and the
+            // periodic probe loop already warns for the providers the
+            // default/fallback chain actually depends on.
+            tracing::debug!(
+                provider = %id,
+                error = probe.error.as_deref().unwrap_or("no models listed"),
+                "live model discovery returned nothing; using checked-in catalog"
+            );
+            continue;
+        }
+        merge_probe_into_catalog(&probe, id, &*state.kernel);
+    }
+}
+
 fn attach_probe_result(
     entry: &mut serde_json::Value,
     probe: &librefang_kernel::provider_health::ProbeResult,
@@ -812,31 +926,7 @@ fn attach_probe_result(
     entry["latency_ms"] = serde_json::json!(probe.latency_ms);
     if !probe.discovered_models.is_empty() {
         entry["discovered_models"] = serde_json::json!(&probe.discovered_models);
-        // Pre-compute the merged info outside the RCU closure: the closure
-        // may re-run on CAS retry (#3384) so all allocation happens here once.
-        let info: Vec<librefang_kernel::provider_health::DiscoveredModelInfo> =
-            if probe.discovered_model_info.is_empty() {
-                probe
-                    .discovered_models
-                    .iter()
-                    .map(
-                        |name| librefang_kernel::provider_health::DiscoveredModelInfo {
-                            name: name.clone(),
-                            parameter_size: None,
-                            quantization_level: None,
-                            family: None,
-                            families: None,
-                            size: None,
-                            capabilities: vec![],
-                        },
-                    )
-                    .collect()
-            } else {
-                probe.discovered_model_info.clone()
-            };
-        kernel.model_catalog_update(&mut |cat| {
-            cat.merge_discovered_models(provider_id, &info);
-        });
+        merge_probe_into_catalog(probe, provider_id, kernel);
     }
     if !probe.discovered_model_info.is_empty() {
         entry["discovered_model_info"] = serde_json::json!(&probe.discovered_model_info);

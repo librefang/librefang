@@ -2445,6 +2445,116 @@ async fn custom_provider_without_the_flag_is_not_probed_for_models() {
     );
 }
 
+/// #7775: the models a self-hosted OpenAI-compatible gateway serves must reach
+/// `GET /api/models`, which is the list every surface picks a model from.
+///
+/// The ids belong to the operator, so no checked-in catalogue can ship them —
+/// and before this fix `list_models` refreshed a live catalogue for OpenRouter
+/// and EveryAPI only, then merely *read* the probe cache to filter static
+/// entries. A gateway had nothing static to filter and nothing live to add, so
+/// the list came back with only whatever the operator had hand-registered.
+#[tokio::test(flavor = "multi_thread")]
+async fn gateway_served_models_reach_the_model_list() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                { "id": "sensor-model-generic" },
+                { "id": "sensor-model-generic-high" },
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let h = boot_with_provider(ProviderInfo {
+        id: "acme-gateway".to_string(),
+        display_name: "ACME Gateway".to_string(),
+        api_key_env: "LIBREFANG_TEST_ACME_GATEWAY_API_KEY".to_string(),
+        base_url: server.uri(),
+        key_required: false,
+        auth_status: AuthStatus::NotRequired,
+        discover_models: true,
+        ..ProviderInfo::default()
+    });
+
+    let (status, body) =
+        json_request(&h, Method::GET, "/api/models?provider=acme-gateway", None).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let ids: Vec<&str> = body["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&"sensor-model-generic") && ids.contains(&"sensor-model-generic-high"),
+        "every model the gateway lists must be selectable from /api/models; got {ids:?}"
+    );
+    // The hand-registered entry is not collateral: the live filter (#3191) runs
+    // against the same probe result and must not drop a custom-tier model the
+    // operator added themselves.
+    assert!(
+        ids.contains(&"acme-gateway-test-model"),
+        "discovery must not evict an operator-registered model; got {ids:?}"
+    );
+}
+
+/// The counterpart guard: `/api/models` must not turn into a probe of every
+/// configured provider. A provider that never opted into discovery is left
+/// alone entirely — no request, not merely no merge — so enabling this on one
+/// gateway does not start billing round-trips against the others.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_model_list_does_not_probe_a_provider_that_never_opted_in() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{ "id": "should-never-be-listed" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let h = boot_with_provider(ProviderInfo {
+        id: "acme-quiet".to_string(),
+        display_name: "ACME Quiet".to_string(),
+        api_key_env: "LIBREFANG_TEST_ACME_QUIET_API_KEY".to_string(),
+        base_url: server.uri(),
+        key_required: true,
+        auth_status: AuthStatus::Configured,
+        ..ProviderInfo::default()
+    });
+
+    let (status, body) =
+        json_request(&h, Method::GET, "/api/models?provider=acme-quiet", None).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let ids: Vec<&str> = body["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert!(
+        !ids.contains(&"should-never-be-listed"),
+        "a provider without the opt-in must not gain live models; got {ids:?}"
+    );
+    let received = server
+        .received_requests()
+        .await
+        .expect("wiremock records requests");
+    assert!(
+        received.is_empty(),
+        "no listing request should have been sent at all; got {:?}",
+        received.iter().map(|r| r.url.to_string()).collect::<Vec<_>>()
+    );
+}
+
 /// `PUT /api/providers/{name}/discovery` flips the flag, reports it back on
 /// `/api/providers`, and persists it into the provider's own TOML so the
 /// opt-in survives a daemon restart.
