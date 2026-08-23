@@ -720,8 +720,13 @@ async fn context_window_override_flips_effective_value_on_every_model_surface() 
 
     // GET the override back — the field round-trips through
     // `model_overrides.json`, which is what makes it editable at any time.
-    let (status, stored) =
-        json_request(&h, Method::GET, &format!("/api/models/overrides/{key}"), None).await;
+    let (status, stored) = json_request(
+        &h,
+        Method::GET,
+        &format!("/api/models/overrides/{key}"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stored["context_window"].as_u64(), Some(corrected_window));
 
@@ -730,7 +735,10 @@ async fn context_window_override_flips_effective_value_on_every_model_surface() 
         json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(detail["context_window"].as_u64(), Some(corrected_window));
-    assert_eq!(detail["max_output_tokens"].as_u64(), Some(corrected_max_out));
+    assert_eq!(
+        detail["max_output_tokens"].as_u64(),
+        Some(corrected_max_out)
+    );
     assert_eq!(
         detail["limits_catalog"]["context_window"].as_u64(),
         Some(catalog_window),
@@ -765,7 +773,10 @@ async fn context_window_override_flips_effective_value_on_every_model_surface() 
         .iter()
         .find(|m| m["id"].as_str() == Some(model_id))
         .expect("gpt-4o-mini should be in /api/providers/openai");
-    assert_eq!(prov_entry["context_window"].as_u64(), Some(corrected_window));
+    assert_eq!(
+        prov_entry["context_window"].as_u64(),
+        Some(corrected_window)
+    );
     assert_eq!(
         prov_entry["limits_catalog"]["context_window"].as_u64(),
         Some(catalog_window)
