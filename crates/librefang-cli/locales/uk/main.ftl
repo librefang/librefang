@@ -625,6 +625,8 @@ agent-new-template-not-found-fix = Запустіть `librefang agent new`, щ�
 agent-new-choose-template-prompt =   Оберіть темплейт [1]: 
 agent-sessions-none-active = Немає активних сесій.
 agent-sessions-none-found = Сесій не знайдено.
+message-invalid-session-id = Некоректний UUID сесії: { $value }
+message-invalid-session-id-fix = Передайте UUID наявної сесії цього агента або не вказуйте --session-id, щоб використати його канонічну сесію. Перелік доступний через `librefang sessions <agent>`.
 
 label-source = Джерело
 label-name = Ім'я

@@ -612,6 +612,8 @@ agent-new-template-not-found-fix = Run `librefang agent new` to see available te
 agent-new-choose-template-prompt =   Choose template [1]: 
 agent-sessions-none-active = No active sessions.
 agent-sessions-none-found = No sessions found.
+message-invalid-session-id = Not a valid session UUID: { $value }
+message-invalid-session-id-fix = Pass the UUID of an existing session for this agent, or omit --session-id to use its canonical session. `librefang sessions <agent>` lists them.
 
 label-source = Source
 label-name = Name

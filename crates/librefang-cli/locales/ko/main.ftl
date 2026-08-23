@@ -612,6 +612,8 @@ agent-new-template-not-found-fix = 사용 가능한 템플릿을 보려면 `libr
 agent-new-choose-template-prompt =   템플릿을 선택하십시오 [1]: 
 agent-sessions-none-active = 활성 세션이 없습니다.
 agent-sessions-none-found = 세션을 찾을 수 없습니다.
+message-invalid-session-id = 유효한 세션 UUID가 아닙니다: { $value }
+message-invalid-session-id-fix = 이 에이전트의 기존 세션 UUID를 전달하거나, --session-id를 생략하여 표준 세션을 사용하십시오. `librefang sessions <agent>`로 목록을 확인할 수 있습니다.
 
 label-source = 소스
 label-name = 이름
