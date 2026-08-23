@@ -1168,12 +1168,10 @@ fn single_line(text: &str) -> String {
 
 /// Truncate on a character boundary at [`PREVIEW_MAX_CHARS`], marking the cut.
 fn truncate_preview(text: &str) -> String {
-    let mut seen = 0usize;
-    for (index, _) in text.char_indices() {
+    for (seen, (index, _)) in text.char_indices().enumerate() {
         if seen == PREVIEW_MAX_CHARS {
             return format!("{}…", &text[..index]);
         }
-        seen += 1;
     }
     text.to_string()
 }
