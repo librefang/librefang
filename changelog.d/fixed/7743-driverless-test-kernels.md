@@ -3,4 +3,4 @@
   That premise held on a CI runner and failed on the laptop of anyone who develops LibreFang with Claude Code or an `OPENAI_API_KEY` exported, where the same tests instead spawned the real CLI against the checkout or hit the provider API for real.
   Pinning a deliberately nonexistent provider name did not help: boot classifies an unknown provider as a misconfiguration to recover from and falls through to the very same host probe, rewriting the live config to whatever it detected.
   `default_model.provider = "none"` now states the absence of a driver outright, and boot honours it by installing the stub driver directly — no provider construction, no credential-helper subprocess, no fallback slot, no auto-detection — with per-turn resolution short-circuiting to the same stub.
-  (#PR) (@houko)
+  (#7813) (@houko)
