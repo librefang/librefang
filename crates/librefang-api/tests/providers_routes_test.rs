@@ -179,6 +179,59 @@ async fn list_models_filters_by_unknown_provider_yields_empty() {
     assert_eq!(body["models"].as_array().unwrap().len(), 0);
 }
 
+/// Regression #7780, end to end through `GET /api/models`.
+///
+/// A model discovered behind an OpenAI-compatible gateway used to enter the catalog with `context_window: 131_072` regardless of what the gateway said, so the route served a fabricated number that neither an operator nor the budget math behind `resolve_context_window` could tell from a measured one.
+/// This asserts both halves of the fix on the wire: a reported capacity survives to the response, and an unreported one is served as the catalog's `unknown` encoding with `limits_known: false` rather than as the old literal.
+#[tokio::test(flavor = "multi_thread")]
+async fn list_models_serves_probed_capacity_and_never_the_hardcoded_literal() {
+    let h = boot();
+    h._state.kernel.model_catalog_update(&mut |catalog| {
+        catalog.merge_discovered_models(
+            "openai",
+            &[
+                // LiteLLM in front of a build that answers /model/info.
+                librefang_kernel::provider_health::DiscoveredModelInfo {
+                    context_window: Some(8_192),
+                    max_output_tokens: Some(2_048),
+                    ..librefang_kernel::provider_health::DiscoveredModelInfo::bare(
+                        "gw-reports-capacity",
+                    )
+                },
+                // The reproduction from the issue: the bare OpenAI shape, which carries `id` / `object` / `created` / `owned_by` and nothing else.
+                librefang_kernel::provider_health::DiscoveredModelInfo::bare("gw-reports-nothing"),
+            ],
+        );
+    });
+
+    let (status, body) = json_request(&h, Method::GET, "/api/models?provider=openai", None).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let rows = body["models"].as_array().expect("models array");
+    let by_id = |id: &str| {
+        rows.iter()
+            .find(|m| m["id"].as_str() == Some(id))
+            .unwrap_or_else(|| panic!("{id} missing from {body}"))
+    };
+
+    let reported = by_id("gw-reports-capacity");
+    assert_eq!(reported["context_window"], 8_192);
+    assert_eq!(reported["max_output_tokens"], 2_048);
+    assert_eq!(reported["limits_known"], true);
+
+    let silent = by_id("gw-reports-nothing");
+    assert_ne!(
+        silent["context_window"], 131_072,
+        "the fabricated literal must not reach any surface: {silent}"
+    );
+    assert_eq!(silent["context_window"], 0);
+    assert_eq!(silent["max_output_tokens"], 0);
+    assert_eq!(
+        silent["limits_known"], false,
+        "the route must say the numbers have no source, so a reader can tell \
+         `unknown` apart from an image model's `not applicable`"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/models/{id}
 // ---------------------------------------------------------------------------
@@ -1468,6 +1521,7 @@ fn boot_with_provider(provider: ProviderInfo) -> Harness {
         input_cost_per_m: 0.0,
         output_cost_per_m: 0.0,
         pricing_known: true,
+        limits_known: true,
         image_input_cost_per_m: None,
         image_output_cost_per_m: None,
         supports_tools: false,

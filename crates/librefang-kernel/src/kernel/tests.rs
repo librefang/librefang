@@ -15146,3 +15146,293 @@ mod provider_budget_gate_5980 {
         kernel.shutdown();
     }
 }
+
+// ---------------------------------------------------------------------------
+// #7808 — semantic-memory tool gating in `available_tools`.
+//
+// The `memory_semantic_*` tools reach the embedding-backed `memories` table:
+// cross-session, PII-bearing content the three KV tools never touch. The
+// common `capabilities.tools = ["memory_*"]` declaration glob-matches the new
+// names, so `capabilities.tools` alone cannot express "KV yes, semantic no" —
+// which is why the declared `memory_read` / `memory_write` scopes gate them a
+// second time. These tests pin every arm of that gate through the real kernel
+// path (`boot_with_config` -> `spawn_agent` -> `available_tools`), not an
+// inline mirror of the predicate.
+// ---------------------------------------------------------------------------
+
+/// All four semantic tool names, so a rename cannot silently drop one from the
+/// gate's coverage.
+const SEMANTIC_MEMORY_TOOLS: &[&str] = &[
+    "memory_semantic_search",
+    "memory_semantic_stats",
+    "memory_semantic_add",
+    "memory_semantic_forget",
+];
+
+fn boot_gate_kernel(slug: &str) -> (LibreFangKernel, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join(slug);
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+    (kernel, tmp)
+}
+
+fn gate_manifest(name: &str, caps: ManifestCapabilities) -> AgentManifest {
+    AgentManifest {
+        name: name.to_string(),
+        description: "semantic memory gate test agent".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        capabilities: caps,
+        ..Default::default()
+    }
+}
+
+fn tool_names(kernel: &LibreFangKernel, manifest: AgentManifest) -> Vec<String> {
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    kernel
+        .available_tools(agent_id)
+        .iter()
+        .map(|t| t.name.clone())
+        .collect()
+}
+
+#[test]
+fn semantic_memory_tools_available_when_memory_scopes_are_undeclared() {
+    // The default manifest declares no memory scopes at all. Empty means
+    // "undeclared", which stays open — the same reading `capabilities.tools`
+    // already has, and the one that keeps the feature reachable out of the box.
+    let (kernel, _tmp) = boot_gate_kernel("gate-undeclared");
+    let names = tool_names(
+        &kernel,
+        gate_manifest("gate-undeclared-agent", ManifestCapabilities::default()),
+    );
+    for tool in SEMANTIC_MEMORY_TOOLS {
+        assert!(
+            names.contains(&tool.to_string()),
+            "{tool} must be available to an agent with no declared memory scopes; got {names:?}"
+        );
+    }
+    kernel.shutdown();
+}
+
+#[test]
+fn semantic_memory_tools_available_with_wildcard_memory_scopes() {
+    let (kernel, _tmp) = boot_gate_kernel("gate-wildcard");
+    let names = tool_names(
+        &kernel,
+        gate_manifest(
+            "gate-wildcard-agent",
+            ManifestCapabilities {
+                tools: vec!["memory_*".to_string()],
+                memory_read: vec!["*".to_string()],
+                memory_write: vec!["*".to_string()],
+                ..Default::default()
+            },
+        ),
+    );
+    for tool in SEMANTIC_MEMORY_TOOLS {
+        assert!(
+            names.contains(&tool.to_string()),
+            "{tool} must be available with wildcard memory scopes; got {names:?}"
+        );
+    }
+    kernel.shutdown();
+}
+
+#[test]
+fn semantic_memory_tools_are_withheld_when_scopes_cover_only_kv() {
+    // The regression this gate exists for: `capabilities.tools = ["memory_*"]`
+    // glob-matches the semantic names, so without the scope gate an operator
+    // who granted key/value memory would silently acquire read AND write access
+    // to the semantic store as well.
+    let (kernel, _tmp) = boot_gate_kernel("gate-kv-only");
+    let names = tool_names(
+        &kernel,
+        gate_manifest(
+            "gate-kv-only-agent",
+            ManifestCapabilities {
+                tools: vec!["memory_*".to_string()],
+                memory_read: vec!["kv:*".to_string()],
+                memory_write: vec!["kv:*".to_string()],
+                ..Default::default()
+            },
+        ),
+    );
+    for tool in SEMANTIC_MEMORY_TOOLS {
+        assert!(
+            !names.contains(&tool.to_string()),
+            "{tool} must NOT be available when memory scopes cover only kv:*; got {names:?}"
+        );
+    }
+    // The KV tools the declaration actually asked for must still be there —
+    // the gate must not take the whole `memory_*` family down with it.
+    for tool in ["memory_store", "memory_recall", "memory_list"] {
+        assert!(
+            names.contains(&tool.to_string()),
+            "{tool} must still be available; got {names:?}"
+        );
+    }
+    kernel.shutdown();
+}
+
+#[test]
+fn semantic_memory_read_and_write_halves_are_gated_independently() {
+    // A read-only grant on the semantic store must yield search + stats and
+    // withhold add + forget. Getting this wrong in either direction is the
+    // failure mode worth pinning: a read grant that leaks writes lets an agent
+    // rewrite memory it was only meant to inspect, and a write grant that
+    // withholds reads leaves it unable to see what it just wrote.
+    let (kernel, _tmp) = boot_gate_kernel("gate-read-only");
+    let names = tool_names(
+        &kernel,
+        gate_manifest(
+            "gate-read-only-agent",
+            ManifestCapabilities {
+                tools: vec!["memory_*".to_string()],
+                memory_read: vec!["proactive".to_string()],
+                memory_write: vec!["kv:*".to_string()],
+                ..Default::default()
+            },
+        ),
+    );
+    for tool in ["memory_semantic_search", "memory_semantic_stats"] {
+        assert!(
+            names.contains(&tool.to_string()),
+            "{tool} is a read and must be granted by memory_read; got {names:?}"
+        );
+    }
+    for tool in ["memory_semantic_add", "memory_semantic_forget"] {
+        assert!(
+            !names.contains(&tool.to_string()),
+            "{tool} mutates memory and must need memory_write, not memory_read; got {names:?}"
+        );
+    }
+    kernel.shutdown();
+}
+
+#[test]
+fn explicitly_named_semantic_tool_overrides_the_scope_gate() {
+    // An operator naming the tool outright in `capabilities.tools` is a
+    // positive grant, and the gate must not second-guess it — the same
+    // precedence the evolve gate gives an explicit declaration. Only the tool
+    // actually named is admitted; its siblings stay gated.
+    let (kernel, _tmp) = boot_gate_kernel("gate-explicit");
+    let names = tool_names(
+        &kernel,
+        gate_manifest(
+            "gate-explicit-agent",
+            ManifestCapabilities {
+                tools: vec!["memory_semantic_search".to_string()],
+                memory_read: vec!["kv:*".to_string()],
+                memory_write: vec!["kv:*".to_string()],
+                ..Default::default()
+            },
+        ),
+    );
+    assert!(
+        names.contains(&"memory_semantic_search".to_string()),
+        "an explicitly declared tool must survive the scope gate; got {names:?}"
+    );
+    assert!(
+        !names.contains(&"memory_semantic_stats".to_string()),
+        "a sibling that was not declared must stay gated; got {names:?}"
+    );
+    kernel.shutdown();
+}
+
+#[test]
+fn scope_covers_own_memory_accepts_profile_implied_scopes() {
+    // Every non-memory `ToolProfile` implies `memory_write = ["self.*"]`. That
+    // means "this agent may write its own memory", not "this agent is barred
+    // from the semantic store", so matching it literally against the
+    // `proactive` namespace string would strip the write tools from every
+    // profile-based agent.
+    assert!(LibreFangKernel::scope_covers_own_memory("*"));
+    assert!(LibreFangKernel::scope_covers_own_memory("self.*"));
+    assert!(LibreFangKernel::scope_covers_own_memory("proactive"));
+    assert!(!LibreFangKernel::scope_covers_own_memory("kv:*"));
+    assert!(!LibreFangKernel::scope_covers_own_memory("wiki"));
+}
+
+#[test]
+fn semantic_memory_tool_access_classifies_every_semantic_tool() {
+    use crate::SemanticMemoryAccess;
+    assert_eq!(
+        LibreFangKernel::semantic_memory_tool_access("memory_semantic_search"),
+        Some(SemanticMemoryAccess::Read)
+    );
+    assert_eq!(
+        LibreFangKernel::semantic_memory_tool_access("memory_semantic_stats"),
+        Some(SemanticMemoryAccess::Read)
+    );
+    assert_eq!(
+        LibreFangKernel::semantic_memory_tool_access("memory_semantic_add"),
+        Some(SemanticMemoryAccess::Write)
+    );
+    assert_eq!(
+        LibreFangKernel::semantic_memory_tool_access("memory_semantic_forget"),
+        Some(SemanticMemoryAccess::Write)
+    );
+    // The KV tools are NOT semantic and must never be caught by the gate.
+    for kv in ["memory_store", "memory_recall", "memory_list"] {
+        assert_eq!(
+            LibreFangKernel::semantic_memory_tool_access(kv),
+            None,
+            "{kv} must not be classified as a semantic-memory tool"
+        );
+    }
+    // Every semantic tool in the builtin list must be classified, or the gate
+    // silently stops covering a tool someone added later.
+    for def in librefang_runtime::tool_runner::builtin_tool_definitions() {
+        if def.name.starts_with("memory_semantic_") {
+            assert!(
+                LibreFangKernel::semantic_memory_tool_access(&def.name).is_some(),
+                "{} is declared but unclassified — the gate would let it through ungated",
+                def.name
+            );
+        }
+    }
+}
+
+#[test]
+fn semantic_memory_tools_are_stripped_when_the_subsystem_is_disabled() {
+    // With `[proactive_memory] enabled = false` the store is never built, so
+    // these tools could only ever answer `Unavailable`. Advertising them would
+    // spend prompt tokens on four dead schemas and invite the model to plan
+    // around a capability it does not have.
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("gate-subsystem-off");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        proactive_memory: librefang_types::memory::ProactiveMemoryConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+    let names = tool_names(
+        &kernel,
+        gate_manifest("gate-subsystem-off-agent", ManifestCapabilities::default()),
+    );
+    for tool in SEMANTIC_MEMORY_TOOLS {
+        assert!(
+            !names.contains(&tool.to_string()),
+            "{tool} must not be advertised when [proactive_memory] is off; got {names:?}"
+        );
+    }
+    // The KV tools do not depend on the proactive subsystem and must survive.
+    assert!(
+        names.contains(&"memory_store".to_string()),
+        "memory_store is key/value and must be unaffected; got {names:?}"
+    );
+    kernel.shutdown();
+}

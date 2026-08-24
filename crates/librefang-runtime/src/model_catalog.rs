@@ -1438,6 +1438,17 @@ impl ModelCatalog {
     /// capabilities (vision via the "clip" family, embeddings, thinking models).
     /// Falls back to conservative defaults when metadata is absent.
     /// Also updates the provider's `model_count`.
+    ///
+    /// # Token limits
+    ///
+    /// Capacity comes from the probe and is never guessed (#7780).
+    /// Until this method stopped hardcoding `context_window: 131_072` / `max_output_tokens: 16_384`, a model behind an OpenAI-compatible gateway entered the catalog with a fabricated ceiling that every surface then presented as discovered fact, and that `manifest_helpers::resolve_context_window` accepted as a real value because its only test is `> 0`.
+    /// The agent loop built that turn's `ContextBudget` from it, so an 8K model reached through a gateway got a 131K budget: compaction never fired, the prompt was packed past what the provider accepts, and the request failed *after* the input tokens were billed.
+    /// The opposite error is just as silent — a 1M model clamped to 131K compacts away prompt content nobody asked to drop.
+    ///
+    /// So an entry gets numbers only when the endpoint supplied them.
+    /// When it did not, both fields stay `0` and `limits_known` is `false`, and the `> 0` guards already present throughout the budget math fall through to `UNKNOWN_MODEL_CONTEXT_WINDOW` — whose warning names `agent.toml: model.context_window` as the operator's fix.
+    /// A conservative window with a loud warning is recoverable; an invented one is not visible from either end.
     pub fn merge_discovered_models(
         &mut self,
         provider: &str,
@@ -1479,6 +1490,9 @@ impl ModelCatalog {
                     info.families.as_deref(),
                     &info.capabilities,
                 );
+            let reported_context = info.context_window.filter(|v| *v > 0);
+            let reported_max_output = info.max_output_tokens.filter(|v| *v > 0);
+            let limits_known = reported_context.is_some() || reported_max_output.is_some();
             // Upgrade the previously-discovered Local entry in place when the
             // current probe reports stronger capabilities. We never downgrade:
             // a transient probe that drops the `capabilities` array (e.g. an
@@ -1498,16 +1512,31 @@ impl ModelCatalog {
                         entry.supports_streaming = true;
                     }
                 }
+                // Capacity follows the same never-downgrade rule as the capability flags, for the same reason: a probe that drops the capacity keys (an older proxy in front of an upgraded gateway) must not erase a number an earlier probe did report.
+                // Only what is still unknown gets filled in.
+                // Assigning `unwrap_or(0)` back onto a field that is already `0` is a no-op, which keeps this to one branch per field instead of a nested `if let`.
+                if entry.context_window == 0 {
+                    entry.context_window = reported_context.unwrap_or(0);
+                }
+                if entry.max_output_tokens == 0 {
+                    entry.max_output_tokens = reported_max_output.unwrap_or(0);
+                }
+                if limits_known {
+                    entry.limits_known = true;
+                }
                 continue;
             }
             let display = format!("{} ({})", info.name, provider);
+            // `0` is the catalog's documented "unknown" encoding for both fields, and `limits_known` records *why* it is zero — so a surface can tell "this model has no token context" (image / audio) apart from "nobody told us this model's context".
+            // See the `# Token limits` section above.
             self.models.push(ModelCatalogEntry {
                 id: info.name.clone(),
                 display_name: display,
                 provider: provider.to_string(),
                 tier: ModelTier::Local,
-                context_window: 131_072,
-                max_output_tokens: 16_384,
+                context_window: reported_context.unwrap_or(0),
+                max_output_tokens: reported_max_output.unwrap_or(0),
+                limits_known,
                 input_cost_per_m: 0.0,
                 output_cost_per_m: 0.0,
                 supports_tools,

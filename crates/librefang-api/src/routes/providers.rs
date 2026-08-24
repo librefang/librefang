@@ -244,6 +244,8 @@ fn synthesized_cli_model_row(
         "input_cost_per_m": 0.0,
         "output_cost_per_m": 0.0,
         "pricing_known": true,
+        // The zeroes above are unknown, not inapplicable — this row is built from a CLI config file that states no capacity at all.
+        "limits_known": false,
         // Text CLI models have no per-image pricing, but emit the keys (null) so
         // the row's shape matches every catalog row in the same response.
         "image_input_cost_per_m": serde_json::Value::Null,
@@ -413,6 +415,7 @@ pub async fn list_models(
                 "input_cost_per_m": m.input_cost_per_m,
                 "output_cost_per_m": m.output_cost_per_m,
                 "pricing_known": m.pricing_known,
+                "limits_known": m.limits_known,
                 "image_input_cost_per_m": m.image_input_cost_per_m,
                 "image_output_cost_per_m": m.image_output_cost_per_m,
                 "supports_tools": eff.supports_tools,
@@ -645,6 +648,7 @@ pub async fn get_model(
                     "input_cost_per_m": m.input_cost_per_m,
                     "output_cost_per_m": m.output_cost_per_m,
                     "pricing_known": m.pricing_known,
+                    "limits_known": m.limits_known,
                     "image_input_cost_per_m": m.image_input_cost_per_m,
                     "image_output_cost_per_m": m.image_output_cost_per_m,
                     "supports_tools": eff.supports_tools,
@@ -815,17 +819,7 @@ fn merge_probe_into_catalog(
             probe
                 .discovered_models
                 .iter()
-                .map(
-                    |name| librefang_kernel::provider_health::DiscoveredModelInfo {
-                        name: name.clone(),
-                        parameter_size: None,
-                        quantization_level: None,
-                        family: None,
-                        families: None,
-                        size: None,
-                        capabilities: vec![],
-                    },
-                )
+                .map(librefang_kernel::provider_health::DiscoveredModelInfo::bare)
                 .collect()
         } else {
             probe.discovered_model_info.clone()
@@ -1274,6 +1268,7 @@ pub async fn get_provider(
                             "input_cost_per_m": m.input_cost_per_m,
                             "output_cost_per_m": m.output_cost_per_m,
                             "pricing_known": m.pricing_known,
+                            "limits_known": m.limits_known,
                             "image_input_cost_per_m": m.image_input_cost_per_m,
                             "image_output_cost_per_m": m.image_output_cost_per_m,
                             "supports_tools": eff.supports_tools,
@@ -1404,6 +1399,8 @@ pub async fn add_custom_model(
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
         pricing_known: true,
+        // A custom model is a hand-entered declaration: the operator states the limits, and `validate()` below rejects a text entry that omits them.
+        limits_known: true,
         image_input_cost_per_m: body.get("image_input_cost_per_m").and_then(|v| v.as_f64()),
         image_output_cost_per_m: body.get("image_output_cost_per_m").and_then(|v| v.as_f64()),
         supports_tools: body
@@ -2657,15 +2654,7 @@ pub async fn set_provider_url(
                 probe
                     .discovered_models
                     .iter()
-                    .map(|n| librefang_kernel::provider_health::DiscoveredModelInfo {
-                        name: n.clone(),
-                        parameter_size: None,
-                        quantization_level: None,
-                        family: None,
-                        families: None,
-                        size: None,
-                        capabilities: vec![],
-                    })
+                    .map(librefang_kernel::provider_health::DiscoveredModelInfo::bare)
                     .collect()
             } else {
                 probe.discovered_model_info.clone()

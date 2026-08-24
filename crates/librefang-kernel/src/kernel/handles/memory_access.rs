@@ -3,6 +3,11 @@
 //! publish a `MemoryUpdate` event so triggers can fan out without polling.
 
 use librefang_types::agent::AgentId;
+use std::collections::BTreeMap;
+
+use async_trait::async_trait;
+use librefang_memory::namespace_acl::MemoryNamespaceGuard;
+use librefang_types::user_policy::UserMemoryAccess;
 
 use librefang_runtime::kernel_handle;
 use librefang_types::event::*;
@@ -73,6 +78,48 @@ fn reject_empty_key(key: &str) -> Result<(), kernel_handle::KernelOpError> {
     Ok(())
 }
 
+/// The memory-ACL namespace every semantic-memory call is gated on. Matches the
+/// string the REST layer and the proactive-recall path already use, so one
+/// `[[users]] memory_access` block governs the agent tools and the dashboard
+/// identically.
+const PROACTIVE_NAMESPACE: &str = "proactive";
+
+/// Reject an empty / non-UUID caller agent id before it reaches the store.
+///
+/// Unlike the KV methods, semantic memory has no shared fallback namespace:
+/// `ProactiveMemoryStore` parses `user_id` as an `AgentId`, so an unattributed
+/// call has no meaningful scope and must fail rather than silently read or
+/// write somebody else's memories.
+fn require_agent_uuid(agent_id: &str) -> Result<AgentId, kernel_handle::KernelOpError> {
+    use kernel_handle::KernelOpError;
+    if agent_id.is_empty() {
+        return Err(KernelOpError::InvalidInput(
+            "agent_id must be a valid UUID string, got empty string".into(),
+        ));
+    }
+    uuid::Uuid::parse_str(agent_id)
+        .map(AgentId)
+        .map_err(|e| KernelOpError::InvalidInput(format!("invalid agent_id '{agent_id}': {e}")))
+}
+
+/// Grant-everything ACL used when RBAC resolves to no policy.
+///
+/// `memory_acl_for_sender` returns `None` when `[[users]]` is unconfigured or
+/// the sender could not be attributed. The KV tools treat that as "no per-user
+/// restriction" (`enforce_memory_acl` returns `Ok(())`), and the semantic tools
+/// must agree, or turning RBAC off would *tighten* memory access instead of
+/// loosening it.
+fn unrestricted_acl() -> UserMemoryAccess {
+    UserMemoryAccess {
+        readable_namespaces: vec!["*".into()],
+        writable_namespaces: vec!["*".into()],
+        pii_access: true,
+        export_allowed: true,
+        delete_allowed: true,
+    }
+}
+
+#[async_trait]
 impl kernel_handle::MemoryAccess for LibreFangKernel {
     fn memory_store(
         &self,
@@ -248,6 +295,109 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Semantic (vector) memory (#7808)
+    // ------------------------------------------------------------------
+
+    async fn memory_semantic_search(
+        &self,
+        query: &str,
+        agent_id: &str,
+        limit: usize,
+        min_confidence: Option<f32>,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<Vec<librefang_types::memory::MemoryItem>, kernel_handle::KernelOpError> {
+        let agent = require_agent_uuid(agent_id)?;
+        let store = self.require_proactive_store()?;
+        let guard = self.semantic_memory_guard(sender_id, channel);
+        let items = store
+            .search_with_guard(query, &agent.to_string(), limit, &guard)
+            .await?;
+        Ok(match min_confidence {
+            // A fragment with no stored confidence predates confidence
+            // tracking; keep it rather than silently deleting history from the
+            // caller's view when a floor is requested.
+            Some(floor) => items
+                .into_iter()
+                .filter(|i| i.confidence.is_none_or(|c| c >= floor))
+                .collect(),
+            None => items,
+        })
+    }
+
+    async fn memory_semantic_add(
+        &self,
+        content: &str,
+        agent_id: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<Vec<librefang_types::memory::MemoryItem>, kernel_handle::KernelOpError> {
+        let agent = require_agent_uuid(agent_id)?;
+        let store = self.require_proactive_store()?;
+        let guard = self.semantic_memory_guard(sender_id, channel);
+        // Shaped as one user-role message so the extractor sees the same input
+        // shape `POST /api/memory` feeds it.
+        let messages = vec![serde_json::json!({ "role": "user", "content": content })];
+        store
+            .add_with_guard(&messages, &agent.to_string(), &guard)
+            .await
+    }
+
+    async fn memory_semantic_forget(
+        &self,
+        memory_id: &str,
+        agent_id: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<bool, kernel_handle::KernelOpError> {
+        let agent = require_agent_uuid(agent_id)?;
+        let store = self.require_proactive_store()?;
+        let guard = self.semantic_memory_guard(sender_id, channel);
+        store
+            .delete_with_guard(memory_id, &agent.to_string(), &guard)
+            .await
+    }
+
+    async fn memory_semantic_stats(
+        &self,
+        agent_id: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<serde_json::Value, kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
+        let agent = require_agent_uuid(agent_id)?;
+        let store = self.require_proactive_store()?;
+        let guard = self.semantic_memory_guard(sender_id, channel);
+        // `stats` has no `_with_guard` wrapper in `librefang-memory` because no
+        // caller needed one before; counts are still a read of the `proactive`
+        // namespace, so gate it here rather than leaving the one unguarded
+        // semantic read on the trait.
+        if let librefang_memory::namespace_acl::NamespaceGate::Deny(reason) =
+            guard.check_read(PROACTIVE_NAMESPACE)
+        {
+            return Err(KernelOpError::AuthDenied(reason));
+        }
+        let stats = store.stats(&agent.to_string()).await?;
+        // #3298: `MemoryStats::categories` is a `HashMap`, so its iteration
+        // order varies per process. Re-key through a `BTreeMap` so the rendered
+        // tool result is byte-identical run to run — this result lands in the
+        // message history and a reordered one invalidates the provider prompt
+        // cache for every later turn in the conversation.
+        let categories: BTreeMap<&String, &usize> = stats.categories.iter().collect();
+        Ok(serde_json::json!({
+            "total": stats.total,
+            "user_count": stats.user_count,
+            "session_count": stats.session_count,
+            "agent_count": stats.agent_count,
+            "categories": categories,
+            "enabled": stats.enabled,
+            "auto_memorize_enabled": stats.auto_memorize_enabled,
+            "auto_retrieve_enabled": stats.auto_retrieve_enabled,
+            "llm_extraction": stats.llm_extraction,
+        }))
+    }
+
     fn memory_acl_for_sender(
         &self,
         sender_id: Option<&str>,
@@ -258,5 +408,42 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         }
         let user_id = self.security.auth.resolve_user(sender_id, channel)?;
         self.security.auth.memory_acl_for(user_id)
+    }
+}
+
+impl LibreFangKernel {
+    /// Borrow the proactive-memory store, or report it as unavailable.
+    ///
+    /// The store is a `OnceLock` filled during boot only when
+    /// `[proactive_memory] enabled = true`, so "semantic memory is switched
+    /// off" has to surface as `Unavailable` (503-shaped) rather than as an
+    /// empty result set — an agent told "no memories found" would conclude the
+    /// store is empty and stop asking.
+    fn require_proactive_store(
+        &self,
+    ) -> Result<&std::sync::Arc<librefang_memory::ProactiveMemoryStore>, kernel_handle::KernelOpError>
+    {
+        use crate::MemorySubsystemApi;
+        self.proactive_store().ok_or_else(|| {
+            kernel_handle::KernelOpError::unavailable(
+                "semantic memory (enable [proactive_memory] in config.toml)",
+            )
+        })
+    }
+
+    /// Resolve the per-user memory ACL for a sender into a namespace guard.
+    ///
+    /// Falls back to [`unrestricted_acl`] when RBAC is off or the sender is
+    /// unattributed, matching the KV tools' `enforce_memory_acl` contract.
+    fn semantic_memory_guard(
+        &self,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> MemoryNamespaceGuard {
+        use kernel_handle::MemoryAccess;
+        MemoryNamespaceGuard::new(
+            self.memory_acl_for_sender(sender_id, channel)
+                .unwrap_or_else(unrestricted_acl),
+        )
     }
 }

@@ -54,6 +54,7 @@ pub fn test_catalog_baseline() -> CatalogSeed {
         input_cost_per_m: 0.15,
         output_cost_per_m: 0.6,
         pricing_known: true,
+        limits_known: true,
         image_input_cost_per_m: None,
         image_output_cost_per_m: None,
         supports_tools: true,
