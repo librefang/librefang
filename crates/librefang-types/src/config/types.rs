@@ -6820,10 +6820,28 @@ fn librefang_home_dir() -> PathBuf {
         .join(".librefang")
 }
 
+/// Sentinel [`DefaultModelConfig::provider`] value meaning "this kernel has no LLM driver, and boot must not go looking for one".
+///
+/// It is the exact opposite of `"auto"`, which instructs boot to probe the machine it happens to be running on — provider API-key env vars, a reachable local Ollama, a logged-in coding-agent CLI on `PATH` — and adopt whatever it finds.
+/// It is also distinct from an unrecognised provider name: an unrecognised name is a *misconfiguration*, so boot treats the failed driver construction as something to recover from and falls back to that same host probe.
+/// That recovery path is why a test which pinned a deliberately nonexistent provider still ended up spawning the real Anthropic `claude` CLI on a contributor's laptop (#7743).
+///
+/// Boot honours the sentinel by installing the non-functional stub driver directly: no `create_driver` call, no provider env-var read, no credential-helper subprocess, no fallback slot, and no auto-detection.
+/// Per-turn driver resolution short-circuits to the same stub, so every agent turn fails with a deterministic "no LLM provider configured" error no matter what the host machine has installed.
+///
+/// Its intended use is a test kernel whose subject is anything other than an LLM call.
+/// Reach for it through [`DefaultModelConfig::driverless`] rather than writing the literal.
+pub const NO_LLM_PROVIDER: &str = "none";
+
 /// Default LLM model configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DefaultModelConfig {
+    // `provider` intentionally carries no rustdoc beyond the line below: this struct
+    // derives `schemars::JsonSchema`, field docs become `description` entries in the
+    // generated `KernelConfig` schema, and that schema is pinned byte-for-byte by
+    // `librefang-api/tests/config_schema_golden.rs`. The `"auto"` / `NO_LLM_PROVIDER`
+    // contract is documented on `NO_LLM_PROVIDER` and `DefaultModelConfig::driverless`.
     /// Provider name (e.g., "anthropic", "openai").
     pub provider: String,
     /// Model identifier.
@@ -6854,6 +6872,26 @@ pub struct DefaultModelConfig {
 
 fn default_message_timeout_secs() -> u64 {
     300
+}
+
+impl DefaultModelConfig {
+    /// An explicitly driverless default model: no LLM driver is resolved, and boot performs no host probing to find one.
+    ///
+    /// Prefer this over [`Default`] in any test that does not exercise an LLM call.
+    /// `Default` sets `provider = "auto"`, which makes boot interrogate the machine the test runs on, so a test built on `KernelConfig::default()` is only *accidentally* driverless — green on a CI runner with no credentials, and wired to a live billable provider on the laptop of anyone who develops with a coding-agent CLI installed (#7743).
+    pub fn driverless() -> Self {
+        Self {
+            provider: NO_LLM_PROVIDER.to_string(),
+            ..Self::default()
+        }
+    }
+
+    /// Whether this configuration explicitly declares that no LLM driver is to be resolved.
+    ///
+    /// See [`NO_LLM_PROVIDER`] for what boot and per-turn driver resolution owe this answer.
+    pub fn is_driverless(&self) -> bool {
+        self.provider == NO_LLM_PROVIDER
+    }
 }
 
 impl Default for DefaultModelConfig {

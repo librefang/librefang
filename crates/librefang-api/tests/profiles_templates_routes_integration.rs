@@ -244,6 +244,104 @@ async fn templates_list_includes_seeded_template() {
     remove_template(unique);
 }
 
+/// The TUI templates screen renders provider/model per row and gates spawning on whether that provider is configured.
+/// Before #7760 it rendered a compiled-in list instead of calling this route at all; now that it does, the listing has to carry what each template actually declares rather than leaving the client to assume a default.
+#[tokio::test(flavor = "multi_thread")]
+async fn templates_list_carries_provider_and_model_from_the_manifest() {
+    let _g = templates_lock().lock().await;
+    let _ = templates_root();
+
+    let unique = "tmpl_list_provider";
+    write_template(
+        unique,
+        r#"name = "delta"
+version = "0.1.0"
+description = "Delta test template"
+module = "builtin:chat"
+
+[model]
+provider = "anthropic"
+model = "claude-test-9"
+
+[capabilities]
+tools = ["file_read"]
+"#,
+    );
+
+    let h = boot().await;
+    let (status, body) = get_json(&h, "/api/templates").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let row = body["templates"]
+        .as_array()
+        .expect("templates array")
+        .iter()
+        .find(|r| r["name"] == unique)
+        .unwrap_or_else(|| panic!("seeded template missing from list: {body}"))
+        .clone();
+    assert_eq!(row["provider"], "anthropic", "{body}");
+    assert_eq!(row["model"], "claude-test-9", "{body}");
+    assert_eq!(row["description"], "Delta test template", "{body}");
+
+    remove_template(unique);
+}
+
+/// A single unparseable manifest used to fail the whole listing with a 500, so one operator typo blanked every agent type for every client.
+/// It must be skipped instead, leaving the valid entries visible.
+#[tokio::test(flavor = "multi_thread")]
+async fn templates_list_skips_a_malformed_manifest_instead_of_failing() {
+    let _g = templates_lock().lock().await;
+    let _ = templates_root();
+
+    let good = "tmpl_skip_good";
+    let bad = "tmpl_skip_bad";
+    write_template(good, &minimal_manifest_toml("echo", "Echo survives"));
+    write_template(bad, "this is not = = valid toml [[[");
+
+    let h = boot().await;
+    let (status, body) = get_json(&h, "/api/templates").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "one bad manifest must not fail the listing: {body}"
+    );
+    let templates = body["templates"].as_array().expect("templates array");
+    assert!(
+        templates.iter().any(|r| r["name"] == good),
+        "the valid template must still be listed: {body}"
+    );
+    assert!(
+        !templates.iter().any(|r| r["name"] == bad),
+        "the malformed template must be skipped, not rendered: {body}"
+    );
+
+    remove_template(good);
+    remove_template(bad);
+}
+
+/// The listing must not advertise a name that `/templates/{name}` and `/templates/{name}/toml` will reject — a row a client cannot fetch or spawn from is a dead end on the screen.
+#[tokio::test(flavor = "multi_thread")]
+async fn templates_list_omits_names_the_detail_routes_reject() {
+    let _g = templates_lock().lock().await;
+    let _ = templates_root();
+
+    let unusable = "tmpl.dotted.name";
+    write_template(unusable, &minimal_manifest_toml("dotted", "Dotted"));
+
+    let h = boot().await;
+    let (status, body) = get_json(&h, "/api/templates").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !body["templates"]
+            .as_array()
+            .expect("templates array")
+            .iter()
+            .any(|r| r["name"] == unusable),
+        "a name the validator rejects must not be listed: {body}"
+    );
+
+    remove_template(unusable);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn templates_get_known_template_returns_manifest() {
     let _g = templates_lock().lock().await;
