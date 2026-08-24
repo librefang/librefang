@@ -1254,8 +1254,17 @@ class _SystemResource(_Resource):
     def list_agent_templates(self):
         return self._c._request("GET", "/api/templates")
 
+    def create_agent_type(self, **data):
+        return self._c._request("POST", "/api/templates", data)
+
     def get_agent_template(self, name: str):
         return self._c._request("GET", f"/api/templates/{name}")
+
+    def update_agent_type(self, name: str, **data):
+        return self._c._request("PUT", f"/api/templates/{name}", data)
+
+    def delete_agent_type(self, name: str):
+        return self._c._request("DELETE", f"/api/templates/{name}")
 
     def get_agent_template_toml(self, name: str):
         return self._c._request("GET", f"/api/templates/{name}/toml")
