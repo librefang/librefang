@@ -1,14 +1,10 @@
 //! Tool profile + agent template endpoints — extracted from `system.rs` per #3749.
 //!
-//! Mounts `/profiles`, `/profiles/{name}`, `/templates`, `/templates/{name}`,
-//! and `/templates/{name}/toml`. This module is a sibling under `routes::` and
-//! is mounted via `.merge(crate::routes::agent_templates::router())` from
-//! `system::router()`.
+//! Mounts `/profiles`, `/profiles/{name}`, `/templates`, `/templates/{name}`, and `/templates/{name}/toml`.
+//! This module is a sibling under `routes::` and is mounted via `.merge(crate::routes::agent_templates::router())` from `system::router()`.
 //!
-//! `/templates` and `/templates/{name}` also carry the agent-type write verbs (#7740, #7731):
-//! `POST` creates an operator-authored agent type, `PUT` patches one, `DELETE` removes one.
-//! Read the doc comment on [`update_agent_type`] before touching the write path — the patch
-//! semantics there are the whole point of the endpoint, not an implementation detail.
+//! `/templates` and `/templates/{name}` also carry the agent-type write verbs (#7740, #7731): `POST` creates an operator-authored agent type, `PUT` patches one, `DELETE` removes one.
+//! Read the doc comment on [`update_agent_type`] before touching the write path — the patch semantics there are the whole point of the endpoint, not an implementation detail.
 
 use super::AppState;
 use crate::middleware::RequestLanguage;
@@ -181,9 +177,8 @@ mod template_name_validation_tests {
 
 /// Render the three template error strings every read handler might need, and drop the translator.
 ///
-/// `ErrorTranslator` is `!Send`, so holding one across an `.await` makes the enclosing handler fail
-/// axum's `Handler` bound with an error that names neither the translator nor the await. Rendering
-/// eagerly into owned `String`s in a scope that ends before the first await sidesteps that entirely.
+/// `ErrorTranslator` is `!Send`, so holding one across an `.await` makes the enclosing handler fail axum's `Handler` bound with an error that names neither the translator nor the await.
+/// Rendering eagerly into owned `String`s in a scope that ends before the first await sidesteps that entirely.
 fn template_error_messages(lang: &str, name: &str) -> (String, String, String) {
     let t = ErrorTranslator::new(lang);
     (
@@ -615,12 +610,9 @@ enum CreateOutcome {
 
 /// Write a new agent type, refusing to overwrite one that already exists.
 ///
-/// `Path::exists()` followed by a write is check-then-act: two concurrent creates of the same name
-/// both observe "absent" and the second silently replaces the first, which is exactly the 409 this
-/// endpoint promises not to do. Claiming the path with `File::create_new` — an atomic
-/// create-if-absent at the OS level — lets exactly one of them through. The claim is then filled by
-/// the same atomic rename every other write here uses, and removed again if that fails, so a failed
-/// create leaves no empty file behind for the catalog to trip over.
+/// `Path::exists()` followed by a write is check-then-act: two concurrent creates of the same name both observe "absent" and the second silently replaces the first, which is exactly the 409 this endpoint promises not to do.
+/// Claiming the path with `File::create_new` — an atomic create-if-absent at the OS level — lets exactly one of them through.
+/// The claim is then filled by the same atomic rename every other write here uses, and removed again if that fails, so a failed create leaves no empty file behind for the catalog to trip over.
 fn create_agent_type_file(name: &str, manifest: &AgentManifest) -> CreateOutcome {
     let rendered = match toml::to_string_pretty(manifest) {
         Ok(rendered) => rendered,
@@ -706,16 +698,10 @@ pub async fn create_agent_type(
 ///
 /// This is a read-modify-write, and that is load-bearing rather than incidental (#7740).
 /// The flat shape carries seven of `AgentManifest`'s fifty-eight fields.
-/// Rebuilding the document from the request body and writing it over the file — which is what the
-/// endpoint did on the branch this replaces — resets the other fifty-one to their defaults and
-/// answers 200: `[[triggers]]`, `[compaction]`, `max_history_messages`, `mcp_servers`,
-/// `tool_allowlist`, `session_mode`, `[workspaces]`, `channels`, `[exec_policy]` and
-/// `fallback_models` all disappear the first time anyone opens the editor and saves.
+/// Rebuilding the document from the request body and writing it over the file — which is what the endpoint did on the branch this replaces — resets the other fifty-one to their defaults and answers 200: `[[triggers]]`, `[compaction]`, `max_history_messages`, `mcp_servers`, `tool_allowlist`, `session_mode`, `[workspaces]`, `channels`, `[exec_policy]` and `fallback_models` all disappear the first time anyone opens the editor and saves.
 ///
 /// So the stored manifest is parsed first and the body applied over it.
-/// A key the client did not send leaves its field untouched; a key it did send is written through
-/// verbatim, including an empty string, because "the operator cleared this" and "the client did not
-/// mention it" are different instructions and only a typed `Option` can tell them apart.
+/// A key the client did not send leaves its field untouched; a key it did send is written through verbatim, including an empty string, because "the operator cleared this" and "the client did not mention it" are different instructions and only a typed `Option` can tell them apart.
 #[utoipa::path(put, path = "/api/templates/{name}", tag = "system", operation_id = "update_agent_type", params(("name" = String, Path, description = "Agent type name")), request_body = crate::types::JsonObject, responses((status = 200, description = "Agent type updated", body = crate::types::JsonObject), (status = 404, description = "No such agent type"), (status = 409, description = "The name belongs to a live agent, which is edited through /api/agents")))]
 pub async fn update_agent_type(
     Path(name): Path<String>,
