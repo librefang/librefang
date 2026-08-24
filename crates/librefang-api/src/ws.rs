@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
-use url::Url;
+use url::{Host, Url};
 
 // ---------------------------------------------------------------------------
 // Verbose Level
@@ -202,8 +202,17 @@ pub fn ws_bearer_protocol(headers: &HeaderMap) -> Option<String> {
 }
 
 /// Validates the WebSocket `Origin` header against allowed origins.
-/// Returns Ok(()) if: (a) no Origin header (non-browser client), or (b) Origin matches.
-/// Returns Err(reason) if Origin is present but doesn't match any allowed origin.
+///
+/// Returns `Ok(())` when any of these hold, in order:
+///
+/// 1. No `Origin` header at all — a non-browser client (curl, a native app), which cannot be driven cross-site.
+/// 2. A loopback origin (`localhost` / `127.0.0.1` / `::1`) on the listen port.
+/// 3. The origin names the same **literal IP address and port** as this request's own `Host` header — see `origin_is_self`.
+///    A hostname never satisfies this rule, however exactly it matches; hostname and TLS-proxy deployments list their public origin in `cors_origin` instead.
+/// 4. `extra_origins` contains `"*"` and `allow_remote` is set.
+/// 5. `extra_origins` contains an entry whose scheme, host and port all match the origin.
+///
+/// Returns `Err(reason)` if an `Origin` is present and none of the above match.
 pub fn validate_ws_origin(
     headers: &HeaderMap,
     listen_port: Option<u16>,
@@ -220,15 +229,16 @@ pub fn validate_ws_origin(
     let origin_host = parsed
         .host_str()
         .ok_or_else(|| format!("Origin missing host: {origin}"))?;
+    let parsed_host = parsed
+        .host()
+        .ok_or_else(|| format!("Origin missing host: {origin}"))?;
     if origin_scheme != "http" && origin_scheme != "https" {
         return Err(format!("Origin {origin} not in allowed list"));
     }
 
-    let origin_port = if origin_scheme == "https" {
-        parsed.port().unwrap_or(443)
-    } else {
-        parsed.port().unwrap_or(80)
-    };
+    let origin_port = parsed
+        .port()
+        .unwrap_or_else(|| default_port_for_scheme(origin_scheme));
 
     // Only loopback hosts (localhost / 127.0.0.1 / ::1) on the same port
     // are auto-allowed. Fail closed when listen_port is unknown — otherwise
@@ -240,6 +250,11 @@ pub fn validate_ws_origin(
                 return Ok(());
             }
         }
+    }
+
+    // The daemon's own non-loopback address, reached directly by IP (#7777).
+    if origin_is_self(headers, &parsed_host, origin_port, origin_scheme) {
+        return Ok(());
     }
 
     // Wildcard "*" means allow all origins — only permitted when allow_remote is true.
@@ -256,11 +271,9 @@ pub fn validate_ws_origin(
         let extra_host = extra_parsed
             .host_str()
             .ok_or_else(|| format!("Origin missing host in allowed origin: {extra}"))?;
-        let extra_port = if extra_scheme == "https" {
-            extra_parsed.port().unwrap_or(443)
-        } else {
-            extra_parsed.port().unwrap_or(80)
-        };
+        let extra_port = extra_parsed
+            .port()
+            .unwrap_or_else(|| default_port_for_scheme(extra_scheme));
 
         let normalized_extra_host = normalize_origin_host(extra_host);
 
@@ -280,6 +293,65 @@ fn normalize_origin_host(host: &str) -> &str {
         "localhost" | "127.0.0.1" | "::1" | "[::1]" => "localhost",
         _ => host,
     }
+}
+
+/// The default port a scheme implies when the URL or `Host` header omits one.
+fn default_port_for_scheme(scheme: &str) -> u16 {
+    if scheme == "https" {
+        443
+    } else {
+        80
+    }
+}
+
+/// Whether the `Origin` names the same **literal IP address** and port that this request was itself addressed to.
+///
+/// This is the rule that lets a daemon on `0.0.0.0:4545`, opened at `http://192.168.1.161:4545`, accept its own dashboard's WebSocket (#7777).
+///
+/// The implicit allow is restricted to IP literals on purpose, and the restriction is the entire security content of this function.
+/// `Host` is not something the daemon asserted — it is derived from whatever URL the page dialled, and the page chooses that URL.
+/// So `Host == Origin` on a *hostname* proves only that the page came from a name that currently resolves to this address, which is precisely what DNS rebinding arranges: an attacker serves a page from `attacker.example`, rebinds that name to the daemon's loopback or LAN address, and the browser then sends `Host: attacker.example:4545` beside `Origin: http://attacker.example:4545` with nothing forged.
+/// Treating that pair as proof of same-origin would hand any such page a WebSocket and defeat the cross-site hijacking guard from #3731.
+///
+/// An IP literal has no name in the middle to rebind.
+/// For the two sides to match, the page must have been served by whatever answers on that address and port — which, since this request arrived there, is this daemon.
+///
+/// Deployments reached through a hostname or a TLS-terminating proxy are therefore not covered here and must list their public origin in `cors_origin`.
+/// The scheme is not compared, because `Host` carries none and behind a TLS terminator the browser's `https` cannot be reconstructed from the plaintext hop; the origin's scheme only supplies the default port when `Host` omits one.
+/// `X-Forwarded-Host` is deliberately ignored — it is attacker-controlled unless the peer is a verified proxy, and this function has no view of the peer.
+fn origin_is_self(
+    headers: &HeaderMap,
+    origin_host: &Host<&str>,
+    origin_port: u16,
+    origin_scheme: &str,
+) -> bool {
+    // A hostname origin is never self-evident, so there is nothing to compare against.
+    if !matches!(origin_host, Host::Ipv4(_) | Host::Ipv6(_)) {
+        return false;
+    }
+
+    let Some(host_header) = headers.get("host").and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+
+    // `Host` is `host[:port]` with no scheme; borrow the origin's to parse it,
+    // which also normalises `192.168.1.5` / `[fd00::1]` the same way the origin
+    // was normalised so the comparison is on addresses rather than on spelling.
+    let Ok(self_url) = Url::parse(&format!("{origin_scheme}://{host_header}")) else {
+        return false;
+    };
+    let Some(self_host) = self_url.host() else {
+        return false;
+    };
+    if !matches!(self_host, Host::Ipv4(_) | Host::Ipv6(_)) {
+        return false;
+    }
+
+    let self_port = self_url
+        .port()
+        .unwrap_or_else(|| default_port_for_scheme(origin_scheme));
+
+    self_host == *origin_host && self_port == origin_port
 }
 
 // ---------------------------------------------------------------------------
@@ -2621,6 +2693,18 @@ mod tests {
         );
     }
 
+    /// The header pair a real browser sends on a WebSocket handshake.
+    ///
+    /// `Origin` is the page's, `Host` is the authority from the URL the page
+    /// dialled. Tests that set only `Origin` cannot exercise the self-origin rule
+    /// at all, because it returns early when `Host` is absent.
+    fn browser_headers(origin: &str, host: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", origin.parse().unwrap());
+        headers.insert("host", host.parse().unwrap());
+        headers
+    }
+
     #[test]
     fn validate_ws_origin_missing_origin_allowed() {
         let headers = HeaderMap::new();
@@ -2662,19 +2746,32 @@ mod tests {
     }
 
     #[test]
-    fn validate_ws_origin_lan_ip_same_port_rejected() {
-        // LAN IP with matching port should be rejected without explicit allowed_origins.
-        let mut headers = HeaderMap::new();
-        headers.insert("origin", "http://192.168.1.5:4545".parse().unwrap());
+    fn validate_ws_origin_lan_ip_addressed_to_a_different_host_rejected() {
+        // A LAN IP origin is not blanket-allowed just because its port matches the
+        // listen port: it is allowed only when the request was itself addressed to
+        // that same address. Here the browser dialled 10.0.0.7 and the page came
+        // from 192.168.1.5, which is a cross-site request.
+        //
+        // The `host` header is what makes this test mean anything. Without it
+        // `origin_is_self` returns early and the assertion passes for a reason no
+        // real browser ever produces, since every browser sends `Host`.
+        let mut headers = browser_headers("http://192.168.1.5:4545", "10.0.0.7:4545");
         let result = validate_ws_origin(&headers, Some(4545), &[], false);
         assert!(result.is_err());
+
+        // Same origin, no `Host` at all: still rejected, so the rule fails closed
+        // rather than treating an absent header as a match.
+        headers.remove("host");
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_err());
     }
 
     #[test]
     fn validate_ws_origin_arbitrary_host_same_port_rejected() {
-        // Any hostname with matching port is rejected without explicit allowed_origins.
-        let mut headers = HeaderMap::new();
-        headers.insert("origin", "http://myserver.local:8080".parse().unwrap());
+        // Any hostname with matching port is rejected without explicit allowed_origins,
+        // and it stays rejected when the request's own `Host` header names that same
+        // hostname — which is the pairing a real browser sends and the one an attacker
+        // gets for free from DNS rebinding.
+        let headers = browser_headers("http://myserver.local:8080", "myserver.local:8080");
         let result = validate_ws_origin(&headers, Some(8080), &[], false);
         assert!(result.is_err());
     }
@@ -2772,6 +2869,107 @@ mod tests {
         headers.insert("origin", "not-a-url".parse().unwrap());
         let result = validate_ws_origin(&headers, Some(4545), &["*".to_string()], true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_ws_origin_accepts_the_servers_own_lan_origin() {
+        // The reported defect from #7777, reduced: a daemon bound to 0.0.0.0:4545
+        // and opened at http://192.168.1.161:4545 must accept its own dashboard's
+        // socket with nothing configured.
+        let headers = browser_headers("http://192.168.1.161:4545", "192.168.1.161:4545");
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_self_rule_matches_ipv6_literal_host() {
+        // Both sides go through `Url`, so the comparison is on the parsed address
+        // and the bracket/zero-compression spelling does not have to agree.
+        let headers = browser_headers("http://[fd00::1]:4545", "[fd00:0:0:0:0:0:0:1]:4545");
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_self_rule_holds_on_a_port_other_than_listen_port() {
+        // Port-mapped or proxied to a different external port: the rule compares the
+        // origin against the request's own `Host`, not against `listen_port`.
+        let headers = browser_headers("http://192.168.1.161:8443", "192.168.1.161:8443");
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_self_rule_bridges_a_portless_host_header() {
+        // `Host` omits the port on the scheme default, so the origin's scheme supplies it.
+        let headers = browser_headers("https://192.168.1.161", "192.168.1.161");
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_self_rule_requires_the_same_port() {
+        let headers = browser_headers("http://192.168.1.161:4545", "192.168.1.161:9999");
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_err());
+    }
+
+    #[test]
+    fn validate_ws_origin_rebound_hostname_rejected_unless_explicitly_allowed() {
+        // The DNS-rebinding case, and the reason the implicit allow is restricted to
+        // IP literals. The attacker serves a page from a name they own, rebinds that
+        // name to this daemon's address, and the browser then sends matching `Host`
+        // and `Origin` with nothing forged. Equality here is not evidence that this
+        // daemon served the page, so it must not open the socket.
+        let headers = browser_headers("http://attacker.example:4545", "attacker.example:4545");
+        assert!(
+            validate_ws_origin(&headers, Some(4545), &[], false).is_err(),
+            "matching Host and Origin on a hostname must not imply same-origin"
+        );
+
+        // The escape hatch for a legitimate hostname deployment: list it.
+        assert!(validate_ws_origin(
+            &headers,
+            Some(4545),
+            &["http://attacker.example:4545".to_string()],
+            false,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_tls_proxy_hostname_requires_explicit_cors_origin() {
+        // A dashboard behind a TLS terminator is a hostname deployment and is not
+        // covered by the self rule, however exactly `Host` and `Origin` agree.
+        // Nothing distinguishes it from the rebinding case above at this layer, so
+        // the operator names the origin instead.
+        let headers = browser_headers("https://dash.example.com", "dash.example.com");
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_err());
+        assert!(validate_ws_origin(
+            &headers,
+            Some(4545),
+            &["https://dash.example.com".to_string()],
+            false,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_cross_site_origin_carrying_our_host_rejected() {
+        // The #3731 guard: a cross-site page reaching this daemon sends its own
+        // Origin next to our Host, so the two differ and the self rule declines.
+        let headers = browser_headers("http://evil.example", "192.168.1.161:4545");
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_err());
+    }
+
+    #[test]
+    fn validate_ws_origin_self_rule_ignores_x_forwarded_host() {
+        // `X-Forwarded-Host` is attacker-controlled unless the peer is a verified
+        // proxy, and this function has no view of the peer.
+        let mut headers = browser_headers("http://192.168.1.161:4545", "10.0.0.7:4545");
+        headers.insert("x-forwarded-host", "192.168.1.161:4545".parse().unwrap());
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_err());
+    }
+
+    #[test]
+    fn validate_ws_origin_self_rule_ignores_a_malformed_host_header() {
+        let headers = browser_headers("http://192.168.1.161:4545", "not a host::");
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_err());
     }
 
     #[test]
