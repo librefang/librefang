@@ -12,6 +12,7 @@ pub mod backoff;
 pub mod capability;
 pub mod comms;
 pub mod config;
+pub mod ephemeral;
 pub mod error;
 pub mod error_code;
 pub mod event;
