@@ -3110,7 +3110,7 @@ pub async fn reload_channels_from_disk(
     }
 
     // Re-read config from disk
-    let config_path = state.kernel.home_dir().join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
     let fresh_config = match kernel_load_config(Some(&config_path)) {
         Ok(cfg) => cfg,
         Err(e) => {

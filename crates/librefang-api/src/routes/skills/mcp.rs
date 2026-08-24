@@ -143,10 +143,10 @@ async fn persist_mcp_upsert(
 ) -> Result<&'static str, (StatusCode, Json<serde_json::Value>)> {
     match state.kernel.config_ref().mcp_runtime_store {
         librefang_types::config::McpRuntimeStore::File => {
-            if let Some(locked) = crate::routes::guard_config_write() {
+            if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
                 return Err(locked);
             }
-            let config_path = state.kernel.home_dir().join("config.toml");
+            let config_path = state.kernel.config_path().to_path_buf();
             if let Err(e) = upsert_mcp_server_config(&config_path, entry) {
                 return Err(ApiErrorResponse::internal_scrub(e).into_json_tuple());
             }
@@ -173,10 +173,10 @@ async fn persist_mcp_delete(
 ) -> Result<&'static str, (StatusCode, Json<serde_json::Value>)> {
     match state.kernel.config_ref().mcp_runtime_store {
         librefang_types::config::McpRuntimeStore::File => {
-            if let Some(locked) = crate::routes::guard_config_write() {
+            if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
                 return Err(locked);
             }
-            let config_path = state.kernel.home_dir().join("config.toml");
+            let config_path = state.kernel.config_path().to_path_buf();
             if let Err(e) = remove_mcp_server_config(&config_path, name) {
                 return Err(ApiErrorResponse::internal_scrub(e).into_json_tuple());
             }

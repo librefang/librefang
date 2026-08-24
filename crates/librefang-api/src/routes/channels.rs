@@ -1184,7 +1184,7 @@ pub async fn configure_sidecar_channel(
     // 0. Managed mode (#6695) — refused in full, before the catalog lookup and before either file is opened.
     //    The scope matches `set_provider_key` rather than the narrow config-only guards: this handler writes `secrets.env` and `config.toml` inside one `spawn_blocking` call (`write_sidecar_configuration`), so a guard placed at the config write would already have persisted the secrets half and mutated the process environment before refusing.
     //    Refusing up front keeps the request atomic and states the contract plainly: in a managed deployment a sidecar channel is declared as `[[sidecar_channels]]` in the manifest, with its secrets supplied from the pod environment.
-    if let Some(locked) = crate::routes::guard_config_write() {
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
         return Err(locked);
     }
 
@@ -1235,7 +1235,7 @@ pub async fn configure_sidecar_channel(
     //     the config_write_lock in step 4a below.)
     let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
-    let config_path = home.join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
 
     // 4. Split payload: secrets go to secrets.env, everything else goes into the [sidecar_channels.env] table.
     //
@@ -1338,11 +1338,11 @@ pub async fn delete_sidecar_channel(
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
     // Managed mode (#6695) — refused before the rewrite, so the `[[sidecar_channels]]` block a manifest declared cannot be deleted out from under it.
     // The guard precedes the 404 branch on purpose: whether the entry exists is a fact about the managed file, and answering `404` first would tell a caller which manifest entries are present through a route that is not allowed to act on any of them.
-    if let Some(locked) = crate::routes::guard_config_write() {
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
         return Err(locked);
     }
 
-    let config_path = state.kernel.home_dir().join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
 
     // Rewrite config.toml under the same lock that gates configure and POST /api/config/set.
     let removed = {

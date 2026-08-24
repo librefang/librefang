@@ -1075,7 +1075,7 @@ pub async fn config_reload(
 pub async fn export_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     use axum::body::Body;
 
-    let config_path = state.kernel.home_dir().join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
 
     let toml_content = match tokio::fs::read_to_string(&config_path).await {
         Ok(content) => content,
@@ -1143,8 +1143,11 @@ pub async fn export_config(State(state): State<Arc<AppState>>) -> impl IntoRespo
         (status = 200, description = "Configuration provenance and writability", body = crate::types::JsonObject)
     )
 )]
-pub async fn config_status() -> impl IntoResponse {
-    axum::Json(librefang_kernel::config::config_provenance(None))
+pub async fn config_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // The kernel's resolved path, not a second resolution: `source` is the file an operator will go and edit, and a status endpoint that names a different one is worse than no status endpoint (#6695).
+    axum::Json(librefang_kernel::config::config_provenance(Some(
+        state.kernel.config_path(),
+    )))
 }
 
 /// GET /api/config/schema — Return a simplified JSON description of the config structure.
@@ -1372,21 +1375,12 @@ pub async fn config_set(
         );
     }
 
-    let config_path = state.kernel.home_dir().join("config.toml");
-    // Block path-traversal (`..`) but allow Windows drive-letter prefixes
-    if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml")
-        || config_path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"status":"error","error":"invalid config file path"})),
-        );
-    }
+    // No basename / traversal check on `config_path`: it is the kernel's boot-resolved path, not anything the request supplied.
+    // Under `LIBREFANG_CONFIG_PATH` the operator's chosen filename is the point, so rejecting a name that is not literally `config.toml` would refuse to write the very file this daemon loaded (#6695).
+    let config_path = state.kernel.config_path().to_path_buf();
 
     // Serialize concurrent writes to prevent read-modify-write races
-    if let Some(locked) = crate::routes::guard_config_write() {
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
         return locked;
     }
     let _config_guard = state.config_write_lock.lock().await;

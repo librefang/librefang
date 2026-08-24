@@ -658,13 +658,30 @@ pub fn config_mode() -> ConfigMode {
 /// `LIBREFANG_CONFIG_PATH` relocates the file and nothing more.
 /// It is independent of [`config_mode`] on purpose: a Compose deployment may reasonably bind-mount the config directory somewhere outside `LIBREFANG_HOME` while still editing it from the dashboard, and inferring the lock from the path would hand that operator a read-only UI they never asked for.
 pub fn default_config_path() -> PathBuf {
-    if let Ok(p) = std::env::var(CONFIG_PATH_ENV) {
-        let trimmed = p.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
+    config_path_override().unwrap_or_else(|| librefang_home().join("config.toml"))
+}
+
+/// The `LIBREFANG_CONFIG_PATH` override, or `None` when it is unset, empty, or whitespace.
+///
+/// The single place that reads the variable, so relocation cannot be honoured by one resolver and ignored by another.
+fn config_path_override() -> Option<PathBuf> {
+    let raw = std::env::var(CONFIG_PATH_ENV).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
     }
-    librefang_home().join("config.toml")
+}
+
+/// Resolve the `config.toml` that backs an already-loaded [`KernelConfig`].
+///
+/// `LIBREFANG_CONFIG_PATH` wins exactly as it does in [`default_config_path`]; otherwise the file sits in the config's own `home_dir`.
+/// This is the resolver for [`crate::LibreFangKernel::boot_with_config`], where an embedder handed over a `KernelConfig` without saying where it came from — `boot` records the path it actually loaded from instead.
+///
+/// It deliberately reads `home_dir` from the config rather than from `LIBREFANG_HOME`: an embedder that builds a `KernelConfig` in memory and points `home_dir` at a scratch directory means that directory, and resolving to the real user's `~/.librefang/config.toml` would have such a process write over a config it never read.
+pub fn config_path_for(config: &KernelConfig) -> PathBuf {
+    config_path_override().unwrap_or_else(|| config.home_dir.join("config.toml"))
 }
 
 /// Provenance of the effective configuration, for the authenticated status endpoint.

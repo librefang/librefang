@@ -485,7 +485,7 @@ listen_addr = "127.0.0.1:4545"
             provider = p.name,
         );
 
-        let config_path = librefang_dir.join("config.toml");
+        let config_path = crate::commands::common::cli_config_path();
         match std::fs::write(&config_path, &config) {
             Ok(()) => {
                 crate::restrict_file_permissions(&config_path);

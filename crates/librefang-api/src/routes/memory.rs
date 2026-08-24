@@ -1765,14 +1765,14 @@ pub async fn memory_config_patch(
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if let Some(locked) = crate::routes::guard_config_write() {
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
         return locked;
     }
 
     // Keep the complete read-modify-write-reload transaction under the shared config lock.
     // Otherwise two unrelated dashboard saves can read the same snapshot and the later write silently reverts the earlier one.
     let _config_guard = state.config_write_lock.lock().await;
-    let config_path = state.kernel.home_dir().join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
 
     let content = match tokio::fs::read_to_string(&config_path).await {
         Ok(c) => c,

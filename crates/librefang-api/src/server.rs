@@ -1076,7 +1076,7 @@ pub(crate) async fn change_password(
     // Ahead of the current-password verification, not after it.
     // The write cannot succeed under any branch below, so verifying first would only spend an Argon2 hash and hand back a password-correctness oracle in exchange for the same `423`.
     // The caller is already Owner-authenticated (`is_owner_only_write` in `middleware.rs`) and can read the same fact from `GET /api/config/status`, so answering early discloses nothing new.
-    if let Some(locked) = routes::guard_config_write() {
+    if let Some(locked) = routes::guard_config_write(state.kernel.config_path()) {
         return locked.into_response();
     }
 
@@ -1180,7 +1180,7 @@ pub(crate) async fn change_password(
     }
 
     // Load config.toml for writing
-    let config_path = state.kernel.home_dir().join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
     let mut table: toml::value::Table = if config_path.exists() {
         match std::fs::read_to_string(&config_path) {
             Ok(content) => toml::from_str(&content).unwrap_or_default(),
@@ -2289,7 +2289,7 @@ pub async fn run_daemon(
     {
         let k = kernel.clone();
         let st = state.clone();
-        let config_path = kernel.home_dir().join("config.toml");
+        let config_path = kernel.config_path().to_path_buf();
         let mut shutdown_rx = bg_shutdown_tx.subscribe();
         bg_tasks.push(tokio::spawn(async move {
             // Helper: async stat → mtime, swallowing all errors (file may not
