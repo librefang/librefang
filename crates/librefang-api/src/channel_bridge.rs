@@ -3,11 +3,11 @@
 //! Implements `ChannelBridgeHandle` on `LibreFangKernel` and provides the
 //! `start_channel_bridge()` entry point called by the daemon.
 
-use crate::workflow::{StepAgent, WorkflowId};
+use crate::workflow::WorkflowId;
 use librefang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
 use librefang_channels::router::AgentRouter;
 use librefang_channels::sidecar::SidecarAdapter;
-use librefang_channels::types::{ChannelAdapter, SenderContext};
+use librefang_channels::types::{ChannelAdapter, ConversationScope, SenderContext};
 
 fn is_safe_manifest_name(name: &str) -> bool {
     if name.contains(['/', '\\']) {
@@ -621,6 +621,51 @@ where
 pub struct KernelBridgeAdapter {
     kernel: Arc<dyn KernelApi>,
     started_at: Instant,
+    /// `/think` preference per `(agent, conversation)` (#7140).
+    ///
+    /// Keyed by the conversation the command was typed in, never by the agent alone: one agent routinely serves many chats, so an agent-keyed preference would push one user's reasoning mode — and its token cost — onto everybody else's turns.
+    ///
+    /// Deliberately in-memory. A `/think` toggle is a per-chat convenience, not durable configuration; after a daemon restart every conversation falls back to the agent's `[thinking]` manifest / global default, which is the same state a chat starts in.
+    thinking_prefs: dashmap::DashMap<(AgentId, ConversationScope), bool>,
+}
+
+impl KernelBridgeAdapter {
+    /// Build an adapter over `kernel` with an empty preference store.
+    ///
+    /// Every construction site goes through this rather than a struct literal so adding per-adapter state cannot leave one call site behind.
+    pub fn new(kernel: Arc<dyn KernelApi>) -> Self {
+        Self {
+            kernel,
+            started_at: Instant::now(),
+            thinking_prefs: dashmap::DashMap::new(),
+        }
+    }
+
+    /// The per-turn thinking override to apply to a message from `sender`.
+    ///
+    /// `None` — no `/think` was issued in this conversation, so the agent manifest / global `[thinking]` default stands untouched. This is the read half of `set_thinking`; both sides derive the key the same way, so a preference set in one chat is invisible to every other chat and to every other agent.
+    fn thinking_override_for(&self, agent_id: AgentId, sender: &SenderContext) -> Option<bool> {
+        let scope = ConversationScope::from_sender(sender);
+        self.thinking_prefs.get(&(agent_id, scope)).map(|v| *v)
+    }
+
+    /// `true` only when the catalog positively reports that this agent's configured model has no extended-thinking mode.
+    ///
+    /// An agent left on the empty / `"default"` model, or on an id the catalog does not carry, returns `false`: the honest answer there is silence, not a guess in either direction.
+    fn model_rejects_thinking(&self, agent_id: AgentId) -> bool {
+        let Some(entry) = self.kernel.agent_registry().get(agent_id) else {
+            return false;
+        };
+        let model = entry.manifest.model.model.as_str();
+        if model.is_empty() || model == "default" {
+            return false;
+        }
+        let catalog = self.kernel.model_catalog_ref().load();
+        catalog
+            .find_model_for_manifest(entry.manifest.model.provider.as_str(), model)
+            .map(|m| !catalog.effective_capabilities(m).supports_thinking)
+            .unwrap_or(false)
+    }
 }
 
 /// Compose the message returned to a channel user when `/approve <id>`
@@ -800,14 +845,17 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .map(|e| e.manifest.show_progress)
             .unwrap_or(true);
         let language = self.kernel.config_snapshot().language.clone();
+        let thinking = self.thinking_override_for(agent_id, sender);
         let (event_rx, kernel_handle) = self
             .kernel
             .clone()
-            .send_message_streaming_with_sender_context_and_routing(
+            .send_message_streaming_with_sender_context_routing_thinking_and_session(
                 agent_id,
                 message,
                 None,
                 sender.clone(),
+                thinking,
+                None,
             )
             .await
             .map_err(|e| format!("{e}"))?;
@@ -839,14 +887,17 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .map(|e| e.manifest.show_progress)
             .unwrap_or(true);
         let language = self.kernel.config_snapshot().language.clone();
+        let thinking = self.thinking_override_for(agent_id, sender);
         let (event_rx, kernel_handle) = self
             .kernel
             .clone()
-            .send_message_streaming_with_sender_context_and_routing(
+            .send_message_streaming_with_sender_context_routing_thinking_and_session(
                 agent_id,
                 message,
                 None,
                 sender.clone(),
+                thinking,
+                None,
             )
             .await
             .map_err(|e| format!("{e}"))?;
@@ -867,7 +918,12 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     ) -> Result<String, String> {
         let result = self
             .kernel
-            .send_message_with_sender_context(agent_id, message, sender.clone())
+            .send_message_with_sender_context(
+                agent_id,
+                message,
+                sender.clone(),
+                self.thinking_override_for(agent_id, sender),
+            )
             .await
             .map_err(|e| format!("{e}"))?;
         if result.silent {
@@ -898,7 +954,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         };
         let result = self
             .kernel
-            .send_message_with_blocks_and_sender(agent_id, &text, blocks, sender.clone())
+            .send_message_with_blocks_and_sender(
+                agent_id,
+                &text,
+                blocks,
+                sender.clone(),
+                self.thinking_override_for(agent_id, sender),
+            )
             .await
             .map_err(|e| format!("{e}"))?;
         if result.silent {
@@ -1251,25 +1313,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         };
 
         let kernel = self.kernel.clone();
-        let registry_ref = &self.kernel.agent_registry();
+        let resolver_kernel = self.kernel.clone();
         let result = self
             .kernel
             .workflow_engine()
             .execute_run(
                 run_id,
-                |step_agent| match step_agent {
-                    StepAgent::ById { id } => {
-                        let aid: AgentId = id.parse().ok()?;
-                        let entry = registry_ref.get(aid)?;
-                        let inherit = entry.manifest.inherit_parent_context;
-                        Some((aid, entry.name.clone(), inherit))
-                    }
-                    StepAgent::ByName { name } => {
-                        let entry = registry_ref.find_by_name(name)?;
-                        let inherit = entry.manifest.inherit_parent_context;
-                        Some((entry.id, entry.name.clone(), inherit))
-                    }
-                },
+                |step_agent| resolver_kernel.resolve_step_agent(step_agent),
                 |agent_id, message, session_mode_override| {
                     let k = kernel.clone();
                     async move {
@@ -1918,12 +1968,24 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok(msg)
     }
 
-    async fn set_thinking(&self, _agent_id: AgentId, on: bool) -> Result<String, String> {
-        // Future-ready: stores preference but doesn't affect model behavior yet
+    async fn set_thinking(
+        &self,
+        agent_id: AgentId,
+        on: bool,
+        scope: &ConversationScope,
+    ) -> Result<String, String> {
+        self.thinking_prefs.insert((agent_id, scope.clone()), on);
         let state = if on { "enabled" } else { "disabled" };
-        Ok(format!(
-            "Extended thinking {state}. (This will take effect when supported by the model.)"
-        ))
+        let mut msg =
+            format!("Extended thinking {state} for this chat. Other chats are unaffected.");
+        // Only warn when the catalog positively knows this model cannot think.
+        // An unset / "default" / unrecognised model resolves to no entry, and
+        // guessing there would produce exactly the false statement this
+        // command is being fixed for.
+        if on && self.model_rejects_thinking(agent_id) {
+            msg.push_str("\nNote: this agent's model has no extended-thinking mode, so turns will run as usual until you switch models.");
+        }
+        Ok(msg)
     }
 
     async fn classify_reply_intent(
@@ -2698,10 +2760,7 @@ pub async fn start_channel_bridge_with_config(
         .collect();
     librefang_channels::sidecar::warn_secret_prefix_collisions(&sidecar_names);
 
-    let handle = KernelBridgeAdapter {
-        kernel: kernel.clone(),
-        started_at: Instant::now(),
-    };
+    let handle = KernelBridgeAdapter::new(kernel.clone());
 
     // (adapter, default_agent_name, account_id) — `account_id` is the
     // sidecar's config `name`, which qualifies the per-bot routing key
@@ -2851,10 +2910,8 @@ pub async fn start_channel_bridge_with_config(
     }
     router.load_broadcast(kernel.broadcast_ref().clone());
 
-    let bridge_handle: Arc<dyn ChannelBridgeHandle> = Arc::new(KernelBridgeAdapter {
-        kernel: kernel.clone(),
-        started_at: Instant::now(),
-    });
+    let bridge_handle: Arc<dyn ChannelBridgeHandle> =
+        Arc::new(KernelBridgeAdapter::new(kernel.clone()));
     let router = Arc::new(router);
     // Create message journal for crash recovery
     let data_dir = std::path::PathBuf::from(
@@ -3332,10 +3389,7 @@ mod tests {
             .submit_manual_request(second)
             .expect("submit second approval");
 
-        let adapter = KernelBridgeAdapter {
-            kernel: kernel.clone(),
-            started_at: Instant::now(),
-        };
+        let adapter = KernelBridgeAdapter::new(kernel.clone());
         let first_message = adapter
             .resolve_approval_text(&first_id.to_string(), true, Some(&code), "channel-user")
             .await;
@@ -3354,6 +3408,101 @@ mod tests {
         assert!(
             kernel.approvals().get_pending(second_id).is_some(),
             "replayed code must not resolve the second request"
+        );
+    }
+
+    /// A `SenderContext` for one conversation, shaped the way `build_sender_context` shapes it on the message path.
+    fn sender_in(account: Option<&str>, chat: &str) -> SenderContext {
+        SenderContext {
+            channel: "telegram".to_string(),
+            chat_id: Some(chat.to_string()),
+            account_id: account.map(str::to_string),
+            user_id: "member-1".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Injection-site guard for #7140. `/think` promises the user a per-chat setting, and `KernelBridgeAdapter` is where that promise is kept: the store is written by `set_thinking` and read by every send path. Keying it by `agent_id` alone compiles, passes every command-path test, and silently pushes one chat's reasoning mode (and token bill) onto every other chat the agent serves — the same shape as the #7605 memory leak.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn think_preference_is_isolated_per_conversation() {
+        use librefang_testing::MockKernelBuilder;
+
+        let (kernel, _tmp) = MockKernelBuilder::new().build();
+        let agent = kernel
+            .agent_registry()
+            .find_by_name("assistant")
+            .expect("default assistant agent should exist after boot")
+            .id;
+        let other_agent = AgentId::new();
+        let adapter = KernelBridgeAdapter::new(kernel.clone());
+
+        let chat_a = ConversationScope::new("telegram", Some("bot-a"), Some("chat-a"));
+        let chat_b = ConversationScope::new("telegram", Some("bot-a"), Some("chat-b"));
+
+        // Nobody has configured anything: every conversation keeps the
+        // agent/global `[thinking]` default, which `None` means.
+        assert_eq!(
+            adapter.thinking_override_for(agent, &sender_in(Some("bot-a"), "chat-a")),
+            None,
+            "an unconfigured conversation must not force thinking either way"
+        );
+
+        adapter
+            .set_thinking(agent, true, &chat_a)
+            .await
+            .expect("set_thinking");
+
+        // Round trip: what was set in chat A is what chat A reads back.
+        assert_eq!(
+            adapter.thinking_override_for(agent, &sender_in(Some("bot-a"), "chat-a")),
+            Some(true),
+        );
+        // …and chat B, same agent, same bot, is untouched.
+        assert_eq!(
+            adapter.thinking_override_for(agent, &sender_in(Some("bot-a"), "chat-b")),
+            None,
+            "/think in one chat must not reach another chat on the same agent",
+        );
+        // …as is the same chat id reached through a second bot account.
+        assert_eq!(
+            adapter.thinking_override_for(agent, &sender_in(Some("bot-b"), "chat-a")),
+            None,
+            "/think must not cross bot accounts",
+        );
+        // …as is a different agent entirely.
+        assert_eq!(
+            adapter.thinking_override_for(other_agent, &sender_in(Some("bot-a"), "chat-a")),
+            None,
+        );
+
+        // The opposite toggle in chat B leaves chat A's `on` standing.
+        adapter
+            .set_thinking(agent, false, &chat_b)
+            .await
+            .expect("set_thinking");
+        assert_eq!(
+            adapter.thinking_override_for(agent, &sender_in(Some("bot-a"), "chat-a")),
+            Some(true),
+        );
+        assert_eq!(
+            adapter.thinking_override_for(agent, &sender_in(Some("bot-a"), "chat-b")),
+            Some(false),
+        );
+    }
+
+    /// The command path builds the scope from `session_scope` parts, the message path from a `SenderContext`. If the two ever disagree, a `/think` write lands under a key no send path will ever read, and the command goes back to acking without acting.
+    #[test]
+    fn conversation_scope_agrees_across_the_command_and_message_paths() {
+        assert_eq!(
+            ConversationScope::from_sender(&sender_in(Some("bot-a"), "chat-a")),
+            ConversationScope::new("telegram", Some("bot-a"), Some("chat-a")),
+        );
+        // Absent and empty are the same conversation, not two.
+        let mut blank = sender_in(None, "chat-a");
+        blank.account_id = Some(String::new());
+        assert_eq!(
+            ConversationScope::from_sender(&blank),
+            ConversationScope::new("telegram", None, Some("chat-a")),
         );
     }
 
@@ -3379,10 +3528,7 @@ mod tests {
             .expect("default assistant agent should exist after boot")
             .id;
 
-        let adapter = KernelBridgeAdapter {
-            kernel: kernel.clone(),
-            started_at: Instant::now(),
-        };
+        let adapter = KernelBridgeAdapter::new(kernel.clone());
 
         // No binding of either level yet -> both fall through (None).
         assert_eq!(

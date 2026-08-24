@@ -93,12 +93,13 @@ type StoredCanvasNode = {
  *  attaches when rendering. Not on the canonical `WorkflowStep` because not
  *  every list endpoint hydrates it. */
 type LoadedWorkflowStep = WorkflowStep & {
-  /** `workflow_to_json` emits the step's binding as `{"agent_id": …}` or
-   *  `{"agent_name": …}` — the same field names the create/update parser
-   *  reads, not the `{id, name}` shape this used to assume. Reading the
-   *  wrong keys left every hydrated node unbound, so a workflow without a
-   *  saved layout round-tripped through the canvas as zero steps. */
-  agent?: { agent_id?: string; agent_name?: string };
+  /** `workflow_to_json` emits the step's binding as `{"agent_id": …}`,
+   *  `{"agent_name": …}` or `{"agent_type": …}` — the same field names the
+   *  create/update parser reads, not the `{id, name}` shape this used to
+   *  assume. Reading the wrong keys left every hydrated node unbound, so a
+   *  workflow without a saved layout round-tripped through the canvas as
+   *  zero steps. */
+  agent?: { agent_id?: string; agent_name?: string; agent_type?: string };
 };
 
 /**
@@ -110,6 +111,7 @@ type WorkflowStepBuild = {
   name: string;
   agent_id?: string;
   agent_name?: string;
+  agent_type?: string;
   /** Per-step session override; omitted to defer to the agent manifest. */
   session_mode?: "persistent" | "new";
   prompt: string;
@@ -223,8 +225,10 @@ function CustomNode({ data, type: nodeTypeKey, selected, t }: { data: CanvasNode
   const isEnd = data.nodeType === "end";
   const runState = data._runState;
   const needsAgent = AGENT_NODE_TYPES_SET.has(data.nodeType ?? "");
-  // A step bound by `agent_name` alone is fully bound — the backend
-  // resolves it at run time — so it must not be flagged as unassigned.
+  // A step bound by `agent_name` alone is fully bound — the backend resolves
+  // it at run time — and so is one bound to an agent *type*, which resolves
+  // find-or-spawn (#7712). Neither may be flagged as unassigned, and the
+  // helper is what keeps that judgement in one place.
   const missingAgent = needsAgent && !isStepBound(data);
   const KindIcon = NODE_KIND_ICON[data.nodeType ?? ""] ?? HelpCircle;
 
@@ -304,12 +308,12 @@ function CustomNode({ data, type: nodeTypeKey, selected, t }: { data: CanvasNode
       </div>
 
       {/* Inline meta strip — agent binding, missing warning, deps */}
-      {(data.agentName || missingAgent || (data.dependsOn && data.dependsOn.length > 0)) && (
+      {(data.agentName || data.agentType || missingAgent || (data.dependsOn && data.dependsOn.length > 0)) && (
         <div className="px-3 pb-2 flex items-center gap-2 flex-wrap text-[9px] font-mono">
-          {data.agentName && (
+          {(data.agentName || data.agentType) && (
             <span className="inline-flex items-center gap-1 text-text-dim/80">
               <span className="w-1 h-1 rounded-full bg-success" />
-              <span className="truncate max-w-[120px]">{data.agentName}</span>
+              <span className="truncate max-w-[120px]">{data.agentName || data.agentType}</span>
             </span>
           )}
           {missingAgent && (
@@ -718,6 +722,9 @@ function NodeConfigPanel({
     onUpdate(node.id, {
       ...d,
       label, description,
+      // One routing key per step (#7712): the chosen source's field is
+      // written and the other two are cleared, so no abandoned binding
+      // survives for `buildSteps` to pick between — in either direction.
       ...boundAgent,
       prompt,
       stepMode: mode,
@@ -733,10 +740,10 @@ function NodeConfigPanel({
     onClose();
   };
 
-  // Drives the rest of the panel: a step bound only by name is as real as
-  // one bound to a live instance, so its prompt / mode / dependency fields
-  // must stay reachable.
-  const hasAgent = !!boundAgent.agentId || !!boundAgent.agentName;
+  // Drives the rest of the panel: a step bound only by name, or only to a
+  // type, is as real as one bound to a live instance, so its prompt / mode /
+  // dependency fields must stay reachable.
+  const hasAgent = isStepBound(boundAgent);
 
   return (
     <motion.aside
@@ -1459,19 +1466,33 @@ function CanvasPageInner() {
           // local lets TS narrow `nd` once instead of fighting `?.` in
           // every branch.
           const agentBinding: {
+            agentSource?: CanvasNodeData["agentSource"];
             agentId?: string;
             agentName?: string;
+            agentType?: string;
             prompt?: string;
           } = (() => {
             if (nd?.agentId) {
               return {
+                agentSource: "instance",
                 agentId: nd.agentId,
                 agentName: nd.agentName || availableAgents.find(a => a.id === nd.agentId)?.name || nd.agentId,
                 prompt: nd.prompt || rawPrompt,
               };
             }
+            // A template that binds a step to an agent *type* already answers
+            // "which agent runs this" — overwriting it with the default agent
+            // would discard the template author's choice (#7712). The same is
+            // true of a name binding, which the backend resolves at run time.
+            if (nd?.agentType) {
+              return { agentSource: "type", agentType: nd.agentType, prompt: nd.prompt || rawPrompt };
+            }
+            if (nd?.agentName) {
+              return { agentSource: "name", agentName: nd.agentName, prompt: nd.prompt || rawPrompt };
+            }
             if (needsAgent && defaultAgent) {
               return {
+                agentSource: "instance",
                 agentId: defaultAgent.id,
                 agentName: defaultAgent.name,
                 prompt: rawPrompt + langSuffix,
@@ -1541,7 +1562,16 @@ function CanvasPageInner() {
           nodeType: "agent",
           agentId: s.agent?.agent_id,
           agentName: s.agent?.agent_name,
-          agentSource: s.agent?.agent_id ? "instance" : s.agent?.agent_name ? "name" : undefined,
+          agentType: s.agent?.agent_type,
+          // Record which key the backend sent so the panel can leave the
+          // binding again; precedence matches `stepAgentPayload`.
+          agentSource: s.agent?.agent_id
+            ? "instance"
+            : s.agent?.agent_type
+              ? "type"
+              : s.agent?.agent_name
+                ? "name"
+                : undefined,
           sessionMode: normalizeSessionMode(s.session_mode) || undefined,
         },
       }));
@@ -1836,6 +1866,7 @@ function CanvasPageInner() {
     return stepNodes
       .map((n, idx) => {
         const d = n.data;
+        // Exactly one routing key per step (#7712) — see `stepAgentPayload`.
         const step: WorkflowStepBuild = {
           name: d.label || `Step ${idx + 1}`,
           ...stepAgentFields(d),
@@ -2015,8 +2046,8 @@ function CanvasPageInner() {
       ...n,
       data: {
         ...n.data,
-        // Same bound-step predicate `buildSteps` uses, so a name-bound step
-        // animates during a run instead of sitting inert.
+        // Same bound-step predicate `buildSteps` uses, so a step bound by
+        // name or by type animates during a run instead of sitting inert.
         _runState: isStepBound(n.data) ? "running" : undefined,
       }
     })));

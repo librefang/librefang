@@ -61,6 +61,7 @@ const EMPTY: StepAgentBindingValue = {
   source: "instance",
   agentId: "",
   agentName: "",
+  agentType: "",
   sessionMode: "",
 };
 
@@ -70,6 +71,7 @@ describe("bindingFromNodeData", () => {
       source: "instance",
       agentId: "id-research",
       agentName: "researcher",
+      agentType: "",
       sessionMode: "",
     });
   });
@@ -79,11 +81,34 @@ describe("bindingFromNodeData", () => {
     expect(bindingFromNodeData({ agentName: "researcher" }).source).toBe("name");
   });
 
+  it("infers the type source when only a type is set", () => {
+    // A find-or-spawn step (#7712), or a template that authored one.
+    expect(bindingFromNodeData({ agentType: "researcher" })).toEqual({
+      source: "type",
+      agentId: "",
+      agentName: "",
+      agentType: "researcher",
+      sessionMode: "",
+    });
+  });
+
   it("honours an explicitly stored source over the inference", () => {
     expect(
       bindingFromNodeData({ agentSource: "name", agentId: "id-research", agentName: "researcher" })
         .source,
     ).toBe("name");
+    expect(
+      bindingFromNodeData({ agentSource: "type", agentId: "id-research", agentType: "researcher" })
+        .source,
+    ).toBe("type");
+  });
+
+  it("ignores a stored source that is not one of the three", () => {
+    // A layout written by a build that spelled the source differently.
+    expect(
+      bindingFromNodeData({ agentSource: "template", agentType: "researcher" } as unknown as CanvasNodeData)
+        .source,
+    ).toBe("type");
   });
 
   it("drops a session mode the API would not parse", () => {
@@ -98,7 +123,7 @@ describe("bindingToNodeData", () => {
   it("emits only the id for an instance binding", () => {
     expect(
       bindingToNodeData(
-        { source: "instance", agentId: "id-writer", agentName: "stale", sessionMode: "" },
+        { ...EMPTY, agentId: "id-writer", agentName: "stale", agentType: "stale-type" },
         AGENTS,
       ),
     ).toEqual({
@@ -106,6 +131,7 @@ describe("bindingToNodeData", () => {
       agentId: "id-writer",
       // Re-derived from the registry, so a stale echo cannot be saved.
       agentName: "writer",
+      agentType: undefined,
       sessionMode: undefined,
     });
   });
@@ -113,14 +139,32 @@ describe("bindingToNodeData", () => {
   it("emits only the name for a name binding, dropping the stale id", () => {
     expect(
       bindingToNodeData(
-        { source: "name", agentId: "id-writer", agentName: " researcher ", sessionMode: "new" },
+        { ...EMPTY, source: "name", agentId: "id-writer", agentName: " researcher ", sessionMode: "new" },
         AGENTS,
       ),
     ).toEqual({
       agentSource: "name",
       agentId: undefined,
       agentName: "researcher",
+      agentType: undefined,
       sessionMode: "new",
+    });
+  });
+
+  it("emits only the type for a type binding, dropping the id and the name", () => {
+    // The clearing is what makes a type binding reversible: nothing an
+    // abandoned source wrote survives for `stepAgentPayload` to prefer.
+    expect(
+      bindingToNodeData(
+        { ...EMPTY, source: "type", agentId: "id-writer", agentName: "writer", agentType: " researcher " },
+        AGENTS,
+      ),
+    ).toEqual({
+      agentSource: "type",
+      agentId: undefined,
+      agentName: undefined,
+      agentType: "researcher",
+      sessionMode: undefined,
     });
   });
 });
@@ -146,6 +190,12 @@ describe("stepAgentFields", () => {
     });
   });
 
+  it("sends the type alone for a type binding", () => {
+    expect(
+      stepAgentFields({ agentSource: "type", agentType: "researcher" }),
+    ).toEqual({ agent_type: "researcher", session_mode: undefined });
+  });
+
   it("carries the session override and omits it when unset", () => {
     expect(stepAgentFields({ agentId: "id-research", sessionMode: "new" }).session_mode).toBe("new");
     expect(stepAgentFields({ agentId: "id-research" }).session_mode).toBeUndefined();
@@ -156,8 +206,13 @@ describe("isStepBound", () => {
   it("counts a name-only binding as bound", () => {
     expect(isStepBound({ agentName: "researcher" })).toBe(true);
   });
+  it("counts a type-only binding as bound", () => {
+    // Find-or-spawn resolves at run time, so the step is not unassigned.
+    expect(isStepBound({ agentSource: "type", agentType: "researcher" })).toBe(true);
+  });
   it("does not count whitespace as a binding", () => {
     expect(isStepBound({ agentName: "   " })).toBe(false);
+    expect(isStepBound({ agentType: "   " })).toBe(false);
     expect(isStepBound({})).toBe(false);
   });
 });
@@ -174,7 +229,28 @@ describe("switchAgentSource", () => {
       source: "instance",
       agentId: "",
       agentName: "not-spawned-yet",
+      agentType: "",
       sessionMode: "",
+    });
+  });
+
+  it("carries the instance name into a type binding and back again", () => {
+    const bound: StepAgentBindingValue = { ...EMPTY, agentId: "id-research", agentName: "researcher" };
+    const asType = switchAgentSource(bound, "type", AGENTS);
+    expect(asType).toMatchObject({ source: "type", agentType: "researcher" });
+    // The return trip is what a two-valued source made unreachable.
+    expect(switchAgentSource(asType, "instance", AGENTS)).toMatchObject({
+      source: "instance",
+      agentId: "id-research",
+      agentName: "researcher",
+    });
+  });
+
+  it("carries a template name into a name binding", () => {
+    const asType: StepAgentBindingValue = { ...EMPTY, source: "type", agentType: "not-spawned-yet" };
+    expect(switchAgentSource(asType, "name", AGENTS)).toMatchObject({
+      source: "name",
+      agentName: "not-spawned-yet",
     });
   });
 });
@@ -207,6 +283,51 @@ describe("StepAgentBinding", () => {
       agentId: "id-writer",
       agentName: "writer",
     });
+  });
+
+  it("switches to an agent type and back out again", async () => {
+    // The type binding (#7712) is the third door #7724 has to keep openable:
+    // once `agentType` is the only field set, nothing but a source control
+    // that can report "instance" again could clear it.
+    const user = userEvent.setup();
+    const seen: StepAgentBindingValue[] = [];
+    render(<Harness initial={EMPTY} onValue={v => seen.push(v)} />);
+
+    await user.selectOptions(screen.getByLabelText("canvas.assign_agent"), "id-research");
+    await user.selectOptions(screen.getByLabelText("canvas.agent_source_label"), "type");
+    expect(last(seen)).toMatchObject({ source: "type", agentType: "researcher" });
+    expect(screen.getByLabelText("canvas.agent_type_label")).toHaveValue("researcher");
+    expect(screen.queryByLabelText("canvas.assign_agent")).toBeNull();
+    // Only the type reaches the API, so the abandoned id cannot bind the step.
+    expect(bindingToNodeData(last(seen), AGENTS)).toMatchObject({
+      agentSource: "type",
+      agentId: undefined,
+      agentName: undefined,
+      agentType: "researcher",
+    });
+
+    await user.selectOptions(screen.getByLabelText("canvas.agent_source_label"), "instance");
+    expect(screen.getByLabelText("canvas.assign_agent")).toHaveValue("id-research");
+    expect(bindingToNodeData(last(seen), AGENTS)).toMatchObject({
+      agentSource: "instance",
+      agentId: "id-research",
+      agentType: undefined,
+    });
+  });
+
+  it("keeps a hand-typed type that no template answers to yet", async () => {
+    const user = userEvent.setup();
+    const seen: StepAgentBindingValue[] = [];
+    render(<Harness initial={{ ...EMPTY, source: "type" }} onValue={v => seen.push(v)} />);
+
+    await user.type(screen.getByLabelText("canvas.agent_type_label"), "nightly-auditor");
+    expect(last(seen)).toMatchObject({ source: "type", agentType: "nightly-auditor" });
+
+    // Bouncing out to the name source and back keeps the typed handle.
+    await user.selectOptions(screen.getByLabelText("canvas.agent_source_label"), "name");
+    expect(screen.getByLabelText("canvas.agent_name_label")).toHaveValue("nightly-auditor");
+    await user.selectOptions(screen.getByLabelText("canvas.agent_source_label"), "type");
+    expect(screen.getByLabelText("canvas.agent_type_label")).toHaveValue("nightly-auditor");
   });
 
   it("keeps a hand-typed name that no running agent answers to", async () => {

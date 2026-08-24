@@ -135,12 +135,15 @@ impl LibreFangKernel {
     }
 
     /// Send a multimodal message with sender identity context from a channel.
+    ///
+    /// `thinking_override` follows [`Self::send_message_with_thinking_override`]: the channel bridge resolves it per conversation from `/think` (#7140).
     pub async fn send_message_with_blocks_and_sender(
         &self,
         agent_id: AgentId,
         message: &str,
         blocks: Vec<librefang_types::message::ContentBlock>,
         sender: &SenderContext,
+        thinking_override: Option<bool>,
     ) -> KernelResult<AgentLoopResult> {
         self.send_message_full(
             agent_id,
@@ -149,7 +152,7 @@ impl LibreFangKernel {
             Some(blocks),
             Some(sender),
             None,
-            None,
+            thinking_override,
             None,
         )
         .await
@@ -1762,22 +1765,6 @@ impl LibreFangKernel {
             loop_opts,
             owner,
         )
-    }
-
-    /// Sender-aware streaming entry point for channel bridges.
-    pub async fn send_message_streaming_with_sender_context_and_routing(
-        self: &Arc<Self>,
-        agent_id: AgentId,
-        message: &str,
-        kernel_handle: Option<Arc<dyn KernelHandle>>,
-        sender: &SenderContext,
-    ) -> KernelResult<(
-        tokio::sync::mpsc::Receiver<StreamEvent>,
-        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
-    )> {
-        let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
-        self.send_message_streaming_resolved(agent_id, message, handle, Some(sender), None, None)
-            .await
     }
 
     /// Streaming entry point with per-call deep-thinking override.

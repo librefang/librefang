@@ -2,9 +2,11 @@
  * Agent binding control for one workflow step, extracted out of
  * `pages/CanvasPage.tsx`'s node config panel (refs #7724).
  *
- * A step's agent can be bound two ways, and the API accepts both:
+ * A step's agent can be bound three ways, and the API accepts all three:
  * `agent_id` pins a specific running instance, `agent_name` resolves by
- * name at run time and therefore survives a respawn that mints a new id.
+ * name at run time and therefore survives a respawn that mints a new id,
+ * and `agent_type` resolves find-or-spawn against an agent template,
+ * spawning one when nothing of that type is running (#7712).
  * The chosen source lives in explicit state (`StepAgentBindingValue.source`)
  * and each source renders only its own control.
  *
@@ -13,19 +15,31 @@
  * builds a one-way door: the select can never report the value that would
  * clear the other field, so the binding cannot be switched back. Rendering
  * exactly the control that belongs to the active source means no control is
- * ever fed a value contradicting its own state, and both directions of the
- * switch are reachable.
+ * ever fed a value contradicting its own state, and every direction of the
+ * switch is reachable.
  *
- * The switch is also lossless: leaving `instance` carries the selected
- * agent's name into the name field, and returning re-selects the live agent
- * that carries that name when one exists.
+ * The source is three-valued rather than a boolean for that same reason: a
+ * step bound to a type would otherwise be a door with no handle on the
+ * inside, since nothing in the panel could clear `agentType` again.
+ *
+ * The switch is also lossless: whichever name is on screen — the selected
+ * agent's name, a typed name, or a template name — is carried into the next
+ * source, and returning to `instance` re-selects the live agent that
+ * carries that name when one exists.
  */
 import type { AgentItem } from "../api";
 import type { CanvasNodeData } from "../lib/canvas";
-import { CANVAS_INPUT_CLASS, CANVAS_LABEL_CLASS } from "../lib/canvas";
+import { CANVAS_INPUT_CLASS, CANVAS_LABEL_CLASS, stepAgentPayload } from "../lib/canvas";
 
 /** Which field of the step's `agent` binding the operator is authoring. */
-export type StepAgentSource = "instance" | "name";
+export type StepAgentSource = "instance" | "name" | "type";
+
+const AGENT_SOURCES: readonly StepAgentSource[] = ["instance", "name", "type"];
+
+/** Narrow a stored or user-supplied source; anything else reads as "not recorded". */
+function asAgentSource(raw: unknown): StepAgentSource | null {
+  return AGENT_SOURCES.includes(raw as StepAgentSource) ? (raw as StepAgentSource) : null;
+}
 
 /** Per-step `session_mode`; `""` defers to the target agent's manifest. */
 export type StepSessionMode = "" | "persistent" | "new";
@@ -38,6 +52,8 @@ export type StepAgentBindingValue = {
   /** Agent name — the payload when `source === "name"`, and the display
    *  echo of the selected instance otherwise. */
   agentName: string;
+  /** Agent template name — the payload when `source === "type"`. */
+  agentType: string;
   sessionMode: StepSessionMode;
 };
 
@@ -53,43 +69,65 @@ export function normalizeSessionMode(raw: unknown): StepSessionMode {
  *
  * `agentSource` is absent on every node built before this control existed
  * and on every node hydrated from a workflow's steps, so it is inferred
- * from whichever field the backend actually populated — `agent_id` wins
- * because that is the precedence the API's step parser applies.
+ * from whichever field the backend actually populated. The inference
+ * follows the same specificity order as `stepAgentPayload` — id, then type,
+ * then name — so the control opens on the binding the workflow would send.
  */
 export function bindingFromNodeData(data: CanvasNodeData): StepAgentBindingValue {
   const agentId = typeof data.agentId === "string" ? data.agentId : "";
   const agentName = typeof data.agentName === "string" ? data.agentName : "";
-  const stored = data.agentSource;
+  const agentType = typeof data.agentType === "string" ? data.agentType : "";
+  const stored = asAgentSource(data.agentSource);
   const source: StepAgentSource =
-    stored === "name" || stored === "instance"
-      ? stored
-      : !agentId && agentName
-        ? "name"
-        : "instance";
-  return { source, agentId, agentName, sessionMode: normalizeSessionMode(data.sessionMode) };
+    stored ?? (agentId ? "instance" : agentType ? "type" : agentName ? "name" : "instance");
+  return {
+    source,
+    agentId,
+    agentName,
+    agentType,
+    sessionMode: normalizeSessionMode(data.sessionMode),
+  };
 }
 
 /**
  * Project the editing state back onto node data.
  *
- * Exactly one of `agentId` / `agentName` survives, so `buildSteps` can emit
- * the matching API field without re-deriving the operator's intent, and a
- * stale value from the other source can never leak into a saved step.
+ * Choosing a source writes that source's field and clears the other two, so
+ * `buildSteps` can emit the matching API field without re-deriving the
+ * operator's intent, a stale value from an abandoned source can never leak
+ * into a saved step, and every one of the three bindings can be left again.
  */
 export function bindingToNodeData(
   value: StepAgentBindingValue,
   agents: AgentItem[],
-): Pick<CanvasNodeData, "agentSource" | "agentId" | "agentName" | "sessionMode"> {
+): Pick<CanvasNodeData, "agentSource" | "agentId" | "agentName" | "agentType" | "sessionMode"> {
   const sessionMode = value.sessionMode === "" ? undefined : value.sessionMode;
   if (value.source === "name") {
     const name = value.agentName.trim();
-    return { agentSource: "name", agentId: undefined, agentName: name || undefined, sessionMode };
+    return {
+      agentSource: "name",
+      agentId: undefined,
+      agentName: name || undefined,
+      agentType: undefined,
+      sessionMode,
+    };
+  }
+  if (value.source === "type") {
+    const type = value.agentType.trim();
+    return {
+      agentSource: "type",
+      agentId: undefined,
+      agentName: undefined,
+      agentType: type || undefined,
+      sessionMode,
+    };
   }
   const agent = agents.find(a => a.id === value.agentId);
   return {
     agentSource: "instance",
     agentId: value.agentId || undefined,
     agentName: agent?.name || undefined,
+    agentType: undefined,
     sessionMode,
   };
 }
@@ -97,32 +135,31 @@ export function bindingToNodeData(
 /**
  * The `agent_*` / `session_mode` fields of the API step payload for a node.
  *
- * The API's step parser reads `agent_id` first, so a payload carrying both
- * fields makes the name binding unreachable; exactly the field the operator
- * chose is emitted. `session_mode` is omitted rather than sent empty — the
- * parser logs and discards a value it cannot read, and an unset override is
- * how a step defers to the target agent's manifest.
+ * The routing key comes from `stepAgentPayload`, which sends exactly one of
+ * `agent_id` / `agent_name` / `agent_type`: a payload carrying several is
+ * rejected by the API rather than resolved, so the field the operator chose
+ * is the only one emitted. `session_mode` is omitted rather than sent empty
+ * — the parser logs and discards a value it cannot read, and an unset
+ * override is how a step defers to the target agent's manifest.
  */
 export function stepAgentFields(data: CanvasNodeData): {
   agent_id?: string;
   agent_name?: string;
+  agent_type?: string;
   session_mode?: "persistent" | "new";
 } {
-  const agentId = typeof data.agentId === "string" ? data.agentId : "";
-  const agentName = typeof data.agentName === "string" ? data.agentName.trim() : "";
   const sessionMode = normalizeSessionMode(data.sessionMode);
-  const byName = data.agentSource === "name" || !agentId;
   return {
-    agent_id: byName ? undefined : agentId,
-    agent_name: byName ? agentName || undefined : undefined,
+    ...(stepAgentPayload(data) ?? {}),
     session_mode: sessionMode === "" ? undefined : sessionMode,
   };
 }
 
-/** True when the step has an agent the backend can resolve. A name-only
- *  binding counts — it is a valid `agent_name` step. */
+/** True when the step has an agent the backend can resolve. A name-only or
+ *  type-only binding counts: `agent_name` is resolved at run time and
+ *  `agent_type` is find-or-spawn, so neither is an unassigned step. */
 export function isStepBound(data: CanvasNodeData): boolean {
-  return !!data.agentId || !!(typeof data.agentName === "string" && data.agentName.trim());
+  return stepAgentPayload(data) !== null;
 }
 
 /** Move the binding to another source without losing the operator's work. */
@@ -132,19 +169,27 @@ export function switchAgentSource(
   agents: AgentItem[],
 ): StepAgentBindingValue {
   if (next === value.source) return value;
-  if (next === "name") {
-    const selected = agents.find(a => a.id === value.agentId);
-    return { ...value, source: "name", agentName: selected?.name ?? value.agentName };
-  }
+  // The human-readable handle for whatever is bound right now: the selected
+  // instance's name, the typed agent name, or the template name. Carrying it
+  // across is what makes every direction of the switch lossless.
+  const handle = (
+    value.source === "instance"
+      ? agents.find(a => a.id === value.agentId)?.name ?? value.agentName
+      : value.source === "type"
+        ? value.agentType
+        : value.agentName
+  ).trim();
+  if (next === "name") return { ...value, source: "name", agentName: handle || value.agentName };
+  if (next === "type") return { ...value, source: "type", agentType: handle || value.agentType };
   // Returning to a concrete instance: re-select the live agent carrying the
-  // typed name so `name -> instance -> name` is a no-op, and fall back to
+  // handle so `instance -> elsewhere -> instance` is a no-op, and fall back to
   // "no agent" (an empty, still-selectable dropdown) when none matches.
-  const match = agents.find(a => a.name === value.agentName.trim());
+  const match = agents.find(a => a.name === handle);
   return {
     ...value,
     source: "instance",
     agentId: match?.id ?? "",
-    agentName: match?.name ?? value.agentName,
+    agentName: match?.name ?? handle,
   };
 }
 
@@ -167,14 +212,17 @@ export function StepAgentBinding({
       <select
         id="step-agent-source"
         value={value.source}
-        onChange={e => onChange(switchAgentSource(value, e.target.value as StepAgentSource, agents))}
+        onChange={e =>
+          onChange(switchAgentSource(value, asAgentSource(e.target.value) ?? "instance", agents))
+        }
         className={CANVAS_INPUT_CLASS}
       >
         <option value="instance">{t("canvas.agent_source_instance")}</option>
         <option value="name">{t("canvas.agent_source_name")}</option>
+        <option value="type">{t("canvas.agent_source_type")}</option>
       </select>
 
-      {value.source === "instance" ? (
+      {value.source === "instance" && (
         <>
           <label className={CANVAS_LABEL_CLASS} htmlFor="step-agent-instance">
             {t("canvas.assign_agent")}
@@ -201,7 +249,9 @@ export function StepAgentBinding({
             ))}
           </select>
         </>
-      ) : (
+      )}
+
+      {value.source === "name" && (
         <>
           <label className={CANVAS_LABEL_CLASS} htmlFor="step-agent-name">
             {t("canvas.agent_name_label")}
@@ -222,6 +272,25 @@ export function StepAgentBinding({
           </datalist>
           <p className="mt-1 text-[10px] leading-snug text-text-dim/70">
             {t("canvas.agent_name_hint")}
+          </p>
+        </>
+      )}
+
+      {value.source === "type" && (
+        <>
+          <label className={CANVAS_LABEL_CLASS} htmlFor="step-agent-type">
+            {t("canvas.agent_type_label")}
+          </label>
+          <input
+            id="step-agent-type"
+            type="text"
+            value={value.agentType}
+            placeholder={t("canvas.agent_type_placeholder")}
+            onChange={e => onChange({ ...value, agentType: e.target.value })}
+            className={CANVAS_INPUT_CLASS}
+          />
+          <p className="mt-1 text-[10px] leading-snug text-text-dim/70">
+            {t("canvas.agent_type_hint")}
           </p>
         </>
       )}

@@ -247,8 +247,15 @@ pub trait ChannelBridgeHandle: Send + Sync {
         Err("Not implemented".to_string())
     }
 
-    /// Toggle extended thinking mode for an agent.
-    async fn set_thinking(&self, _agent_id: AgentId, _on: bool) -> Result<String, String> {
+    /// Toggle extended thinking for one conversation on `agent_id`.
+    ///
+    /// `scope` is the conversation the command was typed in, not the agent: one agent commonly serves many chats across many channel accounts, and `/think` acks say "for this chat", so the preference must be stored and read back per conversation (#7140). Implementations that key it by `agent_id` alone leak one user's reasoning mode — and its cost — into every other conversation the agent serves.
+    async fn set_thinking(
+        &self,
+        _agent_id: AgentId,
+        _on: bool,
+        _scope: &crate::types::ConversationScope,
+    ) -> Result<String, String> {
         Ok("Extended thinking preference saved.".to_string())
     }
 
@@ -7067,12 +7074,24 @@ async fn handle_command(
             }
         }
         "think" => {
+            // Bare `/think` means "on"; anything that is not a recognised on/off word is a typo, and silently reading it as "off" is how `/think of` used to disable thinking while acking success.
+            let on = match args.first().map(|a| a.to_ascii_lowercase()).as_deref() {
+                None | Some("on") | Some("true") | Some("enable") | Some("enabled") => true,
+                Some("off") | Some("false") | Some("disable") | Some("disabled") => false,
+                Some(other) => {
+                    return format!("Unknown argument '{other}'. Usage: /think [on|off]");
+                }
+            };
             let agent_id = resolve_for_command();
             match agent_id {
                 Some(aid) => {
-                    let on = args.first().map(|a| a == "on").unwrap_or(true);
+                    // Same (channel, chat_id) pair `/new` resets and the next inbound turn resolves its session from, plus the account dimension — see `ConversationScope` (#7140).
+                    let (ch, chat) =
+                        session_scope(channel_type, &sender.platform_id, sender_user_id);
+                    let scope =
+                        crate::types::ConversationScope::new(ch, account_id, chat.as_deref());
                     handle
-                        .set_thinking(aid, on)
+                        .set_thinking(aid, on, &scope)
                         .await
                         .unwrap_or_else(|e| format!("Error: {e}"))
                 }
@@ -7531,6 +7550,53 @@ mod tests {
         }
         async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
             Err("spawn not implemented in mock".to_string())
+        }
+        fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+            // Test mock: no event bus to forward to.
+        }
+    }
+
+    /// Records every `/think` toggle with the conversation scope it arrived with, so a test can assert the command path passes the conversation identity down instead of the bare agent id (#7140).
+    struct ThinkRecorderHandle {
+        agents: Mutex<Vec<(AgentId, String)>>,
+        calls: Mutex<Vec<(AgentId, bool, crate::types::ConversationScope)>>,
+    }
+
+    impl ThinkRecorderHandle {
+        fn new(agents: Vec<(AgentId, String)>) -> Self {
+            Self {
+                agents: Mutex::new(agents),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ChannelBridgeHandle for ThinkRecorderHandle {
+        async fn send_message(&self, _agent_id: AgentId, message: &str) -> Result<String, String> {
+            Ok(format!("Echo: {message}"))
+        }
+        async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
+            let agents = self.agents.lock().unwrap();
+            Ok(agents.iter().find(|(_, n)| n == name).map(|(id, _)| *id))
+        }
+        async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+            Ok(self.agents.lock().unwrap().clone())
+        }
+        async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+            Err("spawn not implemented in mock".to_string())
+        }
+        async fn set_thinking(
+            &self,
+            agent_id: AgentId,
+            on: bool,
+            scope: &crate::types::ConversationScope,
+        ) -> Result<String, String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((agent_id, on, scope.clone()));
+            Ok("ok".to_string())
         }
         fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
             // Test mock: no event bus to forward to.
@@ -8258,6 +8324,175 @@ mod tests {
             "/model must route per-account; got {:?}",
             calls,
         );
+    }
+
+    /// Regression for #7140: `/think` acks say "for this chat", so the command path must hand `set_thinking` the conversation it was typed in. One agent commonly serves many Telegram chats; passing the bare agent id is what made one user's toggle rewrite everybody else's turns.
+    #[tokio::test]
+    async fn think_command_carries_the_conversation_scope() {
+        let agent = AgentId::new();
+        let recorder = Arc::new(ThinkRecorderHandle::new(vec![(
+            agent,
+            "shared-agent".to_string(),
+        )]));
+        let handle: Arc<dyn ChannelBridgeHandle> = recorder.clone();
+        let router = Arc::new(AgentRouter::new());
+        router.set_channel_default("telegram:bot-a".to_string(), agent);
+
+        // Two distinct chats served by the same agent through the same bot.
+        let chat_one = ChannelUser {
+            platform_id: "chat-1".to_string(),
+            display_name: "Group One".to_string(),
+            librefang_user: None,
+        };
+        let chat_two = ChannelUser {
+            platform_id: "chat-2".to_string(),
+            display_name: "Group Two".to_string(),
+            librefang_user: None,
+        };
+
+        let on = handle_command(
+            "think",
+            &["on".to_string()],
+            &handle,
+            &router,
+            &chat_one,
+            &ChannelType::Telegram,
+            Some("bot-a"),
+            None,
+            "member-1",
+        )
+        .await;
+        assert_eq!(on, "ok");
+
+        let off = handle_command(
+            "think",
+            &["off".to_string()],
+            &handle,
+            &router,
+            &chat_two,
+            &ChannelType::Telegram,
+            Some("bot-a"),
+            None,
+            "member-2",
+        )
+        .await;
+        assert_eq!(off, "ok");
+
+        let calls = recorder.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "both toggles must reach the handle");
+        assert_eq!(calls[0].0, agent);
+        assert_eq!(calls[1].0, agent, "same agent serves both chats");
+        assert!(calls[0].1, "/think on");
+        assert!(!calls[1].1, "/think off");
+        assert_ne!(
+            calls[0].2, calls[1].2,
+            "two chats on one agent must produce different scopes, or the \
+             second toggle overwrites the first"
+        );
+
+        // The scope is the same (channel, chat_id) pair `/new` resets, plus
+        // the account — so `set_thinking` and the message path agree on the key.
+        let (channel, chat) =
+            session_scope(&ChannelType::Telegram, &chat_one.platform_id, "member-1");
+        assert_eq!(
+            calls[0].2,
+            crate::types::ConversationScope::new(channel, Some("bot-a"), chat.as_deref()),
+        );
+    }
+
+    /// The same chat reached through two different bot accounts is two conversations, so `/think` in one must not carry into the other (#7140).
+    #[tokio::test]
+    async fn think_command_scope_separates_bot_accounts() {
+        let agent = AgentId::new();
+        let recorder = Arc::new(ThinkRecorderHandle::new(vec![(
+            agent,
+            "shared-agent".to_string(),
+        )]));
+        let handle: Arc<dyn ChannelBridgeHandle> = recorder.clone();
+        let router = Arc::new(AgentRouter::new());
+        router.set_channel_default("telegram:bot-a".to_string(), agent);
+        router.set_channel_default("telegram:bot-b".to_string(), agent);
+
+        let chat = ChannelUser {
+            platform_id: "chat-1".to_string(),
+            display_name: "Group One".to_string(),
+            librefang_user: None,
+        };
+
+        for account in ["bot-a", "bot-b"] {
+            handle_command(
+                "think",
+                &["on".to_string()],
+                &handle,
+                &router,
+                &chat,
+                &ChannelType::Telegram,
+                Some(account),
+                None,
+                "member-1",
+            )
+            .await;
+        }
+
+        let calls = recorder.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2);
+        assert_ne!(
+            calls[0].2, calls[1].2,
+            "one chat id under two bot accounts must not collapse to one scope"
+        );
+    }
+
+    /// `/think of` is a typo, not "off". Reading an unrecognised argument as `false` disabled thinking while acking success — the confirmation-without-action class this issue is about (#7140).
+    #[tokio::test]
+    async fn think_command_rejects_an_unknown_argument() {
+        let agent = AgentId::new();
+        let recorder = Arc::new(ThinkRecorderHandle::new(vec![(
+            agent,
+            "shared-agent".to_string(),
+        )]));
+        let handle: Arc<dyn ChannelBridgeHandle> = recorder.clone();
+        let router = Arc::new(AgentRouter::new());
+        router.set_channel_default("telegram:bot-a".to_string(), agent);
+
+        let chat = ChannelUser {
+            platform_id: "chat-1".to_string(),
+            display_name: "Group One".to_string(),
+            librefang_user: None,
+        };
+
+        let result = handle_command(
+            "think",
+            &["of".to_string()],
+            &handle,
+            &router,
+            &chat,
+            &ChannelType::Telegram,
+            Some("bot-a"),
+            None,
+            "member-1",
+        )
+        .await;
+        assert!(result.contains("Usage: /think [on|off]"), "got: {result}");
+        assert!(
+            recorder.calls.lock().unwrap().is_empty(),
+            "a typo must not silently toggle anything"
+        );
+
+        // Bare `/think` still means "on".
+        let result = handle_command(
+            "think",
+            &[],
+            &handle,
+            &router,
+            &chat,
+            &ChannelType::Telegram,
+            Some("bot-a"),
+            None,
+            "member-1",
+        )
+        .await;
+        assert_eq!(result, "ok");
+        assert!(recorder.calls.lock().unwrap()[0].1);
     }
 
     /// Regression test for #5672 Layer B: `/agent` in bot-a must NOT

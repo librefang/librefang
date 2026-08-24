@@ -127,6 +127,35 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn workflow_engine(&self) -> &WorkflowEngine;
 
     // ====================================================================
+    // Workflow step agent resolution (#7712)
+    // ====================================================================
+
+    /// Resolve a workflow step's agent reference for a real run, returning
+    /// `(agent id, agent name, inherit_parent_context)`.
+    ///
+    /// Every workflow driver in the API layer routes through this rather than
+    /// re-implementing the `match` over [`StepAgent`]: the variants are a
+    /// kernel-side policy (in particular `ByType`'s find-or-spawn, which the
+    /// API layer has no way to perform), and a driver carrying its own copy
+    /// silently reports "agent not found" for any variant it has not been
+    /// taught about.
+    fn resolve_step_agent(
+        &self,
+        agent_ref: &crate::workflow::StepAgent,
+    ) -> Option<(AgentId, String, bool)>;
+
+    /// Resolve a workflow step's agent reference **without** side effects,
+    /// for dry runs and previews.
+    ///
+    /// Identical to [`Self::resolve_step_agent`] except that a `type`
+    /// reference with no registered instance is previewed from its template
+    /// instead of spawned — a dry run is documented as side-effect free.
+    fn preview_step_agent(
+        &self,
+        agent_ref: &crate::workflow::StepAgent,
+    ) -> Option<(AgentId, String, bool)>;
+
+    // ====================================================================
     // Autonomous goal runner (#5744)
     // ====================================================================
 
@@ -724,29 +753,23 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         message: &str,
         blocks: Vec<librefang_types::message::ContentBlock>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
+    /// `thinking_override` carries the conversation's `/think` preference (`None` = agent/global default). Channel turns resolve it per conversation, so it has to ride the send call rather than be read off the agent (#7140).
     async fn send_message_with_sender_context(
         &self,
         agent_id: AgentId,
         message: &str,
         sender: librefang_channels::types::SenderContext,
+        thinking_override: Option<bool>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
+    /// Multimodal counterpart of [`KernelApi::send_message_with_sender_context`]; `thinking_override` has the same per-conversation meaning.
     async fn send_message_with_blocks_and_sender(
         &self,
         agent_id: AgentId,
         message: &str,
         blocks: Vec<librefang_types::message::ContentBlock>,
         sender: librefang_channels::types::SenderContext,
+        thinking_override: Option<bool>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
-    async fn send_message_streaming_with_sender_context_and_routing(
-        self: Arc<Self>,
-        agent_id: AgentId,
-        message: &str,
-        kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
-        sender: librefang_channels::types::SenderContext,
-    ) -> KernelResult<(
-        tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
-        tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
-    )>;
 
     // ====================================================================
     // Test-only / boot-only kernel ops surfaced for integration tests
@@ -905,6 +928,18 @@ impl KernelApi for LibreFangKernel {
     }
     fn workflow_engine(&self) -> &WorkflowEngine {
         <Self as crate::WorkflowSubsystemApi>::engine_ref(self)
+    }
+    fn resolve_step_agent(
+        &self,
+        agent_ref: &crate::workflow::StepAgent,
+    ) -> Option<(AgentId, String, bool)> {
+        LibreFangKernel::resolve_step_agent(self, agent_ref)
+    }
+    fn preview_step_agent(
+        &self,
+        agent_ref: &crate::workflow::StepAgent,
+    ) -> Option<(AgentId, String, bool)> {
+        LibreFangKernel::preview_step_agent(self, agent_ref)
     }
 
     fn start_goal_run(
@@ -1675,8 +1710,16 @@ impl KernelApi for LibreFangKernel {
         agent_id: AgentId,
         message: &str,
         sender: librefang_channels::types::SenderContext,
+        thinking_override: Option<bool>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
-        Self::send_message_with_sender_context(self, agent_id, message, &sender).await
+        Self::send_message_with_sender_context_and_thinking(
+            self,
+            agent_id,
+            message,
+            &sender,
+            thinking_override,
+        )
+        .await
     }
     async fn send_message_with_blocks_and_sender(
         &self,
@@ -1684,25 +1727,15 @@ impl KernelApi for LibreFangKernel {
         message: &str,
         blocks: Vec<librefang_types::message::ContentBlock>,
         sender: librefang_channels::types::SenderContext,
+        thinking_override: Option<bool>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
-        Self::send_message_with_blocks_and_sender(self, agent_id, message, blocks, &sender).await
-    }
-    async fn send_message_streaming_with_sender_context_and_routing(
-        self: Arc<Self>,
-        agent_id: AgentId,
-        message: &str,
-        kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
-        sender: librefang_channels::types::SenderContext,
-    ) -> KernelResult<(
-        tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
-        tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
-    )> {
-        LibreFangKernel::send_message_streaming_with_sender_context_and_routing(
-            &self,
+        Self::send_message_with_blocks_and_sender(
+            self,
             agent_id,
             message,
-            kernel_handle,
+            blocks,
             &sender,
+            thinking_override,
         )
         .await
     }
