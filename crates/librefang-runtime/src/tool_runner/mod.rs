@@ -50,7 +50,7 @@ use self::agent::{
 use self::artifact::tool_read_artifact;
 pub use self::canvas::sanitize_canvas_html;
 use self::canvas::tool_canvas_present;
-use self::channel::{tool_channel_members, tool_channel_send};
+use self::channel::{tool_channel_dm, tool_channel_members, tool_channel_send};
 use self::cron::{tool_cron_cancel, tool_cron_create, tool_cron_enable, tool_cron_list};
 pub(crate) use self::definitions::tool_name;
 pub use self::definitions::{builtin_tool_definitions, select_native_tools, ALWAYS_NATIVE_TOOLS};

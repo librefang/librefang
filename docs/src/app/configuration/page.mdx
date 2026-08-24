@@ -2365,7 +2365,7 @@ session_scoped_recall = true
 | `session_ttl_hours` | u32 | `24` | Session memory TTL in hours. Memories older than this are cleaned up before each agent execution. |
 | `duplicate_threshold` | f32 | `0.5` | Similarity threshold for duplicate detection (0.0–1.0). Uses vector cosine similarity when embeddings are available, otherwise falls back to Jaccard word overlap. |
 | `confidence_decay_rate` | f64 | `0.01` | Confidence decay rate per day. Follows exponential decay: `conf × e^(−rate × days)`. Default of `0.01` takes ~70 days to halve. |
-| `max_memories_per_agent` | usize | `1000` | Maximum memories per agent. When exceeded, oldest/lowest-confidence entries are evicted. `0` = no cap. |
+| `max_memories_per_agent` | usize | `1000` | Maximum memories per agent. When exceeded, raw dialogue rows are evicted before extracted facts, lowest-confidence first within each class. `0` = no cap. |
 | `session_scoped_recall` | bool | `true` | (#7605) Stamp each auto-memorized memory with the session that produced it, and refuse to auto-retrieve a memory stamped for a different session. Keeps one visitor's content out of another visitor's turn on an agent that serves several people. Memories written before this shipped carry no stamp and stay recallable everywhere. Set `false` for a single agent-wide pool — the pre-#7605 behaviour, and what an agent with `session_mode = "new"` wants if its runs are meant to build on each other. |
 
 #### Per-agent overrides

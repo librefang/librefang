@@ -149,6 +149,7 @@ common `[[sidecar_channels]]` fields documented under
    - `im:history`
    - `im:read`
    - `im:write`
+   - `users:read` (only if you enable display-name resolution, below)
 4. Install the app to your workspace.
 5. Copy the Bot User OAuth Token (`xoxb-...`).
 6. Set the environment variables:
@@ -182,6 +183,8 @@ SLACK_BOT_TOKEN = "xoxb-..."
 # SLACK_FILE_ALLOWED_EXTENSIONS = ""   # comma-separated allow-list; empty accepts every extension
 # SLACK_FILE_DOWNLOAD_CHANNELS = ""    # comma-separated channel IDs; empty means every channel
 # SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS = ""   # channel IDs that never accept uploads
+# SLACK_RESOLVE_DISPLAY_NAMES = "false"       # set "true" to show human names instead of raw U… ids
+# SLACK_DISPLAY_NAME_TTL = "21600"            # how long a resolved name is cached, in seconds
 ```
 
 8. Restart the daemon.
@@ -198,6 +201,22 @@ One attachment per message is forwarded (the wire protocol carries one content v
 Link-preview images are not followed — those belong to a URL somebody pasted, not to an upload.
 
 Four knobs gate it, all optional: `SLACK_FILE_DOWNLOADS` turns the whole feature off, `SLACK_FILE_MAX_BYTES` caps the size (10 MiB by default), `SLACK_FILE_ALLOWED_EXTENSIONS` restricts which extensions are accepted, and `SLACK_FILE_DOWNLOAD_CHANNELS` / `SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS` decide which channels participate — the pair a busy channel needs to opt out without disabling uploads everywhere.
+
+### Sender Display Names
+
+By default the adapter reports the sender's raw Slack id (`U09…`) as their display name, and that is what an agent sees and what the group roster stores.
+Set `SLACK_RESOLVE_DISPLAY_NAMES = "true"` to resolve it through Slack's `users.info` instead, which also fills in the `@handle`.
+This needs the `users:read` bot scope; without it every lookup fails and the adapter keeps reporting ids.
+
+Lookups are cached per user id for `SLACK_DISPLAY_NAME_TTL` seconds (six hours by default), so a busy channel costs a handful of API calls a day rather than one per message — `users.info` sits in a per-method rate limit that an uncached lookup would exhaust.
+Absences are cached too: a deleted user, or a bot missing the scope, costs one request rather than one per message.
+A transient failure (a rate limit, a dropped connection) is only suppressed for a minute, so a workspace that recovers starts resolving names again promptly.
+
+**This is off by default because it changes what LibreFang stores, not only what it shows.**
+The daemon persists one roster row per person who speaks in a group (`channel`, `chat_id`, `user_id`, display name, handle, first and last seen), and that row carries whatever this adapter reports.
+Leaving the knob off keeps the stored value an opaque platform id; turning it on writes real names into `~/.librefang/memory.db` until the row is removed.
+Rows have no automatic expiry today, so treat enabling it as a decision about personal data retention, not a display preference.
+Operators who want human-readable names for a handful of people without any lookup or storage change can keep using `[users]` entries, which stay authoritative.
 
 ### Processing-State Reactions
 

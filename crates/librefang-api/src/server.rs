@@ -1054,6 +1054,9 @@ pub(crate) struct ChangePasswordRequest {
 /// Verifies the current password, then updates whichever credentials are
 /// provided in the request body. At least one of `new_password` or
 /// `new_username` must be non-empty. All existing sessions are invalidated on success.
+///
+/// Refused with `423 Locked` in managed mode (#6695): the new username and password hash are persisted as top-level `dashboard_user` / `dashboard_pass_hash` keys in `config.toml`, so a deployment that owns the file owns the dashboard credential too.
+/// In such a deployment the credential is rotated by changing the manifest and rolling, which is also the only way the change survives the next rollout.
 #[utoipa::path(
     post,
     path = "/api/auth/change-password",
@@ -1062,13 +1065,21 @@ pub(crate) struct ChangePasswordRequest {
     responses(
         (status = 200, description = "Credentials updated and existing sessions invalidated", body = crate::types::JsonObject),
         (status = 400, description = "Missing required fields or password too short"),
-        (status = 401, description = "Current password is incorrect")
+        (status = 401, description = "Current password is incorrect"),
+        (status = 423, description = "Configuration is managed by the deployment; rotate the credential in the manifest", body = crate::types::JsonObject)
     )
 )]
 pub(crate) async fn change_password(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
     axum::Json(body): axum::Json<ChangePasswordRequest>,
 ) -> axum::response::Response {
+    // Ahead of the current-password verification, not after it.
+    // The write cannot succeed under any branch below, so verifying first would only spend an Argon2 hash and hand back a password-correctness oracle in exchange for the same `423`.
+    // The caller is already Owner-authenticated (`is_owner_only_write` in `middleware.rs`) and can read the same fact from `GET /api/config/status`, so answering early discloses nothing new.
+    if let Some(locked) = routes::guard_config_write() {
+        return locked.into_response();
+    }
+
     let cfg = state.kernel.config_snapshot();
 
     let cfg_user = resolve_credential(
