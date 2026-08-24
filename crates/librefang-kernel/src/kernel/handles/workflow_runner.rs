@@ -878,6 +878,60 @@ mod tests {
         );
     }
 
+    /// Every step field `WorkflowCreateSpec` accepts and acts on must be advertised in the tool schema.
+    ///
+    /// `WorkflowCreateSpec` deserialises the canonical [`crate::workflow::WorkflowStep`], so the tool silently accepts every field that struct grows — agent-type routing, `required_skills`, `session_mode` — whether or not the published schema mentions them.
+    /// A field accepted but unadvertised is a field no model will ever send, and the `workflow-creator` skill would be documenting keys the tool's own schema denies.
+    /// This asserts the acceptance and the advertisement together, so the two cannot drift apart in either direction.
+    #[test]
+    fn the_tool_schema_advertises_the_step_routing_fields_the_spec_accepts() {
+        use crate::workflow::StepAgent;
+        use librefang_types::agent::SessionMode;
+
+        let wf = build_created_workflow(&spec(serde_json::json!([{
+            "name": "review",
+            "agent": {"type": "code-reviewer"},
+            "prompt_template": "Review {{input}}",
+            "required_skills": ["git-expert"],
+            "session_mode": "new",
+            "inherit_context": false,
+        }])))
+        .expect("agent-type routing, required_skills and session_mode are accepted");
+
+        let step = &wf.steps[0];
+        assert!(
+            matches!(&step.agent, StepAgent::ByType { template } if template == "code-reviewer"),
+            "`{{\"type\": …}}` must bind find-or-spawn, got {:?}",
+            step.agent
+        );
+        assert_eq!(step.required_skills, vec!["git-expert".to_string()]);
+        assert!(matches!(step.session_mode, Some(SessionMode::New)));
+        assert_eq!(step.inherit_context, Some(false));
+
+        let defs = librefang_runtime::tool_runner::builtin_tool_definitions();
+        let step_props = &defs
+            .iter()
+            .find(|d| d.name == "workflow_create")
+            .expect("workflow_create must be a builtin tool")
+            .input_schema["properties"]["steps"]["items"]["properties"];
+
+        for field in ["required_skills", "session_mode", "inherit_context"] {
+            assert!(
+                step_props[field].is_object(),
+                "step field `{field}` is accepted by workflow_create but absent from its schema"
+            );
+        }
+        let agent_doc = step_props["agent"]["description"]
+            .as_str()
+            .expect("the agent property must be documented");
+        for routing_key in crate::workflow::STEP_AGENT_ROUTING_KEYS {
+            assert!(
+                agent_doc.contains(&format!("\"{routing_key}\"")),
+                "the agent binding doc must name the `{routing_key}` routing key, got: {agent_doc}"
+            );
+        }
+    }
+
     /// Pins the operator-facing timeout text format.
     /// Operators scrape for `"workflow run timed out after"` and pull the seconds field; any drift in this string is a breaking change to the contract the PR explicitly locks in.
     /// If you need to change the format, announce it in the changelog under a breaking-change bullet and update this assertion.

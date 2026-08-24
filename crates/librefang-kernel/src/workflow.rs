@@ -363,7 +363,7 @@ pub enum StepAgent {
 ///
 /// Ordered as they are reported in the "exactly one of" error so the
 /// message reads the same on every host.
-const STEP_AGENT_ROUTING_KEYS: [&str; 3] = ["id", "name", "type"];
+pub(crate) const STEP_AGENT_ROUTING_KEYS: [&str; 3] = ["id", "name", "type"];
 
 /// Select the [`StepAgent`] variant for one tagged-object payload.
 ///

@@ -159,6 +159,114 @@ fn resolve_send_target<'a>(
         .or(sender_id)
 }
 
+/// Resolve the conversation a `channel_dm` is authorized against: the base channel type and the platform conversation id of the turn currently being handled.
+///
+/// `channel_dm` deliberately takes no `channel` / `chat_id` arguments.
+/// Its whole safety property is that the recipient must be a member of *this* conversation's roster, and a caller-supplied conversation would let the model choose its own authorization set — which is the #6117 cross-chat leak with extra steps.
+/// So the pair is derived from the turn and nothing else, and an out-of-band caller (cron, trigger, API-driven run) has no conversation to be authorized against and is refused rather than silently given a wider one.
+///
+/// The channel is reduced to its base type for two reasons at once: the roster is keyed on the bare `channel_type_str` the bridge writes, and the WhatsApp gateway stamps `sender_channel = "whatsapp:<jid>"` (#5227), which no registered adapter name matches.
+fn resolve_dm_conversation<'a>(
+    turn_channel: Option<&'a str>,
+    turn_chat_id: Option<&'a str>,
+    turn_sender_id: Option<&'a str>,
+) -> Result<(&'a str, &'a str), String> {
+    let channel = turn_channel
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or("channel_dm is only available while handling an inbound channel message — it addresses a member of the conversation the turn arrived on, and there is no such conversation here. Use channel_send with an explicit channel and recipient instead.")?;
+
+    let conversation = resolve_send_target(None, turn_chat_id, turn_sender_id)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or("channel_dm could not determine the current conversation: the turn carries no chat id and no sender id.")?;
+
+    Ok((channel_base(channel), conversation))
+}
+
+/// `channel_dm` — deliver a message privately to one member of the current group conversation.
+///
+/// The gap this closes (#7086): in a group the only target `channel_send` accepts is the group itself (#6117), and `notify_owner` — which the guard used to recommend — produces an `owner_notice` in the reply envelope that no sidecar channel adapter routes anywhere.
+/// An agent asked to tell one person their task finished therefore had to either broadcast it to everyone or drop it silently.
+///
+/// The authorization set is the persisted roster of the conversation the turn arrived on: the recipient must be someone the daemon has observed speaking there.
+/// That is what keeps #6117 closed while still allowing a private reply — the model cannot name an arbitrary platform id, only someone already in the room with it.
+///
+/// What "private" means per platform, because it is not the same everywhere:
+///
+/// * Slack — `chat.postMessage` addressed to a `U…` id posts into the bot↔user IM, which the bot may open with any workspace member.
+/// * Telegram — a `chat_id` equal to a user id is that user's private chat, but a bot cannot open one; the user must have started the bot, otherwise the API rejects the send.
+/// * WhatsApp — a participant JID addresses that participant's individual chat.
+///
+/// The failure is surfaced, never papered over: nothing here falls back to posting in the group, because a "private" notice that silently becomes public is worse than an error.
+pub(super) async fn tool_channel_dm(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    sender_id: Option<&str>,
+    sender_channel: Option<&str>,
+    sender_chat_id: Option<&str>,
+    sender_account_id: Option<&str>,
+    caller_agent_id: Option<&str>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+
+    let user_id = trim_opt_string(input["user_id"].as_str())
+        .ok_or("Missing 'user_id' parameter — the platform user id of the member to reach, as returned by channel_members.")?;
+
+    let message = input["message"]
+        .as_str()
+        .ok_or("Missing 'message' parameter (the text to deliver privately).")?;
+    if message.trim().is_empty() {
+        return Err("Message cannot be empty".to_string());
+    }
+
+    let (channel, conversation) =
+        resolve_dm_conversation(sender_channel, sender_chat_id, sender_id)?;
+
+    // Naming the conversation itself is not a private message, it is the broadcast the caller was trying to avoid.
+    // The roster lookup below would reject it anyway (a chat id is not one of its own members), but that error would describe the wrong problem.
+    if user_id == conversation {
+        return Err(format!(
+            "channel_dm user_id '{user_id}' is the current conversation itself, not a member of it. To post where everyone in the conversation can read it, use channel_send."
+        ));
+    }
+
+    // Platform ids are opaque and `send_channel_*` lookups are case-sensitive (#6078), so the membership check is too: a case-insensitive match here would authorize one id and deliver to a different one.
+    let members = kh
+        .roster_members(channel, conversation)
+        .map_err(|e| e.to_string())?;
+    let is_member = members
+        .iter()
+        .any(|m| m.get("user_id").and_then(|v| v.as_str()) == Some(user_id));
+    if !is_member {
+        return Err(format!(
+            "channel_dm user_id '{user_id}' is not a recorded member of the current conversation on channel '{channel}'. A private message may only be addressed to someone the daemon has seen speak in this conversation — call channel_members to see who that is."
+        ));
+    }
+
+    if let Some(violation) = check_taint_outbound_text(message, &TaintSink::agent_message()) {
+        return Err(violation);
+    }
+
+    // No `thread_id`: the turn's thread belongs to the group conversation, and carrying it into a one-to-one chat addresses a thread that does not exist there.
+    // No caller-supplied `account_id` either — the send routes through the same bot account the turn arrived on, which makes the #6443 cross-account guard unnecessary rather than merely satisfied.
+    let confirmation = mirror_on_success(
+        kh,
+        caller_agent_id,
+        channel,
+        user_id,
+        message,
+        kh.send_channel_message(channel, user_id, message, None, sender_account_id)
+            .await
+            .map_err(|e| e.to_string()),
+    )
+    .await?;
+
+    Ok(format!(
+        "Delivered privately to {user_id} on {channel}; the rest of the conversation cannot see it. {confirmation}"
+    ))
+}
+
 /// Resolve the `(channel, chat_id)` pair a `channel_members` read targets.
 ///
 /// Both components default to the conversation the current turn arrived on, so the common "who is in this channel?" call needs no arguments at all.
@@ -310,8 +418,13 @@ pub(super) async fn tool_channel_send(
     //
     // A different-channel dispatch (e.g. emailing while replying to a WhatsApp
     // peer) stays allowed — only intra-channel re-targeting is the leak. To
-    // legitimately reach a different contact, the agent uses `notify_owner`
-    // (kernel-mediated) or waits for that contact's own inbound message.
+    // legitimately reach one member of the CURRENT conversation, the agent uses
+    // `channel_dm`, which is authorized against that conversation's roster; to
+    // reach a contact in a different conversation it waits for that contact's
+    // own inbound message. The guard used to recommend `notify_owner` here,
+    // which was a dead end: `owner_notice` is surfaced through the API reply
+    // envelope and consumed by no sidecar channel adapter, so on Slack the
+    // model was refused and then sent to a path that delivered nothing (#7086).
     if let (Some(explicit), Some(turn_channel)) = (explicit_recipient, sender_channel) {
         // The expected chat is the same canonical reply target a no-recipient
         // send resolves to (`resolve_send_target` with no explicit recipient):
@@ -333,7 +446,7 @@ pub(super) async fn tool_channel_send(
                 && explicit != expected
             {
                 return Err(format!(
-                    "channel_send recipient '{explicit}' does not match the current chat '{expected}' on channel '{channel}'. Cross-chat dispatch is forbidden — to reach a different contact use notify_owner, or wait for that contact's inbound message."
+                    "channel_send recipient '{explicit}' does not match the current chat '{expected}' on channel '{channel}'. Cross-chat dispatch is forbidden. To reach one member of THIS conversation privately, use channel_dm — it delivers to a member of this chat's roster. To reach someone in a different conversation, wait for their inbound message: notify_owner is not a delivery path on a channel, it only surfaces a notice to the operator out of band."
                 ));
             }
         }
@@ -639,7 +752,7 @@ pub(super) async fn tool_channel_send(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_roster_target, resolve_send_target};
+    use super::{resolve_dm_conversation, resolve_roster_target, resolve_send_target};
 
     // A group turn: the speaker (`sender_id`) and the room (`sender_chat_id`)
     // differ. A no-recipient send must reply to the room, not the speaker —
@@ -690,6 +803,94 @@ mod tests {
     #[test]
     fn no_identity_resolves_none() {
         assert_eq!(resolve_send_target(None, None, None), None);
+    }
+
+    // A group turn resolves to (base channel type, the group) — the pair whose roster authorizes the recipient.
+    #[test]
+    fn dm_conversation_is_the_current_group() {
+        let resolved = resolve_dm_conversation(Some("slack"), Some("C123"), Some("U9")).unwrap();
+        assert_eq!(resolved, ("slack", "C123"));
+    }
+
+    // The WhatsApp gateway stamps `sender_channel = "whatsapp:<jid>"` (#5227).
+    // The suffix has to come off twice over: the roster is keyed on the bare channel type, and no registered adapter answers to the embedded form.
+    #[test]
+    fn dm_conversation_strips_the_channel_suffix() {
+        let resolved =
+            resolve_dm_conversation(Some("whatsapp:123@g.us"), Some("123@g.us"), Some("44@s.wa"))
+                .unwrap();
+        assert_eq!(resolved, ("whatsapp", "123@g.us"));
+    }
+
+    // A DM stamps no chat id (or an empty one), so the peer is the conversation — the same fallback `channel_send` uses.
+    // The roster of a one-to-one chat is empty, so the membership check refuses the send; that is the correct outcome, not an error here.
+    #[test]
+    fn dm_conversation_falls_back_to_the_peer() {
+        assert_eq!(
+            resolve_dm_conversation(Some("telegram"), None, Some("4242")).unwrap(),
+            ("telegram", "4242")
+        );
+        assert_eq!(
+            resolve_dm_conversation(Some("telegram"), Some(""), Some("4242")).unwrap(),
+            ("telegram", "4242")
+        );
+    }
+
+    // Out-of-band callers (cron, triggers, API-driven runs) have no conversation, so no roster can authorize a recipient.
+    // Refusing is the point: falling back to a caller-supplied conversation would let the model pick its own authorization set, which is #6117 again.
+    #[test]
+    fn dm_conversation_is_refused_without_a_turn() {
+        let err = resolve_dm_conversation(None, Some("C123"), Some("U9"))
+            .expect_err("channel_dm must be refused without an inbound channel turn");
+        assert!(err.contains("inbound channel message"), "{err}");
+        assert!(resolve_dm_conversation(Some("  "), Some("C123"), None).is_err());
+        let no_ids = resolve_dm_conversation(Some("slack"), None, None)
+            .expect_err("channel_dm must be refused with no conversation to scope against");
+        assert!(no_ids.contains("current conversation"), "{no_ids}");
+    }
+
+    // A dispatch arm with no matching `ToolDefinition` is invisible to the model and to `tool_load` / `tool_search`.
+    #[test]
+    fn channel_dm_is_registered_in_builtins() {
+        let defs = crate::tool_runner::builtin_tool_definitions();
+        let def = defs
+            .iter()
+            .find(|d| d.name == "channel_dm")
+            .expect("channel_dm must appear in builtin_tool_definitions");
+        let props = def.input_schema["properties"]
+            .as_object()
+            .expect("properties object");
+        assert!(props.contains_key("user_id"));
+        assert!(props.contains_key("message"));
+        // Neither the channel nor the conversation is an argument — both come from the turn, and that is what bounds the recipient to this conversation's roster.
+        assert!(!props.contains_key("channel"));
+        assert!(!props.contains_key("chat_id"));
+        let required: Vec<&str> = def.input_schema["required"]
+            .as_array()
+            .expect("required array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(required, vec!["message", "user_id"]);
+    }
+
+    // #3298: the schema is stringified into every request that declares this tool, so its key order has to be a canonical property of the literal rather than something a future edit can shuffle — a reordering invalidates provider prompt caches on byte-identical content.
+    #[test]
+    fn channel_dm_schema_property_order_is_canonical() {
+        let defs = crate::tool_runner::builtin_tool_definitions();
+        let def = defs
+            .iter()
+            .find(|d| d.name == "channel_dm")
+            .expect("channel_dm must appear in builtin_tool_definitions");
+        let keys: Vec<&str> = def.input_schema["properties"]
+            .as_object()
+            .expect("properties object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(keys, sorted);
     }
 
     // A bare `channel_members` call during a group turn reads that group.

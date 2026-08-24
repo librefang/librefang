@@ -1123,8 +1123,11 @@ impl ProactiveMemoryStore {
         }
     }
 
-    /// Evict the lowest-confidence memories for an agent if adding `new_count`
-    /// memories would exceed the configured `max_memories_per_agent` cap.
+    /// Evict memories for an agent if adding `new_count` would exceed the configured
+    /// `max_memories_per_agent` cap.
+    ///
+    /// Eviction order is decided by `SemanticStore::eviction_candidates`, which
+    /// ranks raw dialogue ahead of extracted facts before falling back to confidence.
     ///
     /// Does nothing when the cap is 0 (disabled) or when there is still room.
     fn evict_if_over_cap(&self, agent_id: AgentId, new_count: usize) -> LibreFangResult<()> {
@@ -1159,10 +1162,10 @@ impl ProactiveMemoryStore {
             new_count = new_count,
             max = max,
             evicting = to_evict,
-            "Per-agent memory cap exceeded, evicting lowest-confidence memories"
+            "Per-agent memory cap exceeded, evicting raw dialogue before extracted facts"
         );
 
-        let ids = self.semantic.lowest_confidence(agent_id, to_evict)?;
+        let ids = self.semantic.eviction_candidates(agent_id, to_evict)?;
         for id in &ids {
             self.semantic.forget(*id)?;
         }

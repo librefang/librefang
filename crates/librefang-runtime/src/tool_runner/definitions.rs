@@ -81,6 +81,7 @@ pub(crate) mod tool_name {
     pub const CRON_CANCEL: &str = "cron_cancel";
     pub const CRON_ENABLE: &str = "cron_enable";
     pub const CHANNEL_SEND: &str = "channel_send";
+    pub const CHANNEL_DM: &str = "channel_dm";
     pub const CHANNEL_MEMBERS: &str = "channel_members";
     pub const HAND_LIST: &str = "hand_list";
     pub const HAND_ACTIVATE: &str = "hand_activate";
@@ -1031,6 +1032,18 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                 }),
             },
             ToolDefinition {
+                name: tool_name::CHANNEL_DM.to_string(),
+                description: "Deliver a message privately to ONE member of the group conversation you are currently in, instead of posting where everyone can read it. Use it to tell a single person their task is done, or to return a result only they asked for. The recipient must be a member the daemon has seen speak in this conversation — call channel_members for the user_id. Only available while handling an inbound channel message; the channel, the conversation and the bot account all come from that message and cannot be overridden. Platform limits: Slack opens a DM with any workspace member, but Telegram and Discord bots cannot message a user who has never started a chat with them, and that send fails rather than falling back to the group.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "message": { "type": "string", "description": "The text to deliver privately to that one member." },
+                        "user_id": { "type": "string", "description": "Platform user id of the member to reach (Slack 'U…', Telegram numeric id, WhatsApp participant JID), as returned by channel_members. Not the conversation id." }
+                    },
+                    "required": ["message", "user_id"]
+                }),
+            },
+            ToolDefinition {
                 name: tool_name::CHANNEL_MEMBERS.to_string(),
                 description: "List the known members of a group conversation on a channel: the platform user_id, display_name, and username of everyone the daemon has seen speak there. Use it to answer \"who is in this channel?\", to attribute a request to the person who made it when handing work to an external system, and to obtain the platform user id needed to address one member individually. Both arguments default to the conversation the current message arrived on, so during message handling this can be called with no arguments; a direct message has no roster. Read-only.".to_string(),
                 input_schema: serde_json::json!({
@@ -1318,13 +1331,16 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                                 "type": "object",
                                 "properties": {
                                     "name": { "type": "string", "description": "Step name, unique within the workflow. Other steps reference it in depends_on." },
-                                    "agent": { "type": "string", "description": "Name of the agent that runs this step (agent_list shows what exists). An object {\"id\": \"<uuid>\"} addresses one by UUID instead." },
+                                    "agent": { "description": "Which agent runs this step. A bare string is the agent's name (agent_list shows what exists). The object forms carry exactly one routing key: {\"name\": \"researcher\"} by name, {\"id\": \"<uuid>\"} by instance UUID, or {\"type\": \"researcher\"} by agent type — find-or-spawn, which reuses a registered agent of that name and otherwise spawns the template of that name, so the workflow stands on its own on an instance where nothing is pre-registered." },
                                     "prompt_template": { "type": "string", "description": "Prompt for this step. {{input}} interpolates the previous step's output; {{var}} interpolates a workflow input parameter or an earlier step's output_var." },
                                     "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Names of steps that must finish first. Any step may be named, including one declared later. Omit for straight-line execution." },
                                     "output_var": { "type": "string", "description": "Store this step's output under this name so later steps can reference it as {{name}}" },
                                     "mode": { "description": "Sequencing for this step: the string \"sequential\" (default), \"fan_out\" to run in parallel with the following fan_out steps, or \"collect\" to gather them. Richer nodes take a tagged object, e.g. {\"conditional\": {\"condition\": \"APPROVED\"}}." },
                                     "error_mode": { "description": "What to do when this step fails: \"fail\" (default, abort the run), \"skip\" (continue without it), or {\"retry\": {\"max_retries\": 3}}." },
-                                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Wall-clock limit for this step (default 120, ceiling 3600)" }
+                                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Wall-clock limit for this step (default 120, ceiling 3600)" },
+                                    "required_skills": { "type": "array", "items": { "type": "string" }, "description": "Skills the resolved agent must actually be able to use. Checked right after agent resolution and before the prompt is built, so an unmet requirement fails the run with an error naming the skill and the fix, and bills no LLM call. Omit unless the step cannot work without them." },
+                                    "session_mode": { "type": "string", "enum": ["persistent", "new"], "description": "Session this step's invocation uses: \"persistent\" reuses the target agent's long-running session, \"new\" mints a fresh one. Omit to defer to the agent's own setting." },
+                                    "inherit_context": { "type": "boolean", "description": "Set false to suppress parent-workflow context injection for this step regardless of the agent's setting. Omit to defer to the agent." }
                                 },
                                 "required": ["name", "agent", "prompt_template"]
                             }

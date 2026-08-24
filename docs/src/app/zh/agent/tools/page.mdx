@@ -98,6 +98,7 @@ claim TTL 用来从 worker 崩溃中恢复 —— 认领者没在 TTL 内 `task_
 | 工具 | 参数 | 用途 |
 |---|---|---|
 | `channel_send` | `channel`、`target`、`content`(文本 / 图 / 文件 / poll) | 给某 channel 用户发消息、图片、文件或 poll —— **不走 agent 循环**。适合推告警、异步结果、带外通知。 |
+| `channel_dm` | `user_id`、`message` | 把消息私下发给当前这轮所在群会话中的某一位成员,而不是发到所有人都能看到的群里。 |
 | `channel_members` | 可选 `channel`、`chat_id` | 列出群会话中已知的成员 —— 守护进程见过发言的每个人的 `user_id`、`display_name`、`username`。只读。 |
 
 `channel_send` 是 `[deliver_only]` webhook 模式内部用的工具;agent 也能直接调。Capability:`channel.*`。
@@ -106,6 +107,21 @@ claim TTL 用来从 worker 崩溃中恢复 —— 认领者没在 TTL 内 `task_
 两个参数都默认取当前消息所在的会话,所以在处理消息时可以完全不带参数调用;私聊没有花名册。
 指定当前轮次所在 channel 上的另一个会话会被拒绝,理由与 `channel_send` 拒绝跨会话投递相同 —— 一个群不能枚举另一个群的成员。
 用它把请求归属到提出请求的人,并拿到外部系统通知此人所需的平台 `user_id`。
+
+### 在群里只找一个人
+
+在群会话里,`channel_send` 只能发给群本身 —— 把它改指向某个人会被跨会话派发守卫拒绝,因为一个能任意指定收件人的 agent,也就能被诱导指错人。
+`channel_dm` 是那个收窄过的例外:它只接受 `user_id` 和 `message`,别的都不接受。
+channel、会话和机器人账号全部来自正在处理的这一轮,而收件人必须已经出现在该会话的名册里 —— 也就是 daemon 见过其发言、并且 `channel_members` 会列出的人。
+因此 agent 无法给一个素未谋面的平台 id 发消息,也无法借一个会话伸进另一个会话。
+
+带外场景(cron、trigger、API 触发的运行)没有会话,也就没有名册可以授权任何人;`channel_dm` 在那里按设计不可用,该用带显式 recipient 的 `channel_send`。
+
+"私下"在各平台上的含义并不相同,这个工具也不假装相同。
+Slack 允许机器人与工作区内任意成员开启 DM,所以 `U…` id 总能送达。
+Telegram 和 Discord 的机器人无法主动联系从未给它发过消息的人,这种发送会失败 —— 它绝不会悄悄退回到发群里,因为一条本该私密、却无声变成公开的通知,比报错更糟。
+
+`notify_owner` 不是它的替代品:那产生的是面向运维者的通知,通过运维者自己的界面带外送达,没有任何 channel adapter 会把它转给会话参与者。
 
 ---
 

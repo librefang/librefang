@@ -191,6 +191,16 @@ describe("query key factories", () => {
       // Always same
       expect(configKeys.full()).toEqual(configKeys.full());
     });
+
+    it("status is anchored under configKeys.all so a config write invalidates it", () => {
+      // A save that flips the daemon into managed mode must not leave a stale
+      // `writable: true` behind, and every config mutation invalidates
+      // `configKeys.all` — which only reaches this key while it stays nested.
+      expect(configKeys.status()).toEqual(["config", "status"]);
+      expect(configKeys.status().slice(0, configKeys.all.length)).toEqual(
+        configKeys.all,
+      );
+    });
   });
 
   describe("approvalKeys", () => {

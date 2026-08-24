@@ -42,6 +42,8 @@ def _adapter(**env):
         "SLACK_FILE_ALLOWED_EXTENSIONS": "",
         "SLACK_FILE_DOWNLOAD_CHANNELS": "",
         "SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS": "",
+        "SLACK_RESOLVE_DISPLAY_NAMES": "",
+        "SLACK_DISPLAY_NAME_TTL": "",
     }
     for k, v in defaults.items():
         os.environ[k] = env.get(k, v)
@@ -2593,3 +2595,219 @@ async def test_on_command_send_still_routes_to_on_send(monkeypatch):
     await a.on_command(cmd)
     body = json.loads(fake.calls[0]["body_raw"])
     assert body["channel"] == "C01" and body["text"] == "hi"
+
+
+# ---- display-name resolution (#7086) -------------------------------
+
+
+def _group_event(user="U1", text="hello"):
+    """One inbound group message, parsed the way the envelope handler parses it."""
+    return sa.parse_slack_event(
+        {"type": "message", "channel": "C0DESIGN", "user": user,
+         "text": text, "ts": "1.0"},
+        bot_user_id="UBOT",
+        allowed_channels=[],
+        account_id=None,
+        file_policy=sa.SlackFilePolicy(),
+    )
+
+
+def test_users_identity_prefers_the_chosen_display_name():
+    identity, err = sa.parse_users_identity({
+        "ok": True,
+        "user": {"name": "ana", "real_name": "Ana Legal Name",
+                 "profile": {"display_name": "Ana", "real_name": "Ana Legal Name"}},
+    })
+    assert err is None
+    assert identity.display_name == "Ana"
+    assert identity.username == "ana"
+
+
+def test_users_identity_walks_the_fallback_ladder():
+    # `profile.display_name` is blank for a large share of real accounts, so the
+    # ladder is the difference between a name and a regression to the raw id.
+    blank_display, _ = sa.parse_users_identity({
+        "ok": True,
+        "user": {"name": "ana", "real_name": "Ana Legal Name",
+                 "profile": {"display_name": "   "}},
+    })
+    assert blank_display.display_name == "Ana Legal Name"
+
+    handle_only, _ = sa.parse_users_identity({"ok": True, "user": {"name": "ana"}})
+    assert handle_only.display_name == "ana"
+    assert handle_only.username == "ana"
+
+
+def test_users_identity_returns_nothing_when_every_name_is_blank():
+    identity, err = sa.parse_users_identity({"ok": True, "user": {"profile": {}}})
+    assert identity is None
+    assert err is None
+
+
+def test_users_identity_separates_a_definitive_absence_from_a_transient_error():
+    # A user who does not exist is an answer worth caching for the full TTL;
+    # a rate limit is not.
+    absent, err = sa.parse_users_identity({"ok": False, "error": "user_not_found"})
+    assert absent is None and err is None
+    transient, err = sa.parse_users_identity({"ok": False, "error": "ratelimited"})
+    assert transient is None and err == "ratelimited"
+    scope, err = sa.parse_users_identity({"ok": False, "error": "missing_scope"})
+    assert scope is None and err == "missing_scope"
+
+
+def test_identity_cache_hit_miss_and_expiry():
+    cache = sa._IdentityCache(ttl_secs=3600, max_entries=8)
+    assert cache.get("U1") == (False, None)
+    cache.put("U1", sa.SlackIdentity(display_name="Ana"))
+    hit, identity = cache.get("U1")
+    assert hit is True and identity.display_name == "Ana"
+
+    # A cached absence is a hit carrying `None` — that is what stops one doomed
+    # lookup per message for a deleted user.
+    cache.put("U2", None)
+    assert cache.get("U2") == (True, None)
+
+    # An expired entry is indistinguishable from never having been cached.
+    cache.put("U3", sa.SlackIdentity(display_name="Bo"), ttl_secs=0)
+    assert cache.get("U3") == (False, None)
+
+
+def test_identity_cache_evicts_oldest_first_at_the_cap():
+    cache = sa._IdentityCache(ttl_secs=3600, max_entries=2)
+    cache.put("U1", sa.SlackIdentity(display_name="Ana"))
+    cache.put("U2", sa.SlackIdentity(display_name="Bo"))
+    cache.put("U3", sa.SlackIdentity(display_name="Cy"))
+    assert cache.get("U1") == (False, None)
+    assert cache.get("U2")[0] is True
+    assert cache.get("U3")[0] is True
+
+
+def test_display_names_are_not_resolved_unless_the_operator_opts_in(monkeypatch):
+    # Default OFF: the feature needs the `users:read` scope a pre-#7086 install
+    # does not have, and switching it on changes what the daemon persists about
+    # real people, not just what it renders.
+    fake = _FakeUrlopen([])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    assert a.resolve_display_names is False
+
+    ev = a._apply_identity(_group_event())
+    assert ev["params"]["user_name"] == "U1"
+    assert fake.calls == []
+
+
+def test_display_name_replaces_the_raw_id_when_enabled(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, {"ok": True, "user": {"name": "ana", "profile": {"display_name": "Ana"}}}),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_RESOLVE_DISPLAY_NAMES="true")
+
+    ev = a._apply_identity(_group_event())
+    assert ev["params"]["user_name"] == "Ana"
+    # The same request already answered for the handle, and the roster has a
+    # column waiting for it.
+    assert ev["params"]["metadata"]["sender_username"] == "ana"
+    # The user id itself is untouched — DM routing and the `[users]` mapping run
+    # on the id, not the name.
+    assert ev["params"]["metadata"]["sender_user_id"] == "U1"
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["url"].endswith("/users.info")
+    assert fake.calls[0]["params"]["user"] == "U1"
+
+
+def test_repeated_ids_cost_exactly_one_users_info_call(monkeypatch):
+    # The whole reason the cache exists: `users.info` sits in a tiered per-method
+    # rate limit, and a busy channel produces one message per member per minute.
+    # The script holds a single response, so a second lookup would fail loudly.
+    fake = _FakeUrlopen([
+        (200, {"ok": True, "user": {"name": "ana", "profile": {"display_name": "Ana"}}}),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_RESOLVE_DISPLAY_NAMES="true")
+
+    names = [
+        a._apply_identity(_group_event(text=f"msg {i}"))["params"]["user_name"]
+        for i in range(5)
+    ]
+    assert names == ["Ana"] * 5
+    assert len(fake.calls) == 1
+
+
+def test_distinct_ids_are_resolved_independently(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, {"ok": True, "user": {"name": "ana", "profile": {"display_name": "Ana"}}}),
+        (200, {"ok": True, "user": {"name": "bo", "profile": {"display_name": "Bo"}}}),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_RESOLVE_DISPLAY_NAMES="true")
+
+    assert a._apply_identity(_group_event(user="U1"))["params"]["user_name"] == "Ana"
+    assert a._apply_identity(_group_event(user="U2"))["params"]["user_name"] == "Bo"
+    # And neither one is re-fetched.
+    assert a._apply_identity(_group_event(user="U1"))["params"]["user_name"] == "Ana"
+    assert len(fake.calls) == 2
+
+
+def test_unresolvable_user_keeps_the_raw_id_and_is_not_re_fetched(monkeypatch):
+    # Slack has nothing to say about this user. The raw id is a worse label than
+    # a real name but a better one than an empty string, and it is exactly what
+    # every pre-#7086 deployment already shows — so the path degrades to the old
+    # behaviour rather than to a blank sender.
+    fake = _FakeUrlopen([(200, {"ok": False, "error": "user_not_found"})])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_RESOLVE_DISPLAY_NAMES="true")
+
+    for _ in range(3):
+        ev = a._apply_identity(_group_event())
+        assert ev["params"]["user_name"] == "U1"
+        assert "sender_username" not in ev["params"]["metadata"]
+    assert len(fake.calls) == 1
+
+
+def test_missing_scope_does_not_repeat_the_doomed_lookup(monkeypatch):
+    # The feature switched on without `users:read` granted: one warning, one
+    # request, then the adapter goes back to reporting ids until the cooldown.
+    fake = _FakeUrlopen([(200, {"ok": False, "error": "missing_scope"})])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_RESOLVE_DISPLAY_NAMES="true")
+
+    assert a._apply_identity(_group_event())["params"]["user_name"] == "U1"
+    assert a._apply_identity(_group_event())["params"]["user_name"] == "U1"
+    assert len(fake.calls) == 1
+
+
+def test_transient_failure_uses_the_short_cooldown_not_the_full_ttl(monkeypatch):
+    # A rate limit that has passed must not keep the whole workspace anonymous
+    # for six hours.
+    fake = _FakeUrlopen([(200, {"ok": False, "error": "ratelimited"})])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_RESOLVE_DISPLAY_NAMES="true")
+    a._apply_identity(_group_event())
+
+    expires_at, identity = a._identity_cache._entries["U1"]
+    assert identity is None
+    remaining = expires_at - sa.time.monotonic()
+    assert 0 < remaining <= sa.NEGATIVE_TTL_SECS
+    assert remaining < a.display_name_ttl
+
+
+def test_transport_failure_falls_back_to_the_raw_id(monkeypatch):
+    def _boom(_req, timeout=None):
+        raise OSError("connection reset")
+
+    monkeypatch.setattr(sa.urllib.request, "urlopen", _boom)
+    a = _adapter(SLACK_RESOLVE_DISPLAY_NAMES="true")
+    ev = a._apply_identity(_group_event())
+    assert ev["params"]["user_name"] == "U1"
+
+
+def test_display_name_ttl_env_is_validated():
+    with pytest.raises(SystemExit) as exc:
+        _adapter(SLACK_DISPLAY_NAME_TTL="soon")
+    assert exc.value.code == 2
+    # A non-positive TTL would make the cache useless; fall back to the default.
+    a = _adapter(SLACK_DISPLAY_NAME_TTL="0")
+    assert a.display_name_ttl == float(sa.DEFAULT_DISPLAY_NAME_TTL_SECS)
+    a2 = _adapter(SLACK_DISPLAY_NAME_TTL="60")
+    assert a2.display_name_ttl == 60.0

@@ -26,9 +26,11 @@ Behaviour parity with the Rust adapter:
 * **Allowed channels**: empty list = allow all. When non-empty,
   channel must be in the list; DMs (``channel`` starts with ``D``)
   are exempt (the operator's per-user DM allowlist handles those).
-* **Display name**: Slack user IDs as display name (the Rust adapter
-  surfaces the raw ``Uxxxxxxx`` id, deliberately — DM resolution and
-  the kernel user mapping run on the id, not the human name).
+* **Display name**: the raw ``Uxxxxxxx`` id by default (DM resolution and the kernel user mapping run on the id, not the human name, and the in-process Rust adapter never spent a call to improve on it).
+  Set ``SLACK_RESOLVE_DISPLAY_NAMES=true`` (#7086) to resolve it through ``users.info`` instead, cached per user id for ``SLACK_DISPLAY_NAME_TTL`` seconds so a busy channel costs a handful of calls a day rather than one per message.
+  Requires the ``users:read`` bot scope; without it every lookup fails and the adapter keeps reporting the id.
+  Off by default because turning it on changes what the daemon *stores*, not only what it shows: the roster row the bridge persists for each group sender carries whatever ``user_name`` this adapter reports.
+  Operators who prefer explicit mappings keep using ``[users]``, which stays authoritative.
 * **Slash commands**: ``/cmd args`` → ``Command`` (text otherwise).
 * **Thread context**: ``thread_ts`` is surfaced as ``thread_id`` so
   replies thread under the originating message.
@@ -64,6 +66,8 @@ Configure via ``[[sidecar_channels]]``::
     # SLACK_FILE_ALLOWED_EXTENSIONS = "png,jpg,pdf,mp4"
     # SLACK_FILE_DOWNLOAD_CHANNELS = "C0123"
     # SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS = "C0789"
+    # SLACK_RESOLVE_DISPLAY_NAMES = "false"
+    # SLACK_DISPLAY_NAME_TTL = "21600"
     # SLACK_ACCOUNT_ID = "workspace-prod"
 
 Secrets via ``~/.librefang/secrets.env``: ``SLACK_APP_TOKEN`` (the
@@ -139,6 +143,17 @@ DEFAULT_INBOUND_FILE_MAX_BYTES = MAX_FILE_UPLOAD_BYTES
 
 INITIAL_BACKOFF_SECS = 1.0
 READ_TICK_SECS = 30.0
+
+# How long a resolved (or definitively absent) display name is trusted (#7086).
+# Six hours: long enough that a busy channel costs a handful of `users.info` calls a day, short enough that somebody who changes their display name is not misnamed for a week.
+DEFAULT_DISPLAY_NAME_TTL_SECS = 6 * 60 * 60
+
+# How long a *transient* lookup failure (429, transport error) suppresses a retry.
+# Deliberately short — a rate limit that has passed should not keep the whole workspace anonymous for hours.
+NEGATIVE_TTL_SECS = 60.0
+
+# Ceiling on the identity cache. A workspace larger than this degrades into extra lookups, never into unbounded memory.
+MAX_CACHED_IDENTITIES = 5_000
 
 
 def _resolve_public_url(
@@ -406,6 +421,112 @@ def parse_users_info(body: dict) -> tuple[Optional[str], Optional[str]]:
     if user.get("is_restricted") is True or user.get("is_ultra_restricted") is True:
         return "guest", None
     return "member", None
+
+
+# ---------------------------------------------------------------------------
+# Display-name resolution (#7086)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SlackIdentity:
+    """The human-readable half of a Slack user, as ``users.info`` reports it.
+
+    ``display_name`` is what a person recognises; ``username`` is the ``@handle``.
+    Either may be ``None`` — a workspace can leave both blank, and a bot without the ``users:read`` scope gets neither.
+    """
+
+    display_name: Optional[str] = None
+    username: Optional[str] = None
+
+
+def _first_nonempty(*candidates: Any) -> Optional[str]:
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
+
+
+def parse_users_identity(body: dict) -> tuple[Optional[SlackIdentity], Optional[str]]:
+    """Translate a Slack ``users.info`` response into the name a human would recognise.
+
+    Returns ``(identity, error)``.
+    ``identity`` is ``None`` when the response carries no usable name — a deleted or unknown user, or a workspace where every name field is blank.
+    ``error`` carries the platform error string for a failure the caller should treat as transient (rate limits, transport hiccups); a *definitive* "no such user" answer returns ``(None, None)`` so the caller can cache the absence instead of asking again on every message.
+
+    Precedence for ``display_name`` follows what the person chose to be called, then falls back through what the workspace knows: ``profile.display_name`` → ``profile.real_name`` → ``user.real_name`` → ``user.name``.
+    ``profile.display_name`` is empty for a large share of real accounts, which is why the ladder exists at all — resolving to an empty string would be a regression on the raw id it replaces.
+    """
+    if not isinstance(body, dict):
+        return None, "non-object response"
+    if body.get("ok") is not True:
+        err = str(body.get("error") or "unknown error")
+        if err in ("user_not_found", "users_not_found"):
+            return None, None
+        return None, err
+    user = body.get("user")
+    if not isinstance(user, dict):
+        return None, "response has no user object"
+    profile = user.get("profile")
+    if not isinstance(profile, dict):
+        profile = {}
+    display_name = _first_nonempty(
+        profile.get("display_name"),
+        profile.get("real_name"),
+        user.get("real_name"),
+        user.get("name"),
+    )
+    username = _first_nonempty(user.get("name"))
+    if display_name is None and username is None:
+        return None, None
+    return SlackIdentity(display_name=display_name, username=username), None
+
+
+class _IdentityCache:
+    """Bounded, TTL'd ``user_id`` → :class:`SlackIdentity` cache.
+
+    The cache is the whole point of the feature, not an optimisation on top of it: Slack's ``users.info`` sits in a tiered per-method rate limit, and a busy channel produces one message per member per minute, so an uncached per-message lookup would spend the workspace's budget on re-resolving the same handful of people.
+
+    Absences are cached too, and for the same reason: a deleted user, or a bot without the ``users:read`` scope, otherwise costs one doomed request per message forever.
+    A *transient* failure (a 429, a transport error) is cached only for :data:`NEGATIVE_TTL_SECS`, long enough to stop a burst from hammering the API and short enough that a recovered workspace resolves names again within the minute.
+
+    Eviction is oldest-first on insertion order once ``max_entries`` is reached — the same bound-then-evict shape as ``SlackAdapter._pending_reactions``, so a workspace with more members than the cap degrades into extra lookups rather than unbounded memory.
+    """
+
+    def __init__(self, *, ttl_secs: float, max_entries: int) -> None:
+        self.ttl_secs = ttl_secs
+        self.max_entries = max_entries
+        # user_id -> (expires_at, identity_or_None)
+        self._entries: dict[str, tuple[float, Optional[SlackIdentity]]] = {}
+        self._lock = threading.Lock()
+
+    def get(self, user_id: str) -> tuple[bool, Optional[SlackIdentity]]:
+        """``(hit, identity)``. A hit with ``None`` is a cached absence, not a miss."""
+        now = time.monotonic()
+        with self._lock:
+            entry = self._entries.get(user_id)
+            if entry is None:
+                return False, None
+            expires_at, identity = entry
+            if expires_at <= now:
+                del self._entries[user_id]
+                return False, None
+            return True, identity
+
+    def put(
+        self,
+        user_id: str,
+        identity: Optional[SlackIdentity],
+        *,
+        ttl_secs: Optional[float] = None,
+    ) -> None:
+        ttl = self.ttl_secs if ttl_secs is None else ttl_secs
+        with self._lock:
+            # Re-inserting an existing key must not keep its old insertion position, or a hot entry would be evicted ahead of colder ones.
+            self._entries.pop(user_id, None)
+            while len(self._entries) >= self.max_entries:
+                self._entries.pop(next(iter(self._entries)))
+            self._entries[user_id] = (time.monotonic() + ttl, identity)
 
 
 # ---------------------------------------------------------------------------
@@ -915,6 +1036,17 @@ class SlackAdapter(SidecarAdapter):
                   "list",
                   placeholder="C0789",
                   advanced=True),
+            Field("SLACK_RESOLVE_DISPLAY_NAMES",
+                  "Resolve sender display names via users.info (needs the "
+                  "users:read scope; off by default)",
+                  "bool",
+                  placeholder="false",
+                  advanced=True),
+            Field("SLACK_DISPLAY_NAME_TTL",
+                  "How long a resolved display name is cached, in seconds",
+                  "number",
+                  placeholder=str(DEFAULT_DISPLAY_NAME_TTL_SECS),
+                  advanced=True),
             Field("SLACK_ACCOUNT_ID",
                   "Account ID (multi-bot routing)",
                   "text",
@@ -963,6 +1095,33 @@ class SlackAdapter(SidecarAdapter):
         )
         acct = os.environ.get("SLACK_ACCOUNT_ID", "").strip()
         self.account_id = acct or None
+
+        # Display-name resolution (#7086).
+        #
+        # Default OFF, and deliberately so on two counts.
+        # It needs the `users:read` scope, which a bot installed before this existed does not have — enabling it by default would turn every inbound message into a logged `missing_scope` failure on upgrade.
+        # And it is the point at which the daemon starts learning and persisting real people's names: the roster row the bridge writes carries whatever `user_name` this adapter reports, so turning this on changes what is stored, not just what is displayed.
+        # An operator opts in; nobody has personal data resolved on their behalf by an upgrade.
+        self.resolve_display_names = _bool_env(
+            os.environ.get("SLACK_RESOLVE_DISPLAY_NAMES", ""), default=False,
+        )
+        ttl_raw = os.environ.get("SLACK_DISPLAY_NAME_TTL", "").strip()
+        try:
+            display_name_ttl = float(ttl_raw or DEFAULT_DISPLAY_NAME_TTL_SECS)
+        except (TypeError, ValueError):
+            log.error("SLACK_DISPLAY_NAME_TTL invalid (must be a number of seconds)",
+                      value=ttl_raw)
+            raise SystemExit(2) from None
+        if display_name_ttl <= 0:
+            log.warn("SLACK_DISPLAY_NAME_TTL <= 0; using the default instead",
+                     requested=display_name_ttl,
+                     default=DEFAULT_DISPLAY_NAME_TTL_SECS)
+            display_name_ttl = float(DEFAULT_DISPLAY_NAME_TTL_SECS)
+        self.display_name_ttl = display_name_ttl
+        self._identity_cache = _IdentityCache(
+            ttl_secs=display_name_ttl,
+            max_entries=MAX_CACHED_IDENTITIES,
+        )
 
         # Inbound attachment policy (#7087).
         max_bytes_raw = os.environ.get("SLACK_FILE_MAX_BYTES", "").strip()
@@ -1118,6 +1277,72 @@ class SlackAdapter(SidecarAdapter):
         if not isinstance(user_id, str) or not user_id:
             raise RuntimeError("slack auth.test missing user_id in 200 OK body")
         return user_id
+
+    def _lookup_identity(self, user_id: str) -> Optional[SlackIdentity]:
+        """Resolve one Slack user id to a human-readable identity, at most once per TTL.
+
+        Every exit path writes the cache, including the failures — an unresolvable user must cost one request, not one per message.
+        A transient failure gets the short :data:`NEGATIVE_TTL_SECS` cooldown; a definitive answer (resolved, or "no such user") gets the full TTL.
+        """
+        hit, cached = self._identity_cache.get(user_id)
+        if hit:
+            return cached
+
+        try:
+            status, body, raw = self._http(
+                f"{self.api_base}/users.info",
+                method="POST",
+                body=urllib.parse.urlencode({"user": user_id}).encode("utf-8"),
+                headers={
+                    **self._auth_headers(),
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+            )
+        except Exception as e:  # transport failure — cool down briefly, then try again
+            log.warn("slack users.info transport error", user=user_id, error=str(e))
+            self._identity_cache.put(user_id, None, ttl_secs=NEGATIVE_TTL_SECS)
+            return None
+
+        if status != 200 or not isinstance(body, dict):
+            snippet = raw[:200].decode("utf-8", "replace") if raw else ""
+            log.warn("slack users.info non-200", user=user_id, status=status, body=snippet)
+            self._identity_cache.put(user_id, None, ttl_secs=NEGATIVE_TTL_SECS)
+            return None
+
+        identity, err = parse_users_identity(body)
+        if err is not None:
+            # `missing_scope` is the one an operator most needs to see: it means the feature is switched on but the bot was never granted `users:read`, and every message will otherwise silently keep the raw id.
+            log.warn("slack users.info rejected", user=user_id, error=err)
+            self._identity_cache.put(user_id, None, ttl_secs=NEGATIVE_TTL_SECS)
+            return None
+
+        self._identity_cache.put(user_id, identity)
+        return identity
+
+    def _apply_identity(self, ev: Optional[dict]) -> Optional[dict]:
+        """Replace an inbound event's placeholder ``user_name`` (the raw ``U…`` id) with a resolved display name.
+
+        A no-op unless the operator opted in, and a no-op again whenever the lookup yields nothing — the raw id is a worse label than a real name but a better one than an empty string, and it is what every pre-#7086 deployment already shows.
+
+        The resolved handle is stamped into ``sender_username`` as well, because the same request already answered for it and the roster has a column waiting for it.
+        """
+        if not self.resolve_display_names or not isinstance(ev, dict):
+            return ev
+        params = ev.get("params")
+        if not isinstance(params, dict):
+            return ev
+        metadata = params.get("metadata")
+        user_id = metadata.get("sender_user_id") if isinstance(metadata, dict) else None
+        if not isinstance(user_id, str) or not user_id:
+            return ev
+        identity = self._lookup_identity(user_id)
+        if identity is None:
+            return ev
+        if identity.display_name:
+            params["user_name"] = identity.display_name
+        if identity.username:
+            metadata["sender_username"] = identity.username
+        return ev
 
     def _fetch_socket_mode_url(self) -> str:
         status, body, raw = self._http(
@@ -1505,6 +1730,7 @@ class SlackAdapter(SidecarAdapter):
             )
             if ev is None:
                 return
+            ev = self._apply_identity(ev)
             # No reaction here (#6731). Receiving a message is not the same as answering it: the daemon may decline the turn for any of ~two dozen reasons (mention-only group gating, an `[allowed_channels]`-adjacent RBAC denial, a per-user rate limit, a slash command it handles itself), all of which return before any adapter-visible lifecycle signal.
             # The receipt is added from the `queued` phase in `_on_phase` instead, which fires only for a turn that is actually run.
             emit(ev)
@@ -1522,7 +1748,7 @@ class SlackAdapter(SidecarAdapter):
                 account_id=self.account_id,
             )
             if ev is not None:
-                emit(ev)
+                emit(self._apply_identity(ev))
             return
         # Unknown envelope types — slack adds new ones occasionally
         # (slash_commands, etc.). Forward-compat: log and ignore.

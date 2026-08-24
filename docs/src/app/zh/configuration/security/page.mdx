@@ -217,7 +217,7 @@ max_memories_per_agent = 1000
 | `session_ttl_hours` | u32 | `24` | 会话记忆的 TTL（小时）。超过此时间的记忆在每次 Agent 执行前被清理。 |
 | `duplicate_threshold` | f32 | `0.5` | 重复检测的相似度阈值（0.0-1.0）。有嵌入向量时使用余弦相似度，否则回退到 Jaccard 词重叠。 |
 | `confidence_decay_rate` | f64 | `0.01` | 每天的置信度衰减率。遵循指数衰减：`conf x e^(-rate x days)`。默认 `0.01` 约 70 天减半。 |
-| `max_memories_per_agent` | usize | `1000` | 每个 Agent 的最大记忆数。超出时淘汰最旧/置信度最低的条目。`0` = 无上限。 |
+| `max_memories_per_agent` | usize | `1000` | 每个 Agent 的最大记忆数。超出时优先淘汰原始对话行，其次才是抽取出的事实；同类之内按置信度从低到高淘汰。`0` = 无上限。 |
 
 ---
 
