@@ -5,4 +5,4 @@ Rows written before this shipped carry no stamp and stay recallable everywhere, 
 Set `[proactive_memory] session_scoped_recall = false` in `config.toml`, or in one agent's `agent.toml`, to go back to a single agent-wide pool — worth doing for a single-user agent whose `session_mode = "new"` runs are meant to build on each other.
 Separately, `capabilities.memory_read = []` and `memory_write = []` in `agent.toml` now actually stop automatic recall and automatic capture; previously the agent kept receiving a populated `memories_used` on every turn and kept growing its store.
 An absent `memory_read` key still means "unrestricted", as every other capability list does — only a list the manifest actually wrote is enforced.
-(#PR) (@houko)
+(#7849) (@houko)
