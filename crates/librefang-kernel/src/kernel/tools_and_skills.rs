@@ -1549,15 +1549,10 @@ impl LibreFangKernel {
         }
     }
 
-    /// Whether one declared `memory_read` / `memory_write` scope covers the
-    /// agent's own semantic memory.
+    /// Whether one declared `memory_read` / `memory_write` scope covers the agent's own semantic memory.
     ///
-    /// Thin re-export of
-    /// [`librefang_types::capability::scope_covers_own_memory`], which moved
-    /// to the types crate in #7605 so the automatic memorize / retrieve gate
-    /// in `librefang-runtime` answers this question identically to the tool
-    /// gate here. Kept as an associated function because the `tool_allowlist`
-    /// diagnostic and the tests call it by that name.
+    /// Thin re-export of [`librefang_types::capability::scope_covers_own_memory`], which moved to the types crate in #7605 so the automatic memorize / retrieve gate in `librefang-runtime` answers this question identically to the tool gate here.
+    /// Kept as an associated function because the `tool_allowlist` diagnostic and the tests call it by that name.
     pub fn scope_covers_own_memory(scope: &str) -> bool {
         librefang_types::capability::scope_covers_own_memory(scope)
     }

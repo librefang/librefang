@@ -31,10 +31,7 @@ pub(super) fn manifest_to_capabilities(manifest: &AgentManifest) -> Vec<Capabili
             if manifest.capabilities.agent_spawn {
                 merged.agent_spawn = true;
             }
-            // A declared list wins over the profile's implied one, including
-            // when it is empty: `memory_read = []` is the operator saying
-            // "grant nothing", which #7605 made expressible and load-bearing
-            // for the automatic memorize / retrieve paths.
+            // A declared list wins over the profile's implied one, including when it is empty: `memory_read = []` is the operator saying "grant nothing", which #7605 made expressible and load-bearing for the automatic memorize / retrieve paths.
             if manifest.capabilities.memory_read.is_some() {
                 merged.memory_read = manifest.capabilities.memory_read.clone();
             }

@@ -33,12 +33,10 @@ pub(super) struct FinalizeEndTurnContext<'a> {
     /// `librefang_types::agent::compose_sender_scope` so the formula
     /// matches `SessionId::for_sender_scope`'s scope-string composition.
     pub(super) sender_chat_scope: Option<&'a str>,
-    /// Identity of the session this turn belongs to, when session-scoped
-    /// recall is in effect for the agent (#7605). Stamped onto every memory
-    /// `auto_memorize` extracts, so a later turn in a different session will
-    /// not recall it. `None` stores session-agnostic memories, which is the
-    /// pre-#7605 behaviour and what an operator gets back by setting
-    /// `session_scoped_recall = false`. Produced by [`session_recall_scope`].
+    /// Identity of the session this turn belongs to, when session-scoped recall is in effect for the agent (#7605).
+    /// Stamped onto every memory `auto_memorize` extracts, so a later turn in a different session will not recall it.
+    /// `None` stores session-agnostic memories, which is the pre-#7605 behaviour and what an operator gets back by setting `session_scoped_recall = false`.
+    /// Produced by [`session_recall_scope`].
     pub(super) session_scope: Option<&'a str>,
     pub(super) streaming: bool,
     pub(super) opts: &'a LoopOptions,
@@ -497,14 +495,10 @@ pub(super) async fn maybe_fold_stale_tool_results(
 ///
 /// Two independent reasons to skip retrieval, checked in this order:
 ///
-/// 1. `capabilities.memory_read` is declared and grants no scope covering the
-///    agent's own memory (#7605). An operator who writes `memory_read = []`
-///    into `agent.toml` is asking for exactly that, and until this gate existed
-///    they still got a populated `memories_used` on every turn. An absent
-///    `memory_read` key stays permissive, matching how every other capability
-///    list reads when it is not there.
-/// 2. The per-agent `[proactive_memory]` override disables `auto_retrieve`
-///    (#4870).
+/// 1. `capabilities.memory_read` is declared and grants no scope covering the agent's own memory (#7605).
+///    An operator who writes `memory_read = []` into `agent.toml` is asking for exactly that, and until this gate existed they still got a populated `memories_used` on every turn.
+///    An absent `memory_read` key stays permissive, matching how every other capability list reads when it is not there.
+/// 2. The per-agent `[proactive_memory]` override disables `auto_retrieve` (#4870).
 ///
 /// Returns `Some(store)` when both the kernel-global config and the
 /// per-agent override allow `auto_retrieve`, else `None`. The store's
@@ -540,10 +534,7 @@ pub(super) fn gated_proactive_memory_for_retrieve<'a>(
 }
 
 /// Gate the proactive-memory store for the *memorize* side (#4870, #7605).
-/// `capabilities.memory_write` gates it the way `memory_read` gates the
-/// retrieve half; see [`gated_proactive_memory_for_retrieve`] for the
-/// rationale and for why a declared-empty list is not the same as an absent
-/// one.
+/// `capabilities.memory_write` gates it the way `memory_read` gates the retrieve half; see [`gated_proactive_memory_for_retrieve`] for the rationale and for why a declared-empty list is not the same as an absent one.
 pub(super) fn gated_proactive_memory_for_memorize<'a>(
     manifest: &AgentManifest,
     pm: Option<&'a Arc<librefang_memory::ProactiveMemoryStore>>,
@@ -573,26 +564,12 @@ pub(super) fn gated_proactive_memory_for_memorize<'a>(
 
 /// Resolve the session identity that memory reads and writes are scoped to for this turn (#7605).
 ///
-/// Returns `Some(session_id_string)` when session-scoped recall is in effect,
-/// which is the default, and `None` when the operator has turned it off —
-/// globally via `[proactive_memory] session_scoped_recall = false` in
-/// `config.toml`, or for one agent via the same key in the `[proactive_memory]`
-/// block of `agent.toml`.
+/// Returns `Some(session_id_string)` when session-scoped recall is in effect, which is the default, and `None` when the operator has turned it off — globally via `[proactive_memory] session_scoped_recall = false` in `config.toml`, or for one agent via the same key in the `[proactive_memory]` block of `agent.toml`.
 ///
-/// The identity is the session the loop is already reading and writing, not a
-/// new one derived here: whatever the resolution ladder in
-/// `docs/architecture/session-mode-resolution.md` settled on for this
-/// invocation — the canonical session for a bare `librefang message`, the
-/// caller's `session_id` for a REST turn or `librefang message --session-id`,
-/// `SessionId::for_channel` for a channel message, the parent's session for a
-/// fork.
+/// The identity is the session the loop is already reading and writing, not a new one derived here: whatever the resolution ladder in `docs/architecture/session-mode-resolution.md` settled on for this invocation — the canonical session for a bare `librefang message`, the caller's `session_id` for a REST turn or `librefang message --session-id`, `SessionId::for_channel` for a channel message, the parent's session for a fork.
 ///
-/// A consequence worth naming: an agent with `session_mode = "new"` gets a
-/// fresh session per invocation, so with this on it no longer auto-recalls
-/// what a previous invocation memorized. That is the intended reading of
-/// "new" — an isolated turn — but an agent that relied on the old
-/// agent-wide pool for continuity wants `session_scoped_recall = false` in its
-/// `agent.toml`.
+/// A consequence worth naming: an agent with `session_mode = "new"` gets a fresh session per invocation, so with this on it no longer auto-recalls what a previous invocation memorized.
+/// That is the intended reading of "new" — an isolated turn — but an agent that relied on the old agent-wide pool for continuity wants `session_scoped_recall = false` in its `agent.toml`.
 pub(super) fn session_recall_scope(
     manifest: &AgentManifest,
     session: &librefang_memory::session::Session,

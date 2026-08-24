@@ -1752,7 +1752,8 @@ pub struct ManifestCapabilities {
     pub tools: Vec<String>,
     /// Memory read scopes, or `None` when the manifest never mentioned the key.
     ///
-    /// The distinction is load-bearing (#7605). Everywhere else in a manifest an empty list reads as "undeclared, therefore unrestricted" — `capabilities.tools = []` grants every tool — so an operator who writes `memory_read = []` to lock an agent out of memory gets the opposite of what they typed.
+    /// The distinction is load-bearing (#7605).
+    /// Everywhere else in a manifest an empty list reads as "undeclared, therefore unrestricted" — `capabilities.tools = []` grants every tool — so an operator who writes `memory_read = []` to lock an agent out of memory gets the opposite of what they typed.
     /// Keeping the tri-state lets `memory_read = []` mean "declared, and it grants nothing" while an absent key keeps the historical open default for the many manifests that never had a `[capabilities]` block.
     ///
     /// Read it through [`ManifestCapabilities::allows_own_memory_read`] rather than matching on the `Option` at call sites.
@@ -1791,7 +1792,8 @@ impl ManifestCapabilities {
     /// `None` — the manifest never declared `memory_read` — is permissive, matching how every other capability list in a manifest reads when absent.
     /// A declared list must contain a scope that covers the store; `memory_read = []` therefore denies, which is the whole point of keeping the tri-state.
     ///
-    /// This governs the **automatic** recall path. The `memory_semantic_*` tool gate (#7808) answers the same question from the kernel-resolved `Capability::MemoryRead` list, where the declared-empty case has already collapsed into "no entries" and stays open for backwards compatibility.
+    /// This governs the **automatic** recall path.
+    /// The `memory_semantic_*` tool gate (#7808) answers the same question from the kernel-resolved `Capability::MemoryRead` list, where the declared-empty case has already collapsed into "no entries" and stays open for backwards compatibility.
     pub fn allows_own_memory_read(&self) -> bool {
         scope_list_covers_own_memory(self.memory_read.as_deref())
     }

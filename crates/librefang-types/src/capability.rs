@@ -188,8 +188,7 @@ pub fn validate_capability_inheritance(
 
 /// The namespace string the proactive (semantic) memory store is addressed by in the per-user ACL and the REST layer.
 ///
-/// Kept next to [`glob_matches`] because every consumer of it is deciding
-/// whether a declared `memory_read` / `memory_write` scope reaches this store.
+/// Kept next to [`glob_matches`] because every consumer of it is deciding whether a declared `memory_read` / `memory_write` scope reaches this store.
 pub const OWN_MEMORY_NAMESPACE: &str = "proactive";
 
 /// Whether one declared `memory_read` / `memory_write` scope covers the agent's own semantic-memory store.
