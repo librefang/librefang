@@ -3,4 +3,4 @@ Until now the only recovery LibreFang shipped was `librefang security audit-rese
 `librefang security audit-reanchor` diagnoses the first break, distinguishes a wrong link between two rows from an edit to a row's own content, and repairs it by archiving every row at or after the break to `<data_dir>/audit-archive/` as JSON Lines before deleting them, then appending a `ChainReanchored` marker linked to the last row that still verified.
 The archive's SHA-256 is committed into that marker, so the preserved rows are tamper-evident too: altering the archive afterwards no longer matches the hash the repaired chain vouches for.
 The whole repair — re-diagnosis, delete, marker, row count — happens inside one `BEGIN IMMEDIATE` transaction and aborts without mutating anything if the break moved since the dry run reported it, and the command refuses to run at all while a daemon holds the database.
-This is the recovery half of #7702; the prevention half landed in #7847, and a log broken before that fix needs this one (#7702) (@houko)
+This is the recovery half of #7702; the prevention half landed in #7847, and a log broken before that fix needs this one (#7855) (@houko)
