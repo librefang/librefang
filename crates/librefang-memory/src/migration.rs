@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 48;
+const SCHEMA_VERSION: u32 = 49;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -230,6 +230,13 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // elapsed idle span on every hourly tick. NULL on pre-migration rows, which
     // the read path treats as "clock starts at accessed_at".
     run_step!(48, migrate_v48);
+
+    // v49 (#7714): add `workflow_runs.owner_agent_id` so a run records which
+    // agent asked for it, and `usage_events.billed_agent_id` so a spawned
+    // worker's spend rolls up to the agent that spawned it. Both are NULL on
+    // every pre-migration row: an ownerless run stays ownerless, and a usage
+    // row with no `billed_agent_id` bills to `agent_id` exactly as before.
+    run_step!(49, migrate_v49);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -919,6 +926,37 @@ fn migrate_v48(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (48, datetime('now'), 'Add memories.last_decayed_at so confidence decay charges each idle interval once (#7756)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v49 (#7714): Record who owns a workflow run, and who a call's spend bills to.
+///
+/// `workflow_runs.owner_agent_id` is the agent that asked for the run — the caller of `workflow_run` / `workflow_start`, the agent bound to the channel that issued the command, or the agent an API caller named.
+/// It is a property of the *run*, not of the agent that executes a step, which is what lets two owners drive the same shared step-agent type and still keep their attribution apart.
+///
+/// `usage_events.billed_agent_id` is the agent a call's cost rolls up to: a spawned worker's spend belongs on its spawner's budget line, not on the throwaway child's.
+/// It is deliberately a second column rather than a rewrite of `agent_id`: `agent_id` remains the quota subject that both the pre-call `check_quota` and the post-call `check_all_and_record` evaluate, so those two continue to ask about the same agent against that same agent's limits.
+/// Folding attribution into `agent_id` would have made the pre-call check read the child's history while the post-call check read the parent's, both against the child's ceiling.
+///
+/// `NULL` in either column means "no attribution recorded", which is every row written before this migration and every call with no owner or parent.
+fn migrate_v49(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "workflow_runs", "owner_agent_id")? {
+        conn.execute(
+            "ALTER TABLE workflow_runs ADD COLUMN owner_agent_id TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    if !try_column_exists(conn, "usage_events", "billed_agent_id")? {
+        conn.execute(
+            "ALTER TABLE usage_events ADD COLUMN billed_agent_id TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (49, datetime('now'), 'Add workflow_runs.owner_agent_id and usage_events.billed_agent_id for run ownership and spend rollup (#7714)')",
         [],
     )?;
     Ok(())
@@ -2547,6 +2585,80 @@ mod tests {
             confidence, 1.0,
             "re-running migrate_v48 must not touch data"
         );
+    }
+
+    #[test]
+    fn test_migrate_v49_adds_owner_and_billed_agent_columns() {
+        // #7714: a run records who asked for it, and a usage row records whose
+        // budget line its cost belongs on. Both columns are nullable with no
+        // default, so every pre-migration row reads back NULL — an ownerless
+        // run stays ownerless and an unbilled usage row still bills to
+        // `agent_id`, which is exactly the pre-migration behaviour.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(column_exists(&conn, "workflow_runs", "owner_agent_id"));
+        assert!(column_exists(&conn, "usage_events", "billed_agent_id"));
+
+        // Legacy-shaped INSERTs that omit the new columns leave them NULL.
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_id, workflow_name, state, input, step_results, started_at) \
+             VALUES ('legacy-run', 'wf-1', 'wf', 'completed', 'in', '[]', '2026-07-19T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+        let owner: Option<String> = conn
+            .query_row(
+                "SELECT owner_agent_id FROM workflow_runs WHERE id = 'legacy-run'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            owner, None,
+            "a pre-v49 workflow run must read back an absent owner, not a synthetic one"
+        );
+
+        conn.execute(
+            "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms) \
+             VALUES ('legacy-usage', 'agent-1', '2026-07-19T00:00:00+00:00', 'm', 'p', 1, 2, 0.5, 0, 10)",
+            [],
+        )
+        .unwrap();
+        let billed: Option<String> = conn
+            .query_row(
+                "SELECT billed_agent_id FROM usage_events WHERE id = 'legacy-usage'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            billed, None,
+            "a pre-v49 usage row must read back NULL so it still bills to agent_id"
+        );
+
+        // A second call is a no-op (both columns already present) and must not
+        // disturb either seeded row.
+        migrate_v49(&conn).unwrap();
+        let (state, cost): (String, f64) = (
+            conn.query_row(
+                "SELECT state FROM workflow_runs WHERE id = 'legacy-run'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT cost_usd FROM usage_events WHERE id = 'legacy-usage'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            state, "completed",
+            "re-running migrate_v49 must not touch data"
+        );
+        assert_eq!(cost, 0.5, "re-running migrate_v49 must not touch data");
     }
 
     #[test]
