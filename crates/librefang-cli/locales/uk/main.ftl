@@ -1423,10 +1423,13 @@ tui-event-agent-kill-failed = Не вдалося примусово зупин�
 tui-event-agent-invalid-id = Недійсний ID агента: { $agent_id }
 tui-event-skills-fetch-failed = Не вдалося отримати скіли
 tui-event-mcp-fetch-failed = Не вдалося отримати MCP-сервери
+tui-event-channels-fetch-failed = Не вдалося отримати канали
 tui-event-skills-update-failed = Не вдалося оновити скіли
 tui-event-skills-update-error = Оновлення скілів: { $error }
 tui-event-mcp-update-failed = Не вдалося оновити MCP-сервери
+tui-event-channels-update-failed = Не вдалося оновити канали
 tui-event-mcp-update-error = Оновлення MCP: { $error }
+tui-event-channels-update-error = Оновлення каналів: { $error }
 tui-event-session-delete-failed = Не вдалося видалити сесію { $session_id }
 tui-event-session-management-not-available-in-process = Управління сесіями недоступне в інпроцес-режимі
 tui-event-kv-save-failed = Не вдалося зберегти пару ключ-значення
@@ -1519,6 +1522,7 @@ tui-mod-agent-killed-status = Агента { $id } примусово зупин
 tui-mod-agent-kill-failed = Не вдалося примусово зупинити: { $error }
 tui-mod-agent-skills-updated = Скіли оновлено для агента { $id }.
 tui-mod-agent-mcp-updated = Сервери MCP оновлено для агента { $id }.
+tui-mod-agent-channels-updated = Канали оновлено для агента { $id }.
 tui-mod-ready = Готово
 tui-mod-setup = Налаштування
 tui-mod-workflow-created = Воркфлоу створено!
@@ -2023,6 +2027,7 @@ tui-agents-title-custom-prompt = Власний — Системний пром�
 tui-agents-title-custom-tools = Власний — Інструменти
 tui-agents-title-custom-skills = Власний — Скіли
 tui-agents-title-custom-mcp = Власний — MCP-сервери
+tui-agents-title-edit-channels = Редагування — Канали
 tui-agents-title-spawning = Створення...
 tui-agents-title-screen = Агенти
 tui-agents-title-detail = Деталі агента
@@ -2035,6 +2040,7 @@ tui-agents-prompt-tools =   Оберіть інструменти (Space для 
 tui-agents-prompt-skills =   Оберіть скіли (якщо нічого не вибрано = всі скіли):
 tui-agents-prompt-mcp =   Оберіть MCP-сервери (якщо нічого не вибрано = всі сервери):
 tui-agents-prompt-edit-skills =   Space для перемикання, Enter для збереження (нічого не вибрано = всі):
+tui-agents-prompt-edit-channels =   Space для перемикання, Enter для збереження (нічого не вибрано = усі канали):
 tui-agents-prompt-spawning =   Створення агента...
 tui-agents-label-no-agent-selected = Агента не обрано.
 tui-agents-label-none-available = (немає доступних)
@@ -2052,7 +2058,7 @@ tui-agents-opt-create-new = Створити нового агента
 
 tui-agents-hints-filter =   [Введення] Фільтр  [Enter] Застосувати  [Esc] Скасувати пошук
 tui-agents-hints-list =   [↑↓] Навігація  [Enter] Деталі  [/] Пошук  [Esc] Назад
-tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [c] Чат  [k] Зупинити  [Esc] Назад
+tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [n] Змінити канали  [c] Чат  [k] Зупинити  [Esc] Назад
 tui-agents-hints-navigate =     [↑↓] Навігація  [Enter] Обрати  [Esc] Назад
 tui-agents-hints-input =     [Enter] Далі  [Esc] Назад
 tui-agents-hints-tools =     [↑↓] Навігація  [Space] Перемкнути  [Enter] Створити  [Esc] Назад
@@ -2078,8 +2084,10 @@ tui-agents-detail-parent =   Батьківський:
 tui-agents-detail-children =   Дочірні:  
 tui-agents-detail-skills =   Скіли:    
 tui-agents-detail-mcp =   MCP:      
+tui-agents-detail-channels =   Канали:   
 tui-agents-detail-all-skills = [Усі скіли]
 tui-agents-detail-all-servers = [Усі сервери]
+tui-agents-detail-all-channels = [Усі канали]
 tui-agents-detail-none = [Немає]
 tui-agents-default-desc = Власний агент { $name }
 tui-agents-default-prompt = Ви — { $name }, корисний помічник.

@@ -330,6 +330,15 @@ impl App {
                 available,
             } => {
                 // Populate skill editor: mark assigned skills as checked
+                if let Some(detail) = self.agents.detail.as_mut() {
+                    detail.skills_mode = if assigned.is_empty() {
+                        "all"
+                    } else {
+                        "allowlist"
+                    }
+                    .to_string();
+                    detail.skills = assigned.clone();
+                }
                 self.agents.available_skills = available
                     .into_iter()
                     .map(|name| {
@@ -344,6 +353,17 @@ impl App {
                 available,
             } => {
                 // Populate MCP editor: mark assigned servers as checked
+                if let Some(detail) = self.agents.detail.as_mut() {
+                    // `["*"]` is the explicit all-servers opt-in (#5855); an empty list is
+                    // a real "no servers", which the renderer reports separately.
+                    detail.mcp_servers_mode = if assigned.iter().any(|s| s == "*") {
+                        "all"
+                    } else {
+                        "allowlist"
+                    }
+                    .to_string();
+                    detail.mcp_servers = assigned.clone();
+                }
                 self.agents.available_mcp = available
                     .into_iter()
                     .map(|name| {
@@ -362,6 +382,50 @@ impl App {
                 self.agents.status_msg =
                     crate::i18n::t_args("tui-mod-agent-mcp-updated", &[("id", &id)]);
                 self.agents.sub = agents::AgentSubScreen::AgentDetail;
+            }
+            AppEvent::AgentChannelsLoaded {
+                assigned,
+                available,
+            } => {
+                // Populate the channel editor: mark assigned channels as checked
+                if let Some(detail) = self.agents.detail.as_mut() {
+                    detail.channels_mode = if assigned.is_empty() {
+                        "all"
+                    } else {
+                        "allowlist"
+                    }
+                    .to_string();
+                    detail.channels = assigned.clone();
+                }
+                self.agents.available_channels = available
+                    .into_iter()
+                    .map(|name| {
+                        let checked = assigned.contains(&name);
+                        (name, checked)
+                    })
+                    .collect();
+                self.agents.channel_cursor = 0;
+            }
+            AppEvent::AgentChannelsUpdated(id) => {
+                self.agents.status_msg =
+                    crate::i18n::t_args("tui-mod-agent-channels-updated", &[("id", &id)]);
+                self.agents.sub = agents::AgentSubScreen::AgentDetail;
+                // The detail pane renders the allowlist it was built with, so refresh it
+                // instead of leaving the old value on screen next to a success message.
+                if let Some(detail) = self.agents.detail.as_mut() {
+                    detail.channels = self
+                        .agents
+                        .available_channels
+                        .iter()
+                        .filter(|(_, checked)| *checked)
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                    detail.channels_mode = if detail.channels.is_empty() {
+                        "all".to_string()
+                    } else {
+                        "allowlist".to_string()
+                    };
+                }
             }
             AppEvent::FetchError(err) => {
                 // Route to the active tab's status message
@@ -1442,6 +1506,38 @@ impl App {
             agents::AgentAction::FetchAgentMcpServers(id) => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_fetch_agent_mcp_servers(backend, id, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::FetchAgentChannels(id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_agent_channels(backend, id, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::LoadAgentDetail(id) => {
+                // All three allowlists the detail pane renders, fetched together so the
+                // pane shows the agent's real configuration rather than struct defaults.
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_agent_skills(backend, id.clone(), self.event_tx.clone());
+                }
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_agent_mcp_servers(
+                        backend,
+                        id.clone(),
+                        self.event_tx.clone(),
+                    );
+                }
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_agent_channels(backend, id, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::UpdateChannels { id, channels } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_update_agent_channels(
+                        backend,
+                        id,
+                        channels,
+                        self.event_tx.clone(),
+                    );
                 }
             }
         }

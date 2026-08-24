@@ -800,6 +800,7 @@
           "agents"
         ],
         "summary": "PUT /api/agents/{id}/channels — Update an agent's channel allowlist.",
+        "description": "Body shape mirrors the sibling `mcp_servers` route rather than the bare array the OpenAPI\nannotation used to advertise (#7742).\nThe old handler read `body[\"channels\"]` out of an untyped `Value` and fell back to `Vec::new()`\nfor anything it did not recognise, so the documented bare-array body — and any typo in the key —\nsilently cleared the allowlist and reopened the agent to every channel.\nWidening an allowlist is not a defensible interpretation of a malformed request, so a body that\ndoes not deserialize is now a 400.",
         "operationId": "set_agent_channels",
         "parameters": [
           {
@@ -813,11 +814,11 @@
           }
         ],
         "requestBody": {
-          "description": "Array of channel_type strings",
+          "description": "Object containing the channel allowlist",
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/JsonArray"
+                "$ref": "#/components/schemas/SetAgentChannelsRequest"
               }
             }
           },
@@ -826,6 +827,16 @@
         "responses": {
           "200": {
             "description": "Update an agent's channel allowlist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request body",
             "content": {
               "application/json": {
                 "schema": {
@@ -14972,6 +14983,23 @@
             "minimum": 0
           }
         }
+      },
+      "SetAgentChannelsRequest": {
+        "type": "object",
+        "description": "Body of `PUT /api/agents/{id}/channels`.",
+        "required": [
+          "channels"
+        ],
+        "properties": {
+          "channels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`channel_type` strings the agent may receive messages from.\nAn empty list clears the allowlist, which means \"all channels\" (`mode = \"all\"`)."
+          }
+        },
+        "additionalProperties": false
       },
       "SetAgentFileRequest": {
         "type": "object",

@@ -1409,10 +1409,13 @@ tui-event-agent-kill-failed = Failed to kill agent { $agent_id }
 tui-event-agent-invalid-id = Invalid agent ID: { $agent_id }
 tui-event-skills-fetch-failed = Failed to fetch skills
 tui-event-mcp-fetch-failed = Failed to fetch MCP servers
+tui-event-channels-fetch-failed = Failed to fetch channels
 tui-event-skills-update-failed = Failed to update skills
 tui-event-skills-update-error = Skills update: { $error }
 tui-event-mcp-update-failed = Failed to update MCP servers
+tui-event-channels-update-failed = Failed to update channels
 tui-event-mcp-update-error = MCP update: { $error }
+tui-event-channels-update-error = Channel update: { $error }
 tui-event-session-delete-failed = Failed to delete session { $session_id }
 tui-event-session-management-not-available-in-process = Session management not available in in-process mode
 tui-event-kv-save-failed = Failed to save KV pair
@@ -1505,6 +1508,7 @@ tui-mod-agent-killed-status = Agent { $id } killed.
 tui-mod-agent-kill-failed = Kill failed: { $error }
 tui-mod-agent-skills-updated = Skills updated for agent { $id }.
 tui-mod-agent-mcp-updated = MCP servers updated for agent { $id }.
+tui-mod-agent-channels-updated = Channels updated for agent { $id }.
 tui-mod-ready = Ready
 tui-mod-setup = Setup
 tui-mod-workflow-created = Workflow created!
@@ -2004,6 +2008,7 @@ tui-agents-title-custom-prompt = Custom — System Prompt
 tui-agents-title-custom-tools = Custom — Tools
 tui-agents-title-custom-skills = Custom — Skills
 tui-agents-title-custom-mcp = Custom — MCP Servers
+tui-agents-title-edit-channels = Edit — Channels
 tui-agents-title-spawning = Spawning...
 tui-agents-title-screen = Agents
 tui-agents-title-detail = Agent Detail
@@ -2016,6 +2021,7 @@ tui-agents-prompt-tools =   Select tools (Space to toggle):
 tui-agents-prompt-skills =   Select skills (none checked = all skills):
 tui-agents-prompt-mcp =   Select MCP servers (none checked = all servers):
 tui-agents-prompt-edit-skills =   Space to toggle, Enter to save (none checked = all):
+tui-agents-prompt-edit-channels =   Space to toggle, Enter to save (none checked = every channel):
 tui-agents-prompt-spawning =   Spawning agent...
 tui-agents-label-no-agent-selected = No agent selected.
 tui-agents-label-none-available = (none available)
@@ -2033,7 +2039,7 @@ tui-agents-opt-create-new = Create new agent
 
 tui-agents-hints-filter =   [Type] Filter  [Enter] Accept  [Esc] Cancel search
 tui-agents-hints-list =   [↑↓] Navigate  [Enter] Detail  [/] Search  [Esc] Back
-tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [c] Chat  [k] Kill  [Esc] Back
+tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [c] Chat  [k] Kill  [Esc] Back
 tui-agents-hints-navigate =     [↑↓] Navigate  [Enter] Select  [Esc] Back
 tui-agents-hints-input =     [Enter] Next  [Esc] Back
 tui-agents-hints-tools =     [↑↓] Navigate  [Space] Toggle  [Enter] Create  [Esc] Back
@@ -2059,8 +2065,10 @@ tui-agents-detail-parent =   Parent:
 tui-agents-detail-children =   Children: 
 tui-agents-detail-skills =   Skills:   
 tui-agents-detail-mcp =   MCP:      
+tui-agents-detail-channels =   Channels: 
 tui-agents-detail-all-skills = [All skills]
 tui-agents-detail-all-servers = [All servers]
+tui-agents-detail-all-channels = [All channels]
 tui-agents-detail-none = [None]
 tui-agents-default-desc = A custom { $name } agent
 tui-agents-default-prompt = You are { $name }, a helpful agent.

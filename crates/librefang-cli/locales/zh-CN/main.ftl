@@ -487,10 +487,13 @@ tui-event-agent-kill-failed = 终止智能体 { $agent_id } 失败
 tui-event-agent-invalid-id = 无效的智能体 ID: { $agent_id }
 tui-event-skills-fetch-failed = 获取技能失败
 tui-event-mcp-fetch-failed = 获取 MCP 服务失败
+tui-event-channels-fetch-failed = 获取频道失败
 tui-event-skills-update-failed = 更新技能失败
 tui-event-skills-update-error = 技能更新: { $error }
 tui-event-mcp-update-failed = 更新 MCP 服务失败
+tui-event-channels-update-failed = 更新频道失败
 tui-event-mcp-update-error = MCP 更新: { $error }
+tui-event-channels-update-error = 频道更新: { $error }
 tui-event-session-delete-failed = 删除会话 { $session_id } 失败
 tui-event-session-management-not-available-in-process = 进程内模式下会话管理不可用
 tui-event-kv-save-failed = 保存键值对失败
@@ -583,6 +586,7 @@ tui-mod-agent-killed-status = 智能体 { $id } 已终止。
 tui-mod-agent-kill-failed = 终止失败: { $error }
 tui-mod-agent-skills-updated = 已更新智能体 { $id } 的技能。
 tui-mod-agent-mcp-updated = 已更新智能体 { $id } 的 MCP 服务端。
+tui-mod-agent-channels-updated = 已更新智能体 { $id } 的频道。
 tui-mod-ready = 准备就绪
 tui-mod-setup = 待设置
 tui-mod-workflow-created = 工作流已创建！
@@ -1070,6 +1074,7 @@ tui-agents-title-custom-prompt = 自定义 — 系统提示词
 tui-agents-title-custom-tools = 自定义 — 工具
 tui-agents-title-custom-skills = 自定义 — Skill
 tui-agents-title-custom-mcp = 自定义 — MCP 服务
+tui-agents-title-edit-channels = 编辑 — 频道
 tui-agents-title-spawning = 正在创建...
 tui-agents-title-screen = Agent
 tui-agents-title-detail = Agent 详情
@@ -1082,6 +1087,7 @@ tui-agents-prompt-tools =   选择工具 (空格键切换):
 tui-agents-prompt-skills =   选择 Skill (未勾选 = 所有 Skill):
 tui-agents-prompt-mcp =   选择 MCP 服务 (未勾选 = 所有服务):
 tui-agents-prompt-edit-skills =   空格键切换，Enter 保存 (未勾选 = 所有):
+tui-agents-prompt-edit-channels =   空格键切换，Enter 保存 (未勾选 = 所有频道):
 tui-agents-prompt-spawning =   正在创建 Agent...
 tui-agents-label-no-agent-selected = 未选择 Agent。
 tui-agents-label-none-available = (无可用项)
@@ -1099,7 +1105,7 @@ tui-agents-opt-create-new = 创建新 Agent
 
 tui-agents-hints-filter =   [输入] 过滤  [Enter] 应用  [Esc] 取消搜索
 tui-agents-hints-list =   [↑↓] 导航  [Enter] 详情  [/] 搜索  [Esc] 返回
-tui-agents-hints-detail =   [s] 编辑 Skill  [m] 编辑 MCP  [c] 聊天  [k] 停止  [Esc] 返回
+tui-agents-hints-detail =   [s] 编辑 Skill  [m] 编辑 MCP  [n] 编辑频道  [c] 聊天  [k] 停止  [Esc] 返回
 tui-agents-hints-navigate =     [↑↓] 导航  [Enter] 选择  [Esc] 返回
 tui-agents-hints-input =     [Enter] 下一步  [Esc] 返回
 tui-agents-hints-tools =     [↑↓] 导航  [Space] 切换  [Enter] 创建  [Esc] 返回
@@ -1125,8 +1131,10 @@ tui-agents-detail-parent =   父级:
 tui-agents-detail-children =   子级:     
 tui-agents-detail-skills =   Skill:    
 tui-agents-detail-mcp =   MCP:      
+tui-agents-detail-channels =   频道:     
 tui-agents-detail-all-skills = [所有 Skill]
 tui-agents-detail-all-servers = [所有服务]
+tui-agents-detail-all-channels = [所有频道]
 tui-agents-detail-none = [无]
 tui-agents-default-desc = 自定义 { $name } Agent
 tui-agents-default-prompt = 您是 { $name }，一个有用的助手。
