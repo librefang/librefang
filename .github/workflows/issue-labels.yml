@@ -17,6 +17,13 @@ permissions:
   issues: write
   contents: read
 
+# The per-issue paths are safe to cancel: `area` recomputes labels from the current title and body, and `response-state` derives the awaiting-response / needs-attention pair from the triggering comment, so the newest event is the one whose answer should win.
+# The `workflow_dispatch` backfill instead walks every unlabeled open issue, so it shares one constant group key and is never cancelled — a half-finished backfill leaves part of the backlog unlabeled with nothing to retrigger it.
+# Issue numbers are unique within the repository, so two different issues can never share a group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number || 'backfill' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
 jobs:
   # ── Area labels based on title keywords ───────────────────────────
   area:

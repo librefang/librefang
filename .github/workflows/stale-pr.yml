@@ -13,6 +13,13 @@ on:
 permissions:
   pull-requests: write
 
+# Two paths with different safety properties share this workflow.
+# The `pull_request_target` path only removes `stale-pr` from the single PR that was pushed to, so it is idempotent and safe to cancel — the newer push repeats the same removal.
+# The `schedule` / `workflow_dispatch` path sweeps up to 100 open PRs and adds or removes a label one PR at a time, so cancelling it mid-flight would leave a partially swept repository; every sweep shares the constant `sweep` group key and is never cancelled, which makes two overlapping cron fires serialise instead of racing.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || 'sweep' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+
 jobs:
   stale:
     runs-on: ubuntu-latest

@@ -10,6 +10,13 @@ permissions:
   issues: write
   pull-requests: write
 
+# A greeting is a one-shot side effect, so this group never cancels: killing a run that has already posted, or dropping one that has not yet, is not something a later run repairs.
+# The group is per PR / issue rather than workflow-wide on purpose — GitHub keeps only one pending run per concurrency group and cancels any earlier pending one, so a single shared group would silently drop the greeting for every contributor who opened a PR while another greeting was still in flight.
+# PRs and issues share one number space within a repository, so the two triggers cannot collide on the same group key.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
 jobs:
   welcome:
     runs-on: ubuntu-latest
