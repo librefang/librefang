@@ -679,12 +679,8 @@ fn push_aged_entry(
     // Update the tip so the next record links to the right hash.
     *log.tip.lock().unwrap() = new_hash.clone();
 
-    // Back-date the persisted row too. Every append now derives its
-    // predecessor from the durable tail inside the write transaction (#7702),
-    // so a DB row still carrying the pre-back-dating timestamp and hash reads
-    // as a divergent chain on the very next `record()`: the append would chain
-    // onto the stored hash and reconcile the in-memory window back to what the
-    // table holds, silently undoing the ageing this helper exists to apply.
+    // Back-date the persisted row too.
+    // Every append now derives its predecessor from the durable tail inside the write transaction (#7702), so a DB row still carrying the pre-back-dating timestamp and hash reads as a divergent chain on the very next `record()`: the append would chain onto the stored hash and reconcile the in-memory window back to what the table holds, silently undoing the ageing this helper exists to apply.
     if let Some(pool) = log.db.as_ref() {
         let conn = pool.get().unwrap();
         conn.execute(
@@ -1871,8 +1867,7 @@ fn audit_chain_holds_under_concurrent_record() {
 }
 
 /// Schema used by the multi-writer tests below, matching migration V8 /
-/// V22 (`seq INTEGER PRIMARY KEY` plus the later `user_id` / `channel`
-/// columns).
+/// V22 (`seq INTEGER PRIMARY KEY` plus the later `user_id` / `channel` columns).
 const AUDIT_TABLE_DDL: &str = "CREATE TABLE audit_entries (
     seq INTEGER PRIMARY KEY,
     timestamp TEXT NOT NULL,
@@ -1886,10 +1881,7 @@ const AUDIT_TABLE_DDL: &str = "CREATE TABLE audit_entries (
     hash TEXT NOT NULL
 )";
 
-/// A file-backed pool with the daemon's WAL pragmas, so `max_size > 1`
-/// actually buys multiple simultaneous connections (`:memory:` is
-/// per-connection) and a writer waiting on the RESERVED lock blocks instead
-/// of failing with `SQLITE_BUSY`.
+/// A file-backed pool with the daemon's WAL pragmas, so `max_size > 1` actually buys multiple simultaneous connections (`:memory:` is per-connection) and a writer waiting on the RESERVED lock blocks instead of failing with `SQLITE_BUSY`.
 fn multi_writer_pool(db_path: &std::path::Path) -> Pool<SqliteConnectionManager> {
     let manager = SqliteConnectionManager::file(db_path).with_init(|c| {
         c.execute_batch(
@@ -1925,29 +1917,14 @@ fn all_rows(pool: &Pool<SqliteConnectionManager>) -> Vec<(u64, String, String)> 
 
 /// Prevention regression for #7702 — the deterministic half.
 ///
-/// The reported symptom is `chain break at seq N` with everything below N
-/// verifying and everything above it verifying: two independently derived
-/// chains merged into one table.
-/// This reproduces that merge without threads or timing, by replaying the
-/// exact sequence the issue analysis identified.
+/// The reported symptom is `chain break at seq N` with everything below N verifying and everything above it verifying: two independently derived chains merged into one table.
+/// This reproduces that merge without threads or timing, by replaying the exact sequence the issue analysis identified.
 ///
-/// Before the fix, `record_with_context` derived `seq` from
-/// `entries.last().seq + 1` and `prev_hash` from the in-memory `tip`, both
-/// read before `BEGIN IMMEDIATE` opened and never re-checked against the
-/// table.
-/// A second writer survived only because those two values came from the
-/// *same* stale snapshot, so its INSERT collided on `seq INTEGER PRIMARY KEY`
-/// and failed closed — an interlock that holds only while the row occupying
-/// that seq still exists.
-/// The default `audit.retention_days = 90` prune issues
-/// `DELETE FROM audit_entries WHERE seq < ?1` on a daily schedule and frees
-/// it with no operator involvement; the stale writer's next INSERT then
-/// succeeds carrying a `prev_hash` that names a row which is no longer its
-/// predecessor, and the chain forks.
+/// Before the fix, `record_with_context` derived `seq` from `entries.last().seq + 1` and `prev_hash` from the in-memory `tip`, both read before `BEGIN IMMEDIATE` opened and never re-checked against the table.
+/// A second writer survived only because those two values came from the *same* stale snapshot, so its INSERT collided on `seq INTEGER PRIMARY KEY` and failed closed — an interlock that holds only while the row occupying that seq still exists.
+/// The default `audit.retention_days = 90` prune issues `DELETE FROM audit_entries WHERE seq < ?1` on a daily schedule and frees it with no operator involvement; the stale writer's next INSERT then succeeds carrying a `prev_hash` that names a row which is no longer its predecessor, and the chain forks.
 ///
-/// With the tail read inside the write transaction, the stale writer chains
-/// onto the row that is actually last at INSERT time, so the fork is
-/// unreachable rather than merely unlikely.
+/// With the tail read inside the write transaction, the stale writer chains onto the row that is actually last at INSERT time, so the fork is unreachable rather than merely unlikely.
 #[test]
 fn stale_snapshot_append_cannot_fork_the_chain_after_a_prune() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2034,23 +2011,11 @@ fn stale_snapshot_append_cannot_fork_the_chain_after_a_prune() {
 
 /// Prevention regression for #7702 — the concurrent half.
 ///
-/// [`audit_chain_holds_under_concurrent_record`] shares one [`AuditLog`]
-/// across its threads, so every append there is already serialised by that
-/// instance's `entries` mutex and the SQLite-level interlock is never
-/// exercised.
-/// This one runs two independent [`AuditLog`] instances over the same
-/// database file — the two-daemon shape from the issue — so the only thing
-/// standing between them is the `BEGIN IMMEDIATE` transaction the append
-/// opens.
+/// [`audit_chain_holds_under_concurrent_record`] shares one [`AuditLog`] across its threads, so every append there is already serialised by that instance's `entries` mutex and the SQLite-level interlock is never exercised.
+/// This one runs two independent [`AuditLog`] instances over the same database file — the two-daemon shape from the issue — so the only thing standing between them is the `BEGIN IMMEDIATE` transaction the append opens.
 ///
-/// This test is timing-dependent by construction: it cannot force a
-/// particular interleaving, only make one likely.
-/// The deterministic guarantee lives in
-/// [`stale_snapshot_append_cannot_fork_the_chain_after_a_prune`]; this test
-/// bounds the flakiness rather than eliminating it, by giving both writers a
-/// 10 s `busy_timeout` so a writer that loses the RESERVED lock waits for it
-/// instead of dropping its entry and turning a scheduling hiccup into a
-/// failed assertion.
+/// This test is timing-dependent by construction: it cannot force a particular interleaving, only make one likely.
+/// The deterministic guarantee lives in [`stale_snapshot_append_cannot_fork_the_chain_after_a_prune`]; this test bounds the flakiness rather than eliminating it, by giving both writers a 10 s `busy_timeout` so a writer that loses the RESERVED lock waits for it instead of dropping its entry and turning a scheduling hiccup into a failed assertion.
 #[test]
 fn chain_holds_under_two_writers_on_one_database() {
     use std::sync::Arc;

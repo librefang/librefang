@@ -447,18 +447,13 @@ struct AnchorRecord {
 }
 
 /// The `audit_entries` columns [`decode_audit_row`] expects, in order.
-/// Shared by the boot reload in [`AuditLog::with_db`] and the reconciliation
-/// re-read in [`AuditLog::read_reconcile_window`] so the two can never drift
-/// into decoding different column positions.
+/// Shared by the boot reload in [`AuditLog::with_db`] and the reconciliation re-read in [`AuditLog::read_reconcile_window`] so the two can never drift into decoding different column positions.
 const AUDIT_ROW_COLUMNS: &str =
     "seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash";
 
 /// Decode one `audit_entries` row selected with [`AUDIT_ROW_COLUMNS`].
 ///
-/// Schema v22 added the `user_id` / `channel` columns; rows persisted before
-/// that migration return NULL for both, which deserialises to `None` and keeps
-/// the original hash intact (the hash function omits absent fields, see
-/// `compute_entry_hash`).
+/// Schema v22 added the `user_id` / `channel` columns; rows persisted before that migration return NULL for both, which deserialises to `None` and keeps the original hash intact (the hash function omits absent fields, see `compute_entry_hash`).
 fn decode_audit_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditEntry> {
     let action_str: String = row.get(3)?;
     // Decode via `FromStr` (exhaustive over every variant).
@@ -493,9 +488,7 @@ fn decode_audit_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditEntry> {
 
 /// Build an entry and its hash from a `(seq, prev_hash)` pair.
 ///
-/// Kept separate from the append path because the pair is only known inside
-/// the write transaction (#7702) — the hash covers `seq` and `prev_hash`, so
-/// the entry cannot be assembled before the predecessor is read.
+/// Kept separate from the append path because the pair is only known inside the write transaction (#7702) — the hash covers `seq` and `prev_hash`, so the entry cannot be assembled before the predecessor is read.
 #[allow(clippy::too_many_arguments)]
 fn build_entry(
     seq: u64,
@@ -527,29 +520,25 @@ fn build_entry(
 
 /// Outcome of one append attempt.
 enum Append {
-    /// The row is committed (or this is pure in-memory mode, where memory IS
-    /// the store). Boxed so the committed variant does not inflate every
-    /// `Append` value by the size of a whole entry. `reconcile` is `Some` when the durable tail had moved
-    /// underneath this process and the in-memory window must be replaced
-    /// before the entry is installed.
+    /// The row is committed (or this is pure in-memory mode, where memory IS the store).
+    /// Boxed so the committed variant does not inflate every `Append` value by the size of a whole entry.
+    /// `reconcile` is `Some` when the durable tail had moved underneath this process and the in-memory window must be replaced before the entry is installed.
     Committed {
         entry: Box<AuditEntry>,
         reconcile: Option<Reconcile>,
     },
-    /// Nothing reached disk. Chain state must not advance — see the note on
-    /// `record_with_context`. The hash is the one the entry would have
-    /// carried, returned only to keep the success path's signature.
+    /// Nothing reached disk.
+    /// Chain state must not advance — see the note on `record_with_context`.
+    /// The hash is the one the entry would have carried, returned only to keep the success path's signature.
     Dropped { would_be_hash: String },
 }
 
-/// In-memory state re-derived from the database when an append found the
-/// durable tail ahead of (or behind) this process's snapshot.
+/// In-memory state re-derived from the database when an append found the durable tail ahead of (or behind) this process's snapshot.
 struct Reconcile {
-    /// Tail rows as the write transaction saw them, ordered by `seq` ascending
-    /// and ending at the row the pending entry chains onto.
+    /// Tail rows as the write transaction saw them, ordered by `seq` ascending and ending at the row the pending entry chains onto.
     window: Vec<AuditEntry>,
-    /// Hash of the row preceding `window`, or `None` when the window starts at
-    /// the genesis sentinel. Same rule `with_db` applies on boot.
+    /// Hash of the row preceding `window`, or `None` when the window starts at the genesis sentinel.
+    /// Same rule `with_db` applies on boot.
     anchor: Option<String>,
     /// `COUNT(*)` taken inside the same transaction, before the pending INSERT.
     persisted_rows: usize,
@@ -910,13 +899,9 @@ impl AuditLog {
         let mut entries = lock_audit_recover(&self.entries, "entries");
         let mut tip = lock_audit_recover(&self.tip, "tip");
 
-        // What this process believes the tail to be. It is authoritative
-        // only in pure in-memory mode and when the table holds no rows at
-        // all: after a `trim` / `prune` that dropped everything, `tip`
-        // carries the hash of the last dropped entry and the chain has to
-        // continue from it rather than restart at the genesis sentinel.
-        // Everywhere else it is a hint, and `append_durable` overrules it
-        // with what the database actually holds.
+        // What this process believes the tail to be.
+        // It is authoritative only in pure in-memory mode and when the table holds no rows at all: after a `trim` / `prune` that dropped everything, `tip` carries the hash of the last dropped entry and the chain has to continue from it rather than restart at the genesis sentinel.
+        // Everywhere else it is a hint, and `append_durable` overrules it with what the database actually holds.
         //
         // Derive the next seq from the last entry, not `entries.len()`,
         // because a retention trim may have dropped a prefix — using
@@ -941,11 +926,9 @@ impl AuditLog {
         // (graceful or otherwise) before the retry succeeded
         // committed the broken on-disk chain.
         //
-        // We invert the trade-off: a transient DB write failure drops
-        // the audit event and leaves chain state untouched.  The ERROR
-        // log inside `append_durable` is the operator's signal to
-        // investigate.  The next call re-derives its predecessor from
-        // the database and tries again with a fresh timestamp.
+        // We invert the trade-off: a transient DB write failure drops the audit event and leaves chain state untouched.
+        // The ERROR log inside `append_durable` is the operator's signal to investigate.
+        // The next call re-derives its predecessor from the database and tries again with a fresh timestamp.
         let appended = match self.db.as_ref() {
             // Pure in-memory mode: memory IS the source of truth.
             None => Append::Committed {
@@ -1006,13 +989,9 @@ impl AuditLog {
         let entry = match appended {
             Append::Committed { entry, reconcile } => {
                 if let Some(reconcile) = reconcile {
-                    // The durable tail moved underneath us, so the window we
-                    // were holding is no longer a suffix of what is on disk.
-                    // Replace it with the rows the write transaction actually
-                    // saw. `chain_anchor` becomes the hash of the row before
-                    // the window (exactly the rule `with_db` uses on boot), so
-                    // `verify_integrity` walks a true suffix instead of
-                    // reporting a break that exists only in this process.
+                    // The durable tail moved underneath us, so the window we were holding is no longer a suffix of what is on disk.
+                    // Replace it with the rows the write transaction actually saw.
+                    // `chain_anchor` becomes the hash of the row before the window (exactly the rule `with_db` uses on boot), so `verify_integrity` walks a true suffix instead of reporting a break that exists only in this process.
                     *entries = reconcile.window;
                     {
                         let mut anchor = lock_audit_recover(&self.chain_anchor, "chain_anchor");
@@ -1024,9 +1003,7 @@ impl AuditLog {
                 entry
             }
             Append::Dropped { would_be_hash } => {
-                // Drop locks without mutating; the caller's (discarded)
-                // return value is the uncommitted hash, mirroring the
-                // success path's signature.
+                // Drop locks without mutating; the caller's (discarded) return value is the uncommitted hash, mirroring the success path's signature.
                 return would_be_hash;
             }
         };
