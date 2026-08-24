@@ -1,12 +1,7 @@
 //! End-to-end wiring for the `channel_members` roster read (#7086).
 //!
-//! The channel bridge has persisted every group sender it sees through
-//! `ChannelBridgeHandle::roster_upsert` since the `group_roster` table landed,
-//! and `KernelHandle::roster_members` could always read it back — with no
-//! caller anywhere in the tree. These tests cover the boundary that closes
-//! that gap: the dispatch arm resolves the conversation from the turn context,
-//! calls `roster_members` with the bare channel type, and refuses to read a
-//! conversation other than the one the turn arrived on.
+//! The channel bridge has persisted every group sender it sees through `ChannelBridgeHandle::roster_upsert` since the `group_roster` table landed, and `KernelHandle::roster_members` could always read it back — with no caller anywhere in the tree.
+//! These tests cover the boundary that closes that gap: the dispatch arm resolves the conversation from the turn context, calls `roster_members` with the bare channel type, and refuses to read a conversation other than the one the turn arrived on.
 
 use async_trait::async_trait;
 use librefang_kernel_handle::prelude::*;
@@ -206,9 +201,7 @@ impl librefang_kernel_handle::SessionWriter for RosterKernel {
 impl librefang_kernel_handle::AcpFsBridge for RosterKernel {}
 impl librefang_kernel_handle::AcpTerminalBridge for RosterKernel {}
 
-/// The rows the real `ChannelSenderHandle` builds out of
-/// `RosterStore::members`, in the order that store returns them (display name,
-/// then user id).
+/// The rows the real `ChannelSenderHandle` builds out of `RosterStore::members`, in the order that store returns them (display name, then user id).
 impl ChannelSender for RosterKernel {
     fn roster_members(
         &self,
@@ -267,9 +260,7 @@ fn make_ctx<'a>(
     }
 }
 
-/// The use case from #7086: an agent in a shared Slack channel answers "who is
-/// in here?" with no arguments, and gets back the platform user id it needs to
-/// attribute the request to a person.
+/// The use case from #7086: an agent in a shared Slack channel answers "who is in here?" with no arguments, and gets back the platform user id it needs to attribute the request to a person.
 #[tokio::test]
 async fn channel_members_reads_the_current_conversation_with_no_arguments() {
     let (kernel, calls) = RosterKernel::new();
@@ -302,8 +293,7 @@ async fn channel_members_reads_the_current_conversation_with_no_arguments() {
     );
 }
 
-/// An empty roster is the normal state for a DM and for a group nobody has
-/// spoken in yet, so it must not read as a broken tool.
+/// An empty roster is the normal state for a DM and for a group nobody has spoken in yet, so it must not read as a broken tool.
 #[tokio::test]
 async fn channel_members_explains_an_empty_roster() {
     let (kernel, _calls) = RosterKernel::new();
@@ -321,9 +311,7 @@ async fn channel_members_explains_an_empty_roster() {
     assert!(body["note"].as_str().expect("note").contains("roster"));
 }
 
-/// The inbound twin of the #6117 cross-chat dispatch leak: a member of one
-/// group must not be able to enumerate another group's membership, and the
-/// refusal has to happen before the kernel is asked.
+/// The inbound twin of the #6117 cross-chat dispatch leak: a member of one group must not be able to enumerate another group's membership, and the refusal has to happen before the kernel is asked.
 #[tokio::test]
 async fn channel_members_refuses_another_chat_on_the_same_channel() {
     let (kernel, calls) = RosterKernel::new();
@@ -345,9 +333,7 @@ async fn channel_members_refuses_another_chat_on_the_same_channel() {
     );
 }
 
-/// The WhatsApp gateway stamps `sender_channel = "whatsapp:<jid>"` (#5227)
-/// while the roster is keyed on the bare channel type, so the lookup key has
-/// to be the base type or every WhatsApp read misses.
+/// The WhatsApp gateway stamps `sender_channel = "whatsapp:<jid>"` (#5227) while the roster is keyed on the bare channel type, so the lookup key has to be the base type or every WhatsApp read misses.
 #[tokio::test]
 async fn channel_members_strips_the_channel_suffix_before_the_lookup() {
     let (kernel, calls) = RosterKernel::new();
@@ -370,8 +356,7 @@ async fn channel_members_strips_the_channel_suffix_before_the_lookup() {
     );
 }
 
-/// Out-of-band callers (cron, triggers) have no conversation to default to, so
-/// the arguments become required instead of resolving to something arbitrary.
+/// Out-of-band callers (cron, triggers) have no conversation to default to, so the arguments become required instead of resolving to something arbitrary.
 #[tokio::test]
 async fn channel_members_requires_arguments_without_a_turn() {
     let (kernel, calls) = RosterKernel::new();

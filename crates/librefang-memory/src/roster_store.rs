@@ -64,13 +64,8 @@ impl RosterStore {
 
     /// List all members of a group chat, ordered by display name then user id.
     ///
-    /// The tiebreak is load-bearing, not cosmetic: this list reaches an LLM
-    /// prompt through the `channel_members` tool, and two members sharing a
-    /// display name would otherwise come back in whatever order SQLite
-    /// happened to produce, invalidating the provider prompt cache on
-    /// unchanged content (#3298).
-    /// The in-memory `GroupRosterStore::members` in `librefang-channels`
-    /// already breaks the same tie on the participant id.
+    /// The tiebreak is load-bearing, not cosmetic: this list reaches an LLM prompt through the `channel_members` tool, and two members sharing a display name would otherwise come back in whatever order SQLite happened to produce, invalidating the provider prompt cache on unchanged content (#3298).
+    /// The in-memory `GroupRosterStore::members` in `librefang-channels` already breaks the same tie on the participant id.
     pub fn members(
         &self,
         channel: &str,
@@ -197,10 +192,7 @@ mod tests {
         assert_eq!(members[0].1, "Alice Updated");
     }
 
-    // Two members with the same display name must come back in a fixed
-    // order regardless of insertion order: the list is rendered into an LLM
-    // prompt by the `channel_members` tool, so an unstable tail silently
-    // invalidates the provider prompt cache (#3298).
+    // Two members with the same display name must come back in a fixed order regardless of insertion order: the list is rendered into an LLM prompt by the `channel_members` tool, so an unstable tail silently invalidates the provider prompt cache (#3298).
     #[test]
     fn same_display_name_is_ordered_by_user_id_across_insertion_orders() {
         let forward = in_memory_store();

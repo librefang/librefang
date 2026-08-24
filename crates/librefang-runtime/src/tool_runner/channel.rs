@@ -161,23 +161,12 @@ fn resolve_send_target<'a>(
 
 /// Resolve the `(channel, chat_id)` pair a `channel_members` read targets.
 ///
-/// Both components default to the conversation the current turn arrived on, so
-/// the common "who is in this channel?" call needs no arguments at all.
+/// Both components default to the conversation the current turn arrived on, so the common "who is in this channel?" call needs no arguments at all.
 ///
-/// An explicit `chat_id` naming a *different* conversation on the channel the
-/// turn arrived on is refused. The roster carries the display name of every
-/// member the daemon has ever seen speak in a chat, so a free-form chat id
-/// would let one group enumerate the membership of every other chat the same
-/// bot sits in — the inbound twin of the #6117 cross-chat dispatch leak. The
-/// guard is deliberately the same shape as the one in `tool_channel_send`:
-/// only an explicit argument is scrutinised, only when the turn's channel is
-/// known, only within the same base channel type (so the WhatsApp gateway's
-/// `"whatsapp:<jid>"` stamp does not silently disable it), and the chat id is
-/// compared case-sensitively while the channel match is not. A cross-channel
-/// read stays allowed for the same reason a cross-channel send does — the
-/// agent is reaching into a surface the current conversation has no claim on
-/// either way, and out-of-band callers (cron, triggers) have no turn context
-/// to scope against.
+/// An explicit `chat_id` naming a *different* conversation on the channel the turn arrived on is refused.
+/// The roster carries the display name of every member the daemon has ever seen speak in a chat, so a free-form chat id would let one group enumerate the membership of every other chat the same bot sits in — the inbound twin of the #6117 cross-chat dispatch leak.
+/// The guard is deliberately the same shape as the one in `tool_channel_send`: only an explicit argument is scrutinised, only when the turn's channel is known, only within the same base channel type (so the WhatsApp gateway's `"whatsapp:<jid>"` stamp does not silently disable it), and the chat id is compared case-sensitively while the channel match is not.
+/// A cross-channel read stays allowed for the same reason a cross-channel send does — the agent is reaching into a surface the current conversation has no claim on either way, and out-of-band callers (cron, triggers) have no turn context to scope against.
 fn resolve_roster_target<'a>(
     explicit_channel: Option<&'a str>,
     explicit_chat_id: Option<&'a str>,
@@ -189,8 +178,7 @@ fn resolve_roster_target<'a>(
         .or_else(|| turn_channel.filter(|s| !s.is_empty()))
         .ok_or("Missing 'channel' parameter. It is auto-filled only while handling an inbound channel message — pass it explicitly from a cron job, trigger, or API-driven run.")?;
 
-    // The same canonical conversation id `channel_send` replies to: the chat /
-    // room, falling back to the peer for a DM.
+    // The same canonical conversation id `channel_send` replies to: the chat / room, falling back to the peer for a DM.
     let turn_conversation =
         resolve_send_target(None, turn_chat_id, turn_sender_id).filter(|s| !s.is_empty());
 
@@ -216,17 +204,10 @@ fn resolve_roster_target<'a>(
 
 /// `channel_members` — enumerate the persisted roster of a group conversation.
 ///
-/// This is the read half of the roster the channel bridge has been writing
-/// since the `group_roster` table landed: every group message the daemon
-/// observes upserts its sender through `ChannelBridgeHandle::roster_upsert`,
-/// and `KernelHandle::roster_members` has been able to read it back the whole
-/// time with no caller. Without this tool an agent sitting in a shared Slack
-/// or Telegram group cannot answer "who is in this channel?", and has no way
-/// to obtain the platform user id it needs to attribute a request to the
-/// person who made it (#7086).
+/// This is the read half of the roster the channel bridge has been writing since the `group_roster` table landed: every group message the daemon observes upserts its sender through `ChannelBridgeHandle::roster_upsert`, and `KernelHandle::roster_members` has been able to read it back the whole time with no caller.
+/// Without this tool an agent sitting in a shared Slack or Telegram group cannot answer "who is in this channel?", and has no way to obtain the platform user id it needs to attribute a request to the person who made it (#7086).
 ///
-/// Read-only and non-mutating: it neither sends anything nor teaches the
-/// roster about anyone new.
+/// Read-only and non-mutating: it neither sends anything nor teaches the roster about anyone new.
 pub(super) fn tool_channel_members(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
@@ -244,10 +225,7 @@ pub(super) fn tool_channel_members(
         sender_id,
     )?;
 
-    // The roster is keyed on the bare channel *type* (`channel_type_str` in
-    // the bridge), so strip the conversation suffix the WhatsApp gateway
-    // embeds in its channel string (#5227) before looking it up — otherwise
-    // every WhatsApp read misses.
+    // The roster is keyed on the bare channel *type* (`channel_type_str` in the bridge), so strip the conversation suffix the WhatsApp gateway embeds in its channel string (#5227) before looking it up — otherwise every WhatsApp read misses.
     let roster_channel = channel_base(channel);
 
     let members = kh
@@ -261,9 +239,8 @@ pub(super) fn tool_channel_members(
         "members": members,
     });
 
-    // An empty roster is the expected state for a DM, and for a group the
-    // daemon has never observed a message in. Say so, rather than letting the
-    // model read `[]` as "this channel has no members" or as a broken tool.
+    // An empty roster is the expected state for a DM, and for a group the daemon has never observed a message in.
+    // Say so, rather than letting the model read `[]` as "this channel has no members" or as a broken tool.
     if members.is_empty() {
         out["note"] = serde_json::Value::String(
             "No members recorded for this conversation. The roster is built from group messages the daemon has observed, so a member who has never spoken in it is absent, and a direct message has no roster at all.".to_string(),
@@ -723,8 +700,7 @@ mod tests {
         assert_eq!(resolved, ("slack", "C123"));
     }
 
-    // A DM stamps no chat id (or the peer's own id), so the peer is the
-    // conversation — the same fallback `channel_send` uses.
+    // A DM stamps no chat id (or the peer's own id), so the peer is the conversation — the same fallback `channel_send` uses.
     #[test]
     fn roster_target_falls_back_to_the_peer_in_a_dm() {
         let resolved =
@@ -735,8 +711,7 @@ mod tests {
         assert_eq!(empty_chat, ("telegram", "4242"));
     }
 
-    // Restating the current conversation is allowed — only a *different* one
-    // is a leak.
+    // Restating the current conversation is allowed — only a *different* one is a leak.
     #[test]
     fn roster_target_accepts_an_explicit_current_chat() {
         let resolved = resolve_roster_target(
@@ -750,8 +725,7 @@ mod tests {
         assert_eq!(resolved, ("slack", "C123"));
     }
 
-    // The inbound twin of the #6117 leak: one group must not enumerate
-    // another group's membership.
+    // The inbound twin of the #6117 leak: one group must not enumerate another group's membership.
     #[test]
     fn roster_target_rejects_another_chat_on_the_same_channel() {
         let err = resolve_roster_target(
@@ -766,8 +740,7 @@ mod tests {
         assert!(err.contains("C123"), "{err}");
     }
 
-    // The channel match is case-insensitive, so varying the casing cannot
-    // slip a foreign chat id past the guard.
+    // The channel match is case-insensitive, so varying the casing cannot slip a foreign chat id past the guard.
     #[test]
     fn roster_target_guard_survives_channel_case_variation() {
         assert!(resolve_roster_target(
@@ -781,9 +754,7 @@ mod tests {
     }
 
     // The WhatsApp gateway stamps `sender_channel = "whatsapp:<jid>"` (#5227).
-    // Comparing the raw strings would never match the bare `"whatsapp"` a tool
-    // call names, silently disabling the guard for exactly the multi-member
-    // groups it protects.
+    // Comparing the raw strings would never match the bare `"whatsapp"` a tool call names, silently disabling the guard for exactly the multi-member groups it protects.
     #[test]
     fn roster_target_guard_survives_the_whatsapp_channel_suffix() {
         assert!(resolve_roster_target(
@@ -805,9 +776,7 @@ mod tests {
         assert_eq!(ok, ("whatsapp", "123@g.us"));
     }
 
-    // A different channel than the turn arrived on stays readable, matching
-    // the `channel_send` scoping — the guard only covers intra-channel
-    // re-targeting.
+    // A different channel than the turn arrived on stays readable, matching the `channel_send` scoping — the guard only covers intra-channel re-targeting.
     #[test]
     fn roster_target_allows_a_different_channel() {
         let resolved = resolve_roster_target(
@@ -821,9 +790,7 @@ mod tests {
         assert_eq!(resolved, ("telegram", "-100"));
     }
 
-    // The tool has to be declared to be reachable: a dispatch arm with no
-    // matching `ToolDefinition` is invisible to the model and to
-    // `tool_load` / `tool_search`.
+    // The tool has to be declared to be reachable: a dispatch arm with no matching `ToolDefinition` is invisible to the model and to `tool_load` / `tool_search`.
     #[test]
     fn channel_members_is_registered_in_builtins() {
         let defs = crate::tool_runner::builtin_tool_definitions();
@@ -836,18 +803,14 @@ mod tests {
             .expect("properties object");
         assert!(props.contains_key("channel"));
         assert!(props.contains_key("chat_id"));
-        // Both arguments default to the current conversation, so a bare call
-        // during message handling must be valid.
+        // Both arguments default to the current conversation, so a bare call during message handling must be valid.
         assert!(
             def.input_schema.get("required").is_none(),
             "channel_members must have no required arguments"
         );
     }
 
-    // #3298: the schema is stringified into every request that declares this
-    // tool, so its key order has to be a canonical property of the literal
-    // rather than something a future edit can shuffle — a reordering
-    // invalidates provider prompt caches on byte-identical content.
+    // #3298: the schema is stringified into every request that declares this tool, so its key order has to be a canonical property of the literal rather than something a future edit can shuffle — a reordering invalidates provider prompt caches on byte-identical content.
     #[test]
     fn channel_members_schema_property_order_is_canonical() {
         let defs = crate::tool_runner::builtin_tool_definitions();
@@ -866,8 +829,7 @@ mod tests {
         assert_eq!(keys, sorted);
     }
 
-    // Out-of-band callers (cron, triggers) carry no turn context, so both
-    // arguments become required rather than resolving to something arbitrary.
+    // Out-of-band callers (cron, triggers) carry no turn context, so both arguments become required rather than resolving to something arbitrary.
     #[test]
     fn roster_target_requires_explicit_arguments_out_of_band() {
         let no_channel = resolve_roster_target(None, Some("C1"), None, None, None)

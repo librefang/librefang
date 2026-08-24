@@ -821,10 +821,7 @@ impl ToolProfile {
                 "agent_send",
                 "agent_list",
                 "channel_send",
-                // The read half of the channel surface (#7086): an agent that
-                // may reply into a shared group but cannot enumerate its
-                // members has no way to attribute a request to the person who
-                // made it.
+                // The read half of the channel surface (#7086): an agent that may reply into a shared group but cannot enumerate its members has no way to attribute a request to the person who made it.
                 "channel_members",
                 "memory_store",
                 "memory_list",
