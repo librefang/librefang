@@ -267,17 +267,10 @@ pub(crate) fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
 
 /// Repair a broken audit chain without destroying the rows past the break.
 ///
-/// Where `audit-reset` restores verification by emptying `audit_entries`, this
-/// archives every row at or after the break to a JSON Lines file, removes only
-/// those rows, and appends a `ChainReanchored` marker linked to the last row
-/// that still verified. The pre-break history keeps its original hashes, the
-/// severed rows stay readable on disk, and the archive's SHA-256 is committed
-/// into the chain so the preserved copy is tamper-evident too.
+/// Where `audit-reset` restores verification by emptying `audit_entries`, this archives every row at or after the break to a JSON Lines file, removes only those rows, and appends a `ChainReanchored` marker linked to the last row that still verified.
+/// The pre-break history keeps its original hashes, the severed rows stay readable on disk, and the archive's SHA-256 is committed into the chain so the preserved copy is tamper-evident too.
 ///
-/// The whole command is offline: it refuses to run while a daemon holds the
-/// database, including for the dry run, because a diagnosis taken against a
-/// live writer describes a state that may no longer exist by the time the
-/// operator acts on it.
+/// The whole command is offline: it refuses to run while a daemon holds the database, including for the dry run, because a diagnosis taken against a live writer describes a state that may no longer exist by the time the operator acts on it.
 pub(crate) fn cmd_audit_reanchor(config: Option<PathBuf>, confirm: bool) {
     use librefang_runtime::audit::recovery;
 

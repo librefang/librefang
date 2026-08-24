@@ -113,14 +113,9 @@ pub enum AuditAction {
     /// carries the URL and agent name. Subsequent `/api/a2a/send` and
     /// `/api/a2a/tasks/.../status` calls to that URL are now permitted.
     A2aTrusted,
-    /// Bug #7702: an operator repaired a broken chain with
-    /// [`recovery::reanchor_after_break`]. The entry is the first row of
-    /// the repaired chain, linked to the last row that still verified, and
-    /// its detail is a JSON document naming the break, the number of rows
-    /// severed, and the archive file holding them together with that
-    /// archive's SHA-256. Committing the digest here is what makes the
-    /// preserved rows tamper-evident too: altering the archive after the
-    /// repair no longer matches the hash the chain vouches for.
+    /// Bug #7702: an operator repaired a broken chain with [`recovery::reanchor_after_break`].
+    /// The entry is the first row of the repaired chain, linked to the last row that still verified, and its detail is a JSON document naming the break, the number of rows severed, and the archive file holding them together with that archive's SHA-256.
+    /// Committing the digest here is what makes the preserved rows tamper-evident too: altering the archive after the repair no longer matches the hash the chain vouches for.
     ChainReanchored,
 }
 
@@ -452,10 +447,7 @@ fn format_anchor_line(seq: u64, hash: &str) -> String {
 
 /// The sentinel `prev_hash` of the first entry in a chain: 64 zero characters.
 ///
-/// A chain that has had its prefix trimmed starts at the hash of the last
-/// dropped entry instead, so "is this the genesis?" is a real question at
-/// several boundaries — boot reload, reconciliation, verification and repair
-/// all ask it.
+/// A chain that has had its prefix trimmed starts at the hash of the last dropped entry instead, so "is this the genesis?" is a real question at several boundaries — boot reload, reconciliation, verification and repair all ask it.
 pub(crate) fn genesis_hash() -> String {
     "0".repeat(64)
 }
