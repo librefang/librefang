@@ -71,7 +71,9 @@ There are **two memory stores**, with two separate tool families, and the names 
 
 Only `memory_semantic_search` ships its schema on every turn; the other three are reachable through `tool_search` / `tool_load`.
 
-The semantic tools need both a `capabilities.tools` entry that admits them (a bare `memory_*` glob does) **and** memory scopes that cover the agent's own memory: `capabilities.memory_read` for `search` / `stats`, `capabilities.memory_write` for `add` / `forget`. Undeclared scopes stay open; declaring scopes that cover only the key/value store (`memory_read = ["kv:*"]`) withholds the semantic tools while leaving the key/value ones intact. They are also withheld entirely when `[proactive_memory] enabled = false`, since the store is then never built.
+The semantic tools need both a `capabilities.tools` entry that admits them (a bare `memory_*` glob does) **and** memory scopes that cover the agent's own memory: `capabilities.memory_read` for `search` / `stats`, `capabilities.memory_write` for `add` / `forget`. Undeclared scopes stay open; declaring scopes that cover only the key/value store (`memory_read = ["kv:*"]`) withholds the semantic tools while leaving the key/value ones intact.
+The same two scopes gate **automatic** memory as of #7605, with one difference: there a declared-but-empty list (`memory_read = []`) denies, where the tool gate treats it as undeclared.
+They are also withheld entirely when `[proactive_memory] enabled = false`, since the store is then never built.
 
 See [Memory System](/agent/memory#proactive-memory) for the entry schema, scopes, decay formula, and consolidation trigger.
 
@@ -98,8 +100,14 @@ The claim TTL exists to recover from worker crashes — if the claimer doesn't `
 | Tool | Arguments | Purpose |
 |---|---|---|
 | `channel_send` | `channel`, `target`, `content` (text / image / file / poll) | Send a message, image, file, or poll to a channel user — **without going through the agent loop**. Useful for pushing alerts, async results, or out-of-band notifications. |
+| `channel_members` | optional `channel`, `chat_id` | List the known members of a group conversation — `user_id`, `display_name`, `username` for everyone the daemon has seen speak there. Read-only. |
 
 `channel_send` is what `[deliver_only]` webhook mode uses internally; agents can also call it directly. Capability: `channel.*`.
+
+`channel_members` reads the roster the channel bridge builds as it observes group messages, so it lists the people who have spoken in a conversation rather than the platform's full membership list.
+Both arguments default to the conversation the current message arrived on, so during message handling it can be called with no arguments at all; a direct message has no roster.
+Naming a different conversation on the channel the turn arrived on is refused, for the same reason `channel_send` refuses a cross-chat dispatch — one group must not be able to enumerate another's membership.
+Use it to attribute a request to the person who made it, and to obtain the platform `user_id` an external system needs in order to notify them.
 
 ---
 

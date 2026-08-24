@@ -11906,6 +11906,42 @@
             }
           }
         }
+      },
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/templates — Create an operator-authored agent type.",
+        "description": "The body is the flat editor shape; `name` is required here because there is no URL segment to take it from.",
+        "operationId": "create_agent_type",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Agent type created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid name"
+          },
+          "409": {
+            "description": "Name already taken by an agent type or a live agent"
+          }
+        }
       }
     },
     "/api/templates/{name}": {
@@ -11928,7 +11964,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Template details, plus a read-only privacy pass over the manifest for registry promotion",
+            "description": "Template details, plus the flat editor projection and a read-only privacy pass over the manifest for registry promotion",
             "content": {
               "application/json": {
                 "schema": {
@@ -11936,6 +11972,90 @@
                 }
               }
             }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "system"
+        ],
+        "summary": "PUT /api/templates/:name — Apply the flat editor shape as a **patch** over the stored manifest.",
+        "description": "This is a read-modify-write, and that is load-bearing rather than incidental (#7740).\nThe flat shape carries seven of `AgentManifest`'s fifty-eight fields.\nRebuilding the document from the request body and writing it over the file — which is what the endpoint did on the branch this replaces — resets the other fifty-one to their defaults and answers 200: `[[triggers]]`, `[compaction]`, `max_history_messages`, `mcp_servers`, `tool_allowlist`, `session_mode`, `[workspaces]`, `channels`, `[exec_policy]` and `fallback_models` all disappear the first time anyone opens the editor and saves.\n\nSo the stored manifest is parsed first and the body applied over it.\nA key the client did not send leaves its field untouched; a key it did send is written through verbatim, including an empty string, because \"the operator cleared this\" and \"the client did not mention it\" are different instructions and only a typed `Option` can tell them apart.",
+        "operationId": "update_agent_type",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Agent type updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such agent type"
+          },
+          "409": {
+            "description": "The name belongs to a live agent, which is edited through /api/agents"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "system"
+        ],
+        "summary": "DELETE /api/templates/:name — Remove an operator-authored agent type.",
+        "description": "Only reaches `agent-types/`. A name that resolves to a live agent is refused with the same\nmanaged-elsewhere conflict `PUT` uses — deleting an agent is `DELETE /api/agents/{id}`.",
+        "operationId": "delete_agent_type",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent type deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such agent type"
+          },
+          "409": {
+            "description": "The name belongs to a live agent, which is deleted through /api/agents"
           }
         }
       }

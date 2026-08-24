@@ -350,6 +350,8 @@ impl LibreFangKernel {
         migrate_root_backups(&config.home_dir);
         migrate_root_state_files(&config.home_dir);
         cleanup_legacy_root_logs(&config.home_dir);
+        // #7723: a transient mission workspace is removed by its in-process guard when the run ends, so anything still sitting under `<home>/transient` is the residue of a run the daemon did not survive. Boot is the one moment at which no mission of ours can be live, which makes it the only safe place to collect it.
+        mission_workspace::sweep_orphan_missions(&config.home_dir);
 
         // Initialize memory substrate
         let db_path = config

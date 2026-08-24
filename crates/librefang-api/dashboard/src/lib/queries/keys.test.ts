@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   agentKeys,
+  agentTypeKeys,
   modelKeys,
   handKeys,
   workflowKeys,
@@ -263,6 +264,27 @@ describe("query key factories", () => {
     });
   });
 
+  describe("agentTypeKeys", () => {
+    it("hierarchy is anchored so invalidating `all` reaches list and detail", () => {
+      expect(agentTypeKeys.all).toEqual(["agentTypes"]);
+      expect(agentTypeKeys.lists()).toEqual(["agentTypes", "list"]);
+      expect(agentTypeKeys.list()).toEqual(["agentTypes", "list"]);
+      expect(agentTypeKeys.details()).toEqual(["agentTypes", "detail"]);
+      expect(agentTypeKeys.detail("coder")).toEqual([
+        "agentTypes",
+        "detail",
+        "coder",
+      ]);
+      const prefix = agentTypeKeys.all;
+      expect(agentTypeKeys.lists().slice(0, prefix.length)).toEqual(prefix);
+      expect(agentTypeKeys.detail("coder").slice(0, prefix.length)).toEqual(prefix);
+    });
+
+    it("does not collide with agentKeys, which owns a different domain", () => {
+      expect(agentTypeKeys.all).not.toEqual(agentKeys.all);
+    });
+  });
+
   describe("invalidation patterns", () => {
     it("agentKeys.all prefixes all agent sub-keys", () => {
       const prefix = agentKeys.all;
@@ -402,6 +424,7 @@ describe("query key factories", () => {
   describe("all factories exist", () => {
     const factories = [
       agentKeys,
+      agentTypeKeys,
       modelKeys,
       providerKeys,
       channelKeys,

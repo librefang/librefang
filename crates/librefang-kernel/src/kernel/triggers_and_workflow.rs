@@ -1538,6 +1538,33 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
     }
 }
 
+/// Workflow-step required-skills gate (#7721). Same `Weak<LibreFangKernel>` reasoning as [`KernelOperatorBridge`]: the engine stores this behind a `OnceLock`, and a strong handle would cycle through `kernel.workflows.engine`.
+///
+/// A dropped kernel reports every requirement as unknown rather than passing the step — the gate exists to fail closed, and the only way to reach this state is a shutdown racing a run.
+struct KernelStepSkillGate {
+    kernel: Weak<LibreFangKernel>,
+}
+
+#[async_trait::async_trait]
+impl crate::workflow::StepSkillGate for KernelStepSkillGate {
+    async fn check_required_skills(
+        &self,
+        agent_id: AgentId,
+        required: &[String],
+    ) -> crate::workflow::RequiredSkillReport {
+        let Some(kernel) = self.kernel.upgrade() else {
+            let mut unknown = required.to_vec();
+            unknown.sort();
+            unknown.dedup();
+            return crate::workflow::RequiredSkillReport {
+                unknown,
+                ..Default::default()
+            };
+        };
+        kernel.classify_required_skills(agent_id, required)
+    }
+}
+
 impl LibreFangKernel {
     /// Install the operator-step notifier + timeout-resume driver onto the
     /// workflow engine (#4977 step 2). Called once from `set_self_handle`
@@ -1552,6 +1579,13 @@ impl LibreFangKernel {
                 kernel: Arc::downgrade(self),
             });
         self.workflows.engine.set_operator_hooks(notifier, driver);
+        // #7721: the required-skills gate needs the same kernel handle and the
+        // same once-per-boot install point, so it rides along here rather than
+        // adding a second post-boot hook site that a future caller could miss.
+        let skill_gate: Arc<dyn crate::workflow::StepSkillGate> = Arc::new(KernelStepSkillGate {
+            kernel: Arc::downgrade(self),
+        });
+        self.workflows.engine.set_step_skill_gate(skill_gate);
     }
 }
 

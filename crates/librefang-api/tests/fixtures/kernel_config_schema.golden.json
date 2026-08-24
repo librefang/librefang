@@ -980,6 +980,7 @@
         "format_context_max_chars": 8000,
         "update_threshold_same_category": 0.699999988079071,
         "update_threshold_cross_category": 0.800000011920929,
+        "session_scoped_recall": true,
         "extractor_sidecar": null
       },
       "allOf": [
@@ -5566,6 +5567,11 @@
           "type": "integer",
           "format": "uint",
           "minimum": 0.0
+        },
+        "session_scoped_recall": {
+          "description": "Whether `auto_memorize` stamps each extracted memory with the session it came from, and `auto_retrieve` refuses to surface a memory stamped for a *different* session (#7605).\n\nThe proactive store is per **agent**, not per conversation, so before this switch existed one visitor's turn on a public agent could be auto-retrieved into another visitor's turn purely through memory — even when the two turns were addressed to different `session_id`s and their message histories never touched. Default `true`: a memory belongs to the conversation that produced it unless an operator says otherwise.\n\nSetting `false` restores the pre-#7605 behaviour (every memory of an agent is a candidate for every one of that agent's turns). That is the right choice for a single-user assistant whose `session_mode = \"new\"` sub-agents are expected to inherit what earlier runs learned; it is the wrong choice for anything serving more than one person.\n\nMemories written before this shipped carry no session tag and stay recallable from every session, so turning it on does not hide an existing store.",
+          "default": true,
+          "type": "boolean"
         },
         "session_ttl_hours": {
           "description": "Session memory TTL in hours. Memories older than this are cleaned up automatically before each agent execution. Default: 24 hours.",

@@ -24,6 +24,7 @@ export {
   listAgentEvents,
   listAgentSessions,
   listAgentTemplates,
+  getAgentType,
   listPromptVersions,
   listPromptsOverview,
   listExperiments,
@@ -188,6 +189,9 @@ export type {
 // ---------------------------------------------------------------------------
 export {
   // agents
+  createAgentType,
+  updateAgentType,
+  deleteAgentType,
   spawnAgent,
   cloneAgent,
   stopAgent,

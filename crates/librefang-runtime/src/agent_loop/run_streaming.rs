@@ -245,6 +245,11 @@ async fn run_agent_loop_streaming_inner(
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
+    // #7605: the session this turn belongs to, when session-scoped memory recall is in effect for this agent.
+    // Resolved once here so the recall (before the turn) and the memorize (after it) agree on the scope even if the manifest were hot-reloaded in between.
+    let session_scope: Option<String> =
+        session_recall_scope(manifest, session, proactive_memory.as_ref());
+
     let RecallSetup {
         memories,
         memories_used,
@@ -258,6 +263,7 @@ async fn run_agent_loop_streaming_inner(
         sender_user_id: sender_user_id.as_deref(),
         sender_channel: sender_channel.as_deref(),
         sender_chat_scope: sender_chat_scope.as_deref(),
+        session_scope: session_scope.as_deref(),
         kernel: kernel.as_ref(),
         stable_prefix_mode,
         streaming: true,
@@ -1191,6 +1197,7 @@ async fn run_agent_loop_streaming_inner(
                         messages: &messages,
                         sender_user_id: sender_user_id.as_deref(),
                         sender_chat_scope: sender_chat_scope.as_deref(),
+                        session_scope: session_scope.as_deref(),
                         streaming: true,
                         opts,
                     },

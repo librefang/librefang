@@ -202,6 +202,7 @@ fn workflow_to_json(w: &Workflow) -> serde_json::Value {
                 "output_var": s.output_var,
                 "depends_on": s.depends_on,
                 "session_mode": serde_json::to_value(s.session_mode).unwrap_or(serde_json::Value::Null),
+                "required_skills": s.required_skills,
             })
         }).collect::<Vec<_>>(),
         "created_at": w.created_at.to_rfc3339(),
@@ -557,6 +558,56 @@ fn parse_step_session_mode(
             None
         }
     }
+}
+
+/// Hard cap on `required_skills` entries per workflow step.
+///
+/// Same bounding rationale as [`MAX_INPUT_SCHEMA_PARAMS`]: a step legitimately requires a handful of skills, and a hostile array within the 8 MiB body cap must not pre-allocate an unbounded `Vec`.
+const MAX_REQUIRED_SKILLS_PER_STEP: usize = 64;
+
+/// Parse a workflow step's optional `required_skills` array (#7721).
+///
+/// Deliberately **strict**, unlike [`parse_step_session_mode`] and [`parse_input_schema`]: those degrade to a default that is merely less specific, whereas silently dropping a `required_skills` entry turns off a gate the workflow author asked for and hands back a workflow that looks like it validates something it does not.
+/// A rejected payload is a loud, fixable 400; a filtered one is a silent hole.
+///
+/// Accepts an absent key, an explicit `null`, or an array of non-blank strings; anything else is an error naming the step and the offending entry.
+/// Names are trimmed, deduplicated and sorted so the persisted workflow — and therefore every error message derived from it — is stable regardless of authoring order.
+fn parse_required_skills(step: &serde_json::Value, step_name: &str) -> Result<Vec<String>, String> {
+    let Some(raw) = step.get("required_skills") else {
+        return Ok(Vec::new());
+    };
+    if raw.is_null() {
+        return Ok(Vec::new());
+    }
+    let Some(arr) = raw.as_array() else {
+        return Err(format!(
+            "Step '{step_name}': 'required_skills' must be an array of skill names"
+        ));
+    };
+    if arr.len() > MAX_REQUIRED_SKILLS_PER_STEP {
+        return Err(format!(
+            "Step '{step_name}': 'required_skills' has {} entries (max {MAX_REQUIRED_SKILLS_PER_STEP})",
+            arr.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let Some(name) = entry.as_str() else {
+            return Err(format!(
+                "Step '{step_name}': every 'required_skills' entry must be a string, got {entry}"
+            ));
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(format!(
+                "Step '{step_name}': 'required_skills' contains an empty skill name"
+            ));
+        }
+        out.push(name.to_string());
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
 }
 
 /// Hard cap on declared workflow input parameters.

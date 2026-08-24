@@ -821,6 +821,8 @@ impl ToolProfile {
                 "agent_send",
                 "agent_list",
                 "channel_send",
+                // The read half of the channel surface (#7086): an agent that may reply into a shared group but cannot enumerate its members has no way to attribute a request to the person who made it.
+                "channel_members",
                 "memory_store",
                 "memory_list",
                 "memory_recall",
@@ -835,6 +837,7 @@ impl ToolProfile {
                 "agent_send",
                 "agent_list",
                 "channel_send",
+                "channel_members",
                 "memory_store",
                 "memory_list",
                 "memory_recall",
@@ -859,12 +862,12 @@ impl ToolProfile {
             shell: if has_shell { vec!["*".into()] } else { vec![] },
             agent_spawn: has_agent,
             agent_message: if has_agent { vec!["*".into()] } else { vec![] },
-            memory_read: if has_memory {
+            memory_read: Some(if has_memory {
                 vec!["*".into()]
             } else {
                 vec!["self.*".into()]
-            },
-            memory_write: vec!["self.*".into()],
+            }),
+            memory_write: Some(vec!["self.*".into()]),
             ofp_discover: false,
             ofp_connect: vec![],
         }
@@ -1750,12 +1753,27 @@ pub struct ManifestCapabilities {
     /// Allowed tool IDs.
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub tools: Vec<String>,
-    /// Memory read scopes.
-    #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
-    pub memory_read: Vec<String>,
-    /// Memory write scopes.
-    #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
-    pub memory_write: Vec<String>,
+    /// Memory read scopes, or `None` when the manifest never mentioned the key.
+    ///
+    /// The distinction is load-bearing (#7605).
+    /// Everywhere else in a manifest an empty list reads as "undeclared, therefore unrestricted" — `capabilities.tools = []` grants every tool — so an operator who writes `memory_read = []` to lock an agent out of memory gets the opposite of what they typed.
+    /// Keeping the tri-state lets `memory_read = []` mean "declared, and it grants nothing" while an absent key keeps the historical open default for the many manifests that never had a `[capabilities]` block.
+    ///
+    /// Read it through [`ManifestCapabilities::allows_own_memory_read`] rather than matching on the `Option` at call sites.
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_compat::option_vec_lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub memory_read: Option<Vec<String>>,
+    /// Memory write scopes, or `None` when the manifest never mentioned the key.
+    /// See [`Self::memory_read`] for why this is an `Option` and not a plain `Vec`.
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_compat::option_vec_lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub memory_write: Option<Vec<String>>,
     /// Whether this agent can spawn sub-agents.
     pub agent_spawn: bool,
     /// Agent message patterns (e.g., ["*"] or ["agent-name"]).
@@ -1769,6 +1787,34 @@ pub struct ManifestCapabilities {
     /// Allowed OFP peer patterns.
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub ofp_connect: Vec<String>,
+}
+
+impl ManifestCapabilities {
+    /// Whether this manifest permits reading the agent's own semantic-memory store (#7605).
+    ///
+    /// `None` — the manifest never declared `memory_read` — is permissive, matching how every other capability list in a manifest reads when absent.
+    /// A declared list must contain a scope that covers the store; `memory_read = []` therefore denies, which is the whole point of keeping the tri-state.
+    ///
+    /// This governs the **automatic** recall path.
+    /// The `memory_semantic_*` tool gate (#7808) answers the same question from the kernel-resolved `Capability::MemoryRead` list, where the declared-empty case has already collapsed into "no entries" and stays open for backwards compatibility.
+    pub fn allows_own_memory_read(&self) -> bool {
+        scope_list_covers_own_memory(self.memory_read.as_deref())
+    }
+
+    /// Whether this manifest permits writing the agent's own semantic-memory store (#7605).
+    /// See [`Self::allows_own_memory_read`]; `memory_write = []` blocks automatic memorization.
+    pub fn allows_own_memory_write(&self) -> bool {
+        scope_list_covers_own_memory(self.memory_write.as_deref())
+    }
+}
+
+fn scope_list_covers_own_memory(scopes: Option<&[String]>) -> bool {
+    match scopes {
+        None => true,
+        Some(scopes) => scopes
+            .iter()
+            .any(|s| crate::capability::scope_covers_own_memory(s)),
+    }
 }
 
 /// Per-agent override for the kernel-global `[rl_export]` policy (#3331).
@@ -2474,20 +2520,94 @@ mod tests {
         assert!(tools.contains(&"agent_send".to_string()));
         assert!(tools.contains(&"channel_send".to_string()));
         assert!(tools.contains(&"memory_recall".to_string()));
-        assert_eq!(tools.len(), 6);
+        // The roster read ships with the send (#7086).
+        assert!(tools.contains(&"channel_members".to_string()));
+        assert_eq!(tools.len(), 7);
     }
 
     #[test]
     fn test_tool_profile_automation() {
         let tools = ToolProfile::Automation.tools();
         assert!(tools.contains(&"channel_send".to_string()));
-        assert_eq!(tools.len(), 12);
+        assert!(tools.contains(&"channel_members".to_string()));
+        assert_eq!(tools.len(), 13);
     }
 
     #[test]
     fn test_tool_profile_full() {
         let tools = ToolProfile::Full.tools();
         assert_eq!(tools, vec!["*"]);
+    }
+
+    /// #7605: `memory_read = []` in `agent.toml` must be distinguishable from
+    /// an absent key, or the operator's explicit lockout reads as the
+    /// permissive default that every other capability list uses when missing.
+    #[test]
+    fn declared_empty_memory_scopes_deny_while_an_absent_key_stays_open() {
+        let absent: ManifestCapabilities = toml::from_str("tools = []").expect("parse");
+        assert_eq!(absent.memory_read, None);
+        assert_eq!(absent.memory_write, None);
+        assert!(
+            absent.allows_own_memory_read(),
+            "a manifest with no [capabilities] memory keys keeps the historical open default"
+        );
+        assert!(absent.allows_own_memory_write());
+
+        let declared_empty: ManifestCapabilities =
+            toml::from_str("memory_read = []\nmemory_write = []").expect("parse");
+        assert_eq!(declared_empty.memory_read, Some(vec![]));
+        assert!(
+            !declared_empty.allows_own_memory_read(),
+            "regression #7605: memory_read = [] must block automatic recall"
+        );
+        assert!(
+            !declared_empty.allows_own_memory_write(),
+            "regression #7605: memory_write = [] must block automatic memorization"
+        );
+    }
+
+    #[test]
+    fn declared_memory_scopes_are_matched_against_the_agents_own_store() {
+        let wildcard: ManifestCapabilities =
+            toml::from_str("memory_read = [\"*\"]\nmemory_write = [\"self.*\"]").expect("parse");
+        assert!(wildcard.allows_own_memory_read());
+        assert!(wildcard.allows_own_memory_write());
+
+        // A grant that names an unrelated namespace is a declaration that
+        // does not reach this store.
+        let elsewhere: ManifestCapabilities =
+            toml::from_str("memory_read = [\"kv:*\"]\nmemory_write = [\"kv:*\"]").expect("parse");
+        assert!(!elsewhere.allows_own_memory_read());
+        assert!(!elsewhere.allows_own_memory_write());
+
+        let named: ManifestCapabilities =
+            toml::from_str("memory_read = [\"proactive\"]").expect("parse");
+        assert!(named.allows_own_memory_read());
+    }
+
+    /// The tri-state has to survive the msgpack / JSON round-trips a manifest
+    /// takes through the session store and the REST layer: an undeclared list
+    /// that came back as `Some([])` would silently switch memory off.
+    #[test]
+    fn undeclared_memory_scopes_survive_a_serde_roundtrip_as_undeclared() {
+        let caps = ManifestCapabilities::default();
+        let json = serde_json::to_string(&caps).expect("serialize");
+        assert!(
+            !json.contains("memory_read"),
+            "an undeclared list must not be emitted, or reading it back would declare it: {json}"
+        );
+        let back: ManifestCapabilities = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.memory_read, None);
+        assert!(back.allows_own_memory_read());
+
+        let declared = ManifestCapabilities {
+            memory_read: Some(vec![]),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&declared).expect("serialize");
+        let back: ManifestCapabilities = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.memory_read, Some(vec![]));
+        assert!(!back.allows_own_memory_read());
     }
 
     #[test]
@@ -2506,7 +2626,10 @@ mod tests {
         assert!(caps.shell.is_empty());
         assert!(caps.agent_spawn);
         assert!(caps.agent_message.contains(&"*".to_string()));
-        assert!(caps.memory_read.contains(&"*".to_string()));
+        assert!(caps
+            .memory_read
+            .as_deref()
+            .is_some_and(|r| r.contains(&"*".to_string())));
     }
 
     #[test]
@@ -2515,7 +2638,10 @@ mod tests {
         assert!(caps.network.is_empty());
         assert!(caps.shell.is_empty());
         assert!(!caps.agent_spawn);
-        assert_eq!(caps.memory_read, vec!["self.*".to_string()]);
+        assert_eq!(
+            caps.memory_read.as_deref(),
+            Some(&["self.*".to_string()][..])
+        );
     }
 
     #[test]
@@ -3013,10 +3139,13 @@ memory_write = ["self.*"]
         let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
         assert_eq!(manifest.name, "brand-guardian");
         assert!(manifest.model.system_prompt.contains("Brand Guardian"));
-        assert_eq!(manifest.capabilities.memory_read, vec!["*".to_string()]);
+        assert_eq!(
+            manifest.capabilities.memory_read,
+            Some(vec!["*".to_string()])
+        );
         assert_eq!(
             manifest.capabilities.memory_write,
-            vec!["self.*".to_string()]
+            Some(vec!["self.*".to_string()])
         );
     }
 

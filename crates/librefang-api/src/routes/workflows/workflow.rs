@@ -48,6 +48,11 @@ pub async fn create_workflow(
             })
             .unwrap_or_default();
 
+        let required_skills = match parse_required_skills(s, &step_name) {
+            Ok(v) => v,
+            Err(e) => return ApiErrorResponse::bad_request(e).into_json_tuple(),
+        };
+
         steps.push(WorkflowStep {
             name: step_name,
             agent,
@@ -59,6 +64,7 @@ pub async fn create_workflow(
             inherit_context: s["inherit_context"].as_bool(),
             depends_on,
             session_mode: parse_step_session_mode(s),
+            required_skills,
         });
     }
 
@@ -330,6 +336,11 @@ pub async fn update_workflow(
                 })
                 .unwrap_or_default();
 
+            let required_skills = match parse_required_skills(s, &step_name) {
+                Ok(v) => v,
+                Err(e) => return ApiErrorResponse::bad_request(e).into_json_tuple(),
+            };
+
             parsed_steps.push(WorkflowStep {
                 name: step_name,
                 agent,
@@ -341,6 +352,7 @@ pub async fn update_workflow(
                 inherit_context: s["inherit_context"].as_bool(),
                 depends_on,
                 session_mode: parse_step_session_mode(s),
+                required_skills,
             });
         }
         parsed_steps
@@ -692,11 +704,16 @@ pub async fn dry_run_workflow(
 
     match state.kernel.dry_run_workflow(workflow_id, input).await {
         Ok(steps) => {
-            let all_agents_found = steps.iter().all(|s| s.agent_found);
+            // A step whose `required_skills` the resolved agent cannot use
+            // will fail the moment a real run reaches it, so it counts against
+            // `valid` exactly as an unresolvable agent does (#7721).
+            let valid = steps
+                .iter()
+                .all(|s| s.agent_found && s.skill_error.is_none());
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
-                    "valid": all_agents_found,
+                    "valid": valid,
                     "steps": steps.iter().map(|s| serde_json::json!({
                         "step_name": s.step_name,
                         "agent_name": s.agent_name,
@@ -704,6 +721,7 @@ pub async fn dry_run_workflow(
                         "resolved_prompt": s.resolved_prompt,
                         "skipped": s.skipped,
                         "skip_reason": s.skip_reason,
+                        "skill_error": s.skill_error,
                     })).collect::<Vec<_>>(),
                 })),
             )
