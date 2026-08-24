@@ -718,6 +718,20 @@ monitoring-daemon-running-error = демон запущений за адрес�
 monitoring-daemon-running-error-fix = спочатку зупиніть демона: `librefang stop`
 monitoring-anchor-remove-failed = не вдалося вилучити якір { $path }: { $error }
 monitoring-audit-reset-seed-fresh = Наступний запуск демона створить свіжий ланцюг Меркла з поточного кінця.
+monitoring-audit-reanchor-verified = Ланцюг аудиту перевіряється — відновлювати нічого.
+monitoring-audit-reanchor-diagnose-failed = не вдалося прочитати ланцюг аудиту: { $error }
+monitoring-audit-reanchor-break = Розрив ланцюга на seq { $seq } ({ $kind }): очікувалося { $expected }, знайдено { $found }.
+monitoring-audit-reanchor-counts = { $rows_before } рядк(ів) у audit_entries: { $surviving } до розриву й далі перевіряються, { $severed } від розриву й вище буде заархівовано та вилучено.
+monitoring-audit-reanchor-would-header =   Буде зроблено:
+monitoring-audit-reanchor-would-archive =     1. Заархівувати { $severed } відокремлених рядк(ів) як JSON Lines у { $path }
+monitoring-audit-reanchor-would-delete =     2. Вилучити ці { $severed } рядк(ів) із `audit_entries` у { $path }
+monitoring-audit-reanchor-would-marker =     3. Додати запис ChainReanchored, пов'язаний з останнім вцілілим рядком, із SHA-256 архіву
+monitoring-audit-reanchor-would-anchor =     4. Перезаписати файл якоря { $path }
+monitoring-audit-reanchor-dry-run = audit reanchor змінює журнал аудиту — запустіть повторно з `--confirm`, щоб продовжити
+monitoring-audit-reanchor-failed = audit reanchor не вдався: { $error }
+monitoring-audit-reanchor-success = Ланцюг аудиту відновлено: відокремлено { $severed } рядк(ів) від seq { $seq }, маркер записано на seq { $marker }, залишилося { $rows } рядк(ів).
+monitoring-audit-reanchor-archive = Відокремлені рядки збережено у { $path } (sha256 { $digest }).
+monitoring-audit-reanchor-verify-hint = Запустіть демона й виконайте `librefang security verify`, щоб підтвердити цілісність ланцюга.
 
 # skill.rs
 skill-install-progress = Встановлення { $source }

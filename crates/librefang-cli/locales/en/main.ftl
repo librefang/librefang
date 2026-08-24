@@ -706,6 +706,20 @@ monitoring-daemon-running-error = daemon is running at { $url }; refusing to tou
 monitoring-daemon-running-error-fix = stop the daemon first: `librefang stop`
 monitoring-anchor-remove-failed = failed to remove anchor { $path }: { $error }
 monitoring-audit-reset-seed-fresh = The next daemon boot will seed a fresh Merkle chain from the current tip.
+monitoring-audit-reanchor-verified = Audit chain verifies — nothing to repair.
+monitoring-audit-reanchor-diagnose-failed = cannot read the audit chain: { $error }
+monitoring-audit-reanchor-break = Chain break at seq { $seq } ({ $kind }): expected { $expected }, found { $found }.
+monitoring-audit-reanchor-counts = { $rows_before } row(s) in audit_entries: { $surviving } below the break keep verifying, { $severed } at or after it are archived and removed.
+monitoring-audit-reanchor-would-header =   Would:
+monitoring-audit-reanchor-would-archive =     1. Archive the { $severed } severed row(s) as JSON Lines under { $path }
+monitoring-audit-reanchor-would-delete =     2. DELETE those { $severed } row(s) from `audit_entries` in { $path }
+monitoring-audit-reanchor-would-marker =     3. Append a ChainReanchored entry linked to the last surviving row, carrying the archive's SHA-256
+monitoring-audit-reanchor-would-anchor =     4. Rewrite the anchor file { $path }
+monitoring-audit-reanchor-dry-run = audit reanchor modifies the audit trail — re-run with `--confirm` to proceed
+monitoring-audit-reanchor-failed = audit reanchor failed: { $error }
+monitoring-audit-reanchor-success = Audit chain repaired: severed { $severed } row(s) from seq { $seq }, marker written at seq { $marker }, { $rows } row(s) remain.
+monitoring-audit-reanchor-archive = Severed rows preserved at { $path } (sha256 { $digest }).
+monitoring-audit-reanchor-verify-hint = Start the daemon and run `librefang security verify` to confirm the chain is intact.
 # skill.rs
 skill-install-progress = Installing { $source }
 

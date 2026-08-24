@@ -629,6 +629,7 @@ fn main() {
             SecurityCommands::Audit { limit, json } => cmd_security_audit(limit, json),
             SecurityCommands::Verify => cmd_security_verify(),
             SecurityCommands::AuditReset { confirm } => cmd_audit_reset(cli.config, confirm),
+            SecurityCommands::AuditReanchor { confirm } => cmd_audit_reanchor(cli.config, confirm),
         },
         Some(Commands::Memory(sub)) => match sub {
             MemoryCommands::List { agent, json } => cmd_memory_list(&agent, json),
