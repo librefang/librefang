@@ -2088,6 +2088,7 @@ tui-workflows-label-name = 워크플로 이름:
 tui-workflows-placeholder-name = my-workflow
 tui-workflows-label-desc = 설명:
 tui-workflows-placeholder-desc = 이 워크플로가 하는 일
+tui-workflows-hint-steps = 각 단계는 agent_id, agent_name, agent_type 중 정확히 하나만 지정합니다. agent_type은 템플릿 이름이며 해당 타입이 실행 중이 아니면 새로 생성됩니다. 실행마다 새 세션을 쓰려면 session_mode = "new"를 추가하세요.
 tui-workflows-label-steps = 단계 (JSON 배열):
 tui-workflows-placeholder-steps = {"[{\"name\":\"draft\",\"agent_name\":\"writer\",\"prompt\":\"{{input}}\",\"session_mode\":\"new\"}]"}
 tui-workflows-label-review = 검토 — Enter를 눌러 생성

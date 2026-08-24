@@ -2088,6 +2088,7 @@ tui-workflows-label-name = Workflow name:
 tui-workflows-placeholder-name = my-workflow
 tui-workflows-label-desc = Description:
 tui-workflows-placeholder-desc = What this workflow does
+tui-workflows-hint-steps = Each step sets exactly one of agent_id, agent_name or agent_type; agent_type names a template and is spawned when nothing of that type is running. Add session_mode = "new" for a fresh session per run.
 tui-workflows-label-steps = Steps (JSON array):
 tui-workflows-placeholder-steps = {"[{\"name\":\"draft\",\"agent_name\":\"writer\",\"prompt\":\"{{input}}\",\"session_mode\":\"new\"}]"}
 tui-workflows-label-review = Review — press Enter to create

@@ -1154,6 +1154,7 @@ tui-workflows-label-name = 工作流名称:
 tui-workflows-placeholder-name = my-workflow
 tui-workflows-label-desc = 描述:
 tui-workflows-placeholder-desc = 此工作流的作用
+tui-workflows-hint-steps = 每个步骤只能设置 agent_id、agent_name 或 agent_type 之一；agent_type 指定模板名称，当该类型没有运行中的智能体时会自动创建。添加 session_mode = "new" 可让每次运行使用全新会话。
 tui-workflows-label-steps = 步骤 (JSON 数组):
 tui-workflows-placeholder-steps = {"[{\"name\":\"draft\",\"agent_name\":\"writer\",\"prompt\":\"{{input}}\",\"session_mode\":\"new\"}]"}
 tui-workflows-label-review = 确认 — 按 Enter 创建

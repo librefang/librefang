@@ -2107,6 +2107,7 @@ tui-workflows-label-name = Назва воркфлоу:
 tui-workflows-placeholder-name = мій-воркфлоу
 tui-workflows-label-desc = Опис:
 tui-workflows-placeholder-desc = Що робить цей воркфлоу
+tui-workflows-hint-steps = Кожен крок задає рівно один із agent_id, agent_name або agent_type; agent_type називає шаблон і запускається, коли жодного агента цього типу не працює. Додайте session_mode = "new" для нової сесії на кожен запуск.
 tui-workflows-label-steps = Кроки (JSON-масив):
 tui-workflows-placeholder-steps = {"[{\"name\":\"draft\",\"agent_name\":\"writer\",\"prompt\":\"{{input}}\",\"session_mode\":\"new\"}]"}
 tui-workflows-label-review = Огляд — натисніть Enter, щоб створити
