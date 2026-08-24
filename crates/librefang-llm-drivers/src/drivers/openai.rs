@@ -12,7 +12,7 @@ use librefang_types::config::ResponseFormat;
 use librefang_types::message::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use librefang_types::tool::ToolCall;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
@@ -49,6 +49,14 @@ pub struct OpenAIDriver {
     /// after the first try, so the request is issued at most `max_retries + 1`
     /// times. Sourced from `DriverConfig.max_retries` (default 3).
     max_retries: u32,
+    /// Models this endpoint has rejected `reasoning_effort` for (#7769).
+    ///
+    /// Whether a model can reason and whether the gateway in front of it will forward the field are different questions, and only the second decides the outcome — litellm strips the parameter and 400s before the model ever sees it, and the error names the adapter rather than the model.
+    /// No static table answers that, so the driver discovers it: the first rejection strips the field and retries, and the model is recorded here so `build_request` omits it from then on instead of spending a round trip per turn re-learning the same answer.
+    ///
+    /// Keyed by model alone because one driver instance is one `base_url`, so the provider half of the pair is already fixed.
+    /// Deliberately per-instance and in-memory: a gateway's model group can be reconfigured to accept the field, and a persisted negative cache would keep suppressing it long after that.
+    reasoning_effort_unsupported: std::sync::Arc<std::sync::Mutex<BTreeSet<String>>>,
 }
 
 impl OpenAIDriver {
@@ -91,6 +99,7 @@ impl OpenAIDriver {
             request_timeout_secs,
             emit_caller_trace_headers: true,
             max_retries: 3,
+            reasoning_effort_unsupported: Default::default(),
         }
     }
 
@@ -137,7 +146,26 @@ impl OpenAIDriver {
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
             max_retries: 3,
+            reasoning_effort_unsupported: Default::default(),
         }
+    }
+
+    /// Whether this endpoint has already rejected `reasoning_effort` for `model`.
+    ///
+    /// A poisoned lock is recovered rather than propagated: the set is an optimisation, and panicking a live agent turn over it would trade a wasted round trip for a lost turn.
+    fn reasoning_effort_rejected(&self, model: &str) -> bool {
+        self.reasoning_effort_unsupported
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(model)
+    }
+
+    /// Record that this endpoint rejected `reasoning_effort` for `model`.
+    fn record_reasoning_effort_rejected(&self, model: &str) {
+        self.reasoning_effort_unsupported
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(model.to_string());
     }
 
     /// True if this provider is Moonshot/Kimi and requires reasoning_content on assistant messages with tool_calls.
@@ -1193,7 +1221,10 @@ impl OpenAIDriver {
             },
             // Request extended thinking when the caller configured a budget (#6398).
             // Emitted only under the default `None` echo policy: `EmptyString` (Kimi) disables thinking wire-side above, and `Strip` / `Echo` models (DeepSeek R1 / V4) reason by default without an opt-in — this API family rejects requests with unexpected reasoning fields (see the R1 `reasoning_content` note above), so nothing extra is sent to them.
-            reasoning_effort: if echo_policy == ReasoningEchoPolicy::None {
+            // A gateway that already rejected the field for this model is not asked again (#7769) — the answer is deterministic, so re-sending it only buys a 400 and a retry on every turn.
+            reasoning_effort: if echo_policy == ReasoningEchoPolicy::None
+                && !self.reasoning_effort_rejected(&request.model)
+            {
                 request
                     .thinking
                     .as_ref()
@@ -1364,6 +1395,25 @@ impl LlmDriver for OpenAIDriver {
                     oai_request.temperature = None;
                     // Small backoff before retrying so we don't tight-loop on a
                     // misconfigured request (100 ms × attempt, max ~300 ms).
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt as u64 + 1),
+                    ))
+                    .await;
+                    continue;
+                }
+
+                // A gateway that will not forward `reasoning_effort` rejects the request before the model sees it (#7769).
+                // Strip the field, remember the model so `build_request` omits it from here on, and retry — the same shape as the `temperature` strip above.
+                if status == 400
+                    && oai_request.reasoning_effort.is_some()
+                    && crate::llm_driver::llm_errors::is_unsupported_reasoning_effort_error(&body)
+                    && attempt < max_retries
+                {
+                    warn!(model = %oai_request.model, "Gateway rejected reasoning_effort, retrying without it");
+                    oai_request.reasoning_effort = None;
+                    self.record_reasoning_effort_rejected(&oai_request.model);
+                    // Same small backoff as the sibling parameter strips, so a
+                    // misconfigured request cannot tight-loop.
                     tokio::time::sleep(std::time::Duration::from_millis(
                         100 * (attempt as u64 + 1),
                     ))
@@ -1795,6 +1845,25 @@ impl LlmDriver for OpenAIDriver {
                     oai_request.temperature = None;
                     tokio::time::sleep(std::time::Duration::from_millis(
                         100 * (attempt + 1) as u64,
+                    ))
+                    .await;
+                    continue;
+                }
+
+                // A gateway that will not forward `reasoning_effort` rejects the request before the model sees it (#7769).
+                // Strip the field, remember the model so `build_request` omits it from here on, and retry — the same shape as the `temperature` strip above.
+                if status == 400
+                    && oai_request.reasoning_effort.is_some()
+                    && crate::llm_driver::llm_errors::is_unsupported_reasoning_effort_error(&body)
+                    && attempt < max_retries
+                {
+                    warn!(model = %oai_request.model, "Gateway rejected reasoning_effort, retrying without it (stream)");
+                    oai_request.reasoning_effort = None;
+                    self.record_reasoning_effort_rejected(&oai_request.model);
+                    // Same small backoff as the sibling parameter strips, so a
+                    // misconfigured request cannot tight-loop.
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt as u64 + 1),
                     ))
                     .await;
                     continue;

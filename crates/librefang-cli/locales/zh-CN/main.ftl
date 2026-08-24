@@ -1676,6 +1676,20 @@ monitoring-daemon-running-error = 守护进程正在 { $url } 运行；拒绝修
 monitoring-daemon-running-error-fix = 请先停止守护进程：`librefang stop`
 monitoring-anchor-remove-failed = 移除 anchor { $path } 失败：{ $error }
 monitoring-audit-reset-seed-fresh = 下次守护进程启动时会从当前 tip 初始化新的 Merkle 链。
+monitoring-audit-reanchor-verified = 审计链校验通过 — 无需修复。
+monitoring-audit-reanchor-diagnose-failed = 无法读取审计链：{ $error }
+monitoring-audit-reanchor-break = seq { $seq } 处链断裂（{ $kind }）：期望 { $expected }，实际 { $found }。
+monitoring-audit-reanchor-counts = audit_entries 共 { $rows_before } 行：断裂之前的 { $surviving } 行继续校验通过，断裂处及其之后的 { $severed } 行将被归档并删除。
+monitoring-audit-reanchor-would-header =   将执行：
+monitoring-audit-reanchor-would-archive =     1. 将被切离的 { $severed } 行以 JSON Lines 形式归档到 { $path }
+monitoring-audit-reanchor-would-delete =     2. 从 { $path } 的 `audit_entries` 中删除这 { $severed } 行
+monitoring-audit-reanchor-would-marker =     3. 追加一条 ChainReanchored 记录，链接到最后一条幸存行，并写入归档文件的 SHA-256
+monitoring-audit-reanchor-would-anchor =     4. 重写锚点文件 { $path }
+monitoring-audit-reanchor-dry-run = audit reanchor 会修改审计轨迹 — 请加上 `--confirm` 重新运行以继续
+monitoring-audit-reanchor-failed = audit reanchor 失败：{ $error }
+monitoring-audit-reanchor-success = 审计链已修复：自 seq { $seq } 起切离 { $severed } 行，已在 seq { $marker } 写入标记，剩余 { $rows } 行。
+monitoring-audit-reanchor-archive = 被切离的行已保存到 { $path }（sha256 { $digest }）。
+monitoring-audit-reanchor-verify-hint = 启动守护进程并运行 `librefang security verify` 确认链完整。
 # skill.rs
 skill-install-progress = 正在安装 { $source }
 # system.rs

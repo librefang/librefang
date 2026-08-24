@@ -1562,6 +1562,18 @@ pub(crate) enum SecurityCommands {
         #[arg(long)]
         confirm: bool,
     },
+    /// Repair a broken audit chain by severing the rows past the break, preserving them in an archive.
+    ///
+    /// Use instead of `audit-reset` whenever the pre-break history is worth keeping — which in a compliance or production environment is always.
+    /// Requires `--confirm` and refuses to run while a daemon holds the database.
+    #[command(
+        long_about = "Repair the audit trail after `librefang security verify` reports a chain break, without discarding history.\n\nA Merkle chain has one predecessor per row, so a repair has to sever one side of the break. This command archives the severed rows to `<data_dir>/audit-archive/` as JSON Lines before removing them, appends a `ChainReanchored` marker linked to the last row that still verified, and commits the archive's SHA-256 into that marker so the preserved copy is tamper-evident too. Rows below the break keep their original hashes.\n\nWithout `--confirm` it prints the break and what it would do, and exits non-zero. Refuses to run if the daemon is still holding the database.\n\nExamples:\n  librefang security audit-reanchor\n  librefang security audit-reanchor --confirm"
+    )]
+    AuditReanchor {
+        /// Required. Without this flag the command prints what it would do and exits non-zero.
+        #[arg(long)]
+        confirm: bool,
+    },
 }
 
 #[derive(Subcommand)]

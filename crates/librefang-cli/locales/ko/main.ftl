@@ -706,6 +706,20 @@ monitoring-daemon-running-error = 데몬이 { $url }에서 실행 중입니다. 
 monitoring-daemon-running-error-fix = 먼저 데몬을 중지하십시오: `librefang stop`
 monitoring-anchor-remove-failed = 앵커 { $path } 제거에 실패했습니다: { $error }
 monitoring-audit-reset-seed-fresh = 다음 데몬 부팅 시 현재 끝점에서 새 Merkle 체인이 시드됩니다.
+monitoring-audit-reanchor-verified = 감사 체인이 정상입니다 — 복구할 것이 없습니다.
+monitoring-audit-reanchor-diagnose-failed = 감사 체인을 읽을 수 없습니다: { $error }
+monitoring-audit-reanchor-break = seq { $seq }에서 체인 단절 ({ $kind }): 기대값 { $expected }, 실제값 { $found }.
+monitoring-audit-reanchor-counts = audit_entries에 { $rows_before }개 행: 단절 이전 { $surviving }개는 계속 검증되고, 단절 지점 이후 { $severed }개는 보관 후 삭제됩니다.
+monitoring-audit-reanchor-would-header =   수행할 작업:
+monitoring-audit-reanchor-would-archive =     1. 분리되는 { $severed }개 행을 { $path } 아래에 JSON Lines로 보관
+monitoring-audit-reanchor-would-delete =     2. { $path }의 `audit_entries`에서 해당 { $severed }개 행 삭제
+monitoring-audit-reanchor-would-marker =     3. 마지막으로 살아남은 행에 연결된 ChainReanchored 항목을 추가하고 보관 파일의 SHA-256을 기록
+monitoring-audit-reanchor-would-anchor =     4. 앵커 파일 { $path } 재작성
+monitoring-audit-reanchor-dry-run = audit reanchor는 감사 추적을 변경합니다 — 진행하려면 `--confirm`과 함께 다시 실행하세요
+monitoring-audit-reanchor-failed = audit reanchor 실패: { $error }
+monitoring-audit-reanchor-success = 감사 체인 복구 완료: seq { $seq }부터 { $severed }개 행을 분리했고, seq { $marker }에 마커를 기록했으며, { $rows }개 행이 남았습니다.
+monitoring-audit-reanchor-archive = 분리된 행은 { $path }에 보존되었습니다 (sha256 { $digest }).
+monitoring-audit-reanchor-verify-hint = 데몬을 시작한 뒤 `librefang security verify`로 체인 무결성을 확인하세요.
 # skill.rs
 skill-install-progress = { $source } 설치 중
 

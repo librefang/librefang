@@ -764,6 +764,37 @@ pub fn is_transient(message: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Unsupported-parameter rejection
+// ---------------------------------------------------------------------------
+
+/// Wire shapes an endpoint uses to say it will not accept a request *parameter*.
+///
+/// litellm raises `UnsupportedParamsError` and renders it as `openai does not support parameters: ['reasoning_effort']`, OpenAI's own API returns the typed `unsupported_parameter` error code, and FastAPI / vLLM-style proxies surface the underlying Python `TypeError` as `unexpected keyword argument`.
+/// Matching those shapes rather than any one gateway's exact sentence is what keeps the check useful across the proxies LibreFang actually meets, which is also why it cannot be answered from a static model catalogue: whether a model can reason and whether the gateway in front of it will forward the field are different questions.
+const UNSUPPORTED_PARAM_PATTERNS: &[&str] = &[
+    "unsupportedparamserror",
+    "does not support parameters",
+    "unsupported_parameter",
+    "unsupported parameter",
+    "unexpected keyword argument",
+];
+
+/// Whether an error body rejects a request parameter rather than the request's content.
+///
+/// Callers must gate this on an HTTP 400 themselves — the patterns are substrings of free-form provider text, and any other status carrying the same words is a different failure.
+pub fn is_unsupported_parameter_error(message: &str) -> bool {
+    matches_any(&message.to_lowercase(), UNSUPPORTED_PARAM_PATTERNS)
+}
+
+/// Whether an unsupported-parameter rejection names `reasoning_effort` specifically.
+///
+/// Used by the OpenAI-compatible driver to decide it can strip that one field and retry, the way it already strips `temperature` and swaps `max_tokens` for `max_completion_tokens`.
+pub fn is_unsupported_reasoning_effort_error(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("reasoning_effort") && matches_any(&lower, UNSUPPORTED_PARAM_PATTERNS)
+}
+
+// ---------------------------------------------------------------------------
 // HTML / Cloudflare error detection
 // ---------------------------------------------------------------------------
 
@@ -1453,5 +1484,50 @@ mod tests {
     fn cap_message_within_limit_returns_unchanged() {
         let input = "\u{4f60}\u{597d}";
         assert_eq!(cap_message(input, 10), input);
+    }
+
+    // ── Unsupported-parameter rejection (#7769) ────────────────────────────
+
+    /// The three shapes that actually occur: litellm's `UnsupportedParamsError`, OpenAI's typed `unsupported_parameter` code, and the bare Python `TypeError` a FastAPI / vLLM-style proxy leaks.
+    #[test]
+    fn unsupported_parameter_error_covers_the_shapes_that_occur() {
+        for body in [
+            "litellm.UnsupportedParamsError: openai does not support parameters: ['reasoning_effort'], for model=gpt-4o. Received Model Group=default",
+            r#"{"error":{"message":"Unsupported parameter: 'reasoning_effort'","code":"unsupported_parameter"}}"#,
+            "TypeError: create() got an unexpected keyword argument 'reasoning_effort'",
+        ] {
+            assert!(
+                is_unsupported_parameter_error(body),
+                "should classify as a parameter rejection: {body}"
+            );
+            assert!(
+                is_unsupported_reasoning_effort_error(body),
+                "should name reasoning_effort: {body}"
+            );
+        }
+    }
+
+    /// The 400s the circuit breaker must keep counting, and that the driver must not answer by stripping a field.
+    #[test]
+    fn unsupported_parameter_error_rejects_other_400s() {
+        for body in [
+            r#"{"error":{"message":"Incorrect API key provided","code":"invalid_api_key"}}"#,
+            r#"{"error":{"message":"The model 'gpt-9' does not exist","code":"model_not_found"}}"#,
+            "Invalid JSON payload received. Unknown name \"messsages\"",
+            r#"{"error":{"code":"context_length_exceeded","message":"This model's maximum context length is 8192 tokens"}}"#,
+        ] {
+            assert!(
+                !is_unsupported_parameter_error(body),
+                "must not classify as a parameter rejection: {body}"
+            );
+        }
+    }
+
+    /// A rejection of some *other* parameter is still a parameter rejection, but stripping `reasoning_effort` would not answer it.
+    #[test]
+    fn unsupported_reasoning_effort_error_is_narrower_than_the_class() {
+        let body = r#"{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model","code":"unsupported_parameter"}}"#;
+        assert!(is_unsupported_parameter_error(body));
+        assert!(!is_unsupported_reasoning_effort_error(body));
     }
 }
