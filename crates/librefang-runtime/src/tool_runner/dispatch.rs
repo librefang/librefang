@@ -268,6 +268,20 @@ pub async fn execute_tool_raw(
             tool_memory_semantic_stats(input, *kernel, *caller_agent_id, *sender_id, *channel)
                 .await,
         ),
+        "memory_semantic_duplicates" => Some(
+            tool_memory_semantic_duplicates(input, *kernel, *caller_agent_id, *sender_id, *channel)
+                .await,
+        ),
+        "memory_semantic_consolidate" => Some(
+            tool_memory_semantic_consolidate(
+                input,
+                *kernel,
+                *caller_agent_id,
+                *sender_id,
+                *channel,
+            )
+            .await,
+        ),
         "wiki_get" => Some(tool_wiki_get(input, *kernel, *sender_id, *channel)),
         "wiki_search" => Some(tool_wiki_search(input, *kernel, *sender_id, *channel)),
         "wiki_write" => Some(tool_wiki_write(

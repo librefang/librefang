@@ -272,6 +272,7 @@ fn redacted_config_json(
         "update_threshold_cross_category": config.proactive_memory.update_threshold_cross_category,
         "extractor_sidecar": serde_json::to_value(&config.proactive_memory.extractor_sidecar).unwrap_or_default(),
         "session_scoped_recall": config.proactive_memory.session_scoped_recall,
+        "min_similarity": config.proactive_memory.min_similarity,
     });
 
     // ── Auto-Dream (background memory consolidation) ──

@@ -235,6 +235,23 @@ fn semantic_min_confidence(input: &serde_json::Value) -> Result<Option<f32>, Too
     }
 }
 
+/// Read `min_similarity`, the cosine floor below which a fragment is not
+/// returned at all.
+///
+/// Range is `[-1.0, 1.0]` rather than `[0.0, 1.0]`: cosine is genuinely
+/// signed, and rejecting a negative floor would refuse a legitimate (if
+/// unusual) "anything not actively opposite" request.
+fn semantic_min_similarity(input: &serde_json::Value) -> Result<Option<f32>, ToolError> {
+    match input.get("min_similarity").and_then(|v| v.as_f64()) {
+        None => Ok(None),
+        Some(f) if (-1.0..=1.0).contains(&f) => Ok(Some(f as f32)),
+        Some(f) => Err(ToolError::InvalidParameter {
+            name: "min_similarity",
+            reason: format!("must be between -1.0 and 1.0, got {f}"),
+        }),
+    }
+}
+
 /// Render fragments as the JSON the model can act on: an `id` it can pass back
 /// to `memory_semantic_forget`, plus the content and the decay metadata that
 /// tells it how much to trust the fragment.
@@ -242,14 +259,22 @@ fn render_fragments(items: &[librefang_types::memory::MemoryItem]) -> String {
     let rows: Vec<serde_json::Value> = items
         .iter()
         .map(|i| {
-            serde_json::json!({
+            let mut row = serde_json::json!({
                 "id": i.id,
                 "content": i.content,
                 "level": i.level.scope_str(),
                 "category": i.category,
                 "confidence": i.confidence,
                 "created_at": i.created_at.to_rfc3339(),
-            })
+            });
+            // Present only when something measured it — a text-match fallback
+            // or a row with no stored embedding measures nothing (#7808).
+            // Emitting `0.0` there would read as "measured, and irrelevant",
+            // and even `null` invites the model to compare it against a floor.
+            if let (Some(score), Some(obj)) = (i.similarity, row.as_object_mut()) {
+                obj.insert("similarity".to_string(), serde_json::json!(score));
+            }
+            row
         })
         .collect();
     serde_json::to_string_pretty(&rows).unwrap_or_else(|_| format!("{rows:?}"))
@@ -275,17 +300,37 @@ pub(super) async fn tool_memory_semantic_search(
     }
     let limit = semantic_limit(input);
     let min_confidence = semantic_min_confidence(input)?;
+    let min_similarity = semantic_min_similarity(input)?;
     let items = kh
-        .memory_semantic_search(query, agent, limit, min_confidence, peer_id, channel)
+        .memory_semantic_search(
+            query,
+            agent,
+            limit,
+            min_confidence,
+            min_similarity,
+            peer_id,
+            channel,
+        )
         .await
         .map_err(semantic_tool_error)?;
     if items.is_empty() {
         // Say which store was searched. "No results" from a tool named
         // `memory_*` is otherwise indistinguishable from a KV key miss, and the
         // model will retry the wrong tool.
+        // Naming the floor matters as much as naming the store: with a floor
+        // set, "no results" can mean "nothing cleared the bar" rather than
+        // "nothing is stored", and a model that cannot tell those apart will
+        // conclude its memory is empty and stop asking.
+        let floor_note = match min_similarity {
+            Some(f) => format!(
+                " Nothing scored at or above min_similarity {f}; retry with a lower floor, or \
+                 omit it, to see what the closest matches actually were."
+            ),
+            None => String::new(),
+        };
         return Ok(format!(
             "No semantic memories matched '{query}'. (Searched this agent's semantic memory; \
-             key/value entries are a separate store — use memory_list / memory_recall for those.)"
+             key/value entries are a separate store — use memory_list / memory_recall for those.){floor_note}"
         ));
     }
     Ok(render_fragments(&items))
@@ -380,6 +425,82 @@ pub(super) async fn tool_memory_semantic_forget(
              Run memory_semantic_search first to get a current id."
         ))
     }
+}
+
+pub(super) async fn tool_memory_semantic_duplicates(
+    _input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+    peer_id: Option<&str>,
+    channel: Option<&str>,
+) -> Result<String, ToolError> {
+    let kh = require_kernel_typed(kernel)?;
+    let agent = require_caller_agent(caller_agent_id, "memory_semantic_duplicates")?;
+    let groups = kh
+        .memory_semantic_duplicates(agent, peer_id, channel)
+        .await
+        .map_err(semantic_tool_error)?;
+    // Groups of one are not duplicates. `find_duplicates` seeds a group per
+    // unabsorbed memory, so the singletons are every memory with no near-twin —
+    // rendering them would bury the actual finding under the whole store.
+    let groups: Vec<&Vec<librefang_types::memory::MemoryItem>> =
+        groups.iter().filter(|g| g.len() > 1).collect();
+    if groups.is_empty() {
+        return Ok("No near-duplicate memories found in this agent's semantic memory.".to_string());
+    }
+    let rendered: Vec<serde_json::Value> = groups
+        .iter()
+        .map(|group| {
+            serde_json::json!({
+                "count": group.len(),
+                "memories": group
+                    .iter()
+                    .map(|i| serde_json::json!({
+                        "id": i.id,
+                        "content": i.content,
+                        "confidence": i.confidence,
+                        "created_at": i.created_at.to_rfc3339(),
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let total: usize = groups.iter().map(|g| g.len()).sum();
+    Ok(format!(
+        "{} duplicate group{} covering {total} memories. Consolidation would keep the newest of \
+         each group and retract the other {}.\n{}",
+        groups.len(),
+        if groups.len() == 1 { "" } else { "s" },
+        total - groups.len(),
+        serde_json::to_string_pretty(&rendered).unwrap_or_else(|_| format!("{rendered:?}")),
+    ))
+}
+
+pub(super) async fn tool_memory_semantic_consolidate(
+    _input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+    peer_id: Option<&str>,
+    channel: Option<&str>,
+) -> Result<String, ToolError> {
+    let kh = require_kernel_typed(kernel)?;
+    let agent = require_caller_agent(caller_agent_id, "memory_semantic_consolidate")?;
+    let merged = kh
+        .memory_semantic_consolidate(agent, peer_id, channel)
+        .await
+        .map_err(semantic_tool_error)?;
+    if merged == 0 {
+        return Ok(
+            "Nothing to consolidate: no near-duplicate groups were found, so no memories were \
+             retracted."
+                .to_string(),
+        );
+    }
+    Ok(format!(
+        "Consolidated this agent's semantic memory: retracted {merged} duplicate memor{}, keeping \
+         the newest of each group.",
+        if merged == 1 { "y" } else { "ies" }
+    ))
 }
 
 pub(super) async fn tool_memory_semantic_stats(

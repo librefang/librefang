@@ -305,14 +305,18 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         agent_id: &str,
         limit: usize,
         min_confidence: Option<f32>,
+        min_similarity: Option<f32>,
         sender_id: Option<&str>,
         channel: Option<&str>,
     ) -> Result<Vec<librefang_types::memory::MemoryItem>, kernel_handle::KernelOpError> {
         let agent = require_agent_uuid(agent_id)?;
         let store = self.require_proactive_store()?;
         let guard = self.semantic_memory_guard(sender_id, channel);
+        // Per-call argument wins; otherwise the agent's own manifest floor,
+        // otherwise the deployment default resolved inside the store (#7808).
+        let floor = min_similarity.or_else(|| self.resolved_min_similarity(agent));
         let items = store
-            .search_with_guard(query, &agent.to_string(), limit, &guard)
+            .search_with_guard(query, &agent.to_string(), limit, floor, &guard)
             .await?;
         Ok(match min_confidence {
             // A fragment with no stored confidence predates confidence
@@ -398,6 +402,53 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         }))
     }
 
+    async fn memory_semantic_duplicates(
+        &self,
+        agent_id: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<Vec<Vec<librefang_types::memory::MemoryItem>>, kernel_handle::KernelOpError> {
+        let agent = require_agent_uuid(agent_id)?;
+        let store = self.require_proactive_store()?;
+        let guard = self.semantic_memory_guard(sender_id, channel);
+        Ok(store
+            .find_duplicates_with_guard(&agent.to_string(), None, &guard)
+            .await?)
+    }
+
+    async fn memory_semantic_consolidate(
+        &self,
+        agent_id: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<u64, kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
+        let agent = require_agent_uuid(agent_id)?;
+        let store = self.require_proactive_store()?;
+
+        // The opt-in is checked here, in front of the store call, and NOT only
+        // by omitting the tool from `available_tools` (#7808). Advertising is
+        // a prompt-shaping decision; this is the enforcement. A tool name can
+        // still arrive from a replayed transcript, a `tool_load` on a cached
+        // name, a hand or skill that hardcodes it, or a manifest edited between
+        // the two — and every one of those paths reaches dispatch without ever
+        // consulting the advertised list.
+        if !self.allows_self_consolidation(agent) {
+            return Err(KernelOpError::AuthDenied(format!(
+                "agent {agent} may not consolidate its own semantic memory: set \
+                 `[proactive_memory] allow_self_consolidation = true` in that agent's agent.toml \
+                 (not config.toml) to allow it. Consolidation merges near-duplicate groups across \
+                 the whole store and soft-deletes every member but the newest. \
+                 `memory_semantic_duplicates` reports the same groups without changing anything."
+            )));
+        }
+
+        let guard = self.semantic_memory_guard(sender_id, channel);
+        Ok(store
+            .consolidate_with_guard(&agent.to_string(), &guard)
+            .await?)
+    }
+
     fn memory_acl_for_sender(
         &self,
         sender_id: Option<&str>,
@@ -429,6 +480,34 @@ impl LibreFangKernel {
                 "semantic memory (enable [proactive_memory] in config.toml)",
             )
         })
+    }
+
+    /// Whether `agent` has opted in to consolidating its own semantic memory
+    /// unattended (#7808).
+    ///
+    /// An agent with no registry entry answers `false`: a caller the kernel
+    /// cannot resolve to a manifest is exactly the caller whose opt-in cannot
+    /// be confirmed, and this gate must fail closed.
+    pub(crate) fn allows_self_consolidation(&self, agent: AgentId) -> bool {
+        self.agents.registry.get(agent).is_some_and(|entry| {
+            entry
+                .manifest
+                .proactive_memory
+                .resolve_allow_self_consolidation()
+        })
+    }
+
+    /// Resolve `agent`'s effective similarity floor: manifest override, else
+    /// the kernel-global `[proactive_memory] min_similarity` (#7808).
+    fn resolved_min_similarity(&self, agent: AgentId) -> Option<f32> {
+        let cfg = self.config.load();
+        match self.agents.registry.get(agent) {
+            Some(entry) => entry
+                .manifest
+                .proactive_memory
+                .resolve_min_similarity(&cfg.proactive_memory),
+            None => cfg.proactive_memory.min_similarity,
+        }
     }
 
     /// Resolve the per-user memory ACL for a sender into a namespace guard.

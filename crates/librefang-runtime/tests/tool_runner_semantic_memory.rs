@@ -33,6 +33,7 @@ struct SearchCall {
     agent_id: String,
     limit: usize,
     min_confidence: Option<f32>,
+    min_similarity: Option<f32>,
     sender_id: Option<String>,
     channel: Option<String>,
 }
@@ -43,6 +44,8 @@ struct Probes {
     adds: Mutex<Vec<(String, String)>>,
     forgets: Mutex<Vec<(String, String)>>,
     stats: Mutex<usize>,
+    duplicates: Mutex<usize>,
+    consolidates: Mutex<Vec<String>>,
 }
 
 /// Stub kernel: records every semantic call and replays a scripted outcome.
@@ -56,6 +59,13 @@ struct AclKernel {
     forget_result: bool,
     /// Category counts `memory_semantic_stats` reports, in insertion order.
     stat_categories: Vec<(String, usize)>,
+    /// Groups `memory_semantic_duplicates` reports.
+    duplicate_groups: Vec<Vec<MemoryItem>>,
+    /// Count `memory_semantic_consolidate` reports as retracted.
+    consolidate_result: u64,
+    /// When set, `memory_semantic_consolidate` refuses with this reason —
+    /// standing in for the kernel's `allow_self_consolidation` gate.
+    consolidate_denied: Option<String>,
     /// When set, every semantic method fails with this ACL refusal instead.
     deny: Option<String>,
 }
@@ -68,6 +78,9 @@ impl AclKernel {
             add_result: Vec::new(),
             forget_result: false,
             stat_categories: Vec::new(),
+            duplicate_groups: Vec::new(),
+            consolidate_result: 0,
+            consolidate_denied: None,
             deny: None,
         }
     }
@@ -148,6 +161,7 @@ impl MemoryAccess for AclKernel {
         agent_id: &str,
         limit: usize,
         min_confidence: Option<f32>,
+        min_similarity: Option<f32>,
         sender_id: Option<&str>,
         channel: Option<&str>,
     ) -> Result<Vec<MemoryItem>, librefang_kernel_handle::KernelOpError> {
@@ -156,6 +170,7 @@ impl MemoryAccess for AclKernel {
             agent_id: agent_id.to_string(),
             limit,
             min_confidence,
+            min_similarity,
             sender_id: sender_id.map(str::to_string),
             channel: channel.map(str::to_string),
         });
@@ -237,6 +252,45 @@ impl MemoryAccess for AclKernel {
             "auto_retrieve_enabled": true,
             "llm_extraction": false,
         }))
+    }
+
+    async fn memory_semantic_duplicates(
+        &self,
+        _agent_id: &str,
+        _sender_id: Option<&str>,
+        _channel: Option<&str>,
+    ) -> Result<Vec<Vec<MemoryItem>>, librefang_kernel_handle::KernelOpError> {
+        *self.probes.duplicates.lock().unwrap() += 1;
+        if let Some(reason) = &self.deny {
+            return Err(librefang_kernel_handle::KernelOpError::AuthDenied(
+                reason.clone(),
+            ));
+        }
+        Ok(self.duplicate_groups.clone())
+    }
+
+    async fn memory_semantic_consolidate(
+        &self,
+        agent_id: &str,
+        _sender_id: Option<&str>,
+        _channel: Option<&str>,
+    ) -> Result<u64, librefang_kernel_handle::KernelOpError> {
+        self.probes
+            .consolidates
+            .lock()
+            .unwrap()
+            .push(agent_id.to_string());
+        if let Some(reason) = &self.consolidate_denied {
+            return Err(librefang_kernel_handle::KernelOpError::AuthDenied(
+                reason.clone(),
+            ));
+        }
+        if let Some(reason) = &self.deny {
+            return Err(librefang_kernel_handle::KernelOpError::AuthDenied(
+                reason.clone(),
+            ));
+        }
+        Ok(self.consolidate_result)
     }
 }
 
@@ -428,6 +482,9 @@ async fn semantic_search_forwards_query_caller_and_defaults() {
             // Default breadth matches the automatic recall's MEMORY_RECALL_LIMIT.
             limit: 5,
             min_confidence: None,
+            // Unset per call: the kernel resolves the agent's / deployment's
+            // configured floor rather than the runtime inventing one (#7808).
+            min_similarity: None,
             sender_id: Some("alice".to_string()),
             channel: Some("telegram".to_string()),
         }
@@ -968,6 +1025,275 @@ async fn memory_glob_in_allowed_tools_admits_the_semantic_tools() {
     );
 }
 
+// ── min_similarity (#7808) ───────────────────────────────────────────────
+
+/// The floor a caller names has to arrive at the kernel intact. Nothing else in
+/// this file can tell a dropped argument from a store that had nothing to
+/// filter, so pin the forwarding directly.
+#[tokio::test]
+async fn semantic_search_forwards_min_similarity() {
+    let stub = AclKernel::new();
+    let probes = Arc::clone(&stub.probes);
+    let kernel: Arc<dyn KernelHandle> = Arc::new(stub);
+
+    let ctx = make_ctx(&kernel, None, None);
+    let _ = execute_tool_raw(
+        "t1",
+        "memory_semantic_search",
+        &json!({"query": "q", "min_similarity": 0.35}),
+        &ctx,
+    )
+    .await;
+
+    let call = probes.searches.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(call.min_similarity, Some(0.35));
+    assert_eq!(
+        call.min_confidence, None,
+        "the two floors measure different things and must not be conflated"
+    );
+}
+
+/// Cosine is signed, so the accepted range is [-1, 1] — and a number outside it
+/// is a caller mistake worth naming rather than silently clamping, because
+/// clamping 35 to 1.0 would return an empty set the model cannot explain.
+#[tokio::test]
+async fn semantic_search_rejects_out_of_range_min_similarity() {
+    let stub = AclKernel::new();
+    let probes = Arc::clone(&stub.probes);
+    let kernel: Arc<dyn KernelHandle> = Arc::new(stub);
+    let ctx = make_ctx(&kernel, None, None);
+
+    for bad in [1.5, -2.0, 35.0] {
+        let result = execute_tool_raw(
+            "t1",
+            "memory_semantic_search",
+            &json!({"query": "q", "min_similarity": bad}),
+            &ctx,
+        )
+        .await;
+        assert!(result.is_error, "min_similarity {bad} must be rejected");
+        assert!(
+            result.content.contains("min_similarity"),
+            "the refusal must name the parameter, got: {}",
+            result.content
+        );
+    }
+    assert!(
+        probes.searches.lock().unwrap().is_empty(),
+        "a rejected argument must never reach the store"
+    );
+
+    // -1.0 and 1.0 are both legitimate cosine values and must be accepted.
+    for ok in [-1.0, 0.0, 1.0] {
+        let result = execute_tool_raw(
+            "t1",
+            "memory_semantic_search",
+            &json!({"query": "q", "min_similarity": ok}),
+            &ctx,
+        )
+        .await;
+        assert!(!result.is_error, "min_similarity {ok} is valid cosine");
+    }
+}
+
+/// An empty result under a floor is ambiguous — "nothing is stored" versus
+/// "nothing cleared the bar" — and a model that reads the first will stop
+/// asking. The result has to say which.
+#[tokio::test]
+async fn semantic_search_empty_under_a_floor_says_the_floor_emptied_it() {
+    let stub = AclKernel::new();
+    let kernel: Arc<dyn KernelHandle> = Arc::new(stub);
+    let ctx = make_ctx(&kernel, None, None);
+
+    let with_floor = execute_tool_raw(
+        "t1",
+        "memory_semantic_search",
+        &json!({"query": "themes", "min_similarity": 0.9}),
+        &ctx,
+    )
+    .await;
+    assert!(!with_floor.is_error);
+    assert!(
+        with_floor.content.contains("min_similarity"),
+        "an empty result under a floor must name the floor, got: {}",
+        with_floor.content
+    );
+
+    let without_floor = execute_tool_raw(
+        "t1",
+        "memory_semantic_search",
+        &json!({"query": "themes"}),
+        &ctx,
+    )
+    .await;
+    assert!(
+        !without_floor.content.contains("min_similarity"),
+        "an unfiltered empty result must not blame a floor nobody set, got: {}",
+        without_floor.content
+    );
+}
+
+/// The score the ranker measured has to reach the model, or it cannot judge how
+/// much a fragment is worth trusting or choose a floor for the next call.
+#[tokio::test]
+async fn semantic_search_reports_the_similarity_of_each_fragment() {
+    let mut stub = AclKernel::new();
+    let mut scored = fragment("m-1", "prefers dark mode", Some(0.9));
+    scored.similarity = Some(0.82);
+    let unscored = fragment("m-2", "lives in Berlin", Some(0.9));
+    stub.search_result = vec![scored, unscored];
+    let kernel: Arc<dyn KernelHandle> = Arc::new(stub);
+
+    let ctx = make_ctx(&kernel, None, None);
+    let result =
+        execute_tool_raw("t1", "memory_semantic_search", &json!({"query": "q"}), &ctx).await;
+
+    assert!(!result.is_error, "got: {}", result.content);
+    let rows: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+    let reported = rows[0]["similarity"].as_f64().unwrap();
+    assert!(
+        (reported - 0.82).abs() < 1e-6,
+        "the measured score must be reported, got {reported}"
+    );
+    assert!(
+        rows[1].get("similarity").is_none(),
+        "an unmeasured fragment must omit the field, never report 0.0 — 0.0 is a measured miss: {}",
+        result.content
+    );
+}
+
+// ── memory_semantic_duplicates ───────────────────────────────────────────
+
+#[tokio::test]
+async fn semantic_duplicates_reports_groups_and_what_merging_would_cost() {
+    let mut stub = AclKernel::new();
+    stub.duplicate_groups = vec![
+        vec![
+            fragment("d-1", "the deploy runs on Friday", Some(0.9)),
+            fragment("d-2", "deploys happen Fridays", Some(0.8)),
+            fragment("d-3", "we deploy each Friday", Some(0.7)),
+        ],
+        // A singleton is not a duplicate: `find_duplicates` seeds one group per
+        // unabsorbed memory, so rendering these would bury the finding under
+        // the whole store.
+        vec![fragment("d-4", "unrelated fact", Some(0.9))],
+    ];
+    let probes = Arc::clone(&stub.probes);
+    let kernel: Arc<dyn KernelHandle> = Arc::new(stub);
+
+    let ctx = make_ctx(&kernel, None, None);
+    let result = execute_tool_raw("t1", "memory_semantic_duplicates", &json!({}), &ctx).await;
+
+    assert!(!result.is_error, "got: {}", result.content);
+    assert_eq!(*probes.duplicates.lock().unwrap(), 1);
+    assert!(result.content.contains("d-1") && result.content.contains("d-3"));
+    assert!(
+        !result.content.contains("d-4"),
+        "a group of one is not a duplicate group: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("retract the other 2"),
+        "the report must state what consolidating would delete, got: {}",
+        result.content
+    );
+    // Reporting is not deleting.
+    assert!(probes.consolidates.lock().unwrap().is_empty());
+    assert!(probes.forgets.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn semantic_duplicates_reports_a_clean_store_plainly() {
+    let stub = AclKernel::new();
+    let kernel: Arc<dyn KernelHandle> = Arc::new(stub);
+    let ctx = make_ctx(&kernel, None, None);
+
+    let result = execute_tool_raw("t1", "memory_semantic_duplicates", &json!({}), &ctx).await;
+    assert!(!result.is_error);
+    assert!(
+        result.content.contains("No near-duplicate memories"),
+        "got: {}",
+        result.content
+    );
+}
+
+// ── memory_semantic_consolidate ──────────────────────────────────────────
+
+#[tokio::test]
+async fn semantic_consolidate_reports_how_many_memories_it_retracted() {
+    let mut stub = AclKernel::new();
+    stub.consolidate_result = 4;
+    let probes = Arc::clone(&stub.probes);
+    let kernel: Arc<dyn KernelHandle> = Arc::new(stub);
+
+    let ctx = make_ctx(&kernel, None, None);
+    let result = execute_tool_raw("t1", "memory_semantic_consolidate", &json!({}), &ctx).await;
+
+    assert!(!result.is_error, "got: {}", result.content);
+    assert_eq!(
+        probes.consolidates.lock().unwrap().as_slice(),
+        [CALLER.to_string()],
+        "consolidation is scoped to the calling agent and no other"
+    );
+    assert!(
+        result.content.contains('4'),
+        "the count of retracted memories must be reported, got: {}",
+        result.content
+    );
+}
+
+/// A no-op has to read as a no-op. "Consolidated" with nothing merged would
+/// teach the model that the pile it is worried about has been dealt with.
+#[tokio::test]
+async fn semantic_consolidate_reports_a_no_op_without_claiming_success() {
+    let stub = AclKernel::new();
+    let kernel: Arc<dyn KernelHandle> = Arc::new(stub);
+    let ctx = make_ctx(&kernel, None, None);
+
+    let result = execute_tool_raw("t1", "memory_semantic_consolidate", &json!({}), &ctx).await;
+    assert!(!result.is_error);
+    assert!(
+        result.content.contains("Nothing to consolidate"),
+        "got: {}",
+        result.content
+    );
+}
+
+/// The kernel's `allow_self_consolidation` refusal must arrive as the soft
+/// `Denied` status, not a hard error.
+///
+/// This is the difference between "you are not allowed to do that, carry on"
+/// and three consecutive hard failures aborting the turn — and a permanent
+/// policy refusal will repeat every time the model retries, so routing it as a
+/// hard failure death-spirals exactly the agents that most want the tool.
+#[tokio::test]
+async fn semantic_consolidate_surfaces_the_opt_in_refusal_as_soft_denied() {
+    let mut stub = AclKernel::new();
+    stub.consolidate_denied = Some(
+        "agent may not consolidate its own semantic memory: set allow_self_consolidation".into(),
+    );
+    let probes = Arc::clone(&stub.probes);
+    let kernel: Arc<dyn KernelHandle> = Arc::new(stub);
+
+    let ctx = make_ctx(&kernel, None, None);
+    let result = execute_tool_raw("t1", "memory_semantic_consolidate", &json!({}), &ctx).await;
+
+    assert!(result.is_error, "a refusal is still an error result");
+    assert_eq!(
+        result.status,
+        ToolExecutionStatus::Denied,
+        "a policy refusal must be soft-Denied, not a hard failure: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("allow_self_consolidation"),
+        "the refusal must name the setting that would allow it, got: {}",
+        result.content
+    );
+    // The gate refused before anything was deleted.
+    assert_eq!(probes.consolidates.lock().unwrap().len(), 1);
+}
+
 // ── tool declarations ────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -980,12 +1306,30 @@ async fn semantic_tools_are_declared_and_search_ships_on_every_turn() {
         "memory_semantic_add",
         "memory_semantic_forget",
         "memory_semantic_stats",
+        "memory_semantic_duplicates",
+        "memory_semantic_consolidate",
     ] {
         assert!(
             defs.iter().any(|d| d.name == name),
             "{name} must appear in builtin_tool_definitions or no agent can ever call it"
         );
     }
+
+    // The destructive tool must say so in the schema the model reads. A
+    // description that reads like maintenance invites a call the agent would
+    // not have made if it knew what the call costs (#7808).
+    let consolidate = defs
+        .iter()
+        .find(|d| d.name == "memory_semantic_consolidate")
+        .unwrap();
+    assert!(
+        consolidate
+            .description
+            .contains("memory_semantic_duplicates")
+            && consolidate.description.contains("allow_self_consolidation"),
+        "the consolidate schema must point at the read-only alternative and name the opt-in: {}",
+        consolidate.description
+    );
 
     // #7808: the search tool has to be visible without a `tool_load`
     // round-trip, because the tool it competes with (`memory_recall`) already is.
@@ -1016,6 +1360,27 @@ fn builtin_tool_definitions_are_byte_stable() {
     let first = serde_json::to_string(&builtin_tool_definitions()).unwrap();
     let second = serde_json::to_string(&builtin_tool_definitions()).unwrap();
     assert_eq!(first, second, "builtin tool definitions must be stable");
+
+    // #3298: these strings are stringified into every request. The semantic
+    // tools carry JSON-object schemas, and a `HashMap` anywhere in one would
+    // reorder its keys between processes and invalidate the provider prompt
+    // cache for the rest of the conversation even though nothing changed.
+    // Serialize the semantic slice on its own so a regression names the tool
+    // rather than pointing at the whole list.
+    let semantic = |()| -> String {
+        serde_json::to_string(
+            &builtin_tool_definitions()
+                .into_iter()
+                .filter(|d| d.name.starts_with("memory_semantic_"))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        semantic(()),
+        semantic(()),
+        "the memory_semantic_* definitions must be byte-identical across builds of the list"
+    );
 
     let names: Vec<String> = builtin_tool_definitions()
         .iter()

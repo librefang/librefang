@@ -78,7 +78,8 @@ use self::media::{
     tool_speech_to_text, tool_text_to_speech, tool_video_generate, tool_video_status,
 };
 use self::memory::{
-    tool_memory_list, tool_memory_recall, tool_memory_semantic_add, tool_memory_semantic_forget,
+    tool_memory_list, tool_memory_recall, tool_memory_semantic_add,
+    tool_memory_semantic_consolidate, tool_memory_semantic_duplicates, tool_memory_semantic_forget,
     tool_memory_semantic_search, tool_memory_semantic_stats, tool_memory_store,
 };
 use self::meta::{tool_meta_load, tool_meta_search};

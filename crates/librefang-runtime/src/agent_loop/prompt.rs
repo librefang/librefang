@@ -168,6 +168,10 @@ fn proactive_item_to_fragment(
         image_url: None,
         image_embedding: None,
         modality: Default::default(),
+        // Carried through so the recall's own ranking survives the conversion
+        // (#7808). It is `None` unless the recall that produced this item was
+        // embedding-ranked, which is exactly when a score exists.
+        similarity: item.similarity,
     }
 }
 

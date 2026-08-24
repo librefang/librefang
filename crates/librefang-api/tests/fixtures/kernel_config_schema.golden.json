@@ -981,6 +981,7 @@
         "update_threshold_same_category": 0.699999988079071,
         "update_threshold_cross_category": 0.800000011920929,
         "session_scoped_recall": true,
+        "min_similarity": null,
         "extractor_sidecar": null
       },
       "allOf": [
@@ -5567,6 +5568,15 @@
           "type": "integer",
           "format": "uint",
           "minimum": 0.0
+        },
+        "min_similarity": {
+          "description": "Minimum cosine similarity a memory must reach against the query before it is recalled at all — the \"nothing rather than noise\" floor (#7808).\n\nRecall over-fetches candidates, re-ranks them by cosine, and truncates to top-k. With no floor, a sparse store fills that top-k with whatever exists: vectors that fail to compare sink to the bottom, but merely-irrelevant ones are promoted on merit and then injected into the prompt as if they were answers. A floor makes an empty recall possible, which is the honest outcome when nothing stored is actually about the query.\n\n`None` (the default) preserves the historical behaviour: every re-ranked candidate is eligible. Useful values sit around 0.2–0.4 for `text-embedding-3-small`; too high a floor empties recall entirely, so raise it while watching what recall returns rather than setting it blind. Ignored when no query embedding exists (the `content LIKE` / FTS fallback measures no similarity), and overridable per agent via [`ProactiveMemoryOverrides::min_similarity`] or per call by the `memory_semantic_search` tool's `min_similarity` argument.",
+          "default": null,
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
         },
         "session_scoped_recall": {
           "description": "Whether `auto_memorize` stamps each extracted memory with the session it came from, and `auto_retrieve` refuses to surface a memory stamped for a *different* session (#7605).\n\nThe proactive store is per **agent**, not per conversation, so before this switch existed one visitor's turn on a public agent could be auto-retrieved into another visitor's turn purely through memory — even when the two turns were addressed to different `session_id`s and their message histories never touched. Default `true`: a memory belongs to the conversation that produced it unless an operator says otherwise.\n\nSetting `false` restores the pre-#7605 behaviour (every memory of an agent is a candidate for every one of that agent's turns). That is the right choice for a single-user assistant whose `session_mode = \"new\"` sub-agents are expected to inherit what earlier runs learned; it is the wrong choice for anything serving more than one person.\n\nMemories written before this shipped carry no session tag and stay recallable from every session, so turning it on does not hide an existing store.",

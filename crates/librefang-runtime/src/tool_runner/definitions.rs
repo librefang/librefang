@@ -38,6 +38,8 @@ pub(crate) mod tool_name {
     pub const MEMORY_SEMANTIC_ADD: &str = "memory_semantic_add";
     pub const MEMORY_SEMANTIC_FORGET: &str = "memory_semantic_forget";
     pub const MEMORY_SEMANTIC_STATS: &str = "memory_semantic_stats";
+    pub const MEMORY_SEMANTIC_DUPLICATES: &str = "memory_semantic_duplicates";
+    pub const MEMORY_SEMANTIC_CONSOLIDATE: &str = "memory_semantic_consolidate";
     pub const WIKI_GET: &str = "wiki_get";
     pub const WIKI_SEARCH: &str = "wiki_search";
     pub const WIKI_WRITE: &str = "wiki_write";
@@ -453,7 +455,8 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                     "properties": {
                         "query": { "type": "string", "description": "What to look for, in natural language" },
                         "limit": { "type": "integer", "description": "Max fragments to return (default 5, max 50)" },
-                        "min_confidence": { "type": "number", "description": "Drop fragments whose confidence has decayed below this floor, 0.0-1.0. Use it to ask for nothing rather than stale noise." }
+                        "min_confidence": { "type": "number", "description": "Drop fragments whose confidence has decayed below this floor, 0.0-1.0. Use it to ask for nothing rather than stale noise." },
+                        "min_similarity": { "type": "number", "description": "Drop fragments whose similarity to the query falls below this floor, -1.0-1.0. Different from min_confidence: confidence is how much the memory is still trusted, similarity is how well it answers THIS query. Set it when an empty answer is better than an unrelated one; around 0.3 is a reasonable starting point. Ignored when no embedding provider is configured, because then nothing is scored." }
                     },
                     "required": ["query"]
                 }),
@@ -483,6 +486,22 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             ToolDefinition {
                 name: tool_name::MEMORY_SEMANTIC_STATS.to_string(),
                 description: "Report how much this agent remembers semantically: total fragments, counts per level, counts per category, and whether automatic memorize/recall and LLM extraction are switched on. Use it to check whether semantic memory is actually enabled before concluding that a search found nothing because nothing was stored.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::MEMORY_SEMANTIC_DUPLICATES.to_string(),
+                description: "Group this agent's near-duplicate semantic memories and report the groups, changing nothing. Use it when the same claim keeps resurfacing in recall and you suspect several copies are reinforcing each other — the groups tell you which ids say the same thing. Each group lists two or more memories the store considers the same fact; you can retract the ones you disagree with individually via memory_semantic_forget, or merge a whole group with memory_semantic_consolidate where that tool is available.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::MEMORY_SEMANTIC_CONSOLIDATE.to_string(),
+                description: "Merge every near-duplicate group in this agent's semantic memory, keeping the newest memory of each group and permanently retracting the rest. This deletes memories you did not name, across the whole store, in one call, and cannot be undone from here — run memory_semantic_duplicates first and read what it reports. Returns how many memories were retracted. Only available when this agent's manifest sets `[proactive_memory] allow_self_consolidation = true`; if it is not, use memory_semantic_duplicates and report what you found instead.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {},
