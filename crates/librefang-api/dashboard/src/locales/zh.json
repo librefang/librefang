@@ -1037,6 +1037,7 @@
     "saved_restart_required": "已保存 — 需要重启 daemon 才能生效",
     "schema_unavailable_hint": "该 channel 以独立 sidecar 进程运行，但其配置表单无法加载。请查看下方错误；若缺少 SDK，请先安装，否则请修复所报告的问题。重启 daemon 以重新加载 schema。",
     "schema_unavailable_title": "配置表单不可用",
+    "sidecar_sdk_version": "适配器 SDK",
     "secret_set_placeholder": "•••• (已设置 — 留空则保持不变)",
     "select_all": "全选",
     "shadowed_secrets_warning": "警告：以下 token 被 shell 环境变量遮蔽，需要先 unset 并重启才会生效：{{keys}}",

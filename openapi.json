@@ -14928,6 +14928,13 @@
           },
           "name": {
             "type": "string"
+          },
+          "sdk_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `librefang-sdk` version the adapter reported on `--describe`."
           }
         }
       },

@@ -1037,6 +1037,7 @@
     "saved_restart_required": "저장됨 — 적용하려면 데몬을 다시 시작하세요",
     "schema_unavailable_hint": "이 채널은 프로세스 외부 사이드카로 실행되며 설정 양식을 로드할 수 없습니다. 아래 오류를 확인하세요. SDK가 없다면 설치하고, 그렇지 않다면 보고된 문제를 해결하세요. 스키마 검색을 다시 시도하려면 데몬을 재시작하세요.",
     "schema_unavailable_title": "설정 양식을 사용할 수 없습니다.",
+    "sidecar_sdk_version": "어댑터 SDK",
     "secret_set_placeholder": "•••• (설정 - 유지하려면 비워두세요)",
     "select_all": "모두 선택",
     "shadowed_secrets_warning": "경고: 이러한 토큰은 셸 환경 변수에 의해 숨겨지며 설정을 해제하고 다시 시작할 때까지 적용되지 않습니다: {{keys}}",

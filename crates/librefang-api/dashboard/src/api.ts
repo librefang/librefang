@@ -178,6 +178,9 @@ export interface ChannelItem {
   /** Set on an unconfigured sidecar row when `--describe` failed at daemon boot and there is no static fallback — i.e. `fields` is empty and the configure form would otherwise be a blank drawer.
    *  Carries the actionable reason (typically: the Python sidecar SDK is not installed), surfaced in the configure form so the operator knows why the form is empty and how to fix it. */
   schema_error?: string;
+  /** `librefang-sdk` version the sidecar adapter reported on `--describe`, absent when it reported none (an SDK too old to carry the field, or a failed describe).
+   *  `--describe` resolves the same interpreter and PYTHONPATH as the eventual spawn, so this is the SDK that will actually serve traffic — the thing #7140 had no way to see short of shelling into the host. */
+  sdk_version?: string;
   /** Read-only TOML snippet the operator can copy into config.toml
    *  if they prefer hand-editing over the configure drawer. Emitted
    *  by the backend on every row. */

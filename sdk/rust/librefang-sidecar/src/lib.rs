@@ -36,7 +36,7 @@ pub mod runtime;
 pub use protocol::{
     events, parse_command, ChannelUser, Command, Content, Field, FieldType, Interactive,
     InteractiveButton, InteractiveMessage, MessageBuilder, Reaction, Schema, SendCommand,
-    StreamDelta, StreamEnd, StreamStart, TypingCmd, UnknownCommand,
+    StreamDelta, StreamEnd, StreamStart, TypingCmd, UnknownCommand, PROTOCOL_VERSION,
 };
 pub use runtime::{
     run, run_stdio, run_stdio_main, run_stdio_with, with_backoff, DynError, EmitFn,
