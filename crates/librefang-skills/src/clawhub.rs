@@ -28,7 +28,7 @@ pub const ENV_CLAWHUB_URL: &str = "LIBREFANG_CLAWHUB_URL";
 /// Read a marketplace URL override from the environment, falling back to `default`.
 ///
 /// An unset variable and one set to whitespace are treated alike: a blank override in a shell profile or compose file is an operator mistake, not a request to fetch from the empty string.
-pub(crate) fn env_url_or(var: &str, default: &str) -> String {
+pub fn env_url_or(var: &str, default: &str) -> String {
     std::env::var(var)
         .ok()
         .map(|value| value.trim().trim_end_matches('/').to_string())

@@ -437,11 +437,7 @@ const ENV_CLAWHUB_CN_URL: &str = "LIBREFANG_CLAWHUB_CN_URL";
 ///
 /// Read per request rather than cached in a `OnceLock` so a restart is enough to move off a dead mirror, matching how the ClawHub and Skillhub clients resolve their own overrides.
 fn clawhub_cn_base_url() -> String {
-    std::env::var(ENV_CLAWHUB_CN_URL)
-        .ok()
-        .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| CLAWHUB_CN_BASE_URL.to_string())
+    librefang_skills::clawhub::env_url_or(ENV_CLAWHUB_CN_URL, CLAWHUB_CN_BASE_URL)
 }
 
 /// Check whether a SkillError represents a ClawHub rate-limit (429).
