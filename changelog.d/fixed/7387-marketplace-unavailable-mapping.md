@@ -3,4 +3,4 @@ A skill marketplace whose API host is retired while its CDN keeps serving answer
   The uniformity is the fix: skill detail previously answered `404`, asserting a skill does not exist when the hub never answered as a marketplace at all, and install answered `500`, whose body is scrubbed before it leaves the process, discarding the one message an operator could act on.
   A truncated or corrupted body stays a network error, because that one is worth a retry and this one is not.
   Each hub's endpoints are also overridable now, so a mirror can be adopted without recompiling; Skillhub takes three variables because it is three hosts, and setting only the API base would leave browse and install still aimed at the dead one.
-  (#PR) (@houko)
+  (#7856) (@houko)
