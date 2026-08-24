@@ -55,7 +55,35 @@ export type StepAgentBindingValue = {
   /** Agent template name — the payload when `source === "type"`. */
   agentType: string;
   sessionMode: StepSessionMode;
+  /** Raw, comma-separated `required_skills` text exactly as typed (#7721).
+   *  Kept as text rather than a parsed array so a half-typed name — the moment after a comma, a trailing space — survives a re-render instead of being normalised out from under the cursor.
+   *  Parsed on projection. */
+  requiredSkills: string;
 };
+
+/**
+ * Parse the comma-separated `required_skills` box into the array the API takes.
+ *
+ * Trims, drops empties and de-duplicates, so `"a, , a"` is `["a"]` and an all-whitespace box is an empty list rather than one blank requirement — the API rejects a blank entry with a 400 rather than ignoring it, which would turn a stray comma into an unsaveable workflow.
+ * Order is the operator's; the API sorts on persist.
+ */
+export function parseRequiredSkills(raw: string): string[] {
+  const seen = new Set<string>();
+  for (const part of raw.split(",")) {
+    const name = part.trim();
+    if (name) seen.add(name);
+  }
+  return [...seen];
+}
+
+/** Render a stored `required_skills` list back into the editable box.
+ *  Anything that is not an array of strings reads as "none required", which is what an older canvas draft and a step with no requirement both look like. */
+export function formatRequiredSkills(raw: unknown): string {
+  if (!Array.isArray(raw)) return "";
+  return raw.filter((name): name is string => typeof name === "string" && name.trim() !== "")
+    .map(name => name.trim())
+    .join(", ");
+}
 
 /** Narrow an untrusted `session_mode` to the two values the API parses.
  *  Anything else (absent, null, a typo, a number) means "defer to the
@@ -86,6 +114,7 @@ export function bindingFromNodeData(data: CanvasNodeData): StepAgentBindingValue
     agentName,
     agentType,
     sessionMode: normalizeSessionMode(data.sessionMode),
+    requiredSkills: formatRequiredSkills(data.requiredSkills),
   };
 }
 
@@ -100,8 +129,14 @@ export function bindingFromNodeData(data: CanvasNodeData): StepAgentBindingValue
 export function bindingToNodeData(
   value: StepAgentBindingValue,
   agents: AgentItem[],
-): Pick<CanvasNodeData, "agentSource" | "agentId" | "agentName" | "agentType" | "sessionMode"> {
+): Pick<
+  CanvasNodeData,
+  "agentSource" | "agentId" | "agentName" | "agentType" | "sessionMode" | "requiredSkills"
+> {
   const sessionMode = value.sessionMode === "" ? undefined : value.sessionMode;
+  // An empty requirement list is stored as absent rather than `[]`: the two mean the same thing to the API, and absent is what every step authored before this control existed already looks like.
+  const parsedSkills = parseRequiredSkills(value.requiredSkills);
+  const requiredSkills = parsedSkills.length > 0 ? parsedSkills : undefined;
   if (value.source === "name") {
     const name = value.agentName.trim();
     return {
@@ -110,6 +145,7 @@ export function bindingToNodeData(
       agentName: name || undefined,
       agentType: undefined,
       sessionMode,
+      requiredSkills,
     };
   }
   if (value.source === "type") {
@@ -120,6 +156,7 @@ export function bindingToNodeData(
       agentName: undefined,
       agentType: type || undefined,
       sessionMode,
+      requiredSkills,
     };
   }
   const agent = agents.find(a => a.id === value.agentId);
@@ -129,11 +166,12 @@ export function bindingToNodeData(
     agentName: agent?.name || undefined,
     agentType: undefined,
     sessionMode,
+    requiredSkills,
   };
 }
 
 /**
- * The `agent_*` / `session_mode` fields of the API step payload for a node.
+ * The `agent_*` / `session_mode` / `required_skills` fields of the API step payload for a node.
  *
  * The routing key comes from `stepAgentPayload`, which sends exactly one of
  * `agent_id` / `agent_name` / `agent_type`: a payload carrying several is
@@ -141,17 +179,23 @@ export function bindingToNodeData(
  * is the only one emitted. `session_mode` is omitted rather than sent empty
  * — the parser logs and discards a value it cannot read, and an unset
  * override is how a step defers to the target agent's manifest.
+ *
+ * `required_skills` is omitted when empty for the same reason, and because the API's parser for it is strict rather than lenient (#7721): a blank entry is a 400 naming the step, not a silently dropped requirement.
  */
 export function stepAgentFields(data: CanvasNodeData): {
   agent_id?: string;
   agent_name?: string;
   agent_type?: string;
   session_mode?: "persistent" | "new";
+  required_skills?: string[];
 } {
   const sessionMode = normalizeSessionMode(data.sessionMode);
+  const requiredSkills = formatRequiredSkills(data.requiredSkills);
+  const parsedSkills = parseRequiredSkills(requiredSkills);
   return {
     ...(stepAgentPayload(data) ?? {}),
     session_mode: sessionMode === "" ? undefined : sessionMode,
+    required_skills: parsedSkills.length > 0 ? parsedSkills : undefined,
   };
 }
 
@@ -196,11 +240,15 @@ export function switchAgentSource(
 export function StepAgentBinding({
   value,
   agents,
+  skills = [],
   onChange,
   t,
 }: {
   value: StepAgentBindingValue;
   agents: AgentItem[];
+  /** Names of the skills loaded on this instance, offered as suggestions.
+   *  Suggestions only — a workflow may legitimately require a skill that is declared but not yet installed, and the dry run is what reports that. */
+  skills?: string[];
   onChange: (next: StepAgentBindingValue) => void;
   t: (key: string) => string;
 }) {
@@ -312,6 +360,27 @@ export function StepAgentBinding({
       </select>
       <p className="mt-1 text-[10px] leading-snug text-text-dim/70">
         {t("canvas.session_mode_hint")}
+      </p>
+
+      <label className={CANVAS_LABEL_CLASS} htmlFor="step-required-skills">
+        {t("canvas.required_skills_label")}
+      </label>
+      <input
+        id="step-required-skills"
+        type="text"
+        list="step-required-skills-options"
+        value={value.requiredSkills}
+        placeholder={t("canvas.required_skills_placeholder")}
+        onChange={e => onChange({ ...value, requiredSkills: e.target.value })}
+        className={CANVAS_INPUT_CLASS}
+      />
+      <datalist id="step-required-skills-options">
+        {skills.map(name => (
+          <option key={name} value={name} />
+        ))}
+      </datalist>
+      <p className="mt-1 text-[10px] leading-snug text-text-dim/70">
+        {t("canvas.required_skills_hint")}
       </p>
     </div>
   );

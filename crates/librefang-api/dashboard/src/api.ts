@@ -600,6 +600,9 @@ export interface WorkflowStep {
   /** Per-step `SessionMode` override. `null` / absent defers to the target
    *  agent's manifest, which is how the API serializes an unset value. */
   session_mode?: "persistent" | "new" | null;
+  /** Skill names the step's resolved agent must be able to use (#7721).
+   *  Empty when the step requires nothing; the API sorts and de-duplicates the list on persist. */
+  required_skills?: string[];
 }
 
 export interface WorkflowLastRunSummary {
@@ -2624,6 +2627,9 @@ export interface DryRunStepPreview {
   resolved_prompt: string;
   skipped: boolean;
   skip_reason?: string;
+  /** Why the resolved agent cannot satisfy the step's `required_skills` (#7721).
+   *  Present only for a mismatch, and it is a step-level failure: the run stops here, so the dry run reports `valid: false` even though `agent_found` is true. */
+  skill_error?: string | null;
 }
 
 /** Response from the dry-run endpoint. */

@@ -1647,7 +1647,10 @@
     "session_mode_default": "Domyślnie jak agent",
     "session_mode_persistent": "Użyj ponownie sesji agenta",
     "session_mode_new": "Nowa sesja przy każdym uruchomieniu",
-    "session_mode_hint": "Nowa sesja izoluje ten krok od wszystkiego, co agent powiedział wcześniej."
+    "session_mode_hint": "Nowa sesja izoluje ten krok od wszystkiego, co agent powiedział wcześniej.",
+    "required_skills_label": "Wymagane umiejętności",
+    "required_skills_placeholder": "browser-automation, pdf-extract",
+    "required_skills_hint": "Rozdzielone przecinkami. Krok kończy się błędem przed uruchomieniem, jeśli agent nie może użyć którejś z nich."
   },
   "workflows": {
     "title": "Przepływy pracy",

@@ -1647,7 +1647,10 @@
     "session_mode_default": "Agent default",
     "session_mode_persistent": "Reuse the agent's session",
     "session_mode_new": "Fresh session each run",
-    "session_mode_hint": "A fresh session isolates this step from anything the agent said before."
+    "session_mode_hint": "A fresh session isolates this step from anything the agent said before.",
+    "required_skills_label": "Required skills",
+    "required_skills_placeholder": "browser-automation, pdf-extract",
+    "required_skills_hint": "Comma-separated. The step fails before it runs if the agent cannot use one of them."
   },
   "workflows": {
     "title": "Workflows",

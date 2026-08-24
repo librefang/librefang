@@ -1647,7 +1647,10 @@
     "session_mode_default": "跟随智能体默认值",
     "session_mode_persistent": "复用智能体的会话",
     "session_mode_new": "每次运行使用新会话",
-    "session_mode_hint": "新会话会将该步骤与智能体之前说过的内容隔离。"
+    "session_mode_hint": "新会话会将该步骤与智能体之前说过的内容隔离。",
+    "required_skills_label": "所需技能",
+    "required_skills_placeholder": "browser-automation, pdf-extract",
+    "required_skills_hint": "以逗号分隔。若智能体无法使用其中任意一项，该步骤会在运行前失败。"
   },
   "workflows": {
     "title": "工作流",

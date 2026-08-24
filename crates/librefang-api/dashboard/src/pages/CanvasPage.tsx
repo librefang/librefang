@@ -70,6 +70,7 @@ import {
 import { useCreateSchedule } from "../lib/mutations/schedules";
 import { useWorkflows, useWorkflowTemplates, workflowQueries } from "../lib/queries/workflows";
 import { useAgents } from "../lib/queries/agents";
+import { useSkills } from "../lib/queries/skills";
 import {
   StepAgentBinding,
   bindingFromNodeData,
@@ -114,6 +115,8 @@ type WorkflowStepBuild = {
   agent_type?: string;
   /** Per-step session override; omitted to defer to the agent manifest. */
   session_mode?: "persistent" | "new";
+  /** Skills the step's agent must be able to use; omitted when none (#7721). */
+  required_skills?: string[];
   prompt: string;
   timeout_secs: number;
   mode?:
@@ -658,9 +661,10 @@ function useAgentPanelWidth(): [number, (next: number) => void] {
 }
 
 function NodeConfigPanel({
-  node, agents, onUpdate, onClose, onDelete, siblingNodes, width, onResize, t
+  node, agents, skills, onUpdate, onClose, onDelete, siblingNodes, width, onResize, t
 }: {
-  node: CanvasNode; agents: AgentItem[]; onUpdate: (id: string, data: CanvasNodeData) => void;
+  node: CanvasNode; agents: AgentItem[]; skills: string[];
+  onUpdate: (id: string, data: CanvasNodeData) => void;
   /** Avoids stuffing arbitrary fields onto ReactFlow's Node type. */
   siblingNodes?: Array<{ id: string; label: string }>;
   width: number; onResize: (next: number) => void;
@@ -787,7 +791,13 @@ function NodeConfigPanel({
         </div>
 
         {/* Agent binding */}
-        <StepAgentBinding value={binding} agents={agents} onChange={setBinding} t={t} />
+        <StepAgentBinding
+          value={binding}
+          agents={agents}
+          skills={skills}
+          onChange={setBinding}
+          t={t}
+        />
 
         {/* Prompt */}
         {hasAgent && (
@@ -932,6 +942,13 @@ function CanvasPageInner() {
   const queryClient = useQueryClient();
   const agentsQuery = useAgents();
   const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
+  // Suggestions for a step's `required_skills` box.
+  // A workflow may require a skill this instance has not installed — that is a case the dry run is meant to report — so this list only autocompletes, it never restricts.
+  const skillsQuery = useSkills();
+  const skillNames = useMemo(
+    () => (skillsQuery.data ?? []).map(s => s.name).sort((a, b) => a.localeCompare(b)),
+    [skillsQuery.data],
+  );
   const workflowsQuery = useWorkflows();
   const workflows = useMemo(() => workflowsQuery.data ?? [], [workflowsQuery.data]);
   const [selectedWorkflow, setSelectedWorkflow] = useState<WorkflowItem | null>(null);
@@ -1573,6 +1590,10 @@ function CanvasPageInner() {
                 ? "name"
                 : undefined,
           sessionMode: normalizeSessionMode(s.session_mode) || undefined,
+          requiredSkills:
+            Array.isArray(s.required_skills) && s.required_skills.length > 0
+              ? s.required_skills
+              : undefined,
         },
       }));
       const hasDag = steps.some((step) => Array.isArray(step.depends_on) && step.depends_on.length > 0);
@@ -2577,7 +2598,7 @@ function CanvasPageInner() {
                       onClick={() => setExpandedDryStep(expandedDryStep === i ? null : i)}>
                       {step.skipped
                         ? <SkipForward className="w-3 h-3 text-text-dim/40 shrink-0" />
-                        : step.agent_found
+                        : step.agent_found && !step.skill_error
                           ? <CheckCircle2 className="w-3 h-3 text-success shrink-0" />
                           : <AlertCircle className="w-3 h-3 text-warning shrink-0" />}
                       <span className="text-[10px] font-bold truncate flex-1">{step.step_name}</span>
@@ -2590,6 +2611,8 @@ function CanvasPageInner() {
                     {expandedDryStep === i && (
                       <div className="px-3 pb-3 space-y-1.5 border-t border-border-subtle">
                         {!step.agent_found && <p className="text-[10px] text-warning mt-2">{t("canvas.agent_not_found")}</p>}
+                        {/* The kernel's own mismatch text names the step, the agent, the missing skill and the fix (#7721), so it is shown verbatim rather than flattened into a generic "invalid step" line. */}
+                        {step.skill_error && <p className="text-[10px] text-warning mt-2">{step.skill_error}</p>}
                         {step.skip_reason && <p className="text-[10px] text-text-dim mt-2">{step.skip_reason}</p>}
                         <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("canvas.resolved_prompt")}</p>
                         <pre className="text-[10px] text-text whitespace-pre-wrap max-h-20 overflow-y-auto bg-surface rounded-lg p-2">
@@ -2670,6 +2693,7 @@ function CanvasPageInner() {
                 .filter(n => n.id !== editingNode.id && AGENT_NODE_TYPES_SET.has(n.data.nodeType ?? ""))
                 .map(n => ({ id: n.id, label: n.data.label || n.id }))}
               agents={agents}
+              skills={skillNames}
               width={agentPanelWidth}
               onResize={setAgentPanelWidth}
               onUpdate={handleNodeUpdate} onClose={() => setEditingNode(null)}

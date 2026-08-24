@@ -16,8 +16,10 @@ import {
   StepAgentBinding,
   bindingFromNodeData,
   bindingToNodeData,
+  formatRequiredSkills,
   isStepBound,
   normalizeSessionMode,
+  parseRequiredSkills,
   stepAgentFields,
   switchAgentSource,
   type StepAgentBindingValue,
@@ -43,6 +45,7 @@ function Harness({
     <StepAgentBinding
       value={value}
       agents={AGENTS}
+      skills={SKILLS}
       onChange={next => {
         setValue(next);
         onValue(next);
@@ -57,12 +60,15 @@ function last(values: StepAgentBindingValue[]): StepAgentBindingValue {
   return values[values.length - 1];
 }
 
+const SKILLS = ["browser-automation", "pdf-extract"];
+
 const EMPTY: StepAgentBindingValue = {
   source: "instance",
   agentId: "",
   agentName: "",
   agentType: "",
   sessionMode: "",
+  requiredSkills: "",
 };
 
 describe("bindingFromNodeData", () => {
@@ -73,6 +79,7 @@ describe("bindingFromNodeData", () => {
       agentName: "researcher",
       agentType: "",
       sessionMode: "",
+      requiredSkills: "",
     });
   });
 
@@ -89,6 +96,7 @@ describe("bindingFromNodeData", () => {
       agentName: "",
       agentType: "researcher",
       sessionMode: "",
+      requiredSkills: "",
     });
   });
 
@@ -116,6 +124,18 @@ describe("bindingFromNodeData", () => {
     expect(bindingFromNodeData({ sessionMode: "bogus" } as unknown as CanvasNodeData).sessionMode).toBe("");
     expect(normalizeSessionMode(42)).toBe("");
     expect(normalizeSessionMode("new")).toBe("new");
+  });
+});
+
+describe("bindingFromNodeData required skills", () => {
+  it("seeds the box from a stored list and drops a malformed one", () => {
+    expect(
+      bindingFromNodeData({ requiredSkills: ["b", "a"] } as CanvasNodeData).requiredSkills,
+    ).toBe("b, a");
+    expect(
+      bindingFromNodeData({ requiredSkills: "b,a" } as unknown as CanvasNodeData)
+        .requiredSkills,
+    ).toBe("");
   });
 });
 
@@ -202,6 +222,28 @@ describe("stepAgentFields", () => {
   });
 });
 
+describe("parseRequiredSkills", () => {
+  it("trims, drops blanks and de-duplicates", () => {
+    expect(parseRequiredSkills("  a , ,a,  b ")).toEqual(["a", "b"]);
+  });
+
+  it("reads an all-whitespace box as no requirement", () => {
+    expect(parseRequiredSkills("  ,  , ")).toEqual([]);
+  });
+});
+
+describe("formatRequiredSkills", () => {
+  it("renders a stored list back into the editable box", () => {
+    expect(formatRequiredSkills(["a", "b"])).toBe("a, b");
+  });
+
+  it("reads anything that is not a string array as no requirement", () => {
+    expect(formatRequiredSkills(undefined)).toBe("");
+    expect(formatRequiredSkills("a,b")).toBe("");
+    expect(formatRequiredSkills([1, "", "  ", "a"])).toBe("a");
+  });
+});
+
 describe("isStepBound", () => {
   it("counts a name-only binding as bound", () => {
     expect(isStepBound({ agentName: "researcher" })).toBe(true);
@@ -231,6 +273,7 @@ describe("switchAgentSource", () => {
       agentName: "not-spawned-yet",
       agentType: "",
       sessionMode: "",
+      requiredSkills: "",
     });
   });
 
@@ -364,6 +407,71 @@ describe("StepAgentBinding", () => {
     // an empty string the API would log and discard.
     await user.selectOptions(sessionSelect, "");
     expect(bindingToNodeData(last(seen), AGENTS).sessionMode).toBeUndefined();
+  });
+
+  // #7721 shipped `required_skills` on the kernel and the API with no editor surface, so a workflow author could only set it by hand-editing TOML or posting JSON.
+  // These pin the whole path: typed text becomes the API array, a stored array comes back into the box, and the box survives an agent rebinding.
+  it("sends the typed required skills as the API array", async () => {
+    const user = userEvent.setup();
+    const seen: StepAgentBindingValue[] = [];
+    render(<Harness initial={{ ...EMPTY, agentId: "id-research" }} onValue={v => seen.push(v)} />);
+
+    const input = screen.getByLabelText("canvas.required_skills_label");
+    expect(input).toHaveValue("");
+
+    await user.type(input, "browser-automation, pdf-extract");
+    const data = bindingToNodeData(last(seen), AGENTS);
+    expect(data.requiredSkills).toEqual(["browser-automation", "pdf-extract"]);
+    expect(stepAgentFields(data).required_skills).toEqual([
+      "browser-automation",
+      "pdf-extract",
+    ]);
+  });
+
+  it("omits the field entirely when the box is blank", async () => {
+    const user = userEvent.setup();
+    const seen: StepAgentBindingValue[] = [];
+    render(
+      <Harness
+        initial={{ ...EMPTY, agentId: "id-research", requiredSkills: "pdf-extract" }}
+        onValue={v => seen.push(v)}
+      />,
+    );
+
+    // A stray comma must not become a blank requirement: the API rejects one with a 400 naming the step, so the workflow would stop saving at all.
+    await user.clear(screen.getByLabelText("canvas.required_skills_label"));
+    await user.type(screen.getByLabelText("canvas.required_skills_label"), " , ");
+    const data = bindingToNodeData(last(seen), AGENTS);
+    expect(data.requiredSkills).toBeUndefined();
+    expect(stepAgentFields(data).required_skills).toBeUndefined();
+  });
+
+  it("keeps the required skills when the agent binding is switched", async () => {
+    const user = userEvent.setup();
+    const seen: StepAgentBindingValue[] = [];
+    render(
+      <Harness
+        initial={{ ...EMPTY, agentId: "id-research", requiredSkills: "browser-automation" }}
+        onValue={v => seen.push(v)}
+      />,
+    );
+
+    await user.selectOptions(screen.getByLabelText("canvas.agent_source_label"), "type");
+    expect(screen.getByLabelText("canvas.required_skills_label")).toHaveValue(
+      "browser-automation",
+    );
+    expect(bindingToNodeData(last(seen), AGENTS).requiredSkills).toEqual([
+      "browser-automation",
+    ]);
+  });
+
+  it("offers the loaded skills as datalist suggestions", () => {
+    render(<Harness initial={EMPTY} onValue={vi.fn()} />);
+    const input = screen.getByLabelText("canvas.required_skills_label");
+    const list = document.getElementById(input.getAttribute("list")!);
+    expect([...list!.querySelectorAll("option")].map(o => o.getAttribute("value"))).toEqual(
+      SKILLS,
+    );
   });
 
   it("offers every known agent name as a datalist suggestion", () => {

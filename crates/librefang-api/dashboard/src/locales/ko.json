@@ -1647,7 +1647,10 @@
     "session_mode_default": "에이전트 기본값",
     "session_mode_persistent": "에이전트의 세션 재사용",
     "session_mode_new": "실행마다 새 세션",
-    "session_mode_hint": "새 세션은 이 단계를 에이전트의 이전 대화와 분리합니다."
+    "session_mode_hint": "새 세션은 이 단계를 에이전트의 이전 대화와 분리합니다.",
+    "required_skills_label": "필요한 스킬",
+    "required_skills_placeholder": "browser-automation, pdf-extract",
+    "required_skills_hint": "쉼표로 구분합니다. 에이전트가 그중 하나라도 사용할 수 없으면 단계는 실행 전에 실패합니다."
   },
   "workflows": {
     "title": "워크플로",

@@ -1647,7 +1647,10 @@
     "session_mode_default": "Як в агента",
     "session_mode_persistent": "Використати сесію агента повторно",
     "session_mode_new": "Нова сесія на кожен запуск",
-    "session_mode_hint": "Нова сесія ізолює цей крок від усього, що агент казав раніше."
+    "session_mode_hint": "Нова сесія ізолює цей крок від усього, що агент казав раніше.",
+    "required_skills_label": "Потрібні навички",
+    "required_skills_placeholder": "browser-automation, pdf-extract",
+    "required_skills_hint": "Через кому. Крок завершиться помилкою ще до запуску, якщо агент не може скористатися однією з них."
   },
   "workflows": {
     "title": "Воркфлоу",

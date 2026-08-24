@@ -27,6 +27,9 @@ export type CanvasNodeData = {
   /** Per-step `session_mode` override sent to the API: `"persistent"`,
    *  `"new"`, or absent to defer to the target agent's manifest. */
   sessionMode?: "persistent" | "new";
+  /** Skill names this step's agent must be able to use (#7721).
+   *  Absent — not `[]` — when the step requires nothing, which is what every step authored before this field existed looks like. */
+  requiredSkills?: string[];
   prompt?: string;
   timeoutSecs?: number;
   maxRetries?: number;
@@ -86,7 +89,7 @@ function isCanvasNodeData(value: unknown, depth: number): value is CanvasNodeDat
   const booleanFields = ["_expanded"];
   if (booleanFields.some((field) => value[field] !== undefined && typeof value[field] !== "boolean")) return false;
 
-  for (const field of ["dependsOn", "_childIds"]) {
+  for (const field of ["dependsOn", "_childIds", "requiredSkills"]) {
     const fieldValue = value[field];
     if (fieldValue !== undefined
       && (!Array.isArray(fieldValue) || fieldValue.some((item) => typeof item !== "string"))) return false;
