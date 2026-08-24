@@ -1287,13 +1287,16 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                                 "type": "object",
                                 "properties": {
                                     "name": { "type": "string", "description": "Step name, unique within the workflow. Other steps reference it in depends_on." },
-                                    "agent": { "type": "string", "description": "Name of the agent that runs this step (agent_list shows what exists). An object {\"id\": \"<uuid>\"} addresses one by UUID instead." },
+                                    "agent": { "description": "Which agent runs this step. A bare string is the agent's name (agent_list shows what exists). The object forms carry exactly one routing key: {\"name\": \"researcher\"} by name, {\"id\": \"<uuid>\"} by instance UUID, or {\"type\": \"researcher\"} by agent type — find-or-spawn, which reuses a registered agent of that name and otherwise spawns the template of that name, so the workflow stands on its own on an instance where nothing is pre-registered." },
                                     "prompt_template": { "type": "string", "description": "Prompt for this step. {{input}} interpolates the previous step's output; {{var}} interpolates a workflow input parameter or an earlier step's output_var." },
                                     "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Names of steps that must finish first. Any step may be named, including one declared later. Omit for straight-line execution." },
                                     "output_var": { "type": "string", "description": "Store this step's output under this name so later steps can reference it as {{name}}" },
                                     "mode": { "description": "Sequencing for this step: the string \"sequential\" (default), \"fan_out\" to run in parallel with the following fan_out steps, or \"collect\" to gather them. Richer nodes take a tagged object, e.g. {\"conditional\": {\"condition\": \"APPROVED\"}}." },
                                     "error_mode": { "description": "What to do when this step fails: \"fail\" (default, abort the run), \"skip\" (continue without it), or {\"retry\": {\"max_retries\": 3}}." },
-                                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Wall-clock limit for this step (default 120, ceiling 3600)" }
+                                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Wall-clock limit for this step (default 120, ceiling 3600)" },
+                                    "required_skills": { "type": "array", "items": { "type": "string" }, "description": "Skills the resolved agent must actually be able to use. Checked right after agent resolution and before the prompt is built, so an unmet requirement fails the run with an error naming the skill and the fix, and bills no LLM call. Omit unless the step cannot work without them." },
+                                    "session_mode": { "type": "string", "enum": ["persistent", "new"], "description": "Session this step's invocation uses: \"persistent\" reuses the target agent's long-running session, \"new\" mints a fresh one. Omit to defer to the agent's own setting." },
+                                    "inherit_context": { "type": "boolean", "description": "Set false to suppress parent-workflow context injection for this step regardless of the agent's setting. Omit to defer to the agent." }
                                 },
                                 "required": ["name", "agent", "prompt_template"]
                             }
