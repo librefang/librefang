@@ -2501,6 +2501,31 @@ async fn set_provider_discovery_flips_flag_and_persists_to_the_provider_file() {
         "the opt-in must survive a restart; file content:\n{persisted}"
     );
 
+    // The assertion above is not enough on its own: the file used to be written
+    // with `id` + `discover_models` and nothing else, which failed the catalog
+    // loader's required fields, so the loader discarded it whole and the flag
+    // reverted on every boot (#7776). Reload the way the daemon does at boot and
+    // assert the record actually comes back.
+    let reloaded = librefang_runtime::model_catalog::ModelCatalog::new_from_dir(
+        &h._state.kernel.home_dir().join("providers"),
+    );
+    let round_tripped = reloaded.get_provider("acme-toggle").unwrap_or_else(|| {
+        panic!("the persisted file must load back as a provider; file content:\n{persisted}")
+    });
+    assert!(
+        round_tripped.discover_models,
+        "the reloaded catalog must carry the opt-in; file content:\n{persisted}"
+    );
+    assert_eq!(
+        round_tripped.base_url, "http://127.0.0.1:59999/v1",
+        "the endpoint has to be written too, or the probe loop has nothing to poll"
+    );
+    assert_eq!(round_tripped.display_name, "ACME Toggle");
+    assert_eq!(
+        round_tripped.api_key_env,
+        "LIBREFANG_TEST_ACME_TOGGLE_API_KEY"
+    );
+
     // Turning it back off rewrites the same key rather than appending a second one.
     let (status, _) = json_request(
         &h,

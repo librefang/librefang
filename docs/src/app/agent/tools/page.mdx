@@ -234,6 +234,10 @@ The margin is absolute rather than a share of the length, so on a long recording
 Lower `max_secs` if a call times out.
 How much media fits in one request depends on provider speed, and a self-hosted endpoint can be an order of magnitude slower than a hosted one.
 
+Lower it as well if a call is rejected for being over the post-extraction audio budget.
+Two size limits apply, and they measure different things: the input container is checked against the 50 MB video limit before anything is read, and the audio track extracted from it is checked against the 20 MB audio limit before it is sent to a provider.
+The second is the one a long recording reaches, because the extracted track is what actually leaves the process — the rejection names the measured size and the cap, so the window can be scaled down from those two numbers rather than guessed at.
+
 ---
 
 ## Owner Notifications

@@ -552,20 +552,48 @@ impl Default for ProviderInfo {
     }
 }
 
+/// Derive the conventional API-key environment variable name for a provider id.
+///
+/// `litellm` → `LITELLM_API_KEY`, `alibaba-coding-plan` → `ALIBABA_CODING_PLAN_API_KEY`.
+/// This is the same shape the runtime already synthesizes when a provider is
+/// registered from a bare `[provider_urls]` entry, so a catalog file that omits
+/// `api_key_env` resolves to the variable the operator was already setting.
+pub fn default_api_key_env(provider_id: &str) -> String {
+    format!("{}_API_KEY", provider_id.to_uppercase().replace('-', "_"))
+}
+
 /// Provider metadata as stored in TOML catalog files.
 ///
 /// Unlike [`ProviderInfo`], this struct omits runtime-only fields (`auth_status`,
 /// `model_count`) so it maps 1:1 to the `[provider]` section in community catalog
 /// files at `providers/<name>.toml`.
+///
+/// Every field except `id` is optional, because this struct doubles as a
+/// partial overlay (#7776). A file that carries only `id` and one flag — which
+/// is exactly what the discovery toggle used to write, and what an operator
+/// hand-editing the TOML naturally produces — must still deserialize; the
+/// alternative is a hard parse error that makes the loader drop the whole file
+/// and silently revert the setting on the next boot. Missing values are filled
+/// in by [`From<ProviderCatalogToml> for ProviderInfo`] (`display_name` falls
+/// back to `id`, `api_key_env` to [`default_api_key_env`]) or left empty for
+/// the catalog's merge step to fill from another source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderCatalogToml {
     /// Provider identifier (e.g. "anthropic").
     pub id: String,
     /// Human-readable display name (e.g. "Anthropic").
+    /// Falls back to `id` when absent.
+    #[serde(default)]
     pub display_name: String,
     /// Environment variable name for the API key.
+    /// Falls back to [`default_api_key_env`] when absent.
+    #[serde(default)]
     pub api_key_env: String,
     /// Default base URL.
+    /// May legitimately be empty: CLI-backed providers have no HTTP endpoint,
+    /// and for a gateway configured through `[provider_urls]` in `config.toml`
+    /// the URL arrives after the catalog is loaded.
+    #[serde(default)]
     pub base_url: String,
     /// Whether an API key is required (false for local providers).
     #[serde(default = "default_key_required")]
@@ -593,10 +621,23 @@ fn default_key_required() -> bool {
 
 impl From<ProviderCatalogToml> for ProviderInfo {
     fn from(p: ProviderCatalogToml) -> Self {
+        // Back-fill the two fields a partial overlay is allowed to omit, so
+        // downstream code never has to special-case an empty display name or
+        // an empty env var name (#7776).
+        let display_name = if p.display_name.is_empty() {
+            p.id.clone()
+        } else {
+            p.display_name
+        };
+        let api_key_env = if p.api_key_env.is_empty() {
+            default_api_key_env(&p.id)
+        } else {
+            p.api_key_env
+        };
         Self {
             id: p.id,
-            display_name: p.display_name,
-            api_key_env: p.api_key_env,
+            display_name,
+            api_key_env,
             base_url: p.base_url,
             key_required: p.key_required,
             auth_status: AuthStatus::default(),
@@ -673,6 +714,66 @@ pub struct AliasesCatalogFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #7776: the discovery toggle used to write `id` + `discover_models` and
+    /// nothing else. That shape has to keep deserializing, or the loader drops
+    /// the file and the operator's opt-in silently reverts on the next boot.
+    #[test]
+    fn partial_provider_record_deserializes_and_backfills_identity() {
+        let raw = "[provider]\nid = \"litellm\"\ndiscover_models = true\n";
+        let file: ModelCatalogFile = toml::from_str(raw).expect("partial overlay must parse");
+        let provider = file.provider.expect("the [provider] table is present");
+        assert!(provider.discover_models);
+
+        let info: ProviderInfo = provider.into();
+        assert_eq!(info.id, "litellm");
+        assert_eq!(
+            info.display_name, "litellm",
+            "an absent display name falls back to the id"
+        );
+        assert_eq!(
+            info.api_key_env, "LITELLM_API_KEY",
+            "an absent api_key_env falls back to the conventional derivation"
+        );
+        assert_eq!(
+            info.base_url, "",
+            "base_url stays empty for the catalog merge / [provider_urls] to fill"
+        );
+        assert!(
+            info.key_required,
+            "key_required keeps its historical default"
+        );
+        assert!(info.discover_models, "the flag the file exists to carry");
+    }
+
+    /// A complete record must not be disturbed by the fallbacks above.
+    #[test]
+    fn complete_provider_record_keeps_every_declared_value() {
+        let raw = concat!(
+            "[provider]\n",
+            "id = \"acme\"\n",
+            "display_name = \"ACME Inc\"\n",
+            "api_key_env = \"ACME_TOKEN\"\n",
+            "base_url = \"https://api.acme.test/v1\"\n",
+            "key_required = false\n",
+        );
+        let file: ModelCatalogFile = toml::from_str(raw).expect("full record must parse");
+        let info: ProviderInfo = file.provider.expect("provider table").into();
+        assert_eq!(info.display_name, "ACME Inc");
+        assert_eq!(info.api_key_env, "ACME_TOKEN");
+        assert_eq!(info.base_url, "https://api.acme.test/v1");
+        assert!(!info.key_required);
+        assert!(!info.discover_models, "absent flag stays off");
+    }
+
+    #[test]
+    fn default_api_key_env_uppercases_and_underscores() {
+        assert_eq!(default_api_key_env("litellm"), "LITELLM_API_KEY");
+        assert_eq!(
+            default_api_key_env("alibaba-coding-plan"),
+            "ALIBABA_CODING_PLAN_API_KEY"
+        );
+    }
 
     #[test]
     fn test_model_tier_display() {

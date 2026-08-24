@@ -71,14 +71,43 @@ async fn start_test_server_with_provider(
     model: &str,
     api_key_env: &str,
 ) -> TestServer {
+    start_test_server_with_provider_at(provider, model, api_key_env, None).await
+}
+
+/// Start a test server whose default provider points at `base_url`.
+///
+/// `None` keeps the provider's registry default (the real endpoint), which is
+/// what every pre-existing caller wants. `Some(url)` aims the driver at a local
+/// stub — a `wiremock::MockServer` speaking the Ollama protocol — so a test can
+/// drive a complete agent turn through the production message handler without a
+/// provider credential and without touching the network.
+async fn start_test_server_with_provider_at(
+    provider: &str,
+    model: &str,
+    api_key_env: &str,
+    base_url: Option<&str>,
+) -> TestServer {
     let provider = provider.to_string();
     let model = model.to_string();
     let api_key_env = api_key_env.to_string();
-    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
+    let base_url = base_url.map(str::to_string);
+    start_test_server_with_builder(MockKernelBuilder::new().with_config(move |cfg| {
         cfg.default_model.provider = provider;
         cfg.default_model.model = model;
         cfg.default_model.api_key_env = api_key_env;
-    }));
+        cfg.default_model.base_url = base_url;
+    }))
+    .await
+}
+
+/// Boot the shared test router on top of an arbitrary [`MockKernelBuilder`].
+///
+/// Split out of `start_test_server_with_provider` so a test that needs more
+/// than provider/model/base_url — a seeded model catalog, for instance — gets
+/// the same router, auth layer, and listener as every other test rather than a
+/// hand-rolled copy of them.
+async fn start_test_server_with_builder(builder: MockKernelBuilder) -> TestServer {
+    let test = TestAppState::with_builder(builder);
     let config_path = test.tmp_path().join("config.toml");
     let test = test.with_config_path(config_path.clone());
     let (state, _tmp, _) = test.into_parts();
@@ -5855,5 +5884,368 @@ async fn users_provider_keys_unknown_user_404() {
         resp.status(),
         404,
         "listing keys for an unknown user must 404"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Explicit session targeting on POST /api/agents/{id}/message — issue #7605
+//
+// `librefang message --session-id <UUID>` forwards its argument as
+// `MessageRequest.session_id`. These tests pin the server-side contract the
+// flag depends on: two ids address two histories, and no id keeps the
+// canonical-session behaviour every existing caller relies on.
+//
+// A wiremock server speaking the native Ollama protocol (`POST /api/chat`)
+// stands in for the provider, so a complete turn — session load, LLM call,
+// history write — runs without credentials or network access. Asserting on a
+// *failed* turn would prove nothing: no session write happens before the
+// provider call, so an ignored `session_id` would look identical.
+// ---------------------------------------------------------------------------
+
+/// Model catalog carrying an `ollama` provider that needs no key and lives at
+/// `base_url`. Without it the message handler's provider-auth gate short-
+/// circuits with 412 before any session resolution happens.
+fn ollama_stub_catalog(base_url: &str) -> librefang_testing::CatalogSeed {
+    use librefang_types::model_catalog::{AuthStatus, ProviderInfo};
+
+    let (mut providers, mut models) = librefang_testing::test_catalog_baseline();
+    providers.push(ProviderInfo {
+        id: "ollama".to_string(),
+        display_name: "Ollama (wiremock stub)".to_string(),
+        api_key_env: "OLLAMA_API_KEY".to_string(),
+        base_url: base_url.to_string(),
+        key_required: false,
+        auth_status: AuthStatus::NotRequired,
+        model_count: 1,
+        ..ProviderInfo::default()
+    });
+    let mut entry = models[0].clone();
+    entry.id = "test-model".to_string();
+    entry.display_name = "Ollama test model".to_string();
+    entry.provider = "ollama".to_string();
+    models.push(entry);
+    (providers, models)
+}
+
+/// Boot a test server whose default provider is a wiremock endpoint that
+/// answers every `POST /api/chat` with a one-word assistant turn.
+async fn start_test_server_with_stub_llm() -> (TestServer, wiremock::MockServer) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let llm = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "model": "test-model",
+            "message": { "role": "assistant", "content": "ack" },
+            "done": true,
+            "done_reason": "stop",
+            "prompt_eval_count": 7,
+            "eval_count": 2,
+        })))
+        .mount(&llm)
+        .await;
+
+    let uri = llm.uri();
+    let config_uri = uri.clone();
+    let server = start_test_server_with_builder(
+        MockKernelBuilder::new()
+            .with_config(move |cfg| {
+                cfg.default_model.provider = "ollama".to_string();
+                cfg.default_model.model = "test-model".to_string();
+                cfg.default_model.api_key_env = "OLLAMA_API_KEY".to_string();
+                cfg.default_model.base_url = Some(config_uri);
+                // Keep the turn to a single provider round trip. Proactive
+                // memory would add retrieval and extraction work that is
+                // orthogonal to session routing (and is the subject of the
+                // second half of #7605, tracked separately).
+                cfg.proactive_memory.enabled = false;
+            })
+            .with_catalog_seed(ollama_stub_catalog(&uri)),
+    )
+    .await;
+    (server, llm)
+}
+
+async fn spawn_stub_agent(server: &TestServer) -> String {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({ "manifest_toml": TEST_MANIFEST }))
+        .send()
+        .await
+        .expect("spawn request");
+    assert_eq!(resp.status().as_u16(), 201, "spawn must succeed");
+    let body: serde_json::Value = resp.json().await.expect("spawn body");
+    body["agent_id"]
+        .as_str()
+        .expect("agent_id in spawn body")
+        .to_string()
+}
+
+/// `POST /api/agents/{id}/message`, optionally pinned to `session_id`.
+async fn post_agent_message(
+    server: &TestServer,
+    agent_id: &str,
+    text: &str,
+    session_id: Option<&str>,
+) -> (u16, serde_json::Value) {
+    let mut payload = serde_json::json!({ "message": text });
+    if let Some(sid) = session_id {
+        payload["session_id"] = serde_json::Value::String(sid.to_string());
+    }
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/agents/{}/message",
+            server.base_url, agent_id
+        ))
+        .json(&payload)
+        .send()
+        .await
+        .expect("message request");
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
+/// `GET /api/agents/{id}/session`, optionally pinned to `session_id`.
+/// Returns the resolved session id and the flattened message texts.
+async fn get_agent_session_texts(
+    server: &TestServer,
+    agent_id: &str,
+    session_id: Option<&str>,
+) -> (String, Vec<String>) {
+    let url = match session_id {
+        Some(sid) => format!(
+            "{}/api/agents/{}/session?session_id={}",
+            server.base_url, agent_id, sid
+        ),
+        None => format!("{}/api/agents/{}/session", server.base_url, agent_id),
+    };
+    let resp = reqwest::Client::new()
+        .get(url)
+        .send()
+        .await
+        .expect("session request");
+    assert_eq!(resp.status().as_u16(), 200, "session read must succeed");
+    let body: serde_json::Value = resp.json().await.expect("session body");
+    let texts = body["messages"]
+        .as_array()
+        .map(|ms| {
+            ms.iter()
+                .map(|m| m["content"].as_str().unwrap_or_default().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    (
+        body["session_id"]
+            .as_str()
+            .expect("session_id in body")
+            .to_string(),
+        texts,
+    )
+}
+
+/// Two turns addressed with different explicit `session_id`s must land in two
+/// separate histories: neither session may contain the other's text.
+///
+/// This is the property `librefang message --session-id` exists to give
+/// scripted callers. Before #7605 the CLI had no way to send the field, so N
+/// unrelated end-users of one public agent were interleaved into a single
+/// canonical transcript — visitor A's message sitting in the model context of
+/// visitor B's turn.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_message_explicit_session_ids_land_in_distinct_sessions() {
+    let (server, _llm) = start_test_server_with_stub_llm().await;
+    let agent_id = spawn_stub_agent(&server).await;
+
+    const SESSION_A: &str = "11111111-1111-4111-8111-111111111111";
+    const SESSION_B: &str = "22222222-2222-4222-8222-222222222222";
+
+    let (status_a, body_a) =
+        post_agent_message(&server, &agent_id, "visitor A secret", Some(SESSION_A)).await;
+    assert_eq!(
+        status_a, 200,
+        "session-pinned turn A must succeed: {body_a}"
+    );
+
+    let (status_b, body_b) =
+        post_agent_message(&server, &agent_id, "visitor B secret", Some(SESSION_B)).await;
+    assert_eq!(
+        status_b, 200,
+        "session-pinned turn B must succeed: {body_b}"
+    );
+
+    let (resolved_a, texts_a) = get_agent_session_texts(&server, &agent_id, Some(SESSION_A)).await;
+    let (resolved_b, texts_b) = get_agent_session_texts(&server, &agent_id, Some(SESSION_B)).await;
+
+    assert_eq!(
+        resolved_a, SESSION_A,
+        "session A must resolve to its own id"
+    );
+    assert_eq!(
+        resolved_b, SESSION_B,
+        "session B must resolve to its own id"
+    );
+
+    assert!(
+        texts_a.iter().any(|t| t.contains("visitor A secret")),
+        "session A must hold its own turn: {texts_a:?}"
+    );
+    assert!(
+        !texts_a.iter().any(|t| t.contains("visitor B secret")),
+        "session A must NOT hold session B's turn: {texts_a:?}"
+    );
+    assert!(
+        texts_b.iter().any(|t| t.contains("visitor B secret")),
+        "session B must hold its own turn: {texts_b:?}"
+    );
+    assert!(
+        !texts_b.iter().any(|t| t.contains("visitor A secret")),
+        "session B must NOT hold session A's turn: {texts_b:?}"
+    );
+}
+
+/// Two turns addressed with the *same* explicit `session_id` must accumulate
+/// in one history — the continuity half of the contract, which `--incognito`
+/// cannot provide because it suppresses session writes entirely.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_message_same_explicit_session_id_keeps_continuity() {
+    let (server, _llm) = start_test_server_with_stub_llm().await;
+    let agent_id = spawn_stub_agent(&server).await;
+
+    const SESSION: &str = "33333333-3333-4333-8333-333333333333";
+
+    for text in ["first turn text", "second turn text"] {
+        let (status, body) = post_agent_message(&server, &agent_id, text, Some(SESSION)).await;
+        assert_eq!(status, 200, "pinned turn must succeed: {body}");
+    }
+
+    let (resolved, texts) = get_agent_session_texts(&server, &agent_id, Some(SESSION)).await;
+    assert_eq!(resolved, SESSION);
+    assert!(
+        texts.iter().any(|t| t.contains("first turn text"))
+            && texts.iter().any(|t| t.contains("second turn text")),
+        "both turns must share the pinned session: {texts:?}"
+    );
+}
+
+/// Backward compatibility: omitting `session_id` must keep resolving the
+/// agent's canonical session, exactly as before the flag existed.
+///
+/// This is the assertion that protects existing users of `librefang message`
+/// and of the REST endpoint. It also pins that the canonical session stays
+/// clean of the pinned conversations: a turn addressed to an explicit session
+/// must not also be appended to the canonical one.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_message_without_session_id_keeps_canonical_session() {
+    let (server, _llm) = start_test_server_with_stub_llm().await;
+    let agent_id = spawn_stub_agent(&server).await;
+
+    const SESSION_PINNED: &str = "44444444-4444-4444-8444-444444444444";
+
+    // The canonical session id, as the daemon reports it before any traffic.
+    let (canonical_before, _) = get_agent_session_texts(&server, &agent_id, None).await;
+    assert_ne!(
+        canonical_before, SESSION_PINNED,
+        "the pinned id must not accidentally be the canonical one"
+    );
+
+    // A pinned turn, then an unpinned one.
+    let (status, body) =
+        post_agent_message(&server, &agent_id, "pinned only", Some(SESSION_PINNED)).await;
+    assert_eq!(status, 200, "pinned turn must succeed: {body}");
+
+    let (status, body) = post_agent_message(&server, &agent_id, "canonical only", None).await;
+    assert_eq!(status, 200, "unpinned turn must succeed: {body}");
+    // #5199: the handler echoes the resolved session id only when the caller
+    // did not pin one — which is how a CLI caller learns which session it got.
+    assert_eq!(
+        body["session_id"].as_str(),
+        Some(canonical_before.as_str()),
+        "unpinned turn must report the canonical session: {body}"
+    );
+
+    let (canonical_after, canonical_texts) =
+        get_agent_session_texts(&server, &agent_id, None).await;
+    assert_eq!(
+        canonical_after, canonical_before,
+        "an unpinned turn must not move the canonical session"
+    );
+    assert!(
+        canonical_texts.iter().any(|t| t.contains("canonical only")),
+        "canonical session must hold the unpinned turn: {canonical_texts:?}"
+    );
+    assert!(
+        !canonical_texts.iter().any(|t| t.contains("pinned only")),
+        "canonical session must NOT hold the pinned turn: {canonical_texts:?}"
+    );
+}
+
+/// A session id owned by a *different* agent must be refused, not read. The
+/// CLI cannot validate ownership locally, so this guard is what keeps a
+/// mistyped-but-well-formed UUID from surfacing another agent's history.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_message_rejects_session_id_owned_by_another_agent() {
+    let (server, _llm) = start_test_server_with_stub_llm().await;
+    let agent_a = spawn_stub_agent(&server).await;
+
+    const SESSION_A: &str = "55555555-5555-4555-8555-555555555555";
+    let (status, body) =
+        post_agent_message(&server, &agent_a, "agent A turn", Some(SESSION_A)).await;
+    assert_eq!(status, 200, "pinned turn must succeed: {body}");
+
+    // A second agent under the same daemon, addressing agent A's session.
+    const MANIFEST_B: &str = r#"
+name = "test-agent-session-b"
+version = "0.1.0"
+description = "Integration test agent"
+author = "test"
+module = "builtin:chat"
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "You are a test agent. Reply concisely."
+"#;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({ "manifest_toml": MANIFEST_B }))
+        .send()
+        .await
+        .expect("spawn B");
+    assert_eq!(resp.status().as_u16(), 201);
+    let body: serde_json::Value = resp.json().await.expect("spawn B body");
+    let agent_b = body["agent_id"].as_str().expect("agent_id").to_string();
+
+    let (status, body) =
+        post_agent_message(&server, &agent_b, "agent B probe", Some(SESSION_A)).await;
+    assert_ne!(
+        status, 200,
+        "agent B must not be able to drive agent A's session: {body}"
+    );
+
+    // Agent A's history is untouched by the rejected probe.
+    let (_, texts_a) = get_agent_session_texts(&server, &agent_a, Some(SESSION_A)).await;
+    assert!(
+        !texts_a.iter().any(|t| t.contains("agent B probe")),
+        "cross-agent probe must not append to the target session: {texts_a:?}"
+    );
+}
+
+/// A malformed `session_id` is a 400 with a stable machine code, not a 422 and
+/// not a silent fallback to the canonical session. The CLI rejects bad UUIDs
+/// before sending, so this covers every other caller of the endpoint.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_message_rejects_malformed_session_id() {
+    let (server, _llm) = start_test_server_with_stub_llm().await;
+    let agent_id = spawn_stub_agent(&server).await;
+
+    let (status, body) = post_agent_message(&server, &agent_id, "hello", Some("not-a-uuid")).await;
+    assert_eq!(status, 400, "malformed session_id must be a 400: {body}");
+    assert_eq!(
+        body["code"].as_str(),
+        Some("invalid_session_id"),
+        "error code must be stable for scripted callers: {body}"
     );
 }
