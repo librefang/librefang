@@ -444,6 +444,18 @@ impl LibreFangKernel {
             .is_ok()
         }
 
+        // #7743: `default_model.provider = "none"` is an explicit declaration that this kernel has no LLM driver.
+        // Every host-probing step below — the EveryAPI credential helper subprocess, the provider env-var scan, the Ollama TCP probe, the coding-agent-CLI-on-`PATH` scan — is gated on this flag being false, and so is every driver construction.
+        // The kernel ends up holding `StubDriver`, deterministically, on any machine.
+        // Without it the only way to ask for "no driver" was to name a provider that does not exist, which boot classifies as a misconfiguration to recover from: it falls through to auto-detection and wires up whatever the developer happens to have logged in.
+        let driverless = config.default_model.is_driverless();
+        if driverless {
+            info!(
+                "default_model.provider = \"{}\" — LLM driver resolution and host provider detection are disabled",
+                librefang_types::config::NO_LLM_PROVIDER
+            );
+        }
+
         let (everyapi_suppressed, early_everyapi_provider) = {
             let mut catalog = librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
             catalog.load_suppressed(
@@ -469,7 +481,10 @@ impl LibreFangKernel {
                 .join("providers")
                 .join("everyapi.toml")
                 .exists();
-        let everyapi_credential = if everyapi_suppressed || everyapi_explicit {
+        // `everyapi_credentials::resolve` shells out to the EveryAPI CLI, so an
+        // ungated call here spawns a subprocess on every boot — including every
+        // test kernel boot (#7743).
+        let everyapi_credential = if driverless || everyapi_suppressed || everyapi_explicit {
             None
         } else {
             crate::everyapi_credentials::resolve(false).ok()
@@ -609,7 +624,10 @@ impl LibreFangKernel {
         // For the API key, try: 1) explicit api_key_env from config, 2) provider_api_keys
         // mapping, 3) auth profiles, 4) convention {PROVIDER}_API_KEY. This ensures
         // custom providers (e.g. nvidia, azure) work without hardcoded env var names.
-        let default_api_key = if !config.default_model.api_key_env.is_empty() {
+        let default_api_key = if driverless {
+            // #7743: no driver means no credential — and no reason to read one out of the environment.
+            None
+        } else if !config.default_model.api_key_env.is_empty() {
             std::env::var(&config.default_model.api_key_env).ok()
         } else {
             // api_key_env not set — resolve using provider_api_keys / convention
@@ -659,7 +677,13 @@ impl LibreFangKernel {
             && !everyapi_suppressed
             && !everyapi_explicit
             && everyapi_credential.is_some();
-        let primary_result = if everyapi_suppressed && config.default_model.provider == "everyapi" {
+        let primary_result = if driverless {
+            // #7743: the stub IS the primary driver here, deliberately. Returning
+            // it as `Ok` rather than an error keeps boot off the "primary init
+            // failed — try auto-detect" recovery path below, which is precisely
+            // the path that resolves a live provider from the host.
+            Ok(Arc::new(StubDriver) as Arc<dyn LlmDriver>)
+        } else if everyapi_suppressed && config.default_model.provider == "everyapi" {
             Err(LlmError::MissingApiKey(
                 "EveryAPI provider is suppressed".to_string(),
             ))
@@ -684,7 +708,9 @@ impl LibreFangKernel {
             default_api_key.as_deref(),
         );
 
-        if rotation_specs.len() > 1 || (primary_result.is_err() && !rotation_specs.is_empty()) {
+        if !driverless
+            && (rotation_specs.len() > 1 || (primary_result.is_err() && !rotation_specs.is_empty()))
+        {
             let mut rotation_drivers: Vec<(Arc<dyn LlmDriver>, String)> = Vec::new();
 
             for spec in rotation_specs {
@@ -742,7 +768,8 @@ impl LibreFangKernel {
 
         // CLI profile rotation (Claude Code): create one driver per profile
         // directory, wrapped in TokenRotationDriver for automatic failover.
-        if driver_chain.is_empty()
+        if !driverless
+            && driver_chain.is_empty()
             && !config.default_model.cli_profile_dirs.is_empty()
             && matches!(
                 config.default_model.provider.as_str(),
@@ -882,78 +909,84 @@ impl LibreFangKernel {
                  fallthrough to this provider is a known residual"
             );
         }
-        for fb in &config.fallback_providers {
-            let (fb_provider, fb_model) = resolve_fallback_target(
-                &fb.provider,
-                &fb.model,
-                &config.default_model.provider,
-                &config.default_model.model,
-            );
-            if everyapi_suppressed && fb_provider == "everyapi" {
-                warn!("EveryAPI fallback provider is suppressed; skipping slot");
-                continue;
-            }
-            // Governance allowlist (issue #6459): never add a disallowed provider
-            // to the boot default_driver fallback chain. This driver seeds
-            // aux.primary and the CLI-profile / init-failure primary shortcuts, so
-            // an ungated slot here lets a failover reach a disallowed vendor.
-            // Fail-closed skip + WARN, mirroring the per-slot gate in resolve_driver.
-            if !config.providers.is_provider_allowed(&fb_provider) {
-                warn!(
-                    provider = %fb_provider,
-                    allowed = ?config.providers.allowed,
-                    "Fallback LLM provider blocked by org-wide allowlist; skipping slot"
+        // #7743: a driverless kernel gets no fallback slots either. A single live
+        // slot here would make `driver_chain` longer than one, wrap the stub primary
+        // in a `FallbackDriver`, and let a failover reach a real provider — which is
+        // the same host leak one layer out.
+        if !driverless {
+            for fb in &config.fallback_providers {
+                let (fb_provider, fb_model) = resolve_fallback_target(
+                    &fb.provider,
+                    &fb.model,
+                    &config.default_model.provider,
+                    &config.default_model.model,
                 );
-                continue;
-            }
-            let fb_api_key = if !fb.api_key_env.is_empty() {
-                std::env::var(&fb.api_key_env).ok()
-            } else {
-                // Resolve using provider_api_keys / convention for custom providers
-                let env_var = config.resolve_api_key_env(&fb_provider);
-                std::env::var(&env_var).ok()
-            };
-            let fb_config = DriverConfig {
-                provider: fb_provider.clone(),
-                api_key: fb_api_key,
-                base_url: fb
-                    .base_url
-                    .clone()
-                    .or_else(|| config.provider_urls.get(&fb_provider).cloned()),
-                vertex_ai: config.vertex_ai.clone(),
-                azure_openai: config.azure_openai.clone(),
-                skip_permissions: true,
-                message_timeout_secs: config.default_model.message_timeout_secs,
-                mcp_bridge: Some(mcp_bridge_cfg.clone()),
-                proxy_url: config.provider_proxy_urls.get(&fb_provider).cloned(),
-                request_timeout_secs: config
-                    .provider_request_timeout_secs
-                    .get(&fb_provider)
-                    .copied(),
-                emit_caller_trace_headers: config.telemetry.emit_caller_trace_headers,
-                max_retries: config
-                    .provider_max_retries
-                    .get(&fb_provider)
-                    .copied()
-                    .unwrap_or_else(|| DriverConfig::default().max_retries),
-            };
-            match drivers::create_driver(&fb_config) {
-                Ok(d) => {
-                    info!(
-                        provider = %fb_provider,
-                        model = %fb_model,
-                        "Fallback provider configured"
-                    );
-                    driver_chain.push(d.clone());
-                    model_chain.push((d, fb_model));
-                    provider_chain.push(fb_provider);
+                if everyapi_suppressed && fb_provider == "everyapi" {
+                    warn!("EveryAPI fallback provider is suppressed; skipping slot");
+                    continue;
                 }
-                Err(e) => {
+                // Governance allowlist (issue #6459): never add a disallowed provider
+                // to the boot default_driver fallback chain. This driver seeds
+                // aux.primary and the CLI-profile / init-failure primary shortcuts, so
+                // an ungated slot here lets a failover reach a disallowed vendor.
+                // Fail-closed skip + WARN, mirroring the per-slot gate in resolve_driver.
+                if !config.providers.is_provider_allowed(&fb_provider) {
                     warn!(
                         provider = %fb_provider,
-                        error = %e,
-                        "Fallback provider init failed — skipped"
+                        allowed = ?config.providers.allowed,
+                        "Fallback LLM provider blocked by org-wide allowlist; skipping slot"
                     );
+                    continue;
+                }
+                let fb_api_key = if !fb.api_key_env.is_empty() {
+                    std::env::var(&fb.api_key_env).ok()
+                } else {
+                    // Resolve using provider_api_keys / convention for custom providers
+                    let env_var = config.resolve_api_key_env(&fb_provider);
+                    std::env::var(&env_var).ok()
+                };
+                let fb_config = DriverConfig {
+                    provider: fb_provider.clone(),
+                    api_key: fb_api_key,
+                    base_url: fb
+                        .base_url
+                        .clone()
+                        .or_else(|| config.provider_urls.get(&fb_provider).cloned()),
+                    vertex_ai: config.vertex_ai.clone(),
+                    azure_openai: config.azure_openai.clone(),
+                    skip_permissions: true,
+                    message_timeout_secs: config.default_model.message_timeout_secs,
+                    mcp_bridge: Some(mcp_bridge_cfg.clone()),
+                    proxy_url: config.provider_proxy_urls.get(&fb_provider).cloned(),
+                    request_timeout_secs: config
+                        .provider_request_timeout_secs
+                        .get(&fb_provider)
+                        .copied(),
+                    emit_caller_trace_headers: config.telemetry.emit_caller_trace_headers,
+                    max_retries: config
+                        .provider_max_retries
+                        .get(&fb_provider)
+                        .copied()
+                        .unwrap_or_else(|| DriverConfig::default().max_retries),
+                };
+                match drivers::create_driver(&fb_config) {
+                    Ok(d) => {
+                        info!(
+                            provider = %fb_provider,
+                            model = %fb_model,
+                            "Fallback provider configured"
+                        );
+                        driver_chain.push(d.clone());
+                        model_chain.push((d, fb_model));
+                        provider_chain.push(fb_provider);
+                    }
+                    Err(e) => {
+                        warn!(
+                            provider = %fb_provider,
+                            error = %e,
+                            "Fallback provider init failed — skipped"
+                        );
+                    }
                 }
             }
         }
