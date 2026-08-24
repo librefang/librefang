@@ -4770,11 +4770,47 @@ impl SystemResource {
         .await
     }
 
+    pub async fn create_agent_type(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "templates"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent_template(&self, name: &str) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
+            &["api", "templates", name],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn update_agent_type(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "templates", name],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn delete_agent_type(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
             &["api", "templates", name],
             None,
             &[],

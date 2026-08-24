@@ -1664,8 +1664,20 @@ func (r *SystemResource) ListAgentTemplates() (interface{}, error) {
 	return r.client.request("GET", "/api/templates", nil, nil)
 }
 
+func (r *SystemResource) CreateAgentType(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/templates", data, nil)
+}
+
 func (r *SystemResource) GetAgentTemplate(name string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/templates/%s", name), nil, nil)
+}
+
+func (r *SystemResource) UpdateAgentType(name string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/templates/%s", name), data, nil)
+}
+
+func (r *SystemResource) DeleteAgentType(name string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/templates/%s", name), nil, nil)
 }
 
 func (r *SystemResource) GetAgentTemplateToml(name string) (interface{}, error) {
