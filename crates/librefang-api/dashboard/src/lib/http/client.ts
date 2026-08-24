@@ -136,6 +136,8 @@ export {
   getAgentTools,
   // per-agent skill assignment — read (#4917)
   getAgentSkills,
+  // per-agent MCP server assignment — read (#7713)
+  getAgentMcpServers,
   getAgentTemplateToml,
   // overview
   loadDashboardSnapshot,

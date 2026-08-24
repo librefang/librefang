@@ -50,6 +50,13 @@ impl Drop for Harness {
 }
 
 async fn boot(api_key: &str) -> Harness {
+    boot_with_mcp_servers(api_key, Vec::new()).await
+}
+
+async fn boot_with_mcp_servers(
+    api_key: &str,
+    mcp_servers: Vec<librefang_types::config::McpServerConfigEntry>,
+) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     // Seed the pinned registry fixture so the kernel boots with content, offline.
@@ -68,6 +75,7 @@ async fn boot(api_key: &str) -> Harness {
             extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         },
+        mcp_servers,
         ..KernelConfig::default()
     };
 
@@ -2324,5 +2332,217 @@ async fn test_patch_identity_empty_string_clears_a_single_field() {
         identity.emoji.as_deref(),
         Some("🦊"),
         "clearing one field must not disturb the others"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Declared-but-unavailable skills and MCP servers (#7713)
+//
+// A template can name a skill nobody installed or an MCP server that is not
+// reachable here. The declaration is kept verbatim, so without these fields
+// the operator's only signal is a step that quietly does nothing.
+// ---------------------------------------------------------------------------
+
+/// A skill named in the manifest but absent from the registry surfaces on both
+/// read routes, and clears once it is installed and the registry reloaded —
+/// with no re-spawn, so the agent id is unchanged throughout.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pending_skill_surfaces_then_clears_after_registry_reload() {
+    let h = boot(TEST_TOKEN).await;
+
+    let manifest_toml = r#"
+name = "pending-skills-agent"
+description = "declares a skill that is not installed here"
+skills = ["ghost-skill"]
+
+[model]
+provider = "ollama"
+model = "test-model"
+"#;
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            "/api/agents",
+            serde_json::json!({ "manifest_toml": manifest_toml }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "spawn must succeed; body={body:?}"
+    );
+    let id = body["agent_id"].as_str().expect("agent_id").to_string();
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["skills"],
+        serde_json::json!(["ghost-skill"]),
+        "the declaration must be retained verbatim"
+    );
+    assert_eq!(
+        body["pending_skills"],
+        serde_json::json!(["ghost-skill"]),
+        "an uninstalled skill must surface as pending on the detail payload"
+    );
+    assert_eq!(body["pending_mcp_servers"], serde_json::json!([]));
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/skills"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["pending"],
+        serde_json::json!(["ghost-skill"]),
+        "the skills route must list the same pending name"
+    );
+
+    // Install the skill on disk and reload the registry through the API.
+    let skill_dir = h.state.kernel.home_dir().join("skills").join("ghost-skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("skill.toml"),
+        r#"
+[skill]
+name = "ghost-skill"
+version = "0.1.0"
+description = "Test skill"
+
+[runtime]
+type = "python"
+entry = "main.py"
+
+[[tools.provided]]
+name = "ghost-skill_tool"
+description = "A test tool"
+input_schema = { type = "object" }
+"#,
+    )
+    .expect("write skill.toml");
+
+    let (status, _) = send(
+        h.app.clone(),
+        post_json("/api/skills/reload", serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "skills reload must succeed");
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["pending_skills"],
+        serde_json::json!([]),
+        "installing the skill must clear the pending state without a re-spawn"
+    );
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/skills"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["pending"], serde_json::json!([]));
+}
+
+/// The MCP half, end to end: a configured server with no live connection reads
+/// as pending on both routes, and clears once it actually connects.
+///
+/// The server is present in `effective_mcp_servers` for the whole test, so a
+/// pending set derived from the configured snapshot would report `[]` at the
+/// first assertion and this test would fail.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pending_mcp_server_surfaces_until_the_connection_is_live() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let backend = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&backend)
+        .await;
+
+    let server = librefang_types::config::McpServerConfigEntry {
+        name: "ghost-mcp".to_string(),
+        template_id: None,
+        transport: Some(librefang_types::config::McpTransportEntry::HttpCompat {
+            base_url: backend.uri(),
+            headers: Vec::new(),
+            tools: vec![librefang_types::config::HttpCompatToolConfig {
+                name: "probe".to_string(),
+                path: "/probe".to_string(),
+                ..Default::default()
+            }],
+        }),
+        timeout_secs: 5,
+        env: Vec::new(),
+        headers: Vec::new(),
+        oauth: None,
+        taint_scanning: true,
+        taint_policy: None,
+    };
+    let h = boot_with_mcp_servers(TEST_TOKEN, vec![server]).await;
+
+    let manifest_toml = r#"
+name = "pending-mcp-agent"
+description = "declares an MCP server that has not connected yet"
+mcp_servers = ["ghost-mcp"]
+
+[model]
+provider = "ollama"
+model = "test-model"
+"#;
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            "/api/agents",
+            serde_json::json!({ "manifest_toml": manifest_toml }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "spawn must succeed; body={body:?}"
+    );
+    let id = body["agent_id"].as_str().expect("agent_id").to_string();
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["mcp_servers"],
+        serde_json::json!(["ghost-mcp"]),
+        "the declaration must be retained verbatim"
+    );
+    assert_eq!(
+        body["pending_mcp_servers"],
+        serde_json::json!(["ghost-mcp"]),
+        "a configured server with no live connection must surface as pending"
+    );
+    assert_eq!(body["pending_skills"], serde_json::json!([]));
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/mcp_servers"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["pending"],
+        serde_json::json!(["ghost-mcp"]),
+        "the mcp_servers route must list the same pending name"
+    );
+    assert_eq!(
+        body["available"],
+        serde_json::json!([]),
+        "nothing is available while the server has not connected"
+    );
+
+    Arc::clone(&h.state.kernel).connect_mcp_servers().await;
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["pending_mcp_servers"],
+        serde_json::json!([]),
+        "a live connection must clear the pending state without a re-spawn"
+    );
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/mcp_servers"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["pending"], serde_json::json!([]));
+    assert_eq!(
+        body["available"],
+        serde_json::json!(["ghost-mcp"]),
+        "the connected server must now be in the available pool"
     );
 }

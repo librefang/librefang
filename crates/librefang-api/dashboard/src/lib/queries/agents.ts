@@ -14,6 +14,7 @@ import {
   listTools,
   getAgentTools,
   getAgentSkills,
+  getAgentMcpServers,
 } from "../http/client";
 import { agentKeys, toolKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
@@ -123,6 +124,12 @@ export const agentQueries = {
       queryFn: () => getAgentSkills(agentId),
       enabled: !!agentId,
     }),
+  agentMcpServers: (agentId: string) =>
+    queryOptions({
+      queryKey: agentKeys.mcpServers(agentId),
+      queryFn: () => getAgentMcpServers(agentId),
+      enabled: !!agentId,
+    }),
   toolsList: () =>
     queryOptions({
       queryKey: toolKeys.list(),
@@ -183,4 +190,8 @@ export function useAgentTools(agentId: string, options: QueryOverrides = {}) {
 
 export function useAgentSkills(agentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.agentSkills(agentId), options));
+}
+
+export function useAgentMcpServers(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.agentMcpServers(agentId), options));
 }

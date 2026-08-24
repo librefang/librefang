@@ -786,6 +786,8 @@
         "pattern_custom": "사용자 정의 이벤트 패턴(JSON 또는 문자열)"
       },
       "skill_meta": "설치됨",
+      "skill_pending": "대기 중",
+      "skill_pending_desc": "여기에 설치되지 않음 — 다음 스킬 리로드 시 활성화됩니다",
       "skill_remove": "{{name}} 제거",
       "live_conversation": "실시간 대화",
       "no_conversation": "아직 대화가 없습니다. 채팅을 열어 첫 번째 메시지를 보내세요.",
@@ -825,6 +827,8 @@
       "tools_click_assign": "할당하려면 클릭하세요.",
       "tools_mcp_granted": "mcp_servers로 허용됨",
       "tools_mcp_not_granted": "MCP 서버 탭에서 허용하세요",
+      "mcp_pending_title": "연결되지 않은 MCP 서버",
+      "mcp_pending_desc": "agent.toml에서 허용되었지만 연결이 없어 도구를 제공하지 않습니다. MCP 페이지에서 서버를 확인하세요. 연결되는 즉시 활성화됩니다.",
       "tools_mcp_readonly": "이 서버는 agent.toml의 mcp_servers를 통해 허용됩니다. 허용 범위는 MCP 서버 탭에서 변경하고, 개별 도구는 tool_allowlist와 tool_blocklist로 필터링합니다.",
       "tools_blocked": "차단 목록",
       "tools_reset_to_all": "모든 도구를 사용하려면 재설정하세요.",

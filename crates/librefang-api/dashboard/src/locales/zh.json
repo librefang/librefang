@@ -786,6 +786,8 @@
         "pattern_custom": "自定义事件模式（JSON 或字符串）"
       },
       "skill_meta": "已安装",
+      "skill_pending": "待激活",
+      "skill_pending_desc": "此处未安装 — 将在下次技能重载时激活",
       "skill_remove": "移除 {{name}}",
       "live_conversation": "实时对话",
       "no_conversation": "还没有对话 — 打开聊天发送第一条消息。",
@@ -825,6 +827,8 @@
       "tools_click_assign": "点击分配",
       "tools_mcp_granted": "通过 mcp_servers 授权",
       "tools_mcp_not_granted": "在 MCP 服务器标签页授权",
+      "mcp_pending_title": "未连接的 MCP 服务器",
+      "mcp_pending_desc": "已在 agent.toml 中授权，但没有实时连接，因此不提供任何工具。请在 MCP 页面检查该服务器；一旦连接成功即会生效。",
       "tools_mcp_readonly": "该服务器通过 agent.toml 中的 mcp_servers 授权。请在 MCP 服务器标签页更改授权；单个工具由 tool_allowlist 和 tool_blocklist 过滤。",
       "tools_blocked": "已加入屏蔽列表",
       "tools_reset_to_all": "重置为使用所有工具",

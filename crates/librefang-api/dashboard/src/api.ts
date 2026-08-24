@@ -1357,6 +1357,13 @@ export interface AgentDetail {
   tools_disabled?: boolean;
   /** `agent.toml: skills_disabled` — hard off switch for every skill. */
   skills_disabled?: boolean;
+  /** Declared skills the daemon's registry does not have (#7713).
+   *  The manifest keeps the name; it activates on the next skills reload. */
+  pending_skills?: string[];
+  /** Declared MCP servers with no live connection (#7713).
+   *  Derived from the live connection pool, not the configured server list, so a
+   *  server that is configured here and unreachable is listed rather than hidden. */
+  pending_mcp_servers?: string[];
   /** Human-readable schedule summary derived from manifest.schedule:
    *  'manual' for reactive, the cron expression, 'proactive', or
    *  'continuous · Ns'. Matches what `enrich_agent_json` puts on the
@@ -1573,10 +1580,37 @@ export interface AgentSkillsResponse {
   available: string[];
   mode: "all" | "allowlist" | "none";
   disabled: boolean;
+  /** Assigned names the registry does not have — declared but not installed (#7713). */
+  pending?: string[];
 }
 
 export async function getAgentSkills(agentId: string): Promise<AgentSkillsResponse> {
   return get<AgentSkillsResponse>(`/api/agents/${encodeURIComponent(agentId)}/skills`);
+}
+
+/**
+ * Per-agent MCP server assignment, returned by `GET /api/agents/{id}/mcp_servers`.
+ *
+ * - `assigned`: the manifest allowlist (`agent.toml: mcp_servers`).
+ * - `available`: server names the daemon currently has connected tools for.
+ * - `mode`: `"all"` (`["*"]`), `"allowlist"` (a pinned set), or `"none"` (empty list — no server is granted).
+ * - `pending`: assigned names with no live connection (#7713). A server that is
+ *   configured but unreachable appears here, which is the whole point: it is
+ *   indistinguishable from a healthy one in the configured server list.
+ */
+export interface AgentMcpServersResponse {
+  assigned: string[];
+  available: string[];
+  mode: "all" | "allowlist" | "none";
+  pending?: string[];
+}
+
+export async function getAgentMcpServers(
+  agentId: string,
+): Promise<AgentMcpServersResponse> {
+  return get<AgentMcpServersResponse>(
+    `/api/agents/${encodeURIComponent(agentId)}/mcp_servers`,
+  );
 }
 
 /**

@@ -56,7 +56,7 @@ pub mod workflow;
 
 pub use kernel::DeliveryTracker;
 pub use kernel::LibreFangKernel;
-pub use kernel::{SemanticMemoryAccess, SkillReloadOutcome};
+pub use kernel::{PendingSkillMcpDeclarations, SemanticMemoryAccess, SkillReloadOutcome};
 pub use kernel::{SYSTEM_CHANNEL_AUTONOMOUS, SYSTEM_CHANNEL_CRON, SYSTEM_CHANNEL_WEBUI};
 pub use kernel_api::KernelApi;
 

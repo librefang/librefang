@@ -786,6 +786,8 @@
         "pattern_custom": "Niestandardowy wzorzec zdarzenia (JSON lub ciąg znaków)"
       },
       "skill_meta": "zainstalowane",
+      "skill_pending": "oczekuje",
+      "skill_pending_desc": "nie zainstalowano tutaj — aktywuje się przy następnym przeładowaniu umiejętności",
       "skill_remove": "Usuń {{name}}",
       "live_conversation": "Rozmowa na żywo",
       "no_conversation": "Brak rozmów — otwórz czat, aby wysłać pierwszą wiadomość.",
@@ -825,6 +827,8 @@
       "tools_click_assign": "kliknij, aby przypisać",
       "tools_mcp_granted": "przyznane przez mcp_servers",
       "tools_mcp_not_granted": "przyznaj w zakładce serwerów MCP",
+      "mcp_pending_title": "Niepołączone serwery MCP",
+      "mcp_pending_desc": "Przyznane w agent.toml, ale bez aktywnego połączenia, więc nie dostarczają żadnych narzędzi. Sprawdź serwer na stronie MCP; uprawnienie zadziała, gdy tylko się połączy.",
       "tools_mcp_readonly": "Ten serwer jest przyznany przez mcp_servers w agent.toml. Zmień uprawnienia w zakładce serwerów MCP; poszczególne narzędzia są filtrowane przez tool_allowlist i tool_blocklist.",
       "tools_blocked": "na liście zablokowanych",
       "tools_reset_to_all": "Resetuj, aby używać wszystkich narzędzi",

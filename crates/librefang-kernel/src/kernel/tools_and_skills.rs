@@ -84,6 +84,22 @@ pub struct SkillReloadOutcome {
     pub count: usize,
 }
 
+/// Skills and MCP servers an agent's manifest declares that are not usable on this instance right now (#7713).
+///
+/// The declaration itself is always retained verbatim — spawn and persistence never drop it — so this type exists purely to make the resolution-time gap visible.
+/// Without it a template that names a skill nobody installed, or an MCP server that never connected, behaves exactly like a template that named nothing: the tools are simply absent and the operator has nothing to read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PendingSkillMcpDeclarations {
+    /// Declared skill names absent from the loaded skill registry.
+    ///
+    /// Allowlist mode only: an empty `skills` list means "every registry skill", so nothing can be pending there.
+    pub skills: Vec<String>,
+    /// Declared MCP server names that resolve to no usable server.
+    ///
+    /// Allowlist mode only: an empty list grants no servers and `["*"]` grants every connected one, so neither can be pending.
+    pub mcp_servers: Vec<String>,
+}
+
 impl LibreFangKernel {
     /// Get the list of tools available to an agent based on its manifest.
     ///
@@ -478,6 +494,130 @@ impl LibreFangKernel {
         );
 
         tools
+    }
+
+    /// Whether the manifest pins a specific MCP allowlist, the only mode in which a declaration can be pending.
+    ///
+    /// Mirrors `available_tools` step 3 exactly: MCP disabled contributes nothing, an empty list grants no servers (#5855), and `["*"]` grants every connected server.
+    fn mcp_allowlist_is_specific(manifest: &AgentManifest) -> bool {
+        !manifest.mcp_disabled
+            && !manifest.mcp_servers.is_empty()
+            && !manifest.mcp_servers.iter().any(|s| s == "*")
+    }
+
+    /// Declared names whose normalized form is absent from `available` (already normalized), sorted and deduplicated.
+    fn declared_not_in(declared: &[String], available: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = declared
+            .iter()
+            .filter(|name| {
+                let normalized = librefang_runtime::mcp::normalize_name(name);
+                !available.iter().any(|a| a == &normalized)
+            })
+            .cloned()
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Declared skills the loaded registry does not have.
+    fn pending_skill_declarations(&self, manifest: &AgentManifest) -> Vec<String> {
+        if manifest.skills_disabled || manifest.skills.is_empty() {
+            return Vec::new();
+        }
+        let registry = read_kernel_state(&self.skills.skill_registry, "skill_registry");
+        let installed = registry.skill_names();
+        let mut pending: Vec<String> = manifest
+            .skills
+            .iter()
+            .filter(|name| !installed.iter().any(|n| n == *name))
+            .cloned()
+            .collect();
+        pending.sort();
+        pending.dedup();
+        pending
+    }
+
+    /// Declared MCP servers with no live connection contributing tools.
+    ///
+    /// Liveness, not configuration, is the question. `connect_mcp_servers` writes the effective server list *before* it dials anything and leaves a server that failed to connect — or that has no transport at all — sitting in that list untouched, so `effective_mcp_servers` answers "did somebody write this down", not "can the agent call it".
+    /// A declared server that is configured and unreachable is precisely the case this surface exists to expose, and the configured snapshot reports it as available.
+    ///
+    /// So the set is derived from `mcp_connections`, whose members are the connections whose tools are actually in `mcp_tools`, minus any server the health monitor has explicitly marked `Error` — a subprocess that died silently leaves its `McpConnection` in the vec until the health loop or a reconnect replaces it (#2738).
+    /// The health check is a veto rather than a requirement, unlike `GET /api/mcp/status`'s `connected` flag: `report_ok` is a no-op when no record was registered for the server, and treating a missing record as "not connected" would report a perfectly live server as pending.
+    async fn unconnected_mcp_declarations(&self, manifest: &AgentManifest) -> Vec<String> {
+        if !Self::mcp_allowlist_is_specific(manifest) {
+            return Vec::new();
+        }
+        let live: Vec<String> = {
+            let connections = self.mcp.mcp_connections.lock().await;
+            connections
+                .iter()
+                .filter(|conn| {
+                    !matches!(
+                        self.mcp
+                            .mcp_health
+                            .get_health(conn.name())
+                            .map(|h| h.status),
+                        Some(librefang_types::mcp::McpStatus::Error(_))
+                    )
+                })
+                .map(|conn| librefang_runtime::mcp::normalize_name(conn.name()))
+                .collect()
+        };
+        Self::declared_not_in(&manifest.mcp_servers, &live)
+    }
+
+    /// Declared MCP servers absent from the effective server list — nobody has configured them on this instance at all.
+    ///
+    /// Deliberately weaker than [`Self::unconnected_mcp_declarations`], and used only for the spawn-time warning: `spawn_agent` runs inside `boot`, while MCP servers are dialed later from `start_background_agents`, so at spawn every declared server is legitimately unconnected and a liveness check there would fire on a healthy fresh install.
+    /// "Not configured" is true regardless of where boot has got to.
+    fn unconfigured_mcp_declarations(&self, manifest: &AgentManifest) -> Vec<String> {
+        if !Self::mcp_allowlist_is_specific(manifest) {
+            return Vec::new();
+        }
+        let configured: Vec<String> = self
+            .mcp
+            .effective_mcp_servers
+            .read()
+            .map(|servers| {
+                servers
+                    .iter()
+                    .map(|s| librefang_runtime::mcp::normalize_name(&s.name))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self::declared_not_in(&manifest.mcp_servers, &configured)
+    }
+
+    /// Skills and MCP servers this agent declares that it cannot use right now (#7713).
+    ///
+    /// Backs `pending_skills` / `pending_mcp_servers` on the agents API and the pending badges on the dashboard.
+    /// Nothing here is a permanent state: installing the skill and reloading the registry, or connecting the server, clears the entry on the next read without re-spawning the agent.
+    pub async fn pending_skill_and_mcp_declarations(
+        &self,
+        agent_id: AgentId,
+    ) -> PendingSkillMcpDeclarations {
+        let Some(entry) = self.agents.registry.get(agent_id) else {
+            return PendingSkillMcpDeclarations::default();
+        };
+        PendingSkillMcpDeclarations {
+            skills: self.pending_skill_declarations(&entry.manifest),
+            mcp_servers: self.unconnected_mcp_declarations(&entry.manifest).await,
+        }
+    }
+
+    /// The spawn-time view of the same gap: declarations that resolve to nothing configured on this instance.
+    ///
+    /// Synchronous because every spawn path is (`boot`, the CLI, the desktop app), and config-based rather than liveness-based for the reason spelled out on [`Self::unconfigured_mcp_declarations`].
+    pub(crate) fn unresolved_declarations_at_spawn(
+        &self,
+        manifest: &AgentManifest,
+    ) -> PendingSkillMcpDeclarations {
+        PendingSkillMcpDeclarations {
+            skills: self.pending_skill_declarations(manifest),
+            mcp_servers: self.unconfigured_mcp_declarations(manifest),
+        }
     }
 
     /// Collect prompt context from prompt-only skills for system prompt injection.
@@ -2122,5 +2262,298 @@ mod tests {
             pending.is_empty(),
             "no candidate should reach disk after a security block"
         );
+    }
+
+    // ── pending_skill_and_mcp_declarations (#7713) ───────────────────────
+
+    /// Boot a kernel in a temp home with the given MCP server entries preconfigured.
+    fn boot_pending_kernel(
+        servers: Vec<librefang_types::config::McpServerConfigEntry>,
+    ) -> (Arc<LibreFangKernel>, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        std::fs::create_dir_all(home.join("skills")).unwrap();
+        let mut cfg = KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            ..KernelConfig::default()
+        };
+        cfg.mcp_servers = servers;
+        let kernel = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
+        (Arc::new(kernel), dir)
+    }
+
+    /// Register an agent whose manifest declares the given skills / MCP servers.
+    fn spawn_pending_agent(
+        kernel: &LibreFangKernel,
+        name: &str,
+        skills: &[&str],
+        mcp_servers: &[&str],
+    ) -> AgentId {
+        kernel
+            .spawn_agent_inner(
+                AgentManifest {
+                    name: name.to_string(),
+                    description: "declared-but-unavailable fixture".to_string(),
+                    author: "test".to_string(),
+                    module: "builtin:chat".to_string(),
+                    skills: skills.iter().map(|s| s.to_string()).collect(),
+                    mcp_servers: mcp_servers.iter().map(|s| s.to_string()).collect(),
+                    ..Default::default()
+                },
+                None,
+                None,
+                None,
+            )
+            .expect("agent should spawn")
+    }
+
+    /// Write a tool-providing skill under `home/skills/<name>/` so the registry can load it.
+    fn install_tool_skill(home: &std::path::Path, name: &str) {
+        let skill_dir = home.join("skills").join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("skill.toml"),
+            format!(
+                r#"
+[skill]
+name = "{name}"
+version = "0.1.0"
+description = "Test skill"
+
+[runtime]
+type = "python"
+entry = "main.py"
+
+[[tools.provided]]
+name = "{name}_tool"
+description = "A test tool"
+input_schema = {{ type = "object" }}
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn http_compat_server(
+        name: &str,
+        base_url: String,
+    ) -> librefang_types::config::McpServerConfigEntry {
+        librefang_types::config::McpServerConfigEntry {
+            name: name.to_string(),
+            transport: Some(librefang_types::config::McpTransportEntry::HttpCompat {
+                base_url,
+                headers: Vec::new(),
+                tools: vec![librefang_types::config::HttpCompatToolConfig {
+                    name: "probe".to_string(),
+                    path: "/probe".to_string(),
+                    ..Default::default()
+                }],
+            }),
+            template_id: None,
+            timeout_secs: 5,
+            env: Vec::new(),
+            headers: Vec::new(),
+            oauth: None,
+            taint_scanning: true,
+            taint_policy: None,
+        }
+    }
+
+    /// A declared-but-uninstalled skill stays in the manifest, reads as pending, contributes no
+    /// tools — and activates after install + reload WITHOUT re-spawning the agent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pending_skill_clears_after_install_and_reload_without_respawn() {
+        let (kernel, dir) = boot_pending_kernel(Vec::new());
+        let agent_id = spawn_pending_agent(&kernel, "pending-skill-agent", &["ghost-skill"], &[]);
+
+        let entry = kernel
+            .agents
+            .registry
+            .get(agent_id)
+            .expect("registry entry");
+        assert_eq!(
+            entry.manifest.skills,
+            vec!["ghost-skill".to_string()],
+            "the declaration must be retained verbatim, not dropped"
+        );
+
+        let pending = kernel.pending_skill_and_mcp_declarations(agent_id).await;
+        assert_eq!(pending.skills, vec!["ghost-skill".to_string()]);
+        assert!(pending.mcp_servers.is_empty());
+        assert!(
+            !kernel
+                .available_tools(agent_id)
+                .iter()
+                .any(|t| t.name == "ghost-skill_tool"),
+            "an uninstalled skill must contribute no tools"
+        );
+
+        install_tool_skill(dir.path(), "ghost-skill");
+        kernel.reload_skills();
+
+        let pending = kernel.pending_skill_and_mcp_declarations(agent_id).await;
+        assert!(
+            pending.skills.is_empty(),
+            "installing the skill must clear the pending state"
+        );
+        assert!(
+            kernel
+                .available_tools(agent_id)
+                .iter()
+                .any(|t| t.name == "ghost-skill_tool"),
+            "the skill must activate on reload without re-spawning the agent"
+        );
+        kernel.shutdown();
+    }
+
+    /// The regression that made `effective_mcp_servers` the wrong source: a server that IS
+    /// configured but fails to connect is left in the effective list untouched, so the configured
+    /// snapshot reports it as available while it contributes nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn configured_mcp_server_that_fails_to_connect_stays_pending() {
+        let broken = librefang_types::config::McpServerConfigEntry {
+            name: "ghost-mcp".to_string(),
+            transport: Some(librefang_types::config::McpTransportEntry::Stdio {
+                command: "librefang-nonexistent-mcp-binary".to_string(),
+                args: Vec::new(),
+            }),
+            template_id: None,
+            timeout_secs: 5,
+            env: Vec::new(),
+            headers: Vec::new(),
+            oauth: None,
+            taint_scanning: true,
+            taint_policy: None,
+        };
+        let (kernel, _dir) = boot_pending_kernel(vec![broken]);
+        let agent_id = spawn_pending_agent(&kernel, "pending-mcp-agent", &[], &["ghost-mcp"]);
+
+        kernel.connect_mcp_servers().await;
+
+        assert!(
+            kernel
+                .mcp
+                .effective_mcp_servers
+                .read()
+                .unwrap()
+                .iter()
+                .any(|s| s.name == "ghost-mcp"),
+            "the failed server must remain in the configured snapshot — that is what makes it the wrong source"
+        );
+        assert!(
+            kernel.mcp.mcp_connections.lock().await.is_empty(),
+            "the connection must have failed for this test to mean anything"
+        );
+
+        let pending = kernel.pending_skill_and_mcp_declarations(agent_id).await;
+        assert_eq!(
+            pending.mcp_servers,
+            vec!["ghost-mcp".to_string()],
+            "a configured-but-unreachable server must read as pending"
+        );
+
+        // The spawn-time view answers the narrower question ("is this configured at all?") on
+        // purpose, because spawn runs before boot dials anything.
+        let entry = kernel
+            .agents
+            .registry
+            .get(agent_id)
+            .expect("registry entry");
+        assert!(
+            kernel
+                .unresolved_declarations_at_spawn(&entry.manifest)
+                .mcp_servers
+                .is_empty(),
+            "the spawn-time view must not flag a server that is configured"
+        );
+        kernel.shutdown();
+    }
+
+    /// Pending before the server is up, clear once it connects — no re-spawn in between.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pending_mcp_clears_once_the_server_connects() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let backend = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&backend)
+            .await;
+
+        let (kernel, _dir) =
+            boot_pending_kernel(vec![http_compat_server("live-mcp", backend.uri())]);
+        let agent_id = spawn_pending_agent(&kernel, "connecting-mcp-agent", &[], &["live-mcp"]);
+
+        let pending = kernel.pending_skill_and_mcp_declarations(agent_id).await;
+        assert_eq!(
+            pending.mcp_servers,
+            vec!["live-mcp".to_string()],
+            "configured but not yet dialed must read as pending"
+        );
+
+        kernel.connect_mcp_servers().await;
+        assert_eq!(
+            kernel.mcp.mcp_connections.lock().await.len(),
+            1,
+            "the fixture server must actually connect"
+        );
+
+        let pending = kernel.pending_skill_and_mcp_declarations(agent_id).await;
+        assert!(
+            pending.mcp_servers.is_empty(),
+            "a live connection must clear the pending state without a re-spawn"
+        );
+        kernel.shutdown();
+    }
+
+    /// Nothing is pending outside allowlist mode — the mode semantics mirror `available_tools`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pending_declarations_are_empty_outside_allowlist_mode() {
+        let (kernel, _dir) = boot_pending_kernel(Vec::new());
+
+        // Skills: no allowlist is "all skills", so no name can be pending.
+        let all_mode = spawn_pending_agent(&kernel, "all-mode", &[], &[]);
+        let pending = kernel.pending_skill_and_mcp_declarations(all_mode).await;
+        assert!(pending.skills.is_empty() && pending.mcp_servers.is_empty());
+
+        // MCP: `["*"]` grants every connected server.
+        let wildcard = spawn_pending_agent(&kernel, "wildcard-mcp", &[], &["*"]);
+        assert!(kernel
+            .pending_skill_and_mcp_declarations(wildcard)
+            .await
+            .mcp_servers
+            .is_empty());
+
+        // Both halves off by manifest flag.
+        let disabled = kernel
+            .spawn_agent_inner(
+                AgentManifest {
+                    name: "disabled-both".to_string(),
+                    description: "skills and MCP switched off".to_string(),
+                    author: "test".to_string(),
+                    module: "builtin:chat".to_string(),
+                    skills: vec!["ghost-skill".to_string()],
+                    mcp_servers: vec!["ghost-mcp".to_string()],
+                    skills_disabled: true,
+                    mcp_disabled: true,
+                    ..Default::default()
+                },
+                None,
+                None,
+                None,
+            )
+            .expect("agent should spawn");
+        let pending = kernel.pending_skill_and_mcp_declarations(disabled).await;
+        assert!(pending.skills.is_empty() && pending.mcp_servers.is_empty());
+
+        // An unknown agent id is not an error, it is simply empty.
+        let unknown = kernel
+            .pending_skill_and_mcp_declarations(agent(AGENT_A))
+            .await;
+        assert_eq!(unknown, PendingSkillMcpDeclarations::default());
+        kernel.shutdown();
     }
 }

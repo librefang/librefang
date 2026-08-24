@@ -370,13 +370,22 @@ pub async fn get_agent_skills(
         );
     }
     let available = read_agent_skills_registry(state.kernel.skill_registry_ref()).skill_names();
+    let mode = skill_assignment_mode(&entry.manifest);
+    // `ErrorTranslator` holds a `!Send` FluentBundle, so it must not be alive across the await below (#7713 added the first await to this handler).
+    drop(t);
+    let pending = state
+        .kernel
+        .pending_skill_and_mcp_declarations(agent_id)
+        .await;
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "assigned": entry.manifest.skills,
             "available": available,
-            "mode": skill_assignment_mode(&entry.manifest),
+            "mode": mode,
             "disabled": entry.manifest.skills_disabled,
+            // Declared but not installed — retained in the manifest, activates on the next skills reload (#7713).
+            "pending": pending.skills,
         })),
     )
 }
@@ -493,12 +502,20 @@ pub async fn get_agent_mcp_servers(
         }
     }
     let mode = mcp_servers_mode(&entry.manifest.mcp_servers);
+    // `ErrorTranslator` holds a `!Send` FluentBundle, so it must not be alive across the await below (#7713 added the first await to this handler).
+    drop(t);
+    let pending = state
+        .kernel
+        .pending_skill_and_mcp_declarations(agent_id)
+        .await;
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "assigned": entry.manifest.mcp_servers,
             "available": available,
             "mode": mode,
+            // Declared but with no live connection — configured-and-unreachable counts as pending (#7713).
+            "pending": pending.mcp_servers,
         })),
     )
 }
