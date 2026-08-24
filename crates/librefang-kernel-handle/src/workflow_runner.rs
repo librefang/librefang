@@ -294,24 +294,16 @@ pub trait WorkflowRunner: Send + Sync {
     /// Create and register a new workflow from an agent-authored spec (#6934).
     ///
     /// `spec` is the tool payload as received — `{ name, description, steps[], input_schema?, total_timeout_secs? }`.
-    /// It is passed through as JSON rather than as a typed struct because the workflow types live in
-    /// `librefang-kernel`, which the runtime cannot depend on; the kernel deserializes it into its own `Workflow`
-    /// so the wire shape can never drift from the struct the engine executes.
+    /// It is passed through as JSON rather than as a typed struct because the workflow types live in `librefang-kernel`, which the runtime cannot depend on; the kernel deserializes it into its own `Workflow` so the wire shape can never drift from the struct the engine executes.
     ///
-    /// Note that this is **not** the `POST /api/workflows` body: that endpoint has its own hand-written parser over
-    /// different field names (`agent_id` / `agent_name` / `prompt`), while this path deserializes the canonical
-    /// workflow shape (`agent` / `prompt_template`) — the same one `*.workflow.toml` files use.
+    /// Note that this is **not** the `POST /api/workflows` body: that endpoint has its own hand-written parser over different field names (`agent_id` / `agent_name` / `prompt`), while this path deserializes the canonical workflow shape (`agent` / `prompt_template`) — the same one `*.workflow.toml` files use.
     ///
-    /// Every check lives on the kernel side of this boundary — name legality, resource caps, `Workflow::validate()`,
-    /// and the uniqueness of the name — because the caller is an LLM and a JSON-schema constraint is advice it is
-    /// free to ignore.
+    /// Every check lives on the kernel side of this boundary — name legality, resource caps, `Workflow::validate()`, and the uniqueness of the name — because the caller is an LLM and a JSON-schema constraint is advice it is free to ignore.
     ///
-    /// `caller_agent_id` is recorded on the registration log line so a workflow an agent synthesized can be traced
-    /// back to the turn that produced it. It is a trace, not an authorization gate: no ownership model exists for
-    /// workflows yet, and inventing one here would put the policy in the wrong layer.
+    /// `caller_agent_id` is recorded on the registration log line so a workflow an agent synthesized can be traced back to the turn that produced it.
+    /// It is a trace, not an authorization gate: no ownership model exists for workflows yet, and inventing one here would put the policy in the wrong layer.
     ///
-    /// Errors: `InvalidInput` for a spec that cannot become a valid workflow, `Conflict` when the name is already
-    /// registered, `Unavailable` when no workflow engine is wired.
+    /// Errors: `InvalidInput` for a spec that cannot become a valid workflow, `Conflict` when the name is already registered, `Unavailable` when no workflow engine is wired.
     async fn create_workflow(
         &self,
         spec: &serde_json::Value,

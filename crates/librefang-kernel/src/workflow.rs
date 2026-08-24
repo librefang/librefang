@@ -1208,11 +1208,9 @@ pub struct DryRunStep {
     pub skip_reason: Option<String>,
 }
 
-/// Rejection returned by [`WorkflowEngine::register_unique_name`] when another registered workflow already carries
-/// the proposed name.
+/// Rejection returned by [`WorkflowEngine::register_unique_name`] when another registered workflow already carries the proposed name.
 ///
-/// Carries the id of the incumbent so callers can point the operator (or the agent that proposed the name) at the
-/// workflow they collided with instead of only telling them the name is taken.
+/// Carries the id of the incumbent so callers can point the operator (or the agent that proposed the name) at the workflow they collided with instead of only telling them the name is taken.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowNameTaken {
     /// The proposed name, as supplied — not lowercased.
@@ -1924,9 +1922,7 @@ impl WorkflowEngine {
     /// Register a new workflow definition and persist it to disk.
     ///
     /// Last writer wins on the *name*: this overwrites nothing keyed by id, but two workflows may end up sharing a name.
-    /// Callers that need the name to be unique must use [`Self::register_unique_name`] instead — checking
-    /// [`Self::list_workflows`] first and calling this afterwards is a check-then-act race, because the read lock is
-    /// released before the insert takes the write lock.
+    /// Callers that need the name to be unique must use [`Self::register_unique_name`] instead — checking [`Self::list_workflows`] first and calling this afterwards is a check-then-act race, because the read lock is released before the insert takes the write lock.
     pub async fn register(&self, workflow: Workflow) -> WorkflowId {
         let id = workflow.id;
         self.persist_definition(&workflow).await;
@@ -1937,19 +1933,12 @@ impl WorkflowEngine {
 
     /// Register a workflow only if no registered workflow already carries its name, as one atomic operation.
     ///
-    /// The name comparison and the insert happen under a single acquisition of the registry write lock, so two
-    /// concurrent callers proposing the same name cannot both observe it as free: whichever takes the lock second
-    /// sees the first one's entry and loses. This is the property `list_workflows()`-then-`register()` cannot
-    /// provide, and it matters because workflow lookup by name (`run_workflow`, `describe_workflow`) resolves to
-    /// whichever duplicate the `HashMap` iterator reaches first — a same-named second workflow silently shadows
-    /// the original for some fraction of calls.
+    /// The name comparison and the insert happen under a single acquisition of the registry write lock, so two concurrent callers proposing the same name cannot both observe it as free: whichever takes the lock second sees the first one's entry and loses.
+    /// This is the property `list_workflows()`-then-`register()` cannot provide, and it matters because workflow lookup by name (`run_workflow`, `describe_workflow`) resolves to whichever duplicate the `HashMap` iterator reaches first — a same-named second workflow silently shadows the original for some fraction of calls.
     ///
-    /// The comparison is case-insensitive to match that name-based lookup, which lowercases both sides; a
-    /// `Deploy` registered next to an existing `deploy` would be unreachable by name half the time.
+    /// The comparison is case-insensitive to match that name-based lookup, which lowercases both sides; a `Deploy` registered next to an existing `deploy` would be unreachable by name half the time.
     ///
-    /// Persistence deliberately runs *after* the lock is released. Holding the registry write lock across a
-    /// `tokio::fs` round-trip would block every reader on disk IO, and the reservation is already in force the
-    /// moment the entry is in the map.
+    /// Persistence deliberately runs *after* the lock is released. Holding the registry write lock across a `tokio::fs` round-trip would block every reader on disk IO, and the reservation is already in force the moment the entry is in the map.
     pub async fn register_unique_name(
         &self,
         workflow: Workflow,
@@ -6957,9 +6946,7 @@ mod tests {
         }
     }
 
-    /// Count registered workflows carrying `name`, compared the way name-based
-    /// lookup compares (`run_workflow` / `describe_workflow` both lowercase
-    /// each side before testing equality).
+    /// Count registered workflows carrying `name`, compared the way name-based lookup compares (`run_workflow` / `describe_workflow` both lowercase each side before testing equality).
     async fn count_named(engine: &WorkflowEngine, name: &str) -> usize {
         let wanted = name.to_lowercase();
         engine
@@ -6970,20 +6957,12 @@ mod tests {
             .count()
     }
 
-    /// Pins the bug [`WorkflowEngine::register_unique_name`] exists to close,
-    /// as the deterministic sequential replay of the interleaving two
-    /// concurrent callers can hit (#6934).
+    /// Pins the bug [`WorkflowEngine::register_unique_name`] exists to close, as the deterministic sequential replay of the interleaving two concurrent callers can hit (#6934).
     ///
-    /// `list_workflows()` takes the read lock and drops it before returning, so
-    /// a caller that decides a name is free on the strength of that snapshot is
-    /// deciding on stale information by the time it calls `register()`. Both
-    /// callers below see an empty registry, both conclude the name is theirs,
-    /// and the engine ends up holding two workflows named `deploy` — which
-    /// name-based lookup then resolves to whichever one the `HashMap` iterator
-    /// reaches first.
+    /// `list_workflows()` takes the read lock and drops it before returning, so a caller that decides a name is free on the strength of that snapshot is deciding on stale information by the time it calls `register()`.
+    /// Both callers below see an empty registry, both conclude the name is theirs, and the engine ends up holding two workflows named `deploy` — which name-based lookup then resolves to whichever one the `HashMap` iterator reaches first.
     ///
-    /// Written out in one task rather than raced across two, so the failure is
-    /// reproducible on every run instead of on unlucky scheduling.
+    /// Written out in one task rather than raced across two, so the failure is reproducible on every run instead of on unlucky scheduling.
     #[tokio::test]
     async fn check_then_register_admits_a_duplicate_name() {
         let engine = WorkflowEngine::new();
@@ -7006,15 +6985,11 @@ mod tests {
         );
     }
 
-    /// The regression for #6934: N callers racing on the same name must produce
-    /// exactly one registration.
+    /// The regression for #6934: N callers racing on the same name must produce exactly one registration.
     ///
-    /// Multi-threaded runtime with more tasks than worker threads so the
-    /// reservations genuinely interleave. Against a check-then-act
-    /// implementation (read lock, drop, write lock) this fails — several tasks
-    /// observe the empty registry before any of them inserts. Against the
-    /// single-write-lock reservation it cannot: the losers are looking at a map
-    /// that already contains the winner's entry.
+    /// Multi-threaded runtime with more tasks than worker threads so the reservations genuinely interleave.
+    /// Against a check-then-act implementation (read lock, drop, write lock) this fails — several tasks observe the empty registry before any of them inserts.
+    /// Against the single-write-lock reservation it cannot: the losers are looking at a map that already contains the winner's entry.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_register_unique_name_admits_exactly_one() {
         const CALLERS: usize = 32;
@@ -7058,8 +7033,7 @@ mod tests {
         );
     }
 
-    /// Every rejected caller must be told which workflow it collided with, so
-    /// the error can name the incumbent rather than only the taken name.
+    /// Every rejected caller must be told which workflow it collided with, so the error can name the incumbent rather than only the taken name.
     #[tokio::test]
     async fn register_unique_name_reports_the_incumbent_id() {
         let engine = WorkflowEngine::new();
@@ -7079,10 +7053,8 @@ mod tests {
         );
     }
 
-    /// Name lookup lowercases both sides, so `Deploy` and `deploy` are the same
-    /// name as far as `run_workflow` is concerned. Reserving one must therefore
-    /// reserve the other, or the second registration is unreachable by name for
-    /// an arbitrary fraction of calls.
+    /// Name lookup lowercases both sides, so `Deploy` and `deploy` are the same name as far as `run_workflow` is concerned.
+    /// Reserving one must therefore reserve the other, or the second registration is unreachable by name for an arbitrary fraction of calls.
     #[tokio::test]
     async fn register_unique_name_is_case_insensitive() {
         let engine = WorkflowEngine::new();
@@ -7102,13 +7074,9 @@ mod tests {
         assert_eq!(count_named(&engine, "deploy").await, 1);
     }
 
-    /// A workflow reserved through `register_unique_name` must be persisted the
-    /// same way `register` persists one — the reservation is not allowed to
-    /// come at the cost of surviving a restart.
+    /// A workflow reserved through `register_unique_name` must be persisted the same way `register` persists one — the reservation is not allowed to come at the cost of surviving a restart.
     ///
-    /// Multi-thread flavor, and `load_from_dir_sync` behind `block_in_place`,
-    /// for the same reason as `register_writes_atomically_and_cleans_tmp`
-    /// above: the loader takes `blocking_write` on the registry.
+    /// Multi-thread flavor, and `load_from_dir_sync` behind `block_in_place`, for the same reason as `register_writes_atomically_and_cleans_tmp` above: the loader takes `blocking_write` on the registry.
     #[tokio::test(flavor = "multi_thread")]
     async fn register_unique_name_persists_the_definition() {
         let tmp = tempfile::tempdir().unwrap();

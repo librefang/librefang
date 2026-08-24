@@ -38,9 +38,8 @@ fn placeholder_regex() -> &'static regex::Regex {
 
 /// Upper bound on the number of steps an agent may put in one workflow.
 ///
-/// `workflow_create` takes LLM-authored input, so every ceiling here is enforced rather than merely advertised — a
-/// JSON-schema `maxItems` is advice the calling model is free to ignore. The tool schema publishes the same numbers
-/// so a model is never told one ceiling and rejected at another.
+/// `workflow_create` takes LLM-authored input, so every ceiling here is enforced rather than merely advertised — a JSON-schema `maxItems` is advice the calling model is free to ignore.
+/// The tool schema publishes the same numbers so a model is never told one ceiling and rejected at another.
 pub(crate) const MAX_CREATED_WORKFLOW_STEPS: usize = 50;
 
 /// Upper bound on a single step's `timeout_secs` in an agent-created workflow (1 hour).
@@ -54,9 +53,7 @@ pub(crate) const MAX_CREATED_WORKFLOW_NAME_LEN: usize = 64;
 
 /// Does this workflow advertise input parameters an agent can discover?
 ///
-/// True when an explicit `[[input_schema]]` block was authored **or** any step's `prompt_template` carries a
-/// `{{var}}` placeholder — the auto-detect fallback, which mirrors `Workflow::to_template()` so the discovery
-/// surface reads the same for both authoring styles (#4982 — gap 2).
+/// True when an explicit `[[input_schema]]` block was authored **or** any step's `prompt_template` carries a `{{var}}` placeholder — the auto-detect fallback, which mirrors `Workflow::to_template()` so the discovery surface reads the same for both authoring styles (#4982 — gap 2).
 fn has_discoverable_input_schema(workflow: &crate::workflow::Workflow) -> bool {
     let has_explicit = workflow
         .input_schema
@@ -83,11 +80,8 @@ fn summarize_workflow(workflow: &crate::workflow::Workflow) -> kernel_handle::Wo
 
 /// The agent-authored payload `workflow_create` accepts.
 ///
-/// Deliberately a `Deserialize` over the canonical [`crate::workflow::WorkflowStep`] /
-/// [`crate::workflow::WorkflowInputParam`] types rather than a hand-written `Value` walk: the tool's accepted shape
-/// is then the struct the engine executes, by construction, and cannot drift from it the way the `POST
-/// /api/workflows` parser has. It also means an input parameter's `param_type` is the key the struct actually reads
-/// — the same spelling `workflow_describe` reports back — so a described workflow round-trips.
+/// Deliberately a `Deserialize` over the canonical [`crate::workflow::WorkflowStep`] / [`crate::workflow::WorkflowInputParam`] types rather than a hand-written `Value` walk: the tool's accepted shape is then the struct the engine executes, by construction, and cannot drift from it the way the `POST /api/workflows` parser has.
+/// It also means an input parameter's `param_type` is the key the struct actually reads — the same spelling `workflow_describe` reports back — so a described workflow round-trips.
 #[derive(serde::Deserialize)]
 struct WorkflowCreateSpec {
     name: String,
@@ -102,10 +96,9 @@ struct WorkflowCreateSpec {
 
 /// Validate an agent-supplied workflow name.
 ///
-/// `[A-Za-z0-9_-]`, 1–[`MAX_CREATED_WORKFLOW_NAME_LEN`] chars. The name never reaches the filesystem — persistence
-/// is keyed by id (`<uuid>.workflow.json`) — so this is not a traversal guard. It exists because the name is how
-/// agents address the workflow afterwards and it lands verbatim in prompt text: control characters, newlines and
-/// leading/trailing whitespace all produce a workflow that is awkward or impossible to name back.
+/// `[A-Za-z0-9_-]`, 1–[`MAX_CREATED_WORKFLOW_NAME_LEN`] chars.
+/// The name never reaches the filesystem — persistence is keyed by id (`<uuid>.workflow.json`) — so this is not a traversal guard.
+/// It exists because the name is how agents address the workflow afterwards and it lands verbatim in prompt text: control characters, newlines and leading/trailing whitespace all produce a workflow that is awkward or impossible to name back.
 fn validate_created_workflow_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.chars().count() > MAX_CREATED_WORKFLOW_NAME_LEN {
         return Err(format!(
@@ -126,11 +119,9 @@ fn validate_created_workflow_name(name: &str) -> Result<(), String> {
 
 /// Turn an agent-authored spec into a registrable [`crate::workflow::Workflow`], or explain why it cannot be one.
 ///
-/// Pulled out of the trait method as a free function so every rejection branch is unit-testable without booting a
-/// kernel — the branches are the whole security surface of an always-available, LLM-driven creation tool.
+/// Pulled out of the trait method as a free function so every rejection branch is unit-testable without booting a kernel — the branches are the whole security surface of an always-available, LLM-driven creation tool.
 ///
-/// The returned `Err` is relayed to the model verbatim, so each one names the offending field and the limit it
-/// broke; a model that cannot see which ceiling it hit retries the same payload.
+/// The returned `Err` is relayed to the model verbatim, so each one names the offending field and the limit it broke; a model that cannot see which ceiling it hit retries the same payload.
 fn build_created_workflow(spec: &serde_json::Value) -> Result<crate::workflow::Workflow, String> {
     use crate::workflow::{Workflow, WorkflowId};
 
@@ -167,8 +158,7 @@ fn build_created_workflow(spec: &serde_json::Value) -> Result<crate::workflow::W
             ));
         }
     }
-    // Dependencies are checked in a second pass so a step may depend on one declared after it — DAG execution is
-    // topological, not positional, and rejecting a forward reference would forbid a legal workflow.
+    // Dependencies are checked in a second pass so a step may depend on one declared after it — DAG execution is topological, not positional, and rejecting a forward reference would forbid a legal workflow.
     for step in &spec.steps {
         for dep in &step.depends_on {
             if !seen.contains(dep.as_str()) {
@@ -199,8 +189,7 @@ fn build_created_workflow(spec: &serde_json::Value) -> Result<crate::workflow::W
         input_schema: spec.input_schema,
     };
 
-    // The same semantic pass `POST /api/workflows` and the canvas run: empty Transform code, unparseable Tera
-    // templates, zero / over-cap Wait durations, operator nodes wired into a DAG.
+    // The same semantic pass `POST /api/workflows` and the canvas run: empty Transform code, unparseable Tera templates, zero / over-cap Wait durations, operator nodes wired into a DAG.
     let errs = workflow.validate();
     if !errs.is_empty() {
         let detail = errs
@@ -652,9 +641,7 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
         let summary = summarize_workflow(&workflow);
         let name = workflow.name.clone();
 
-        // `register_unique_name`, not `list_workflows()`-then-`register()`: the name check and the insert have to be
-        // one operation or two agents creating the same name concurrently both win, and name-based lookup then
-        // resolves to whichever duplicate the registry iterator reaches first (#6934).
+        // `register_unique_name`, not `list_workflows()`-then-`register()`: the name check and the insert have to be one operation or two agents creating the same name concurrently both win, and name-based lookup then resolves to whichever duplicate the registry iterator reaches first (#6934).
         let id = self
             .workflows
             .engine
@@ -662,9 +649,8 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
             .await
             .map_err(|taken| KernelOpError::Conflict(taken.to_string()))?;
 
-        // Provenance trace, not an authorization gate: workflows have no ownership model, and an agent-authored one
-        // is executable by any agent the moment it is registered. Logging who asked for it is what makes that
-        // reviewable after the fact.
+        // Provenance trace, not an authorization gate: workflows have no ownership model, and an agent-authored one is executable by any agent the moment it is registered.
+        // Logging who asked for it is what makes that reviewable after the fact.
         tracing::info!(
             workflow_id = %id,
             workflow_name = %name,
@@ -702,14 +688,7 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
 mod tests {
     use super::*;
 
-    /// Pins the operator-facing timeout text format. Operators scrape
-    /// for `"workflow run timed out after"` and pull the seconds field;
-    /// any drift in this string is a breaking change to the contract
-    /// the PR explicitly locks in. If you need to change the format,
-    /// announce it in the changelog under a breaking-change bullet and
-    /// update this assertion.
-    /// A minimal spec that `build_created_workflow` accepts, as JSON, so each
-    /// test below can mutate exactly the field it is about.
+    /// A minimal spec that `build_created_workflow` accepts, as JSON, so each test below can mutate exactly the field it is about.
     fn spec(steps: serde_json::Value) -> serde_json::Value {
         serde_json::json!({
             "name": "nightly-report",
@@ -736,8 +715,7 @@ mod tests {
             &wf.steps[0].agent,
             crate::workflow::StepAgent::ByName { name } if name == "writer"
         ));
-        // Serde defaults fill the fields the model left out, rather than a
-        // hand-written parser inventing its own.
+        // Serde defaults fill the fields the model left out, rather than a hand-written parser inventing its own.
         assert_eq!(wf.steps[0].timeout_secs, 120);
         assert!(matches!(
             wf.steps[0].mode,
@@ -745,10 +723,7 @@ mod tests {
         ));
     }
 
-    /// The input-parameter key is `param_type` — the spelling
-    /// `WorkflowInputParam` deserializes and `workflow_describe` reports — so a
-    /// described workflow round-trips back through creation with its declared
-    /// types intact.
+    /// The input-parameter key is `param_type` — the spelling `WorkflowInputParam` deserializes and `workflow_describe` reports — so a described workflow round-trips back through creation with its declared types intact.
     #[test]
     fn build_created_workflow_preserves_declared_param_types() {
         let mut s = spec(one_step());
@@ -779,9 +754,8 @@ mod tests {
         assert!(err.contains("not a valid workflow definition"), "{err}");
     }
 
-    /// The ceiling is inclusive: exactly `MAX_CREATED_WORKFLOW_STEPS` steps is
-    /// a legal workflow, one more is not. Pinned in one test so a future edit
-    /// cannot quietly move the boundary by one.
+    /// The ceiling is inclusive: exactly `MAX_CREATED_WORKFLOW_STEPS` steps is a legal workflow, one more is not.
+    /// Pinned in one test so a future edit cannot quietly move the boundary by one.
     #[test]
     fn build_created_workflow_caps_the_step_count() {
         let steps = |n: usize| {
@@ -823,9 +797,7 @@ mod tests {
         assert!(err.contains("per-workflow ceiling"), "{err}");
     }
 
-    /// Step names address dependencies, so a duplicate makes `depends_on`
-    /// ambiguous and an unknown target makes it unsatisfiable — both produce a
-    /// workflow that cannot run, and both are cheap to catch at creation.
+    /// Step names address dependencies, so a duplicate makes `depends_on` ambiguous and an unknown target makes it unsatisfiable — both produce a workflow that cannot run, and both are cheap to catch at creation.
     #[test]
     fn build_created_workflow_rejects_broken_step_dependencies() {
         let dup = spec(serde_json::json!([
@@ -845,8 +817,7 @@ mod tests {
         assert!(err.contains("not a step in this workflow"), "{err}");
     }
 
-    /// A dependency on a step declared later is legal — DAG execution is
-    /// topological, not positional.
+    /// A dependency on a step declared later is legal — DAG execution is topological, not positional.
     #[test]
     fn build_created_workflow_allows_a_forward_dependency() {
         let s = spec(serde_json::json!([
@@ -870,9 +841,7 @@ mod tests {
         );
     }
 
-    /// The semantic pass `POST /api/workflows` runs must run here too — an
-    /// agent-authored operator node is exactly as unrunnable as a hand-written
-    /// one.
+    /// The semantic pass `POST /api/workflows` runs must run here too — an agent-authored operator node is exactly as unrunnable as a hand-written one.
     #[test]
     fn build_created_workflow_runs_the_shared_semantic_validation() {
         let s = spec(serde_json::json!([{
@@ -885,12 +854,9 @@ mod tests {
         assert!(err.contains("wait.duration_secs"), "{err}");
     }
 
-    /// The ceilings the tool schema advertises must be the ceilings this module
-    /// enforces.
+    /// The ceilings the tool schema advertises must be the ceilings this module enforces.
     ///
-    /// They live in two crates — the schema in `librefang-runtime`, the limits
-    /// here — so nothing but a test keeps them in step, and a model told one
-    /// number and rejected at another burns a turn discovering the difference.
+    /// They live in two crates — the schema in `librefang-runtime`, the limits here — so nothing but a test keeps them in step, and a model told one number and rejected at another burns a turn discovering the difference.
     /// The kernel is the only place both are visible.
     #[test]
     fn the_tool_schema_advertises_the_ceilings_this_module_enforces() {
@@ -926,6 +892,9 @@ mod tests {
         );
     }
 
+    /// Pins the operator-facing timeout text format.
+    /// Operators scrape for `"workflow run timed out after"` and pull the seconds field; any drift in this string is a breaking change to the contract the PR explicitly locks in.
+    /// If you need to change the format, announce it in the changelog under a breaking-change bullet and update this assertion.
     #[test]
     fn workflow_timeout_text_format_is_stable() {
         assert_eq!(

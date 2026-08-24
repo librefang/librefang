@@ -1,10 +1,7 @@
-// Integration tests for the workflow_start, workflow_cancel and workflow_create tools
-// (#4844 section E, #6934).
+// Integration tests for the workflow_start, workflow_cancel and workflow_create tools (#4844 section E, #6934).
 //
 // Uses the same hand-rolled stub kernel pattern as tool_runner_workflow_readonly.rs.
-// The write-side stub extends WorkflowRunner with start_workflow_async,
-// cancel_workflow_run and create_workflow implementations driven by per-test
-// configuration.
+// The write-side stub extends WorkflowRunner with start_workflow_async, cancel_workflow_run and create_workflow implementations driven by per-test configuration.
 
 use async_trait::async_trait;
 use librefang_kernel_handle::prelude::*;
@@ -45,9 +42,7 @@ struct WorkflowWriteStubKernel {
     start_run_id: Option<String>,
     cancel_result: StubCancelResult,
     create_result: StubCreateResult,
-    /// The `(spec, caller_agent_id)` pair the last create_workflow call received,
-    /// so the tests can assert what actually crossed the trait boundary rather
-    /// than only what came back.
+    /// The `(spec, caller_agent_id)` pair the last create_workflow call received, so the tests can assert what actually crossed the trait boundary rather than only what came back.
     create_seen: Mutex<Option<(serde_json::Value, Option<String>)>>,
 }
 
@@ -618,8 +613,8 @@ async fn workflow_cancel_missing_run_id_returns_error() {
 // workflow_create tests (#6934)
 // ---------------------------------------------------------------------------
 
-/// A well-formed creation payload. Individual tests mutate one field of it so
-/// the thing under test is the only difference from a known-good spec.
+/// A well-formed creation payload.
+/// Individual tests mutate one field of it so the thing under test is the only difference from a known-good spec.
 fn create_payload() -> serde_json::Value {
     json!({
         "name": "nightly-report",
@@ -651,9 +646,7 @@ fn workflow_create_appears_in_builtin_definitions() {
         vec!["name", "steps"],
         "name and steps are the only fields a workflow cannot be built without"
     );
-    // A step needs somewhere to run and something to say — the schema must say so,
-    // because the kernel rejects a step missing either and the model needs to know
-    // before it spends a turn on the call.
+    // A step needs somewhere to run and something to say — the schema must say so, because the kernel rejects a step missing either and the model needs to know before it spends a turn on the call.
     let step_required: Vec<&str> = def.input_schema["properties"]["steps"]["items"]["required"]
         .as_array()
         .expect("step required array")
@@ -733,9 +726,7 @@ async fn workflow_create_missing_or_malformed_steps_returns_error() {
         result.content
     );
 
-    // A single step object instead of an array is the shape a model most often
-    // gets wrong, and it must be named as such rather than reaching the kernel
-    // as an opaque deserialization failure.
+    // A single step object instead of an array is the shape a model most often gets wrong, and it must be named as such rather than reaching the kernel as an opaque deserialization failure.
     let mut payload = create_payload();
     payload["steps"] = json!({ "name": "write", "agent": "writer", "prompt_template": "go" });
     let result = execute_tool_raw("t1", "workflow_create", &payload, &ctx).await;
@@ -747,9 +738,7 @@ async fn workflow_create_missing_or_malformed_steps_returns_error() {
     );
 }
 
-/// A name collision is something the model can fix on its next turn — by
-/// picking another name — so the rejection has to arrive as a readable reason
-/// against the `name` field, not as an opaque upstream failure.
+/// A name collision is something the model can fix on its next turn — by picking another name — so the rejection has to arrive as a readable reason against the `name` field, not as an opaque upstream failure.
 #[tokio::test]
 async fn workflow_create_relays_a_name_collision() {
     let kernel: Arc<dyn KernelHandle> = Arc::new(WorkflowWriteStubKernel::with_create(
@@ -771,8 +760,7 @@ async fn workflow_create_relays_a_name_collision() {
     );
 }
 
-/// Same for a spec the kernel refused: the reason names the field and the limit,
-/// and a model that cannot see which one it broke retries the same payload.
+/// Same for a spec the kernel refused: the reason names the field and the limit, and a model that cannot see which one it broke retries the same payload.
 #[tokio::test]
 async fn workflow_create_relays_a_validation_failure() {
     let kernel: Arc<dyn KernelHandle> = Arc::new(WorkflowWriteStubKernel::with_create(
