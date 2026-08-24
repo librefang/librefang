@@ -237,6 +237,10 @@ api-error-backup-finalize-failed = Не вдалося фіналізувати 
 api-error-backup-open-failed = Не вдалося відкрити бекап: { $error }
 api-error-backup-invalid-archive = Недійсний архів бекапу: { $error }
 api-error-backup-delete-failed = Не вдалося видалити бекап: { $error }
+api-error-backup-invalid-keep-config = Недійсне 'keep_config' — має бути логічним значенням
+api-error-backup-invalid-components = Недійсне 'components' — має бути масивом назв компонентів
+api-error-backup-empty-components = 'components' не може бути порожнім — пропустіть це поле, щоб відновити всі компоненти
+api-error-backup-unknown-component = Невідомий компонент бекапу '{ $component }'. Дійсні компоненти: { $valid }
 
 # Schedule errors
 api-error-schedule-not-found = Розклад не знайдено

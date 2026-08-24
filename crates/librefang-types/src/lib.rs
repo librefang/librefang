@@ -26,6 +26,7 @@ pub mod memory;
 pub mod message;
 pub mod model_catalog;
 pub mod oauth;
+pub mod registry_paths;
 pub mod registry_schema;
 pub mod scheduler;
 pub mod serde_compat;

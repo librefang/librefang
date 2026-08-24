@@ -660,6 +660,7 @@ pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
                 tracing::info!(
                     adapter = entry.name,
                     fields = schema.fields.len(),
+                    sdk_version = schema.sdk_version.as_deref().unwrap_or("unreported"),
                     "sidecar schema cached"
                 );
                 write_cache_recover(schema_cache(), "schema").insert(entry.name, schema);
@@ -684,6 +685,9 @@ pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
                                 options: None,
                             })
                             .collect(),
+                        // The fallback exists precisely because `--describe`
+                        // failed, so no adapter reported a version here.
+                        sdk_version: None,
                     };
                     tracing::warn!(
                         adapter = entry.name,
@@ -802,6 +806,17 @@ fn sidecar_discovery_rows(
                  (secrets) and ~/.librefang/config.toml (non-secrets)",
             ],
         });
+        // The SDK version the adapter reported on `--describe`, so an operator
+        // can see which `librefang-sdk` is actually winning without shelling
+        // into the box (#7140: a March SDK served a August daemon for months).
+        // Omitted rather than nulled when the adapter did not report one — an
+        // SDK too old to carry the field, or a failed describe.
+        if let Some(version) = cache_guard
+            .get(entry.name)
+            .and_then(|s| s.sdk_version.as_deref())
+        {
+            row["sdk_version"] = serde_json::json!(version);
+        }
         // When `--describe` failed at boot and there is no static fallback, `fields` is empty and the configure form would be a blank drawer.
         // Surface the cached failure reason (typically the `pip install librefang-sdk` install hint) so the dashboard can explain why instead of showing nothing.
         if let Some(reason) = err_guard.get(entry.name) {
@@ -1787,12 +1802,17 @@ mod schema_error_discovery_tests {
             wechat["schema_error"], HINT,
             "the cached failure reason must ride along as schema_error"
         );
+        assert!(
+            wechat.get("sdk_version").is_none(),
+            "a failed describe reported no SDK version, so the key must be absent rather than null"
+        );
 
         // --- schema cached: no schema_error, fields populated ---
         let schema = SidecarSchema {
             name: "wechat".to_string(),
             display_name: "WeChat".to_string(),
             description: "test".to_string(),
+            sdk_version: Some("2026.8.19".to_string()),
             fields: vec![SidecarSchemaField {
                 key: "WECHAT_BOT_TOKEN".to_string(),
                 label: "Bot token".to_string(),
@@ -1818,6 +1838,10 @@ mod schema_error_discovery_tests {
         assert!(
             wechat.get("schema_error").is_none(),
             "a usable schema must not carry a schema_error"
+        );
+        assert_eq!(
+            wechat["sdk_version"], "2026.8.19",
+            "the adapter's reported SDK version must reach the discovery row"
         );
 
         // Reset shared caches so we don't leak state into other tests.
@@ -1884,6 +1908,7 @@ mod sidecar_configuration_write_tests {
             name: TEST_ENTRY.name.to_string(),
             display_name: TEST_ENTRY.display_name.to_string(),
             description: TEST_ENTRY.description.to_string(),
+            sdk_version: Some("2026.8.19".to_string()),
             fields: vec![
                 SidecarSchemaField {
                     key: "TEST_TOKEN".to_string(),

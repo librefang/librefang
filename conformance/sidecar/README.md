@@ -44,12 +44,13 @@ sides and compare values.
 The corpus is the contract. Changing it is changing the protocol:
 
 1. Add/modify the `.json` frame here.
-2. Extend **both** conformance tests
-   (`crates/librefang-channels/tests/sidecar_protocol_conformance.rs`
-   and `sdk/python/tests/test_sidecar_conformance.py`) — a corpus
-   entry with no assertion on both sides is not conformance.
-3. If the change is not additive-optional, bump the protocol version
-   and update `docs/architecture/sidecar-protocol.md`.
+2. Extend **every** conformance suite — `crates/librefang-channels/tests/sidecar_protocol_conformance.rs`, `sdk/python/tests/test_sidecar_conformance.py`, and `sdk/rust/librefang-sidecar/tests/conformance.rs`.
+   A corpus entry with no assertion on both sides of the wire is not conformance.
+3. If the change is not additive-optional, bump `librefang_channels::sidecar::SIDECAR_PROTOCOL_VERSION` — the source of truth — and then every file `crates/librefang-channels/tests/sidecar_version_contract.rs` names, which is what fails if you miss one.
+
+Build a frame the way an adapter builds it, not by passing the corpus's own values in by hand.
+`events/ready_full.json` used to be reproduced by calling the `ready()` builder with `protocol_version=1` supplied by the test, which is why nobody noticed for months that the SDK default was `None` and that every real `ready` frame carried `null` (#7140).
+Going through `SidecarAdapter.ready_event()` puts the declarative defaults every adapter inherits under the assertion.
 
 See `docs/architecture/sidecar-protocol.md` for the versioned spec,
 the frozen-vs-provisional policy, and `protocol_version` semantics.

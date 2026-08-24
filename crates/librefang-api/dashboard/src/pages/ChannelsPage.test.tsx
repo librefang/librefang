@@ -368,6 +368,65 @@ describe("ChannelsPage", () => {
     ).toBeDisabled();
   });
 
+  it("shows the SDK version the sidecar adapter reported, and nothing when it reported none", () => {
+    // #7140: a Telegram sidecar ran a four-month-old librefang-sdk against a
+    // current daemon and the only way to find that out was shelling into the
+    // host. The configure drawer is where an operator is already looking at
+    // that adapter.
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({ name: "slack" }),
+        makeChannel({
+          name: "telegram",
+          display_name: "Telegram",
+          configured: false,
+          sdk_version: "2026.3.2201",
+          fields: [
+            {
+              key: "TELEGRAM_BOT_TOKEN",
+              label: "Bot token",
+              type: "secret",
+              required: true,
+            },
+          ],
+        }),
+        makeChannel({
+          name: "wechat",
+          display_name: "WeChat",
+          configured: false,
+          // An SDK too old to report a version is exactly the deployment this
+          // line exists to expose, so it must read as "unknown" — an absent
+          // line — rather than borrowing another adapter's number.
+          fields: [
+            {
+              key: "WECHAT_BOT_TOKEN",
+              label: "Bot token",
+              type: "secret",
+              required: true,
+            },
+          ],
+        }),
+      ]),
+    );
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /channels\.add/ }));
+    let drawer = screen.getByTestId("drawer-slot");
+    fireEvent.click(within(drawer).getByText("Telegram"));
+    drawer = screen.getByTestId("drawer-slot");
+    expect(within(drawer).getByTestId("sidecar-sdk-version")).toHaveTextContent(
+      "2026.3.2201",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /common\.cancel/ }));
+    fireEvent.click(screen.getByRole("button", { name: /channels\.add/ }));
+    drawer = screen.getByTestId("drawer-slot");
+    fireEvent.click(within(drawer).getByText("WeChat"));
+    drawer = screen.getByTestId("drawer-slot");
+    expect(
+      within(drawer).queryByTestId("sidecar-sdk-version"),
+    ).not.toBeInTheDocument();
+  });
+
   it("forwards the schema-driven values to useSaveSidecarConfig on Save", () => {
     const { save } = setMutationDefaults();
     useChannelsMock.mockReturnValue(

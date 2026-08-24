@@ -237,6 +237,10 @@ api-error-backup-finalize-failed = Nie udało się sfinalizować kopii zapasowej
 api-error-backup-open-failed = Nie udało się otworzyć kopii zapasowej: { $error }
 api-error-backup-invalid-archive = Nieprawidłowe archiwum kopii zapasowej: { $error }
 api-error-backup-delete-failed = Nie udało się usunąć kopii zapasowej: { $error }
+api-error-backup-invalid-keep-config = Nieprawidłowe 'keep_config' — musi być wartością logiczną
+api-error-backup-invalid-components = Nieprawidłowe 'components' — musi być tablicą nazw komponentów
+api-error-backup-empty-components = 'components' nie może być puste — pomiń to pole, aby przywrócić wszystkie komponenty
+api-error-backup-unknown-component = Nieznany komponent kopii zapasowej '{ $component }'. Prawidłowe komponenty: { $valid }
 
 # Schedule errors
 api-error-schedule-not-found = Nie znaleziono harmonogramu

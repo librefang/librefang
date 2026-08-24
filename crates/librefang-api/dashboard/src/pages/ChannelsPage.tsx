@@ -649,6 +649,17 @@ function SidecarForm({
             </div>
           </div>
         )}
+        {channel.sdk_version && (
+          <p
+            data-testid="sidecar-sdk-version"
+            className="text-[11px] font-mono text-text-dim/80"
+          >
+            {t("channels.sidecar_sdk_version", {
+              defaultValue: "Adapter SDK",
+            })}{" "}
+            {channel.sdk_version}
+          </p>
+        )}
         {visible.map((f) => (
           <div key={f.key} className="space-y-1">
             <label className="text-xs font-bold">

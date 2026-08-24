@@ -62,12 +62,25 @@ impl Drop for RouterHarness {
 }
 
 async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
+    boot_router_with_config(api_key, |_| {}).await
+}
+
+/// Same harness, with a hook to adjust the `KernelConfig` before boot.
+///
+/// The extraction-reporting tests need boot itself to resolve a *different*
+/// model than the shared fixture does — reporting is a boot-time resolution
+/// now, so the only way to exercise a different outcome is to boot a kernel
+/// that reaches it.
+async fn boot_router_with_config(
+    api_key: &str,
+    adjust: impl FnOnce(&mut KernelConfig),
+) -> RouterHarness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     // Seed the pinned registry fixture so the kernel boots with content, offline.
     librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
 
-    let config = KernelConfig {
+    let mut config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),
         data_dir: tmp.path().join("data"),
         api_key: api_key.to_string(),
@@ -82,6 +95,7 @@ async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
         },
         ..KernelConfig::default()
     };
+    adjust(&mut config);
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
     let kernel = Arc::new(kernel);
@@ -366,7 +380,12 @@ async fn get_memory_config_returns_documented_shape() {
         "auto_retrieve",
         "extraction_model",
         "effective_extraction_model",
+        "effective_extraction_provider",
         "extraction_model_source",
+        "extraction_status",
+        "extraction_llm_active",
+        "extraction_degraded_reason",
+        "extraction_sidecar_command",
         "max_retrieve",
     ] {
         assert!(
@@ -379,7 +398,7 @@ async fn get_memory_config_returns_documented_shape() {
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/memory/config — an unset extraction model still names what runs
+// GET /api/memory/config — the report is boot's resolution, not a re-derivation
 // ---------------------------------------------------------------------------
 
 /// `extraction_model` unset means "inherit the kernel default". Reporting only
@@ -391,9 +410,19 @@ async fn get_memory_config_returns_documented_shape() {
 /// could not finish inside its own 30 s ceiling, so extraction failed on every
 /// turn and each finished reply was held for over two minutes. No surface
 /// could name the culprit, because no surface reported the resolved value.
+///
+/// The inherited spec here carries a provider prefix (`ollama/test-model`),
+/// which is the common real-world shape — `[default_model] model` is routinely
+/// written `provider/model`. Echoing that spec back is not a report of what
+/// runs: it does not say which provider was selected, and it is not the model
+/// name the upstream API is given. Boot splits the two and strips the prefix,
+/// so the route must show both halves as boot resolved them.
 #[tokio::test(flavor = "multi_thread")]
 async fn get_memory_config_names_the_inherited_extraction_model() {
-    let harness = boot_router_with_api_key(TEST_KEY).await;
+    let harness = boot_router_with_config(TEST_KEY, |cfg| {
+        cfg.default_model.model = "ollama/test-model".to_string();
+    })
+    .await;
 
     let resp = harness
         .app
@@ -417,17 +446,118 @@ async fn get_memory_config_names_the_inherited_extraction_model() {
         "an unset extraction_model must be reported as inherited, not as a choice: {body}"
     );
 
-    // The resolved name must be non-empty and must match the model the
-    // fallback actually resolves to — otherwise the field is decoration.
-    let effective = pm["effective_extraction_model"].as_str().unwrap_or("");
-    assert!(
-        !effective.is_empty(),
-        "effective_extraction_model must name a model even when none is configured: {body}"
+    // Split, as boot resolved it — not the `provider/model` spec it started
+    // from. `provider` answers "who is being called", `model` is what the
+    // upstream API receives.
+    assert_eq!(
+        pm["effective_extraction_provider"], "ollama",
+        "the resolved provider must be reported, not left for the caller to parse \
+         out of the spec: {body}"
     );
     assert_eq!(
-        effective,
-        harness._state.kernel.config_ref().default_model.model,
-        "effective_extraction_model must equal the kernel default it inherits from: {body}"
+        pm["effective_extraction_model"], "test-model",
+        "the resolved model must be reported with the provider prefix stripped, \
+         the same form the driver is given: {body}"
+    );
+    assert_ne!(
+        pm["effective_extraction_model"],
+        serde_json::json!(harness._state.kernel.config_ref().default_model.model),
+        "reporting the unsplit `provider/model` spec is the bug: it names neither \
+         the provider nor the model the API is called with: {body}"
+    );
+
+    // An inherited default is the documented behaviour, so a healthy install
+    // must report a live LLM — not a degradation.
+    assert_eq!(
+        pm["extraction_status"], "llm",
+        "a default install extracts with an LLM: {body}"
+    );
+    assert_eq!(
+        pm["extraction_llm_active"],
+        serde_json::Value::Bool(true),
+        "an LLM performs extraction here, so llm_active must say so: {body}"
+    );
+    assert_eq!(
+        pm["extraction_degraded_reason"],
+        serde_json::Value::Null,
+        "nothing is degraded, so no reason may be reported: {body}"
+    );
+}
+
+/// A `build_extraction_driver` failure drops extraction to substring matching
+/// with **no LLM at all** — and the route used to report the configured model
+/// as effective anyway, because it re-derived the answer from `KernelConfig`
+/// and so could not see the failure. That is the worst version of the bug the
+/// reporting exists to fix: the operator reads a model name, believes
+/// extraction is running on it, and never learns that memory quality quietly
+/// collapsed to substring matching.
+///
+/// `arcee-ai` makes the failure deterministic rather than
+/// environment-dependent. It is a provider in the pinned model-catalog fixture
+/// (so boot's `resolve_extraction_model_target` accepts it as the prefix and
+/// picks a provider other than the default), and it is *not* in the LLM driver
+/// registry — for which `create_driver` has no successful path without a
+/// `base_url`: it errors whether or not an `ARCEE_AI_API_KEY` happens to be
+/// exported on the machine running the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_memory_config_reports_a_failed_extraction_driver_as_degraded() {
+    let harness = boot_router_with_config(TEST_KEY, |cfg| {
+        cfg.proactive_memory.extraction_model = Some("arcee-ai:coder-large".to_string());
+    })
+    .await;
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_get("/api/memory/config"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = read_json(resp).await;
+    let pm = &body["proactive_memory"];
+
+    // The raw setting still reports what the operator wrote — that is a
+    // different question from what runs.
+    assert_eq!(
+        pm["extraction_model"], "arcee-ai:coder-large",
+        "the configured setting must still be echoed: {body}"
+    );
+    assert_eq!(
+        pm["extraction_model_source"], "configured",
+        "an operator did choose this model, even though it failed to build: {body}"
+    );
+
+    // What runs: nothing with a model in it.
+    assert_eq!(
+        pm["extraction_status"], "degraded_substring",
+        "a driver that failed to build must be reported as degraded, not as a \
+         healthy LLM extraction: {body}"
+    );
+    assert_eq!(
+        pm["extraction_llm_active"],
+        serde_json::Value::Bool(false),
+        "no LLM extracts anything after a failed driver build: {body}"
+    );
+    assert_eq!(
+        pm["effective_extraction_model"],
+        serde_json::Value::Null,
+        "no model is effective when the driver failed to build — naming one here \
+         is exactly the misreport under test: {body}"
+    );
+    assert_eq!(
+        pm["effective_extraction_provider"],
+        serde_json::Value::Null,
+        "no provider is being called when the driver failed to build: {body}"
+    );
+
+    // The failure has to be readable, and has to name what was attempted —
+    // otherwise "degraded" is a dead end for whoever is debugging it.
+    let reason = pm["extraction_degraded_reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("arcee-ai") && reason.contains("coder-large"),
+        "the degraded reason must name the provider and model that failed, \
+         got {reason:?}: {body}"
     );
 }
 

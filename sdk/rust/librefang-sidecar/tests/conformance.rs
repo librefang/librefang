@@ -11,7 +11,11 @@
 //!
 //! Equality is structural JSON value equality, not byte equality — see `conformance/sidecar/README.md`.
 
-use librefang_sidecar::protocol::{events, parse_command, ChannelUser, Command, Content};
+use librefang_sidecar::protocol::{
+    events, parse_command, ChannelUser, Command, Content, PROTOCOL_VERSION,
+};
+use librefang_sidecar::runtime::SidecarAdapter;
+use librefang_sidecar::{DynError, SendCommand};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
@@ -81,24 +85,53 @@ fn event_producer_skip() -> HashSet<String> {
     s
 }
 
+/// The corpus `ready` frame's declared shape, as a real adapter declares it.
+struct CorpusAdapter;
+
+#[async_trait::async_trait]
+impl SidecarAdapter for CorpusAdapter {
+    fn capabilities(&self) -> Vec<String> {
+        ["typing", "reaction", "interactive", "thread", "streaming"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+
+    fn account_id(&self) -> Option<String> {
+        Some("bot-1".to_string())
+    }
+
+    async fn on_send(&self, _cmd: SendCommand) -> Result<(), DynError> {
+        unreachable!("conformance adapter does not send")
+    }
+}
+
+/// The trait default must declare a version, not leave it unset.
+///
+/// Asserted separately from the corpus comparison so a regression names the cause instead of printing a whole-frame diff.
+#[test]
+fn adapter_default_declares_the_protocol_version() {
+    assert_eq!(
+        CorpusAdapter.protocol_version(),
+        Some(PROTOCOL_VERSION),
+        "an adapter that overrides nothing must still announce a protocol version"
+    );
+}
+
 fn build_event(name: &str) -> Value {
     match name {
-        "ready_full.json" => events::ready(
-            vec![
-                "typing".into(),
-                "reaction".into(),
-                "interactive".into(),
-                "thread".into(),
-                "streaming".into(),
-            ],
-            Some("bot-1".into()),
-            false,
-            Vec::new(),
-            Vec::new(),
-            Some(1),
-        ),
+        // Built through `ready_event()` rather than by calling `events::ready` with the version passed by hand: the literal made this assertion blind to `SidecarAdapter::protocol_version` defaulting to `None`, so the corpus said 1 while every real `ready` frame carried `null` and the suite stayed green (#7140).
+        "ready_full.json" => CorpusAdapter.ready_event(),
         "message_text.json" => librefang_sidecar::MessageBuilder::new("42", "Alice")
             .content(Content::text("hello"))
+            .channel_id("-100123")
+            .platform("telegram")
+            .build(),
+        // The frame a Telegram slash command travels in.
+        // `Content::command` was the one frozen-core content shape with no fixture at all, which is why nothing failed when the adapter and the daemon disagreed about it.
+        "message_command.json" => librefang_sidecar::MessageBuilder::new("42", "Alice")
+            .content(Content::command("agent", vec!["researcher".to_string()]))
+            .message_id("8891")
             .channel_id("-100123")
             .platform("telegram")
             .build(),
@@ -127,6 +160,7 @@ fn every_event_fixture_is_covered() {
     let asserted: HashSet<String> = [
         "ready_full.json",
         "message_text.json",
+        "message_command.json",
         "message_minimal.json",
         "error.json",
         "typing.json",
