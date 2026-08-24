@@ -1208,6 +1208,31 @@ pub struct DryRunStep {
     pub skip_reason: Option<String>,
 }
 
+/// Rejection returned by [`WorkflowEngine::register_unique_name`] when another registered workflow already carries
+/// the proposed name.
+///
+/// Carries the id of the incumbent so callers can point the operator (or the agent that proposed the name) at the
+/// workflow they collided with instead of only telling them the name is taken.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowNameTaken {
+    /// The proposed name, as supplied — not lowercased.
+    pub name: String,
+    /// The workflow that already holds the name.
+    pub existing_id: WorkflowId,
+}
+
+impl std::fmt::Display for WorkflowNameTaken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "a workflow named '{}' already exists (id {})",
+            self.name, self.existing_id
+        )
+    }
+}
+
+impl std::error::Error for WorkflowNameTaken {}
+
 /// The workflow engine — manages definitions and executes pipeline runs.
 ///
 /// `runs` is a [`DashMap`] so concurrent step writes for *different* runs
@@ -1859,41 +1884,94 @@ impl WorkflowEngine {
         }
     }
 
-    /// Register a new workflow definition and persist it to disk.
+    /// Write one workflow definition to `workflows_dir`.
     ///
     /// Persistence is atomic: serialise → write `<id>.workflow.json.tmp` →
     /// rename to `<id>.workflow.json`. A crash mid-write leaves the `.tmp`
     /// side-file (ignored by `load_from_dir_sync`'s extension filter) but
     /// never a half-written `<id>.workflow.json` that would later refuse to
     /// parse and stall startup.
-    pub async fn register(&self, workflow: Workflow) -> WorkflowId {
+    ///
+    /// Every failure path is a `warn!` rather than an error return: refusing the registration because the disk write failed leaves the caller worse off than a workflow that is live now and does not survive a restart.
+    async fn persist_definition(&self, workflow: &Workflow) {
+        let Some(ref dir) = self.workflows_dir else {
+            return;
+        };
         let id = workflow.id;
-        if let Some(ref dir) = self.workflows_dir {
-            let path = dir.join(format!("{id}.workflow.json"));
-            let tmp_path = dir.join(format!("{id}.workflow.json.tmp"));
-            match serde_json::to_string_pretty(&workflow) {
-                Ok(json) => {
-                    if let Err(e) = tokio::fs::create_dir_all(dir).await {
-                        warn!(workflow_id = %id, error = %e, "Failed to create workflows dir");
-                    } else if let Err(e) = tokio::fs::write(&tmp_path, &json).await {
-                        warn!(workflow_id = %id, error = %e, "Failed to persist workflow definition (tmp write)");
-                    } else if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
-                        warn!(workflow_id = %id, error = %e, "Failed to persist workflow definition (atomic rename)");
-                        // Best-effort cleanup so the next register attempt isn't
-                        // blocked by a stale tmp file.
-                        let _ = tokio::fs::remove_file(&tmp_path).await;
-                    } else {
-                        debug!(workflow_id = %id, path = %path.display(), "Persisted workflow definition");
-                    }
-                }
-                Err(e) => {
-                    warn!(workflow_id = %id, error = %e, "Failed to serialize workflow definition");
+        let path = dir.join(format!("{id}.workflow.json"));
+        let tmp_path = dir.join(format!("{id}.workflow.json.tmp"));
+        match serde_json::to_string_pretty(workflow) {
+            Ok(json) => {
+                if let Err(e) = tokio::fs::create_dir_all(dir).await {
+                    warn!(workflow_id = %id, error = %e, "Failed to create workflows dir");
+                } else if let Err(e) = tokio::fs::write(&tmp_path, &json).await {
+                    warn!(workflow_id = %id, error = %e, "Failed to persist workflow definition (tmp write)");
+                } else if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
+                    warn!(workflow_id = %id, error = %e, "Failed to persist workflow definition (atomic rename)");
+                    // Best-effort cleanup so the next register attempt isn't
+                    // blocked by a stale tmp file.
+                    let _ = tokio::fs::remove_file(&tmp_path).await;
+                } else {
+                    debug!(workflow_id = %id, path = %path.display(), "Persisted workflow definition");
                 }
             }
+            Err(e) => {
+                warn!(workflow_id = %id, error = %e, "Failed to serialize workflow definition");
+            }
         }
+    }
+
+    /// Register a new workflow definition and persist it to disk.
+    ///
+    /// Last writer wins on the *name*: this overwrites nothing keyed by id, but two workflows may end up sharing a name.
+    /// Callers that need the name to be unique must use [`Self::register_unique_name`] instead — checking
+    /// [`Self::list_workflows`] first and calling this afterwards is a check-then-act race, because the read lock is
+    /// released before the insert takes the write lock.
+    pub async fn register(&self, workflow: Workflow) -> WorkflowId {
+        let id = workflow.id;
+        self.persist_definition(&workflow).await;
         self.workflows.write().await.insert(id, workflow);
         info!(workflow_id = %id, "Workflow registered");
         id
+    }
+
+    /// Register a workflow only if no registered workflow already carries its name, as one atomic operation.
+    ///
+    /// The name comparison and the insert happen under a single acquisition of the registry write lock, so two
+    /// concurrent callers proposing the same name cannot both observe it as free: whichever takes the lock second
+    /// sees the first one's entry and loses. This is the property `list_workflows()`-then-`register()` cannot
+    /// provide, and it matters because workflow lookup by name (`run_workflow`, `describe_workflow`) resolves to
+    /// whichever duplicate the `HashMap` iterator reaches first — a same-named second workflow silently shadows
+    /// the original for some fraction of calls.
+    ///
+    /// The comparison is case-insensitive to match that name-based lookup, which lowercases both sides; a
+    /// `Deploy` registered next to an existing `deploy` would be unreachable by name half the time.
+    ///
+    /// Persistence deliberately runs *after* the lock is released. Holding the registry write lock across a
+    /// `tokio::fs` round-trip would block every reader on disk IO, and the reservation is already in force the
+    /// moment the entry is in the map.
+    pub async fn register_unique_name(
+        &self,
+        workflow: Workflow,
+    ) -> Result<WorkflowId, WorkflowNameTaken> {
+        let id = workflow.id;
+        let name_lower = workflow.name.to_lowercase();
+        {
+            let mut registry = self.workflows.write().await;
+            if let Some(existing) = registry
+                .values()
+                .find(|w| w.name.to_lowercase() == name_lower)
+            {
+                return Err(WorkflowNameTaken {
+                    name: workflow.name.clone(),
+                    existing_id: existing.id,
+                });
+            }
+            registry.insert(id, workflow.clone());
+        }
+        self.persist_definition(&workflow).await;
+        info!(workflow_id = %id, name = %workflow.name, "Workflow registered with a reserved name");
+        Ok(id)
     }
 
     /// Load and register all workflow definitions from a directory (sync version for boot).
@@ -6869,6 +6947,187 @@ mod tests {
         let retrieved = engine.get_workflow(id).await;
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().name, "test-pipeline");
+    }
+
+    /// Build a `Workflow` whose only interesting property is its name.
+    fn named_workflow(name: &str) -> Workflow {
+        Workflow {
+            name: name.to_string(),
+            ..test_workflow()
+        }
+    }
+
+    /// Count registered workflows carrying `name`, compared the way name-based
+    /// lookup compares (`run_workflow` / `describe_workflow` both lowercase
+    /// each side before testing equality).
+    async fn count_named(engine: &WorkflowEngine, name: &str) -> usize {
+        let wanted = name.to_lowercase();
+        engine
+            .list_workflows()
+            .await
+            .iter()
+            .filter(|w| w.name.to_lowercase() == wanted)
+            .count()
+    }
+
+    /// Pins the bug [`WorkflowEngine::register_unique_name`] exists to close,
+    /// as the deterministic sequential replay of the interleaving two
+    /// concurrent callers can hit (#6934).
+    ///
+    /// `list_workflows()` takes the read lock and drops it before returning, so
+    /// a caller that decides a name is free on the strength of that snapshot is
+    /// deciding on stale information by the time it calls `register()`. Both
+    /// callers below see an empty registry, both conclude the name is theirs,
+    /// and the engine ends up holding two workflows named `deploy` — which
+    /// name-based lookup then resolves to whichever one the `HashMap` iterator
+    /// reaches first.
+    ///
+    /// Written out in one task rather than raced across two, so the failure is
+    /// reproducible on every run instead of on unlucky scheduling.
+    #[tokio::test]
+    async fn check_then_register_admits_a_duplicate_name() {
+        let engine = WorkflowEngine::new();
+
+        let free_for_a = count_named(&engine, "deploy").await == 0;
+        let free_for_b = count_named(&engine, "deploy").await == 0;
+        assert!(
+            free_for_a && free_for_b,
+            "both callers see the name as free"
+        );
+
+        engine.register(named_workflow("deploy")).await;
+        engine.register(named_workflow("deploy")).await;
+
+        assert_eq!(
+            count_named(&engine, "deploy").await,
+            2,
+            "check-then-register is expected to admit the duplicate — if this now fails, `register` itself grew a \
+             name check and `register_unique_name`'s reason for existing needs revisiting"
+        );
+    }
+
+    /// The regression for #6934: N callers racing on the same name must produce
+    /// exactly one registration.
+    ///
+    /// Multi-threaded runtime with more tasks than worker threads so the
+    /// reservations genuinely interleave. Against a check-then-act
+    /// implementation (read lock, drop, write lock) this fails — several tasks
+    /// observe the empty registry before any of them inserts. Against the
+    /// single-write-lock reservation it cannot: the losers are looking at a map
+    /// that already contains the winner's entry.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_register_unique_name_admits_exactly_one() {
+        const CALLERS: usize = 32;
+
+        let engine = WorkflowEngine::new();
+        let mut handles = Vec::with_capacity(CALLERS);
+        for _ in 0..CALLERS {
+            let engine = engine.clone();
+            handles.push(tokio::spawn(async move {
+                engine.register_unique_name(named_workflow("deploy")).await
+            }));
+        }
+
+        let mut winners = Vec::new();
+        let mut losers = 0usize;
+        for h in handles {
+            match h.await.expect("registration task must not panic") {
+                Ok(id) => winners.push(id),
+                Err(taken) => {
+                    assert_eq!(taken.name, "deploy");
+                    losers += 1;
+                }
+            }
+        }
+
+        assert_eq!(
+            winners.len(),
+            1,
+            "exactly one caller may win the name, got {winners:?}"
+        );
+        assert_eq!(losers, CALLERS - 1, "every other caller must be rejected");
+        assert_eq!(
+            count_named(&engine, "deploy").await,
+            1,
+            "the registry must hold one workflow named 'deploy'"
+        );
+        assert_eq!(
+            engine.get_workflow(winners[0]).await.map(|w| w.name),
+            Some("deploy".to_string()),
+            "the winner's id must be the one that resolves"
+        );
+    }
+
+    /// Every rejected caller must be told which workflow it collided with, so
+    /// the error can name the incumbent rather than only the taken name.
+    #[tokio::test]
+    async fn register_unique_name_reports_the_incumbent_id() {
+        let engine = WorkflowEngine::new();
+        let first = engine
+            .register_unique_name(named_workflow("deploy"))
+            .await
+            .expect("first registration wins");
+
+        let err = engine
+            .register_unique_name(named_workflow("deploy"))
+            .await
+            .expect_err("second registration must be rejected");
+        assert_eq!(err.existing_id, first);
+        assert!(
+            err.to_string().contains("already exists"),
+            "rendered error should read as a collision: {err}"
+        );
+    }
+
+    /// Name lookup lowercases both sides, so `Deploy` and `deploy` are the same
+    /// name as far as `run_workflow` is concerned. Reserving one must therefore
+    /// reserve the other, or the second registration is unreachable by name for
+    /// an arbitrary fraction of calls.
+    #[tokio::test]
+    async fn register_unique_name_is_case_insensitive() {
+        let engine = WorkflowEngine::new();
+        engine
+            .register_unique_name(named_workflow("deploy"))
+            .await
+            .expect("first registration wins");
+
+        let err = engine
+            .register_unique_name(named_workflow("Deploy"))
+            .await
+            .expect_err("a case variant is the same name to lookup, so it must collide");
+        assert_eq!(
+            err.name, "Deploy",
+            "the rejection echoes the proposed name as supplied"
+        );
+        assert_eq!(count_named(&engine, "deploy").await, 1);
+    }
+
+    /// A workflow reserved through `register_unique_name` must be persisted the
+    /// same way `register` persists one — the reservation is not allowed to
+    /// come at the cost of surviving a restart.
+    ///
+    /// Multi-thread flavor, and `load_from_dir_sync` behind `block_in_place`,
+    /// for the same reason as `register_writes_atomically_and_cleans_tmp`
+    /// above: the loader takes `blocking_write` on the registry.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_unique_name_persists_the_definition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = WorkflowEngine::new_with_persistence(tmp.path());
+        let id = engine
+            .register_unique_name(named_workflow("deploy"))
+            .await
+            .expect("registration wins");
+
+        let reloaded = WorkflowEngine::new_with_persistence(tmp.path());
+        let loaded = tokio::task::block_in_place(|| {
+            reloaded.load_from_dir_sync(&tmp.path().join("workflows"))
+        });
+        assert_eq!(loaded, 1, "expected exactly one workflow loaded back");
+        assert_eq!(
+            reloaded.get_workflow(id).await.map(|w| w.name),
+            Some("deploy".to_string()),
+            "the reserved workflow must be on disk under its own id"
+        );
     }
 
     // Multi-thread flavor because `load_from_dir_sync` uses

@@ -100,6 +100,7 @@ pub(crate) mod tool_name {
     pub const WORKFLOW_STATUS: &str = "workflow_status";
     pub const WORKFLOW_START: &str = "workflow_start";
     pub const WORKFLOW_CANCEL: &str = "workflow_cancel";
+    pub const WORKFLOW_CREATE: &str = "workflow_create";
     pub const SYSTEM_TIME: &str = "system_time";
     pub const CANVAS_PRESENT: &str = "canvas_present";
     pub const READ_ARTIFACT: &str = "read_artifact";
@@ -1267,6 +1268,53 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                         "run_id": { "type": "string", "description": "The workflow run UUID to cancel" }
                     },
                     "required": ["run_id"]
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::WORKFLOW_CREATE.to_string(),
+                description: "Define and register a new multi-step workflow so it can be run later with workflow_run / workflow_start. Use this when the same multi-agent sequence is worth repeating; for a one-off, send the agents messages directly instead. The workflow becomes available immediately and outlives the conversation. Names are unique across the daemon: a name already in use is rejected rather than overwritten, so call workflow_list first if you are unsure. Returns {id, name, description, step_count, has_input_schema}.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Unique name, 1-64 characters of letters, digits, '_' and '-'. This is how the workflow is addressed afterwards (e.g. 'nightly-report')." },
+                        "description": { "type": "string", "description": "What the workflow does, for whoever reads workflow_list later" },
+                        "steps": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 50,
+                            "description": "The steps, in execution order. Sequential by default; declare depends_on to run them as a DAG instead.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string", "description": "Step name, unique within the workflow. Other steps reference it in depends_on." },
+                                    "agent": { "type": "string", "description": "Name of the agent that runs this step (agent_list shows what exists). An object {\"id\": \"<uuid>\"} addresses one by UUID instead." },
+                                    "prompt_template": { "type": "string", "description": "Prompt for this step. {{input}} interpolates the previous step's output; {{var}} interpolates a workflow input parameter or an earlier step's output_var." },
+                                    "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Names of steps that must finish first. Any step may be named, including one declared later. Omit for straight-line execution." },
+                                    "output_var": { "type": "string", "description": "Store this step's output under this name so later steps can reference it as {{name}}" },
+                                    "mode": { "description": "Sequencing for this step: the string \"sequential\" (default), \"fan_out\" to run in parallel with the following fan_out steps, or \"collect\" to gather them. Richer nodes take a tagged object, e.g. {\"conditional\": {\"condition\": \"APPROVED\"}}." },
+                                    "error_mode": { "description": "What to do when this step fails: \"fail\" (default, abort the run), \"skip\" (continue without it), or {\"retry\": {\"max_retries\": 3}}." },
+                                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Wall-clock limit for this step (default 120, ceiling 3600)" }
+                                },
+                                "required": ["name", "agent", "prompt_template"]
+                            }
+                        },
+                        "input_schema": {
+                            "type": "array",
+                            "description": "Parameters callers pass to workflow_run. Each becomes a {{name}} placeholder available to every step's prompt_template.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string", "description": "Parameter name, as referenced by {{name}} in a prompt_template" },
+                                    "param_type": { "type": "string", "enum": ["string", "number", "boolean", "file", "image", "agent_id"], "description": "Value type (default 'string'). Note the key is param_type, not type — this is the same spelling workflow_describe reports back." },
+                                    "required": { "type": "boolean", "description": "Whether callers must supply it (default true)" },
+                                    "description": { "type": "string", "description": "What the parameter means, shown by workflow_describe" }
+                                },
+                                "required": ["name"]
+                            }
+                        },
+                        "total_timeout_secs": { "type": "integer", "minimum": 1, "maximum": 86400, "description": "Wall-clock limit for the whole run (ceiling 86400 = 24h). Omit to use the daemon default." }
+                    },
+                    "required": ["name", "steps"]
                 }),
             },
             ToolDefinition {
