@@ -1106,7 +1106,7 @@ const SAFETY_SECTION: &str = "\
 const OUTPUT_CHANNELS_SECTION: &str = "\
 ## Output Channels
 - Public reply: the text you write in the current turn goes to the source chat (DM or group).
-- Private message to the owner: call the `notify_owner(reason, summary)` tool. The content will NOT appear in the source chat.
+- Private notice to the operator: call the `notify_owner(reason, summary)` tool. The content will NOT appear in the source chat. It reaches the operator out of band on their own surface rather than being delivered as a message on this channel, so it is not a way to answer one participant privately.
 - In a group, NEVER write narrative addressed directly to the owner (by honorific or name) as a public reply: use `notify_owner` instead.
 - When you have sent a `notify_owner`, do not repeat the `summary` in the public reply.";
 

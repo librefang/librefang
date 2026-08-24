@@ -79,6 +79,7 @@ pub(crate) mod tool_name {
     pub const CRON_CANCEL: &str = "cron_cancel";
     pub const CRON_ENABLE: &str = "cron_enable";
     pub const CHANNEL_SEND: &str = "channel_send";
+    pub const CHANNEL_DM: &str = "channel_dm";
     pub const HAND_LIST: &str = "hand_list";
     pub const HAND_ACTIVATE: &str = "hand_activate";
     pub const HAND_STATUS: &str = "hand_status";
@@ -1008,6 +1009,18 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                         "poll_explanation": { "type": "string", "description": "Explanation shown after answering (quiz mode)" }
                     },
                     "required": ["channel", "message"]
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::CHANNEL_DM.to_string(),
+                description: "Deliver a message privately to ONE member of the group conversation you are currently in, instead of posting where everyone can read it. Use it to tell a single person their task is done, or to return a result only they asked for. The recipient must be a member the daemon has seen speak in this conversation — call channel_members for the user_id. Only available while handling an inbound channel message; the channel, the conversation and the bot account all come from that message and cannot be overridden. Platform limits: Slack opens a DM with any workspace member, but Telegram and Discord bots cannot message a user who has never started a chat with them, and that send fails rather than falling back to the group.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "message": { "type": "string", "description": "The text to deliver privately to that one member." },
+                        "user_id": { "type": "string", "description": "Platform user id of the member to reach (Slack 'U…', Telegram numeric id, WhatsApp participant JID), as returned by channel_members. Not the conversation id." }
+                    },
+                    "required": ["message", "user_id"]
                 }),
             },
             ToolDefinition {

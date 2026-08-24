@@ -1165,6 +1165,22 @@ pub async fn execute_tool_raw(
             .map_err(ToolError::upstream_msg)
         }
 
+        // Targeted delivery to one member of the current conversation (#7086).
+        // Deliberately takes no channel / chat_id / account_id: all three come
+        // from the turn, so the roster that authorizes the recipient is the one
+        // the model is actually talking in and cannot be chosen by the model.
+        "channel_dm" => tool_channel_dm(
+            input,
+            *kernel,
+            *sender_id,
+            *channel,
+            *chat_id,
+            *sender_account_id,
+            *caller_agent_id,
+        )
+        .await
+        .map_err(ToolError::upstream_msg),
+
         // Persistent process tools.
         "process_start" => {
             tool_process_start(
