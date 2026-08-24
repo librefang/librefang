@@ -228,6 +228,30 @@ pub trait WorkflowRunner: Send + Sync {
         Err(KernelOpError::unavailable("Workflow engine"))
     }
 
+    /// Owner-aware variant of [`Self::run_workflow`] (#7714).
+    ///
+    /// `caller_agent_id` is the agent that invoked the `workflow_run` tool.
+    /// The kernel records it on the run as the run's owner, which is what lets
+    /// two owners drive the same shared step-agent type and still keep their
+    /// attribution apart.
+    ///
+    /// `&str` rather than `AgentId` for trait-object compatibility, matching
+    /// [`Self::start_workflow_async_tracked`]; the kernel parses it and treats
+    /// an unparseable or absent value as an ownerless run.
+    ///
+    /// The default impl forwards to [`Self::run_workflow`] and drops the
+    /// owner, so an implementor that has not adopted ownership keeps its
+    /// current behaviour.
+    async fn run_workflow_owned(
+        &self,
+        workflow_id: &str,
+        input: &str,
+        caller_agent_id: Option<&str>,
+    ) -> Result<(String, String), KernelOpError> {
+        let _ = caller_agent_id;
+        self.run_workflow(workflow_id, input).await
+    }
+
     /// List all registered workflow definitions, sorted by name for determinism.
     async fn list_workflows(&self) -> Vec<WorkflowSummary> {
         Vec::new()
