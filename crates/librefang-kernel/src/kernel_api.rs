@@ -717,10 +717,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         message: &str,
         blocks: Vec<librefang_types::message::ContentBlock>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
-    /// `thinking_override` carries the conversation's `/think` preference
-    /// (`None` = agent/global default). Channel turns resolve it per
-    /// conversation, so it has to ride the send call rather than be read off
-    /// the agent (#7140).
+    /// `thinking_override` carries the conversation's `/think` preference (`None` = agent/global default). Channel turns resolve it per conversation, so it has to ride the send call rather than be read off the agent (#7140).
     async fn send_message_with_sender_context(
         &self,
         agent_id: AgentId,
@@ -728,8 +725,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         sender: librefang_channels::types::SenderContext,
         thinking_override: Option<bool>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
-    /// Multimodal counterpart of [`KernelApi::send_message_with_sender_context`];
-    /// `thinking_override` has the same per-conversation meaning.
+    /// Multimodal counterpart of [`KernelApi::send_message_with_sender_context`]; `thinking_override` has the same per-conversation meaning.
     async fn send_message_with_blocks_and_sender(
         &self,
         agent_id: AgentId,

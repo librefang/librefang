@@ -249,12 +249,7 @@ pub trait ChannelBridgeHandle: Send + Sync {
 
     /// Toggle extended thinking for one conversation on `agent_id`.
     ///
-    /// `scope` is the conversation the command was typed in, not the agent:
-    /// one agent commonly serves many chats across many channel accounts, and
-    /// `/think` acks say "for this chat", so the preference must be stored and
-    /// read back per conversation (#7140). Implementations that key it by
-    /// `agent_id` alone leak one user's reasoning mode — and its cost — into
-    /// every other conversation the agent serves.
+    /// `scope` is the conversation the command was typed in, not the agent: one agent commonly serves many chats across many channel accounts, and `/think` acks say "for this chat", so the preference must be stored and read back per conversation (#7140). Implementations that key it by `agent_id` alone leak one user's reasoning mode — and its cost — into every other conversation the agent serves.
     async fn set_thinking(
         &self,
         _agent_id: AgentId,
@@ -7079,9 +7074,7 @@ async fn handle_command(
             }
         }
         "think" => {
-            // Bare `/think` means "on"; anything that is not a recognised
-            // on/off word is a typo, and silently reading it as "off" is how
-            // `/think of` used to disable thinking while acking success.
+            // Bare `/think` means "on"; anything that is not a recognised on/off word is a typo, and silently reading it as "off" is how `/think of` used to disable thinking while acking success.
             let on = match args.first().map(|a| a.to_ascii_lowercase()).as_deref() {
                 None | Some("on") | Some("true") | Some("enable") | Some("enabled") => true,
                 Some("off") | Some("false") | Some("disable") | Some("disabled") => false,
@@ -7092,9 +7085,7 @@ async fn handle_command(
             let agent_id = resolve_for_command();
             match agent_id {
                 Some(aid) => {
-                    // Same (channel, chat_id) pair `/new` resets and the next
-                    // inbound turn resolves its session from, plus the account
-                    // dimension — see `ConversationScope` (#7140).
+                    // Same (channel, chat_id) pair `/new` resets and the next inbound turn resolves its session from, plus the account dimension — see `ConversationScope` (#7140).
                     let (ch, chat) =
                         session_scope(channel_type, &sender.platform_id, sender_user_id);
                     let scope =
@@ -7565,9 +7556,7 @@ mod tests {
         }
     }
 
-    /// Records every `/think` toggle with the conversation scope it arrived
-    /// with, so a test can assert the command path passes the conversation
-    /// identity down instead of the bare agent id (#7140).
+    /// Records every `/think` toggle with the conversation scope it arrived with, so a test can assert the command path passes the conversation identity down instead of the bare agent id (#7140).
     struct ThinkRecorderHandle {
         agents: Mutex<Vec<(AgentId, String)>>,
         calls: Mutex<Vec<(AgentId, bool, crate::types::ConversationScope)>>,
@@ -8337,10 +8326,7 @@ mod tests {
         );
     }
 
-    /// Regression for #7140: `/think` acks say "for this chat", so the
-    /// command path must hand `set_thinking` the conversation it was typed in.
-    /// One agent commonly serves many Telegram chats; passing the bare agent
-    /// id is what made one user's toggle rewrite everybody else's turns.
+    /// Regression for #7140: `/think` acks say "for this chat", so the command path must hand `set_thinking` the conversation it was typed in. One agent commonly serves many Telegram chats; passing the bare agent id is what made one user's toggle rewrite everybody else's turns.
     #[tokio::test]
     async fn think_command_carries_the_conversation_scope() {
         let agent = AgentId::new();
@@ -8414,8 +8400,7 @@ mod tests {
         );
     }
 
-    /// The same chat reached through two different bot accounts is two
-    /// conversations, so `/think` in one must not carry into the other (#7140).
+    /// The same chat reached through two different bot accounts is two conversations, so `/think` in one must not carry into the other (#7140).
     #[tokio::test]
     async fn think_command_scope_separates_bot_accounts() {
         let agent = AgentId::new();
@@ -8457,9 +8442,7 @@ mod tests {
         );
     }
 
-    /// `/think of` is a typo, not "off". Reading an unrecognised argument as
-    /// `false` disabled thinking while acking success — the confirmation-without-
-    /// action class this issue is about (#7140).
+    /// `/think of` is a typo, not "off". Reading an unrecognised argument as `false` disabled thinking while acking success — the confirmation-without-action class this issue is about (#7140).
     #[tokio::test]
     async fn think_command_rejects_an_unknown_argument() {
         let agent = AgentId::new();

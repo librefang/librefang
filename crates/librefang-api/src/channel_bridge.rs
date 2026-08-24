@@ -623,23 +623,16 @@ pub struct KernelBridgeAdapter {
     started_at: Instant,
     /// `/think` preference per `(agent, conversation)` (#7140).
     ///
-    /// Keyed by the conversation the command was typed in, never by the agent
-    /// alone: one agent routinely serves many chats, so an agent-keyed
-    /// preference would push one user's reasoning mode — and its token cost —
-    /// onto everybody else's turns.
+    /// Keyed by the conversation the command was typed in, never by the agent alone: one agent routinely serves many chats, so an agent-keyed preference would push one user's reasoning mode — and its token cost — onto everybody else's turns.
     ///
-    /// Deliberately in-memory. A `/think` toggle is a per-chat convenience,
-    /// not durable configuration; after a daemon restart every conversation
-    /// falls back to the agent's `[thinking]` manifest / global default, which
-    /// is the same state a chat starts in.
+    /// Deliberately in-memory. A `/think` toggle is a per-chat convenience, not durable configuration; after a daemon restart every conversation falls back to the agent's `[thinking]` manifest / global default, which is the same state a chat starts in.
     thinking_prefs: dashmap::DashMap<(AgentId, ConversationScope), bool>,
 }
 
 impl KernelBridgeAdapter {
     /// Build an adapter over `kernel` with an empty preference store.
     ///
-    /// Every construction site goes through this rather than a struct literal
-    /// so adding per-adapter state cannot leave one call site behind.
+    /// Every construction site goes through this rather than a struct literal so adding per-adapter state cannot leave one call site behind.
     pub fn new(kernel: Arc<dyn KernelApi>) -> Self {
         Self {
             kernel,
@@ -650,22 +643,15 @@ impl KernelBridgeAdapter {
 
     /// The per-turn thinking override to apply to a message from `sender`.
     ///
-    /// `None` — no `/think` was issued in this conversation, so the agent
-    /// manifest / global `[thinking]` default stands untouched. This is the
-    /// read half of `set_thinking`; both sides derive the key the same way, so
-    /// a preference set in one chat is invisible to every other chat and to
-    /// every other agent.
+    /// `None` — no `/think` was issued in this conversation, so the agent manifest / global `[thinking]` default stands untouched. This is the read half of `set_thinking`; both sides derive the key the same way, so a preference set in one chat is invisible to every other chat and to every other agent.
     fn thinking_override_for(&self, agent_id: AgentId, sender: &SenderContext) -> Option<bool> {
         let scope = ConversationScope::from_sender(sender);
         self.thinking_prefs.get(&(agent_id, scope)).map(|v| *v)
     }
 
-    /// `true` only when the catalog positively reports that this agent's
-    /// configured model has no extended-thinking mode.
+    /// `true` only when the catalog positively reports that this agent's configured model has no extended-thinking mode.
     ///
-    /// An agent left on the empty / `"default"` model, or on an id the catalog
-    /// does not carry, returns `false`: the honest answer there is silence,
-    /// not a guess in either direction.
+    /// An agent left on the empty / `"default"` model, or on an id the catalog does not carry, returns `false`: the honest answer there is silence, not a guess in either direction.
     fn model_rejects_thinking(&self, agent_id: AgentId) -> bool {
         let Some(entry) = self.kernel.agent_registry().get(agent_id) else {
             return false;
@@ -3437,8 +3423,7 @@ mod tests {
         );
     }
 
-    /// A `SenderContext` for one conversation, shaped the way
-    /// `build_sender_context` shapes it on the message path.
+    /// A `SenderContext` for one conversation, shaped the way `build_sender_context` shapes it on the message path.
     fn sender_in(account: Option<&str>, chat: &str) -> SenderContext {
         SenderContext {
             channel: "telegram".to_string(),
@@ -3449,12 +3434,7 @@ mod tests {
         }
     }
 
-    /// Injection-site guard for #7140. `/think` promises the user a per-chat
-    /// setting, and `KernelBridgeAdapter` is where that promise is kept: the
-    /// store is written by `set_thinking` and read by every send path. Keying
-    /// it by `agent_id` alone compiles, passes every command-path test, and
-    /// silently pushes one chat's reasoning mode (and token bill) onto every
-    /// other chat the agent serves — the same shape as the #7605 memory leak.
+    /// Injection-site guard for #7140. `/think` promises the user a per-chat setting, and `KernelBridgeAdapter` is where that promise is kept: the store is written by `set_thinking` and read by every send path. Keying it by `agent_id` alone compiles, passes every command-path test, and silently pushes one chat's reasoning mode (and token bill) onto every other chat the agent serves — the same shape as the #7605 memory leak.
     #[tokio::test(flavor = "multi_thread")]
     async fn think_preference_is_isolated_per_conversation() {
         use librefang_testing::MockKernelBuilder;
@@ -3522,10 +3502,7 @@ mod tests {
         );
     }
 
-    /// The command path builds the scope from `session_scope` parts, the
-    /// message path from a `SenderContext`. If the two ever disagree, a
-    /// `/think` write lands under a key no send path will ever read, and the
-    /// command goes back to acking without acting.
+    /// The command path builds the scope from `session_scope` parts, the message path from a `SenderContext`. If the two ever disagree, a `/think` write lands under a key no send path will ever read, and the command goes back to acking without acting.
     #[test]
     fn conversation_scope_agrees_across_the_command_and_message_paths() {
         assert_eq!(

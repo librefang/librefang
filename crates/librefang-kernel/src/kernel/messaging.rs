@@ -136,8 +136,7 @@ impl LibreFangKernel {
 
     /// Send a multimodal message with sender identity context from a channel.
     ///
-    /// `thinking_override` follows [`Self::send_message_with_thinking_override`]:
-    /// the channel bridge resolves it per conversation from `/think` (#7140).
+    /// `thinking_override` follows [`Self::send_message_with_thinking_override`]: the channel bridge resolves it per conversation from `/think` (#7140).
     pub async fn send_message_with_blocks_and_sender(
         &self,
         agent_id: AgentId,

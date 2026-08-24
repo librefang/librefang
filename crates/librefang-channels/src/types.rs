@@ -446,17 +446,9 @@ pub struct SenderContext {
 
 /// Conversation identity a per-chat channel preference is keyed by.
 ///
-/// `channel` and `chat_id` are exactly the pair the bridge feeds into
-/// `SessionId::for_sender_scope`, so a preference stored against this scope
-/// covers the same conversation slice `/new` resets and no wider.
-/// `account_id` is the one dimension the derived session id does not carry:
-/// two sidecar instances of the same channel type (two Telegram bots) can
-/// serve the same chat, and a preference set through one must not follow the
-/// other.
+/// `channel` and `chat_id` are exactly the pair the bridge feeds into `SessionId::for_sender_scope`, so a preference stored against this scope covers the same conversation slice `/new` resets and no wider. `account_id` is the one dimension the derived session id does not carry: two sidecar instances of the same channel type (two Telegram bots) can serve the same chat, and a preference set through one must not follow the other.
 ///
-/// Constructed from the `SenderContext` on the message path and from
-/// `session_scope` plus the inbound `account_id` on the command path, so both
-/// sides land on the same key for the same conversation (#7140).
+/// Constructed from the `SenderContext` on the message path and from `session_scope` plus the inbound `account_id` on the command path, so both sides land on the same key for the same conversation (#7140).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConversationScope {
     /// Sanitized channel name (`telegram`, `whatsapp`, `ext-cron`, …).
@@ -470,9 +462,7 @@ pub struct ConversationScope {
 impl ConversationScope {
     /// Build the scope of the conversation a `SenderContext` came from.
     ///
-    /// Empty strings collapse to `None` so an adapter that sends `""` and one
-    /// that omits the field entirely do not split one conversation into two
-    /// scopes.
+    /// Empty strings collapse to `None` so an adapter that sends `""` and one that omits the field entirely do not split one conversation into two scopes.
     pub fn from_sender(sender: &SenderContext) -> Self {
         Self {
             channel: sender.channel.clone(),
