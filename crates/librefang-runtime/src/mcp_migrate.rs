@@ -219,7 +219,7 @@ pub fn migrate_if_needed(home_dir: &Path, config_path: &Path) -> Result<Option<S
                     continue;
                 }
             };
-            if let Err(e) = upsert_mcp_server_from_template(&config_path, inst, &template) {
+            if let Err(e) = upsert_mcp_server_from_template(config_path, inst, &template) {
                 warn!("migration: could not upsert '{}': {e}", inst.id);
                 skipped_count += 1;
                 continue;
